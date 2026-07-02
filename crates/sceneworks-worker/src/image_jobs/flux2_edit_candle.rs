@@ -115,39 +115,13 @@ fn flux2_edit_candle_available(request: &ImageRequest, settings: &Settings) -> b
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → the family default
 /// (klein 4 / dev 28).
 fn flux2_edit_candle_steps(request: &ImageRequest, default: u32) -> u32 {
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    request
-        .advanced
-        .get("steps")
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
-        .map(|steps| steps.clamp(1, 50) as u32)
-        .unwrap_or(default)
+    resolve_advanced_or_manifest_u32(request, "steps", default, 1..=50)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → the family default
 /// (klein 1.0 / dev 4.0), clamped.
 fn flux2_edit_candle_guidance(request: &ImageRequest, default: f32) -> f32 {
-    let manifest_default = request
-        .model_manifest_entry
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(default);
-    advanced::f32_clamped(
-        &request.advanced,
-        "guidanceScale",
-        manifest_default,
-        0.0..=30.0,
-    )
+    resolve_advanced_or_manifest_f32(request, "guidanceScale", default, 0.0..=30.0)
 }
 
 /// Reference asset ids for a FLUX.2 edit, in order. The multi-image picker (sc-6211) sends the plural

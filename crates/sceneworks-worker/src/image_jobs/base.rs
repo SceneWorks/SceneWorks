@@ -815,6 +815,68 @@ fn resolve_guidance(request: &ImageRequest, model: &ResolvedModel) -> Option<f32
     Some(scale)
 }
 
+/// Resolve an unsigned advanced knob with a manifest fallback (sc-8825). The single mechanism the
+/// bespoke edit/adapter/control lanes (`*_edit_candle.rs`, `sdxl_ipadapter.rs`, `kolors_*.rs`,
+/// `qwen_control.rs`, `instantid.rs`, `pulid.rs`) had each re-implemented as an inline parse closure:
+/// `advanced[key]` (JSON uint OR numeric string) → the manifest `[key]` (same parse) → `default`.
+/// The parsed **advanced-or-manifest** value is clamped to `range`; the `default` is returned
+/// **unclamped** (it is a trusted per-lane constant, and clamping it would silently change a lane
+/// whose default sits outside its own historical range). Each caller passes its OWN `range`/`default`,
+/// so the drifting steps bounds (1..=80 / 1..=50 / 1..=100) are preserved byte-for-byte — this is a
+/// dedup-of-mechanism refactor, not a policy change.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_advanced_or_manifest_u32(
+    request: &ImageRequest,
+    key: &str,
+    default: u32,
+    range: std::ops::RangeInclusive<u32>,
+) -> u32 {
+    let parse = |value: &Value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    };
+    request
+        .advanced
+        .get(key)
+        .and_then(parse)
+        .or_else(|| request.model_manifest_entry.get(key).and_then(parse))
+        .map(|value| value.clamp(*range.start() as u64, *range.end() as u64) as u32)
+        .unwrap_or(default)
+}
+
+/// Resolve a float advanced knob with a manifest fallback (sc-8825). The guidance twin of
+/// [`resolve_advanced_or_manifest_u32`]: the manifest `[key]` (JSON float OR numeric string) supplies
+/// the effective default (else the per-lane `default`), then [`advanced::f32_clamped`] reads
+/// `advanced[key]` — falling back to that manifest default — and clamps the result to `range`. Unlike
+/// the u32 twin, the resolved value here is always clamped (matching the historical `f32_clamped`
+/// call, which clamps the manifest/default fallback too). Each caller passes its OWN `range`/`default`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_advanced_or_manifest_f32(
+    request: &ImageRequest,
+    key: &str,
+    default: f32,
+    range: std::ops::RangeInclusive<f32>,
+) -> f32 {
+    let manifest_default = request
+        .model_manifest_entry
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or(default);
+    advanced::f32_clamped(&request.advanced, key, manifest_default, range)
+}
+
 /// True for a TRUE-CFG family whose engine reads the CFG scale from `true_cfg` (with a real
 /// negative prompt) and **rejects** the distilled `guidance` scalar — i.e. Chroma (epic 3531),
 /// uniquely identified by `supports_guidance=false` + `supports_negative_prompt=true`. The

@@ -172,6 +172,152 @@ fn steps_default_is_family_default_and_clamps() {
     );
 }
 
+// The shared advanced→manifest→default resolvers the bespoke edit/adapter/control lanes call
+// (sc-8825). Gated identically to the resolvers themselves so they compile on the macOS AND
+// backend-candle lanes. These lock the four behaviors the per-lane inline closures had:
+// advanced wins, manifest is the fallback, absent → the (unclamped) default, and the
+// advanced-or-manifest value is clamped to the caller's range while garbage parses to the default.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
+    // advanced present wins and is clamped to the caller's range.
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "advanced": { "steps": 12 } })),
+            "steps",
+            30,
+            1..=80,
+        ),
+        12
+    );
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "advanced": { "steps": 200 } })),
+            "steps",
+            30,
+            1..=80,
+        ),
+        80
+    );
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "advanced": { "steps": 0 } })),
+            "steps",
+            30,
+            1..=80,
+        ),
+        1
+    );
+    // A numeric string parses just like a JSON int.
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "advanced": { "steps": "24" } })),
+            "steps",
+            30,
+            1..=100,
+        ),
+        24
+    );
+    // advanced absent → manifest fallback (also clamped).
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "modelManifestEntry": { "steps": 200 } })),
+            "steps",
+            30,
+            1..=100,
+        ),
+        100
+    );
+    // Both absent → the default, returned UNCLAMPED (the distilled 4-step default survives a 1..=50
+    // range — clamping the default here would be a behavior change).
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(&request(json!({ "projectId": "p" })), "steps", 4, 1..=50,),
+        4
+    );
+    // Un-parseable advanced → NOT a fallback to manifest (matches the inline closures: a present-but-
+    // garbage advanced value fails the parse and the closure moves on to manifest, then default).
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "advanced": { "steps": "abc" } })),
+            "steps",
+            30,
+            1..=80,
+        ),
+        30
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
+    // advanced present wins and is clamped to the caller's range.
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 7.5 } })),
+            "guidanceScale",
+            5.0,
+            0.0..=30.0,
+        ),
+        7.5
+    );
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 99.0 } })),
+            "guidanceScale",
+            5.0,
+            0.0..=30.0,
+        ),
+        30.0
+    );
+    // A numeric string parses just like a JSON float.
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": "2.5" } })),
+            "guidanceScale",
+            5.0,
+            0.0..=30.0,
+        ),
+        2.5
+    );
+    // advanced absent → manifest fallback (also clamped).
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p", "modelManifestEntry": { "guidanceScale": 99.0 } })),
+            "guidanceScale",
+            5.0,
+            0.0..=30.0,
+        ),
+        30.0
+    );
+    // Both absent → the per-lane default.
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p" })),
+            "guidanceScale",
+            4.0,
+            0.0..=30.0,
+        ),
+        4.0
+    );
+    // Un-parseable advanced → the f32 reader falls back to the manifest default (here the lane
+    // default 5.0), then clamps — matching the historical `f32_clamped` call.
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": "abc" } })),
+            "guidanceScale",
+            5.0,
+            0.0..=30.0,
+        ),
+        5.0
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn mlx_model_table_maps_known_families() {
