@@ -56,9 +56,21 @@ CLAIM_WORKER_RE = re.compile(r"\bclaim-worker-[a-z]\b")
 def write_updated_snapshots() -> None:
     if not UPDATE_SNAPSHOTS:
         return
+    # Merge into the existing on-disk snapshots rather than serializing only the
+    # labels touched this run. Otherwise a filtered update (e.g.
+    # `UPDATE_SNAPSHOTS=1 pytest -k character`) would clobber every untouched
+    # snapshot, since UPDATED_SNAPSHOTS only accumulates labels asserted during
+    # this run (sc-8862). snapshots() returns {} when the file does not yet
+    # exist, so first-ever generation still works.
+    #
+    # Note: because this merge preserves all pre-existing labels, intentionally
+    # REMOVING a snapshot must be done by editing snapshots.json manually — a
+    # filtered UPDATE_SNAPSHOTS run will never delete stale entries.
+    merged = snapshots()
+    merged.update(UPDATED_SNAPSHOTS)
     SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
     SNAPSHOT_PATH.write_text(
-        json.dumps(UPDATED_SNAPSHOTS, indent=2, sort_keys=True) + "\n",
+        json.dumps(merged, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
 
