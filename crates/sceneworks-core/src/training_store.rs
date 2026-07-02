@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -1266,6 +1267,22 @@ fn resolve_item_source(
     })
 }
 
+/// Open `project.db` for a training-store read/write with the same 5s
+/// `busy_timeout` every other project.db opener uses, so cross-connection
+/// overlap (worker embedding writes racing an API dataset read) queues instead
+/// of failing immediately with `database is locked` (sc-8815). Runs the
+/// version-gated comprehensive migration too — matching `character_store`'s
+/// migrating variant — so the `assets`/`training_datasets` tables are
+/// guaranteed present before we query them (the migration is a no-op read once
+/// the schema is current).
+fn connect_project_db(project_path: &Path) -> ProjectStoreResult<Connection> {
+    fs::create_dir_all(project_path)?;
+    let connection = Connection::open(project_path.join("project.db"))?;
+    connection.busy_timeout(Duration::from_millis(5000))?;
+    apply_project_migrations(&connection)?;
+    Ok(connection)
+}
+
 fn resolve_asset_source(
     project_path: &Path,
     project_id: &str,
@@ -1275,7 +1292,7 @@ fn resolve_asset_source(
     if !is_safe_id(asset_id) {
         return Err(ProjectStoreError::BadRequest("Invalid asset ID".to_owned()));
     }
-    let connection = Connection::open(project_path.join("project.db"))?;
+    let connection = connect_project_db(project_path)?;
     let (file_path, sidecar_path): (String, Option<String>) = connection
         .query_row(
             "select file_path, sidecar_path from assets where id = ?1",
@@ -1380,10 +1397,11 @@ fn ensure_dataset_project(project_id: &str, dataset: &TrainingDataset) -> Projec
 }
 
 pub fn ensure_training_dataset_table(project_path: &Path) -> ProjectStoreResult<()> {
-    let connection = Connection::open(project_path.join("project.db"))?;
-    // Route through the version-gated comprehensive migration so the training
-    // path stops replaying DDL on every call (the table is created either way).
-    apply_project_migrations(&connection)
+    // `connect_project_db` runs the version-gated comprehensive migration so the
+    // training path stops replaying DDL on every call (the table is created
+    // either way) and picks up the shared 5s busy_timeout (sc-8815).
+    connect_project_db(project_path)?;
+    Ok(())
 }
 
 pub fn apply_training_dataset_migrations(connection: &Connection) -> ProjectStoreResult<()> {
@@ -1415,7 +1433,7 @@ fn list_dataset_summaries_from_index(
     project_path: &Path,
     project_id: &str,
 ) -> ProjectStoreResult<Vec<TrainingDatasetSummary>> {
-    let connection = Connection::open(project_path.join("project.db"))?;
+    let connection = connect_project_db(project_path)?;
     let mut statement = connection.prepare(
         "
         select id, project_id, name, modality, status, version, item_count, created_at, updated_at, file_path, character_id
@@ -1489,7 +1507,7 @@ fn index_dataset(
 ) -> ProjectStoreResult<()> {
     ensure_training_dataset_table(project_path)?;
     let rel_path = relative_string(project_path, manifest_path)?;
-    let connection = Connection::open(project_path.join("project.db"))?;
+    let connection = connect_project_db(project_path)?;
     connection.execute(
         "
         insert or replace into training_datasets (
@@ -1515,7 +1533,7 @@ fn index_dataset(
 
 fn remove_dataset_index(project_path: &Path, dataset_id: &str) -> ProjectStoreResult<()> {
     ensure_training_dataset_table(project_path)?;
-    let connection = Connection::open(project_path.join("project.db"))?;
+    let connection = connect_project_db(project_path)?;
     connection.execute(
         "delete from training_datasets where id = ?1",
         params![dataset_id],
@@ -2268,5 +2286,69 @@ mod tests {
 
         // Metadata write: the dataset version is untouched (the pixels didn't change).
         assert_eq!(store.get_dataset("proj", "ds_test").unwrap().version, 1);
+    }
+
+    /// sc-8815: every training-store project.db opener now routes through
+    /// `connect_project_db`, so it (a) runs migrations — the `assets` and
+    /// `training_datasets` tables exist even on a fresh db — and (b) inherits the
+    /// shared 5s `busy_timeout`, so a second writer queues behind an in-flight
+    /// write transaction instead of failing instantly with `database is locked`.
+    #[test]
+    fn connect_project_db_migrates_and_queues_on_contention() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Instant;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let project_path = dir.path().to_path_buf();
+
+        // (a) Fresh db: the helper runs the comprehensive migration, so core
+        // tables queried by the training surface are present.
+        let connection = connect_project_db(&project_path).expect("connect");
+        for table in ["assets", "training_datasets"] {
+            let count: i64 = connection
+                .query_row(
+                    "select count(*) from sqlite_master where type = 'table' and name = ?1",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .expect("table lookup");
+            assert_eq!(count, 1, "migration should create `{table}`");
+        }
+
+        // (b) Hold an exclusive write transaction on one connection, then have a
+        // second connection attempt a write. With the 5s busy_timeout the second
+        // write blocks until the first commits rather than returning SQLITE_BUSY
+        // immediately. A 0ms default timeout (raw Connection::open) would error
+        // in well under our hold window.
+        let hold = Duration::from_millis(300);
+        connection
+            .execute_batch("begin immediate; insert into training_datasets (id, project_id, name, modality, status, version, item_count, file_path, created_at, updated_at) values ('lock', 'p', 'n', 'image', 'draft', 1, 0, 'f', 't', 't');")
+            .expect("begin write");
+
+        let (tx, rx) = mpsc::channel();
+        let writer_path = project_path.clone();
+        let writer = thread::spawn(move || {
+            let started = Instant::now();
+            let conn = connect_project_db(&writer_path).expect("second connect");
+            let result = conn.execute(
+                "insert into training_datasets (id, project_id, name, modality, status, version, item_count, file_path, created_at, updated_at) values ('other', 'p', 'n', 'image', 'draft', 1, 0, 'f', 't', 't')",
+                [],
+            );
+            tx.send(started.elapsed()).ok();
+            result
+        });
+
+        // Keep the write lock held past what a 0ms timeout would tolerate.
+        thread::sleep(hold);
+        connection.execute_batch("commit").expect("commit");
+
+        let elapsed = rx.recv().expect("writer reported");
+        let write_result = writer.join().expect("writer thread");
+        write_result.expect("second writer should queue, not fail with SQLITE_BUSY");
+        assert!(
+            elapsed >= hold,
+            "second writer ({elapsed:?}) should have blocked for the lock hold ({hold:?}) rather than erroring instantly"
+        );
     }
 }
