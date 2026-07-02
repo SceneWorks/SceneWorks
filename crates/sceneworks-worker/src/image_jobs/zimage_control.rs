@@ -156,7 +156,8 @@ fn zimage_control_guidance(request: &ImageRequest) -> f32 {
 /// The (repo, filename) of the ControlNet weights — `advanced.controlWeights.{repo,filename}` overrides,
 /// else the model's Fun-Controlnet-Union default: the Turbo 8-step variant, or the base
 /// (full-CFG) variant for the base `z_image` model (sc-8379). Parity with the MLX `resolve_control_weights`.
-fn zimage_control_repo_file(request: &ImageRequest) -> (String, String) {
+/// The payload filename must be a plain component (sc-8821 / F-019).
+fn zimage_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
     let (default_repo, default_file) = if is_zimage_base_model(&request.model) {
         (ZIMAGE_CTRL_BASE_REPO, ZIMAGE_CTRL_BASE_FILE)
     } else {
@@ -171,10 +172,13 @@ fn zimage_control_repo_file(request: &ImageRequest) -> (String, String) {
             .unwrap_or(default)
             .to_owned()
     };
-    (
+    Ok((
         pick("repo", default_repo),
-        pick("filename", default_file),
-    )
+        safe_weight_filename(
+            &pick("filename", default_file),
+            "advanced.controlWeights.filename",
+        )?,
+    ))
 }
 
 /// Resolve the Fun-Controlnet-Union weight **file** the `ZImageControl` provider loads, downloading on
@@ -186,7 +190,7 @@ async fn ensure_zimage_control_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
-    let (repo, file) = zimage_control_repo_file(request);
+    let (repo, file) = zimage_control_repo_file(request)?;
     if let Ok(p) = std::env::var("SCENEWORKS_CONTROLNET_ZIMAGE") {
         let p = PathBuf::from(p);
         if p.is_file() {

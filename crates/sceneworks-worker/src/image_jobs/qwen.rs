@@ -16,7 +16,10 @@ fn qwen_control_available(request: &ImageRequest, settings: &Settings) -> bool {
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
-fn resolve_qwen_control_weights(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
+fn resolve_qwen_control_weights(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
     // Default repo from the shared strict-control table (single source of truth); the file stays
     // engine-specific.
     resolve_control_weights_for(
@@ -150,7 +153,7 @@ async fn generate_qwen_control_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("Qwen model row missing".to_owned()))?;
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("Qwen-Image weights not found".to_owned()))?;
-    let control_weights = resolve_qwen_control_weights(request, settings).ok_or_else(|| {
+    let control_weights = resolve_qwen_control_weights(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
             "Qwen strict-pose control weights not found (download {QWEN_CONTROL_REPO})."
         ))
@@ -220,7 +223,7 @@ async fn generate_qwen_control_stream(
     // Per-generation PiD decode (epic 7840, sc-7849): the strict-pose control engine shares the
     // `qwenimage` latent space, so route its decode through PiD when `advanced.usePid` is set and the
     // snapshots are cached; otherwise native VAE. `use_pid` and `spec.pid` stay in lockstep.
-    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model);
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
     let use_pid = pid_weights.is_some();
     let mut spec = qwen_control_spec(weights_dir, control_weights, quant, adapters);
     if let Some(pid) = pid_weights {
@@ -755,7 +758,7 @@ async fn generate_qwen_edit_stream(
     // Per-generation PiD decode (epic 7840, sc-7849): Qwen-Image-Edit shares the `qwenimage` latent
     // space, so route its decode through PiD when `advanced.usePid` is set and the snapshots are
     // cached; otherwise native VAE. `use_pid` and `spec.pid` stay in lockstep.
-    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model);
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
     let use_pid = pid_weights.is_some();
     let mut spec = load_spec(weights_dir, quant, adapters, None);
     if let Some(pid) = pid_weights {

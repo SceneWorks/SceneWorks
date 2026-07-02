@@ -36,6 +36,30 @@ pub(crate) fn safe_join(base: &Path, relative: &str) -> WorkerResult<PathBuf> {
     Ok(target)
 }
 
+/// Confine a payload-supplied weight *filename* that is joined under a resolved HF
+/// snapshot / app-cache directory (sc-8821 / F-019): `advanced.controlWeights.filename`
+/// on every strict-control lane and `advanced.pidCheckpoint.filename` on the PiD
+/// decoder. The repo half of those overrides is already sanitized
+/// (`safe_repo_dir_name` slugs separators into `--`), but the filename was joined
+/// raw, so a `../../…` (or absolute) filename escaped the snapshot and loaded an
+/// arbitrary readable file as weights — reachable over the LAN jobs API (epic 4484),
+/// the same primitive `normalize_app_managed_lora_path` closes for LoRA paths. A
+/// weight file inside an HF repo snapshot is always a single plain path component,
+/// so require exactly that: no separators (`/` or `\`), no `..`/`.`, not absolute.
+pub(crate) fn safe_weight_filename(filename: &str, label: &str) -> WorkerResult<String> {
+    let filename = filename.trim();
+    let mut components = Path::new(filename).components();
+    let single_normal = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none();
+    if single_normal && !filename.contains('/') && !filename.contains('\\') {
+        Ok(filename.to_owned())
+    } else {
+        Err(WorkerError::InvalidPayload(format!(
+            "{label} must be a plain filename (no path separators or '..'): {filename}"
+        )))
+    }
+}
+
 pub(crate) fn normalize_absolute_path(path: &Path) -> WorkerResult<PathBuf> {
     let mut output = if path.is_absolute() {
         PathBuf::new()

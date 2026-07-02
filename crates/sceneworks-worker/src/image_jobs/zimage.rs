@@ -36,14 +36,16 @@ fn zimage_base_control_available(request: &ImageRequest, settings: &Settings) ->
 }
 
 /// Resolve the Fun-Controlnet-Union checkpoint (`advanced.controlWeights.{repo,filename}`
-/// else defaults) to a single `.safetensors` in the HF cache. `None` when absent (the
-/// model-download flow fetches it ahead of generation, like base weights).
+/// else defaults) to a single `.safetensors` in the HF cache. `Ok(None)` when absent (the
+/// model-download flow fetches it ahead of generation, like base weights); `Err` when the
+/// payload filename is not a plain component (sc-8821 / F-019 — a `../…` filename must not
+/// escape the snapshot).
 fn resolve_control_weights_for(
     request: &ImageRequest,
     settings: &Settings,
     default_repo: &'static str,
     default_file: &'static str,
-) -> Option<PathBuf> {
+) -> WorkerResult<Option<PathBuf>> {
     let control = request
         .advanced
         .get("controlWeights")
@@ -58,16 +60,24 @@ fn resolve_control_weights_for(
             .to_owned()
     };
     let repo = str_field("repo", default_repo);
-    let filename = str_field("filename", default_file);
-    let snapshot = huggingface_snapshot_dir(&settings.data_dir, &repo)?;
+    let filename = safe_weight_filename(
+        &str_field("filename", default_file),
+        "advanced.controlWeights.filename",
+    )?;
+    let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, &repo) else {
+        return Ok(None);
+    };
     let path = snapshot.join(filename);
-    path.exists().then_some(path)
+    Ok(path.exists().then_some(path))
 }
 
 /// Resolve the Z-Image Fun-Controlnet-Union checkpoint. The default repo comes from the shared
 /// strict-control table (single source of truth — `STRICT_CONTROL_ENGINES`); the file default stays
 /// engine-specific.
-fn resolve_control_weights(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
+fn resolve_control_weights(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
     resolve_control_weights_for(
         request,
         settings,
@@ -79,7 +89,10 @@ fn resolve_control_weights(request: &ImageRequest, settings: &Settings) -> Optio
 /// Resolve the **base** Z-Image Fun-Controlnet-Union checkpoint (sc-8251). The default repo comes from
 /// the shared strict-control table (single source of truth — `STRICT_CONTROL_ENGINES`); the file
 /// default stays engine-specific.
-fn resolve_base_control_weights(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
+fn resolve_base_control_weights(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
     resolve_control_weights_for(
         request,
         settings,
@@ -238,7 +251,7 @@ async fn generate_zimage_control_stream(
 
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("Z-Image weights not found".to_owned()))?;
-    let control_weights = resolve_control_weights(request, settings).ok_or_else(|| {
+    let control_weights = resolve_control_weights(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
             "Z-Image strict-pose control weights not found (download {ZIMAGE_CONTROL_REPO})."
         ))
@@ -490,7 +503,7 @@ async fn generate_zimage_base_control_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("z-image base model row missing".to_owned()))?;
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("Z-Image base weights not found".to_owned()))?;
-    let control_weights = resolve_base_control_weights(request, settings).ok_or_else(|| {
+    let control_weights = resolve_base_control_weights(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
             "Z-Image base strict-control weights not found (download {ZIMAGE_BASE_CONTROL_REPO})."
         ))

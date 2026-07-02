@@ -617,7 +617,8 @@ fn flux2_dev_control_available(request: &ImageRequest, settings: &Settings) -> b
 
 /// The (repo, filename) of the FLUX.2-dev control weights — `advanced.controlWeights.{repo,filename}`
 /// overrides, else the `-2602` Fun-Controlnet-Union default (parity with the Z-Image resolver).
-fn flux2_control_repo_file(request: &ImageRequest) -> (String, String) {
+/// The payload filename must be a plain component (sc-8821 / F-019).
+fn flux2_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
     let cw = request
         .advanced
         .get("controlWeights")
@@ -630,15 +631,18 @@ fn flux2_control_repo_file(request: &ImageRequest) -> (String, String) {
             .unwrap_or(default)
             .to_owned()
     };
-    (
+    Ok((
         // Default repo from the shared strict-control table (single source of truth); the file stays
         // engine-specific.
         pick(
             "repo",
             strict_control_default_repo(FLUX2_DEV_CONTROL_ENGINE_ID),
         ),
-        pick("filename", FLUX2_CONTROL_FILE),
-    )
+        safe_weight_filename(
+            &pick("filename", FLUX2_CONTROL_FILE),
+            "advanced.controlWeights.filename",
+        )?,
+    ))
 }
 
 /// Resolve the Fun-Controlnet-Union checkpoint the engine loads, downloading on first use. Order: an
@@ -651,7 +655,7 @@ async fn ensure_flux2_control_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
-    let (repo, file) = flux2_control_repo_file(request);
+    let (repo, file) = flux2_control_repo_file(request)?;
     if let Ok(p) = std::env::var("SCENEWORKS_CONTROLNET_FLUX2") {
         let p = PathBuf::from(p);
         if p.is_file() {

@@ -104,29 +104,33 @@ fn pid_requested(request: &ImageRequest) -> bool {
 
 /// Resolve the per-generation PiD decoder weights for `model`, or `None` to keep the native VAE decode.
 ///
-/// Returns `None` whenever ANY of: the request did not opt in (`advanced.usePid` unset/false); the
+/// Returns `Ok(None)` whenever ANY of: the request did not opt in (`advanced.usePid` unset/false); the
 /// model has no PiD backbone (non-eligible → silently ignore the toggle); or the PiD checkpoint / Gemma
 /// snapshot is not cached under `data_dir` yet (provisioning is sc-7852). The checkpoint repo+filename
 /// and the Gemma repo default to the turnkey convention and may be overridden via
-/// `advanced.pidCheckpoint` (`{repo, filename}`) / `advanced.pidGemma` (repo string).
+/// `advanced.pidCheckpoint` (`{repo, filename}`) / `advanced.pidGemma` (repo string). An override
+/// filename that is not a plain component is an error (sc-8821 / F-019 — a `../…` filename must not
+/// escape the snapshot).
 ///
 /// The caller sets BOTH `LoadSpec::with_pid(checkpoint, gemma)` and `GenerationRequest.use_pid = true`
-/// exactly when this returns `Some` — never one without the other (the engine rejects that).
+/// exactly when this returns `Ok(Some)` — never one without the other (the engine rejects that).
 fn resolve_pid_weights(
     request: &ImageRequest,
     data_dir: &Path,
     model: &str,
-) -> Option<gen_core::PidWeights> {
+) -> WorkerResult<Option<gen_core::PidWeights>> {
     if !pid_requested(request) {
-        return None;
+        return Ok(None);
     }
-    let backbone = pid_backbone_for(model)?;
+    let Some(backbone) = pid_backbone_for(model) else {
+        return Ok(None);
+    };
     let (default_repo, default_file) = match backbone {
         "qwenimage" => (PID_QWENIMAGE_REPO, PID_QWENIMAGE_FILE),
         "flux" => (PID_FLUX_REPO, PID_FLUX_FILE),
         "flux2" => (PID_FLUX2_REPO, PID_FLUX2_FILE),
         "sdxl" => (PID_SDXL_REPO, PID_SDXL_FILE),
-        _ => return None,
+        _ => return Ok(None),
     };
 
     let ckpt_cfg = request
@@ -139,12 +143,15 @@ fn resolve_pid_weights(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(default_repo);
-    let filename = ckpt_cfg
-        .and_then(|c| c.get("filename"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(default_file);
+    let filename = safe_weight_filename(
+        ckpt_cfg
+            .and_then(|c| c.get("filename"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(default_file),
+        "advanced.pidCheckpoint.filename",
+    )?;
     let gemma_repo = request
         .advanced
         .get("pidGemma")
@@ -154,15 +161,20 @@ fn resolve_pid_weights(
         .unwrap_or(PID_GEMMA_REPO);
 
     // Both snapshots must be cached, or fall through to the native VAE (no partial/half-loaded PiD).
-    let checkpoint = huggingface_snapshot_dir(data_dir, repo)?.join(filename);
+    let Some(snapshot) = huggingface_snapshot_dir(data_dir, repo) else {
+        return Ok(None);
+    };
+    let checkpoint = snapshot.join(filename);
     if !checkpoint.exists() {
-        return None;
+        return Ok(None);
     }
-    let gemma = huggingface_snapshot_dir(data_dir, gemma_repo)?;
-    Some(gen_core::PidWeights {
+    let Some(gemma) = huggingface_snapshot_dir(data_dir, gemma_repo) else {
+        return Ok(None);
+    };
+    Ok(Some(gen_core::PidWeights {
         checkpoint: WeightsSource::File(checkpoint),
         gemma: WeightsSource::Dir(gemma),
-    })
+    }))
 }
 
 #[cfg(all(target_os = "macos", test))]
@@ -217,7 +229,9 @@ mod pid_tests {
     fn resolve_returns_none_without_opt_in() {
         let dir = tempfile::tempdir().unwrap();
         let req = request("qwen_image", json!({}));
-        assert!(resolve_pid_weights(&req, dir.path(), &req.model).is_none());
+        assert!(resolve_pid_weights(&req, dir.path(), &req.model)
+            .expect("plain default filename resolves")
+            .is_none());
     }
 
     #[test]
@@ -225,7 +239,9 @@ mod pid_tests {
         let dir = tempfile::tempdir().unwrap();
         // SenseNova is autoregressive (no VAE latent) → no PiD backbone, toggle ignored.
         let req = request("sensenova_u1_8b", json!({ "usePid": true }));
-        assert!(resolve_pid_weights(&req, dir.path(), &req.model).is_none());
+        assert!(resolve_pid_weights(&req, dir.path(), &req.model)
+            .expect("plain default filename resolves")
+            .is_none());
     }
 
     #[test]
@@ -236,9 +252,39 @@ mod pid_tests {
         for model in ["qwen_image", "flux_dev", "flux2_dev", "sdxl"] {
             let req = request(model, json!({ "usePid": true }));
             assert!(
-                resolve_pid_weights(&req, dir.path(), &req.model).is_none(),
+                resolve_pid_weights(&req, dir.path(), &req.model)
+                    .expect("plain default filename resolves")
+                    .is_none(),
                 "{model} should resolve None when its checkpoint is not cached"
             );
         }
+    }
+
+    /// sc-8821 / F-019: a payload `pidCheckpoint.filename` that is not a plain component (traversal,
+    /// absolute, sub-path) is REJECTED with an `InvalidPayload` pointing at the field — never joined
+    /// under the snapshot. A plain override filename still resolves (Ok).
+    #[test]
+    fn resolve_rejects_traversal_pid_checkpoint_filenames() {
+        let dir = tempfile::tempdir().unwrap();
+        for filename in ["../../etc/hosts", "/etc/hosts", "sub/dir.safetensors", ".."] {
+            let req = request(
+                "qwen_image",
+                json!({ "usePid": true, "pidCheckpoint": { "filename": filename } }),
+            );
+            let error = resolve_pid_weights(&req, dir.path(), &req.model)
+                .expect_err("unsafe pidCheckpoint.filename must be rejected");
+            assert!(
+                error.to_string().contains("advanced.pidCheckpoint.filename"),
+                "error should point at the offending field: {error}"
+            );
+        }
+        // A plain override filename passes validation (snapshot absent → Ok(None), native VAE).
+        let req = request(
+            "qwen_image",
+            json!({ "usePid": true, "pidCheckpoint": { "filename": "custom.safetensors" } }),
+        );
+        assert!(resolve_pid_weights(&req, dir.path(), &req.model)
+            .expect("plain override filename resolves")
+            .is_none());
     }
 }

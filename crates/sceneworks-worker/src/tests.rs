@@ -2990,6 +2990,46 @@ fn lora_paths_resolve_symlinks_before_root_check() {
     assert!(error.to_string().contains("LoRA path must be inside"));
 }
 
+// sc-8821 / F-019: payload-supplied weight filenames (`advanced.controlWeights.filename`,
+// `advanced.pidCheckpoint.filename`) are joined under a resolved HF snapshot / app-cache
+// dir, so they must be a single plain path component — traversal, absolute paths, and
+// sub-paths are rejected before any join.
+#[test]
+fn weight_filenames_are_confined_to_plain_components() {
+    // Plain filenames pass through (trimmed).
+    assert_eq!(
+        super::safe_weight_filename("model.safetensors", "advanced.controlWeights.filename")
+            .expect("plain filename accepted"),
+        "model.safetensors"
+    );
+    assert_eq!(
+        super::safe_weight_filename("  model.safetensors  ", "advanced.controlWeights.filename")
+            .expect("surrounding whitespace trimmed"),
+        "model.safetensors"
+    );
+
+    for unsafe_name in [
+        "../../etc/hosts",
+        "..",
+        ".",
+        "",
+        "/etc/hosts",
+        "sub/dir.safetensors",
+        "..\\..\\secrets.safetensors",
+        "sub\\dir.safetensors",
+        "model.safetensors/",
+    ] {
+        let error = super::safe_weight_filename(unsafe_name, "advanced.controlWeights.filename")
+            .expect_err("non-plain filename rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("advanced.controlWeights.filename"),
+            "error names the offending field for {unsafe_name:?}: {error}"
+        );
+    }
+}
+
 // sc-8803 / F-002: LoRA/model import *source* paths are client-supplied over the
 // unauthenticated jobs API; the worker must confine them before copying (or, for
 // uploads, moving) the file into an app-listable directory.

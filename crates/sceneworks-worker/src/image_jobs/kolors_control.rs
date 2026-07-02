@@ -116,7 +116,8 @@ fn kolors_control_guidance(request: &ImageRequest) -> f32 {
 
 /// The (repo, filename) of the ControlNet weights — `advanced.controlWeights.{repo,filename}` overrides,
 /// else the Kolors-ControlNet-Pose default (parity with the MLX `resolve_control_weights_for`).
-fn kolors_control_repo_file(request: &ImageRequest) -> (String, String) {
+/// The payload filename must be a plain component (sc-8821 / F-019).
+fn kolors_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
     let cw = request.advanced.get("controlWeights").and_then(Value::as_object);
     let pick = |key: &str, default: &str| {
         cw.and_then(|m| m.get(key))
@@ -126,10 +127,13 @@ fn kolors_control_repo_file(request: &ImageRequest) -> (String, String) {
             .unwrap_or(default)
             .to_owned()
     };
-    (
+    Ok((
         pick("repo", KOLORS_CONTROL_REPO),
-        pick("filename", KOLORS_CONTROL_FILE),
-    )
+        safe_weight_filename(
+            &pick("filename", KOLORS_CONTROL_FILE),
+            "advanced.controlWeights.filename",
+        )?,
+    ))
 }
 
 /// Resolve the Kolors ControlNet weight **file** the `KolorsControl` provider loads, downloading on first
@@ -141,7 +145,7 @@ async fn ensure_kolors_control_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
-    let (repo, file) = kolors_control_repo_file(request);
+    let (repo, file) = kolors_control_repo_file(request)?;
     if let Ok(p) = std::env::var("SCENEWORKS_CONTROLNET_KOLORS") {
         let p = PathBuf::from(p);
         if p.is_file() {
