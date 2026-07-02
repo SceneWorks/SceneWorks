@@ -169,6 +169,7 @@ fn pose_detect_candle_real_weights_finds_person() {
         PathBuf::from(det),
         PathBuf::from(pose),
         vec![Some(PathBuf::from(img))],
+        &gen_core::CancelFlag::new(),
     )
     .expect("detect_batch");
     eprintln!("DWPose execution device = {device}");
