@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
-import { sortNewest } from "../sorters.js";
+import { upsertJobNewest } from "../sorters.js";
 
 const maxLoraUploadBytes = 2 * 1024 * 1024 * 1024;
 const maxModelUploadBytes = 256 * 1024 * 1024 * 1024;
@@ -109,7 +109,7 @@ export function useModelsAndLoras({
       method: "POST",
       body,
     });
-    setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+    setJobs((items) => upsertJobNewest(items, job));
     if (options.navigateToQueue ?? false) {
       setActiveView("Queue");
     }
@@ -160,7 +160,7 @@ export function useModelsAndLoras({
       method: "POST",
       body,
     });
-    setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+    setJobs((items) => upsertJobNewest(items, job));
     if (options.navigateToQueue ?? false) {
       setActiveView("Queue");
     }
@@ -184,7 +184,7 @@ export function useModelsAndLoras({
           method: "POST",
           body: JSON.stringify(body),
         });
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setJobs((items) => upsertJobNewest(items, job));
         setError("");
         return job;
       } catch (err) {
@@ -202,7 +202,7 @@ export function useModelsAndLoras({
           method: "POST",
           body: JSON.stringify({ requestedGpu: "auto" }),
         });
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setJobs((items) => upsertJobNewest(items, job));
         setError("");
         return job;
       } catch (err) {
@@ -223,7 +223,7 @@ export function useModelsAndLoras({
           method: "POST",
           body: JSON.stringify({ requestedGpu: "auto" }),
         });
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setJobs((items) => upsertJobNewest(items, job));
         setError("");
         return job;
       } catch (err) {

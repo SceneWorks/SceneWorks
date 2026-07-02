@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
-import { sortNewest } from "../sorters.js";
+import { upsertJobNewest } from "../sorters.js";
 
 // Owns the project's training-dataset state plus dataset CRUD, caption sidecar/job,
 // and training-job creation. Extracted from App.jsx (sc-1651). The training target/
@@ -198,7 +198,7 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
           body: JSON.stringify(payload),
         },
       );
-      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+      setJobs((items) => upsertJobNewest(items, job));
       setError("");
       return job;
     },
@@ -219,7 +219,7 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
           body: JSON.stringify(payload),
         },
       );
-      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+      setJobs((items) => upsertJobNewest(items, job));
       setError("");
       return job;
     },
@@ -242,7 +242,7 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
           body: JSON.stringify(payload),
         },
       );
-      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+      setJobs((items) => upsertJobNewest(items, job));
       setError("");
       return job;
     },
@@ -265,7 +265,7 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
           body: JSON.stringify(payload),
         },
       );
-      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+      setJobs((items) => upsertJobNewest(items, job));
       setError("");
       return job;
     },
@@ -314,7 +314,7 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
         method: "POST",
         body: JSON.stringify(request),
       });
-      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+      setJobs((items) => upsertJobNewest(items, job));
       setError("");
       return job;
     },

@@ -22,7 +22,7 @@ import { LogsScreen } from "./screens/LogsScreen.jsx";
 import { LicensesScreen } from "./screens/LicensesScreen.jsx";
 import { SetupWizard } from "./screens/SetupWizard.jsx";
 import { editModelForAsset } from "./presetUtils.js";
-import { sortNewest, sortOldest, sortWorkers } from "./sorters.js";
+import { capTerminalJobs, sortNewest, sortOldest, sortWorkers, upsertJobNewest } from "./sorters.js";
 import { useCharacters } from "./hooks/useCharacters.js";
 import { usePresets } from "./hooks/usePresets.js";
 import { useTraining } from "./hooks/useTraining.js";
@@ -39,6 +39,7 @@ import {
   restrictFoldedToScope,
 } from "./assetVariants.js";
 import { buildWorkersById } from "./workers.js";
+import { createEditorScratchRegistry } from "./editorScratch.js";
 import { isDesktop as isDesktopShell, tauriInvoke } from "./runtime.js";
 
 // Desktop (Tauri) shell detection (unified helper, epic 4484 story 6). The first-run
@@ -138,7 +139,11 @@ function mergeFreshJobs(currentJobs, serverJobs) {
       merged.set(current.id, current);
     }
   }
-  return [...merged.values()].sort(sortNewest);
+  // sc-8860 (F-058): this deliberately keeps client-side entries the server no
+  // longer returns, so without a cap a long session grows unbounded. Cap the
+  // retained terminal-job tail (active jobs are never dropped) so a refresh can't
+  // monotonically grow `jobs`.
+  return capTerminalJobs([...merged.values()].sort(sortNewest));
 }
 
 function generatedResultAssetCount(job) {
@@ -584,6 +589,9 @@ export function App() {
   const generatedAssetRefreshesRef = useRef(new Map());
   const refreshDataRef = useRef(null);
   const refreshAssetsRef = useRef(null);
+  // Latest purgeAsset, held in a ref so the App-level scratch-op survivor (sc-8850) can
+  // purge orphaned scratch/result assets from the SSE handler without re-subscribing.
+  const purgeAssetRef = useRef(null);
   const refreshCharactersRef = useRef(null);
   const refreshLorasRef = useRef(null);
   const refreshPresetsRef = useRef(null);
@@ -601,6 +609,34 @@ export function App() {
       if (leaveGuardRef.current === guard) leaveGuardRef.current = null;
     };
   }, []);
+  // In-flight Image-Editor AI-op scratch registry (sc-8850). The editor stages an
+  // ephemeral scratch asset per AI op and normally loads the result back + purges
+  // everything itself. But navigating away mid-job unmounts the editor, so that
+  // in-component purge never runs. This registry lives in App (survives the unmount) and
+  // purges the tracked scratch/mask + result assets whenever such a job terminates and
+  // the editor is no longer claiming it. It calls purgeAsset through a ref so it stays
+  // stable across renders. See editorScratch.js for the full survivor behaviour.
+  const editorScratchRegistryRef = useRef(null);
+  if (!editorScratchRegistryRef.current) {
+    editorScratchRegistryRef.current = createEditorScratchRegistry({
+      purgeAsset: (asset) => purgeAssetRef.current?.(asset),
+    });
+  }
+  const editorScratchRegistry = editorScratchRegistryRef.current;
+  // Latest jobs list, so the claim-release sweep can read it without re-subscribing.
+  const jobsRef = useRef([]);
+  const trackEditorScratchOp = useCallback(
+    (jobId, assets) => editorScratchRegistry.track(jobId, assets),
+    [editorScratchRegistry],
+  );
+  const releaseEditorScratchOp = useCallback(
+    (jobId, resultJob = null) => editorScratchRegistry.release(jobId, resultJob),
+    [editorScratchRegistry],
+  );
+  const registerEditorScratchClaim = useCallback(
+    (getClaimedIds) => editorScratchRegistry.registerClaim(getClaimedIds, () => jobsRef.current),
+    [editorScratchRegistry],
+  );
   const navTo = useCallback((viewId) => {
     if (viewId === activeViewRef.current) return;
     const guard = leaveGuardRef.current;
@@ -630,7 +666,7 @@ export function App() {
         if (navigateToQueue) {
           setActiveView("Queue");
         }
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setJobs((items) => upsertJobNewest(items, job));
         setError("");
         return job;
       } catch (err) {
@@ -1116,7 +1152,7 @@ export function App() {
         hasGeneratedAssets &&
         (resultAssetCount > previousRefresh.assetCount ||
           (resultAssetCount === 0 && generationSetId && generationSetId !== previousRefresh.generationSetId));
-      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+      setJobs((items) => upsertJobNewest(items, job));
       if (hasGeneratedAssets) {
         if (job.result?.generationSetId) {
           setLatestGenerationSetId(job.result.generationSetId);
@@ -1232,6 +1268,16 @@ export function App() {
       events?.close();
     };
   }, [access.authRequired, ready, token]);
+
+  // Survivor sweep for orphaned Image-Editor scratch ops (sc-8850). Runs on every `jobs`
+  // change (SSE ticks, initial load, etc.): purges the scratch + result assets of any
+  // tracked editor AI-op whose job has terminated and whose editor is no longer claiming
+  // it (unmounted mid-job). The editor's own in-component watcher handles the mounted
+  // case and releases its claim; this catches everything the unmounted editor left behind.
+  useEffect(() => {
+    jobsRef.current = jobs;
+    editorScratchRegistry.sweep(jobs);
+  }, [jobs, editorScratchRegistry]);
 
   async function refreshData() {
     const fetchInitial = async (label, path, fallback, optional = false) => {
@@ -1448,7 +1494,7 @@ export function App() {
             requestedGpu,
           }),
         });
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setJobs((items) => upsertJobNewest(items, job));
         setError("");
         return job;
       } catch (err) {
@@ -1479,7 +1525,7 @@ export function App() {
             payload: { ...payload, projectId: activeProject.id },
           }),
         });
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setJobs((items) => upsertJobNewest(items, job));
         setError("");
         return job;
       } catch (err) {
@@ -1698,7 +1744,7 @@ export function App() {
             requestedGpu,
           }),
         });
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setJobs((items) => upsertJobNewest(items, job));
         setError("");
         return job;
       } catch (err) {
@@ -1725,7 +1771,7 @@ export function App() {
             requestedGpu,
           }),
         });
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setJobs((items) => upsertJobNewest(items, job));
         setError("");
         return job;
       } catch (err) {
@@ -1957,6 +2003,10 @@ export function App() {
     },
     [token],
   );
+  // Keep the ref current for the App-level scratch-op survivor (sc-8850), which purges
+  // from the SSE/sweep path without re-subscribing. Assigned here (after purgeAsset is
+  // defined) rather than in the hoisted ref block above, which runs before this const.
+  purgeAssetRef.current = purgeAsset;
 
   const importAsset = useCallback(
     async (file, options = {}) => {
@@ -2003,7 +2053,7 @@ export function App() {
             ? { payloadChanges: { duplicatedAt: new Date().toISOString() } }
             : (options.body ?? {});
         const updatedJob = await apiFetch(path, token, { method: "POST", body: JSON.stringify(body) });
-        setJobs((items) => [updatedJob, ...items.filter((item) => item.id !== updatedJob.id)].sort(sortNewest));
+        setJobs((items) => upsertJobNewest(items, updatedJob));
         setError("");
       } catch (err) {
         setError(err.message);
@@ -2164,6 +2214,10 @@ export function App() {
     // Navigation
     setActiveView,
     registerLeaveGuard,
+    // Image-Editor scratch-op survivor coordination (sc-8850)
+    trackEditorScratchOp,
+    releaseEditorScratchOp,
+    registerEditorScratchClaim,
     // Characters
     characters,
     createCharacter,
@@ -2204,7 +2258,8 @@ export function App() {
     refreshTrainingDatasets, loadTrainingDataset, loadTrainingDatasetReadiness, setTrainingDatasetItemQualityAck, createTrainingDataset, uploadTrainingDatasetItem,
     updateTrainingDataset, batchRenameTrainingDataset, writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob, createTrainingDatasetUpscaleJob, createTrainingDatasetAnalysisJob, createTrainingDatasetFaceAnalysisJob, smartCropTrainingDataset, stripExifTrainingDataset, createTrainingJob, trainingPresets, trainingPresetsError,
-    trainingTargets, trainingTargetsError, setActiveView, registerLeaveGuard, characters,
+    trainingTargets, trainingTargetsError, setActiveView, registerLeaveGuard,
+    trackEditorScratchOp, releaseEditorScratchOp, registerEditorScratchClaim, characters,
     createCharacter, updateCharacter, archiveCharacter, unarchiveCharacter, listArchivedCharacters,
     addCharacterReference, updateCharacterReference,
     removeCharacterReference, createCharacterLook, updateCharacterLook, deleteCharacterLook,
