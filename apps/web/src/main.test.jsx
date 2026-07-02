@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, ErrorBoundary, eventUrl } from "./main.jsx";
 import { AssetPickerField, CharacterImportDialog } from "./components/AssetPicker.jsx";
+import { getMediaTicket, setMediaTicket } from "./api.js";
 import { assetUrl } from "./components/assetMedia.jsx";
 import {
   AssetDetail,
@@ -835,6 +836,150 @@ describe("SceneWorks app shell", () => {
     expect(requests.filter((request) => request.path.endsWith("/jobs/events/ticket")).length).toBe(1);
     expect(FakeEventSource.instances.length).toBe(1);
     expect(FakeEventSource.instances[0].url).toContain("ticket=stream-ticket");
+  });
+
+  // sc-9063 (follow-up to sc-8810 / F-008): a media-ticket mint that keeps failing
+  // in remote-auth mode must not block ALL data loading. `ready` waits for the
+  // first mint attempt to SETTLE, not to succeed: on failure the lists/metadata
+  // still load (thumbnails degrade to placeholders), a distinct notice names the
+  // media-ticket problem, and the notice clears once a backoff retry lands.
+  describe("media-ticket mint failure (sc-9063)", () => {
+    function mockRemoteAuthFetch({ requests = [], mint }) {
+      global.fetch = vi.fn((url, options = {}) => {
+        const path = new URL(url).pathname;
+        requests.push({ path, method: options.method ?? "GET" });
+        if (path.endsWith("/health")) {
+          return Promise.resolve(response({ status: "ok", authRequired: true }));
+        }
+        if (path.endsWith("/access")) {
+          return Promise.resolve(response({ authRequired: true }));
+        }
+        if (path.endsWith("/auth/verify")) {
+          return Promise.resolve(response({ ok: true }));
+        }
+        if (path.endsWith("/jobs/events/ticket")) {
+          return Promise.resolve(response({ ticket: "stream-ticket" }));
+        }
+        if (path.endsWith("/files/ticket")) {
+          return Promise.resolve(
+            mint()
+              ? response({ ticket: "media-ticket-1", expiresInSeconds: 300 })
+              : errorResponse(500, "mint exploded"),
+          );
+        }
+        if (path.endsWith("/projects")) {
+          return Promise.resolve(response([{ id: "project-default", name: "Default Project" }]));
+        }
+        return Promise.resolve(response([]));
+      });
+      return requests;
+    }
+
+    afterEach(() => {
+      setMediaTicket("");
+    });
+
+    it("still loads core data and shows a media-ticket notice when the mint persistently fails", async () => {
+      window.localStorage.setItem("sceneworks-token", "remote-token");
+      const requests = mockRemoteAuthFetch({ mint: () => false });
+
+      root = createRoot(container);
+      await act(async () => {
+        root.render(<App />);
+      });
+      await settle();
+
+      // The mint was attempted and failed…
+      expect(requests.some((request) => request.path.endsWith("/files/ticket"))).toBe(true);
+      expect(getMediaTicket()).toBe("");
+      // …but core data still loads (pre-sc-9063 the whole app stayed empty).
+      expect(requests.some((request) => request.path.endsWith("/projects"))).toBe(true);
+      // And a distinct notice names the media-ticket problem.
+      const noticeTexts = [...document.body.querySelectorAll(".notice.error")].map((node) => node.textContent);
+      expect(noticeTexts.some((text) => text.includes("media ticket"))).toBe(true);
+    });
+
+    it("clears the media-ticket notice once a backoff retry succeeds", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        window.localStorage.setItem("sceneworks-token", "remote-token");
+        let mintOk = false;
+        mockRemoteAuthFetch({ mint: () => mintOk });
+
+        root = createRoot(container);
+        await act(async () => {
+          root.render(<App />);
+        });
+        await settle();
+
+        expect(getMediaTicket()).toBe("");
+        const failedTexts = [...document.body.querySelectorAll(".notice.error")].map((node) => node.textContent);
+        expect(failedTexts.some((text) => text.includes("media ticket"))).toBe(true);
+
+        // The first backoff retry fires after 1s; let it succeed this time.
+        mintOk = true;
+        await act(async () => {
+          vi.advanceTimersByTime(1000);
+        });
+        await settle();
+
+        expect(getMediaTicket()).toBe("media-ticket-1");
+        const remainingTexts = [...document.body.querySelectorAll(".notice.error")].map((node) => node.textContent);
+        expect(remainingTexts.some((text) => text.includes("media ticket"))).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("still gates the initial data load on a successful mint (sc-8810 unchanged)", async () => {
+      window.localStorage.setItem("sceneworks-token", "remote-token");
+      const requests = mockRemoteAuthFetch({ mint: () => true });
+
+      root = createRoot(container);
+      await act(async () => {
+        root.render(<App />);
+      });
+      await settle();
+
+      expect(getMediaTicket()).toBe("media-ticket-1");
+      const mintIndex = requests.findIndex((request) => request.path.endsWith("/files/ticket"));
+      const projectsIndex = requests.findIndex((request) => request.path.endsWith("/projects"));
+      expect(mintIndex).toBeGreaterThanOrEqual(0);
+      expect(projectsIndex).toBeGreaterThan(mintIndex);
+      expect(document.body.querySelectorAll(".notice.error").length).toBe(0);
+    });
+
+    it("leaves auth-off (desktop/loopback) mode untouched: no mint, data loads, no notice", async () => {
+      const requests = [];
+      global.fetch = vi.fn((url, options = {}) => {
+        const path = new URL(url).pathname;
+        requests.push({ path, method: options.method ?? "GET" });
+        if (path.endsWith("/health")) {
+          return Promise.resolve(response({ status: "ok", authRequired: false }));
+        }
+        if (path.endsWith("/access")) {
+          return Promise.resolve(response({ authRequired: false }));
+        }
+        if (path.endsWith("/jobs/events/ticket")) {
+          return Promise.resolve(response({ ticket: "stream-ticket" }));
+        }
+        if (path.endsWith("/projects")) {
+          return Promise.resolve(response([{ id: "project-default", name: "Default Project" }]));
+        }
+        return Promise.resolve(response([]));
+      });
+
+      root = createRoot(container);
+      await act(async () => {
+        root.render(<App />);
+      });
+      await settle();
+
+      expect(requests.some((request) => request.path.endsWith("/files/ticket"))).toBe(false);
+      expect(requests.some((request) => request.path.endsWith("/projects"))).toBe(true);
+      expect(getMediaTicket()).toBe("");
+      expect(document.body.querySelectorAll(".notice.error").length).toBe(0);
+    });
   });
 
   it("gates the studios behind workspace creation when no projects exist", async () => {
