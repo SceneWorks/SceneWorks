@@ -208,6 +208,15 @@ async function assertVersionsAligned() {
     { path: "apps/desktop/package.json", version: JSON.parse(await readFile(path.join(root, "apps/desktop/package.json"), "utf8")).version },
     { path: "apps/desktop/tauri.conf.json", version: JSON.parse(await readFile(path.join(root, "apps/desktop/tauri.conf.json"), "utf8")).version },
   ];
+  // Scope of this assert: four-way ALIGNMENT only. Using versionSources[0]
+  // (root package.json) purely as the equality reference means we verify all
+  // four fields are equal, NOT that the version moved upward. A hypothetical
+  // synchronized all-four-down edit would pass this check. That's deliberate:
+  // upward-DIRECTION is owned by scripts/sync-version.mjs, whose only mutation
+  // path is `npm version`, and `npm version` never moves a version down. There
+  // is no committed floor to compare against here — these four files ARE the
+  // version sources — so a hardcoded baseline would be a rot-prone footgun
+  // rather than a real guard. Alignment is the invariant this file owns.
   const reference = versionSources[0].version;
   const mismatched = versionSources.filter((source) => source.version !== reference);
   if (mismatched.length) {
