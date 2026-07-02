@@ -672,6 +672,104 @@ fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
     }
 }
 
+/// The `(engine Quant, recipe bit count)` a resolved turnkey tier subdir ACTUALLY loads at, parsed
+/// from the tier dir's basename (sc-8820). The tier resolvers ([`standard_tier_subdir`],
+/// [`ideogram_model_subdir`], [`boogu_model_subdir`], [`krea_model_subdir`]) fall through q4→q8→bf16
+/// (or the Boogu `<variant>`-shaped names) when the requested tier isn't downloaded, so the resolved
+/// path can be a DIFFERENT precision than the request asked for. This maps the resolved basename back
+/// to its precision so the caller can record the tier that ran, not the one requested:
+///   - `bf16` / `<variant>-bf16` → dense (`None`, `None`)
+///   - `q4`   / `<variant>-q4`   → Q4 (`4`)
+///   - `q8`   / `<variant>-q8`   → Q8 (`8`)
+///   - a bare Boogu `<variant>/` (no `-q4`/`-q8`/`-bf16` suffix) → the shipped **Q8** default
+///
+/// `None` when the basename is not a recognizable tier name — e.g. the resolver fell all the way back
+/// to the repo `root` (a partial/absent turnkey the engine will error on), or the dir is a `modelPath`
+/// override. In that case the caller keeps the request-derived quant rather than inventing one.
+///
+/// macOS-only: its sole caller is [`reconcile_resolved_tier_quant`] on the MLX `generate_stream` path.
+/// The candle lane has no quant-tier layout to reconcile, so this would be dead code there.
+#[cfg(target_os = "macos")]
+fn tier_quant_from_resolved_dir(dir: &Path) -> Option<(Option<Quant>, Option<i64>)> {
+    let name = dir.file_name()?.to_str()?;
+    // Match the trailing tier token: `q4` / `q8` / `bf16`, whether the whole basename (standard/
+    // ideogram/krea) or the suffix of a Boogu `<variant>-<tier>` folder.
+    let tier = name.rsplit('-').next().unwrap_or(name);
+    match tier {
+        "bf16" => Some((None, None)),
+        "q4" => Some((Some(Quant::Q4), Some(4))),
+        "q8" => Some((Some(Quant::Q8), Some(8))),
+        // A bare Boogu `base`/`turbo`/`edit` folder (no tier suffix) IS the packed Q8 default.
+        "base" | "turbo" | "edit" => Some((Some(Quant::Q8), Some(8))),
+        _ => None,
+    }
+}
+
+/// Reconcile the request-derived `(quant, quant_bits)` against the tier subdir the resolver ACTUALLY
+/// landed on (sc-8820). The tier resolvers fall through q4→q8→bf16 when the preferred tier isn't
+/// downloaded, but the recipe quant is derived from the REQUEST — so a user who selected bf16 with
+/// only `q4/` present would silently render Q4 while the sidecar records dense. That makes the epic
+/// 8506 quant A/B workflow lie about precision (and can compare a tier against itself). This corrects
+/// the recorded quant to the resolved tier, and — when a downgrade actually happened — `warn!`s and
+/// emits a `quant_tier_downgraded` event so the UI/telemetry surfaces the fallback instead of hiding
+/// it. We do NOT hard-error: a working render at an adjacent tier beats failing because the preferred
+/// tier is missing (the finding prefers warn+fallback+correct-recording). Returns the
+/// `(quant, quant_bits)` to record + load with.
+///
+/// `allow_quant_change` gates whether the LOAD quant may be rewritten to match the resolved tier.
+/// It's `true` for the ordinary packed-turnkey families (the load-quant is a no-op on already-packed
+/// weights, so correcting it to the resolved tier is safe/right). It's `false` for the DENSE-TE
+/// turnkeys (FLUX.2-klein, sc-8711): their load quant MUST stay `None` so the deliberately-dense bf16
+/// text encoder is never re-quantized — but the *recorded* bit count still gets corrected to the
+/// packed transformer's resolved tier so the sidecar tells the truth. The event/`warn!` still fire so
+/// the fallback is surfaced either way.
+#[cfg(target_os = "macos")]
+fn reconcile_resolved_tier_quant(
+    requested: (Option<Quant>, Option<i64>),
+    weights_dir: &Path,
+    allow_quant_change: bool,
+    model_id: &str,
+    job_id: &str,
+    engine: &str,
+) -> (Option<Quant>, Option<i64>) {
+    let Some((actual_quant, actual_bits)) = tier_quant_from_resolved_dir(weights_dir) else {
+        // Not a recognizable tier dir (fell back to the repo root, or a modelPath override) — keep
+        // the request-derived quant; the engine will surface any missing-weights error itself.
+        return requested;
+    };
+    if actual_bits == requested.1 {
+        return requested;
+    }
+    // The resolved tier differs from what the request asked for → a silent fallback. Surface it and
+    // record the precision that actually ran.
+    let requested_label = requested.1.map_or("bf16".to_owned(), |b| format!("q{b}"));
+    let actual_label = actual_bits.map_or("bf16".to_owned(), |b| format!("q{b}"));
+    tracing::warn!(
+        "{engine}: requested quant tier {requested_label} for {model_id} is not downloaded; \
+         fell back to {actual_label} — recording the tier that actually ran"
+    );
+    emit_event(
+        "quant_tier_downgraded",
+        json!({
+            "jobId": job_id,
+            "engine": engine,
+            "model": model_id,
+            "requested": requested_label,
+            "resolved": actual_label,
+            "requestedBits": requested.1,
+            "resolvedBits": actual_bits,
+        }),
+    );
+    // Always correct the recorded bits; only rewrite the load quant when it's safe to (packed
+    // turnkeys), so a dense-TE turnkey keeps its `None` load quant while still recording the truth.
+    let load_quant = if allow_quant_change {
+        actual_quant
+    } else {
+        requested.0
+    };
+    (load_quant, actual_bits)
+}
+
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=80) else the family default.
 /// Shared by the MLX path and the candle lane (sc-5096).
 #[cfg(any(
@@ -1953,6 +2051,26 @@ async fn generate_stream(
         resolve_quant(request)
     } else {
         (None, None)
+    };
+    // sc-8820: the tier resolvers ([`standard_tier_subdir`] & friends) silently fall through
+    // q4→q8→bf16 when the preferred tier isn't downloaded, but the quant above is derived from the
+    // REQUEST — so a bf16 pick with only `q4/` present would render Q4 while the recipe records dense,
+    // lying to the epic 8506 quant A/B workflow. Reconcile against the tier subdir actually resolved:
+    // record the precision that ran + `warn!`/emit `quant_tier_downgraded` on a real fallback. The
+    // dense-TE turnkeys (FLUX.2-klein) keep their `None` load quant (never re-quantize the dense bf16
+    // TE) while still correcting the recorded bits. SANA (no quant support) has no tier subdir, so
+    // `tier_quant_from_resolved_dir` returns `None` and this is a no-op for it.
+    let (quant, quant_bits) = if model.supports_quant() {
+        reconcile_resolved_tier_quant(
+            (quant, quant_bits),
+            &weights_dir,
+            !is_dense_te_tier(request),
+            &request.model,
+            &job.id,
+            backend,
+        )
+    } else {
+        (quant, quant_bits)
     };
     let steps = resolve_steps(request, &model);
     let guidance = resolve_guidance(request, &model);
@@ -3576,5 +3694,137 @@ mod standard_tier_tests {
             json!({ "denseTextEncoderTier": true })
         )));
         assert!(!is_dense_te_tier(&manifest_request("flux2_dev", json!({}))));
+    }
+}
+
+/// sc-8820: the recorded quant must reflect the tier subdir ACTUALLY resolved, not the one requested,
+/// and a fallback must be surfaced (warn! + `quant_tier_downgraded` event) rather than silently
+/// downgrading with lying telemetry.
+///
+/// macOS-only: exercises [`tier_quant_from_resolved_dir`] / [`reconcile_resolved_tier_quant`], which
+/// only compile on the MLX `generate_stream` path. The candle lane has no quant-tier layout.
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod quant_tier_reconcile_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The resolved basename → precision map used to record the tier that ran (not the one requested).
+    #[test]
+    fn tier_quant_from_resolved_dir_maps_basename_to_precision() {
+        let root = std::path::Path::new("/models/sd3_5_large-mlx");
+        // Standard `q4`/`q8`/`bf16` tier dirs → their precision.
+        assert_eq!(
+            tier_quant_from_resolved_dir(&root.join("q4")),
+            Some((Some(Quant::Q4), Some(4)))
+        );
+        assert_eq!(
+            tier_quant_from_resolved_dir(&root.join("q8")),
+            Some((Some(Quant::Q8), Some(8)))
+        );
+        assert_eq!(
+            tier_quant_from_resolved_dir(&root.join("bf16")),
+            Some((None, None))
+        );
+        // Boogu `<variant>-<tier>` and bare `<variant>` (= the packed Q8 default).
+        assert_eq!(
+            tier_quant_from_resolved_dir(&root.join("base-q4")),
+            Some((Some(Quant::Q4), Some(4)))
+        );
+        assert_eq!(
+            tier_quant_from_resolved_dir(&root.join("turbo-bf16")),
+            Some((None, None))
+        );
+        assert_eq!(
+            tier_quant_from_resolved_dir(&root.join("edit")),
+            Some((Some(Quant::Q8), Some(8)))
+        );
+        // A fell-all-the-way-back-to-root (or modelPath) dir is not a recognizable tier → None, so the
+        // caller keeps the request-derived quant.
+        assert_eq!(tier_quant_from_resolved_dir(root), None);
+    }
+
+    /// The end-to-end reconcile is macOS-only (the MLX generate path). When the resolved tier matches
+    /// the request it's a pass-through; when it differs it records the tier that ran, and the
+    /// dense-TE guard keeps the load quant `None` while still correcting the recorded bits.
+    #[test]
+    fn reconcile_records_the_resolved_tier_on_fallback() {
+        // Requested q8 present as q8 → pass through, records q8.
+        assert_eq!(
+            reconcile_resolved_tier_quant(
+                (Some(Quant::Q8), Some(8)),
+                std::path::Path::new("/m/q8"),
+                true,
+                "sd3_5_large",
+                "job1",
+                "mlx",
+            ),
+            (Some(Quant::Q8), Some(8)),
+        );
+        // Requested bf16 but only q4 downloaded → resolved dir is `q4`; record Q4 (not dense) and
+        // rewrite the load quant to Q4 (safe no-op on already-packed weights).
+        assert_eq!(
+            reconcile_resolved_tier_quant(
+                (None, None),
+                std::path::Path::new("/m/q4"),
+                true,
+                "sd3_5_large",
+                "job1",
+                "mlx",
+            ),
+            (Some(Quant::Q4), Some(4)),
+        );
+        // Dense-TE turnkey: same q4 fallback, but the load quant STAYS `None` (never re-quantize the
+        // dense bf16 TE) while the recorded bits are still corrected to Q4.
+        assert_eq!(
+            reconcile_resolved_tier_quant(
+                (None, None),
+                std::path::Path::new("/m/q4"),
+                false,
+                "flux2_klein_9b",
+                "job1",
+                "mlx",
+            ),
+            (None, Some(4)),
+        );
+        // Unrecognized resolved dir (fell back to repo root / modelPath) → keep the request quant.
+        assert_eq!(
+            reconcile_resolved_tier_quant(
+                (Some(Quant::Q8), Some(8)),
+                std::path::Path::new("/m/root"),
+                true,
+                "sd3_5_large",
+                "job1",
+                "mlx",
+            ),
+            (Some(Quant::Q8), Some(8)),
+        );
+    }
+
+    /// End-to-end tier resolution + recording: a bf16 request against a turnkey where ONLY `q4/` is
+    /// downloaded resolves to `q4/`, and the reconciled recipe records Q4 — the precision that ran —
+    /// not the requested dense bf16. Guards the epic 8506 A/B workflow against telemetry that lies.
+    #[test]
+    fn bf16_request_with_only_q4_present_records_q4() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = root.join("q4").join("transformer");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("diffusion_pytorch_model.safetensors"), b"x").unwrap();
+
+        let req = ImageRequest::from_payload(
+            json!({ "model": "sd3_5_large", "advanced": { "mlxQuantize": 0 } })
+                .as_object()
+                .unwrap(),
+        );
+        // The tier resolver falls through to q4.
+        let resolved = standard_tier_subdir(root, &req);
+        assert_eq!(resolved, root.join("q4"));
+        // The request would have recorded dense bf16 — reconcile corrects it to the resolved Q4 tier.
+        let requested = resolve_quant(&req);
+        assert_eq!(requested, (None, None), "bf16 request derives dense");
+        let (quant, bits) =
+            reconcile_resolved_tier_quant(requested, &resolved, true, "sd3_5_large", "job1", "mlx");
+        assert_eq!((quant, bits), (Some(Quant::Q4), Some(4)));
     }
 }
