@@ -11,7 +11,7 @@ import {
   editableLora,
 } from "./characterPanels.jsx";
 import { CompactSelector } from "../components/CompactSelector.jsx";
-import { assetMatchesCharacter } from "../components/DatasetAddDialog.jsx";
+import { assetMatchesCharacter } from "../characterMembership.js";
 import { extractFamilies } from "../presetUtils.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { useAppContext } from "../context/AppContext.js";
