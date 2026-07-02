@@ -686,10 +686,10 @@ fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
 /// `None` when the basename is not a recognizable tier name — e.g. the resolver fell all the way back
 /// to the repo `root` (a partial/absent turnkey the engine will error on), or the dir is a `modelPath`
 /// override. In that case the caller keeps the request-derived quant rather than inventing one.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+///
+/// macOS-only: its sole caller is [`reconcile_resolved_tier_quant`] on the MLX `generate_stream` path.
+/// The candle lane has no quant-tier layout to reconcile, so this would be dead code there.
+#[cfg(target_os = "macos")]
 fn tier_quant_from_resolved_dir(dir: &Path) -> Option<(Option<Quant>, Option<i64>)> {
     let name = dir.file_name()?.to_str()?;
     // Match the trailing tier token: `q4` / `q8` / `bf16`, whether the whole basename (standard/
@@ -3700,11 +3700,11 @@ mod standard_tier_tests {
 /// sc-8820: the recorded quant must reflect the tier subdir ACTUALLY resolved, not the one requested,
 /// and a fallback must be surfaced (warn! + `quant_tier_downgraded` event) rather than silently
 /// downgrading with lying telemetry.
+///
+/// macOS-only: exercises [`tier_quant_from_resolved_dir`] / [`reconcile_resolved_tier_quant`], which
+/// only compile on the MLX `generate_stream` path. The candle lane has no quant-tier layout.
 #[cfg(test)]
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(target_os = "macos")]
 mod quant_tier_reconcile_tests {
     use super::*;
     use serde_json::json;
@@ -3747,7 +3747,6 @@ mod quant_tier_reconcile_tests {
     /// The end-to-end reconcile is macOS-only (the MLX generate path). When the resolved tier matches
     /// the request it's a pass-through; when it differs it records the tier that ran, and the
     /// dense-TE guard keeps the load quant `None` while still correcting the recorded bits.
-    #[cfg(target_os = "macos")]
     #[test]
     fn reconcile_records_the_resolved_tier_on_fallback() {
         // Requested q8 present as q8 → pass through, records q8.
@@ -3805,7 +3804,6 @@ mod quant_tier_reconcile_tests {
     /// End-to-end tier resolution + recording: a bf16 request against a turnkey where ONLY `q4/` is
     /// downloaded resolves to `q4/`, and the reconciled recipe records Q4 — the precision that ran —
     /// not the requested dense bf16. Guards the epic 8506 A/B workflow against telemetry that lies.
-    #[cfg(target_os = "macos")]
     #[test]
     fn bf16_request_with_only_q4_present_records_q4() {
         let tmp = tempfile::tempdir().unwrap();
