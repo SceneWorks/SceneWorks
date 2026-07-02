@@ -635,17 +635,10 @@ async fn generate_qwen_edit_stream(
             "Qwen-Image-Edit requires a reference image".to_owned(),
         ));
     }
-    // sc-3030 fit_image: pre-fit the Image-Edit source to the output W×H (crop / pad /
-    // outpaint→pad) so an off-aspect edit doesn't stretch. Character-Studio references
-    // stay native (the `should_fit_edit_source` gate excludes them).
-    if should_fit_edit_source(request) {
-        references = references
-            .into_iter()
-            .map(|reference| {
-                fit_engine_image(reference, request.width, request.height, &request.fit_mode)
-            })
-            .collect::<WorkerResult<Vec<_>>>()?;
-    }
+    // sc-3030 / sc-8253 fit_image: pre-fit every reference (the Image-Edit source AND the
+    // Character-Studio character reference) to the output W×H (crop / pad / outpaint→pad) so an
+    // off-aspect reference isn't squished into the square latent. `stretch` keeps the legacy resize.
+    references = fit_edit_references(references, request, request.width, request.height)?;
 
     // Per-iteration grouping (shared with the FLUX.2 edit path): a Character-Studio angle
     // set (11 shared-seed, per-angle prompt) / best-effort pose tier (one per pose, shared

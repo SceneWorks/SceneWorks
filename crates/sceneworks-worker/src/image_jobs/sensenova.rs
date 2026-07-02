@@ -190,14 +190,10 @@ async fn generate_sensenova_edit_stream(
             "SenseNova-U1 it2i requires a reference image".to_owned(),
         ));
     }
-    // sc-3030 fit_image: pre-fit an off-aspect Image-Edit source to the output W×H (crop / pad /
-    // outpaint→pad). Character-Studio references stay native (`should_fit_edit_source` excludes them).
-    if should_fit_edit_source(request) {
-        references = references
-            .into_iter()
-            .map(|reference| fit_engine_image(reference, out_w, out_h, &request.fit_mode))
-            .collect::<WorkerResult<Vec<_>>>()?;
-    }
+    // sc-3030 / sc-8253 fit_image: pre-fit every reference (the Image-Edit source AND the
+    // Character-Studio character reference) to the output W×H (crop / pad / outpaint→pad) so an
+    // off-aspect reference isn't squished into the square latent. `stretch` keeps the legacy resize.
+    references = fit_edit_references(references, request, out_w, out_h)?;
     let conditioning = build_edit_conditioning(&references);
 
     // Per-iteration grouping: a Character-Studio angle set (11 shared-seed, per-angle prompt) or the
