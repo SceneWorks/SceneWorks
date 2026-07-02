@@ -412,8 +412,35 @@ version = "0.10.2"
 source = "git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343#65ecb58c11d2244a7e60c71bdcdb19b15b0a4343"
 dependencies = [
  "byteorder",
- "candle-kernels",
- "candle-ug",
+ "candle-kernels 0.10.2 (git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343)",
+ "candle-ug 0.10.2 (git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343)",
+ "cudarc 0.19.7",
+ "float8",
+ "gemm 0.19.0",
+ "half",
+ "libc",
+ "libm",
+ "memmap2",
+ "num-traits",
+ "num_cpus",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "rayon",
+ "safetensors 0.7.0",
+ "thiserror 2.0.18",
+ "tokenizers 0.22.2",
+ "yoke 0.8.2",
+ "zip 8.6.0",
+]
+
+[[package]]
+name = "candle-core"
+version = "0.10.2"
+source = "git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87#c1e6756a89faefa888ea57b056394a0619925b87"
+dependencies = [
+ "byteorder",
+ "candle-kernels 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
+ "candle-ug 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "cudarc 0.19.7",
  "float8",
  "gemm 0.19.0",
@@ -436,10 +463,12 @@ dependencies = [
 [[package]]
 name = "candle-gen"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
- "candle-core",
- "candle-nn",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
+ "float8",
+ "half",
  "image",
  "rand 0.9.4",
  "rand_distr 0.5.1",
@@ -452,7 +481,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-boogu"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
  "candle-gen",
  "candle-transformers",
@@ -465,7 +494,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-chroma"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
  "candle-gen",
  "candle-transformers",
@@ -479,12 +508,12 @@ dependencies = [
 [[package]]
 name = "candle-gen-clip"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
  "candle-gen-sdxl",
- "candle-nn",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-transformers",
  "inventory",
  "tokenizers 0.22.2",
@@ -493,32 +522,32 @@ dependencies = [
 [[package]]
 name = "candle-gen-depth"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
- "candle-nn",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
 ]
 
 [[package]]
 name = "candle-gen-face"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
- "candle-nn",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
 ]
 
 [[package]]
 name = "candle-gen-flux"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
  "candle-gen-sdxl",
- "candle-nn",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-transformers",
  "inventory",
  "rand 0.9.4",
@@ -530,7 +559,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-flux2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
  "candle-gen",
  "candle-transformers",
@@ -544,7 +573,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-ideogram"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
  "candle-gen",
  "candle-gen-flux2",
@@ -560,7 +589,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-instantid"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
  "candle-gen",
  "candle-gen-face",
@@ -572,17 +601,17 @@ dependencies = [
 [[package]]
 name = "candle-gen-joycaption"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
  "candle-gen",
- "candle-llm",
+ "candle-llm 0.0.0 (git+https://github.com/SceneWorks/candle-llm?rev=3d9fdf04047bf3b1fbf323ab56c919f3a03f0794)",
  "inventory",
 ]
 
 [[package]]
 name = "candle-gen-kolors"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
  "candle-gen",
  "candle-gen-sdxl",
@@ -596,7 +625,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-krea"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
  "candle-gen",
  "candle-gen-qwen-image",
@@ -611,7 +640,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-lens"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
  "candle-gen",
  "candle-gen-flux2",
@@ -624,7 +653,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-ltx"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
  "candle-gen",
  "inventory",
@@ -636,14 +665,14 @@ dependencies = [
 [[package]]
 name = "candle-gen-pulid"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
  "candle-gen-face",
  "candle-gen-flux",
  "candle-gen-sdxl",
- "candle-nn",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-transformers",
  "rand 0.9.4",
  "rand_distr 0.5.1",
@@ -653,7 +682,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-qwen-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
  "candle-gen",
  "candle-transformers",
@@ -668,18 +697,18 @@ dependencies = [
 [[package]]
 name = "candle-gen-sam3"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
- "candle-nn",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "tokenizers 0.22.2",
 ]
 
 [[package]]
 name = "candle-gen-scail2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
  "candle-gen",
  "candle-gen-wan",
@@ -694,11 +723,11 @@ dependencies = [
 [[package]]
 name = "candle-gen-sd3"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
- "candle-nn",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-transformers",
  "inventory",
  "rand 0.9.4",
@@ -711,11 +740,11 @@ dependencies = [
 [[package]]
 name = "candle-gen-sdxl"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
- "candle-nn",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-transformers",
  "hf-hub",
  "inventory",
@@ -729,7 +758,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-seedvr2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
  "candle-gen",
  "inventory",
@@ -740,7 +769,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-sensenova"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
  "candle-gen",
  "inventory",
@@ -753,7 +782,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-svd"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
  "candle-gen",
  "inventory",
@@ -764,7 +793,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-wan"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
  "candle-gen",
  "inventory",
@@ -777,16 +806,17 @@ dependencies = [
 [[package]]
 name = "candle-gen-z-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=bc2146883bf52c54a4ad3ba147548413f4329507#bc2146883bf52c54a4ad3ba147548413f4329507"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=a9a6f0b011fb1549f5938148b6045db84d606a24#a9a6f0b011fb1549f5938148b6045db84d606a24"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
- "candle-nn",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-transformers",
  "inventory",
  "rand 0.9.4",
  "rand_distr 0.5.1",
  "safetensors 0.7.0",
+ "serde_json",
  "tokenizers 0.22.2",
 ]
 
@@ -799,12 +829,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-kernels"
+version = "0.10.2"
+source = "git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87#c1e6756a89faefa888ea57b056394a0619925b87"
+dependencies = [
+ "cudaforge",
+]
+
+[[package]]
+name = "candle-llm"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/candle-llm?rev=3d9fdf04047bf3b1fbf323ab56c919f3a03f0794#3d9fdf04047bf3b1fbf323ab56c919f3a03f0794"
+dependencies = [
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
+ "core-llm",
+ "inventory",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "candle-llm"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/candle-llm?rev=d0ba3e66b4d53420bb0b0745a185b975822089be#d0ba3e66b4d53420bb0b0745a185b975822089be"
 dependencies = [
- "candle-core",
- "candle-nn",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343)",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343)",
  "core-llm",
  "inventory",
  "serde_json",
@@ -816,7 +867,22 @@ name = "candle-nn"
 version = "0.10.2"
 source = "git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343#65ecb58c11d2244a7e60c71bdcdb19b15b0a4343"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343)",
+ "half",
+ "libc",
+ "num-traits",
+ "rayon",
+ "safetensors 0.7.0",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "candle-nn"
+version = "0.10.2"
+source = "git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87#c1e6756a89faefa888ea57b056394a0619925b87"
+dependencies = [
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "half",
  "libc",
  "num-traits",
@@ -829,11 +895,11 @@ dependencies = [
 [[package]]
 name = "candle-transformers"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343#65ecb58c11d2244a7e60c71bdcdb19b15b0a4343"
+source = "git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87#c1e6756a89faefa888ea57b056394a0619925b87"
 dependencies = [
  "byteorder",
- "candle-core",
- "candle-nn",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "fancy-regex",
  "num-traits",
  "rand 0.9.4",
@@ -848,6 +914,15 @@ dependencies = [
 name = "candle-ug"
 version = "0.10.2"
 source = "git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343#65ecb58c11d2244a7e60c71bdcdb19b15b0a4343"
+dependencies = [
+ "ug",
+ "ug-cuda",
+]
+
+[[package]]
+name = "candle-ug"
+version = "0.10.2"
+source = "git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87#c1e6756a89faefa888ea57b056394a0619925b87"
 dependencies = [
  "ug",
  "ug-cuda",
@@ -5732,7 +5807,7 @@ dependencies = [
  "candle-gen-svd",
  "candle-gen-wan",
  "candle-gen-z-image",
- "candle-llm",
+ "candle-llm 0.0.0 (git+https://github.com/SceneWorks/candle-llm?rev=d0ba3e66b4d53420bb0b0745a185b975822089be)",
  "fs2",
  "futures-util",
  "glob",
@@ -8041,7 +8116,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
