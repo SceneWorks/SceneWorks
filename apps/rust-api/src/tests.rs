@@ -5099,6 +5099,159 @@ async fn video_jobs_expand_recipe_presets_server_side() {
 }
 
 #[tokio::test]
+async fn preset_image_job_builds_each_catalog_once() {
+    // sc-8819 (F-017): a preset-backed POST /image/jobs fans out into recipe_preset_catalog,
+    // merge_preset_loras_into_payload, and validate_job_lora_compatibility. Before the fix
+    // each re-assembled model_catalog/lora_catalog from scratch, re-running the whole
+    // per-model/per-LoRA filesystem install-state probe sweep 2× each. The request-scoped
+    // JobCatalogSnapshot threads one snapshot through those seams so each catalog is built
+    // exactly once per job-create — assert that here.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "img-model",
+              "name": "Img Model",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/img", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "loraCompatibility": { "families": ["z-image"] },
+              "ui": { "label": "Img" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.loras.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "loras": [
+            {
+              "id": "style-lora",
+              "name": "Style LoRA",
+              "family": "z-image",
+              "triggerWords": ["style"],
+              "compatibility": { "families": ["z-image"] },
+              "source": { "provider": "local", "path": "loras/style.safetensors" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin loras writes");
+    std::fs::write(
+        config_dir.join("user.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [] }"#,
+    )
+    .expect("user loras writes");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "presets": [
+            {
+              "id": "dream_style",
+              "name": "Dream Style",
+              "workflow": "text_to_image",
+              "model": "img-model",
+              "defaults": { "count": 1, "resolution": "1024x1024", "negativePrompt": "blur" },
+              "prompt": { "prefix": "cinematic", "suffix": "high detail" },
+              "loras": [{ "id": "style-lora", "weight": 0.5 }]
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin recipe presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user recipe presets writes");
+    let lora_dir = temp_dir.path().join("data/loras");
+    std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+    write_test_safetensors(&lora_dir.join("style.safetensors"));
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Image Preset Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    // Reset the probe counters immediately before the job-create so project setup /
+    // seeding above doesn't count against it.
+    crate::test_reset_catalog_build_counters();
+    let (status, image_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_image",
+            "prompt": "a fox",
+            "model": "img-model",
+            "count": 1,
+            "width": 1024,
+            "height": 1024,
+            "recipePresetId": "dream_style"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "job created: {image_job:?}");
+
+    // Correctness preserved: preset prompt folded in, preset LoRA merged, and it validated.
+    assert_eq!(
+        image_job["payload"]["prompt"],
+        "cinematic, a fox, high detail"
+    );
+    assert_eq!(image_job["payload"]["loras"][0]["id"], "style-lora");
+    assert_eq!(
+        image_job["payload"]["advanced"]["recipePresetId"],
+        "dream_style"
+    );
+
+    // The heart of sc-8819: each catalog's full FS-probe assembly ran exactly once for the
+    // whole request, not 2–3× as before the snapshot was threaded through.
+    assert_eq!(
+        crate::test_model_catalog_builds(),
+        1,
+        "model catalog should be assembled once per preset job-create"
+    );
+    assert_eq!(
+        crate::test_lora_catalog_builds(),
+        1,
+        "lora catalog should be assembled once per preset job-create"
+    );
+}
+
+#[tokio::test]
 async fn lora_download_endpoint_queues_hf_download_for_builtin_lora() {
     // sc-5944: built-in LoRAs gain an explicit Download (mirrors model download). A
     // catalog LoRA with a Hugging Face source queues a `lora_download` job carrying the

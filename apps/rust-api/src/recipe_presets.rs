@@ -232,6 +232,18 @@ pub(crate) async fn recipe_preset_catalog(
     state: &AppState,
     project_id: Option<&str>,
 ) -> Result<Vec<Value>, ApiError> {
+    recipe_preset_catalog_with(state, project_id, None).await
+}
+
+/// `recipe_preset_catalog` with an optional caller-supplied model catalog snapshot
+/// (sc-8819). When `snapshot` is `Some`, the model catalog it exposes is reused instead
+/// of re-running the per-model filesystem install-state probes; the resulting presets are
+/// byte-for-byte identical to the `None` path.
+pub(crate) async fn recipe_preset_catalog_with(
+    state: &AppState,
+    project_id: Option<&str>,
+    snapshot: Option<&JobCatalogSnapshot>,
+) -> Result<Vec<Value>, ApiError> {
     let manifest_dir = state.settings.config_dir.join("manifests");
     let builtin_manifest = manifest_dir.join("builtin.recipe-presets.jsonc");
     let user_manifest = manifest_dir.join("user.recipe-presets.jsonc");
@@ -245,7 +257,16 @@ pub(crate) async fn recipe_preset_catalog(
         .into_iter()
         .map(|preset| normalize_recipe_preset_entry(preset, "global", &user_manifest))
         .collect::<Result<Vec<_>, _>>()?;
-    let models = model_catalog(state).await?;
+    // Reuse the request-scoped model catalog snapshot when the caller threaded one
+    // (sc-8819), else build a fresh catalog exactly as before.
+    let owned_models;
+    let models: &[Value] = match snapshot {
+        Some(snapshot) => snapshot.models(state).await?,
+        None => {
+            owned_models = model_catalog(state).await?;
+            &owned_models
+        }
+    };
     let mut presets = merge_entries_by_id(builtin, user);
     if let Some(project_id) = project_id {
         let project_path = project_path_for_id(state.clone(), project_id).await?;
@@ -258,7 +279,7 @@ pub(crate) async fn recipe_preset_catalog(
         presets = merge_entries_by_id(presets, project_presets);
     }
     for preset in presets.iter_mut() {
-        finalize_recipe_preset_entry(preset, &models)?;
+        finalize_recipe_preset_entry(preset, models)?;
     }
     presets.sort_by(|left, right| {
         let left_key = (
