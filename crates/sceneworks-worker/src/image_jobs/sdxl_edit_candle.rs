@@ -140,75 +140,11 @@ fn sdxl_edit_candle_guidance(request: &ImageRequest) -> f32 {
     )
 }
 
-/// Resize an RGB image to exactly `width`×`height` honoring `mode` without distorting it (the candle twin
-/// of the macOS `fit_rgb`): `crop` covers + center-crops, `pad`/`outpaint` contains + letterboxes on a
-/// black canvas (the kept rect aligns with [`gen_core::imageops::contain_box`]), `stretch` is the legacy
-/// non-aspect resize. The candle `SdxlEdit` provider re-resizes to the render size internally, but pre-
-/// fitting here is what honors `fit_mode` (the provider only stretches).
-fn sdxl_edit_fit_rgb(
-    source: &image::RgbImage,
-    width: u32,
-    height: u32,
-    mode: &str,
-) -> image::RgbImage {
-    use image::imageops::FilterType::Lanczos3;
-    let width = width.max(1);
-    let height = height.max(1);
-    let (src_w, src_h) = (source.width(), source.height());
-    match mode {
-        "stretch" => image::imageops::resize(source, width, height, Lanczos3),
-        "crop" => {
-            let ratio = (width as f32 / src_w as f32).max(height as f32 / src_h as f32);
-            // Ceil so the scaled image always fully covers the target before cropping.
-            let new_w = width.max((src_w as f32 * ratio).ceil() as u32);
-            let new_h = height.max((src_h as f32 * ratio).ceil() as u32);
-            let resized = image::imageops::resize(source, new_w, new_h, Lanczos3);
-            let left = (new_w - width) / 2;
-            let top = (new_h - height) / 2;
-            image::imageops::crop_imm(&resized, left, top, width, height).to_image()
-        }
-        // "pad" / "outpaint": contain + center on a black canvas (letterbox).
-        _ => {
-            let (new_w, new_h, left, top) =
-                gen_core::imageops::contain_box(src_w, src_h, width, height);
-            let resized = image::imageops::resize(source, new_w.max(1), new_h.max(1), Lanczos3);
-            let mut canvas = image::RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
-            image::imageops::overlay(&mut canvas, &resized, left as i64, top as i64);
-            canvas
-        }
-    }
-}
-
-/// Fit an engine [`Image`] (RGB8) to `width`×`height` by `mode` via [`sdxl_edit_fit_rgb`].
-fn sdxl_edit_fit_image(source: Image, width: u32, height: u32, mode: &str) -> WorkerResult<Image> {
-    let rgb =
-        image::RgbImage::from_raw(source.width, source.height, source.pixels).ok_or_else(|| {
-            WorkerError::InvalidPayload("SDXL edit image buffer size mismatch".to_owned())
-        })?;
-    let fitted = sdxl_edit_fit_rgb(&rgb, width, height, mode);
-    Ok(Image {
-        width: fitted.width(),
-        height: fitted.height(),
-        pixels: fitted.into_raw(),
-    })
-}
-
-/// Composite `source` contained (long edge fits) + centered on a black `width`×`height` canvas (the
-/// candle twin of the macOS `sdxl_outpaint_canvas`), using the engine's [`gen_core::imageops::contain_box`]
-/// so the padded source lines up pixel-for-pixel with [`gen_core::imageops::outpaint_border_mask`].
-fn sdxl_edit_outpaint_canvas(source: &image::RgbImage, width: u32, height: u32) -> Image {
-    use image::imageops::FilterType::Lanczos3;
-    let (new_w, new_h, left, top) =
-        gen_core::imageops::contain_box(source.width(), source.height(), width, height);
-    let resized = image::imageops::resize(source, new_w.max(1), new_h.max(1), Lanczos3);
-    let mut canvas = image::RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
-    image::imageops::overlay(&mut canvas, &resized, left as i64, top as i64);
-    Image {
-        width,
-        height,
-        pixels: canvas.into_raw(),
-    }
-}
+// Fit/letterbox geometry is the SHARED `fit_engine_image` (base.rs) — the same helper the macOS
+// SDXL edit lane and the candle Z-Image edit lane use — rather than a per-lane twin (sc-8824). Its
+// pad/outpaint arm and `gen_core::imageops::outpaint_border_mask` both call
+// `gen_core::imageops::contain_box`, so the letterboxed source and the outpaint mask stay pixel-
+// aligned with no per-lane rounding drift.
 
 /// Flat telemetry recorded on candle SDXL edit assets (the sub-mode + strength that drove it; parity with
 /// the macOS SDXL advanced recipe keys).
@@ -302,12 +238,12 @@ async fn generate_candle_sdxl_edit_stream(
     // internally, so the source/mask only need to be at `width`×`height` with aligned geometry.
     let (gen_source, gen_mask, mode_tag): (Image, Option<Image>, &str) = match mode {
         SdxlEditCandleMode::Edit => (
-            sdxl_edit_fit_image(source, width, height, &request.fit_mode)?,
+            fit_engine_image(source, width, height, &request.fit_mode)?,
             None,
             "edit",
         ),
         SdxlEditCandleMode::Inpaint => {
-            let src = sdxl_edit_fit_image(source, width, height, &request.fit_mode)?;
+            let src = fit_engine_image(source, width, height, &request.fit_mode)?;
             let mask_id = request
                 .mask_asset_id
                 .as_deref()
@@ -322,19 +258,16 @@ async fn generate_candle_sdxl_edit_stream(
                 mask_id,
                 project_path,
             )?;
-            let mask = sdxl_edit_fit_image(mask, width, height, &request.fit_mode)?;
+            let mask = fit_engine_image(mask, width, height, &request.fit_mode)?;
             (src, Some(mask), "inpaint")
         }
         SdxlEditCandleMode::Outpaint => {
             // Pad the source onto the render canvas; the white border is the region to regenerate.
-            let src_rgb = image::RgbImage::from_raw(source.width, source.height, source.pixels)
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(
-                        "SDXL outpaint source buffer size mismatch".to_owned(),
-                    )
-                })?;
-            let (src_w, src_h) = (src_rgb.width(), src_rgb.height());
-            let canvas = sdxl_edit_outpaint_canvas(&src_rgb, width, height);
+            // Fit + mask MUST share `gen_core::imageops::contain_box` (sc-8824): `fit_engine_image`'s
+            // "outpaint"/pad arm and `outpaint_border_mask` both call it, so the kept rect and the
+            // mask's keep rect are pixel-identical.
+            let (src_w, src_h) = (source.width, source.height);
+            let canvas = fit_engine_image(source, width, height, "outpaint")?;
             // White = regenerate (the padded border), black = keep (the centered source).
             let mut mask = gen_core::imageops::outpaint_border_mask(src_w, src_h, width, height);
             if non_empty(&request.mask_asset_id) {
@@ -347,7 +280,7 @@ async fn generate_candle_sdxl_edit_stream(
                     mask_id,
                     project_path,
                 )?;
-                let user_mask = sdxl_edit_fit_image(user_mask, width, height, "pad")?;
+                let user_mask = fit_engine_image(user_mask, width, height, "pad")?;
                 mask = gen_core::imageops::union_masks(&mask, &user_mask).map_err(|error| {
                     WorkerError::Engine(format!("SDXL outpaint mask union failed: {error}"))
                 })?;

@@ -175,56 +175,10 @@ fn flux2_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
     Vec::new()
 }
 
-/// Resize an RGB image to exactly `width`×`height` honoring `mode` without distorting it (the candle
-/// FLUX.2 twin of the macOS `fit_rgb`): `crop` covers + center-crops, `pad`/`outpaint` contain +
-/// letterbox on black, `stretch` is the legacy non-aspect resize. The Image-Edit source is pre-fitted so
-/// an off-aspect edit doesn't stretch; the provider re-resizes to the render size internally.
-fn flux2_edit_fit_rgb(
-    source: &image::RgbImage,
-    width: u32,
-    height: u32,
-    mode: &str,
-) -> image::RgbImage {
-    use image::imageops::FilterType::Lanczos3;
-    let width = width.max(1);
-    let height = height.max(1);
-    let (src_w, src_h) = (source.width(), source.height());
-    match mode {
-        "stretch" => image::imageops::resize(source, width, height, Lanczos3),
-        "crop" => {
-            let ratio = (width as f32 / src_w as f32).max(height as f32 / src_h as f32);
-            let new_w = width.max((src_w as f32 * ratio).ceil() as u32);
-            let new_h = height.max((src_h as f32 * ratio).ceil() as u32);
-            let resized = image::imageops::resize(source, new_w, new_h, Lanczos3);
-            let left = (new_w - width) / 2;
-            let top = (new_h - height) / 2;
-            image::imageops::crop_imm(&resized, left, top, width, height).to_image()
-        }
-        // "pad" / "outpaint": contain + center on a black canvas (letterbox).
-        _ => {
-            let (new_w, new_h, left, top) =
-                gen_core::imageops::contain_box(src_w, src_h, width, height);
-            let resized = image::imageops::resize(source, new_w.max(1), new_h.max(1), Lanczos3);
-            let mut canvas = image::RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
-            image::imageops::overlay(&mut canvas, &resized, left as i64, top as i64);
-            canvas
-        }
-    }
-}
-
-/// Fit an engine [`Image`] (RGB8) to `width`×`height` by `mode` via [`flux2_edit_fit_rgb`].
-fn flux2_edit_fit_image(source: Image, width: u32, height: u32, mode: &str) -> WorkerResult<Image> {
-    let rgb =
-        image::RgbImage::from_raw(source.width, source.height, source.pixels).ok_or_else(|| {
-            WorkerError::InvalidPayload("FLUX.2 edit image buffer size mismatch".to_owned())
-        })?;
-    let fitted = flux2_edit_fit_rgb(&rgb, width, height, mode);
-    Ok(Image {
-        width: fitted.width(),
-        height: fitted.height(),
-        pixels: fitted.into_raw(),
-    })
-}
+// Fit/letterbox geometry is the SHARED `fit_engine_image` (base.rs), not a per-lane twin (sc-8824):
+// the same helper the macOS FLUX.2 edit lane and the candle Z-Image edit lane use. Its pad/outpaint
+// arm rides `gen_core::imageops::contain_box`, so an off-aspect Image-Edit source letterboxes with
+// exactly the geometry any outpaint mask would, with no per-lane rounding drift.
 
 /// Flat telemetry recorded on candle FLUX.2 edit assets (parity with the macOS FLUX.2 edit recipe keys).
 fn flux2_edit_candle_raw_settings(
@@ -276,7 +230,7 @@ fn load_flux2_edit_references(
         let fitted = if request.fit_mode == "stretch" {
             source
         } else {
-            flux2_edit_fit_image(source, width, height, &request.fit_mode)?
+            fit_engine_image(source, width, height, &request.fit_mode)?
         };
         references.push(fitted);
     }

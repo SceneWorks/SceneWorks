@@ -4043,10 +4043,18 @@ fn character_image_likeness_source_gates_to_plain_with_character() {
 #[cfg(target_os = "macos")]
 #[test]
 fn contain_box_centers_the_contained_rect() {
+    // `fit_rgb`'s pad arm now rides the engine's `contain_box` (sc-8824), the same geometry the
+    // outpaint mask uses — so assert against it directly (i32 offsets).
     // Wide source contained in a square: full width, centered vertically.
-    assert_eq!(contain_box(100, 50, 50, 50), (50, 25, 0, 12));
+    assert_eq!(
+        gen_core::imageops::contain_box(100, 50, 50, 50),
+        (50, 25, 0, 12)
+    );
     // Tall source: full height, centered horizontally.
-    assert_eq!(contain_box(50, 100, 50, 50), (25, 50, 12, 0));
+    assert_eq!(
+        gen_core::imageops::contain_box(50, 100, 50, 50),
+        (25, 50, 12, 0)
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -4076,6 +4084,60 @@ fn fit_rgb_crop_pad_stretch_produce_exact_dims_and_geometry() {
     // stretch → exact target dims (aspect not preserved).
     let stretched = fit_rgb(&source, 40, 30, "stretch");
     assert_eq!((stretched.width(), stretched.height()), (40, 30));
+}
+
+/// sc-8824: the whole point of sharing the fit geometry is that the letterboxed source (`fit_rgb`
+/// pad/outpaint arm) and the outpaint mask's keep-region use the SAME `gen_core::imageops::contain_box`,
+/// so the kept rect and the mask's keep rect are pixel-identical. This runs on BOTH the macOS and
+/// candle lanes (both compile `fit_rgb` + the shared geometry) — it's the divergence guard: were
+/// `fit_rgb` to round differently from the mask (the old local f32 `.round()` copy could, at an exact
+/// `.5`), the black-content rect below would drift off the mask's keep rect and this would fail.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn fit_pad_content_rect_matches_outpaint_mask_keep_rect() {
+    // Odd dims + aspect ratios that stress rounding (incl. a `.5`-boundary contain, e.g. 101→…).
+    let cases: &[(u32, u32, u32, u32)] = &[
+        (100, 50, 50, 50),   // wide → vertical bars
+        (50, 100, 50, 50),   // tall → horizontal bars
+        (101, 37, 64, 64),   // odd source into a square
+        (33, 100, 71, 40),   // odd everything, non-square target
+        (3, 2, 1024, 1024),  // extreme upscale (large `.round()` surface)
+        (1024, 768, 91, 91), // downscale into a small odd square
+    ];
+    for &(src_w, src_h, w, h) in cases {
+        // The mask's keep rect (black pixels) is driven by the engine's `contain_box`.
+        let (new_w, new_h, left, top) = gen_core::imageops::contain_box(src_w, src_h, w, h);
+        // Fit a solid-white source: the letterboxed content lands exactly on the contained rect,
+        // everything else is the black canvas.
+        let source = image::RgbImage::from_pixel(src_w, src_h, image::Rgb([255, 255, 255]));
+        let padded = fit_rgb(&source, w, h, "outpaint");
+        assert_eq!((padded.width(), padded.height()), (w, h));
+        // Every pixel INSIDE the contained rect is white (kept content); every pixel OUTSIDE is
+        // black (the regenerate border). If fit and `contain_box` disagreed by a pixel, an edge
+        // row/col would flip color and this would fail — that's the drift the dedup removes.
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let inside =
+                    x >= left && x < left + new_w as i32 && y >= top && y < top + new_h as i32;
+                let px = padded.get_pixel(x as u32, y as u32);
+                if inside {
+                    assert_ne!(
+                        px,
+                        &image::Rgb([0, 0, 0]),
+                        "kept-rect pixel ({x},{y}) is black for {src_w}x{src_h}->{w}x{h} \
+                         (fit vs mask contain_box drift)"
+                    );
+                } else {
+                    assert_eq!(
+                        px,
+                        &image::Rgb([0, 0, 0]),
+                        "border pixel ({x},{y}) is not black for {src_w}x{src_h}->{w}x{h} \
+                         (fit vs mask contain_box drift)"
+                    );
+                }
+            }
+        }
+    }
 }
 
 // --- Qwen-Image-Edit path (sc-3397) ---
