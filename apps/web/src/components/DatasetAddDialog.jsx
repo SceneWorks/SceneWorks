@@ -1,24 +1,8 @@
 import React, { useMemo, useState } from "react";
 import { isLibraryAsset } from "../constants.js";
+import { assetMatchesCharacter } from "../characterMembership.js";
 import { AssetThumbnail, assetCanRenderAsImage } from "./assetMedia.jsx";
 import { Modal } from "./Modal.jsx";
-
-// An asset belongs to a character when it was generated in association with it
-// (recipe.normalizedSettings.characterId) or generated referencing it
-// (metadata.characterReferences[].characterId). Mirrors the per-character
-// gallery filter so the Character tab surfaces the same images.
-export function assetMatchesCharacter(asset, characterId, character = null) {
-  if (!characterId) {
-    return false;
-  }
-  if (asset?.recipe?.normalizedSettings?.characterId === characterId) {
-    return true;
-  }
-  if ((asset?.metadata?.characterReferences ?? []).some((reference) => reference?.characterId === characterId)) {
-    return true;
-  }
-  return (character?.references ?? []).some((reference) => (reference?.assetId ?? reference?.id) === asset?.id);
-}
 
 function assetTitle(asset) {
   return asset?.displayName ?? asset?.title ?? asset?.name ?? asset?.id ?? "Untitled asset";
