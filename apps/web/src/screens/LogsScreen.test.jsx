@@ -56,6 +56,19 @@ describe("LogsScreen", () => {
     vi.clearAllMocks();
   });
 
+  // Controlled <input>: set the value through the native setter React tracks,
+  // then dispatch the input event so React's synthetic onChange fires.
+  async function typeSearch(input, value) {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    ).set;
+    await act(async () => {
+      setter.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
   async function render() {
     await act(async () => {
       root.render(
@@ -101,5 +114,80 @@ describe("LogsScreen", () => {
     logRows = [];
     await render();
     expect(container.textContent).toContain("No log entries yet");
+  });
+
+  it("filters client-side without issuing a fetch per keystroke (sc-8849)", async () => {
+    vi.useFakeTimers();
+    try {
+      await render();
+      const callsAfterLoad = apiFetch.mock.calls.length;
+      const input = container.querySelector("input.logs-search");
+
+      // Type the term one character at a time.
+      const term = "boom";
+      for (let i = 1; i <= term.length; i += 1) {
+        await typeSearch(input, term.slice(0, i));
+      }
+
+      // No keystroke should have triggered a fetch (search is client-side only).
+      expect(apiFetch.mock.calls.length).toBe(callsAfterLoad);
+
+      // After the debounce window elapses the filter applies once.
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(apiFetch.mock.calls.length).toBe(callsAfterLoad);
+      // Only the row whose message contains "boom" survives.
+      const rows = container.querySelectorAll(".logs-row");
+      expect(rows.length).toBe(1);
+      expect(rows[0].textContent).toContain("image_inference_failed");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not re-arm the 2s poll on every keystroke (sc-8849)", async () => {
+    vi.useFakeTimers();
+    const setInterval = vi.spyOn(globalThis, "setInterval");
+    try {
+      await render();
+      const intervalsAfterLoad = setInterval.mock.calls.length;
+      const input = container.querySelector("input.logs-search");
+
+      for (const value of ["c", "ca", "can", "cand"]) {
+        await typeSearch(input, value);
+      }
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+
+      // The poll interval must not be recreated as the search term changes.
+      expect(setInterval.mock.calls.length).toBe(intervalsAfterLoad);
+    } finally {
+      setInterval.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the search filter and restores all rows (sc-8849)", async () => {
+    vi.useFakeTimers();
+    try {
+      await render();
+      const input = container.querySelector("input.logs-search");
+
+      await typeSearch(input, "boom");
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(container.querySelectorAll(".logs-row").length).toBe(1);
+
+      await typeSearch(input, "");
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(container.querySelectorAll(".logs-row").length).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
