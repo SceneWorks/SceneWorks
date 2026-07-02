@@ -6232,6 +6232,69 @@ fn resolve_control_identity_source_is_none_without_reference() {
     );
 }
 
+/// sc-8822 base-lane positive coverage: WITH a real identity `referenceAssetId`,
+/// `resolve_control_identity_source` — the source resolver the BASE Z-Image strict-control stream
+/// (`generate_zimage_base_control_stream`) now calls before it builds the scorer + drives
+/// `drive_gen_items_scored` — decodes the reference and returns `Some((image, assetId))`. This
+/// exercises the with-reference *decode-success* branch the `_is_none_` test above never touches, and
+/// pins the sc-4411/sc-8822 contract that the returned source id is the CURRENT job's reference (so the
+/// base lane scores against the reference the user picked, not a cached/hardcoded one). Runs in CI on
+/// Mac — no model weights, just a project + an imported PNG.
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_control_identity_source_decodes_present_reference_for_base_zimage() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = data_dir.path().to_path_buf();
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let project = store.create_project("sc8822-base").unwrap();
+    let project_path = std::path::PathBuf::from(&project.path);
+
+    // A real, decodable reference image on disk (distinct dims catch a width/height transpose).
+    let source_file = data_dir.path().join("reference.png");
+    image::RgbImage::from_pixel(48, 32, image::Rgb([180, 40, 90]))
+        .save(&source_file)
+        .unwrap();
+    let asset = store
+        .import_asset(
+            &project.id,
+            sceneworks_core::project_store::UploadAsset {
+                filename: "reference.png".to_owned(),
+                content_type: Some("image/png".to_owned()),
+                source_path: source_file,
+                source_asset_id: None,
+                provenance: None,
+            },
+        )
+        .unwrap();
+    let asset_id = asset["id"].as_str().unwrap().to_owned();
+
+    // BASE `z_image` pose set that carries that character identity reference → the base scored lane
+    // resolves a real likeness source (the inverse of the reference-less None gate above).
+    let base_with_reference = request(json!({
+        "projectId": project.id,
+        "model": "z_image",
+        "referenceAssetId": asset_id,
+        "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    let (image, resolved_id) =
+        resolve_control_identity_source(&base_with_reference, &settings, &project_path)
+            .expect("present reference on the base z_image lane ⇒ decoded likeness source");
+    assert_eq!(
+        resolved_id, asset_id,
+        "the scored source id is the CURRENT job's referenceAssetId (sc-4411/sc-8822 contract)"
+    );
+    assert_eq!(
+        (image.width, image.height),
+        (48, 32),
+        "reference decoded at its true dims"
+    );
+    assert!(
+        !image.pixels.is_empty(),
+        "decoded reference carries pixels for the scorer to embed"
+    );
+}
+
 /// sc-8248 / sc-8249 source threading: the input image canny/depth auto-derive their control map FROM
 /// resolves with the right precedence (sourceAssetId wins, else referenceAssetId), and a pose-only job
 /// (no source / reference) resolves to `None` — proving the live canny/depth path now has an input image
