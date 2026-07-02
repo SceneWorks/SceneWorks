@@ -1155,6 +1155,10 @@ async fn model_catalog_inner(
     state: &AppState,
     estimate_sizes: bool,
 ) -> Result<Vec<Value>, ApiError> {
+    // sc-8819 (F-017): observe full-catalog assembly (the per-model FS install-state probe
+    // sweep) so a test can assert it runs once per job-create.
+    #[cfg(test)]
+    crate::test_note_model_catalog_build();
     let manifest_dir = state.settings.config_dir.join("manifests");
     let builtin =
         load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;

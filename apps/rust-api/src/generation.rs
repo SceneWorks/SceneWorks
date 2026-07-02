@@ -18,7 +18,11 @@ pub(crate) async fn create_image_job(
     if payload.recipe_preset_id.is_none() {
         job_payload.remove("recipePresetId");
     }
-    apply_recipe_preset_to_image_payload(&state, &payload, &mut job_payload).await?;
+    // One request-scoped catalog snapshot threaded through preset expansion + LoRA
+    // validation so the per-model/per-LoRA filesystem install-state probes run once per
+    // job-create instead of 2–3× (sc-8819, F-017).
+    let catalogs = JobCatalogSnapshot::default();
+    apply_recipe_preset_to_image_payload(&state, &payload, &mut job_payload, &catalogs).await?;
     // Ideogram 4 headless/API parity (sc-6519): auto-expand a plain prompt into a rich JSON caption
     // via the magic-prompt utility model — the same separate prompt_refine job the web runs (sc-6501)
     // — and rewrite the job's prompt before it dispatches, so a direct/headless plain-text job escapes
@@ -27,8 +31,14 @@ pub(crate) async fn create_image_job(
     crate::ideogram::rich_auto_caption_for_ideogram(&state, &mut job_payload).await;
     let model_manifest_entry = resolve_model_manifest_entry(&state, &payload.model).await?;
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
-    validate_job_lora_compatibility(&state, Some(&payload.project_id), &mut job_payload, false)
-        .await?;
+    validate_job_lora_compatibility_with(
+        &state,
+        Some(&payload.project_id),
+        &mut job_payload,
+        false,
+        Some(&catalogs),
+    )
+    .await?;
     if payload.seed.is_none() {
         let count = job_payload
             .get("count")
@@ -141,10 +151,60 @@ pub(crate) fn validate_interleave_job(payload: &InterleaveJobRequest) -> Result<
     Ok(())
 }
 
+/// Request-scoped, lazily-memoized snapshot of the model and LoRA catalogs (sc-8819,
+/// F-017). A single preset-backed `POST /image/jobs` (or `/video/jobs`) fans out into
+/// `recipe_preset_catalog`, `merge_preset_loras_into_payload`, and
+/// `validate_job_lora_compatibility`, each of which formerly re-assembled
+/// `model_catalog`/`lora_catalog` from scratch — re-running the per-model install-state
+/// probes (recursive HF-cache walks, `model_is_installed`, `mlx_catalog_status`) 2–3×
+/// over the whole catalog per submit. Threading one snapshot through those seams makes
+/// each catalog's filesystem probing run exactly once per job-create.
+///
+/// This is deliberately request-scoped rather than a shared TTL cache: the snapshot lives
+/// only for the duration of one job-create, so there is no staleness window and the
+/// catalog contents seen by preset expansion and by LoRA validation are guaranteed
+/// identical. It memoizes per `project_id` (constant within a single job-create), so both
+/// the `project_id`-scoped and the `None` (no-project) catalog reads are covered.
+#[derive(Default)]
+pub(crate) struct JobCatalogSnapshot {
+    models: tokio::sync::OnceCell<Vec<Value>>,
+    loras_by_project: tokio::sync::Mutex<HashMap<Option<String>, Arc<Vec<Value>>>>,
+}
+
+impl JobCatalogSnapshot {
+    /// The model catalog, built once per request and reused thereafter. Identical output
+    /// to a direct `model_catalog(state)` call.
+    pub(crate) async fn models(&self, state: &AppState) -> Result<&[Value], ApiError> {
+        let models = self
+            .models
+            .get_or_try_init(|| async { model_catalog(state).await })
+            .await?;
+        Ok(models.as_slice())
+    }
+
+    /// The LoRA catalog for `project_id`, built once per (request, project) and reused
+    /// thereafter. Identical output to a direct `lora_catalog(state, project_id)` call.
+    pub(crate) async fn loras(
+        &self,
+        state: &AppState,
+        project_id: Option<&str>,
+    ) -> Result<Arc<Vec<Value>>, ApiError> {
+        let key = project_id.map(str::to_owned);
+        let mut guard = self.loras_by_project.lock().await;
+        if let Some(existing) = guard.get(&key) {
+            return Ok(existing.clone());
+        }
+        let loras = Arc::new(lora_catalog(state, project_id).await?);
+        guard.insert(key, loras.clone());
+        Ok(loras)
+    }
+}
+
 pub(crate) async fn apply_recipe_preset_to_image_payload(
     state: &AppState,
     payload: &ImageJobRequest,
     job_payload: &mut JsonObject,
+    snapshot: &JobCatalogSnapshot,
 ) -> Result<(), ApiError> {
     let Some(preset_id) = payload.recipe_preset_id.as_deref() else {
         return Ok(());
@@ -152,7 +212,8 @@ pub(crate) async fn apply_recipe_preset_to_image_payload(
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
     }
-    let presets = recipe_preset_catalog(state, Some(&payload.project_id)).await?;
+    let presets =
+        recipe_preset_catalog_with(state, Some(&payload.project_id), Some(snapshot)).await?;
     let preset = presets
         .iter()
         .find(|item| item.get("id").and_then(Value::as_str) == Some(preset_id))
@@ -177,8 +238,15 @@ pub(crate) async fn apply_recipe_preset_to_image_payload(
         "stylePreset".to_owned(),
         Value::String(preset_id.to_owned()),
     );
-    merge_preset_loras_into_payload(state, &payload.project_id, preset_id, preset, job_payload)
-        .await
+    merge_preset_loras_into_payload(
+        state,
+        &payload.project_id,
+        preset_id,
+        preset,
+        job_payload,
+        Some(snapshot),
+    )
+    .await
 }
 
 /// Prepend a preset's declared LoRAs to whatever LoRAs the client already sent,
@@ -191,8 +259,14 @@ pub(crate) async fn merge_preset_loras_into_payload(
     preset_id: &str,
     preset: &Value,
     job_payload: &mut JsonObject,
+    snapshot: Option<&JobCatalogSnapshot>,
 ) -> Result<(), ApiError> {
-    let loras = lora_catalog(state, Some(project_id)).await?;
+    // Reuse the request-scoped LoRA catalog snapshot when threaded (sc-8819), else build
+    // fresh. Both paths see identical catalog contents.
+    let loras = match snapshot {
+        Some(snapshot) => snapshot.loras(state, Some(project_id)).await?,
+        None => Arc::new(lora_catalog(state, Some(project_id)).await?),
+    };
     let existing_lora_ids = job_payload
         .get("loras")
         .and_then(Value::as_array)
@@ -282,6 +356,7 @@ pub(crate) async fn apply_recipe_preset_to_video_payload(
     state: &AppState,
     payload: &VideoJobRequest,
     job_payload: &mut JsonObject,
+    snapshot: &JobCatalogSnapshot,
 ) -> Result<(), ApiError> {
     let Some(preset_id) = payload.recipe_preset_id.as_deref() else {
         return Ok(());
@@ -289,7 +364,8 @@ pub(crate) async fn apply_recipe_preset_to_video_payload(
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
     }
-    let presets = recipe_preset_catalog(state, Some(&payload.project_id)).await?;
+    let presets =
+        recipe_preset_catalog_with(state, Some(&payload.project_id), Some(snapshot)).await?;
     let preset = presets
         .iter()
         .find(|item| item.get("id").and_then(Value::as_str) == Some(preset_id))
@@ -307,8 +383,15 @@ pub(crate) async fn apply_recipe_preset_to_video_payload(
             job_payload.insert("model".to_owned(), Value::String(model.to_owned()));
         }
     }
-    merge_preset_loras_into_payload(state, &payload.project_id, preset_id, preset, job_payload)
-        .await
+    merge_preset_loras_into_payload(
+        state,
+        &payload.project_id,
+        preset_id,
+        preset,
+        job_payload,
+        Some(snapshot),
+    )
+    .await
 }
 
 pub(crate) async fn create_video_job(
@@ -330,15 +413,25 @@ pub(crate) async fn create_video_job(
     if payload.recipe_preset_id.is_none() {
         job_payload.remove("recipePresetId");
     }
-    apply_recipe_preset_to_video_payload(&state, &payload, &mut job_payload).await?;
+    // One request-scoped catalog snapshot threaded through preset expansion + LoRA
+    // validation so the per-model/per-LoRA filesystem install-state probes run once per
+    // job-create instead of 2–3× (sc-8819, F-017).
+    let catalogs = JobCatalogSnapshot::default();
+    apply_recipe_preset_to_video_payload(&state, &payload, &mut job_payload, &catalogs).await?;
     // Resolve the model manifest entry here so the GPU worker never re-parses
     // builtin/user.models.jsonc itself — Rust owns manifest parsing/merging
     // (story 1653). An unknown model resolves to {}, matching the worker's
     // existing fallback to the model's default repo.
     let model_manifest_entry = resolve_model_manifest_entry(&state, &payload.model).await?;
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
-    validate_job_lora_compatibility(&state, Some(&payload.project_id), &mut job_payload, false)
-        .await?;
+    validate_job_lora_compatibility_with(
+        &state,
+        Some(&payload.project_id),
+        &mut job_payload,
+        false,
+        Some(&catalogs),
+    )
+    .await?;
     let job = create_generation_job(
         state,
         job_type,
