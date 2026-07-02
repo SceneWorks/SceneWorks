@@ -4,7 +4,7 @@ import { Stage, Layer, Image as KonvaImage, Line, Rect, Transformer } from "reac
 import { apiFetch } from "../api.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
-import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock, macUpscaleEngineBlocked } from "../macGating.js";
+import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
@@ -54,10 +54,13 @@ import {
   buildUpscaleJobBody,
   detailCapableModels,
   editCapableModels,
-  UPSCALE_ENGINES,
   upscaleEngineHasSoftness,
   upscaleFactorsForEngine,
 } from "../imageJobs.js";
+import {
+  availableUpscaleEngines as upscaleEnginesForPlatform,
+  useUpscaleEngineFallback,
+} from "../upscaleEngines.js";
 
 export {
   buildDetailJobBody,
@@ -846,19 +849,17 @@ export function ImageEditor() {
   // SeedVR2 detail/softness knob (0..1, sc-4815) — only meaningful for the seedvr2 engine.
   const [upscaleSoftness, setUpscaleSoftness] = useState(0);
   // Engines offered in the picker; AuraSR is dropped on every platform (sc-3668 / sc-5499).
-  const availableUpscaleEngines = UPSCALE_ENGINES.filter(
-    (entry) => !macUpscaleEngineBlocked(macCapabilities, entry.key),
-  );
+  const availableUpscaleEngines = upscaleEnginesForPlatform(macCapabilities);
   // If the selected engine got gated out (e.g. a stale saved AuraSR selection), fall back to the
-  // default real-esrgan engine (the guaranteed-available cross-platform upscaler) so the tool stays usable.
-  useEffect(() => {
-    if (macUpscaleEngineBlocked(macCapabilities, upscaleEngine)) {
-      setUpscaleEngine("real-esrgan");
-      if (!upscaleFactorsForEngine("real-esrgan").includes(upscaleFactor)) {
-        setUpscaleFactor(upscaleFactorsForEngine("real-esrgan")[0]);
-      }
-    }
-  }, [macCapabilities, upscaleEngine, upscaleFactor]);
+  // default real-esrgan engine (the guaranteed-available cross-platform upscaler) so the tool stays
+  // usable. Shared with ImageStudio via the single fallback hook (sc-8853).
+  useUpscaleEngineFallback({
+    macCapabilities,
+    upscaleEngine,
+    setUpscaleEngine,
+    upscaleFactor,
+    setUpscaleFactor,
+  });
 
   // Color grade (sc-2439): non-destructive −1..1 adjustments previewed live via a
   // Konva filter, baked into the working image on Apply.

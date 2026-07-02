@@ -12,6 +12,7 @@ import { CharacterAdvancedOptions, useCharacterAdvancedOptions } from "../compon
 import { KeypointCollectionField } from "../components/KeypointCollectionField.jsx";
 import { usePoseLibrary, useUserPoseLoader } from "../poseLibrary.js";
 import { extractFamilies } from "../presetUtils.js";
+import { resolveJobResultAssets } from "../jobResultAssets.js";
 
 // Curated negative prompts seeded into the advanced panel for each Character
 // Studio flow (sc-3857). These are the baseline the editable Negative prompt
@@ -31,15 +32,12 @@ const POSE_LIBRARY_NEGATIVE_PROMPT =
 // recent generation set) is what lets pose / angle previews stream in as each
 // image is saved — otherwise a parallel job's newer generation set hides this
 // job's partial outputs from latestAssets and nothing surfaces in the card.
+//
+// Catalog-only resolution (sc-8853, `mergeResultAssets: false`): an id not yet in
+// the catalog is intentionally dropped rather than backfilled from an embedded
+// result record, which is what keeps this streaming/partial-output behavior.
 function jobImageAssets(job, assets) {
-  if (!job?.result || !Array.isArray(assets)) return [];
-  const byId = new Map(assets.map((asset) => [asset.id, asset]));
-  const ids = job.result.assetIds ?? [];
-  if (ids.length) return ids.map((id) => byId.get(id)).filter((asset) => asset?.type === "image");
-  if (job.result.generationSetId) {
-    return assets.filter((asset) => asset?.type === "image" && asset.generationSetId === job.result.generationSetId);
-  }
-  return [];
+  return resolveJobResultAssets(job, assets, { type: "image", mergeResultAssets: false });
 }
 
 // True when the job was started from the Angle Set form (advanced.angleSet)

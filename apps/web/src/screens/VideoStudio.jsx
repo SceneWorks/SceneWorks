@@ -9,6 +9,7 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
 import { VideoUpscalePanel } from "./VideoUpscalePanel.jsx";
+import { resolveJobResultAssets } from "../jobResultAssets.js";
 
 const MOTIONS = [
   "static",
@@ -44,22 +45,10 @@ function formatPlaybackTime(seconds) {
 
 // Resolve a video job's result assets against the live catalog so the
 // WorkerProgressCard video-player variant can play the finished clip (sc-2089).
-// Mirrors the image-side `jobResultAssets` helper in ImageStudio.jsx.
+// Shares the unified resolver (sc-8853); the video lane keeps the generationSetId
+// fallback in catalog order (no batch-slot sort — that is image-only).
 function jobVideoResultAssets(job, assets) {
-  const catalogById = new Map(assets.map((asset) => [asset.id, asset]));
-  const resultAssets = (job.result?.assets ?? []).filter((asset) => asset?.type === "video");
-  const resultById = new Map(resultAssets.map((asset) => [asset.id, catalogById.get(asset.id) ?? asset]));
-  const assetIds = job.result?.assetIds ?? [];
-  if (assetIds.length) {
-    return assetIds.map((id) => resultById.get(id) ?? catalogById.get(id)).filter((asset) => asset?.type === "video");
-  }
-  if (resultAssets.length) {
-    return resultAssets.map((asset) => catalogById.get(asset.id) ?? asset);
-  }
-  if (job.result?.generationSetId) {
-    return assets.filter((asset) => asset.type === "video" && asset.generationSetId === job.result.generationSetId);
-  }
-  return [];
+  return resolveJobResultAssets(job, assets, { type: "video" });
 }
 import {
   applyPresetDefault,

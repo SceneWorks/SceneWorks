@@ -3,6 +3,7 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
 import { GPU_REQUIRED_JOB_TYPES, NON_GPU_JOB_TYPES } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
+import { resolveJobResultAssets } from "../jobResultAssets.js";
 
 function formatJobType(type) {
   return String(type ?? "job").replaceAll("_", " ");
@@ -302,22 +303,8 @@ function thumbnailVariantForJob(job) {
 }
 
 // Resolve a job's produced asset records against the live catalog. Generic over
-// image/video so the queue's small-row works for both. Matches the resolution
-// strategy used by ImageStudio.jobResultAssets / VideoStudio.jobVideoResultAssets.
+// image/video so the queue's small-row works for both (sc-8853): type-agnostic
+// (no media-type filter), catalog order for the generationSetId fallback.
 function resolveJobAssets(job, assets) {
-  if (!job?.result) return [];
-  const catalogById = new Map((assets ?? []).map((asset) => [asset.id, asset]));
-  const resultAssets = Array.isArray(job.result.assets) ? job.result.assets : [];
-  const resultById = new Map(resultAssets.map((asset) => [asset.id, catalogById.get(asset.id) ?? asset]));
-  const assetIds = job.result.assetIds ?? [];
-  if (assetIds.length) {
-    return assetIds.map((id) => resultById.get(id) ?? catalogById.get(id)).filter(Boolean);
-  }
-  if (resultAssets.length) {
-    return resultAssets.map((asset) => catalogById.get(asset.id) ?? asset);
-  }
-  if (job.result.generationSetId) {
-    return (assets ?? []).filter((asset) => asset.generationSetId === job.result.generationSetId);
-  }
-  return [];
+  return resolveJobResultAssets(job, assets);
 }
