@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiFetch } from "../api.js";
 import { useAppContext } from "../context/AppContext.js";
@@ -18,12 +18,32 @@ import { isDesktop, tauriInvoke } from "../runtime.js";
 const SOURCES = ["api", "worker", "mlx-worker"];
 const LEVELS = ["info", "warn", "error"];
 const POLL_MS = 2000;
-const MAX_ROWS = 2000;
+// The server session-log buffer holds up to DEFAULT_CAPACITY entries
+// (crates/sceneworks-core/src/session_log.rs) and its `query()` applies the
+// text-search filter BEFORE truncating to `limit`. Because free-text search is
+// now performed client-side over the held snapshot (sc-8849), the snapshot must
+// mirror the *entire* server buffer or matches in the older rows become
+// silently unfindable. So the initial fetch and the in-memory row cap both
+// track the server capacity rather than an arbitrary smaller number. There is
+// no shared constant across the HTTP/FFI boundary, so this is pinned by comment.
+const SESSION_LOG_CAPACITY = 5000; // == sceneworks-core session_log DEFAULT_CAPACITY
+const MAX_ROWS = SESSION_LOG_CAPACITY;
+// The full snapshot is already in memory, so text search filters client-side
+// over the held `entries` instead of refetching. We still debounce the term
+// before it drives the (cheap, in-memory) filter to keep typing snappy on large
+// buffers, and — critically — searching no longer touches the fetch/poll deps,
+// which stops the per-keystroke refetch + 2s-poll re-arm (sc-8849).
+const SEARCH_DEBOUNCE_MS = 250;
 
 // Events that answer the routing question get visual emphasis.
 const HIGHLIGHT_EVENTS = new Set(["gpu_route_decision", "claim_lock_contention"]);
 
-async function fetchLogs(token, { afterSeq, limit, source, level, search }) {
+// Note: text `search` is intentionally NOT a fetch parameter. Source/level are
+// cheap, coarse toggles that legitimately change what the server returns, but
+// the full snapshot is already held in memory, so free-text search filters
+// client-side (see `visibleEntries`) rather than issuing a fresh limit:1000
+// fetch per keystroke (sc-8849).
+async function fetchLogs(token, { afterSeq, limit, source, level }) {
   if (isDesktop) {
     return (
       (await tauriInvoke("get_session_logs", {
@@ -31,7 +51,6 @@ async function fetchLogs(token, { afterSeq, limit, source, level, search }) {
         limit,
         source: source || undefined,
         level: level || undefined,
-        search: search || undefined,
       })) ?? []
     );
   }
@@ -40,7 +59,6 @@ async function fetchLogs(token, { afterSeq, limit, source, level, search }) {
   if (limit != null) params.set("limit", String(limit));
   if (source) params.set("source", source);
   if (level) params.set("level", level);
-  if (search) params.set("search", search);
   const query = params.toString();
   return (await apiFetch(`/api/v1/logs${query ? `?${query}` : ""}`, token)) ?? [];
 }
@@ -51,6 +69,7 @@ export function LogsScreen() {
   const [source, setSource] = useState("");
   const [level, setLevel] = useState("");
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [paused, setPaused] = useState(false);
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState(null);
@@ -60,28 +79,36 @@ export function LogsScreen() {
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
 
-  // Full (re)load: filters changed, or first mount.
+  // Full (re)load: source/level filters changed, or first mount. Text search is
+  // deliberately absent from the deps so typing doesn't refetch (sc-8849).
   const loadSnapshot = useCallback(async () => {
     try {
-      const rows = await fetchLogs(token, { limit: 1000, source, level, search });
+      // Fetch the full server buffer (not a 1000-row tail) so the client-side
+      // search covers all held history — matches in the oldest ~4000 rows would
+      // otherwise be unfindable (sc-8849). Only this initial snapshot is large;
+      // the 2s poll below stays incremental (afterSeq) and returns small deltas.
+      const rows = await fetchLogs(token, { limit: SESSION_LOG_CAPACITY, source, level });
       lastSeqRef.current = rows.length ? rows[rows.length - 1].seq : undefined;
       setEntries(rows);
       setError("");
     } catch (err) {
       setError(String(err?.message ?? err));
     }
-  }, [token, source, level, search]);
+  }, [token, source, level]);
 
   // Incremental tail: append only entries newer than the last seq we hold.
   const poll = useCallback(async () => {
     if (pausedRef.current) return;
     try {
+      // Incremental: afterSeq means the server only returns rows newer than the
+      // ones we hold, so this is a small delta each tick — raising the cap to the
+      // buffer capacity just guards against a >1000-row burst between polls; it
+      // does NOT make each poll refetch the whole buffer.
       const rows = await fetchLogs(token, {
         afterSeq: lastSeqRef.current,
-        limit: 1000,
+        limit: SESSION_LOG_CAPACITY,
         source,
         level,
-        search,
       });
       if (!rows.length) return;
       lastSeqRef.current = rows[rows.length - 1].seq;
@@ -93,11 +120,34 @@ export function LogsScreen() {
     } catch (err) {
       setError(String(err?.message ?? err));
     }
-  }, [token, source, level, search]);
+  }, [token, source, level]);
 
   useEffect(() => {
     loadSnapshot();
   }, [loadSnapshot]);
+
+  // Debounce the raw search term (~250ms) before it drives the client-side
+  // filter, so a fast typist doesn't recompute the filtered list on every
+  // keystroke. This never touches the fetch/poll deps (sc-8849).
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedSearch(search), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(id);
+  }, [search]);
+
+  // Client-side text filter over the already-held snapshot: no network, and no
+  // stale-prefix interleave because there are no in-flight per-keystroke fetches.
+  const visibleEntries = useMemo(() => {
+    const needle = debouncedSearch.trim().toLowerCase();
+    if (!needle) return entries;
+    return entries.filter((entry) => {
+      // Search `message` + `raw`. The server searched `raw` only; including the
+      // (raw-derived) `message` here is a deliberate harmless superset — it can
+      // only surface *more* matches, never hide one, so full-history parity with
+      // the old server-side search is preserved (sc-8849).
+      const haystack = `${entry.message ?? ""} ${entry.raw ?? ""}`.toLowerCase();
+      return haystack.includes(needle);
+    });
+  }, [entries, debouncedSearch]);
 
   useEffect(() => {
     const id = setInterval(poll, POLL_MS);
@@ -177,10 +227,10 @@ export function LogsScreen() {
       ) : null}
 
       <div className="logs-list" aria-live="polite">
-        {entries.length === 0 && !error ? (
+        {visibleEntries.length === 0 && !error ? (
           <p className="logs-empty">No log entries yet for this session.</p>
         ) : null}
-        {entries.map((entry) => {
+        {visibleEntries.map((entry) => {
           const eventName = entry.event?.event;
           const highlighted = eventName && HIGHLIGHT_EVENTS.has(eventName);
           const isOpen = expanded === entry.seq;
