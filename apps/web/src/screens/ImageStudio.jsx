@@ -118,9 +118,15 @@ import {
   macBlockedModels,
   macGatingActive,
   macModelFeatureBlock,
-  macUpscaleEngineBlocked,
 } from "../macGating.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
+import { resolveJobResultAssets } from "../jobResultAssets.js";
+import {
+  availableUpscaleEngines as upscaleEnginesForPlatform,
+  upscaleEngineHasSoftness,
+  upscaleFactorsForEngine,
+  useUpscaleEngineFallback,
+} from "../upscaleEngines.js";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import {
   GUIDANCE_METHOD_LABELS,
@@ -155,20 +161,6 @@ function preferredResolution(model, options) {
     : options.includes("1024x1024")
       ? "1024x1024"
       : options[0];
-}
-
-const UPSCALE_ENGINES = [
-  { id: "real-esrgan", label: "Real-ESRGAN", factors: [2, 4] },
-  // SeedVR2: one-step diffusion upscaler (native MLX on Mac / candle off-Mac, epic 4811 / sc-5928 /
-  // sc-5160) with a detail/softness control; shown on every GPU platform via imageUpscaleSeedvr2.
-  { id: "seedvr2", label: "SeedVR2", factors: [2, 4], softness: true },
-  // AuraSR is kept only for graceful fallback of a stale saved selection — hidden on every platform
-  // (dropped, sc-3668 / sc-5499) via macUpscaleEngineBlocked.
-  { id: "aura-sr", label: "AuraSR", factors: [4] },
-];
-
-function upscaleEngineHasSoftness(engineId) {
-  return Boolean(UPSCALE_ENGINES.find((engine) => engine.id === engineId)?.softness);
 }
 
 function formatResolutionLabel(value) {
@@ -224,53 +216,15 @@ function recipeLoraWeight(lora) {
   return finiteRecipeNumber(lora?.weight) ?? undefined;
 }
 
+// Image Studio review slots: images in worker-emitted batch-slot order (sc-8853;
+// the generationSetId fallback is the only branch needing an explicit sort).
 function jobResultAssets(job, assets) {
-  const catalogById = new Map(assets.map((asset) => [asset.id, asset]));
-  const resultAssets = (job.result?.assets ?? []).filter((asset) => asset?.type === "image");
-  const resultById = new Map(resultAssets.map((asset) => [asset.id, catalogById.get(asset.id) ?? asset]));
-  const assetIds = job.result?.assetIds ?? [];
-  if (assetIds.length) {
-    // The worker emits assetIds in batch-slot order, so preserve this array order when filling review slots.
-    return assetIds
-      .map((id) => resultById.get(id) ?? catalogById.get(id))
-      .filter((asset) => asset?.type === "image");
-  }
-  if (resultAssets.length) {
-    return resultAssets.map((asset) => catalogById.get(asset.id) ?? asset);
-  }
-  if (job.result?.generationSetId) {
-    return assets
-      .filter((asset) => asset.type === "image" && asset.generationSetId === job.result.generationSetId)
-      .sort((left, right) => assetBatchIndex(left) - assetBatchIndex(right));
-  }
-  return [];
+  return resolveJobResultAssets(job, assets, { type: "image", sortByBatchIndex: true });
 }
 
 function jobExpectedCount(job, completedCount) {
   const expected = Number(job.result?.expectedCount ?? job.result?.count ?? job.payload?.count);
   return Number.isFinite(expected) && expected > 0 ? Math.max(expected, completedCount) : completedCount;
-}
-
-function assetBatchIndex(asset) {
-  const candidates = [
-    asset?.batchIndex,
-    asset?.recipe?.batchIndex,
-    asset?.recipe?.normalizedSettings?.batchIndex,
-    asset?.lineage?.batchIndex,
-  ];
-  for (const candidate of candidates) {
-    const value = Number(candidate);
-    if (Number.isFinite(value)) {
-      return value;
-    }
-  }
-  const basename = String(asset?.file?.path ?? "").split(/[\\/]/).pop() ?? "";
-  const fileMatch = basename.match(/_(\d{4})\.[^.]+$/);
-  if (fileMatch) {
-    return Number(fileMatch[1]) - 1;
-  }
-  const nameMatch = String(asset?.displayName ?? "").match(/#(\d+)\s*$/);
-  return nameMatch ? Number(nameMatch[1]) - 1 : Number.POSITIVE_INFINITY;
 }
 
 export function ImageStudio() {
@@ -524,24 +478,23 @@ export function ImageStudio() {
 
   function handleUpscaleEngineChange(nextEngine) {
     setUpscaleEngine(nextEngine);
-    const option = UPSCALE_ENGINES.find((candidate) => candidate.id === nextEngine);
-    if (option && !option.factors.includes(upscaleFactor)) {
-      setUpscaleFactor(option.factors[0]);
+    const factors = upscaleFactorsForEngine(nextEngine);
+    if (!factors.includes(upscaleFactor)) {
+      setUpscaleFactor(factors[0]);
     }
   }
 
   // Engines offered in the picker; AuraSR is dropped on every platform (sc-3668 / sc-5499).
-  const availableUpscaleEngines = UPSCALE_ENGINES.filter(
-    (engine) => !macUpscaleEngineBlocked(macCapabilities, engine.id),
-  );
+  const availableUpscaleEngines = upscaleEnginesForPlatform(macCapabilities);
   // If a restored/saved engine is gated out (e.g. a stale saved AuraSR selection), fall back to the
-  // default real-esrgan engine so the user never submits an aura-sr job the native workers refuse.
-  useEffect(() => {
-    if (!macUpscaleEngineBlocked(macCapabilities, upscaleEngine)) return;
-    setUpscaleEngine("real-esrgan");
-    const factors = UPSCALE_ENGINES.find((engine) => engine.id === "real-esrgan")?.factors ?? [2, 4];
-    if (!factors.includes(upscaleFactor)) setUpscaleFactor(factors[0]);
-  }, [macCapabilities, upscaleEngine, upscaleFactor]);
+  // default real-esrgan engine so the user never submits an aura-sr job the native workers refuse (sc-8853).
+  useUpscaleEngineFallback({
+    macCapabilities,
+    upscaleEngine,
+    setUpscaleEngine,
+    upscaleFactor,
+    setUpscaleFactor,
+  });
 
   useEffect(() => {
     if (mode === "edit_image" && selectedAssetEditableSourceId) {
@@ -2331,7 +2284,7 @@ export function ImageStudio() {
                 <label>
                   Scale
                   <select disabled={!upscaleEnabled} onChange={(event) => setUpscaleFactor(Number(event.target.value))} value={upscaleFactor}>
-                    {(UPSCALE_ENGINES.find((engine) => engine.id === upscaleEngine)?.factors ?? [2, 4]).map((factor) => (
+                    {upscaleFactorsForEngine(upscaleEngine).map((factor) => (
                       <option key={factor} value={factor}>
                         {factor}x
                       </option>
@@ -2342,7 +2295,7 @@ export function ImageStudio() {
                   Engine
                   <select disabled={!upscaleEnabled} onChange={(event) => handleUpscaleEngineChange(event.target.value)} value={upscaleEngine}>
                     {availableUpscaleEngines.map((engine) => (
-                      <option key={engine.id} value={engine.id}>
+                      <option key={engine.key} value={engine.key}>
                         {engine.label}
                       </option>
                     ))}
