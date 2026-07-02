@@ -195,6 +195,30 @@ async function assertBuiltinPromptGuides() {
   }
 }
 
+async function assertVersionsAligned() {
+  // sync-version.mjs's contract is that one root `npm version` bumps every
+  // product-version field atomically (root + web + desktop package.json and
+  // tauri.conf.json), so the git tag can never drift from the shipped version.
+  // Assert the invariant here: if these four diverge, a root `npm version patch`
+  // can emit a tag BELOW the version users already run — the Tauri auto-updater
+  // (sc-1355) compares against latest.json and would then serve no update.
+  const versionSources = [
+    { path: "package.json", version: JSON.parse(await readFile(path.join(root, "package.json"), "utf8")).version },
+    { path: "apps/web/package.json", version: JSON.parse(await readFile(path.join(root, "apps/web/package.json"), "utf8")).version },
+    { path: "apps/desktop/package.json", version: JSON.parse(await readFile(path.join(root, "apps/desktop/package.json"), "utf8")).version },
+    { path: "apps/desktop/tauri.conf.json", version: JSON.parse(await readFile(path.join(root, "apps/desktop/tauri.conf.json"), "utf8")).version },
+  ];
+  const reference = versionSources[0].version;
+  const mismatched = versionSources.filter((source) => source.version !== reference);
+  if (mismatched.length) {
+    const detail = versionSources.map((source) => `${source.path}=${source.version}`).join(", ");
+    throw new Error(
+      `Product version fields are not aligned: ${detail}. Run one root ` +
+        `\`npm version <x.y.z>\` (which invokes scripts/sync-version.mjs) so all four move together.`,
+    );
+  }
+}
+
 async function assertCharacterImageTuningSurface() {
   // Catch the sc-2017 picker UX mismatch at build time: a model that opts out
   // of the IP-Adapter Reference-strength slider via `ui.hideReferenceStrength`
@@ -239,6 +263,7 @@ await assertContains("README.md", "SCENEWORKS_ACCESS_TOKEN");
 await assertManifestSchemasParse();
 await assertManifestSchemaReferences();
 await assertManifestRootsMatchSchemas();
+await assertVersionsAligned();
 await assertBuiltinPromptGuides();
 await assertCharacterImageTuningSurface();
 
