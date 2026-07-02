@@ -753,8 +753,11 @@ button:focus-visible {
   gap: var(--gap-3);
   padding: 12px 22px;
   border-bottom: 1px solid var(--border);
-  background: color-mix(in oklch, var(--bg) 92%, transparent);
-  backdrop-filter: blur(10px);
+  /* No `backdrop-filter` here: a blur promotes the topbar to its own
+     DirectComposition layer, which WebView2 can strand blank when a native
+     file dialog steals the foreground (sc-9261). A near-opaque solid keeps the
+     layered look without the extra composited layer. */
+  background: color-mix(in oklch, var(--bg) 97%, transparent);
   position: sticky;
   top: 0;
   z-index: 5;
@@ -7560,8 +7563,11 @@ details[open] > summary.lora-scope-group-heading::before,
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgba(15, 23, 42, 0.55);
-  backdrop-filter: blur(6px);
+  /* No `backdrop-filter`: the blur makes this body-portaled backdrop its own
+     composited layer, so under the WebView2 file-dialog blank (sc-9261) the
+     modal itself can go blank instead of surviving in the root layer. A darker
+     scrim preserves the dimming without promoting the layer. */
+  background: rgba(15, 23, 42, 0.72);
 }
 
 .preview-modal {

@@ -174,6 +174,44 @@ thread_local! {
 static TEST_MAX_MODEL_UPLOAD_BYTES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+// sc-8819 (F-017): count how many times the model/LoRA catalogs are assembled (which
+// each trigger the whole per-model filesystem install-state probe sweep) so a test can
+// assert a preset job-create builds each catalog once, not 2–3×. Thread-local, and the
+// counter is bumped on the caller's async task thread (before the catalog's inner
+// `spawn_blocking`), so under the `#[tokio::test]` current-thread runtime the count is
+// observed on the test thread and is immune to parallel tests on sibling threads.
+#[cfg(test)]
+thread_local! {
+    static TEST_MODEL_CATALOG_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_LORA_CATALOG_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn test_reset_catalog_build_counters() {
+    TEST_MODEL_CATALOG_BUILDS.with(|cell| cell.set(0));
+    TEST_LORA_CATALOG_BUILDS.with(|cell| cell.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn test_model_catalog_builds() -> usize {
+    TEST_MODEL_CATALOG_BUILDS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn test_lora_catalog_builds() -> usize {
+    TEST_LORA_CATALOG_BUILDS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn test_note_model_catalog_build() {
+    TEST_MODEL_CATALOG_BUILDS.with(|cell| cell.set(cell.get() + 1));
+}
+
+#[cfg(test)]
+pub(crate) fn test_note_lora_catalog_build() {
+    TEST_LORA_CATALOG_BUILDS.with(|cell| cell.set(cell.get() + 1));
+}
+
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub app_version: String,

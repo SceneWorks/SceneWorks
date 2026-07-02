@@ -228,6 +228,10 @@ pub(crate) async fn lora_catalog(
     state: &AppState,
     project_id: Option<&str>,
 ) -> Result<Vec<Value>, ApiError> {
+    // sc-8819 (F-017): observe full-catalog assembly (the per-LoRA FS install-state probe
+    // sweep) so a test can assert it runs once per job-create.
+    #[cfg(test)]
+    crate::test_note_lora_catalog_build();
     let manifest_dir = state.settings.config_dir.join("manifests");
     let builtin =
         load_manifest_entries(state, &manifest_dir.join("builtin.loras.jsonc"), "loras").await?;
@@ -759,6 +763,21 @@ pub(crate) async fn validate_job_lora_compatibility(
     job_payload: &mut JsonObject,
     allow_inline_loras: bool,
 ) -> Result<(), ApiError> {
+    validate_job_lora_compatibility_with(state, project_id, job_payload, allow_inline_loras, None)
+        .await
+}
+
+/// `validate_job_lora_compatibility` with an optional caller-supplied catalog snapshot
+/// (sc-8819). When `snapshot` is `Some`, the model and LoRA catalogs it exposes are reused
+/// instead of re-running the per-model/per-LoRA filesystem install-state probes; the
+/// validation result is identical to the `None` path.
+pub(crate) async fn validate_job_lora_compatibility_with(
+    state: &AppState,
+    project_id: Option<&str>,
+    job_payload: &mut JsonObject,
+    allow_inline_loras: bool,
+    snapshot: Option<&JobCatalogSnapshot>,
+) -> Result<(), ApiError> {
     let Some(loras) = job_payload
         .get("loras")
         .and_then(Value::as_array)
@@ -772,15 +791,21 @@ pub(crate) async fn validate_job_lora_compatibility(
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("Model is required for LoRA compatibility"))?;
     let model_id = model_id.to_owned();
-    let models = model_catalog(state).await?;
-    let catalog_loras = lora_catalog(state, project_id).await?;
+    let models = match snapshot {
+        Some(snapshot) => Arc::new(snapshot.models(state).await?.to_vec()),
+        None => Arc::new(model_catalog(state).await?),
+    };
+    let catalog_loras = match snapshot {
+        Some(snapshot) => snapshot.loras(state, project_id).await?,
+        None => Arc::new(lora_catalog(state, project_id).await?),
+    };
     // sc-4202 (F-API-3): validate_lora_specs_for_model reads safetensors headers off
     // disk (validate_lora_safetensors_header) inline. Run it on the blocking pool so a
     // slow/network volume can't stall a tokio worker thread on the job-creation path.
     let normalized = tokio::task::spawn_blocking(move || {
         validate_lora_specs_for_model(
-            &models,
-            &catalog_loras,
+            models.as_slice(),
+            catalog_loras.as_slice(),
             &model_id,
             &loras,
             allow_inline_loras,
