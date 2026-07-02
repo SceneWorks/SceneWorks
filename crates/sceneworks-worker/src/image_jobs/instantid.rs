@@ -607,7 +607,7 @@ async fn generate_instantid_stream(
     // `with_pid`. The candle InstantID lane has no PiD decode yet (sc-8373), so this is macOS-only —
     // `use_pid` never reaches the candle engine (whose `InstantIdRequest` has no such field).
     #[cfg(target_os = "macos")]
-    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model);
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
     #[cfg(target_os = "macos")]
     let use_pid = pid_weights.is_some();
     // Load the xinsir OpenPose ControlNet only for pose mode (it is the MultiControlNet second

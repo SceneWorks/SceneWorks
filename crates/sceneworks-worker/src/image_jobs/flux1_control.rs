@@ -35,7 +35,8 @@ fn flux1_dev_control_available(request: &ImageRequest, settings: &Settings) -> b
 
 /// The (repo, filename) of the FLUX.1-dev control weights — `advanced.controlWeights.{repo,filename}`
 /// overrides, else the Shakker Union-Pro-2.0 default (parity with the FLUX.2 / Z-Image resolvers).
-fn flux1_control_repo_file(request: &ImageRequest) -> (String, String) {
+/// The payload filename must be a plain component (sc-8821 / F-019).
+fn flux1_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
     let cw = request
         .advanced
         .get("controlWeights")
@@ -48,15 +49,18 @@ fn flux1_control_repo_file(request: &ImageRequest) -> (String, String) {
             .unwrap_or(default)
             .to_owned()
     };
-    (
+    Ok((
         // Default repo from the shared strict-control table (single source of truth); the file stays
         // engine-specific.
         pick(
             "repo",
             strict_control_default_repo(FLUX1_DEV_CONTROL_ENGINE_ID),
         ),
-        pick("filename", FLUX1_CONTROL_FILE),
-    )
+        safe_weight_filename(
+            &pick("filename", FLUX1_CONTROL_FILE),
+            "advanced.controlWeights.filename",
+        )?,
+    ))
 }
 
 /// Resolve the Shakker Union-Pro-2.0 checkpoint the engine loads, downloading on first use. Order: an
@@ -69,7 +73,7 @@ async fn ensure_flux1_control_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
-    let (repo, file) = flux1_control_repo_file(request);
+    let (repo, file) = flux1_control_repo_file(request)?;
     if let Ok(p) = std::env::var("SCENEWORKS_CONTROLNET_FLUX1") {
         let p = PathBuf::from(p);
         if p.is_file() {

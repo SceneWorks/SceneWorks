@@ -2629,8 +2629,9 @@ fn sc3031_ab_dump_pose() {
     let weights = resolve_weights_dir(&req, &settings)
         .expect("z-image weights resolve")
         .expect("z-image weights in HF cache");
-    let control_weights =
-        resolve_control_weights(&req, &settings).expect("Fun-Controlnet-Union weights");
+    let control_weights = resolve_control_weights(&req, &settings)
+        .expect("control-weights filename resolves")
+        .expect("Fun-Controlnet-Union weights");
     let (quant, _bits) = resolve_quant(&req);
     let zimage = mlx_model("z_image_turbo").expect("z-image model row");
     let steps = resolve_steps(&req, &zimage);
@@ -3185,7 +3186,8 @@ fn flux2_control_scale_defaults_and_clamps() {
 #[cfg(target_os = "macos")]
 #[test]
 fn flux2_control_repo_file_defaults_and_overrides() {
-    let (repo, file) = flux2_control_repo_file(&request(json!({ "projectId": "p" })));
+    let (repo, file) =
+        flux2_control_repo_file(&request(json!({ "projectId": "p" }))).expect("defaults resolve");
     // The default repo now comes from the shared strict-control table (single source of truth).
     assert_eq!(
         repo,
@@ -3197,9 +3199,64 @@ fn flux2_control_repo_file_defaults_and_overrides() {
     let (repo, file) = flux2_control_repo_file(&request(json!({
         "projectId": "p",
         "advanced": { "controlWeights": { "repo": "me/custom", "filename": "x.safetensors" } }
-    })));
+    })))
+    .expect("plain override filename resolves");
     assert_eq!(repo, "me/custom");
     assert_eq!(file, "x.safetensors");
+}
+
+/// sc-8821 / F-019: a payload `controlWeights.filename` that is not a plain component (traversal,
+/// absolute, sub-path) is REJECTED with an `InvalidPayload` pointing at the field — never joined
+/// under the HF snapshot / app cache — on every MLX control resolver (the shared
+/// `resolve_control_weights_for` behind the Z-Image/Qwen wrappers, plus the FLUX.1/FLUX.2
+/// `*_control_repo_file` pair).
+#[cfg(target_os = "macos")]
+#[test]
+fn mlx_control_weight_filenames_reject_traversal() {
+    let settings = Settings::from_env();
+    for filename in ["../../etc/hosts", "/etc/hosts", "sub/x.safetensors", ".."] {
+        let req = request(json!({
+            "projectId": "p",
+            "advanced": { "controlWeights": { "filename": filename } }
+        }));
+        for (label, error) in [
+            (
+                "z-image turbo",
+                resolve_control_weights(&req, &settings).expect_err("z-image turbo rejects"),
+            ),
+            (
+                "z-image base",
+                resolve_base_control_weights(&req, &settings).expect_err("z-image base rejects"),
+            ),
+            (
+                "qwen",
+                resolve_qwen_control_weights(&req, &settings).expect_err("qwen rejects"),
+            ),
+            (
+                "flux2",
+                flux2_control_repo_file(&req).expect_err("flux2 rejects"),
+            ),
+            (
+                "flux1",
+                flux1_control_repo_file(&req).expect_err("flux1 rejects"),
+            ),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("advanced.controlWeights.filename"),
+                "{label} error should point at the offending field for {filename:?}: {error}"
+            );
+        }
+    }
+    // A plain filename still passes validation on the Option-returning resolvers (whether it maps to
+    // Some or None then depends only on the local HF cache, not on confinement).
+    let plain = request(json!({
+        "projectId": "p",
+        "advanced": { "controlWeights": { "filename": "custom.safetensors" } }
+    }));
+    assert!(resolve_control_weights(&plain, &settings).is_ok());
+    assert!(resolve_qwen_control_weights(&plain, &settings).is_ok());
 }
 
 #[cfg(target_os = "macos")]
@@ -7308,7 +7365,7 @@ fn candle_control_providers_resolve_models_and_repos() {
     assert!(!is_flux1_control_model("flux_schnell"));
     assert!(!is_flux1_control_model("flux2_dev"));
     let flux1 = request(json!({ "projectId": "p", "model": "flux_dev" }));
-    let (f1_repo, f1_file) = flux1_control_candle_repo_file(&flux1);
+    let (f1_repo, f1_file) = flux1_control_candle_repo_file(&flux1).expect("defaults resolve");
     assert_eq!(f1_repo, "Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro-2.0");
     assert_eq!(f1_file, "diffusion_pytorch_model.safetensors");
     assert_eq!(
@@ -7319,7 +7376,7 @@ fn candle_control_providers_resolve_models_and_repos() {
     // sc-8350 — qwen InstantX → 2512-Fun: the default control repo + base repo are the 2512-Fun row, NOT
     // the retired InstantX `Qwen-Image-ControlNet-Union`.
     let qwen = request(json!({ "projectId": "p", "model": "qwen_image" }));
-    let (q_repo, _q_file) = qwen_control_repo_file(&qwen);
+    let (q_repo, _q_file) = qwen_control_repo_file(&qwen).expect("defaults resolve");
     assert_eq!(q_repo, "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union");
     assert_eq!(QWEN_CONTROL_DEFAULT_REPO, "Qwen/Qwen-Image-2512");
     assert_ne!(q_repo, "InstantX/Qwen-Image-ControlNet-Union");
@@ -7340,8 +7397,8 @@ fn candle_control_providers_resolve_models_and_repos() {
         zimage_control_base_default_repo(&base.model),
         "Tongyi-MAI/Z-Image"
     );
-    let (turbo_ctrl_repo, _) = zimage_control_repo_file(&turbo);
-    let (base_ctrl_repo, _) = zimage_control_repo_file(&base);
+    let (turbo_ctrl_repo, _) = zimage_control_repo_file(&turbo).expect("defaults resolve");
+    let (base_ctrl_repo, _) = zimage_control_repo_file(&base).expect("defaults resolve");
     assert_eq!(
         turbo_ctrl_repo,
         "alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1"
@@ -7364,6 +7421,57 @@ fn candle_control_providers_resolve_models_and_repos() {
         "projectId": "p", "model": "z_image", "advanced": { "guidanceScale": 6.5 }
     }));
     assert_eq!(zimage_control_guidance(&base_g), 6.5);
+}
+
+/// sc-8821 / F-019: a payload `controlWeights.filename` that is not a plain component (traversal,
+/// absolute, sub-path) is REJECTED with an `InvalidPayload` pointing at the field — never joined
+/// under the HF snapshot / app cache — on every candle control resolver. A plain override filename
+/// still resolves.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_control_weight_filenames_reject_traversal() {
+    for filename in ["../../etc/hosts", "/etc/hosts", "sub/x.safetensors", ".."] {
+        let req = request(json!({
+            "projectId": "p",
+            "advanced": { "controlWeights": { "filename": filename } }
+        }));
+        for (label, error) in [
+            (
+                "qwen",
+                qwen_control_repo_file(&req).expect_err("qwen rejects"),
+            ),
+            (
+                "kolors",
+                kolors_control_repo_file(&req).expect_err("kolors rejects"),
+            ),
+            (
+                "z-image",
+                zimage_control_repo_file(&req).expect_err("z-image rejects"),
+            ),
+            (
+                "flux2",
+                flux2_control_candle_repo_file(&req).expect_err("flux2 rejects"),
+            ),
+            (
+                "flux1",
+                flux1_control_candle_repo_file(&req).expect_err("flux1 rejects"),
+            ),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("advanced.controlWeights.filename"),
+                "{label} error should point at the offending field for {filename:?}: {error}"
+            );
+        }
+    }
+    let plain = request(json!({
+        "projectId": "p",
+        "advanced": { "controlWeights": { "repo": "me/custom", "filename": "x.safetensors" } }
+    }));
+    let (repo, file) = kolors_control_repo_file(&plain).expect("plain override filename resolves");
+    assert_eq!(repo, "me/custom");
+    assert_eq!(file, "x.safetensors");
 }
 
 /// The trait routes each provider: each lane's `CandleStrictControl` impl reports the right engine id

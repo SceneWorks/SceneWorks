@@ -125,7 +125,8 @@ fn flux1_control_candle_guidance(request: &ImageRequest) -> f32 {
 
 /// The (repo, filename) of the control weights — `advanced.controlWeights.{repo,filename}` overrides,
 /// else the Shakker Union-Pro-2.0 default (parity with the MLX `flux1_control_repo_file`).
-fn flux1_control_candle_repo_file(request: &ImageRequest) -> (String, String) {
+/// The payload filename must be a plain component (sc-8821 / F-019).
+fn flux1_control_candle_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
     let cw = request
         .advanced
         .get("controlWeights")
@@ -138,10 +139,13 @@ fn flux1_control_candle_repo_file(request: &ImageRequest) -> (String, String) {
             .unwrap_or(default)
             .to_owned()
     };
-    (
+    Ok((
         pick("repo", FLUX1_CONTROL_CANDLE_REPO),
-        pick("filename", FLUX1_CONTROL_CANDLE_FILE),
-    )
+        safe_weight_filename(
+            &pick("filename", FLUX1_CONTROL_CANDLE_FILE),
+            "advanced.controlWeights.filename",
+        )?,
+    ))
 }
 
 /// Resolve the Shakker Union-Pro-2.0 weight **file** the `Flux1DevControl` provider loads, downloading on
@@ -155,7 +159,7 @@ async fn ensure_flux1_control_candle_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
-    let (repo, file) = flux1_control_candle_repo_file(request);
+    let (repo, file) = flux1_control_candle_repo_file(request)?;
     if let Ok(p) = std::env::var("SCENEWORKS_CONTROLNET_FLUX1") {
         let p = PathBuf::from(p);
         if p.is_file() {
