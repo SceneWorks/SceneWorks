@@ -212,3 +212,50 @@ fn pose_detect_candle_real_weights_finds_person() {
         );
     }
 }
+
+/// sc-9123: the between-iteration cancel check used by both worker-side pose loops (batch detect +
+/// skeleton render) must surface the TYPED `Canceled` carrying the shared terminal message — that
+/// is what `run_blocking_with_heartbeat` maps to the terminal `Canceled` post instead of a failure
+/// — and must be a no-op while the flag is untripped.
+#[test]
+fn bail_if_canceled_maps_tripped_flag_to_typed_canceled() {
+    let cancel = gen_core::CancelFlag::new();
+    assert!(
+        bail_if_canceled(&cancel).is_ok(),
+        "untripped flag must not bail"
+    );
+    cancel.cancel();
+    let bailed = bail_if_canceled(&cancel);
+    assert!(
+        matches!(bailed, Err(WorkerError::Canceled(ref m)) if m == POSE_CANCEL_MESSAGE),
+        "tripped flag must surface WorkerError::Canceled with the shared terminal message, got {bailed:?}"
+    );
+}
+
+/// sc-9123: a cancel that lands before the batch even starts must short-circuit `detect_batch`
+/// BEFORE the cold detector load — with a pre-tripped flag the bogus weight paths are never
+/// touched, so a typed `Canceled` (not a load error) proves the early checkpoint runs first.
+#[test]
+fn detect_batch_bails_typed_canceled_before_detector_load() {
+    let cancel = gen_core::CancelFlag::new();
+    cancel.cancel();
+    let result = detect_batch(
+        PathBuf::from("/nonexistent/det.onnx"),
+        PathBuf::from("/nonexistent/pose.onnx"),
+        vec![Some(PathBuf::from("/nonexistent/image.png"))],
+        &cancel,
+    );
+    // `RawSource` has no `Debug`, so match out the error side rather than debug-formatting.
+    let canceled_message = match result {
+        Err(WorkerError::Canceled(message)) => Some(message),
+        Err(other) => {
+            panic!("expected typed Canceled before the detector load, got error {other:?}")
+        }
+        Ok(_) => None,
+    };
+    assert_eq!(
+        canceled_message.as_deref(),
+        Some(POSE_CANCEL_MESSAGE),
+        "pre-tripped flag must bail with the typed Canceled (shared terminal message) before touching the detector"
+    );
+}
