@@ -95,9 +95,11 @@ impl<C: CancelHandle, R> CancelJoinGuard<C, R> {
     /// (so the consumer does not drop-and-run), but with no flag to trip, a `spawn_blocking` task
     /// that ignores `abort()` runs to its natural end — it is NOT stopped, only waited-for up to the
     /// bounded deadline. Do not read the old "abort-on-drop still applies" as protection: `abort()`
-    /// is inert on a running blocking task. The `None`-cancel callers are single-shot detectors /
-    /// engine-API-locked generations whose engines can't yet be interrupted (sc-8804 residual,
-    /// tracked for real cancel-flag threading — notably SenseNova VQA, the one multi-minute case).
+    /// is inert on a running blocking task. The remaining `None`-cancel callers are single-shot
+    /// forward passes with nothing to interrupt (kps/SCRFD, person-detect/YOLO11, ArcFace compare,
+    /// the interleave document write) — a deliberate per-engine decision, see
+    /// [`run_blocking_with_heartbeat`]. The multi-minute engine-API-locked case (SenseNova
+    /// VQA/interleave) got a real per-token/per-step cancel flag in sc-9123 and now passes `Some`.
     pub(crate) fn new(cancel: impl Into<Option<C>>, handle: tokio::task::JoinHandle<R>) -> Self {
         Self {
             cancel: cancel.into(),
@@ -260,11 +262,16 @@ pub(crate) async fn mark_job_canceled(
 /// Pass `None` ONLY for paths whose engine has no cancellable surface. HONEST RESIDUAL: with
 /// `None` there is no flag to trip, so the teardown can only AWAIT the task (up to the grace
 /// window) — a `spawn_blocking` task that ignores `abort()` still runs to its natural end. The
-/// current `None` callers are single-shot detectors (kps/SCRFD, person-detect/YOLO11), an ArcFace
-/// embedding compare, and SenseNova VQA/generation; only the last is long enough that a real cancel
-/// flag would matter, and threading one requires changing the engine's generation API (sc-8804
-/// residual, tracked). Do NOT re-add a "abort-on-drop still applies" claim — abort is inert on a
-/// running blocking task.
+/// remaining `None` callers are, by explicit per-engine decision (sc-9123): the single-shot
+/// detectors (kps/SCRFD, person-detect/YOLO11) and the ArcFace embedding compare — each is one
+/// bounded forward pass (plus a cold weight load) with no loop for a flag to interrupt, so
+/// threading cancel through those engine surfaces would buy nothing the bounded join doesn't
+/// already give — and the interleave document write (bounded PNG encode + fs rename, where a
+/// mid-write abort is worse than finishing). The one multi-minute case, SenseNova
+/// VQA/interleave, now threads a REAL `CancelFlag` the engines poll per decoded token and per
+/// denoise step (mlx-gen #634 + the candle sc-9123 sibling), so those callers pass `Some` and a
+/// user cancel actually stops the rollout. Do NOT re-add a "abort-on-drop still applies" claim —
+/// abort is inert on a running blocking task.
 ///
 /// Every consumer is a job handler gated behind `any(target_os = "macos", feature =
 /// "backend-candle")`, so on the plain-Linux parity build (neither) this is unused — allow
