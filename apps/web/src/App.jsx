@@ -22,7 +22,7 @@ import { LogsScreen } from "./screens/LogsScreen.jsx";
 import { LicensesScreen } from "./screens/LicensesScreen.jsx";
 import { SetupWizard } from "./screens/SetupWizard.jsx";
 import { editModelForAsset } from "./presetUtils.js";
-import { sortNewest, sortOldest, sortWorkers } from "./sorters.js";
+import { capTerminalJobs, sortNewest, sortOldest, sortWorkers, upsertJobNewest } from "./sorters.js";
 import { useCharacters } from "./hooks/useCharacters.js";
 import { usePresets } from "./hooks/usePresets.js";
 import { useTraining } from "./hooks/useTraining.js";
@@ -139,7 +139,11 @@ function mergeFreshJobs(currentJobs, serverJobs) {
       merged.set(current.id, current);
     }
   }
-  return [...merged.values()].sort(sortNewest);
+  // sc-8860 (F-058): this deliberately keeps client-side entries the server no
+  // longer returns, so without a cap a long session grows unbounded. Cap the
+  // retained terminal-job tail (active jobs are never dropped) so a refresh can't
+  // monotonically grow `jobs`.
+  return capTerminalJobs([...merged.values()].sort(sortNewest));
 }
 
 function generatedResultAssetCount(job) {
@@ -662,7 +666,7 @@ export function App() {
         if (navigateToQueue) {
           setActiveView("Queue");
         }
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setJobs((items) => upsertJobNewest(items, job));
         setError("");
         return job;
       } catch (err) {
@@ -1148,7 +1152,7 @@ export function App() {
         hasGeneratedAssets &&
         (resultAssetCount > previousRefresh.assetCount ||
           (resultAssetCount === 0 && generationSetId && generationSetId !== previousRefresh.generationSetId));
-      setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+      setJobs((items) => upsertJobNewest(items, job));
       if (hasGeneratedAssets) {
         if (job.result?.generationSetId) {
           setLatestGenerationSetId(job.result.generationSetId);
@@ -1490,7 +1494,7 @@ export function App() {
             requestedGpu,
           }),
         });
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setJobs((items) => upsertJobNewest(items, job));
         setError("");
         return job;
       } catch (err) {
@@ -1521,7 +1525,7 @@ export function App() {
             payload: { ...payload, projectId: activeProject.id },
           }),
         });
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setJobs((items) => upsertJobNewest(items, job));
         setError("");
         return job;
       } catch (err) {
@@ -1740,7 +1744,7 @@ export function App() {
             requestedGpu,
           }),
         });
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setJobs((items) => upsertJobNewest(items, job));
         setError("");
         return job;
       } catch (err) {
@@ -1767,7 +1771,7 @@ export function App() {
             requestedGpu,
           }),
         });
-        setJobs((items) => [job, ...items.filter((item) => item.id !== job.id)].sort(sortNewest));
+        setJobs((items) => upsertJobNewest(items, job));
         setError("");
         return job;
       } catch (err) {
@@ -2049,7 +2053,7 @@ export function App() {
             ? { payloadChanges: { duplicatedAt: new Date().toISOString() } }
             : (options.body ?? {});
         const updatedJob = await apiFetch(path, token, { method: "POST", body: JSON.stringify(body) });
-        setJobs((items) => [updatedJob, ...items.filter((item) => item.id !== updatedJob.id)].sort(sortNewest));
+        setJobs((items) => upsertJobNewest(items, updatedJob));
         setError("");
       } catch (err) {
         setError(err.message);
