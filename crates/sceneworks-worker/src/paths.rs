@@ -46,6 +46,14 @@ pub(crate) fn safe_join(base: &Path, relative: &str) -> WorkerResult<PathBuf> {
 /// the same primitive `normalize_app_managed_lora_path` closes for LoRA paths. A
 /// weight file inside an HF repo snapshot is always a single plain path component,
 /// so require exactly that: no separators (`/` or `\`), no `..`/`.`, not absolute.
+///
+/// Callers all live in `image_jobs` lanes gated macOS or off-Mac + `backend-candle`
+/// (`image_jobs/{*_control,pid,*_candle}`), so the bare (non-macOS, non-candle) lib
+/// build has none — silence dead_code only there, like `decode_image_any`.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
 pub(crate) fn safe_weight_filename(filename: &str, label: &str) -> WorkerResult<String> {
     let filename = filename.trim();
     let mut components = Path::new(filename).components();
