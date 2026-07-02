@@ -384,7 +384,9 @@ pub(crate) async fn create_model_convert_job(
 pub(crate) async fn delete_model(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
+    Query(query): Query<CatalogDeleteQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    let permanent = query.permanent.unwrap_or(false);
     let catalog = model_catalog(&state).await?;
     let model = catalog
         .into_iter()
@@ -398,25 +400,40 @@ pub(crate) async fn delete_model(
         .config_dir
         .join("manifests")
         .join("user.models.jsonc");
-    let removed_entry =
-        remove_catalog_manifest_entry(&state, &manifest_path, "models", &model_id).await?;
-    let cleanup_source = removed_entry.as_ref().unwrap_or(&model);
-    let mut removed_paths = Vec::new();
-    let mut retained_paths = Vec::new();
+    // Peek (not remove) the manifest entry so that if moving the files to the OS
+    // trash fails we can leave the catalog untouched and prompt for confirmation.
+    let manifest_entry = load_manifest_entries(&state, &manifest_path, "models")
+        .await?
+        .into_iter()
+        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id.as_str()));
+    let cleanup_source = manifest_entry.as_ref().unwrap_or(&model);
     let allowed_roots = vec![
         state.settings.data_dir.join("models"),
         huggingface_hub_cache_dir(&state.settings.data_dir),
     ];
-    for path in model_artifact_paths(cleanup_source, &state.settings.data_dir) {
-        remove_owned_artifact_path(
-            path,
-            &allowed_roots,
-            &mut removed_paths,
-            &mut retained_paths,
-        )
-        .await?;
+    let removal = remove_owned_artifacts(
+        model_artifact_paths(cleanup_source, &state.settings.data_dir),
+        &allowed_roots,
+        permanent,
+    )
+    .await?;
+    // Some owned files could not reach the OS trash and nothing was permanently
+    // deleted. Leave the registry entry in place and ask the client to confirm.
+    if !permanent && !removal.trash_failed_paths.is_empty() {
+        return Ok(Json(json!({
+            "id": model_id,
+            "kind": "model",
+            "trashUnavailable": true,
+            "trashFailedPaths": removal.trash_failed_paths,
+            "removedManifestEntry": false,
+            "removedLocalArtifacts": !removal.removed_paths.is_empty(),
+            "removedPaths": removal.removed_paths,
+            "retainedPaths": removal.retained_paths,
+        })));
     }
-    if removed_entry.is_none() && removed_paths.is_empty() {
+    let removed_entry =
+        remove_catalog_manifest_entry(&state, &manifest_path, "models", &model_id).await?;
+    if removed_entry.is_none() && removal.removed_paths.is_empty() {
         return Err(ApiError::bad_request(
             "Built-in model catalog entries are read-only unless local files are installed",
         ));
@@ -430,10 +447,11 @@ pub(crate) async fn delete_model(
     Ok(Json(json!({
         "id": model_id,
         "kind": "model",
+        "trashed": !permanent,
         "removedManifestEntry": removed_entry.is_some(),
-        "removedLocalArtifacts": !removed_paths.is_empty(),
-        "removedPaths": removed_paths,
-        "retainedPaths": retained_paths,
+        "removedLocalArtifacts": !removal.removed_paths.is_empty(),
+        "removedPaths": removal.removed_paths,
+        "retainedPaths": removal.retained_paths,
         "warnings": warnings,
         "policy": policy,
     })))

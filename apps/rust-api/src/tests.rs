@@ -1087,10 +1087,12 @@ async fn project_and_asset_routes_persist_contract_state() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(reindex["assets"], 2);
 
+    // permanent=true exercises the deterministic hard-delete path; the default
+    // (move-to-OS-trash) is environment-dependent and validated manually.
     let (status, purged) = request(
         app,
         "DELETE",
-        &format!("/api/v1/projects/{project_id}/assets/{asset_id}/purge"),
+        &format!("/api/v1/projects/{project_id}/assets/{asset_id}/purge?permanent=true"),
         Value::Null,
     )
     .await;
@@ -7178,10 +7180,12 @@ async fn catalog_delete_routes_remove_manifest_entries_and_owned_artifacts() {
     .expect("user presets writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    // permanent=true keeps the assertions deterministic (the default move-to-OS-trash
+    // path depends on the host having a usable recycle bin/trash).
     let (model_status, model_delete) = request(
         app.clone(),
         "DELETE",
-        "/api/v1/models/delete_me",
+        "/api/v1/models/delete_me?permanent=true",
         Value::Null,
     )
     .await;
@@ -7199,7 +7203,7 @@ async fn catalog_delete_routes_remove_manifest_entries_and_owned_artifacts() {
     let (lora_status, lora_delete) = request(
         app.clone(),
         "DELETE",
-        "/api/v1/loras/delete_style?scope=global",
+        "/api/v1/loras/delete_style?scope=global&permanent=true",
         Value::Null,
     )
     .await;

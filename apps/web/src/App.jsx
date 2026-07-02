@@ -2135,7 +2135,18 @@ export function App() {
   const purgeAsset = useCallback(
     async (asset) => {
       try {
-        await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/purge`, token, { method: "DELETE" });
+        let result = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/purge`, token, { method: "DELETE" });
+        // The purge first tries the OS trash (recoverable). If that fails nothing was
+        // removed; confirm before falling back to a permanent delete.
+        if (result?.status === "trash_unavailable") {
+          const proceed = typeof window.confirm !== "function" ||
+            window.confirm("Cannot move to trash. Continue to permanently delete.");
+          if (!proceed) {
+            setError("");
+            return;
+          }
+          result = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/purge?permanent=true`, token, { method: "DELETE" });
+        }
         setAssets((items) => items.filter((item) => item.id !== asset.id));
         setSelectedAssetId((current) => (current === asset.id ? null : current));
         setError("");

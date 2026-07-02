@@ -34,6 +34,11 @@ license-file = "LICENSE"
 [workspace.dependencies]
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+# Cross-platform "send to the OS trash" (Windows Recycle Bin / macOS Trash / Linux
+# XDG trash). Used so deleting a LoRA/model or purging an asset is recoverable from
+# the operating system's trash instead of an irreversible unlink. Pinned once here so
+# the api (sync helper) and core (project store purge) resolve the same version.
+trash = "5"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

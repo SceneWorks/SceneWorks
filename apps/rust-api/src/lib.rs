@@ -1916,11 +1916,51 @@ fn unique_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     unique
 }
 
+/// Result of attempting to remove a batch of SceneWorks-owned artifact paths.
+#[derive(Default)]
+struct ArtifactRemoval {
+    /// Paths successfully moved to the OS trash (or permanently unlinked).
+    removed_paths: Vec<String>,
+    /// Paths left in place because they are not inside a SceneWorks-owned root
+    /// (e.g. a shared Hugging Face cache blob referenced by another model).
+    retained_paths: Vec<String>,
+    /// Owned paths that could NOT be moved to the OS trash (recycle bin disabled,
+    /// unsupported volume, item too large, …). Nothing was deleted for these, so the
+    /// caller can prompt the user before falling back to a permanent delete.
+    trash_failed_paths: Vec<String>,
+}
+
+/// Move a single path to the operating-system trash (Windows Recycle Bin / macOS
+/// Trash / Linux XDG trash). `trash::delete` is blocking, so it runs on the blocking
+/// pool to avoid stalling the async runtime.
+async fn move_path_to_os_trash(path: PathBuf) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || trash::delete(&path))
+        .await
+        .map_err(|error| format!("trash task failed: {error}"))?
+        .map_err(|error| error.to_string())
+}
+
+/// Remove a batch of artifact paths, moving each SceneWorks-owned path to the OS
+/// trash unless `permanent` is set (then unlink it). Paths outside the allowed roots
+/// are retained. A trash failure is non-fatal: the path is recorded in
+/// `trash_failed_paths` so the caller can offer a permanent-delete confirmation.
+async fn remove_owned_artifacts(
+    paths: Vec<PathBuf>,
+    allowed_roots: &[PathBuf],
+    permanent: bool,
+) -> Result<ArtifactRemoval, ApiError> {
+    let mut removal = ArtifactRemoval::default();
+    for path in paths {
+        remove_owned_artifact_path(path, allowed_roots, permanent, &mut removal).await?;
+    }
+    Ok(removal)
+}
+
 async fn remove_owned_artifact_path(
     path: PathBuf,
     allowed_roots: &[PathBuf],
-    removed_paths: &mut Vec<String>,
-    retained_paths: &mut Vec<String>,
+    permanent: bool,
+    removal: &mut ArtifactRemoval,
 ) -> Result<(), ApiError> {
     let metadata = match tokio::fs::symlink_metadata(&path).await {
         Ok(metadata) => metadata,
@@ -1948,25 +1988,40 @@ async fn remove_owned_artifact_path(
         }
     }
     if !owned {
-        retained_paths.push(path.display().to_string());
+        removal.retained_paths.push(path.display().to_string());
         return Ok(());
     }
-    if metadata.is_dir() {
-        tokio::fs::remove_dir_all(&path).await.map_err(|error| {
-            ApiError::internal(format!(
-                "Failed to remove artifact directory {}: {error}",
-                path.display()
-            ))
-        })?;
-    } else {
-        tokio::fs::remove_file(&path).await.map_err(|error| {
-            ApiError::internal(format!(
-                "Failed to remove artifact file {}: {error}",
-                path.display()
-            ))
-        })?;
+    if permanent {
+        if metadata.is_dir() {
+            tokio::fs::remove_dir_all(&path).await.map_err(|error| {
+                ApiError::internal(format!(
+                    "Failed to remove artifact directory {}: {error}",
+                    path.display()
+                ))
+            })?;
+        } else {
+            tokio::fs::remove_file(&path).await.map_err(|error| {
+                ApiError::internal(format!(
+                    "Failed to remove artifact file {}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+        removal.removed_paths.push(path.display().to_string());
+        return Ok(());
     }
-    removed_paths.push(path.display().to_string());
+    match move_path_to_os_trash(path.clone()).await {
+        Ok(()) => removal.removed_paths.push(path.display().to_string()),
+        Err(error) => {
+            tracing::warn!(
+                event = "artifact_trash_failed",
+                path = %path.display(),
+                error = %error,
+                "Failed to move artifact to the OS trash; awaiting permanent-delete confirmation"
+            );
+            removal.trash_failed_paths.push(path.display().to_string());
+        }
+    }
     Ok(())
 }
 
