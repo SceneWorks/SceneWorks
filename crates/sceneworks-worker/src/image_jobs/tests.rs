@@ -4095,13 +4095,21 @@ fn fit_rgb_crop_pad_stretch_produce_exact_dims_and_geometry() {
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 #[test]
 fn fit_pad_content_rect_matches_outpaint_mask_keep_rect() {
-    // Odd dims + aspect ratios that stress rounding (incl. a `.5`-boundary contain, e.g. 101→…).
+    // Odd dims + aspect ratios that stress rounding. The FIRST case is the divergence guard: it
+    // lands the contained width on an EXACT half — `(1,4,50,50)` → ratio `min(50/1, 50/4) = 12.5`,
+    // so `new_w = 1*12.5 = 12.5`. `contain_box`'s round-half-to-even (floor 12 is even) yields
+    // `new_w = 12` (`left = 19`), whereas the OLD local f32 `.round()` (half-away-from-zero) yields
+    // `new_w = 13` (`left = 18`). Those disagree by a whole column, so the white kept-rect below
+    // would land off the mask's keep rect and this test would FAIL if the old rounding came back —
+    // that's the drift the dedup fixes, and none of the other cases below actually hit it (they all
+    // round identically under both rules). `new_h = 4*12.5 = 50.0` is exact (no bar on that axis).
     let cases: &[(u32, u32, u32, u32)] = &[
-        (100, 50, 50, 50),   // wide → vertical bars
-        (50, 100, 50, 50),   // tall → horizontal bars
-        (101, 37, 64, 64),   // odd source into a square
-        (33, 100, 71, 40),   // odd everything, non-square target
-        (3, 2, 1024, 1024),  // extreme upscale (large `.round()` surface)
+        (1, 4, 50, 50),     // EXACT `.5` contain: half-even (12) vs old half-away (13) DIVERGE
+        (100, 50, 50, 50),  // wide → vertical bars
+        (50, 100, 50, 50),  // tall → horizontal bars
+        (101, 37, 64, 64),  // odd source into a square
+        (33, 100, 71, 40),  // odd everything, non-square target
+        (3, 2, 1024, 1024), // extreme upscale (large `.round()` surface)
         (1024, 768, 91, 91), // downscale into a small odd square
     ];
     for &(src_w, src_h, w, h) in cases {
