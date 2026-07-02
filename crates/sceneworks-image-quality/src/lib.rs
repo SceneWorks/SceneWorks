@@ -32,6 +32,22 @@ const SHADOW_CUTOFF: u8 = 4;
 /// Luma at or above this counts as blown-to-white (8-bit).
 const HIGHLIGHT_CUTOFF: u8 = 251;
 
+/// Focus is measured per-tile over an `FOCUS_TILE_GRID`×`FOCUS_TILE_GRID` grid, then reduced to a
+/// single "is *any* region sharp?" number — so a sharp subject on a flat/dark background is not
+/// dragged soft by the background's near-zero response (sc-8563). 8×8 = 64 tiles: a subject
+/// occupying even a modest fraction of the frame still lands in several tiles.
+const FOCUS_TILE_GRID: u32 = 8;
+/// Reduce the per-tile variances to their `FOCUS_TILE_PERCENTILE` quantile — the sharp-region
+/// signal, but robust to a single high-frequency outlier tile (a strict max would let one noisy
+/// JPEG block or specular edge rescue an otherwise-blurry frame, sc-8563).
+const FOCUS_TILE_PERCENTILE: f64 = 0.90;
+
+/// Luma band counted as "well exposed" — neither crushed toward black nor blown toward white. A
+/// low-key portrait keeps its lit subject inside this band even while the background clips, which is
+/// what separates an intentional dark backdrop from a genuinely under/over-exposed frame (sc-8563).
+const WELL_EXPOSED_LOW: u8 = 24;
+const WELL_EXPOSED_HIGH: u8 = 231;
+
 /// The one pinned perceptual-hash configuration. A fixed algorithm + size means every stored hash
 /// is the same byte length and Hamming distances are comparable across the whole dataset — the
 /// invariant the near-duplicate clustering in `sceneworks_core::dataset_quality` relies on.
@@ -107,13 +123,16 @@ pub fn extract_tier0_scalars(path: &Path, bucket_edge: u32) -> image::ImageResul
 pub fn scalars_from_image(image: &DynamicImage, bucket_edge: u32) -> Tier0Scalars {
     let phash = dataset_hasher().hash_image(image).as_bytes().to_vec();
 
-    // Measure sharpness + exposure on exactly what the trainer feeds in.
+    // Measure sharpness + exposure on exactly what the trainer feeds in. (If the metrics below
+    // change meaning, bump `sceneworks_core::dataset_quality::TIER0_METRICS_VERSION` so persisted
+    // caches recompute instead of being judged under the old definition.)
     let trainer_gray = trainer_grayscale(image, bucket_edge.max(1));
     let (shadow_clip, highlight_clip) = exposure_clip(&trainer_gray);
     Tier0Scalars {
-        blur_variance: laplacian_variance(&trainer_gray),
+        blur_variance: tile_peak_focus(&trainer_gray),
         shadow_clip,
         highlight_clip,
+        well_exposed_fraction: well_exposed_fraction(&trainer_gray),
         phash,
     }
 }
@@ -340,26 +359,94 @@ fn trainer_grayscale(image: &DynamicImage, edge: u32) -> GrayImage {
     DynamicImage::ImageRgb8(resized).into_luma8()
 }
 
-/// Variance of the (4-connected) Laplacian response — the classic focus/blur measure. Higher means
-/// more high-frequency detail (sharper); a flat or out-of-focus image responds near zero.
-fn laplacian_variance(gray: &GrayImage) -> f64 {
+/// The 4-connected Laplacian response over the whole image — the classic focus operator. Computed
+/// once and then tiled by [`tile_peak_focus`]; high-frequency detail responds large, a flat or
+/// out-of-focus region responds near zero.
+fn laplacian_response(gray: &GrayImage) -> image::ImageBuffer<Luma<i32>, Vec<i32>> {
     let kernel: [i32; 9] = [0, 1, 0, 1, -4, 1, 0, 1, 0];
-    let response: image::ImageBuffer<Luma<i32>, Vec<i32>> =
-        imageproc::filter::filter3x3(gray, &kernel);
+    imageproc::filter::filter3x3(gray, &kernel)
+}
 
-    let count = f64::from(response.width()) * f64::from(response.height());
+/// Variance of the Laplacian-response values inside `[x0, x0+w) × [y0, y0+h)`. Empty rect ⇒ 0.
+fn response_tile_variance(
+    response: &image::ImageBuffer<Luma<i32>, Vec<i32>>,
+    x0: u32,
+    y0: u32,
+    w: u32,
+    h: u32,
+) -> f64 {
+    let mut count = 0.0_f64;
+    let mut sum = 0.0_f64;
+    let mut sum_sq = 0.0_f64;
+    for y in y0..(y0 + h) {
+        for x in x0..(x0 + w) {
+            let value = f64::from(response.get_pixel(x, y)[0]);
+            sum += value;
+            sum_sq += value * value;
+            count += 1.0;
+        }
+    }
     if count == 0.0 {
         return 0.0;
     }
-    let mut sum = 0.0;
-    let mut sum_sq = 0.0;
-    for pixel in response.pixels() {
-        let value = f64::from(pixel[0]);
-        sum += value;
-        sum_sq += value * value;
-    }
     let mean = sum / count;
     (sum_sq / count - mean * mean).max(0.0)
+}
+
+/// Tile-based peak focus (sc-8563): split the image into `FOCUS_TILE_GRID`² tiles, take each tile's
+/// Laplacian variance, and reduce to the `FOCUS_TILE_PERCENTILE` quantile — "is the sharpest region
+/// sharp?". A sharp subject on a flat/dark background scores high even though its *global* variance
+/// is dragged down by the background; a uniformly-soft frame has every tile low, so the quantile
+/// stays low and it still flags. Replaces the old whole-image variance, which false-flagged low-key
+/// portraits (a sharp face on a dark backdrop) as blurry.
+fn tile_peak_focus(gray: &GrayImage) -> f64 {
+    let (width, height) = gray.dimensions();
+    if width == 0 || height == 0 {
+        return 0.0;
+    }
+    let response = laplacian_response(gray);
+    // Fewer pixels than the grid on a side ⇒ tiling is meaningless; fall back to whole-image.
+    if width < FOCUS_TILE_GRID || height < FOCUS_TILE_GRID {
+        return response_tile_variance(&response, 0, 0, width, height);
+    }
+    let mut tile_vars: Vec<f64> = Vec::with_capacity((FOCUS_TILE_GRID * FOCUS_TILE_GRID) as usize);
+    for ty in 0..FOCUS_TILE_GRID {
+        // Integer tile bounds that cover the whole image exactly (the last tile absorbs the slack).
+        let y0 = ty * height / FOCUS_TILE_GRID;
+        let y1 = (ty + 1) * height / FOCUS_TILE_GRID;
+        for tx in 0..FOCUS_TILE_GRID {
+            let x0 = tx * width / FOCUS_TILE_GRID;
+            let x1 = (tx + 1) * width / FOCUS_TILE_GRID;
+            tile_vars.push(response_tile_variance(&response, x0, y0, x1 - x0, y1 - y0));
+        }
+    }
+    percentile(&mut tile_vars, FOCUS_TILE_PERCENTILE)
+}
+
+/// The `p`-quantile (`0.0..=1.0`, nearest-rank) of `values`, sorting them in place. Empty ⇒ 0.
+fn percentile(values: &mut [f64], p: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rank = (p.clamp(0.0, 1.0) * (values.len() as f64 - 1.0)).round() as usize;
+    values[rank.min(values.len() - 1)]
+}
+
+/// Fraction of pixels sitting in a healthy midtone band — neither crushed toward black nor blown
+/// toward white (sc-8563). Distinguishes an intentional low-key frame (a lit subject on a dark
+/// backdrop: high `shadow_clip` *and* a healthy well-exposed band) from a genuinely under/over-
+/// exposed one (little to nothing in the band). In `[0, 1]`.
+fn well_exposed_fraction(gray: &GrayImage) -> f64 {
+    let total = u64::from(gray.width()) * u64::from(gray.height());
+    if total == 0 {
+        return 0.0;
+    }
+    let healthy = gray
+        .pixels()
+        .filter(|pixel| (WELL_EXPOSED_LOW..=WELL_EXPOSED_HIGH).contains(&pixel[0]))
+        .count() as f64;
+    healthy / total as f64
 }
 
 /// Fraction of pixels crushed to black and blown to white (luma histogram tails).
@@ -431,6 +518,186 @@ mod tests {
             "checkerboard ({}) should be far sharper than flat ({})",
             sharp.blur_variance,
             flat.blur_variance
+        );
+    }
+
+    /// A sharp checkerboard patch on an otherwise black frame — the sc-8563 shape (sharp subject,
+    /// dark background). Its *global* Laplacian variance is dragged near-zero by the black field, but
+    /// tile-peak focus reads the sharp region and stays high. This is the false positive the change
+    /// fixes.
+    fn sharp_patch_on_black(size: u32, patch: std::ops::Range<u32>) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_fn(size, size, |x, y| {
+            let inside = patch.contains(&x) && patch.contains(&y);
+            if inside && (x + y) % 2 == 0 {
+                Rgb([255, 255, 255])
+            } else {
+                Rgb([0, 0, 0])
+            }
+        }))
+    }
+
+    #[test]
+    fn sharp_region_on_dark_background_is_not_soft() {
+        // 48×48 sharp patch (≈3×3 of the 8×8 tiles) on a 128² black frame.
+        let subject = scalars_from_image(&sharp_patch_on_black(128, 40..88), 128);
+        let all_black = scalars_from_image(&solid(128, 128, [0, 0, 0]), 128);
+        assert!(
+            subject.blur_variance > 100.0 * all_black.blur_variance.max(1.0),
+            "a sharp region on black must read far sharper ({}) than an all-black frame ({})",
+            subject.blur_variance,
+            all_black.blur_variance
+        );
+    }
+
+    #[test]
+    fn a_single_sharp_tile_does_not_rescue_a_blurry_field() {
+        // Only a 16×16 corner (one of the 64 tiles) is sharp; everything else flat. The p90 tile
+        // reduction must stay low — one high-frequency block cannot mask an otherwise-soft frame
+        // (the false-negative guard for the tile measure).
+        let one_tile = scalars_from_image(&sharp_patch_on_black(128, 0..16), 128);
+        assert!(
+            one_tile.blur_variance < 50.0,
+            "a lone sharp tile ({}) must not lift p90 focus above the soft range",
+            one_tile.blur_variance
+        );
+    }
+
+    #[test]
+    fn well_exposed_fraction_tracks_healthy_midtones() {
+        // Mid-gray is entirely in-band; pure black / pure white are entirely out of band.
+        assert!(
+            scalars_from_image(&solid(32, 32, [128, 128, 128]), 32).well_exposed_fraction > 0.99
+        );
+        assert!(scalars_from_image(&solid(32, 32, [0, 0, 0]), 32).well_exposed_fraction < 0.01);
+        assert!(
+            scalars_from_image(&solid(32, 32, [255, 255, 255]), 32).well_exposed_fraction < 0.01
+        );
+    }
+
+    /// The sc-8563 acceptance case, end to end (`scalars_from_image` → `evaluate_tier0`): an image
+    /// with the measured signature of the real repro — a sharp, well-lit subject on a dark blurred
+    /// backdrop — must flag **neither** blur **nor** exposure, and a genuinely-soft version of the
+    /// same framing must still flag blur.
+    ///
+    /// Measured on the actual repro photo (bucket 1024): blurPeak 293.8, shadow_clip 0.315,
+    /// well_exposed 0.503 — all three clear their thresholds. The committed fixture is synthetic
+    /// (the real photo is third-party/copyrighted) but reproduces that regime: a high-frequency
+    /// midtone subject over ~45% clipped-black backdrop.
+    #[test]
+    fn repro_shape_sharp_subject_on_dark_backdrop_flags_neither() {
+        use sceneworks_core::dataset_quality::{
+            evaluate_tier0, DatasetKind, ItemQualityInput, QualityCheck, Tier0Thresholds,
+        };
+
+        let size = 128;
+        let bucket = 128;
+        // Left ~55%: a lit subject — high-frequency detail in a healthy midtone band. Right ~45%:
+        // the dark backdrop that clips shadows.
+        // 4-px blocks (not a 1-px checkerboard, which sits at Nyquist and is low-passed away by the
+        // bucket resize); both values are inside the healthy midtone band.
+        let sharp_subject_on_black =
+            DynamicImage::ImageRgb8(RgbImage::from_fn(size, size, |x, y| {
+                if x < 70 {
+                    if ((x / 4) + (y / 4)) % 2 == 0 {
+                        Rgb([40, 40, 40])
+                    } else {
+                        Rgb([210, 210, 210])
+                    }
+                } else {
+                    Rgb([0, 0, 0])
+                }
+            }));
+        let thresholds = Tier0Thresholds::for_kind(&DatasetKind::Person);
+        let to_item = |img: &DynamicImage| ItemQualityInput {
+            item_id: "repro".to_owned(),
+            width: Some(img.width()),
+            height: Some(img.height()),
+            content_hash: Some("h".to_owned()),
+            scalars: Some(scalars_from_image(img, bucket)),
+            acknowledged: Vec::new(),
+        };
+
+        let sharp = scalars_from_image(&sharp_subject_on_black, bucket);
+        assert!(
+            sharp.shadow_clip > thresholds.exposure_clip_fraction,
+            "the dark backdrop clips shadows like the repro: {}",
+            sharp.shadow_clip
+        );
+        assert!(
+            sharp.well_exposed_fraction > thresholds.well_exposed_min,
+            "the lit subject keeps a healthy midtone band: {}",
+            sharp.well_exposed_fraction
+        );
+        assert!(
+            sharp.blur_variance > thresholds.blur_floor,
+            "the sharp subject clears the blur floor: {}",
+            sharp.blur_variance
+        );
+
+        let eval = evaluate_tier0(
+            std::slice::from_ref(&to_item(&sharp_subject_on_black)),
+            bucket,
+            1,
+            &thresholds,
+        );
+        let flags = &eval.items[0].flags;
+        assert!(
+            !flags.iter().any(|f| f.check == QualityCheck::Blur),
+            "sharp subject on a dark backdrop must not flag blur (sc-8563)"
+        );
+        assert!(
+            !flags.iter().any(|f| f.check == QualityCheck::Exposure),
+            "a lit subject on a clipping backdrop must not flag exposure (sc-8563)"
+        );
+
+        // A genuinely blurry version of the SAME image (a Gaussian blur that softens every edge,
+        // including the subject/backdrop boundary) ⇒ blur must fire — proving the lowered floor
+        // still catches real softness rather than disabling the check. (A hard-edged flat fill would
+        // NOT be soft: its subject boundary is itself a sharp edge the peak-tile measure detects,
+        // which is exactly the point — genuine blur has no sharp edge anywhere.)
+        let blurred = sharp_subject_on_black.blur(3.0);
+        let soft = scalars_from_image(&blurred, bucket);
+        assert!(
+            soft.blur_variance < thresholds.blur_floor,
+            "a blurred version reads soft: {}",
+            soft.blur_variance
+        );
+        let eval = evaluate_tier0(
+            std::slice::from_ref(&to_item(&blurred)),
+            bucket,
+            1,
+            &thresholds,
+        );
+        assert!(
+            eval.items[0]
+                .flags
+                .iter()
+                .any(|f| f.check == QualityCheck::Blur),
+            "a genuinely blurred subject still flags blur"
+        );
+    }
+
+    #[test]
+    fn lit_subject_on_black_keeps_a_healthy_well_exposed_band() {
+        // Left half mid-gray (a lit subject), right half black (backdrop): shadows clip ~half the
+        // frame, yet ~half sits in the healthy band — the signal that spares a low-key portrait.
+        let half = DynamicImage::ImageRgb8(RgbImage::from_fn(64, 64, |x, _| {
+            if x < 32 {
+                Rgb([128, 128, 128])
+            } else {
+                Rgb([0, 0, 0])
+            }
+        }));
+        let s = scalars_from_image(&half, 64);
+        assert!(
+            s.shadow_clip > 0.4,
+            "black half clips shadows: {}",
+            s.shadow_clip
+        );
+        assert!(
+            s.well_exposed_fraction > 0.4,
+            "lit half stays in the healthy band: {}",
+            s.well_exposed_fraction
         );
     }
 
@@ -580,6 +847,92 @@ mod tests {
         assert!(near.peers.contains(&"ramp_b".to_owned()));
     }
 
+    /// sc-8563 threshold calibration probe (not a gate — `#[ignore]`d). Dumps Tier-0 scalars for
+    /// every image under `CALIB_DIR` so `blur_floor` + `well_exposed_min` are set from real photos,
+    /// not synthetic fixtures, and prints a Gaussian-blur ladder on the sharpest image to show the
+    /// sharp→soft drop (the false-negative check on the tile-peak measure).
+    ///
+    /// `CALIB_DIR=~/Datasets/Kassandra CALIB_BUCKET=1024 \`
+    /// `  cargo test -p sceneworks-image-quality calibrate_tier0 -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn calibrate_tier0_over_real_images() {
+        let Ok(dir) = std::env::var("CALIB_DIR") else {
+            eprintln!("set CALIB_DIR to a directory of images");
+            return;
+        };
+        let bucket: u32 = std::env::var("CALIB_BUCKET")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1024);
+
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if matches!(
+                    path.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.to_ascii_lowercase())
+                        .as_deref(),
+                    Some("png" | "jpg" | "jpeg" | "webp")
+                ) {
+                    out.push(path);
+                }
+            }
+        }
+
+        let mut paths = Vec::new();
+        walk(Path::new(&dir), &mut paths);
+        paths.sort();
+
+        let mut rows: Vec<(String, Tier0Scalars)> = Vec::new();
+        for path in &paths {
+            if let Ok(scalars) = extract_tier0_scalars(path, bucket) {
+                rows.push((path.display().to_string(), scalars));
+            }
+        }
+        rows.sort_by(|a, b| {
+            a.1.blur_variance
+                .partial_cmp(&b.1.blur_variance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        eprintln!("bucket={bucket}  n={}", rows.len());
+        eprintln!(
+            "{:>12}  {:>7}  {:>7}  {:>8}  path",
+            "blurPeak", "shadow", "highl", "wellExp"
+        );
+        for (path, s) in &rows {
+            eprintln!(
+                "{:12.1}  {:7.3}  {:7.3}  {:8.3}  {}",
+                s.blur_variance, s.shadow_clip, s.highlight_clip, s.well_exposed_fraction, path
+            );
+        }
+
+        if let Some((path, _)) = rows.last() {
+            if let Ok(img) = image::open(path) {
+                eprintln!("--- gaussian blur ladder on sharpest ({path}) ---");
+                for sigma in [0.0_f32, 0.5, 1.0, 2.0, 4.0, 8.0] {
+                    let candidate = if sigma == 0.0 {
+                        img.clone()
+                    } else {
+                        img.blur(sigma)
+                    };
+                    let s = scalars_from_image(&candidate, bucket);
+                    eprintln!(
+                        "sigma {sigma:>4.1}  blurPeak {:12.1}  wellExp {:.3}",
+                        s.blur_variance, s.well_exposed_fraction
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn compute_readiness_extracts_evaluates_and_reports() {
         use sceneworks_core::dataset_quality::{
@@ -708,6 +1061,7 @@ mod tests {
                 blur_variance: blur,
                 shadow_clip: 0.0,
                 highlight_clip: 0.0,
+                well_exposed_fraction: 1.0,
                 phash: vec![0, 0, 0, 0, 0, 0, 0, 0],
             }),
             acknowledged: Vec::new(),
@@ -744,6 +1098,7 @@ mod tests {
                 blur_variance: 5000.0,
                 shadow_clip: 0.0,
                 highlight_clip: 0.0,
+                well_exposed_fraction: 1.0,
                 phash,
             }),
             acknowledged: Vec::new(),
