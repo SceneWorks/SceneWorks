@@ -126,6 +126,17 @@ pub(crate) struct LorasQuery {
 pub(crate) struct CatalogDeleteQuery {
     pub(crate) project_id: Option<String>,
     pub(crate) scope: Option<String>,
+    /// When true, permanently unlink the artifacts instead of moving them to the OS
+    /// trash. The UI only sets this on the second call after a "move to trash" failure
+    /// prompts the user to confirm a permanent delete. Defaults to false (trash first).
+    pub(crate) permanent: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AssetPurgeQuery {
+    /// See `CatalogDeleteQuery::permanent` — false trashes the media/sidecar, true unlinks.
+    pub(crate) permanent: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

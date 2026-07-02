@@ -296,10 +296,12 @@ pub(crate) async fn delete_asset(
 pub(crate) async fn purge_asset(
     State(state): State<AppState>,
     Path((project_id, asset_id)): Path<(String, String)>,
+    Query(query): Query<AssetPurgeQuery>,
 ) -> Result<Json<sceneworks_core::project_store::AssetMutationResult>, ApiError> {
+    let permanent = query.permanent.unwrap_or(false);
     Ok(Json(
         project_call(state, move |store| {
-            store.purge_asset(&project_id, &asset_id)
+            store.purge_asset(&project_id, &asset_id, permanent)
         })
         .await?,
     ))

@@ -10,6 +10,14 @@ function uploadLimitLabel(bytes) {
   return Number.isInteger(gib) ? `${gib}GB` : `${gib.toFixed(1)}GB`;
 }
 
+// A delete first tries to move the artifacts to the OS trash (Recycle Bin / Trash).
+// When that fails the API removes nothing and returns `trashUnavailable`; the user is
+// then asked whether to fall back to a permanent delete. Returns true to proceed.
+export const TRASH_UNAVAILABLE_CONFIRM = "Cannot move to trash. Continue to permanently delete.";
+function confirmPermanentDelete() {
+  return typeof window.confirm !== "function" || window.confirm(TRASH_UNAVAILABLE_CONFIRM);
+}
+
 // Owns the model + LoRA catalogs and their import/download/convert/delete actions.
 // Extracted from App.jsx (sc-1651). Models and LoRAs are coupled (a LoRA delete/
 // import re-pulls both via the lora overlay), so they share one hook. App keeps the
@@ -60,9 +68,19 @@ export function useModelsAndLoras({
 
   const deleteModel = useCallback(
     async (model) => {
-      const result = await apiFetch(`/api/v1/models/${encodeURIComponent(model.id)}`, token, {
+      let result = await apiFetch(`/api/v1/models/${encodeURIComponent(model.id)}`, token, {
         method: "DELETE",
       });
+      if (result?.trashUnavailable) {
+        if (!confirmPermanentDelete()) {
+          return { cancelled: true };
+        }
+        result = await apiFetch(
+          `/api/v1/models/${encodeURIComponent(model.id)}?permanent=true`,
+          token,
+          { method: "DELETE" },
+        );
+      }
       if (result.removedManifestEntry) {
         setModels((items) => items.filter((item) => item.id !== model.id));
       }
@@ -83,9 +101,20 @@ export function useModelsAndLoras({
       params.set("projectId", activeProject.id);
     }
     const query = params.toString() ? `?${params.toString()}` : "";
-    const result = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}${query}`, token, {
+    let result = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}${query}`, token, {
       method: "DELETE",
     });
+    if (result?.trashUnavailable) {
+      if (!confirmPermanentDelete()) {
+        return { cancelled: true };
+      }
+      params.set("permanent", "true");
+      result = await apiFetch(
+        `/api/v1/loras/${encodeURIComponent(lora.id)}?${params.toString()}`,
+        token,
+        { method: "DELETE" },
+      );
+    }
     if (result.removedManifestEntry) {
       setLoras((items) => items.filter((item) => item.id !== lora.id || item.scope !== lora.scope));
     }

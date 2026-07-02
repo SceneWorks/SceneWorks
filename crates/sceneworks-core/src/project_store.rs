@@ -2257,10 +2257,15 @@ impl ProjectStore {
         })
     }
 
+    /// Permanently remove a (usually already-trashed) asset. With `permanent = false`
+    /// the on-disk media/sidecar are moved to the OS trash (recoverable); if that move
+    /// fails nothing is deleted and the result carries `status = "trash_unavailable"`
+    /// so the caller can prompt the user to confirm a permanent delete (`permanent = true`).
     pub fn purge_asset(
         &self,
         project_id: &str,
         asset_id: &str,
+        permanent: bool,
     ) -> ProjectStoreResult<AssetMutationResult> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
@@ -2271,20 +2276,53 @@ impl ProjectStore {
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
         );
+        let trash_dir = project_path.join("trash");
+        let asset_trash_dir = sidecar_path
+            .parent()
+            .filter(|parent| {
+                parent.file_name().and_then(|name| name.to_str()) == Some(asset_id)
+                    && parent.parent() == Some(trash_dir.as_path())
+            })
+            .map(Path::to_path_buf);
+        if !permanent {
+            // Move the asset's footprint to the OS trash rather than unlinking it. When
+            // the asset already lives in `trash/<id>/`, trash that directory in one shot;
+            // otherwise trash the media file and sidecar directly.
+            let targets: Vec<PathBuf> = if let Some(dir) = asset_trash_dir.clone() {
+                vec![dir]
+            } else {
+                let mut targets = Vec::new();
+                if media_path.exists() && media_path.is_file() {
+                    targets.push(media_path.clone());
+                }
+                if sidecar_path.exists() {
+                    targets.push(sidecar_path.clone());
+                }
+                targets
+            };
+            if !targets.is_empty() && trash::delete_all(&targets).is_err() {
+                // Nothing was removed; let the caller confirm a permanent delete.
+                return Ok(AssetMutationResult {
+                    id: asset_id.to_owned(),
+                    status: "trash_unavailable".to_owned(),
+                });
+            }
+            CharacterStore::new(&self.data_dir, project_path.clone())
+                .remove_asset_references(asset_id)?;
+            purge_asset_record(&project_path, asset_id)?;
+            return Ok(AssetMutationResult {
+                id: asset_id.to_owned(),
+                status: "purged".to_owned(),
+            });
+        }
         CharacterStore::new(&self.data_dir, project_path.clone())
             .remove_asset_references(asset_id)?;
         if media_path.exists() && media_path.is_file() {
             fs::remove_file(media_path)?;
         }
         fs::remove_file(&sidecar_path).ok();
-        let trash_dir = project_path.join("trash");
-        if sidecar_path.parent().is_some_and(|parent| {
-            parent.file_name().and_then(|name| name.to_str()) == Some(asset_id)
-                && parent.parent() == Some(trash_dir.as_path())
-        }) {
-            if let Some(parent) = sidecar_path.parent() {
-                fs::remove_dir_all(parent).ok();
-            }
+        if let Some(parent) = asset_trash_dir {
+            fs::remove_dir_all(parent).ok();
         }
         purge_asset_record(&project_path, asset_id)?;
         Ok(AssetMutationResult {
@@ -5072,7 +5110,7 @@ mod tests {
             Err(ProjectStoreError::BadRequest(_))
         ));
         assert!(matches!(
-            store.purge_asset(&project.id, evil),
+            store.purge_asset(&project.id, evil, true),
             Err(ProjectStoreError::BadRequest(_))
         ));
         // The traversal target is untouched.

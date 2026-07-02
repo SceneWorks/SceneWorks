@@ -765,7 +765,11 @@ export function ModelManagerScreen() {
     setDeleteMessage({ tone: "neutral", text: "" });
     try {
       const result = await onDeleteModel(model);
-      setDeleteMessage({ tone: "success", text: deleteResultText(result, model.name ?? model.id) });
+      if (result?.cancelled) {
+        setDeleteMessage({ tone: "neutral", text: "" });
+      } else {
+        setDeleteMessage({ tone: "success", text: deleteResultText(result, model.name ?? model.id) });
+      }
     } catch (err) {
       setDeleteMessage({ tone: "error", text: err.message });
     } finally {
@@ -784,7 +788,11 @@ export function ModelManagerScreen() {
     setDeleteMessage({ tone: "neutral", text: "" });
     try {
       const result = await onDeleteLora(lora);
-      setDeleteMessage({ tone: "success", text: deleteResultText(result, lora.name ?? lora.id) });
+      if (result?.cancelled) {
+        setDeleteMessage({ tone: "neutral", text: "" });
+      } else {
+        setDeleteMessage({ tone: "success", text: deleteResultText(result, lora.name ?? lora.id) });
+      }
     } catch (err) {
       setDeleteMessage({ tone: "error", text: err.message });
     } finally {

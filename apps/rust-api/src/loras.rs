@@ -182,24 +182,43 @@ pub(crate) async fn delete_lora(
         ),
         _ => return Err(ApiError::bad_request("Unsupported LoRA scope")),
     };
+    let permanent = query.permanent.unwrap_or(false);
+    // Peek (not remove) the manifest entry so a failed move-to-trash leaves the
+    // catalog intact for the client's permanent-delete confirmation prompt.
+    let manifest_entry = if let Some(manifest_path) = manifest_path.as_deref() {
+        load_manifest_entries(&state, manifest_path, "loras")
+            .await?
+            .into_iter()
+            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(lora_id.as_str()))
+    } else {
+        None
+    };
+    let cleanup_source = manifest_entry.as_ref().unwrap_or(&lora);
+    let removal = remove_owned_artifacts(
+        lora_artifact_paths(cleanup_source, &default_root),
+        &allowed_roots,
+        permanent,
+    )
+    .await?;
+    if !permanent && !removal.trash_failed_paths.is_empty() {
+        return Ok(Json(json!({
+            "id": lora_id,
+            "kind": "lora",
+            "scope": scope,
+            "trashUnavailable": true,
+            "trashFailedPaths": removal.trash_failed_paths,
+            "removedManifestEntry": false,
+            "removedLocalArtifacts": !removal.removed_paths.is_empty(),
+            "removedPaths": removal.removed_paths,
+            "retainedPaths": removal.retained_paths,
+        })));
+    }
     let removed_entry = if let Some(manifest_path) = manifest_path.as_deref() {
         remove_catalog_manifest_entry(&state, manifest_path, "loras", &lora_id).await?
     } else {
         None
     };
-    let cleanup_source = removed_entry.as_ref().unwrap_or(&lora);
-    let mut removed_paths = Vec::new();
-    let mut retained_paths = Vec::new();
-    for path in lora_artifact_paths(cleanup_source, &default_root) {
-        remove_owned_artifact_path(
-            path,
-            &allowed_roots,
-            &mut removed_paths,
-            &mut retained_paths,
-        )
-        .await?;
-    }
-    if removed_entry.is_none() && removed_paths.is_empty() {
+    if removed_entry.is_none() && removal.removed_paths.is_empty() {
         return Err(ApiError::bad_request(
             "Built-in LoRA catalog entries are read-only unless local files are installed",
         ));
@@ -215,10 +234,11 @@ pub(crate) async fn delete_lora(
         "id": lora_id,
         "kind": "lora",
         "scope": scope,
+        "trashed": !permanent,
         "removedManifestEntry": removed_entry.is_some(),
-        "removedLocalArtifacts": !removed_paths.is_empty(),
-        "removedPaths": removed_paths,
-        "retainedPaths": retained_paths,
+        "removedLocalArtifacts": !removal.removed_paths.is_empty(),
+        "removedPaths": removal.removed_paths,
+        "retainedPaths": removal.retained_paths,
         "warnings": warnings,
         "policy": policy,
     })))
