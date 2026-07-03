@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, eventUrl, isAbortError, setMediaTicket } from "./api.js";
 import { pollJobToCompletion } from "./pollJob.js";
 import { Icon } from "./components/Icons.jsx";
@@ -1494,15 +1494,27 @@ export function App() {
       .catch(() => {});
   }
 
-  refreshDataRef.current = refreshData;
-  refreshAssetsRef.current = refreshAssets;
-  refreshCharactersRef.current = refreshCharacters;
-  refreshLorasRef.current = refreshLoras;
-  refreshPresetsRef.current = refreshPresets;
-  refreshTrainingDatasetsRef.current = refreshTrainingDatasets;
-  refreshPersonTracksRef.current = refreshPersonTracks;
-  refreshTimelinesRef.current = refreshTimelines;
-  refreshDataWithLoraOverlayRef.current = refreshDataWithLoraOverlay;
+  // sc-8940: Publish the latest refresh closures into their refs from a post-commit
+  // effect rather than the render body — React documents render-body ref mutation as
+  // unsafe (a discarded concurrent/StrictMode render could leave a ref pointing at an
+  // uncommitted closure). No dep array means this runs on every commit, so the refs
+  // always hold the newest *committed* body (fresh token / activeProject). We use
+  // useLayoutEffect (not useEffect) so the assignment flushes before every passive
+  // effect on the same commit: the consumers of these refs (the [ready,token] load
+  // effect, the project-switch effect, the SSE handler) are all plain useEffects/event
+  // handlers, and React runs all layout effects before any passive effect — preserving
+  // the original ordering where consumers saw the fresh closure.
+  useLayoutEffect(() => {
+    refreshDataRef.current = refreshData;
+    refreshAssetsRef.current = refreshAssets;
+    refreshCharactersRef.current = refreshCharacters;
+    refreshLorasRef.current = refreshLoras;
+    refreshPresetsRef.current = refreshPresets;
+    refreshTrainingDatasetsRef.current = refreshTrainingDatasets;
+    refreshPersonTracksRef.current = refreshPersonTracks;
+    refreshTimelinesRef.current = refreshTimelines;
+    refreshDataWithLoraOverlayRef.current = refreshDataWithLoraOverlay;
+  });
 
 
   // Remote-browser login (epic 4484 story 7): the password IS the API access token.
