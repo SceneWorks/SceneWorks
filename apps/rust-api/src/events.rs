@@ -42,6 +42,29 @@ pub(crate) async fn create_event_ticket(State(state): State<AppState>) -> Json<T
     Json(state.event_tickets.issue())
 }
 
+// sc-8947 (F-146, Severity: Info — accepted control, recorded): the SSE stream is
+// gated by a `?ticket=` query param instead of the normal `X-SceneWorks-Token`
+// header because the browser `EventSource` API cannot set request headers. Putting
+// the *access token* in a URL would be a real leak (URLs land in history, logs,
+// Referer), so the token is NEVER used here — the client mints a throwaway ticket
+// and passes that instead. The ticket's exposure is bounded by two controls, and
+// this is the deliberate design; do NOT extend the query-string pattern to the
+// long-lived token:
+//   1. single-use — `consume()` removes the ticket on first redemption whether or
+//      not it was valid, so a leaked URL can be replayed at most zero times after
+//      the legitimate `EventSource` connects.
+//   2. short TTL — `EVENT_TICKET_TTL_SECONDS` (30s), so an unredeemed leak dies fast.
+//
+// The suggested optional hardening — pinning the ticket to the issuing peer IP — is
+// deliberately NOT implemented. Ticket issuance (`POST /jobs/events/ticket`, a
+// `fetch`) and redemption (`GET /jobs/events`, the `EventSource`) are two separate
+// connections, and the web client mints a fresh ticket on every (re)connect
+// (App.jsx `connect()`), including each auto-reconnect. On a dual-stack loopback
+// host `localhost` can resolve to `127.0.0.1` for one request and `::1` for the
+// other, so pinning the ticket to the issuer's IP would reject the redemption and
+// break legitimate SSE in exactly the loopback/LAN setup epic 4484 targets (and it
+// adds nothing behind a reverse proxy, where every peer already shares one IP). The
+// single-use + short-TTL pair is the accepted control.
 pub(crate) async fn job_events(
     State(state): State<AppState>,
     Query(query): Query<EventsQuery>,

@@ -564,6 +564,44 @@ async fn request_with_peer(
     (status, value)
 }
 
+/// Like `request_with_peer` but also attaches request headers (e.g. an
+/// `authorization` token candidate), so the per-IP auth throttle (sc-8870) can be
+/// exercised against the token oracle with a simulated remote peer.
+async fn request_with_peer_headers(
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    body: Value,
+    peer: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, Value) {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let mut request = builder
+        .body(Body::from(body.to_string()))
+        .expect("request builds");
+    let addr: SocketAddr = peer.parse().expect("peer addr parses");
+    request.extensions_mut().insert(ConnectInfo(addr));
+    let response = app.oneshot(request).await.expect("response returns");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body buffers");
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("json body parses")
+    };
+    (status, value)
+}
+
 async fn request_raw(
     app: axum::Router,
     method: &str,
@@ -8586,6 +8624,14 @@ async fn project_file_route_serves_files_and_rejects_traversal() {
             .and_then(|value| value.to_str().ok()),
         Some("image/png")
     );
+    // sc-9674 (sc-8872 follow-up): the serve response forbids MIME sniffing so a
+    // user-controlled project file can't be reinterpreted as active content.
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
 
     let (status, _, bytes) = request_raw(
         app.clone(),
@@ -8656,6 +8702,13 @@ async fn project_file_route_serves_byte_ranges() {
     assert_eq!(
         headers.get("accept-ranges").and_then(|v| v.to_str().ok()),
         Some("bytes")
+    );
+    // sc-9674: the 206 partial-content branch also carries nosniff.
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff")
     );
 
     // An open-ended range serves to EOF (this is how WebKit fetches the
@@ -9342,6 +9395,246 @@ async fn bearer_token_is_accepted_for_access_verification() {
 }
 
 #[tokio::test]
+async fn auth_verify_oracle_throttles_repeated_failures_per_peer() {
+    // sc-8870 (F-068): the public `/api/v1/auth/verify` oracle returns `{ok}` for any
+    // candidate token, so without a lockout a LAN attacker can brute-force the token
+    // (which IS the password in LAN mode) at wire speed. After a burst of wrong-token
+    // attempts from one peer IP, further attempts from that IP are refused with 429,
+    // while a fresh IP and the valid token are unaffected.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+    let attacker = "192.168.1.50:40000";
+    let bad = [("authorization", "Bearer wrong-token")];
+
+    // The first `AUTH_THROTTLE_MAX_FAILURES` (10) wrong guesses answer normally with
+    // `{ok:false}` — the oracle still works, it just counts each miss.
+    for _ in 0..10 {
+        let (status, verified) = request_with_peer_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/verify",
+            Value::Null,
+            attacker,
+            &bad,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(verified["ok"], false);
+    }
+
+    // The next attempt from the same peer is refused before the oracle answers.
+    let (status, body) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/verify",
+        Value::Null,
+        attacker,
+        &bad,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        body["detail"], "Too many authentication attempts; try again later",
+        "throttled response must not leak validity",
+    );
+
+    // Even a *correct* token from the now-blocked peer is refused: the lockout is by
+    // IP, so an attacker can't slip a lucky guess past the throttle.
+    let (status, _) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/verify",
+        Value::Null,
+        attacker,
+        &[("authorization", "Bearer secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    // A different peer IP is untouched and the valid token still verifies — a single
+    // brute-forcer can't lock out the whole deployment, and legitimate use is fine.
+    let (status, verified) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/verify",
+        Value::Null,
+        "10.0.0.9:55555",
+        &[("authorization", "Bearer secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(verified["ok"], true);
+}
+
+#[tokio::test]
+async fn auth_verify_success_clears_peer_throttle_budget() {
+    // sc-8870: a legitimate user who mistypes a few times must not get locked out once
+    // they authenticate — a valid token clears the peer's failure record.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+    let peer = "192.168.1.77:41000";
+
+    // A handful of misses (under the cap of 10), then a success that resets the count.
+    for _ in 0..5 {
+        let (status, _) = request_with_peer_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/verify",
+            Value::Null,
+            peer,
+            &[("authorization", "Bearer wrong-token")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, verified) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/verify",
+        Value::Null,
+        peer,
+        &[("authorization", "Bearer secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(verified["ok"], true);
+
+    // With the budget reset, another full window of misses is tolerated again without
+    // an early lockout (would have tripped at 10 total had the success not cleared it).
+    for _ in 0..9 {
+        let (status, verified) = request_with_peer_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/verify",
+            Value::Null,
+            peer,
+            &[("authorization", "Bearer wrong-token")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "post-success budget must be reset");
+        assert_eq!(verified["ok"], false);
+    }
+}
+
+#[tokio::test]
+async fn loopback_trusted_peer_is_never_throttled() {
+    // sc-8870: the epic-4484 loopback-trust bypass must not accrue throttle failures —
+    // the desktop UI/worker reach the API over loopback with no token, and that must
+    // keep working no matter how many times it happens.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    settings.trust_loopback = true;
+    let app = create_app(settings).expect("app creates");
+
+    // Far more than the cap of gated requests with no token, all over loopback → all
+    // served (the bypass returns before the throttle ever sees them).
+    for _ in 0..20 {
+        let (status, _) = request_with_peer(
+            app.clone(),
+            "GET",
+            "/api/v1/jobs",
+            Value::Null,
+            "127.0.0.1:51234",
+        )
+        .await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+        assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
+}
+
+#[tokio::test]
+async fn gated_route_brute_force_is_throttled_per_peer() {
+    // sc-8870: the throttle also covers the token oracle exposed by every gated route
+    // (401-vs-200 reveals a valid token), not just `/auth/verify`. A LAN peer hammering
+    // a gated route with a bad token gets locked out with 429 after the failure cap.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+    let attacker = "192.168.1.60:42000";
+    let bad = [("authorization", "Bearer wrong-token")];
+
+    for _ in 0..10 {
+        let (status, _) = request_with_peer_headers(
+            app.clone(),
+            "GET",
+            "/api/v1/jobs",
+            Value::Null,
+            attacker,
+            &bad,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, body) = request_with_peer_headers(
+        app.clone(),
+        "GET",
+        "/api/v1/jobs",
+        Value::Null,
+        attacker,
+        &bad,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        body["detail"],
+        "Too many authentication attempts; try again later"
+    );
+}
+
+#[tokio::test]
+async fn gated_route_success_clears_peer_throttle_budget() {
+    // sc-8870 (F-068): a valid token on a *gated route* must clear the peer's failure
+    // budget too, not only the `/auth/verify` endpoint. A non-web LAN/API client
+    // (epic 4484) hits gated routes directly with the token header; if it occasionally
+    // sends a wrong token it would creep toward the cap with no reset path unless a
+    // subsequent good request clears it. Accrue several misses, then one successful
+    // gated-route auth from the same peer, then confirm a full fresh window of misses
+    // is tolerated again (would have tripped at 10 total had success not reset it).
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+    let peer = "192.168.1.61:43000";
+    let bad = [("authorization", "Bearer wrong-token")];
+    let good = [("authorization", "Bearer secret-token")];
+
+    // Five misses (under the cap of 10) on a gated route.
+    for _ in 0..5 {
+        let (status, _) =
+            request_with_peer_headers(app.clone(), "GET", "/api/v1/jobs", Value::Null, peer, &bad)
+                .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // A valid token on the same gated route passes auth and resets the budget.
+    let (status, _) =
+        request_with_peer_headers(app.clone(), "GET", "/api/v1/jobs", Value::Null, peer, &good)
+            .await;
+    assert_ne!(status, StatusCode::UNAUTHORIZED);
+    assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    // With the budget reset, nine more misses are tolerated without an early lockout —
+    // without the gated-route `record_success` the 5 + 5th earlier miss would already
+    // have pushed this past 10 and returned 429 instead of 401.
+    for _ in 0..9 {
+        let (status, _) =
+            request_with_peer_headers(app.clone(), "GET", "/api/v1/jobs", Value::Null, peer, &bad)
+                .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "post-success budget must be reset on the gated-route path"
+        );
+    }
+}
+
+#[tokio::test]
 async fn event_tickets_are_protected_and_match_contract_shape() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let mut settings = test_settings(&temp_dir);
@@ -9376,6 +9669,66 @@ async fn event_tickets_are_protected_and_match_contract_shape() {
         app,
         "GET",
         "/api/v1/jobs/events?ticket=missing",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error["detail"], "Invalid or expired event stream ticket");
+}
+
+/// Drive a request but read only the status line, dropping the body. Needed for the
+/// SSE stream endpoint whose successful response body never ends (buffering it would
+/// hang the test).
+async fn request_status_only(app: axum::Router, method: &str, uri: &str) -> StatusCode {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .expect("request builds");
+    app.oneshot(request)
+        .await
+        .expect("response returns")
+        .status()
+}
+
+#[tokio::test]
+async fn sse_event_ticket_is_single_use_at_the_endpoint() {
+    // sc-8947 (F-146): the SSE ticket rides in the `?ticket=` query string because
+    // EventSource can't set headers. The accepted control that bounds a leaked URL is
+    // that the ticket is single-use (and short-TTL): the first `GET /jobs/events`
+    // redeems it, a replay of the same ticket is rejected. This pins that invariant at
+    // the HTTP layer (not just the ticket store) so nobody loosens the SSE gate.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+
+    let (status, ticket) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/events/ticket",
+        Value::Null,
+        &[("x-sceneworks-token", "secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ticket_value = ticket["ticket"].as_str().expect("ticket value").to_owned();
+
+    // First redemption connects the stream (200 OK, then the SSE body streams — we
+    // only read the status so the never-ending body doesn't hang the test).
+    let status = request_status_only(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/events?ticket={ticket_value}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Replaying the same ticket is rejected — a leaked URL can't be reused.
+    let (status, error) = request(
+        app,
+        "GET",
+        &format!("/api/v1/jobs/events?ticket={ticket_value}"),
         Value::Null,
     )
     .await;
@@ -9539,6 +9892,45 @@ async fn media_tickets_authenticate_project_file_urls() {
     )
     .await;
     assert_ne!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn pose_preview_route_sets_nosniff() {
+    // sc-9674 (sc-8872 follow-up): the pose-preview serve endpoint is a sibling
+    // media route on the API origin, so it must also forbid MIME sniffing. Served
+    // inline for <img> preview, so no attachment disposition.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    let app = create_app(settings).expect("app creates");
+
+    // The handler reads the rendered skeleton from the pose-detect cache; write one.
+    let preview_dir = data_dir.join("cache").join("pose_detect").join("job_ok");
+    std::fs::create_dir_all(&preview_dir).expect("preview dir creates");
+    std::fs::write(preview_dir.join("preview.png"), PNG_32X32).expect("preview writes");
+
+    let (status, headers, bytes) = request_raw(
+        app,
+        "GET",
+        "/api/v1/poses/preview/job_ok/preview.png",
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, PNG_32X32);
+    assert_eq!(
+        headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("image/png")
+    );
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
 }
 
 #[test]
