@@ -4421,6 +4421,72 @@ fn image_route_count_follows_dispatch_order() {
     assert_eq!(route.image_count(&zimage_base_t2i, &settings), 4);
 }
 
+// sc-8828 (F-026): `resolve_candle_image_route` is the extracted candle dispatch decision — the
+// `else if settings.backend_candle_enabled && <predicate>` ladder pulled out of `run_image_generate_job`
+// into a table (the candle sibling of `resolve_image_route`/`ImageRoute`). Locks the flag gate + the
+// no-pose-lane reject + the plain txt2img arm (the branches that route on model id, not staged weights).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_image_route_gates_on_flag_then_pose_reject_then_txt2img() {
+    let mut settings = Settings::from_env();
+
+    // Candle disabled (default) → None (the job stubs), regardless of model.
+    settings.backend_candle_enabled = false;
+    let sdxl_t2i = request(json!({ "projectId": "p", "model": "sdxl", "count": 1 }));
+    assert_eq!(resolve_candle_image_route(&sdxl_t2i, &settings), None);
+
+    settings.backend_candle_enabled = true;
+    // Plain sdxl t2i (no reference / no poses / no edit) → the generic candle txt2img lane.
+    assert_eq!(
+        resolve_candle_image_route(&sdxl_t2i, &settings),
+        Some(CandleImageRoute::CandleTxt2Img),
+    );
+
+    // A strict-pose job on sdxl (a candle engine with NO pose lane) → the loud reject, never silent T2I.
+    let sdxl_pose = request(json!({
+        "projectId": "p", "model": "sdxl", "count": 1,
+        "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&sdxl_pose, &settings),
+        Some(CandleImageRoute::PoseReject),
+    );
+
+    // A non-candle model → None (stubs / MLX-only elsewhere).
+    let unknown = request(json!({ "projectId": "p", "model": "not_a_candle_engine", "count": 1 }));
+    assert_eq!(resolve_candle_image_route(&unknown, &settings), None);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn generic_lane_conditioning_defaults_when_no_reference() {
+    // The generic MLX lane's per-family conditioning resolver (sc-8828, F-026): a plain t2i job (no
+    // reference, no edit source) resolves to the all-`None` default for every family that reaches the
+    // generic lane — the Z-Image arm (via `resolve_zimage_identity_init` returning `None`), the Kolors
+    // arm, and the final Boogu/plain fall-through. No disk access; just proves the dispatch order picks
+    // the right arm and each yields the empty conditioning when its reference precondition is absent.
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+    let project_path = dir.path();
+
+    for model in ["z_image_turbo", "kolors", "sdxl", "flux_dev"] {
+        let req = request(json!({
+            "projectId": "p", "model": model, "count": 1,
+        }));
+        // `has_reference == false` — the reference/IP-Adapter arms are all gated on it (or on an
+        // edit source), so every model falls through to the empty default.
+        let cond = resolve_generic_lane_conditioning(&req, &settings, project_path, false).unwrap();
+        assert!(
+            cond.identity_init.is_none()
+                && cond.flux_ip_dir.is_none()
+                && cond.flux_true_cfg.is_none()
+                && cond.ideogram_edit_mask.is_none(),
+            "plain t2i for '{model}' must resolve to the empty generic-lane conditioning"
+        );
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn should_fit_edit_source_only_for_off_aspect_edit_image() {
