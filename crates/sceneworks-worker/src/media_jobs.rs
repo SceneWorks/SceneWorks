@@ -2219,34 +2219,112 @@ pub(crate) fn export_request_from_job(job: &JobSnapshot) -> WorkerResult<Timelin
 /// The scale→pad→rgb24 filter chain every person-track / frame-extract sample shares. Downscales
 /// into `width×height` preserving aspect (letterboxed on the app ink color), then forces rgb24 so
 /// the detector always sees a 3-channel frame. Shared by the single-frame `render_frame_png` and the
-/// single-pass `render_track_frames` so both produce byte-identical frame geometry.
+/// single-pass `render_track_frames` so both produce identical frame geometry for a given source
+/// frame (the two paths can still pick DIFFERENT source frames — see `render_track_frames`).
 fn frame_scale_pad_filter(width: u32, height: u32) -> String {
     format!(
         "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=0x12110f,format=rgb24"
     )
 }
 
-/// Extract the person-track sample frames in ONE ffmpeg pass (sc-8915 / F-113), replacing the prior
-/// one-`ffmpeg`-process-per-sample accurate-seek loop (up to `MAX_SAMPLES` = 24 spawns per track).
+/// Count the decodable video frames in `source_path` with a single ffmpeg null-mux pass, so the
+/// caller can decide whether the single-pass `select` optimization is provably equivalent to the
+/// old per-frame accurate-seek loop (sc-8915 / F-113). Returns `Ok(Some(n))` on a clean probe,
+/// `Ok(None)` when the frame count can't be parsed from ffmpeg's stderr (unknown → the caller must
+/// take the SAFE per-frame path). We deliberately probe with `ffmpeg` and not `ffprobe`: the desktop
+/// app ships only the imageio-ffmpeg binary (no `ffprobe`), so `ffprobe` is not guaranteed present.
+///
+/// `-c copy -f null -` walks every packet without re-encoding and prints the running `frame=<N>`
+/// counter to stderr; the last value is the exact decodable frame count. This is VFR-safe (it counts
+/// real frames rather than trusting an `avg_frame_rate` metadata field that lies on VFR/screen-record
+/// sources). Probe failures are non-fatal: `None` simply routes to the accurate-seek fallback.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn probe_source_frame_count(ffmpeg: &str, source_path: &Path) -> Option<usize> {
+    let configured = match std::env::var("SCENEWORKS_FFMPEG") {
+        Ok(path) if ffmpeg == "ffmpeg" && !path.trim().is_empty() => path,
+        _ => ffmpeg.to_owned(),
+    };
+    let program = sceneworks_core::media_convert::resolve_ffmpeg_program(&configured);
+    let output = Command::new(program.as_ref())
+        .args([
+            "-hide_banner",
+            "-i",
+            &source_path.display().to_string(),
+            "-map",
+            "0:v:0",
+            "-c",
+            "copy",
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .ok()?;
+    // ffmpeg writes `frame=<N>` progress lines to stderr; the last one is the final decoded count.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    parse_ffmpeg_frame_count(&stderr)
+}
+
+/// Extract the last `frame=<N>` counter ffmpeg prints to stderr (the progress token may be padded
+/// with spaces, e.g. `frame=  12`). Split into its own pure fn so it is unit-testable without ffmpeg.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn parse_ffmpeg_frame_count(stderr: &str) -> Option<usize> {
+    stderr.rmatch_indices("frame=").find_map(|(idx, _)| {
+        stderr[idx + "frame=".len()..]
+            .trim_start()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .filter(|digits| !digits.is_empty())
+            .and_then(|digits| digits.parse::<usize>().ok())
+    })
+}
+
+/// Extract the person-track sample frames in ONE ffmpeg pass (sc-8915 / F-113) — replacing up to
+/// `MAX_SAMPLES` (24) per-sample accurate-seek spawns — WHENEVER that single pass is provably
+/// equivalent to the old per-sample loop, and FALLING BACK to the per-frame accurate seeks when it
+/// is not.
 ///
 /// `sample_timestamps` is a uniform cadence — evenly spaced `duration·i/(count-1)` for the interior
 /// samples, with only the final inclusive-end sample pulled inside the clip by
-/// `FRAME_SEEK_GUARD_SECONDS`. A single `select` filter over that same grid reproduces the exact
-/// frames the per-sample accurate seeks chose: `gte(t, min(selected_n·interval, last_seek))` picks,
-/// for the `selected_n`-th output frame, the first source frame whose `pts ≥` that grid point — the
-/// same "first frame `≥ T`" rule an `-ss T` accurate seek uses. `interval = duration/(count-1)`
-/// (`= 1/SAMPLE_RATE`-equivalent) is the interior step; `last_seek = frame_seek_timestamp(…)` folds
-/// the guard into the final grid point so the last sample lands on a real frame. Verified byte-exact
-/// against the old per-frame path on a synthetic clip (all sampled PNGs md5-identical).
+/// `FRAME_SEEK_GUARD_SECONDS`. A single `select` filter over that same grid picks, for the
+/// `selected_n`-th output frame, the first source frame whose `pts ≥ gte(t, min(selected_n·interval,
+/// last_seek))`. `interval = duration/(count-1)` is the interior step; `last_seek =
+/// frame_seek_timestamp(…)` folds the guard into the final grid point.
 ///
-/// The frames land as a 1-based `seq_%04d.png` image2 sequence, then are renamed to the 0-based
-/// `frame_{index:04}.png` names the segmentation pass re-reads by sample index — identical to before.
+/// EQUIVALENCE CONDITION (why this is NOT unconditionally byte-identical): an `-ss T` accurate seek
+/// re-selects the "first frame with pts ≥ T" INDEPENDENTLY for each sample, so two close grid points
+/// with no source frame between them both resolve to the SAME earlier frame. The single `select`
+/// filter instead scans FORWARD and cannot rewind: once `selected_n` advances it consumes the next
+/// distinct frame, so those two close grid points select DISTINCT forward frames and the clip is
+/// exhausted early. The two paths therefore agree iff every grid point maps to a distinct source
+/// frame — i.e. the source has at least as many decodable frames across the sampled span as there
+/// are samples (`source_frame_count ≥ count`, equivalently source fps ≥ the `(count-1)/duration`
+/// sample cadence). Below that (low-fps screen recordings, timelapses, GIF-derived or low-fps webcam
+/// clips, or clips with fewer frames than samples) the single pass diverges — reproduced with real
+/// ffmpeg at 19–21/24 frames wrong on a 12s@1fps clip — so we take the per-frame path instead.
 ///
-/// A single-sample cadence (`count ≤ 1`, i.e. `duration ≤ 0`) has no interval, so it falls back to
-/// one accurate-seek `render_frame_png` — the exact frame the old loop's sole iteration produced.
-/// If the source is shorter than the grid implies and ffmpeg emits fewer than `count` frames, the
-/// last real frame is cloned forward so every sample index has a readable frame (the tracker records
-/// the logical `timestamps[i]` regardless of which pixels back the final tail samples).
+/// We probe the real decodable frame count with [`probe_source_frame_count`] (an ffmpeg null-mux
+/// count, VFR-safe, no `ffprobe` dependency). Single pass ONLY when the probe succeeds AND
+/// `frame_count ≥ count`; otherwise (including an unknown/failed probe) fall back to per-frame
+/// accurate seeks, which reproduce the exact pre-PR frames by construction.
+///
+/// In the single-pass path the frames land as a 1-based `seq_%04d.png` image2 sequence, then are
+/// renamed to the 0-based `frame_{index:04}.png` names the segmentation pass re-reads by sample
+/// index. A single-sample cadence (`count ≤ 1`, i.e. `duration ≤ 0`) has no interval, so it always
+/// takes one accurate-seek `render_frame_png` — the exact frame the old loop's sole iteration
+/// produced. In the single-pass path, if the source is shorter than the grid implies and ffmpeg
+/// emits fewer than `count` frames, the last real frame is cloned forward so every sample index has
+/// a readable frame (the tracker records the logical `timestamps[i]` regardless).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -2280,6 +2358,27 @@ async fn render_track_frames(
         )
         .await?;
         return Ok(vec![path]);
+    }
+
+    // Gate the single-pass optimization on the equivalence condition above: only when the source has
+    // at least `count` decodable frames does each grid point map to a distinct forward frame that
+    // matches the independent accurate seek. An unknown probe (`None`) is treated as unsafe and also
+    // routes to the fallback. This is what keeps the perf win for well-behaved clips while
+    // guaranteeing correctness for sub-cadence-fps / frame-starved sources.
+    let source_frame_count = probe_source_frame_count(ffmpeg, source_path).await;
+    let single_pass_equivalent = source_frame_count.is_some_and(|frames| frames >= count);
+    if !single_pass_equivalent {
+        return render_track_frames_per_frame(
+            ffmpeg,
+            source_path,
+            work_dir,
+            timestamps,
+            duration,
+            width,
+            height,
+            context,
+        )
+        .await;
     }
 
     // Interior grid step and the guard-folded final seek — the two numbers that define the sample
@@ -2338,6 +2437,104 @@ async fn render_track_frames(
         frame_paths.push(dest);
     }
     Ok(frame_paths)
+}
+
+/// The pre-PR person-track sampling path (sc-8915 / F-113 fallback): one `-ss T` accurate-seek
+/// spawn per sample. This is the correctness reference the single-pass path is gated against — for
+/// sub-cadence-fps / frame-starved sources it selects the exact frames the code shipped before the
+/// single-pass optimization, including re-SELECTING the same earlier frame for close grid points
+/// (which the forward-only single pass cannot). `frame_paths[i]` ↔ `timestamps[i]`, the same 0-based
+/// `frame_{index:04}.png` names the segmentation pass re-reads.
+///
+/// One robustness improvement over the literal pre-PR loop: when a tail sample's seek lands past the
+/// last real frame (the `FRAME_SEEK_GUARD_SECONDS` guard assumes ~5fps-dense frames, so a very
+/// low-fps clip can seek past EOF and some ffmpeg builds then emit NO frame), the last successfully
+/// rendered frame is cloned forward instead of hard-erroring. That mirrors the single-pass path's own
+/// short-source tail handling and matches pre-PR frame *selection* for every sample pre-PR produced,
+/// while never failing the job on a short clip (the tracker still records the logical `timestamps[i]`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[allow(clippy::too_many_arguments)]
+async fn render_track_frames_per_frame(
+    ffmpeg: &str,
+    source_path: &Path,
+    work_dir: &Path,
+    timestamps: &[f64],
+    duration: f64,
+    width: u32,
+    height: u32,
+    context: FfmpegContext<'_>,
+) -> WorkerResult<Vec<PathBuf>> {
+    let mut frame_paths = Vec::with_capacity(timestamps.len());
+    let mut last_written: Option<PathBuf> = None;
+    for (index, &timestamp) in timestamps.iter().enumerate() {
+        let path = work_dir.join(format!("frame_{index:04}.png"));
+        let produced = try_render_frame_png(
+            ffmpeg,
+            source_path,
+            &path,
+            frame_seek_timestamp(timestamp, duration),
+            width,
+            height,
+            Some(context),
+        )
+        .await?;
+        if produced {
+            last_written = Some(path.clone());
+        } else if let Some(previous) = &last_written {
+            // Seek landed past the last real frame on a short/low-fps clip → clone the last frame
+            // forward rather than erroring, matching the single-pass tail behavior.
+            tokio::fs::copy(previous, &path).await?;
+        } else {
+            return Err(WorkerError::InvalidPayload(format!(
+                "FFmpeg produced no sampled frames for {}",
+                source_path.display()
+            )));
+        }
+        frame_paths.push(path);
+    }
+    Ok(frame_paths)
+}
+
+/// Accurate-seek one frame like [`render_frame_png`], but instead of erroring when ffmpeg emits no
+/// output (a seek past the last real frame on a short/low-fps clip), return `Ok(false)` so the caller
+/// can decide whether to clone the previous frame forward. `Ok(true)` means the frame was written.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn try_render_frame_png(
+    ffmpeg: &str,
+    source_path: &Path,
+    output_path: &Path,
+    timestamp: f64,
+    width: u32,
+    height: u32,
+    context: Option<FfmpegContext<'_>>,
+) -> WorkerResult<bool> {
+    let filters = frame_scale_pad_filter(width, height);
+    run_ffmpeg(
+        vec![
+            ffmpeg.to_owned(),
+            "-y".to_owned(),
+            "-ss".to_owned(),
+            format!("{:.3}", timestamp.max(0.0)),
+            "-i".to_owned(),
+            source_path.display().to_string(),
+            "-frames:v".to_owned(),
+            "1".to_owned(),
+            "-vf".to_owned(),
+            filters,
+            "-f".to_owned(),
+            "image2".to_owned(),
+            output_path.display().to_string(),
+        ],
+        context,
+    )
+    .await?;
+    Ok(tokio::fs::try_exists(output_path).await?)
 }
 
 pub(crate) async fn render_frame_png(
@@ -3461,102 +3658,187 @@ mod person_track_e2e_tests {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
-    /// F-113 (sc-8915): the single-pass `render_track_frames` must select byte-identical frames to
-    /// the old one-`ffmpeg`-per-sample accurate-seek loop. Generates a deterministic synthetic clip
-    /// with real ffmpeg, extracts every sample both ways, and asserts each sampled PNG is identical.
+    /// Extract every `timestamps[i]` two ways for one synthetic `rate`fps × `duration`s clip and
+    /// return `(single_pass_frames, accurate_seek_reference_frames)` as raw PNG bytes, so a caller
+    /// can assert they match. `render_track_frames` is the code under test (single-pass WHERE valid,
+    /// per-frame accurate-seek fallback otherwise); the reference is the pre-PR per-frame path built
+    /// directly with `render_frame_png`. Returns `None` when ffmpeg can't build the fixture (so the
+    /// test degrades to a skip rather than a false failure).
+    async fn extract_both_ways(
+        scratch: &std::path::Path,
+        label: &str,
+        rate: &str,
+        duration: f64,
+    ) -> Option<(Vec<Vec<u8>>, Vec<Vec<u8>>)> {
+        use crate::person_track::sample_timestamps;
+
+        let case_dir = scratch.join(label);
+        let cut_dir = case_dir.join("cut"); // code under test (render_track_frames)
+        let ref_dir = case_dir.join("ref"); // per-frame accurate-seek reference
+        std::fs::create_dir_all(&cut_dir).expect("cut dir");
+        std::fs::create_dir_all(&ref_dir).expect("ref dir");
+
+        // A deterministic testsrc2 clip at the requested cadence. `render_frame_png` accurate seek
+        // needs a real container, so materialize the file first.
+        let src = case_dir.join("src.mp4");
+        let make = run_ffmpeg(
+            vec![
+                "ffmpeg".to_owned(),
+                "-y".to_owned(),
+                "-f".to_owned(),
+                "lavfi".to_owned(),
+                "-i".to_owned(),
+                format!("testsrc2=size=320x240:rate={rate}:duration={duration}"),
+                "-pix_fmt".to_owned(),
+                "yuv420p".to_owned(),
+                src.display().to_string(),
+            ],
+            None,
+        )
+        .await;
+        if make.is_err() {
+            eprintln!("skipping {label}: ffmpeg unavailable to build the fixture");
+            return None;
+        }
+
+        let timestamps = sample_timestamps(duration);
+        assert!(
+            timestamps.len() > 1,
+            "{label}: fixture yields a multi-sample cadence"
+        );
+
+        let cut_paths = render_track_frames(
+            "ffmpeg",
+            &src,
+            &cut_dir,
+            &timestamps,
+            duration,
+            1280,
+            720,
+            FfmpegContext {
+                api: &ApiClient::new(&crate::Settings::from_env()),
+                settings: &crate::Settings::from_env(),
+                job_id: "render-track-frames-verify",
+                cancel_message: "",
+            },
+        )
+        .await
+        .expect("render_track_frames extraction");
+        assert_eq!(
+            cut_paths.len(),
+            timestamps.len(),
+            "{label}: one frame per sample"
+        );
+
+        // Build the accurate-seek reference the SAME way the fallback does: one independent `-ss`
+        // seek per sample, cloning the last produced frame forward for any tail sample whose seek
+        // lands past EOF on a low-fps clip. This is exactly the pre-PR frame *selection*, made robust
+        // against the short-clip tail. `render_track_frames` must match it byte-for-byte.
+        let mut cut_bytes = Vec::with_capacity(timestamps.len());
+        let mut ref_bytes = Vec::with_capacity(timestamps.len());
+        let mut last_ref: Option<Vec<u8>> = None;
+        for (index, &timestamp) in timestamps.iter().enumerate() {
+            let ref_path = ref_dir.join(format!("frame_{index:04}.png"));
+            let produced = try_render_frame_png(
+                "ffmpeg",
+                &src,
+                &ref_path,
+                frame_seek_timestamp(timestamp, duration),
+                1280,
+                720,
+                None,
+            )
+            .await
+            .expect("per-frame reference extraction");
+            let bytes = if produced {
+                let b = std::fs::read(&ref_path).expect("read reference frame");
+                last_ref = Some(b.clone());
+                b
+            } else {
+                last_ref
+                    .clone()
+                    .expect("a reference frame exists before any EOF tail sample")
+            };
+            ref_bytes.push(bytes);
+            cut_bytes.push(std::fs::read(&cut_paths[index]).expect("read code-under-test frame"));
+        }
+        Some((cut_bytes, ref_bytes))
+    }
+
+    /// F-113 (sc-8915): `render_track_frames` must select byte-identical frames to the old
+    /// one-`ffmpeg`-per-sample accurate-seek loop across every fps regime, NOT just well-behaved
+    /// high-fps sources. It generates deterministic synthetic clips with real ffmpeg and asserts each
+    /// sampled PNG matches the accurate-seek reference:
+    ///
+    /// - 4s @ 30fps: the well-behaved case (source fps ≥ sample cadence). `render_track_frames` takes
+    ///   the single-pass path and it is byte-identical — the perf win we keep.
+    /// - 12s @ 1fps and 12s @ 1.5fps: sub-cadence-fps sources (12 / 18 real frames < 24 samples). The
+    ///   old, unconditional single-pass code selected 19–21/24 wrong frames here; the gated code
+    ///   falls back to per-frame accurate seeks and matches. THIS is the regression the fix closes —
+    ///   it FAILS against single-pass-always and PASSES after the fallback gate.
+    /// - 3s @ 1fps: a frame-STARVED short clip (3 real frames, 6 samples) — fewer source frames than
+    ///   `MAX_SAMPLES`-bounded samples. Also routes to the fallback and matches.
+    ///
     /// `#[ignore]` because it needs an ffmpeg binary (unset on CI runners); run with the bundled or a
     /// system ffmpeg:
     ///
     /// ```text
     /// SCENEWORKS_FFMPEG=/path/to/ffmpeg \
-    ///   cargo test -p sceneworks-worker --lib render_track_frames_single_pass -- --ignored --nocapture
+    ///   cargo test -p sceneworks-worker --lib render_track_frames_matches_per_frame -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "needs an ffmpeg binary (SCENEWORKS_FFMPEG or ffmpeg on PATH)"]
-    fn render_track_frames_single_pass_matches_per_frame_accurate_seek() {
-        use crate::person_track::sample_timestamps;
-
+    fn render_track_frames_matches_per_frame_accurate_seek_across_fps_regimes() {
         let scratch = std::env::temp_dir().join("sw-render-track-frames-verify");
         let _ = std::fs::remove_dir_all(&scratch);
-        let seq_dir = scratch.join("seq");
-        let single_dir = scratch.join("single");
-        std::fs::create_dir_all(&seq_dir).expect("seq dir");
-        std::fs::create_dir_all(&single_dir).expect("single dir");
+        std::fs::create_dir_all(&scratch).expect("scratch dir");
+
+        // (label, rate, duration): the well-behaved high-fps case plus the sub-cadence-fps and
+        // frame-starved regimes that break the unconditional single-pass optimization.
+        let cases: &[(&str, &str, f64)] = &[
+            ("hi_30fps_4s", "30", 4.0),
+            ("lo_1fps_12s", "1", 12.0),
+            ("lo_1_5fps_12s", "1.5", 12.0),
+            ("starved_1fps_3s", "1", 3.0),
+        ];
 
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async {
-            // A deterministic 4s @ 30fps synthetic clip (testsrc2), the same fixture the manual
-            // verification used. `render_frame_png` with a lavfi source has no accurate seek, so
-            // generate a real file first.
-            let src = scratch.join("src.mp4");
-            let make = run_ffmpeg(
-                vec![
-                    "ffmpeg".to_owned(),
-                    "-y".to_owned(),
-                    "-f".to_owned(),
-                    "lavfi".to_owned(),
-                    "-i".to_owned(),
-                    "testsrc2=size=320x240:rate=30:duration=4".to_owned(),
-                    "-pix_fmt".to_owned(),
-                    "yuv420p".to_owned(),
-                    src.display().to_string(),
-                ],
-                None,
-            )
-            .await;
-            if make.is_err() {
-                eprintln!("skipping: ffmpeg unavailable to build the fixture");
-                return;
-            }
-
-            let duration = 4.0;
-            let timestamps = sample_timestamps(duration);
-            assert!(timestamps.len() > 1, "fixture yields a multi-sample cadence");
-
-            // Single pass.
-            let seq_paths = render_track_frames(
-                "ffmpeg",
-                &src,
-                &seq_dir,
-                &timestamps,
-                duration,
-                1280,
-                720,
-                FfmpegContext {
-                    api: &ApiClient::new(&crate::Settings::from_env()),
-                    settings: &crate::Settings::from_env(),
-                    job_id: "render-track-frames-verify",
-                    cancel_message: "",
-                },
-            )
-            .await
-            .expect("single-pass extraction");
-            assert_eq!(seq_paths.len(), timestamps.len(), "one frame per sample");
-
-            // Per-frame accurate-seek reference (the old loop's exact seeks).
-            for (index, &timestamp) in timestamps.iter().enumerate() {
-                let path = single_dir.join(format!("frame_{index:04}.png"));
-                render_frame_png(
-                    "ffmpeg",
-                    &src,
-                    &path,
-                    frame_seek_timestamp(timestamp, duration),
-                    1280,
-                    720,
-                    None,
-                )
-                .await
-                .expect("per-frame extraction");
-                let single = std::fs::read(&path).expect("read reference frame");
-                let multi = std::fs::read(&seq_paths[index]).expect("read single-pass frame");
-                assert_eq!(
-                    single, multi,
-                    "single-pass frame {index} (t={timestamp:.4}s) differs from the accurate-seek reference"
-                );
+            for &(label, rate, duration) in cases {
+                let Some((cut, reference)) =
+                    extract_both_ways(&scratch, label, rate, duration).await
+                else {
+                    return; // ffmpeg missing → skip the whole test
+                };
+                for (index, (cut_frame, ref_frame)) in cut.iter().zip(&reference).enumerate() {
+                    assert_eq!(
+                        cut_frame, ref_frame,
+                        "{label}: render_track_frames sample {index} differs from the \
+                         accurate-seek reference (sub-cadence-fps fallback regression, sc-8915)"
+                    );
+                }
             }
         });
 
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod render_track_frame_probe_tests {
+    use super::*;
+
+    #[test]
+    fn parse_ffmpeg_frame_count_reads_the_last_padded_progress_token() {
+        // ffmpeg pads the counter and prints many progress lines; the LAST frame= wins.
+        let stderr = "frame=    1 fps=0.0 q=-1.0 size=N/A\nframe=   12 fps=0.0 q=-1.0 Lsize=N/A\n";
+        assert_eq!(parse_ffmpeg_frame_count(stderr), Some(12));
+    }
+
+    #[test]
+    fn parse_ffmpeg_frame_count_handles_no_space_and_missing_token() {
+        assert_eq!(parse_ffmpeg_frame_count("frame=120 other"), Some(120));
+        assert_eq!(parse_ffmpeg_frame_count("no counter here"), None);
     }
 }
 
