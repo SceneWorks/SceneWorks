@@ -967,14 +967,15 @@ pub(crate) async fn run_image_upscale_job(
         )
         .await?;
         let cancel = CancelFlag::new();
-        let seed_source = source_image.clone();
+        // Move `source_image` into the future — the `else` branch already consumes it and it's
+        // unused after this `if`, so the clone (a full RGB buffer copy) was needless (sc-8927).
         run_upscale_with_heartbeat(
             api,
             settings,
             &job.id,
             cancel.clone(),
             tokio::spawn(async move {
-                run_seedvr2_upscale(dir, seed_source, factor, softness, seed, cancel).await
+                run_seedvr2_upscale(dir, source_image, factor, softness, seed, cancel).await
             }),
         )
         .await?

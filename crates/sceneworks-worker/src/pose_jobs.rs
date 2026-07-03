@@ -711,10 +711,14 @@ async fn ensure_one(
     verify_file_sha256(&zip_path, zip_sha256, &format!("DWPose {file} bundle")).await?;
     // The openmmlab bundle is a .zip containing a single .onnx; extract it.
     let target_clone = target.clone();
+    let zip_for_extract = zip_path.clone();
     let file_owned = file.to_owned();
-    tokio::task::spawn_blocking(move || extract_onnx(&zip_path, &file_owned, &target_clone))
+    tokio::task::spawn_blocking(move || extract_onnx(&zip_for_extract, &file_owned, &target_clone))
         .await
         .map_err(|error| task_join_error("weight extract task", error))??;
+    // Drop the (large — ~90-210 MB) archive now the .onnx is extracted; keeping it just
+    // wastes cache disk (sc-8927). Best-effort: a failure here doesn't fail the job.
+    let _ = tokio::fs::remove_file(&zip_path).await;
     Ok(target)
 }
 
