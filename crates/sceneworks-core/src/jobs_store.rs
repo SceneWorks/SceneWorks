@@ -668,9 +668,19 @@ impl JobsStore {
             ],
         )?;
         if let Some(job_id) = request.current_job_id {
+            // Verify ownership before letting a heartbeat refresh the job's
+            // liveness timestamps (sc-8873 / F-071). The progress path was
+            // hardened this way in sc-4172, but the heartbeat wasn't: a stale
+            // worker still heartbeating an old `current_job_id` it no longer
+            // owns (the job was swept to `interrupted` — worker_id cleared — or
+            // reclaimed by another worker) would keep bumping last_heartbeat_at,
+            // masking the job as alive and blocking the time-based stale sweep
+            // from ever reclaiming it. Scoping the UPDATE to the reporting
+            // worker's own rows means a non-owning heartbeat is a silent no-op.
             transaction.execute(
-                "update jobs set last_heartbeat_at = ?1, updated_at = ?1 where id = ?2",
-                params![now, job_id],
+                "update jobs set last_heartbeat_at = ?1, updated_at = ?1 \
+                 where id = ?2 and worker_id = ?3",
+                params![now, job_id, request.worker_id],
             )?;
         }
         let worker = self.get_worker_on_connection(&transaction, &request.worker_id)?;
