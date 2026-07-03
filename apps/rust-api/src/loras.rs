@@ -998,7 +998,7 @@ pub(crate) fn read_safetensors_header_for_api(
 pub(crate) fn sweep_stale_lora_uploads(data_dir: &FsPath) -> std::io::Result<usize> {
     sweep_stale_lora_uploads_before(
         data_dir,
-        SystemTime::now() - Duration::from_secs(STALE_LORA_UPLOAD_SECONDS),
+        SystemTime::now() - Duration::from_secs(STALE_UPLOAD_SECONDS),
     )
 }
 
@@ -1006,31 +1006,9 @@ pub(crate) fn sweep_stale_lora_uploads_before(
     data_dir: &FsPath,
     cutoff: SystemTime,
 ) -> std::io::Result<usize> {
-    let upload_root = data_dir.join("cache").join("lora-uploads");
-    let entries = match std::fs::read_dir(upload_root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error),
-    };
-    let mut removed = 0usize;
-    for entry in entries {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if !file_type.is_dir() {
-            continue;
-        }
-        let filename = entry.file_name();
-        let filename = filename.to_string_lossy();
-        if !filename.starts_with("upload-") {
-            continue;
-        }
-        let modified = entry.metadata()?.modified().unwrap_or(UNIX_EPOCH);
-        if modified <= cutoff {
-            std::fs::remove_dir_all(entry.path())?;
-            removed += 1;
-        }
-    }
-    Ok(removed)
+    // sc-8885 (F-083): LoRA uploads only ever stage per-upload directories, so the
+    // shared sweeper's file+dir handling is a strict superset of the old dir-only loop.
+    sweep_stale_uploads(data_dir, "lora-uploads", cutoff)
 }
 
 pub(crate) fn lora_source_provider(payload: &LoraImportRequest) -> &'static str {

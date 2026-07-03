@@ -166,7 +166,10 @@ const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_MODEL_UPLOAD_BYTES: usize = 256 * 1024 * 1024 * 1024;
 const MAX_LORA_MULTIPART_BODY_BYTES: usize = MAX_UPLOAD_BYTES + 16 * 1024 * 1024;
 const MAX_MODEL_MULTIPART_BODY_BYTES: usize = MAX_MODEL_UPLOAD_BYTES + 16 * 1024 * 1024;
-const STALE_LORA_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
+// sc-8885 (F-083): the shared max age for every `cache/*-uploads` staging area (asset,
+// lora, model, pose, keypoint) before the startup sweep reclaims it. Named for uploads
+// in general — the old `STALE_LORA_UPLOAD_SECONDS` misleadingly implied LoRA-only.
+const STALE_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
 // Thread-local (not a process-global atomic) so a test overriding the cap to
 // exercise the size limit can't leak that value into other LoRA-upload tests
 // running concurrently on sibling threads. `#[tokio::test]` uses a current-thread
@@ -782,6 +785,42 @@ where
         return Err(error);
     }
     Ok(())
+}
+
+/// Remove stale `upload-*` entries under `<data_dir>/cache/<subdir>` older than
+/// `cutoff`. sc-8885 (F-083): the single implementation behind every per-area startup
+/// sweep (asset, lora, model, pose, keypoint) — previously four/five copy-pasted loops
+/// that had already drifted (some skipped non-directories, some didn't). Handles both
+/// files and directories so a staging area holding either is fully reclaimed. A missing
+/// root is not an error (nothing was ever staged). Returns the number of entries removed.
+pub(crate) fn sweep_stale_uploads(
+    data_dir: &FsPath,
+    subdir: &str,
+    cutoff: SystemTime,
+) -> std::io::Result<usize> {
+    let upload_root = data_dir.join("cache").join(subdir);
+    let entries = match std::fs::read_dir(upload_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut removed = 0usize;
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_name().to_string_lossy().starts_with("upload-") {
+            continue;
+        }
+        let modified = entry.metadata()?.modified().unwrap_or(UNIX_EPOCH);
+        if modified <= cutoff {
+            if entry.file_type()?.is_dir() {
+                std::fs::remove_dir_all(entry.path())?;
+            } else {
+                std::fs::remove_file(entry.path())?;
+            }
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {

@@ -7,9 +7,9 @@ use super::{
     inprocess_worker_gpu_id, lora_artifact_paths, merge_model_manifest_entry, mlx_catalog_status,
     open_bind_override_enabled, safe_download_dir, serialize_job_lora, should_warn_open_bind,
     strip_jsonc_comments, sweep_stale_asset_uploads_before, sweep_stale_lora_uploads_before,
-    Settings, WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER,
-    DEFAULT_API_HOST, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE,
-    TEST_MAX_LORA_UPLOAD_BYTES,
+    sweep_stale_uploads, Settings, WorkerCapability, WorkerSnapshot, WorkerStatus,
+    API_MANAGED_MANIFEST_HEADER, DEFAULT_API_HOST, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA,
+    HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
 };
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -798,6 +798,45 @@ async fn import_asset_removes_staged_temp_file_when_a_later_field_errors() {
     assert!(
         leaked.is_empty(),
         "staged upload temp file leaked on error: {leaked:?}"
+    );
+}
+
+#[test]
+fn shared_sweep_removes_stale_files_and_dirs_leaves_fresh_and_unrelated() {
+    // sc-8885 (F-083): the unified sweeper handles both loose files and per-upload
+    // directories, and only touches `upload-*` entries at/older than the cutoff.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let root = temp_dir.path().join("data/cache/pose-uploads");
+    std::fs::create_dir_all(&root).expect("root creates");
+    let stale_file = root.join("upload-old.tmp");
+    let stale_dir = root.join("upload-old-dir");
+    let unrelated = root.join("keep-me.txt");
+    std::fs::write(&stale_file, b"x").expect("stale file writes");
+    std::fs::create_dir_all(&stale_dir).expect("stale dir creates");
+    std::fs::write(stale_dir.join("inner"), b"y").expect("inner writes");
+    std::fs::write(&unrelated, b"z").expect("unrelated writes");
+
+    // Cutoff in the future -> everything upload-* qualifies as stale.
+    let removed = sweep_stale_uploads(
+        &temp_dir.path().join("data"),
+        "pose-uploads",
+        SystemTime::now() + Duration::from_secs(1),
+    )
+    .expect("shared sweep");
+    assert_eq!(removed, 2, "both the file and the directory are removed");
+    assert!(!stale_file.exists());
+    assert!(!stale_dir.exists());
+    assert!(unrelated.exists(), "non upload-* entries are left alone");
+
+    // A missing root is not an error.
+    assert_eq!(
+        sweep_stale_uploads(
+            &temp_dir.path().join("data"),
+            "does-not-exist",
+            SystemTime::now(),
+        )
+        .expect("missing root is ok"),
+        0
     );
 }
 
