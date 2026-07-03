@@ -1293,6 +1293,164 @@ fn snap_seedvr2_dim(value: u32) -> u32 {
     rounded.clamp(16, 4096)
 }
 
+// ---------------------------------------------------------------------------
+// Host-RAM bound for the SeedVR2 upscale (sc-8829, F-027)
+// ---------------------------------------------------------------------------
+// The engine (`mlx-gen-seedvr2`) already bounds its GPU/activation memory (a temporal chunk sizer +
+// spatial tiler). What is NOT bounded is *host* RGB8 RAM: `decode_seedvr2_source_frames` materializes
+// EVERY source frame into a `Vec<Image>` up front, and the up-to-4× output is likewise held whole in a
+// `Vec<RgbFrame>` before encode (the engine's `assemble_overlap` needs every decoded chunk at once, so
+// its API is fundamentally whole-clip). A few-minute 1080p clip => tens of GB of RGB8 (~17 GB source +
+// ~68 GB at 4×) => OOM-killed after minutes of GPU work.
+//
+// Fix (this story): a GENEROUS, machine-derived frame cap that FAILS LOUD *before* decode (using the
+// source asset's sidecar width/height/fps/duration) so no GPU work is wasted, with a post-decode
+// backstop for when the sidecar metadata is absent or wrong. True worker-level streaming chunking
+// (decode -> upscale -> append-encode a window at a time, reusing the engine's public
+// `plan_chunks`/`assemble_overlap` for a lossless seam) removes the cap entirely and is tracked as a
+// follow-up (SeedVR2 is temporal-context — window=(4,3,3) + a 3D causal VAE that re-anchors chunk
+// boundaries — so naive butt-joined chunking would seam; the follow-up must carry overlap cross-fade).
+
+/// Fraction of total physical RAM the source + output RGB8 buffers are allowed to occupy at once.
+/// Deliberately generous: the engine streams its own GPU allocation, so this bounds only the host-side
+/// pixel Vecs, which coexist with the OS, the loaded weights, ffmpeg, and the app. 0.5 leaves half of
+/// RAM for everything else while still admitting minutes-long clips on a large machine.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const SEEDVR2_HOST_RAM_FRACTION: f64 = 0.5;
+
+/// Floor for the derived host-RAM budget when the physical-RAM probe fails (unknown platform / probe
+/// error): assume a modest 16 GB machine and take the fraction of it, so the cap is always active.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const SEEDVR2_FALLBACK_RAM_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+/// Total physical RAM in bytes, best-effort and portable (macOS `sysctl hw.memsize`, Linux
+/// `/proc/meminfo` `MemTotal`). Returns `None` if the probe fails; callers fall back to
+/// [`SEEDVR2_FALLBACK_RAM_BYTES`]. No new crate dependency — the two supported worker platforms
+/// (macOS + Windows/Linux-candle) are covered directly.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn total_physical_ram_bytes() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse::<u64>()
+            .ok()
+    }
+    #[cfg(all(not(target_os = "macos"), target_os = "linux"))]
+    {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+        for line in meminfo.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                // "MemTotal:   16384000 kB"
+                let kb = rest
+                    .trim()
+                    .trim_end_matches(" kB")
+                    .trim()
+                    .parse::<u64>()
+                    .ok()?;
+                return Some(kb.saturating_mul(1024));
+            }
+        }
+        None
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
+    {
+        // Windows (candle lane): `wmic ComputerSystem get TotalPhysicalMemory` is the dependency-free
+        // probe. If it is unavailable the caller falls back to the conservative floor.
+        let out = std::process::Command::new("wmic")
+            .args(["ComputerSystem", "get", "TotalPhysicalMemory", "/value"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            if let Some(rest) = line.trim().strip_prefix("TotalPhysicalMemory=") {
+                return rest.trim().parse::<u64>().ok();
+            }
+        }
+        None
+    }
+}
+
+/// The host-RAM byte budget for the combined source + output RGB8 buffers of one upscale job.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn seedvr2_host_ram_budget_bytes() -> u64 {
+    let total = total_physical_ram_bytes().unwrap_or(SEEDVR2_FALLBACK_RAM_BYTES);
+    ((total as f64) * SEEDVR2_HOST_RAM_FRACTION) as u64
+}
+
+/// Estimated peak host RGB8 bytes held at once for `frame_count` source frames at `src_w × src_h`
+/// upscaled by `factor`: the source Vec (`w·h·3` per frame) plus the output Vec (`(factor·w)·(factor·h)·3`
+/// per frame). Both are alive simultaneously across the decode → generate → encode span, so they add.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn seedvr2_estimated_host_bytes(frame_count: u64, src_w: u64, src_h: u64, factor: u64) -> u64 {
+    let src_per_frame = src_w.saturating_mul(src_h).saturating_mul(3);
+    let out_per_frame = src_per_frame.saturating_mul(factor).saturating_mul(factor);
+    frame_count.saturating_mul(src_per_frame.saturating_add(out_per_frame))
+}
+
+/// Fail loud (before decode / before GPU work) when the estimated combined source + output RGB8
+/// footprint exceeds the machine's host-RAM budget. `Ok(())` when it fits or when the frame count /
+/// dimensions are unknown (0) — the post-decode backstop re-checks with the real count in that case.
+/// The error names the limit AND the offending clip so the user knows exactly what to trim.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn check_seedvr2_host_ram(
+    frame_count: u64,
+    src_w: u64,
+    src_h: u64,
+    factor: u64,
+) -> WorkerResult<()> {
+    if frame_count == 0 || src_w == 0 || src_h == 0 {
+        return Ok(());
+    }
+    let needed = seedvr2_estimated_host_bytes(frame_count, src_w, src_h, factor);
+    let budget = seedvr2_host_ram_budget_bytes();
+    if needed > budget {
+        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+        // Largest frame count that fits, so the message is actionable ("trim to ~N frames").
+        let per_frame = seedvr2_estimated_host_bytes(1, src_w, src_h, factor).max(1);
+        let max_frames = budget / per_frame;
+        return Err(WorkerError::InvalidPayload(format!(
+            "Video too large to upscale {factor}× on this machine: {frame_count} frames at \
+             {src_w}×{src_h} would need ~{needed:.1} GB of RGB frame memory (source + {factor}× \
+             output), over the ~{budget:.1} GB host-memory budget. Trim the clip to about \
+             {max_frames} frames (or fewer), lower the source resolution, or use {min_factor}× \
+             instead.",
+            needed = needed as f64 / GIB,
+            budget = budget as f64 / GIB,
+            min_factor = if factor > 2 { 2 } else { factor },
+        )));
+    }
+    Ok(())
+}
+
 /// Resolve a project-relative asset path safely under `project_path` (reject `..` / absolute
 /// components — same guard as `upscale_jobs::resolve_source`).
 #[cfg(any(
@@ -1494,6 +1652,19 @@ pub(crate) async fn run_video_upscale_job(
         .and_then(Value::as_str)
         .map(str::to_owned);
 
+    // Host-RAM bound (sc-8829, F-027): reject an over-budget clip BEFORE decode / GPU work, using the
+    // asset sidecar's width/height/duration/fps. When any field is missing the estimate is 0 and this
+    // is a no-op — the post-decode backstop (below) re-checks with the real decoded frame count so the
+    // giant 4× allocation is still refused, just a bit later. `check_seedvr2_host_ram` fails loud with
+    // the limit + the clip's size so no minutes-long GPU run is wasted on an eventual OOM-kill.
+    {
+        let meta_w = file.get("width").and_then(Value::as_u64).unwrap_or(0);
+        let meta_h = file.get("height").and_then(Value::as_u64).unwrap_or(0);
+        let meta_duration = file.get("duration").and_then(Value::as_f64).unwrap_or(0.0);
+        let meta_frames = (meta_duration * source_fps as f64).round().max(0.0) as u64;
+        check_seedvr2_host_ram(meta_frames, meta_w, meta_h, factor as u64)?;
+    }
+
     check_cancel(api, &job.id, SEEDVR2_CANCEL_MESSAGE).await?;
     update_job(
         api,
@@ -1527,6 +1698,16 @@ pub(crate) async fn run_video_upscale_job(
     let src_w = source_frames[0].width;
     let src_h = source_frames[0].height;
     let frame_count = source_frames.len() as u32;
+    // Post-decode backstop (sc-8829, F-027): re-check the host-RAM bound with the REAL decoded frame
+    // count + dimensions, catching the case where the sidecar metadata was absent or wrong. The source
+    // Vec is already resident here, but this refuses the far-larger up-to-4× output allocation before
+    // `generate_video` runs the GPU pipeline, so we still fail loud instead of OOM-killing mid-upscale.
+    check_seedvr2_host_ram(
+        frame_count as u64,
+        src_w as u64,
+        src_h as u64,
+        factor as u64,
+    )?;
     let (target_w, target_h) = match (req.target_width, req.target_height) {
         (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
         _ => (src_w.saturating_mul(factor), src_h.saturating_mul(factor)),
@@ -9258,6 +9439,85 @@ mod tests {
         assert!(
             decoded.audio.is_none(),
             "the engine emits no audio (worker muxes the source)"
+        );
+    }
+
+    // sc-8829 (F-027): host-RAM bound for the SeedVR2 upscale. These lock the estimator math and the
+    // fail-loud cap; the real per-machine budget (`seedvr2_host_ram_budget_bytes`) is exercised
+    // indirectly via the explicit-budget check below (the pure estimator is the oracle).
+
+    /// The estimate is source RGB8 (`w·h·3` per frame) + `factor²`× that for the output, times frames.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn seedvr2_host_bytes_estimate_sums_source_and_upscaled_output() {
+        // 1 frame, 1920×1080, 4×: src = 1920·1080·3 = 6_220_800; out = 16× that.
+        let src = 1920u64 * 1080 * 3;
+        assert_eq!(
+            seedvr2_estimated_host_bytes(1, 1920, 1080, 4),
+            src + src * 16
+        );
+        // 2× scales the output term by 4; 100 frames scale linearly.
+        assert_eq!(
+            seedvr2_estimated_host_bytes(100, 1920, 1080, 2),
+            100 * (src + src * 4)
+        );
+        // A 1× (identity) upscale still counts both buffers (src + src).
+        assert_eq!(
+            seedvr2_estimated_host_bytes(10, 640, 480, 1),
+            10 * (640 * 480 * 3) * 2
+        );
+    }
+
+    /// Unknown dimensions/frame count (a 0 in any field) => the pre-decode check is a no-op (the
+    /// post-decode backstop re-checks with the real values), so a missing sidecar never wrongly rejects.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn seedvr2_host_ram_check_skips_when_metadata_unknown() {
+        // Even a would-be-enormous clip passes when frame_count is unknown (0).
+        assert!(check_seedvr2_host_ram(0, 1920, 1080, 4).is_ok());
+        assert!(check_seedvr2_host_ram(100_000, 0, 0, 4).is_ok());
+    }
+
+    /// The estimator + budget compose into a fail-loud rejection: the finding's few-minute 1080p clip
+    /// (~4300 frames at 4× ≈ 320 GB of RGB8) exceeds any realistic host budget, so it must error — and
+    /// the message names both the limit and the clip size. A short clip under the budget passes.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn seedvr2_host_ram_budget_rejects_oversized_clip() {
+        // The pathological clip: its per-frame footprint alone (src + 16× output) times ~4300 frames is
+        // hundreds of GB — larger than the derived budget on any machine this worker runs on.
+        let big = seedvr2_estimated_host_bytes(4300, 1920, 1080, 4);
+        assert!(
+            big as f64 / (1024.0 * 1024.0 * 1024.0) > 300.0,
+            "sanity: the pathological clip is >300 GB of RGB8"
+        );
+        // The real budget is a fraction of physical RAM, always < 300 GB on supported hardware, so this
+        // clip is rejected loudly with an actionable message.
+        let err = check_seedvr2_host_ram(4300, 1920, 1080, 4).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("Video too large"), "fails loud: {msg}");
+        assert!(
+            msg.contains("4300 frames"),
+            "names the clip's frame count: {msg}"
+        );
+        assert!(
+            msg.contains("1920×1080"),
+            "names the source resolution: {msg}"
+        );
+
+        // A tiny clip (8 frames, 64×48, 2×) is nowhere near any budget — it must pass.
+        assert!(
+            check_seedvr2_host_ram(8, 64, 48, 2).is_ok(),
+            "a small clip is not rejected"
         );
     }
 
