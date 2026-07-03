@@ -390,26 +390,30 @@ fn sd3_5_lora_apply_mlx_gpu_smoke() {
     );
 
     let engine_id = env_or("SD3_LORA_ENGINE", "sd3_5_large");
-    let (hub_dir, env_snap, default_steps, default_guidance) = match engine_id.as_str() {
-        "sd3_5_medium" => (
-            "models--stabilityai--stable-diffusion-3.5-medium",
-            "SD3_MEDIUM_SNAPSHOT",
-            "40",
-            5.0,
-        ),
-        "sd3_5_large_turbo" => (
-            "models--stabilityai--stable-diffusion-3.5-large-turbo",
-            "SD3_TURBO_SNAPSHOT",
-            "4",
-            3.5,
-        ),
-        _ => (
-            "models--stabilityai--stable-diffusion-3.5-large",
-            "SD3_LARGE_SNAPSHOT",
-            "28",
-            3.5,
-        ),
-    };
+    // `default_guidance` mirrors `resolve_guidance`: `Some(scale)` for the true-CFG Large/Medium
+    // (supports_guidance=true), `None` for the CFG-free Turbo (supports_guidance=false) — so the smoke
+    // sends the SAME request shape the shipped worker sends (and the dedicated turbo smoke passes None).
+    let (hub_dir, env_snap, default_steps, default_guidance): (&str, &str, &str, Option<f32>) =
+        match engine_id.as_str() {
+            "sd3_5_medium" => (
+                "models--stabilityai--stable-diffusion-3.5-medium",
+                "SD3_MEDIUM_SNAPSHOT",
+                "40",
+                Some(5.0),
+            ),
+            "sd3_5_large_turbo" => (
+                "models--stabilityai--stable-diffusion-3.5-large-turbo",
+                "SD3_TURBO_SNAPSHOT",
+                "4",
+                None,
+            ),
+            _ => (
+                "models--stabilityai--stable-diffusion-3.5-large",
+                "SD3_LARGE_SNAPSHOT",
+                "28",
+                Some(3.5),
+            ),
+        };
 
     let scale: f32 = env_or("SD3_LORA_SCALE", "1.0")
         .parse()
@@ -435,7 +439,7 @@ fn sd3_5_lora_apply_mlx_gpu_smoke() {
         w,
         h,
         steps,
-        Some(default_guidance),
+        default_guidance,
         adapters,
         "sd3_5_lora.png",
     );
