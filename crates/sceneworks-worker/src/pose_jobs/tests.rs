@@ -214,6 +214,63 @@ fn pose_detect_candle_real_weights_finds_person() {
     }
 }
 
+fn pose_test_settings(data_dir: &Path) -> Settings {
+    Settings {
+        api_url: "http://127.0.0.1".to_owned(),
+        access_token: None,
+        data_dir: data_dir.to_path_buf(),
+        config_dir: data_dir.join("config"),
+        worker_id: "test-worker".to_owned(),
+        gpu_id: "gpu-0".to_owned(),
+        is_child_worker: false,
+        poll_seconds: 1,
+        heartbeat_seconds: 1,
+        shutdown_timeout_seconds: 1,
+        huggingface_base_url: crate::DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
+        huggingface_token: None,
+        credentials: Vec::new(),
+        max_lora_url_bytes: crate::DEFAULT_MAX_LORA_URL_BYTES,
+        max_model_url_bytes: crate::DEFAULT_MAX_MODEL_URL_BYTES,
+        allow_private_lora_urls: false,
+        utility_workers: 1,
+        backend_mlx_enabled: true,
+        backend_candle_enabled: false,
+        gpu_memory_limit_bytes: 0,
+    }
+}
+
+/// sc-8912: temp-upload cleanup deletes staged files under the pose-uploads cache and
+/// leaves everything else alone — so it can be run unconditionally on every exit path
+/// (success OR error) without risking a project asset. The snapshot-of-paths signature is
+/// exactly what the caller runs after the fallible body.
+#[tokio::test]
+async fn cleanup_temp_uploads_removes_only_pose_upload_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let settings = pose_test_settings(dir.path());
+
+    let uploads_root = dir.path().join("cache").join("pose-uploads");
+    std::fs::create_dir_all(&uploads_root).expect("mk uploads root");
+    let staged = uploads_root.join("upload-abc.png");
+    std::fs::write(&staged, b"staged").expect("write staged");
+
+    // A file OUTSIDE the uploads cache (e.g. a project asset) must never be removed.
+    let outside = dir.path().join("projects").join("p1");
+    std::fs::create_dir_all(&outside).expect("mk outside");
+    let asset = outside.join("asset.png");
+    std::fs::write(&asset, b"asset").expect("write asset");
+
+    cleanup_temp_uploads(&settings, &[staged.clone(), asset.clone()]).await;
+
+    assert!(!staged.exists(), "a staged pose-upload must be removed");
+    assert!(
+        asset.exists(),
+        "a file outside the pose-uploads cache must be left alone"
+    );
+
+    // Re-running on an already-removed file is a harmless no-op (error-path safety).
+    cleanup_temp_uploads(&settings, &[staged]).await;
+}
+
 /// sc-8879: the openmmlab DWPose bundle digests must be real, distinct 64-hex SHA-256
 /// values (not a placeholder) so the download integrity check actually enforces a pin.
 #[test]
