@@ -124,7 +124,12 @@ fn map_sensenova_engine_error(
 /// sourceAssetId, model, realModelInference}` result, no asset write. The source image resolves
 /// only through the project sidecar/DB (`load_reference_image`), so there is no client-supplied
 /// path escape.
-#[cfg(target_os = "macos")]
+///
+/// The async orchestration (request parse, progress/heartbeat posts, cancel plumbing, result
+/// assembly) is backend-neutral and shared; the only per-backend piece is the blocking
+/// load → preprocess → `vqa` → think-strip seam, injected as [`vqa_generate`] (one cfg-gated impl
+/// per engine — sc-8839, the F-037 dedupe).
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 pub(crate) async fn run_vqa_job(
     api: &ApiClient,
     settings: &Settings,
@@ -225,9 +230,9 @@ pub(crate) async fn run_vqa_job(
     // Keep the worker heartbeat alive across the blocking VLM load + generation (a cold
     // SenseNova-U1 8B load + long answer easily exceeds the API's 90s stale-sweep) so the in-flight
     // job is never falsely marked `interrupted` (sc-8390). The engine checks the threaded
-    // `CancelFlag` before each decoded token (mlx-gen #634), so the keepalive's cancel poll actually
-    // STOPS a multi-minute answer mid-rollout instead of only waiting for it (sc-9123, the sc-8804
-    // F-003 residual).
+    // `CancelFlag` before each decoded token (mlx-gen #634 / its candle sibling), so the keepalive's
+    // cancel poll actually STOPS a multi-minute answer mid-rollout instead of only waiting for it
+    // (sc-9123, the sc-8804 F-003 residual).
     let cancel = gen_core::CancelFlag::new();
     let task_cancel = cancel.clone();
     let answer = run_blocking_with_heartbeat(
@@ -238,44 +243,20 @@ pub(crate) async fn run_vqa_job(
         VQA_CANCEL_MESSAGE,
         "VQA task join",
         tokio::task::spawn_blocking(move || -> WorkerResult<String> {
-            emit_load_event("image_pipeline_load_start", &job_id, "sensenova_u1_8b", 0);
-            let (model, tokenizer) = load_sensenova_model(&weights_dir)?;
-            emit_load_event(
-                "image_pipeline_load_complete",
+            vqa_generate(
+                &weights_dir,
+                &source,
+                &question_for_vqa,
+                max_new_tokens,
+                max_image_pixels,
                 &job_id,
-                "sensenova_u1_8b",
-                0,
-            );
-            // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the
-            // understanding pixel budget (default 768², `load_image_native` min 256²).
-            let pixel_values = image_to_chw01(&source, 256 * 256, max_image_pixels)?;
-            let answer = model
-                .vqa(
-                    &tokenizer,
-                    &question_for_vqa,
-                    std::slice::from_ref(&pixel_values),
-                    max_new_tokens,
-                    Sampler::Greedy,
-                    Some(&task_cancel),
-                )
-                .map_err(|error| {
-                    map_sensenova_engine_error(error, "SenseNova VQA failed", VQA_CANCEL_MESSAGE)
-                })?;
-            Ok(strip_reasoning(&answer))
+                &task_cancel,
+            )
         }),
     )
     .await?;
 
-    let result = json!({
-        "answer": answer,
-        "question": question,
-        "sourceAssetId": source_asset_id,
-        "model": model_id,
-        "realModelInference": true,
-    })
-    .as_object()
-    .cloned()
-    .expect("json! object literal");
+    let result = vqa_result_json(&answer, &question, &source_asset_id, &model_id);
 
     update_job(
         api,
@@ -293,175 +274,75 @@ pub(crate) async fn run_vqa_job(
     Ok(())
 }
 
-/// Candle (Windows/CUDA) VQA — the off-Mac sibling of the macOS MLX handler (sc-5501). Builds the
-/// dense candle `T2iModel` via `load_understanding` and calls `T2iModel::vqa`, retiring the Python
-/// torch `image_vqa` path off-Mac. Same request fields + `{answer, question, sourceAssetId, model,
-/// realModelInference}` result, no asset write.
+/// macOS (MLX) VQA seam: the blocking load → preprocess → `vqa` → think-strip body run inside the
+/// shared handler's `spawn_blocking`. Builds the dense `mlx_gen_sensenova::T2iModel` via
+/// [`load_sensenova_model`] and calls `T2iModel::vqa`. The candle sibling below mirrors it exactly
+/// bar the engine-typed load/preprocess (sc-8839).
+#[cfg(target_os = "macos")]
+fn vqa_generate(
+    weights_dir: &Path,
+    source: &Image,
+    question: &str,
+    max_new_tokens: usize,
+    max_image_pixels: i64,
+    job_id: &str,
+    cancel: &gen_core::CancelFlag,
+) -> WorkerResult<String> {
+    emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
+    let (model, tokenizer) = load_sensenova_model(weights_dir)?;
+    emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
+    // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the understanding
+    // pixel budget (default 768², `load_image_native` min 256²).
+    let pixel_values = image_to_chw01(source, 256 * 256, max_image_pixels)?;
+    let answer = model
+        .vqa(
+            &tokenizer,
+            question,
+            std::slice::from_ref(&pixel_values),
+            max_new_tokens,
+            Sampler::Greedy,
+            Some(cancel),
+        )
+        .map_err(|error| {
+            map_sensenova_engine_error(error, "SenseNova VQA failed", VQA_CANCEL_MESSAGE)
+        })?;
+    Ok(strip_reasoning(&answer))
+}
+
+/// Candle (Windows/CUDA) VQA seam — the off-Mac sibling of [`vqa_generate`] (sc-5501). Builds the
+/// dense `candle_gen_sensenova::T2iModel` via `load_understanding` and calls `T2iModel::vqa`,
+/// retiring the Python torch `image_vqa` path off-Mac. Same shape as the macOS seam; only the
+/// engine-typed load/preprocess differ.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(crate) async fn run_vqa_job(
-    api: &ApiClient,
-    settings: &Settings,
-    job: &JobSnapshot,
-) -> WorkerResult<()> {
-    let request = ImageRequest::from_payload(&job.payload);
-    if request.project_id.trim().is_empty() {
-        return Err(WorkerError::InvalidPayload(
-            "Missing payload.projectId".to_owned(),
-        ));
-    }
-    let model_id = if request.model.trim().is_empty() {
-        "sensenova_u1_8b".to_owned()
-    } else {
-        request.model.clone()
-    };
-    let question = job
-        .payload
-        .get("question")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload("Visual question answering requires a question.".to_owned())
-        })?
-        .to_owned();
-    let source_asset_id = job
-        .payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "Visual question answering requires a source image asset.".to_owned(),
-            )
-        })?
-        .to_owned();
-
-    let max_new_tokens = payload_int(&job.payload, "maxNewTokens", 256, 16, 2048) as usize;
-    let max_image_pixels = payload_int(
-        &job.payload,
-        "maxImagePixels",
-        768 * 768,
-        256 * 256,
-        2048 * 2048,
-    );
-
-    let weights_dir = resolve_weights_dir(&request, settings)?
-        .ok_or_else(|| WorkerError::InvalidPayload("SenseNova-U1 weights not found".to_owned()))?;
-
-    let project =
-        ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
-    let project_path = PathBuf::from(project.path);
-    let backend = backend_label(&settings.gpu_id).to_owned();
-
-    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-    update_job(
-        api,
-        &job.id,
-        image_progress(
-            JobStatus::Preparing,
-            ProgressStage::Preparing,
-            0.08,
-            "Preparing visual question.",
-            None,
-            &backend,
-        ),
-    )
-    .await?;
-
-    let source = load_reference_image(
-        &settings.data_dir,
-        &request.project_id,
-        &source_asset_id,
-        &project_path,
-    )?;
-
-    update_job(
-        api,
-        &job.id,
-        image_progress(
-            JobStatus::Running,
-            ProgressStage::Generating,
-            0.6,
-            "Analyzing image.",
-            None,
-            &backend,
-        ),
-    )
-    .await?;
-
-    let job_id = job.id.clone();
-    let question_for_vqa = question.clone();
-    // Keep the worker heartbeat alive across the blocking VLM load + generation (a cold
-    // SenseNova-U1 8B load + long answer easily exceeds the API's 90s stale-sweep) so the in-flight
-    // job is never falsely marked `interrupted` (sc-8390). The engine checks the threaded
-    // `CancelFlag` before each decoded token (the candle sibling of mlx-gen #634), so the
-    // keepalive's cancel poll actually STOPS a multi-minute answer mid-rollout instead of only
-    // waiting for it (sc-9123, the sc-8804 F-003 residual).
-    let cancel = gen_core::CancelFlag::new();
-    let task_cancel = cancel.clone();
-    let answer = run_blocking_with_heartbeat(
-        api,
-        settings,
-        &job.id,
-        Some(cancel),
-        VQA_CANCEL_MESSAGE,
-        "VQA task join",
-        tokio::task::spawn_blocking(move || -> WorkerResult<String> {
-            emit_load_event("image_pipeline_load_start", &job_id, "sensenova_u1_8b", 0);
-            let (model, tokenizer) = load_understanding(&weights_dir)
-                .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
-            emit_load_event(
-                "image_pipeline_load_complete",
-                &job_id,
-                "sensenova_u1_8b",
-                0,
-            );
-            // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the
-            // understanding pixel budget (default 768², min 256²).
-            let pixel_values = image_to_chw01_candle(&source, 256 * 256, max_image_pixels)?;
-            let answer = model
-                .vqa(
-                    &tokenizer,
-                    &question_for_vqa,
-                    std::slice::from_ref(&pixel_values),
-                    max_new_tokens,
-                    Sampler::Greedy,
-                    Some(&task_cancel),
-                )
-                .map_err(|error| {
-                    map_sensenova_engine_error(error, "SenseNova VQA failed", VQA_CANCEL_MESSAGE)
-                })?;
-            Ok(strip_reasoning(&answer))
-        }),
-    )
-    .await?;
-
-    let result = json!({
-        "answer": answer,
-        "question": question,
-        "sourceAssetId": source_asset_id,
-        "model": model_id,
-        "realModelInference": true,
-    })
-    .as_object()
-    .cloned()
-    .expect("json! object literal");
-
-    update_job(
-        api,
-        &job.id,
-        image_progress(
-            JobStatus::Completed,
-            ProgressStage::Completed,
-            1.0,
-            "Answer ready.",
-            Some(result),
-            &backend,
-        ),
-    )
-    .await?;
-    Ok(())
+fn vqa_generate(
+    weights_dir: &Path,
+    source: &Image,
+    question: &str,
+    max_new_tokens: usize,
+    max_image_pixels: i64,
+    job_id: &str,
+    cancel: &gen_core::CancelFlag,
+) -> WorkerResult<String> {
+    emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
+    let (model, tokenizer) = load_understanding(weights_dir)
+        .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
+    emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
+    // ImageNet-normalized inside `vqa`; pass [3,H,W] in [0,1], 32-aligned, within the understanding
+    // pixel budget (default 768², min 256²).
+    let pixel_values = image_to_chw01_candle(source, 256 * 256, max_image_pixels)?;
+    let answer = model
+        .vqa(
+            &tokenizer,
+            question,
+            std::slice::from_ref(&pixel_values),
+            max_new_tokens,
+            Sampler::Greedy,
+            Some(cancel),
+        )
+        .map_err(|error| {
+            map_sensenova_engine_error(error, "SenseNova VQA failed", VQA_CANCEL_MESSAGE)
+        })?;
+    Ok(strip_reasoning(&answer))
 }
 
 /// Off macOS without the candle backend the in-process engine is unavailable; `image_vqa` is served
@@ -482,12 +363,80 @@ pub(crate) async fn run_vqa_job(
 // Interleave / Document Studio (image_interleave)
 // ===========================================================================
 
+/// The resolved interleave rollout knobs threaded from the shared handler into the per-backend
+/// [`interleave_generate`] seam. Bundled into one struct so the seam stays a small arity and both
+/// engine impls read the exact same resolved values (sc-8839, the F-037 dedupe). The pure
+/// [`resolve_interleave_params`] resolver is unit-tested on the macOS lane.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[derive(Debug, PartialEq)]
+struct InterleaveParams {
+    /// Snapped bucket width (a 32-aligned interleave-resolution bucket).
+    width: i32,
+    /// Snapped bucket height.
+    height: i32,
+    steps: usize,
+    cfg_scale: f32,
+    img_cfg_scale: f32,
+    timestep_shift: f32,
+    max_new_tokens: usize,
+    max_images: usize,
+    think_mode: bool,
+    /// Interleave system protocol message (think/no-think), resolved to the request override else
+    /// [`INTERLEAVE_SYSTEM_MESSAGE`].
+    system_message: String,
+    seed: i64,
+}
+
+/// Resolve every interleave rollout knob from the request + top-level payload: snap the requested
+/// W×H to the nearest [`INTERLEAVE_RESOLUTIONS`] bucket, overlay the `advanced` defaults/overrides
+/// (upstream `examples/interleave/inference.py` @238d6cf), and pick the think/no-think system
+/// message. Pure + backend-neutral (the shared handler's brain), so both engine seams see identical
+/// values and it can be unit-tested without weights or a device (sc-8839).
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn resolve_interleave_params(request: &ImageRequest, payload: &JsonObject) -> InterleaveParams {
+    let advanced = &request.advanced;
+    // Snap the requested W×H to the nearest interleave bucket by aspect ratio (log-space), mirroring
+    // the Python `interleave_resolution_for`. Defaults 2048×1152 (16:9), clamped 256..4096.
+    let req_width = payload_int(payload, "width", 2048, 256, 4096);
+    let req_height = payload_int(payload, "height", 1152, 256, 4096);
+    let (width, height) = interleave_resolution_snap(req_width, req_height);
+    InterleaveParams {
+        width,
+        height,
+        // Upstream interleave defaults (examples/interleave/inference.py @238d6cf).
+        steps: advanced_int(advanced, "numInferenceSteps", 50, 1, 100) as usize,
+        cfg_scale: advanced_float(advanced, "guidanceScale", 4.0),
+        img_cfg_scale: advanced_float(advanced, "imageGuidanceScale", 1.0),
+        timestep_shift: advanced_float(advanced, "timestepShift", 3.0),
+        max_new_tokens: advanced_int(advanced, "maxNewTokens", 2048, 64, 8192) as usize,
+        max_images: advanced_int(advanced, "maxImages", 6, 1, 10) as usize,
+        // Non-Think by default: the document is the deliverable, so skip the chain-of-thought.
+        think_mode: advanced
+            .get("thinkMode")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        system_message: advanced
+            .get("systemMessage")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| INTERLEAVE_SYSTEM_MESSAGE.to_owned()),
+        seed: resolve_seed(request, 0),
+    }
+}
+
 /// Interleaved text-image generation: one model rollout yields ordered text + images, persisted as
 /// a `document` asset whose segments reference the generated image assets in order. Mirrors the
 /// Python `generate_interleaved` → `_write_interleaved_document` contract (request fields, resolution
 /// buckets, think/no-think protocol, asset/result shapes). The base understanding+generation model
 /// loads dense (no distill LoRA) — interleave needs the full model, never the distilled gen LoRA.
-#[cfg(target_os = "macos")]
+///
+/// The async orchestration (request parse, resolution snap, progress/heartbeat posts, pre-rollout
+/// cancel, document-write hand-off) is backend-neutral and shared; the only per-backend piece is the
+/// blocking load → preprocess → `interleave_gen` → decode seam, injected as [`interleave_generate`]
+/// (one cfg-gated impl per engine — sc-8839, the F-037 dedupe).
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 pub(crate) async fn run_interleave_job(
     api: &ApiClient,
     settings: &Settings,
@@ -510,14 +459,9 @@ pub(crate) async fn run_interleave_job(
     } else {
         request.model.clone()
     };
-    let advanced = &request.advanced;
-
-    let max_images = advanced_int(advanced, "maxImages", 6, 1, 10) as usize;
-    // Snap the requested W×H to the nearest interleave bucket by aspect ratio (log-space), mirroring
-    // the Python `interleave_resolution_for`. Defaults 2048×1152 (16:9), clamped 256..4096.
-    let req_width = payload_int(&job.payload, "width", 2048, 256, 4096);
-    let req_height = payload_int(&job.payload, "height", 1152, 256, 4096);
-    let (width, height) = interleave_resolution_snap(req_width, req_height);
+    // Resolve every rollout knob (resolution snap + advanced overlay defaults/overrides) once, so
+    // both backend seams read the exact same values (sc-8839). Pure + backend-neutral → unit-tested.
+    let params = resolve_interleave_params(&request, &job.payload);
 
     let source_asset_ids: Vec<String> = job
         .payload
@@ -533,26 +477,6 @@ pub(crate) async fn run_interleave_job(
                 .collect()
         })
         .unwrap_or_default();
-
-    // Upstream interleave defaults (examples/interleave/inference.py @238d6cf).
-    let steps = advanced_int(advanced, "numInferenceSteps", 50, 1, 100) as usize;
-    let cfg_scale = advanced_float(advanced, "guidanceScale", 4.0);
-    let img_cfg_scale = advanced_float(advanced, "imageGuidanceScale", 1.0);
-    let timestep_shift = advanced_float(advanced, "timestepShift", 3.0);
-    let max_new_tokens = advanced_int(advanced, "maxNewTokens", 2048, 64, 8192) as usize;
-    // Non-Think by default: the document is the deliverable, so skip the chain-of-thought.
-    let think_mode = advanced
-        .get("thinkMode")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let system_message = advanced
-        .get("systemMessage")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| INTERLEAVE_SYSTEM_MESSAGE.to_owned());
-    let seed = resolve_seed(&request, 0);
 
     let weights_dir = resolve_weights_dir(&request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("SenseNova-U1 weights not found".to_owned()))?;
@@ -617,75 +541,48 @@ pub(crate) async fn run_interleave_job(
     // The engine's `interleave_gen` is a single synchronous rollout with no per-segment callback,
     // so (like the Python adapter's single `interleave_gen` call) the document streams as one final
     // result rather than incrementally. The whole rollout runs on a blocking thread; the decoded
-    // images come back as Send `Image`s for asset writing on the async side.
+    // images come back as Send `Image`s for asset writing on the async side. The only per-backend
+    // piece — load → preprocess → `interleave_gen` → decode — is the `interleave_generate` seam.
     let job_id = job.id.clone();
     let prompt_for_gen = prompt.clone();
+    // The document-write hand-off below needs these resolved scalars after `params` moves into the
+    // rollout closure; snapshot the `Copy` fields now (`system_message` is rollout-only, so `params`
+    // itself still moves whole into the seam closure).
+    let (
+        width,
+        height,
+        steps,
+        cfg_scale,
+        img_cfg_scale,
+        timestep_shift,
+        max_new_tokens,
+        max_images,
+        think_mode,
+        seed,
+    ) = (
+        params.width,
+        params.height,
+        params.steps,
+        params.cfg_scale,
+        params.img_cfg_scale,
+        params.timestep_shift,
+        params.max_new_tokens,
+        params.max_images,
+        params.think_mode,
+        params.seed,
+    );
     let cancel = gen_core::CancelFlag::new();
     let task_cancel = cancel.clone();
     let interleave_task =
         tokio::task::spawn_blocking(move || -> WorkerResult<(String, Vec<Image>)> {
-            emit_load_event("image_pipeline_load_start", &job_id, "sensenova_u1_8b", 0);
-            let (model, tokenizer) = load_sensenova_model(&weights_dir)?;
-            emit_load_event(
-                "image_pipeline_load_complete",
+            interleave_generate(
+                &weights_dir,
+                &input_images,
+                &prompt_for_gen,
+                &params,
                 &job_id,
-                "sensenova_u1_8b",
-                0,
-            );
-
-            // Source images: [3,H,W] in [0,1], 32-aligned. Bounds mirror the torch
-            // `interleave_gen` (`load_image_native` min 512², max min(2048², 4096²/n)).
-            let n = input_images.len().max(1) as i64;
-            let max_pixels = (2048 * 2048).min((4096 * 4096) / n);
-            let mut input_arrays = Vec::with_capacity(input_images.len());
-            for image in &input_images {
-                input_arrays.push(image_to_chw01(image, 512 * 512, max_pixels)?);
-            }
-
-            let opts = T2iOptions {
-                cfg_scale,
-                img_cfg_scale,
-                num_steps: steps,
-                timestep_shift,
-                seed: seed as u64,
-                think_mode,
-                ..Default::default()
-            };
-            // The engine checks the threaded flag per decoded text token and per denoise step
-            // (mlx-gen #634), so the keepalive's cancel poll stops a multi-minute rollout
-            // cooperatively (sc-9123). Progress stays a no-op sink: this seam reports liveness via
-            // the Busy heartbeat, not per-step job progress.
-            let out = model
-                .interleave_gen(
-                    &tokenizer,
-                    &prompt_for_gen,
-                    &input_arrays,
-                    width,
-                    height,
-                    &opts,
-                    &system_message,
-                    max_new_tokens,
-                    max_images,
-                    None,
-                    &task_cancel,
-                    &mut |_| {},
-                )
-                .map_err(|error| {
-                    map_sensenova_engine_error(
-                        error,
-                        "SenseNova interleave failed",
-                        INTERLEAVE_CANCEL_MESSAGE,
-                    )
-                })?;
-            // The generated images are model-space [-1,1] `[1,3,H,W]` arrays — decode each to RGB8
-            // exactly as the `Generator` image path does (`decoded_to_image`).
-            let mut decoded = Vec::with_capacity(out.images.len());
-            for image in &out.images {
-                decoded.push(decoded_to_image(image).map_err(|error| {
-                    WorkerError::InvalidPayload(format!("SenseNova interleave decode: {error}"))
-                })?);
-            }
-            Ok((out.text, decoded))
+                &task_cancel,
+            )
         });
     // Keep the worker heartbeat alive across the blocking VLM load + interleave rollout (cold 8B
     // load + multi-image generation easily exceeds the API's 90s stale-sweep) so the in-flight job
@@ -773,282 +670,148 @@ pub(crate) async fn run_interleave_job(
     Ok(())
 }
 
-/// Candle (Windows/CUDA) interleave — the off-Mac sibling of the macOS MLX handler (sc-5501). Builds
-/// the dense candle `T2iModel` via `load_understanding` and calls `T2iModel::interleave_gen`,
-/// retiring the Python torch `image_interleave` path off-Mac. Same request fields, resolution
-/// buckets, think/no-think protocol, and `document` asset shape (the assembly is the shared
-/// `write_interleaved_document`).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(crate) async fn run_interleave_job(
-    api: &ApiClient,
-    settings: &Settings,
-    job: &JobSnapshot,
-) -> WorkerResult<()> {
-    let request = ImageRequest::from_payload(&job.payload);
-    if request.project_id.trim().is_empty() {
-        return Err(WorkerError::InvalidPayload(
-            "Missing payload.projectId".to_owned(),
-        ));
+/// macOS (MLX) interleave seam: the blocking load → preprocess → `interleave_gen` → decode body run
+/// inside the shared handler's `spawn_blocking`. Builds the dense `mlx_gen_sensenova::T2iModel` via
+/// [`load_sensenova_model`] and calls `T2iModel::interleave_gen`, decoding each model-space image
+/// with `decoded_to_image`. The engine's `interleave_gen` takes `width`/`height` as `i32`, an
+/// `init_noises: None`, and a no-op `on_progress` sink — arg shapes intrinsic to the MLX API, not
+/// shared with the candle sibling (sc-8839).
+#[cfg(target_os = "macos")]
+fn interleave_generate(
+    weights_dir: &Path,
+    input_images: &[Image],
+    prompt: &str,
+    params: &InterleaveParams,
+    job_id: &str,
+    cancel: &gen_core::CancelFlag,
+) -> WorkerResult<(String, Vec<Image>)> {
+    emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
+    let (model, tokenizer) = load_sensenova_model(weights_dir)?;
+    emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
+
+    // Source images: [3,H,W] in [0,1], 32-aligned. Bounds mirror the torch `interleave_gen`
+    // (`load_image_native` min 512², max min(2048², 4096²/n)).
+    let n = input_images.len().max(1) as i64;
+    let max_pixels = (2048 * 2048).min((4096 * 4096) / n);
+    let mut input_arrays = Vec::with_capacity(input_images.len());
+    for image in input_images {
+        input_arrays.push(image_to_chw01(image, 512 * 512, max_pixels)?);
     }
-    let prompt = request.prompt.trim().to_owned();
-    if prompt.is_empty() {
-        return Err(WorkerError::InvalidPayload(
-            "Interleaved generation requires a prompt.".to_owned(),
-        ));
-    }
-    let model_id = if request.model.trim().is_empty() {
-        "sensenova_u1_8b".to_owned()
-    } else {
-        request.model.clone()
+
+    let opts = T2iOptions {
+        cfg_scale: params.cfg_scale,
+        img_cfg_scale: params.img_cfg_scale,
+        num_steps: params.steps,
+        timestep_shift: params.timestep_shift,
+        seed: params.seed as u64,
+        think_mode: params.think_mode,
+        ..Default::default()
     };
-    let advanced = &request.advanced;
-
-    let max_images = advanced_int(advanced, "maxImages", 6, 1, 10) as usize;
-    let req_width = payload_int(&job.payload, "width", 2048, 256, 4096);
-    let req_height = payload_int(&job.payload, "height", 1152, 256, 4096);
-    let (width, height) = interleave_resolution_snap(req_width, req_height);
-
-    let source_asset_ids: Vec<String> = job
-        .payload
-        .get("sourceAssetIds")
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let steps = advanced_int(advanced, "numInferenceSteps", 50, 1, 100) as usize;
-    let cfg_scale = advanced_float(advanced, "guidanceScale", 4.0);
-    let img_cfg_scale = advanced_float(advanced, "imageGuidanceScale", 1.0);
-    let timestep_shift = advanced_float(advanced, "timestepShift", 3.0);
-    let max_new_tokens = advanced_int(advanced, "maxNewTokens", 2048, 64, 8192) as usize;
-    let think_mode = advanced
-        .get("thinkMode")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let system_message = advanced
-        .get("systemMessage")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| INTERLEAVE_SYSTEM_MESSAGE.to_owned());
-    let seed = resolve_seed(&request, 0);
-
-    let weights_dir = resolve_weights_dir(&request, settings)?
-        .ok_or_else(|| WorkerError::InvalidPayload("SenseNova-U1 weights not found".to_owned()))?;
-
-    let project =
-        ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
-    let project_path = PathBuf::from(project.path);
-    tokio::fs::create_dir_all(project_path.join("assets").join("documents")).await?;
-    tokio::fs::create_dir_all(project_path.join("assets").join("images")).await?;
-    let backend = backend_label(&settings.gpu_id).to_owned();
-
-    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-    update_job(
-        api,
-        &job.id,
-        image_progress(
-            JobStatus::Preparing,
-            ProgressStage::Preparing,
-            0.08,
-            "Preparing interleaved document.",
-            None,
-            &backend,
-        ),
-    )
-    .await?;
-
-    let mut input_images = Vec::with_capacity(source_asset_ids.len());
-    for asset_id in &source_asset_ids {
-        input_images.push(load_reference_image(
-            &settings.data_dir,
-            &request.project_id,
-            asset_id,
-            &project_path,
-        )?);
-    }
-
-    // Early-exit on a pre-rollout cancel; the mid-rollout case is covered by the CancelFlag
-    // threaded into `interleave_gen` below (sc-9123).
-    match check_cancel(api, &job.id, INTERLEAVE_CANCEL_MESSAGE).await {
-        Ok(()) => {}
-        Err(WorkerError::Canceled(_)) => return Ok(()),
-        Err(other) => return Err(other),
-    }
-
-    update_job(
-        api,
-        &job.id,
-        image_progress(
-            JobStatus::Running,
-            ProgressStage::Generating,
-            0.45,
-            "Composing interleaved document.",
-            None,
-            &backend,
-        ),
-    )
-    .await?;
-    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-
-    let job_id = job.id.clone();
-    let prompt_for_gen = prompt.clone();
-    let cancel = gen_core::CancelFlag::new();
-    let task_cancel = cancel.clone();
-    let interleave_task =
-        tokio::task::spawn_blocking(move || -> WorkerResult<(String, Vec<Image>)> {
-            emit_load_event("image_pipeline_load_start", &job_id, "sensenova_u1_8b", 0);
-            let (model, tokenizer) = load_understanding(&weights_dir)
-                .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
-            emit_load_event(
-                "image_pipeline_load_complete",
-                &job_id,
-                "sensenova_u1_8b",
-                0,
-            );
-
-            // Source images: [3,H,W] in [0,1], 32-aligned. Bounds mirror the torch
-            // `interleave_gen` (`load_image_native` min 512², max min(2048², 4096²/n)).
-            let n = input_images.len().max(1) as i64;
-            let max_pixels = (2048 * 2048).min((4096 * 4096) / n);
-            let mut input_arrays = Vec::with_capacity(input_images.len());
-            for image in &input_images {
-                input_arrays.push(image_to_chw01_candle(image, 512 * 512, max_pixels)?);
-            }
-
-            let opts = T2iOptions {
-                cfg_scale,
-                img_cfg_scale,
-                num_steps: steps,
-                timestep_shift,
-                seed: seed as u64,
-                think_mode,
-                ..Default::default()
-            };
-            // The engine polls the threaded flag between text tokens / denoise steps, and the
-            // keepalive's cancel poll trips it (sc-9123) — the old code passed a fresh un-tripped
-            // flag nothing could ever cancel.
-            let out = model
-                .interleave_gen(
-                    &tokenizer,
-                    &prompt_for_gen,
-                    &input_arrays,
-                    width as usize,
-                    height as usize,
-                    &opts,
-                    &system_message,
-                    max_new_tokens,
-                    max_images,
-                    &task_cancel,
-                )
-                .map_err(|error| {
-                    map_sensenova_engine_error(
-                        error,
-                        "SenseNova interleave failed",
-                        INTERLEAVE_CANCEL_MESSAGE,
-                    )
-                })?;
-            // The generated images are model-space [-1,1] `[1,3,H,W]` tensors — decode each to RGB8.
-            let mut decoded = Vec::with_capacity(out.images.len());
-            for image in &out.images {
-                decoded.push(tensor_to_image(image).map_err(|error| {
-                    WorkerError::InvalidPayload(format!("SenseNova interleave decode: {error}"))
-                })?);
-            }
-            Ok((out.text, decoded))
-        });
-    // Keep the worker heartbeat alive across the blocking VLM load + interleave rollout (cold 8B
-    // load + multi-image generation easily exceeds the API's 90s stale-sweep) so the in-flight job
-    // is never falsely marked `interrupted` (sc-8390). Cancelable mid-rollout via the threaded
-    // flag (sc-9123).
-    let (generated_text, images) = run_blocking_with_heartbeat(
-        api,
-        settings,
-        &job.id,
-        Some(cancel),
-        INTERLEAVE_CANCEL_MESSAGE,
-        "interleave task join",
-        interleave_task,
-    )
-    .await?;
-
-    update_job(
-        api,
-        &job.id,
-        image_progress(
-            JobStatus::Saving,
-            ProgressStage::Saving,
-            0.9,
-            "Saving interleaved document.",
-            None,
-            &backend,
-        ),
-    )
-    .await?;
-
-    // The document assembly synchronously PNG-encodes up to `max_images` multi-megapixel images
-    // (`write_image_asset`) and does the document `fs::write`/`rename` — multi-second work that must
-    // not run on the async runtime thread. Move it onto the blocking pool under the heartbeat wrapper
-    // so the in-flight job keeps beating across the encode + IO and is never falsely swept as
-    // `interrupted` during those seconds (sc-8838, sc-8390). Ownership is moved into the closure.
-    // Cancel flag stays `None` (sc-9123 decision): this is bounded CPU encode + filesystem IO with
-    // no loop worth interrupting, and aborting a half-written document asset mid-rename is worse
-    // than letting the seconds-long write finish.
-    let job_owned = job.clone();
-    let write_task = tokio::task::spawn_blocking(move || {
-        write_interleaved_document(
-            request,
-            job_owned,
-            project_path,
+    // The engine checks the threaded flag per decoded text token and per denoise step (mlx-gen
+    // #634), so the keepalive's cancel poll stops a multi-minute rollout cooperatively (sc-9123).
+    // Progress stays a no-op sink: this seam reports liveness via the Busy heartbeat, not per-step
+    // job progress.
+    let out = model
+        .interleave_gen(
+            &tokenizer,
             prompt,
-            model_id,
-            seed,
-            max_images,
-            width,
-            height,
-            steps,
-            cfg_scale,
-            img_cfg_scale,
-            timestep_shift,
-            max_new_tokens,
-            think_mode,
-            &generated_text,
-            images,
+            &input_arrays,
+            params.width,
+            params.height,
+            &opts,
+            &params.system_message,
+            params.max_new_tokens,
+            params.max_images,
+            None,
+            cancel,
+            &mut |_| {},
         )
-    });
-    let result = run_blocking_with_heartbeat(
-        api,
-        settings,
-        &job.id,
-        None,
-        "",
-        "interleave document write join",
-        write_task,
-    )
-    .await?;
+        .map_err(|error| {
+            map_sensenova_engine_error(
+                error,
+                "SenseNova interleave failed",
+                INTERLEAVE_CANCEL_MESSAGE,
+            )
+        })?;
+    // The generated images are model-space [-1,1] `[1,3,H,W]` arrays — decode each to RGB8 exactly
+    // as the `Generator` image path does (`decoded_to_image`).
+    let mut decoded = Vec::with_capacity(out.images.len());
+    for image in &out.images {
+        decoded.push(decoded_to_image(image).map_err(|error| {
+            WorkerError::InvalidPayload(format!("SenseNova interleave decode: {error}"))
+        })?);
+    }
+    Ok((out.text, decoded))
+}
 
-    update_job(
-        api,
-        &job.id,
-        image_progress(
-            JobStatus::Completed,
-            ProgressStage::Completed,
-            1.0,
-            "Interleaved document ready.",
-            Some(result),
-            &backend,
-        ),
-    )
-    .await?;
-    Ok(())
+/// Candle (Windows/CUDA) interleave seam — the off-Mac sibling of [`interleave_generate`] (sc-5501).
+/// Builds the dense `candle_gen_sensenova::T2iModel` via `load_understanding` and calls
+/// `T2iModel::interleave_gen`, decoding each model-space tensor with `tensor_to_image`, retiring the
+/// Python torch `image_interleave` path off-Mac. The candle engine's `interleave_gen` takes
+/// `width`/`height` as `usize` and no `init_noises`/`on_progress` args — arg shapes intrinsic to the
+/// candle API, not shared with the MLX sibling (sc-8839).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn interleave_generate(
+    weights_dir: &Path,
+    input_images: &[Image],
+    prompt: &str,
+    params: &InterleaveParams,
+    job_id: &str,
+    cancel: &gen_core::CancelFlag,
+) -> WorkerResult<(String, Vec<Image>)> {
+    emit_load_event("image_pipeline_load_start", job_id, "sensenova_u1_8b", 0);
+    let (model, tokenizer) = load_understanding(weights_dir)
+        .map_err(|error| WorkerError::Engine(format!("SenseNova-U1 load: {error}")))?;
+    emit_load_event("image_pipeline_load_complete", job_id, "sensenova_u1_8b", 0);
+
+    // Source images: [3,H,W] in [0,1], 32-aligned. Bounds mirror the torch `interleave_gen`
+    // (`load_image_native` min 512², max min(2048², 4096²/n)).
+    let n = input_images.len().max(1) as i64;
+    let max_pixels = (2048 * 2048).min((4096 * 4096) / n);
+    let mut input_arrays = Vec::with_capacity(input_images.len());
+    for image in input_images {
+        input_arrays.push(image_to_chw01_candle(image, 512 * 512, max_pixels)?);
+    }
+
+    let opts = T2iOptions {
+        cfg_scale: params.cfg_scale,
+        img_cfg_scale: params.img_cfg_scale,
+        num_steps: params.steps,
+        timestep_shift: params.timestep_shift,
+        seed: params.seed as u64,
+        think_mode: params.think_mode,
+        ..Default::default()
+    };
+    // The engine polls the threaded flag between text tokens / denoise steps, and the keepalive's
+    // cancel poll trips it (sc-9123).
+    let out = model
+        .interleave_gen(
+            &tokenizer,
+            prompt,
+            &input_arrays,
+            params.width as usize,
+            params.height as usize,
+            &opts,
+            &params.system_message,
+            params.max_new_tokens,
+            params.max_images,
+            cancel,
+        )
+        .map_err(|error| {
+            map_sensenova_engine_error(
+                error,
+                "SenseNova interleave failed",
+                INTERLEAVE_CANCEL_MESSAGE,
+            )
+        })?;
+    // The generated images are model-space [-1,1] `[1,3,H,W]` tensors — decode each to RGB8.
+    let mut decoded = Vec::with_capacity(out.images.len());
+    for image in &out.images {
+        decoded.push(tensor_to_image(image).map_err(|error| {
+            WorkerError::InvalidPayload(format!("SenseNova interleave decode: {error}"))
+        })?);
+    }
+    Ok((out.text, decoded))
 }
 
 /// Off macOS without the candle backend the in-process engine is unavailable; `image_interleave` is
@@ -1241,6 +1004,28 @@ fn build_interleaved_segments(generated_text: &str, image_writes: &[Value]) -> V
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+/// Assemble the VQA `{answer, question, sourceAssetId, model, realModelInference}` result object —
+/// the shared backend-neutral response shape both engine handlers post (mirrors the Python
+/// `SenseNovaU1Adapter.answer_question` result). Pure, so it is unit-tested cross-platform (sc-8839).
+#[cfg(any(target_os = "macos", test, feature = "backend-candle"))]
+fn vqa_result_json(
+    answer: &str,
+    question: &str,
+    source_asset_id: &str,
+    model_id: &str,
+) -> JsonObject {
+    json!({
+        "answer": answer,
+        "question": question,
+        "sourceAssetId": source_asset_id,
+        "model": model_id,
+        "realModelInference": true,
+    })
+    .as_object()
+    .cloned()
+    .expect("json! object literal")
+}
 
 /// Assemble the concrete unified `T2iModel` + tokenizer for a SenseNova-U1 snapshot, replicating the
 /// engine's private `load_inner` from public re-exports. Loads dense bf16 with NO distill LoRA and
@@ -1523,6 +1308,112 @@ mod tests {
         assert_eq!(interleave_resolution_snap(1152, 2048), (1152, 2048));
         // Extreme wide → 3:1.
         assert_eq!(interleave_resolution_snap(3000, 1000), (2592, 864));
+    }
+
+    /// sc-8839: the shared VQA result assembly (`vqa_result_json`) both engine handlers post. Pure,
+    /// so it is asserted cross-platform (no weights / device / backend cfg).
+    #[test]
+    fn vqa_result_json_has_the_shared_answer_shape() {
+        let result = vqa_result_json("the answer", "the question", "asset_src", "sensenova_u1_8b");
+        assert_eq!(
+            result.get("answer").and_then(Value::as_str),
+            Some("the answer")
+        );
+        assert_eq!(
+            result.get("question").and_then(Value::as_str),
+            Some("the question")
+        );
+        assert_eq!(
+            result.get("sourceAssetId").and_then(Value::as_str),
+            Some("asset_src")
+        );
+        assert_eq!(
+            result.get("model").and_then(Value::as_str),
+            Some("sensenova_u1_8b")
+        );
+        assert_eq!(
+            result.get("realModelInference").and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    /// sc-8839: the shared handler's rollout-knob resolver (`resolve_interleave_params`) — the single
+    /// backend-neutral "brain" both engine seams now read. Asserts the resolution snap, the advanced
+    /// overlay overrides, and the resolved system message / seed with a fake payload (no weights /
+    /// device), which is the shared-driver behavior the per-backend seams then consume identically.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolve_interleave_params_snaps_resolution_and_overlays_advanced() {
+        // Overrides supplied via the `advanced` overlay + a portrait W×H + explicit seed.
+        let payload = json!({
+            "projectId": "proj_1",
+            "prompt": "a document",
+            "width": 1152,
+            "height": 2048,
+            "seed": 7,
+            "advanced": {
+                "numInferenceSteps": 20,
+                "guidanceScale": 6.5,
+                "imageGuidanceScale": 2.0,
+                "timestepShift": 1.5,
+                "maxNewTokens": 512,
+                "maxImages": 3,
+                "thinkMode": true,
+                "systemMessage": "custom protocol"
+            }
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let request = ImageRequest::from_payload(&payload);
+        let params = resolve_interleave_params(&request, &payload);
+        assert_eq!(
+            params,
+            InterleaveParams {
+                // Portrait 1152×2048 snaps to the 9:16 bucket.
+                width: 1152,
+                height: 2048,
+                steps: 20,
+                cfg_scale: 6.5,
+                img_cfg_scale: 2.0,
+                timestep_shift: 1.5,
+                max_new_tokens: 512,
+                max_images: 3,
+                think_mode: true,
+                system_message: "custom protocol".to_owned(),
+                seed: 7,
+            }
+        );
+    }
+
+    /// sc-8839: an empty `advanced` overlay resolves to the upstream interleave defaults (the
+    /// non-think document-studio defaults), and the default 2048×1152 payload snaps to the 16:9
+    /// bucket. Complements the override test above.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolve_interleave_params_uses_upstream_defaults_when_advanced_is_empty() {
+        let payload = json!({ "projectId": "proj_1", "prompt": "hello", "seed": 0 })
+            .as_object()
+            .cloned()
+            .unwrap();
+        let request = ImageRequest::from_payload(&payload);
+        let params = resolve_interleave_params(&request, &payload);
+        assert_eq!(
+            params,
+            InterleaveParams {
+                width: 2048,
+                height: 1152,
+                steps: 50,
+                cfg_scale: 4.0,
+                img_cfg_scale: 1.0,
+                timestep_shift: 3.0,
+                max_new_tokens: 2048,
+                max_images: 6,
+                think_mode: false,
+                system_message: INTERLEAVE_SYSTEM_MESSAGE.to_owned(),
+                seed: 0,
+            }
+        );
     }
 
     #[cfg(target_os = "macos")]
