@@ -3763,6 +3763,157 @@ async fn spawn_progress_capture_stub() -> (String, std::sync::Arc<std::sync::Mut
     (format!("http://{address}"), posts)
 }
 
+/// sc-8845 (F-043) — capture stub whose job GET reports NO user cancel, so the only cancel that can
+/// fire in `run_placeholder_job` is the process-shutdown flag. Records every progress POST body and
+/// answers heartbeats.
+async fn spawn_no_user_cancel_capture_stub(
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+    use std::sync::{Arc, Mutex};
+    type Posts = Arc<Mutex<Vec<Value>>>;
+    async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
+        // No user cancel — a shutdown-driven cancel must be the ONLY thing that can trip.
+        Json(job_snapshot_json(&job_id, false)).into_response()
+    }
+    async fn progress_route(
+        State(posts): State<Posts>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+        Json(body): Json<Value>,
+    ) -> Response {
+        posts.lock().expect("posts lock").push(body);
+        Json(job_snapshot_json(&job_id, false)).into_response()
+    }
+    async fn heartbeat_route(
+        axum::extract::Path(worker_id): axum::extract::Path<String>,
+    ) -> Response {
+        Json(worker_snapshot_json(&worker_id)).into_response()
+    }
+    let posts: Posts = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new()
+        .route("/api/v1/jobs/:job_id", get(job_route))
+        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .route(
+            "/api/v1/workers/:worker_id/heartbeat",
+            post(heartbeat_route),
+        )
+        .with_state(posts.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    (format!("http://{address}"), posts)
+}
+
+fn placeholder_job_snapshot() -> JobSnapshot {
+    serde_json::from_value(json!({
+        "id": "job-1",
+        "type": "placeholder",
+        "status": "running",
+        "projectId": null,
+        "projectName": null,
+        "payload": {},
+        "result": {},
+        "requestedGpu": "auto",
+        "assignedGpu": null,
+        "workerId": "test-worker",
+        "progress": 0.0,
+        "stage": "queued",
+        "message": "queued",
+        "error": null,
+        "etaSeconds": null,
+        "elapsedSeconds": null,
+        "attempts": 1,
+        "sourceJobId": null,
+        "duplicateOfJobId": null,
+        "cancelRequested": false,
+        "createdAt": "2026-07-03T00:00:00Z",
+        "updatedAt": "2026-07-03T00:00:00Z",
+        "startedAt": null,
+        "completedAt": null,
+        "canceledAt": null,
+        "lastHeartbeatAt": null
+    }))
+    .expect("placeholder job snapshot deserializes")
+}
+
+/// sc-8845 (F-043) — a process shutdown mid-job must NOT drop the in-flight future without a
+/// terminal write. When the shared shutdown `CancelFlag` is already tripped, `run_placeholder_job`
+/// must post a terminal `Canceled` progress update (status `canceled`) and return
+/// `WorkerError::Canceled` — a prompt, specific terminal state — instead of running on or leaving
+/// the job `running` for the 90s stale sweep to relabel `interrupted`. It must do so even with the
+/// user-cancel GET reporting NOT canceled, proving the shutdown flag (not a user cancel) is the
+/// trigger. Discriminator: under the old behavior (no shutdown checkpoint) the job would run its
+/// first stage and post a `preparing`/`running` update instead of `canceled`.
+#[tokio::test]
+async fn run_placeholder_job_posts_terminal_canceled_on_shutdown_flag() {
+    let (base_url, posts) = spawn_no_user_cancel_capture_stub().await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    let api = ApiClient::new(&settings);
+    let job = placeholder_job_snapshot();
+
+    // Process shutdown already observed by the loop supervisor before the first stage runs.
+    let shutdown = gen_core::CancelFlag::new();
+    shutdown.cancel();
+
+    let result = super::run_placeholder_job(&api, &settings, &job, &shutdown).await;
+
+    assert!(
+        matches!(result, Err(WorkerError::Canceled(_))),
+        "a tripped shutdown flag must surface as WorkerError::Canceled, not a completed/failed job"
+    );
+    let posts = posts.lock().expect("posts lock");
+    assert_eq!(
+        posts.len(),
+        1,
+        "exactly one progress write is posted — the terminal Canceled — with no work stages first"
+    );
+    assert_eq!(
+        posts[0]["status"], "canceled",
+        "the shutdown-during-job write must be the TERMINAL Canceled state (not left running)"
+    );
+    assert!(
+        posts[0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains("shut down"),
+        "the terminal message should attribute the cancel to worker shutdown, not a user cancel"
+    );
+}
+
+/// sc-8845 (F-043) — control: an UN-tripped shutdown flag must not spuriously cancel a clean run.
+/// The placeholder job should proceed past its first stage (posting a non-terminal `preparing`
+/// update) when neither a user cancel nor a shutdown is present, so the new shutdown checkpoint
+/// can't false-positive a normal job to `canceled`.
+#[tokio::test]
+async fn run_placeholder_job_proceeds_when_shutdown_flag_untripped() {
+    let (base_url, posts) = spawn_no_user_cancel_capture_stub().await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    let api = ApiClient::new(&settings);
+    let job = placeholder_job_snapshot();
+
+    let shutdown = gen_core::CancelFlag::new(); // never tripped
+
+    // Drive only the first stage: the placeholder loop sleeps 1.5s per stage, so a short timeout
+    // lets us observe the first non-terminal write without waiting out the whole job.
+    let run = super::run_placeholder_job(&api, &settings, &job, &shutdown);
+    let _ = tokio::time::timeout(Duration::from_millis(400), run).await;
+
+    let posts = posts.lock().expect("posts lock");
+    assert!(
+        !posts.is_empty(),
+        "a job with no cancel and no shutdown must make progress"
+    );
+    assert_ne!(
+        posts[0]["status"], "canceled",
+        "an untripped shutdown flag must NOT cancel a clean run — the first write is a work stage"
+    );
+}
+
 /// sc-5516 — `begin_video_cancel` trips the engine cancel flag and posts the
 /// cancel acknowledgement as a NON-terminal `running` "Cancelling…" update. The
 /// terminal `Canceled` (which frees the worker row) is posted by `generate_video`

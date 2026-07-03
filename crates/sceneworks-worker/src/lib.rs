@@ -492,47 +492,156 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     let mut lock_failures = 0_u32;
     let mut idle_heartbeat = IdleHeartbeat::new(progress_report_interval(&settings));
     loop {
-        tokio::select! {
-            result = poll_once(&api, &settings, &http_client, &mut idle_heartbeat) => {
-                match result {
-                    Ok(()) => lock_failures = 0,
-                    Err(error) if is_database_locked(&error) => {
-                        // SQLite claim contention. With busy_timeout + BEGIN IMMEDIATE in the
-                        // store this should be rare, but back off (instead of hammering at the
-                        // flat poll interval) and make it visible so an MLX-eligible job lost to
-                        // lock contention is explained rather than silently retried into torch.
-                        lock_failures = lock_failures.saturating_add(1);
-                        let delay = retry_delay(settings.poll_seconds, lock_failures);
-                        emit_event_value(
-                            Level::WARN,
-                            json!({
-                                "event": "claim_lock_contention",
-                                "workerId": settings.worker_id,
-                                "gpuId": settings.gpu_id,
-                                "consecutiveFailures": lock_failures,
-                                "retryInSeconds": delay,
-                                "error": error.to_string(),
-                            }),
-                        );
-                        tokio::time::sleep(Duration::from_secs(delay)).await;
-                    }
-                    Err(error) => {
-                        lock_failures = 0;
-                        tracing::error!(
-                            event = "rust_worker_poll_failed",
-                            error = %error,
-                            "worker claim poll failed"
-                        );
-                        tokio::time::sleep(Duration::from_secs(settings.poll_seconds.max(1))).await;
-                    }
-                }
-            }
+        // sc-8845 (F-043): shutdown is observed ONLY here, around the claim / idle-sleep phase —
+        // NOT around full job execution. `poll_once` does no long GPU work (memory-sync, idle
+        // heartbeat, the transactional claim POST, and the idle sleep), so racing it against
+        // shutdown and dropping it at an await point loses no job state: nothing is claimed on the
+        // idle path, and a claimed job is handled below OUTSIDE this select. Before this change the
+        // select raced the WHOLE `poll_once` (claim + the entire job) against shutdown, so a
+        // graceful quit mid-job dropped the in-flight future at an arbitrary await, left the job
+        // `running` until the 90s stale sweep marked it `interrupted`, and killed spawn_blocking GPU
+        // work mid-write. Now a mid-job shutdown trips the job's cancel and posts a prompt terminal
+        // `Canceled` (see `run_job_with_shutdown`).
+        let claim = tokio::select! {
+            result = poll_once(&api, &settings, &mut idle_heartbeat) => result,
             _ = shutdown_signal() => {
+                // Clean-idle shutdown: no job in flight, so the pre-existing Offline heartbeat +
+                // return is preserved exactly.
                 let _ = heartbeat(&api, &settings, WorkerStatus::Offline, None).await;
                 return Ok(());
             }
+        };
+        match claim {
+            Ok(None) => lock_failures = 0,
+            Ok(Some(job)) => {
+                lock_failures = 0;
+                // Execute the claimed job WITHOUT racing (and dropping) the whole future against
+                // shutdown. `run_job_with_shutdown` supervises execution: on a mid-job shutdown it
+                // trips the job's cancel flag, lets the in-flight future wind down (never dropped
+                // mid-write), and posts a terminal `Canceled` for the job before returning
+                // `ShutdownDuringJob` so the loop exits with the job in a prompt terminal state.
+                match run_job_with_shutdown(&api, &settings, &http_client, job).await {
+                    JobOutcome::Completed => idle_heartbeat.mark_due(),
+                    JobOutcome::ShutdownDuringJob => {
+                        let _ = heartbeat(&api, &settings, WorkerStatus::Offline, None).await;
+                        return Ok(());
+                    }
+                }
+            }
+            Err(error) if is_database_locked(&error) => {
+                // SQLite claim contention. With busy_timeout + BEGIN IMMEDIATE in the
+                // store this should be rare, but back off (instead of hammering at the
+                // flat poll interval) and make it visible so an MLX-eligible job lost to
+                // lock contention is explained rather than silently retried into torch.
+                lock_failures = lock_failures.saturating_add(1);
+                let delay = retry_delay(settings.poll_seconds, lock_failures);
+                emit_event_value(
+                    Level::WARN,
+                    json!({
+                        "event": "claim_lock_contention",
+                        "workerId": settings.worker_id,
+                        "gpuId": settings.gpu_id,
+                        "consecutiveFailures": lock_failures,
+                        "retryInSeconds": delay,
+                        "error": error.to_string(),
+                    }),
+                );
+                // The back-off sleep is a between-jobs wait, so it too must observe shutdown rather
+                // than blocking a graceful quit for up to `delay` seconds.
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
+                    _ = shutdown_signal() => {
+                        let _ = heartbeat(&api, &settings, WorkerStatus::Offline, None).await;
+                        return Ok(());
+                    }
+                }
+            }
+            Err(error) => {
+                lock_failures = 0;
+                tracing::error!(
+                    event = "rust_worker_poll_failed",
+                    error = %error,
+                    "worker claim poll failed"
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(settings.poll_seconds.max(1))) => {}
+                    _ = shutdown_signal() => {
+                        let _ = heartbeat(&api, &settings, WorkerStatus::Offline, None).await;
+                        return Ok(());
+                    }
+                }
+            }
         }
     }
+}
+
+/// Outcome of supervising one claimed job through [`run_job_with_shutdown`].
+enum JobOutcome {
+    /// The job ran to its own terminal state (success, failure, or user cancel) with no shutdown
+    /// observed; the loop continues to the next claim.
+    Completed,
+    /// SIGTERM/Ctrl-C arrived while the job was in flight. The job's cancel flag was tripped, the
+    /// in-flight future was awaited to wind-down (never dropped mid-write), and a terminal
+    /// `Canceled` was posted for it. The loop must now exit.
+    ShutdownDuringJob,
+}
+
+/// Run one claimed job while keeping shutdown observable WITHOUT dropping the in-flight future
+/// (sc-8845, F-043).
+///
+/// The whole-`poll_once`-vs-shutdown `select!` this replaces cancelled the job future at an
+/// arbitrary await on a graceful quit: no terminal job-state write happened, so the claimed job sat
+/// `running` until the API's 90s stale sweep relabelled it `interrupted`, and any `spawn_blocking`
+/// GPU work was killed mid-write (partial outputs left behind). Here, execution is bound to a
+/// process-shutdown [`CancelFlag`]; on shutdown we:
+///   1. trip the flag so handlers that thread it (the generate/edit/detail/video/upscale/train
+///      paths via `run_utility_job`) stop at their next checkpoint instead of running to natural
+///      end, then
+///   2. keep awaiting the SAME job future — it is never dropped, so no write is interrupted — for up
+///      to `shutdown_timeout_seconds`, then
+///   3. post a terminal `Canceled` for the job (unless the handler already wrote a terminal state
+///      itself), so the job lands a prompt, specific terminal state instead of a delayed generic
+///      `interrupted`.
+///
+/// The bounded wait guarantees a graceful quit is never blocked indefinitely by an un-interruptible
+/// compute path: if the future has not resolved by the grace window we still post `Canceled` and
+/// return, having already tripped the flag so the underlying task winds down.
+async fn run_job_with_shutdown(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: JobSnapshot,
+) -> JobOutcome {
+    let job_id = job.id.clone();
+    let shutdown = gen_core::CancelFlag::new();
+    let job_future = run_utility_job(api, settings, http_client, job, shutdown.clone());
+    tokio::pin!(job_future);
+
+    tokio::select! {
+        () = &mut job_future => return JobOutcome::Completed,
+        _ = shutdown_signal() => {}
+    }
+
+    // Shutdown fired mid-job. Trip the shared flag so a handler that observes it winds down
+    // promptly, then AWAIT the same (un-dropped) future to its checkpoint / natural end, bounded by
+    // the grace window so an un-interruptible path can't hang the quit.
+    emit_event_value(
+        Level::WARN,
+        json!({
+            "event": "worker_shutdown_during_job",
+            "workerId": settings.worker_id,
+            "gpuId": settings.gpu_id,
+            "jobId": job_id,
+        }),
+    );
+    shutdown.cancel();
+    let grace = Duration::from_secs(settings.shutdown_timeout_seconds.max(1));
+    let _ = tokio::time::timeout(grace, &mut job_future).await;
+    // Post the terminal `Canceled`. If the handler already wrote its own terminal state (it observed
+    // the flag and posted `Canceled`, or completed/failed in the race window) the API rejects this
+    // as a no-op/409 — harmless; the point is that the job never dangles `running`.
+    let _ = mark_job_canceled(api, &job_id, "Worker shut down before the job completed.").await;
+    JobOutcome::ShutdownDuringJob
 }
 
 /// True when an error ultimately stems from SQLite reporting the jobs database as locked.
@@ -575,12 +684,17 @@ async fn register_worker_with_retry(
     }
 }
 
+/// The claim / idle phase of one loop turn (sc-8845, F-043). Returns the claimed job for the caller
+/// to execute (outside the shutdown `select!`), or `None` when nothing was claimed (already having
+/// slept the idle poll interval). Deliberately does NO job execution: the caller races only THIS
+/// future against shutdown, so a graceful quit between jobs drops nothing load-bearing (no claimed
+/// job, no GPU work — just the memory-sync, idle heartbeat, transactional claim POST, and idle
+/// sleep). Job execution is supervised separately by `run_job_with_shutdown`.
 async fn poll_once(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     idle_heartbeat: &mut IdleHeartbeat,
-) -> WorkerResult<()> {
+) -> WorkerResult<Option<JobSnapshot>> {
     // sc-7824 (epic 7819): pick up a live GPU-memory-limit change here, before claiming the next
     // job, so a Settings slider move applies between jobs (not mid-flight) with no worker restart.
     // No-op unless this is the MLX worker and the desktop has written the live-handoff file.
@@ -602,11 +716,9 @@ async fn poll_once(
         .await?;
     let Some(job) = claim.job else {
         tokio::time::sleep(Duration::from_secs(settings.poll_seconds)).await;
-        return Ok(());
+        return Ok(None);
     };
-    run_utility_job(api, settings, http_client, job).await;
-    idle_heartbeat.mark_due();
-    Ok(())
+    Ok(Some(job))
 }
 
 struct IdleHeartbeat {
@@ -704,14 +816,27 @@ async fn heartbeat(
     }
 }
 
+/// Dispatch one claimed job to its handler and reconcile the terminal state.
+///
+/// `shutdown` (sc-8845, F-043) is the process-shutdown [`CancelFlag`] tripped by
+/// `run_job_with_shutdown` when SIGTERM/Ctrl-C arrives mid-job. Handlers that thread a real cancel
+/// checkpoint honor it to stop promptly; the caller's bounded-wait-then-terminal-`Canceled` write
+/// is what GUARANTEES no job dangles `running` even for a handler that cannot observe the flag. The
+/// always-compiled placeholder path threads it directly so the shutdown-during-job behavior is
+/// exercised on every target (the GPU handlers are macOS/candle-gated). HONEST RESIDUAL: the
+/// per-engine GPU handlers still poll the API `cancel_requested` for a *user* cancel and do not yet
+/// consult this process flag; on shutdown they wind down at the loop's grace window rather than
+/// their next step, and the loop still writes the terminal `Canceled`. A follow-up can thread the
+/// flag through those handler signatures for a prompter mid-step stop (sc-8845 note).
 async fn run_utility_job(
     api: &ApiClient,
     settings: &Settings,
     http_client: &reqwest::Client,
     job: JobSnapshot,
+    shutdown: gen_core::CancelFlag,
 ) {
     let result = match job.job_type {
-        JobType::Placeholder => run_placeholder_job(api, settings, &job)
+        JobType::Placeholder => run_placeholder_job(api, settings, &job, &shutdown)
             .await
             .map_err(|error| ("Placeholder job failed.", error)),
         // Native MLX image generation, served in-process by the linked mlx-gen
@@ -950,6 +1075,7 @@ async fn run_placeholder_job(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    shutdown: &gen_core::CancelFlag,
 ) -> WorkerResult<()> {
     let stages = [
         (
@@ -979,8 +1105,23 @@ async fn run_placeholder_job(
     ];
 
     for (status, stage, progress, message) in stages {
-        let snapshot: JobSnapshot = api.get_json(&format!("/api/v1/jobs/{}", job.id)).await?;
-        if snapshot.cancel_requested {
+        // sc-8845 (F-043): a process shutdown mid-job is a cancel checkpoint too — trip the same
+        // terminal `Canceled` write as a user cancel so the job lands a prompt terminal state
+        // instead of being dropped `running`. Checked before the user-cancel GET so a graceful quit
+        // is honored even if the snapshot fetch is momentarily failing.
+        let shutting_down = shutdown.is_cancelled();
+        let snapshot_cancel = if shutting_down {
+            false
+        } else {
+            let snapshot: JobSnapshot = api.get_json(&format!("/api/v1/jobs/{}", job.id)).await?;
+            snapshot.cancel_requested
+        };
+        if shutting_down || snapshot_cancel {
+            let message = if shutting_down {
+                "Worker shut down before the job completed."
+            } else {
+                "Worker canceled the job before completion."
+            };
             update_job(
                 api,
                 &job.id,
@@ -988,16 +1129,14 @@ async fn run_placeholder_job(
                     JobStatus::Canceled,
                     ProgressStage::Canceled,
                     progress,
-                    "Worker canceled the job before completion.",
+                    message,
                     None,
                     None,
                     None,
                 ),
             )
             .await?;
-            return Err(WorkerError::Canceled(
-                "Worker canceled the job before completion.".to_owned(),
-            ));
+            return Err(WorkerError::Canceled(message.to_owned()));
         }
 
         heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
