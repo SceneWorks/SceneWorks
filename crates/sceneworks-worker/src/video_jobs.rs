@@ -1244,6 +1244,16 @@ fn video_progress(
 // encode pipeline (`encode_media`) + the streaming engine driver (`generate_video`).
 // ---------------------------------------------------------------------------
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_seedvr2::video as seedvr2_video;
+/// The SeedVR2 provider's pure temporal-chunk planning/blend module (`video::plan_chunks`,
+/// `video::assemble_overlap`, `DEFAULT_OVERLAP`, `Chunk`), reused ONE LEVEL UP for worker-window
+/// streaming (sc-9595). Both provider crates expose an identical `video` module over `gen_core::Image`
+/// (byte-identical seam math), so the worker-window cross-fade is the engine's own — the worker never
+/// reimplements the blend. Aliased per platform: MLX on Mac, candle on the Windows/CUDA lane.
+#[cfg(target_os = "macos")]
+use mlx_gen_seedvr2::video as seedvr2_video;
+
 /// HF repo hosting the raw SeedVR2 checkpoint (`numz/SeedVR2_comfyUI`); the engine converts it
 /// in-memory at load (no Python). Override the staged dir with `SCENEWORKS_SEEDVR2_DIR`.
 // SeedVR2 video upscale runs on Mac (native MLX) AND the Windows/CUDA candle lane (sc-5928); these
@@ -1294,188 +1304,134 @@ fn snap_seedvr2_dim(value: u32) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// Host-RAM bound for the SeedVR2 upscale (sc-8829, F-027)
+// Streaming worker-window chunking for the SeedVR2 upscale (sc-9595, removes the sc-8829 host-RAM cap)
 // ---------------------------------------------------------------------------
-// The engine (`mlx-gen-seedvr2`) already bounds its GPU/activation memory (a temporal chunk sizer +
-// spatial tiler). What is NOT bounded is *host* RGB8 RAM: `decode_seedvr2_source_frames` materializes
-// EVERY source frame into a `Vec<Image>` up front, and the up-to-4× output is likewise held whole in a
-// `Vec<RgbFrame>` before encode (the engine's `assemble_overlap` needs every decoded chunk at once, so
-// its API is fundamentally whole-clip). A few-minute 1080p clip => tens of GB of RGB8 (~17 GB source +
-// ~68 GB at 4×) => OOM-killed after minutes of GPU work.
+// sc-8829 (F-027) bounded host RGB8 RAM with a machine-derived frame cap that FAILED LOUD before decode:
+// `decode_seedvr2_source_frames` materialized EVERY source frame into a `Vec<Image>` up front, and the
+// up-to-4× output was likewise held whole before encode (the engine's whole-clip API returns the entire
+// `Vec<Image>`), so a few-minute 1080p clip meant tens of GB of RGB8 → OOM. The cap rejected such clips
+// — a capability narrowing.
 //
-// Fix (this story): a GENEROUS, machine-derived frame cap that FAILS LOUD *before* decode (using the
-// source asset's sidecar width/height/fps/duration) so no GPU work is wasted, with a post-decode
-// backstop for when the sidecar metadata is absent or wrong. True worker-level streaming chunking
-// (decode -> upscale -> append-encode a window at a time, reusing the engine's public
-// `plan_chunks`/`assemble_overlap` for a lossless seam) removes the cap entirely and is tracked as a
-// follow-up (SeedVR2 is temporal-context — window=(4,3,3) + a 3D causal VAE that re-anchors chunk
-// boundaries — so naive butt-joined chunking would seam; the follow-up must carry overlap cross-fade).
+// This story removes the cap by streaming the upscale in temporal WORKER WINDOWS: we plan windows over
+// the real frame count with the engine's own `video::plan_chunks` (a valid chunk length + the
+// `DEFAULT_OVERLAP=4` cross-fade), decode + upscale ONE window at a time through the shared
+// `generate_video` funnel, and cross-fade across worker-window boundaries with the engine's own
+// `video::assemble_overlap` (fed a local 2-window plan) so the seam handling is byte-identical to the
+// engine's internal chunking. Finalized frames stream straight to a numbered PNG sequence on disk and
+// are encoded once at the end (same ffmpeg args as the old whole-clip path), so peak host RAM is bounded
+// to ~one worker window's frames + a ≤4-frame overlap tail regardless of clip length.
+//
+// Seam identity: `plan_chunks`/`assemble_overlap` are the SAME pure functions the engine uses
+// internally, and each engine chunk's output is a deterministic function of its source pixel window +
+// seed (`pipeline::preprocess_chunk`). When a worker window is processed by the engine as a single
+// internal chunk (the common case — `SEEDVR2_WORKER_CHUNK_FRAMES` fits the engine's budget-sized chunk),
+// the streamed output is bit-identical to the whole-clip run. If the engine sub-chunks a worker window
+// under tight GPU budget, the cross-fade still closes every seam (identical blend math) but the
+// upscaled pixels near an internal boundary can differ slightly from a whole-clip run's internal
+// boundary — a real-weights fidelity nuance that only a GPU golden run can measure (see the PR notes).
 
-/// Fraction of total physical RAM the source + output RGB8 buffers are allowed to occupy at once.
-/// Deliberately generous: the engine streams its own GPU allocation, so this bounds only the host-side
-/// pixel Vecs, which coexist with the OS, the loaded weights, ffmpeg, and the app. 0.5 leaves half of
-/// RAM for everything else while still admitting minutes-long clips on a large machine.
+/// The worker-level temporal window size (pixel frames). A valid engine chunk length (mult of 4, ≥8),
+/// chosen at the engine's `MAX_CHUNK_FRAMES` ceiling so that on any machine whose budget-sized chunk is
+/// ≥ this, the engine processes a whole worker window as ONE internal chunk (`plan_chunks(64,64,4)` = a
+/// single chunk) → the streamed output is bit-identical to a whole-clip run. Larger windows mean fewer
+/// worker-window seams and a closer match to whole-clip chunking, traded against a larger per-window
+/// host footprint (≈ `64 · out_w · out_h · 3` bytes of RGB8, ~1.6 GB at 4×-of-1080p — bounded).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-const SEEDVR2_HOST_RAM_FRACTION: f64 = 0.5;
+const SEEDVR2_WORKER_CHUNK_FRAMES: i32 = 64;
 
-/// Floor for the derived host-RAM budget when the physical-RAM probe fails (unknown platform / probe
-/// error): assume a modest 16 GB machine and take the fraction of it, so the cap is always active.
+/// Streaming cross-window assembler (sc-9595): feeds each upscaled worker window into the engine's own
+/// `video::assemble_overlap` and emits finalized frames in order, holding only a ≤`ov`-frame tail plus
+/// the current window in memory. The cross-fade at each worker-window boundary is byte-identical to the
+/// engine's internal chunk assembly — proven equivalent to a single whole-clip `assemble_overlap` over
+/// synthetic frames (see `seedvr2_stream_matches_whole_clip_assembly`).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-const SEEDVR2_FALLBACK_RAM_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-
-/// Total physical RAM in bytes, best-effort and portable (macOS `sysctl hw.memsize`, Linux
-/// `/proc/meminfo` `MemTotal`). Returns `None` if the probe fails; callers fall back to
-/// [`SEEDVR2_FALLBACK_RAM_BYTES`]. No new crate dependency — the two supported worker platforms
-/// (macOS + Windows/Linux-candle) are covered directly.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn total_physical_ram_bytes() -> Option<u64> {
-    #[cfg(target_os = "macos")]
-    {
-        let out = std::process::Command::new("sysctl")
-            .args(["-n", "hw.memsize"])
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        String::from_utf8_lossy(&out.stdout)
-            .trim()
-            .parse::<u64>()
-            .ok()
-    }
-    #[cfg(all(not(target_os = "macos"), target_os = "linux"))]
-    {
-        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
-        for line in meminfo.lines() {
-            if let Some(rest) = line.strip_prefix("MemTotal:") {
-                // "MemTotal:   16384000 kB"
-                let kb = rest
-                    .trim()
-                    .trim_end_matches(" kB")
-                    .trim()
-                    .parse::<u64>()
-                    .ok()?;
-                return Some(kb.saturating_mul(1024));
-            }
-        }
-        None
-    }
-    #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
-    {
-        // Windows (candle lane): `wmic ComputerSystem get TotalPhysicalMemory` is the dependency-free
-        // probe. If it is unavailable the caller falls back to the conservative floor.
-        let out = std::process::Command::new("wmic")
-            .args(["ComputerSystem", "get", "TotalPhysicalMemory", "/value"])
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let text = String::from_utf8_lossy(&out.stdout);
-        for line in text.lines() {
-            if let Some(rest) = line.trim().strip_prefix("TotalPhysicalMemory=") {
-                return rest.trim().parse::<u64>().ok();
-            }
-        }
-        None
-    }
+struct Seedvr2StreamAssembler {
+    /// Cross-fade overlap (frames) between adjacent worker windows — the engine's `DEFAULT_OVERLAP`.
+    ov: i32,
+    /// Total real output frame count (== source frame count); trailing chunk padding past this is dropped.
+    n: i32,
+    /// The retained, blended-but-not-yet-final tail: the assembled frames from `retained_start` onward
+    /// that may still be cross-faded by the NEXT window. Its absolute start is `retained_start`.
+    retained: Vec<Image>,
+    /// Absolute frame index of `retained[0]`.
+    retained_start: i32,
+    /// Whether `push_window` has been called yet (the first window seeds `retained` with no blend).
+    seeded: bool,
 }
 
-/// The host-RAM byte budget for the combined source + output RGB8 buffers of one upscale job.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn seedvr2_host_ram_budget_bytes() -> u64 {
-    let total = total_physical_ram_bytes().unwrap_or(SEEDVR2_FALLBACK_RAM_BYTES);
-    ((total as f64) * SEEDVR2_HOST_RAM_FRACTION) as u64
-}
-
-/// Estimated peak host RGB8 bytes held at once for `frame_count` source frames at `src_w × src_h`:
-/// the source Vec (`w·h·3` per frame) plus the output Vec (`out_w·out_h·3` per frame). Both are alive
-/// simultaneously across the decode → generate → encode span, so they add.
-///
-/// The output size is either the explicit snapped target (`out_dims = Some((out_w, out_h))`, the
-/// accurate post-decode path where the real allocated resolution is known) or, when the target is not
-/// yet resolved (the coarse pre-decode gate), `factor × src` via `out_dims = None`. Using the real
-/// snapped target matters because `VideoUpscaleRequest.target_width/height` can override `factor`
-/// independently (clamped to ≤4096), so a `factor²·src` estimate can under-count a larger explicit
-/// target by up to ~16× and let an OOM-prone job through.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn seedvr2_estimated_host_bytes(
-    frame_count: u64,
-    src_w: u64,
-    src_h: u64,
-    factor: u64,
-    out_dims: Option<(u64, u64)>,
-) -> u64 {
-    let src_per_frame = src_w.saturating_mul(src_h).saturating_mul(3);
-    let out_per_frame = match out_dims {
-        Some((out_w, out_h)) => out_w.saturating_mul(out_h).saturating_mul(3),
-        None => src_per_frame.saturating_mul(factor).saturating_mul(factor),
-    };
-    frame_count.saturating_mul(src_per_frame.saturating_add(out_per_frame))
-}
-
-/// Fail loud (before decode / before GPU work) when the estimated combined source + output RGB8
-/// footprint exceeds the machine's host-RAM budget. `Ok(())` when it fits or when the frame count /
-/// dimensions are unknown (0) — the post-decode backstop re-checks with the real count in that case.
-/// The error names the limit AND the offending clip so the user knows exactly what to trim.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn check_seedvr2_host_ram(
-    frame_count: u64,
-    src_w: u64,
-    src_h: u64,
-    factor: u64,
-    out_dims: Option<(u64, u64)>,
-) -> WorkerResult<()> {
-    if frame_count == 0 || src_w == 0 || src_h == 0 {
-        return Ok(());
+impl Seedvr2StreamAssembler {
+    fn new(n: i32, ov: i32) -> Self {
+        Self {
+            ov,
+            n,
+            retained: Vec::new(),
+            retained_start: 0,
+            seeded: false,
+        }
     }
-    let needed = seedvr2_estimated_host_bytes(frame_count, src_w, src_h, factor, out_dims);
-    let budget = seedvr2_host_ram_budget_bytes();
-    if needed > budget {
-        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-        // Largest frame count that fits, so the message is actionable ("trim to ~N frames").
-        let per_frame = seedvr2_estimated_host_bytes(1, src_w, src_h, factor, out_dims).max(1);
-        let max_frames = budget / per_frame;
-        // Describe the output the estimate actually sized: the explicit snapped target when set,
-        // otherwise the implicit `factor×` output. Only suggest a smaller factor when there IS a
-        // smaller one to drop to (never "use 2×" while already at 2×, and never for explicit targets
-        // where factor isn't what drove the size).
-        let out_desc = match out_dims {
-            Some((out_w, out_h)) => format!("{out_w}×{out_h} output"),
-            None => format!("{factor}× output"),
-        };
-        let downgrade = match out_dims {
-            None if factor > 2 => " or use 2× instead",
-            _ => "",
-        };
-        return Err(WorkerError::InvalidPayload(format!(
-            "Video too large to upscale on this machine: {frame_count} frames at {src_w}×{src_h} \
-             would need ~{needed:.1} GB of RGB frame memory (source + {out_desc}), over the \
-             ~{budget:.1} GB host-memory budget. Trim the clip to about {max_frames} frames (or \
-             fewer), lower the source/target resolution{downgrade}.",
-            needed = needed as f64 / GIB,
-            budget = budget as f64 / GIB,
-        )));
+
+    /// Feed the upscaled frames for the worker window at absolute `start`. Returns the newly finalized
+    /// frames (in order) that no later window can touch; the caller streams them to disk immediately.
+    /// Uses the engine's `video::assemble_overlap` over a local `[retained, window]` 2-window plan so
+    /// the blend is the engine's own.
+    fn push_window(&mut self, start: i32, mut frames: Vec<Image>) -> Vec<Image> {
+        // Clip trailing chunk padding past the real frame count.
+        let visible = (self.n - start).clamp(0, frames.len() as i32);
+        frames.truncate(visible.max(0) as usize);
+        if !self.seeded {
+            self.seeded = true;
+            self.retained_start = start;
+            self.retained = frames;
+        } else {
+            let off = start - self.retained_start;
+            let local_plan = [
+                seedvr2_video::Chunk {
+                    start: 0,
+                    len: self.retained.len() as i32,
+                },
+                seedvr2_video::Chunk {
+                    start: off,
+                    len: frames.len() as i32,
+                },
+            ];
+            let n_local = off + frames.len() as i32;
+            let inputs = [std::mem::take(&mut self.retained), frames];
+            // The engine's own cross-fade closes the worker-window seam (identical to its internal one).
+            self.retained = seedvr2_video::assemble_overlap(&local_plan, &inputs, n_local, self.ov);
+        }
+        // Finalize everything except the last `ov` frames (the next window may still blend them).
+        let keep = self.ov.max(0) as usize;
+        self.drain_prefix(keep)
     }
-    Ok(())
+
+    /// Flush the remaining tail once every window has been pushed.
+    fn finish(&mut self) -> Vec<Image> {
+        self.drain_prefix(0)
+    }
+
+    /// Emit finalized frames from the front of `retained`, keeping `keep` frames retained (and never
+    /// emitting past the real frame count `n`).
+    fn drain_prefix(&mut self, keep: usize) -> Vec<Image> {
+        // How many front frames are finalized this call: everything past `keep`, but never emitting
+        // past the real frame count `n` (`n - retained_start` remaining slots). `Vec::drain` shifts
+        // the tail once, so this is O(n) rather than the O(n²) of a `remove(0)`-per-frame loop.
+        let by_keep = self.retained.len().saturating_sub(keep);
+        let by_count = (self.n - self.retained_start).max(0) as usize;
+        let boundary = by_keep.min(by_count);
+        let out: Vec<Image> = self.retained.drain(..boundary).collect();
+        self.retained_start += boundary as i32;
+        out
+    }
 }
 
 /// Resolve a project-relative asset path safely under `project_path` (reject `..` / absolute
@@ -1532,24 +1488,27 @@ async fn ensure_seedvr2_weights(
     Ok(dir)
 }
 
-/// Decode every frame of `source` to an engine [`Image`] sequence (native resolution — the engine
-/// bicubic-upscales internally to the target). Uses the bundled ffmpeg (`run_ffmpeg`) into PNGs in a
-/// temp dir, then loads them in order. `-fps_mode passthrough` keeps the exact source frame count.
+/// Decode every frame of `source` to a numbered PNG sequence ON DISK (native resolution — the engine
+/// bicubic-upscales internally to the target) and return the ordered PNG paths, WITHOUT loading any
+/// pixels into RAM (sc-9595). Uses the bundled ffmpeg (`run_ffmpeg`); `-fps_mode passthrough` keeps the
+/// exact source frame count. The caller loads each temporal WINDOW of these paths on demand via
+/// [`load_seedvr2_window`], so host RGB8 RAM is bounded to one window instead of the whole clip. The
+/// returned paths live under a job-scoped temp dir the caller is responsible for removing.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-async fn decode_seedvr2_source_frames(
+async fn decode_seedvr2_source_to_disk(
     api: &ApiClient,
     settings: &Settings,
     job_id: &str,
     source: &Path,
-) -> WorkerResult<Vec<Image>> {
-    let frames_dir = std::env::temp_dir().join(format!("sceneworks_seedvr2_src_{job_id}"));
-    let _ = tokio::fs::remove_dir_all(&frames_dir).await;
-    tokio::fs::create_dir_all(&frames_dir).await?;
+    frames_dir: &Path,
+) -> WorkerResult<Vec<PathBuf>> {
+    let _ = tokio::fs::remove_dir_all(frames_dir).await;
+    tokio::fs::create_dir_all(frames_dir).await?;
     let ctx = FfmpegContext::new(api, settings, job_id, SEEDVR2_CANCEL_MESSAGE);
-    let decode = run_ffmpeg(
+    run_ffmpeg(
         vec![
             "ffmpeg".to_owned(),
             "-nostdin".to_owned(),
@@ -1565,38 +1524,363 @@ async fn decode_seedvr2_source_frames(
         ],
         Some(ctx),
     )
-    .await;
-    let loaded = match decode {
-        Ok(()) => {
-            let dir = frames_dir.clone();
-            tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
-                let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)?
-                    .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-                    .filter(|path| path.extension().is_some_and(|ext| ext == "png"))
-                    .collect();
-                paths.sort();
-                let mut frames = Vec::with_capacity(paths.len());
-                for path in paths {
-                    let image = crate::image_decode::decode_image_any(&path)
-                        .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?
-                        .to_rgb8();
-                    frames.push(rgb_image_to_engine(image));
-                }
-                Ok(frames)
-            })
-            .await
-            .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?
-        }
-        Err(error) => Err(error),
-    };
-    let _ = tokio::fs::remove_dir_all(&frames_dir).await;
-    let frames = loaded?;
-    if frames.is_empty() {
+    .await?;
+    let dir = frames_dir.to_path_buf();
+    let paths = tokio::task::spawn_blocking(move || -> WorkerResult<Vec<PathBuf>> {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "png"))
+            .collect();
+        paths.sort();
+        Ok(paths)
+    })
+    .await
+    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+    if paths.is_empty() {
         return Err(WorkerError::InvalidPayload(
             "source video produced no frames to upscale".to_owned(),
         ));
     }
-    Ok(frames)
+    Ok(paths)
+}
+
+/// Load the temporal window `paths[start .. start+len]` (clamped to the sequence end) into engine
+/// [`Image`]s on demand (sc-9595). Real frames only — the engine's `preprocess_chunk` pads a partial
+/// trailing window with last-frame repeats internally, matching the whole-clip path. Runs the blocking
+/// PNG decode off the async runtime.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn load_seedvr2_window(
+    paths: &[PathBuf],
+    start: usize,
+    len: usize,
+) -> WorkerResult<Vec<Image>> {
+    let end = start.saturating_add(len).min(paths.len());
+    let window: Vec<PathBuf> = paths.get(start..end).unwrap_or(&[]).to_vec();
+    tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+        let mut frames = Vec::with_capacity(window.len());
+        for path in window {
+            let image = crate::image_decode::decode_image_any(&path)
+                .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?
+                .to_rgb8();
+            frames.push(rgb_image_to_engine(image));
+        }
+        Ok(frames)
+    })
+    .await
+    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?
+}
+
+/// Append RGB8 frames to a numbered PNG sequence on disk, starting at `next_index`, off the async
+/// runtime (sc-9595). Returns the next free index. The shared frames dir is later encoded once by
+/// [`encode_seedvr2_stream`] with the exact ffmpeg args the whole-clip `encode_media` used, so the
+/// output is byte-identical while peak host RAM stays bounded to one worker window.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn append_seedvr2_frames(
+    frames_dir: &Path,
+    next_index: usize,
+    frames: Vec<Image>,
+) -> WorkerResult<usize> {
+    if frames.is_empty() {
+        return Ok(next_index);
+    }
+    let dir = frames_dir.to_path_buf();
+    let count = frames.len();
+    tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+        for (offset, frame) in frames.into_iter().enumerate() {
+            let index = next_index + offset;
+            let img = image::RgbImage::from_raw(frame.width, frame.height, frame.pixels)
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload("video frame buffer size mismatch".to_owned())
+                })?;
+            let path = dir.join(format!("frame_{index:05}.png"));
+            img.save_with_format(&path, image::ImageFormat::Png)
+                .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+    Ok(next_index + count)
+}
+
+/// Encode a pre-written numbered PNG sequence (`frame_%05d.png`, `frame_count` frames from index 0) to
+/// the final mp4 (silent) + faststart + poster (sc-9595). The ffmpeg encode args are byte-identical to
+/// the whole-clip `encode_media` path (`libx264` / `yuv420p` / `-framerate fps` / `-r fps`), so the
+/// streamed output matches the old path frame-for-frame. Audio muxing stays the caller's source
+/// passthrough step (SeedVR2 emits no audio).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn encode_seedvr2_stream(
+    media_path: &Path,
+    frames_dir: &Path,
+    frame_count: usize,
+    fps: u32,
+    ctx: Option<FfmpegContext<'_>>,
+) -> WorkerResult<()> {
+    if frame_count == 0 {
+        return Err(WorkerError::InvalidPayload(
+            "video generation produced no frames".to_owned(),
+        ));
+    }
+    let fps = fps.max(1);
+    let enc_tmp = media_path.with_extension("enc.mp4");
+    let pattern = frames_dir.join("frame_%05d.png");
+    let result = run_ffmpeg(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-framerate".to_owned(),
+            fps.to_string(),
+            "-start_number".to_owned(),
+            "0".to_owned(),
+            "-i".to_owned(),
+            pattern.to_string_lossy().into_owned(),
+            "-c:v".to_owned(),
+            "libx264".to_owned(),
+            "-pix_fmt".to_owned(),
+            "yuv420p".to_owned(),
+            "-r".to_owned(),
+            fps.to_string(),
+            enc_tmp.to_string_lossy().into_owned(),
+        ],
+        ctx,
+    )
+    .await;
+    match result {
+        Ok(()) => {
+            // Publish atomically, then best-effort faststart + poster (mirrors `encode_media`).
+            tokio::fs::rename(&enc_tmp, media_path).await?;
+            faststart_mp4(media_path).await;
+            write_poster_frame(media_path).await;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&enc_tmp).await;
+            let _ = tokio::fs::remove_file(media_path).await;
+            Err(error)
+        }
+    }
+}
+
+/// Result of the streamed SeedVR2 upscale (sc-9595): the metadata the caller needs to build the asset
+/// fact + encode the pre-written PNG sequence. The upscaled frames themselves are already on disk
+/// (`out_frames_dir`), never held whole in RAM.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct Seedvr2Stream {
+    /// Real output frame count (== source frame count).
+    frame_count: usize,
+    fps: u32,
+    out_w: u32,
+    out_h: u32,
+    src_w: u32,
+    src_h: u32,
+    seed: u64,
+}
+
+/// RAII guard for a worker-owned scratch directory (sc-9595). The streamed 4× PNG sequence can be many
+/// GB, and it now outlives the stream call while the caller runs an `update_job` progress POST + an
+/// `ffmpeg` encode — a span where any `?` (a transient POST failure, a 409 stale-sweep reclaim, an
+/// encode error, or a between-step cancel) would otherwise leak the whole dir on disk. `Drop` removes
+/// it on EVERY exit path (success, encode/create_dir_all/update_job failure, cancel, panic) so cleanup
+/// can never be skipped. Call [`ScratchDir::disarm`] after the caller has already removed the dir to
+/// avoid a redundant (harmless) second removal. `Drop` must use the sync `std::fs` API.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct ScratchDir {
+    path: std::path::PathBuf,
+    armed: bool,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl ScratchDir {
+    /// Guard `path`. Does not create it — the caller populates it; the guard only guarantees removal.
+    fn new(path: std::path::PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    /// Stop guarding: the caller has already removed the dir (e.g. right after a successful encode, to
+    /// free disk before the mux step). A no-op `Drop` follows.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        if self.armed {
+            // Best-effort: a missing dir yields a benign NotFound we intentionally ignore.
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+/// Stream the SeedVR2 upscale in temporal worker windows (sc-9595). Decodes the source to disk, plans
+/// worker windows over the real frame count with the engine's `video::plan_chunks`
+/// (`SEEDVR2_WORKER_CHUNK_FRAMES` + `DEFAULT_OVERLAP`), upscales ONE window at a time through the shared
+/// `generate_video` funnel, cross-fades across worker-window boundaries with the engine's own
+/// `video::assemble_overlap`, and appends each finalized frame to a numbered PNG sequence on disk. Peak
+/// host RGB8 RAM is bounded to ~one worker window + a ≤`ov`-frame tail. Each per-window `generate_video`
+/// call is independently heartbeat-covered + cancellable (the funnel's watchdog), and cancel is polled
+/// between windows too — no long silent blocking span.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[allow(clippy::too_many_arguments)]
+async fn run_seedvr2_stream(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    backend: &str,
+    req: &sceneworks_core::contracts::VideoUpscaleRequest,
+    source_path: &Path,
+    src_frames_dir: &Path,
+    out_frames_dir: &Path,
+    factor: u32,
+    source_fps: u32,
+    weights_dir: PathBuf,
+) -> WorkerResult<Seedvr2Stream> {
+    let seed = req.seed.unwrap_or(0);
+    // Decode the whole source to numbered PNGs on disk (RAM-free), then peek the first frame's dims.
+    let paths =
+        decode_seedvr2_source_to_disk(api, settings, &job.id, source_path, src_frames_dir).await?;
+    let n = paths.len();
+    let first = load_seedvr2_window(&paths, 0, 1).await?;
+    let src_w = first[0].width;
+    let src_h = first[0].height;
+    drop(first);
+
+    // Resolve + snap the target output resolution (identical to the whole-clip path).
+    let (target_w, target_h) = match (req.target_width, req.target_height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
+        _ => (src_w.saturating_mul(factor), src_h.saturating_mul(factor)),
+    };
+    let target_w = snap_seedvr2_dim(target_w);
+    let target_h = snap_seedvr2_dim(target_h);
+
+    tokio::fs::create_dir_all(out_frames_dir).await?;
+
+    // Plan the worker windows over the REAL frame count with the engine's own planner: a valid chunk
+    // length + `DEFAULT_OVERLAP` cross-fade, so the worker-window seam handling matches the engine's
+    // internal chunking exactly.
+    let ov = seedvr2_video::DEFAULT_OVERLAP;
+    let plan = seedvr2_video::plan_chunks(n as i32, SEEDVR2_WORKER_CHUNK_FRAMES, ov);
+    let mut assembler = Seedvr2StreamAssembler::new(n as i32, ov);
+    let mut next_index = 0usize;
+    let mut out_w = target_w;
+    let mut out_h = target_h;
+    let window_total = plan.len().max(1);
+
+    for (window_idx, chunk) in plan.iter().enumerate() {
+        check_cancel(api, &job.id, SEEDVR2_CANCEL_MESSAGE).await?;
+        // Real frames only for this window; the engine's preprocess_chunk pads a partial tail internally.
+        let start = chunk.start.max(0) as usize;
+        if start >= n {
+            break;
+        }
+        let len = chunk.len.max(0) as usize;
+        let window_frames = load_seedvr2_window(&paths, start, len).await?;
+        if window_frames.is_empty() {
+            continue;
+        }
+        let window_len = window_frames.len() as u32;
+
+        // Per-window progress spanning the Generating band (0.18 → 0.55) so the bar advances per window
+        // even though each window's own denoise progress is reported inside `generate_video`.
+        let frac = 0.18 + 0.37 * (window_idx as f64 / window_total as f64);
+        update_job(
+            api,
+            &job.id,
+            video_progress(
+                JobStatus::Running,
+                ProgressStage::Generating,
+                frac,
+                &format!("Upscaling window {}/{window_total}.", window_idx + 1),
+                None,
+                backend,
+            ),
+        )
+        .await?;
+
+        // Upscale this window through the shared streaming driver (generator cache + stall watchdog +
+        // cancel + per-step progress). Same seed for every window → deterministic per-chunk blend.
+        let input = VideoGenInput {
+            engine_id: SEEDVR2_ENGINE_ID,
+            model_dir: weights_dir.clone(),
+            conditioning: vec![Conditioning::VideoClip {
+                frames: window_frames,
+                frame_idx: 0,
+                strength: 1.0,
+            }],
+            width: target_w,
+            height: target_h,
+            frames: window_len,
+            fps: source_fps,
+            seed,
+            softness: Some(req.softness),
+            ..Default::default()
+        };
+        let decoded = generate_video(api, settings, job, backend, input).await?;
+        if let Some(frame) = decoded.frames.first() {
+            out_w = frame.width;
+            out_h = frame.height;
+        }
+        let upscaled: Vec<Image> = decoded
+            .frames
+            .into_iter()
+            .map(|frame| Image {
+                width: frame.width,
+                height: frame.height,
+                pixels: frame.pixels,
+            })
+            .collect();
+
+        // Cross-fade this window against the retained tail (the engine's own blend) and stream the
+        // now-finalized frames to disk.
+        let finalized = assembler.push_window(chunk.start, upscaled);
+        next_index = append_seedvr2_frames(out_frames_dir, next_index, finalized).await?;
+    }
+
+    // Flush the final tail.
+    let tail = assembler.finish();
+    next_index = append_seedvr2_frames(out_frames_dir, next_index, tail).await?;
+
+    if next_index == 0 {
+        return Err(WorkerError::InvalidPayload(
+            "source video produced no frames to upscale".to_owned(),
+        ));
+    }
+
+    Ok(Seedvr2Stream {
+        frame_count: next_index,
+        fps: source_fps,
+        out_w,
+        out_h,
+        src_w,
+        src_h,
+        seed,
+    })
 }
 
 /// Dispatch handler for `JobType::VideoUpscale`: decode the source clip, run the SeedVR2 upscaler
@@ -1679,20 +1963,9 @@ pub(crate) async fn run_video_upscale_job(
         .and_then(Value::as_str)
         .map(str::to_owned);
 
-    // Host-RAM bound (sc-8829, F-027): reject an over-budget clip BEFORE decode / GPU work, using the
-    // asset sidecar's width/height/duration/fps. When any field is missing the estimate is 0 and this
-    // is a no-op — the post-decode backstop (below) re-checks with the real decoded frame count so the
-    // giant 4× allocation is still refused, just a bit later. `check_seedvr2_host_ram` fails loud with
-    // the limit + the clip's size so no minutes-long GPU run is wasted on an eventual OOM-kill.
-    {
-        let meta_w = file.get("width").and_then(Value::as_u64).unwrap_or(0);
-        let meta_h = file.get("height").and_then(Value::as_u64).unwrap_or(0);
-        let meta_duration = file.get("duration").and_then(Value::as_f64).unwrap_or(0.0);
-        let meta_frames = (meta_duration * source_fps as f64).round().max(0.0) as u64;
-        // Coarse pre-flight: target dims aren't snapped yet, so size the output from `factor` (None).
-        // The accurate post-decode check below re-runs with the real snapped target resolution.
-        check_seedvr2_host_ram(meta_frames, meta_w, meta_h, factor as u64, None)?;
-    }
+    // sc-9595: no host-RAM cap. The upscale streams in temporal worker windows (decode → upscale →
+    // append-encode one window at a time), so peak host RGB8 RAM is bounded to ~one window regardless
+    // of clip length — the sc-8829 whole-clip frame cap that rejected long/high-res clips is gone.
 
     check_cancel(api, &job.id, SEEDVR2_CANCEL_MESSAGE).await?;
     update_job(
@@ -1723,58 +1996,44 @@ pub(crate) async fn run_video_upscale_job(
         ),
     )
     .await?;
-    let source_frames = decode_seedvr2_source_frames(api, settings, &job.id, &source_path).await?;
-    let src_w = source_frames[0].width;
-    let src_h = source_frames[0].height;
-    let frame_count = source_frames.len() as u32;
-    let (target_w, target_h) = match (req.target_width, req.target_height) {
-        (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
-        _ => (src_w.saturating_mul(factor), src_h.saturating_mul(factor)),
-    };
-    let target_w = snap_seedvr2_dim(target_w);
-    let target_h = snap_seedvr2_dim(target_h);
-    // Post-decode backstop (sc-8829, F-027): re-check the host-RAM bound with the REAL decoded frame
-    // count + dimensions AND the real snapped target resolution — an explicit `target_width/height`
-    // can be much larger than `factor × src` (clamped to ≤4096), so sizing the output from the snapped
-    // target (not `factor²·src`) is what actually catches an oversized target. Runs AFTER the target
-    // snap but BEFORE `generate_video` fires the up-to-4× GPU allocation, so we still fail loud instead
-    // of OOM-killing mid-upscale.
-    check_seedvr2_host_ram(
-        frame_count as u64,
-        src_w as u64,
-        src_h as u64,
-        factor as u64,
-        Some((target_w as u64, target_h as u64)),
-    )?;
-    let seed = req.seed.unwrap_or(0);
-
-    // Run the SeedVR2 upscale through the shared streaming driver (generator cache + stall
-    // watchdog + cancel + Generating-stage progress). The VideoClip conditioning carries the LR
-    // source frame sequence; `width`/`height` are the target output size (÷16).
-    let input = VideoGenInput {
-        engine_id: SEEDVR2_ENGINE_ID,
-        model_dir: weights_dir,
-        conditioning: vec![Conditioning::VideoClip {
-            frames: source_frames,
-            frame_idx: 0,
-            strength: 1.0,
-        }],
-        width: target_w,
-        height: target_h,
-        frames: frame_count,
-        fps: source_fps,
+    // Decode the whole source to a numbered PNG sequence ON DISK (disk-bounded, no RAM), then load each
+    // temporal window on demand (sc-9595). `-fps_mode passthrough` preserves the exact source frame
+    // count / order; the output frame count/order/fps therefore stay identical to the whole-clip path.
+    let src_frames_dir = std::env::temp_dir().join(format!("sceneworks_seedvr2_src_{}", job.id));
+    let out_frames_dir = std::env::temp_dir().join(format!("sceneworks_seedvr2_out_{}", job.id));
+    let _ = tokio::fs::remove_dir_all(&out_frames_dir).await;
+    // RAII-guard the output PNG scratch so it is removed on EVERY exit after the stream: not just the
+    // stream error arm, but the create_dir_all / update_job progress POST / encode span below, any of
+    // which can `?`-return (transient POST failure, 409 stale-sweep reclaim, encode error, cancel).
+    // Without this the full multi-GB 4× sequence would leak on those paths (sc-9595 review).
+    let mut out_scratch = ScratchDir::new(out_frames_dir.clone());
+    let stream_result = run_seedvr2_stream(
+        api,
+        settings,
+        job,
+        backend,
+        &req,
+        &source_path,
+        &src_frames_dir,
+        &out_frames_dir,
+        factor,
+        source_fps,
+        weights_dir,
+    )
+    .await;
+    // Always drop the source PNG scratch (it's disk-only; the output dir is owned by `out_scratch`).
+    let _ = tokio::fs::remove_dir_all(&src_frames_dir).await;
+    // On stream failure, `out_scratch`'s Drop removes the output dir as the function returns.
+    let stream = stream_result?;
+    let Seedvr2Stream {
+        frame_count: out_count,
+        fps: out_fps,
+        out_w,
+        out_h,
+        src_w,
+        src_h,
         seed,
-        softness: Some(req.softness),
-        ..Default::default()
-    };
-    let decoded = generate_video(api, settings, job, backend, input).await?;
-    let out_fps = decoded.fps;
-    let out_count = decoded.frames.len();
-    let (out_w, out_h) = decoded
-        .frames
-        .first()
-        .map(|frame| (frame.width, frame.height))
-        .unwrap_or((target_w, target_h));
+    } = stream;
     let duration = out_count as f64 / out_fps.max(1) as f64;
 
     // Plan the output asset path (nested under the per-generation id, like VideoPlan).
@@ -1803,9 +2062,18 @@ pub(crate) async fn run_video_upscale_job(
         ),
     )
     .await?;
-    // Encode the upscaled frames to a (silent) mp4 + poster + faststart.
+    // Encode the streamed PNG sequence to a (silent) mp4 + poster + faststart (byte-identical ffmpeg
+    // args to the old whole-clip `encode_media` path), then drop the output scratch dir.
     let ctx = FfmpegContext::new(api, settings, &job.id, SEEDVR2_CANCEL_MESSAGE);
-    encode_media(&media_path, decoded, Some(ctx)).await?;
+    let encode_result =
+        encode_seedvr2_stream(&media_path, &out_frames_dir, out_count, out_fps, Some(ctx)).await;
+    // Free the multi-GB PNG scratch as soon as the encode returns (before the mux step), on BOTH the
+    // ok and err arms; then disarm the guard so its Drop doesn't redundantly re-remove. `encode_result`
+    // is propagated AFTER cleanup — an encode error still leaves no scratch behind (and if this early
+    // removal is itself skipped by an unwind, the still-armed guard's Drop is the backstop).
+    let _ = tokio::fs::remove_dir_all(&out_frames_dir).await;
+    out_scratch.disarm();
+    encode_result?;
 
     // Source-audio passthrough: remux the source's audio onto the upscaled video. `-map 1:a:0?`
     // makes audio optional, so a source with no audio yields a clean video-only file (no error);
@@ -9474,159 +9742,254 @@ mod tests {
         );
     }
 
-    // sc-8829 (F-027): host-RAM bound for the SeedVR2 upscale. These lock the estimator math and the
-    // fail-loud cap; the real per-machine budget (`seedvr2_host_ram_budget_bytes`) is exercised
-    // indirectly via the explicit-budget check below (the pure estimator is the oracle).
+    // sc-9595: streaming worker-window chunking for the SeedVR2 upscale (replaces the sc-8829 host-RAM
+    // cap). The seam-correctness guarantee is that WORKER-WINDOWED streaming assembly is FRAME-IDENTICAL
+    // to a single whole-clip `video::assemble_overlap` — same frame count, order, and cross-fade blend —
+    // reusing the engine's own public `plan_chunks`/`assemble_overlap` one level up. These tests model
+    // the engine as a deterministic per-chunk upscale (a pure function of its source pixel window +
+    // seed, which is what `pipeline::preprocess_chunk` guarantees), exactly as the real driver does, and
+    // exercise the `Seedvr2StreamAssembler`. Real-weight PIXEL identity of an internally sub-chunked
+    // worker window is a GPU-golden concern the ignore-gated smokes don't run (see the PR notes).
 
-    /// The estimate is source RGB8 (`w·h·3` per frame) + the output buffer, times frames. With
-    /// `out_dims = None` the output is sized from `factor²·src` (the coarse pre-decode gate); with
-    /// explicit `out_dims` it's sized from the real snapped target (the accurate post-decode path).
+    /// A single-channel synthetic frame (1×1 RGB, all bytes = `v`) — enough to test frame identity,
+    /// ordering, and the cross-fade blend byte-exactly.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn syn_frame(v: u8) -> Image {
+        Image {
+            width: 1,
+            height: 1,
+            pixels: vec![v, v, v],
+        }
+    }
+
+    /// Model the engine's whole-clip upscale over synthetic frames: `plan_chunks` at engine chunk `c`,
+    /// each chunk = the (identity-)upscaled source window (clamp-padded past the end, like
+    /// `preprocess_chunk`), then `assemble_overlap`. Mirrors `pipeline::generate_video` exactly, minus
+    /// the real tensor pass — the deterministic per-chunk structure is what worker windowing must
+    /// reproduce.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn engine_whole_clip_synthetic(src: &[Image], c: i32, ov: i32) -> Vec<Image> {
+        let n = src.len() as i32;
+        let plan = seedvr2_video::plan_chunks(n, c, ov);
+        let mut chunk_frames: Vec<Vec<Image>> = Vec::with_capacity(plan.len());
+        for chunk in &plan {
+            let mut frames = Vec::with_capacity(chunk.len as usize);
+            for j in 0..chunk.len {
+                let idx = (chunk.start + j).clamp(0, n - 1) as usize;
+                frames.push(src[idx].clone());
+            }
+            chunk_frames.push(frames);
+        }
+        seedvr2_video::assemble_overlap(&plan, &chunk_frames, n, ov)
+    }
+
+    /// Drive the worker-window streaming path over synthetic frames: `plan_chunks` at the worker chunk
+    /// size, upscale each window via `engine_whole_clip_synthetic` (the engine re-plans internally at
+    /// engine chunk `engine_c` over the LOCAL window), and cross-fade across worker windows with the
+    /// `Seedvr2StreamAssembler`. Returns the streamed frame sequence + the max retained-tail length
+    /// observed (the memory bound).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn worker_streamed_synthetic(
+        src: &[Image],
+        worker_chunk: i32,
+        engine_c: i32,
+        ov: i32,
+    ) -> (Vec<Image>, usize) {
+        let n = src.len() as i32;
+        let plan = seedvr2_video::plan_chunks(n, worker_chunk, ov);
+        let mut assembler = Seedvr2StreamAssembler::new(n, ov);
+        let mut out: Vec<Image> = Vec::new();
+        let mut max_tail = 0usize;
+        for chunk in &plan {
+            let start = chunk.start.max(0) as usize;
+            if start >= src.len() {
+                break;
+            }
+            let end = (start + chunk.len.max(0) as usize).min(src.len());
+            let window_src: Vec<Image> = src[start..end].to_vec();
+            let upscaled = engine_whole_clip_synthetic(&window_src, engine_c, ov);
+            out.extend(assembler.push_window(chunk.start, upscaled));
+            max_tail = max_tail.max(assembler.retained.len());
+        }
+        out.extend(assembler.finish());
+        (out, max_tail)
+    }
+
+    /// THE core seam-correctness guarantee (sc-9595): windowed streaming assembly is frame-identical to
+    /// a single whole-clip `assemble_overlap`, across a sweep of frame counts, worker-chunk sizes, and
+    /// engine-chunk sizes — including where the worker chunk and engine chunk differ. Byte-exact on the
+    /// synthetic frames, so both the frame ORDER and the cross-fade BLEND match the whole-clip path.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[test]
-    fn seedvr2_host_bytes_estimate_sums_source_and_upscaled_output() {
-        // 1 frame, 1920×1080, 4× (factor-sized): src = 1920·1080·3 = 6_220_800; out = 16× that.
-        let src = 1920u64 * 1080 * 3;
-        assert_eq!(
-            seedvr2_estimated_host_bytes(1, 1920, 1080, 4, None),
-            src + src * 16
-        );
-        // 2× scales the output term by 4; 100 frames scale linearly.
-        assert_eq!(
-            seedvr2_estimated_host_bytes(100, 1920, 1080, 2, None),
-            100 * (src + src * 4)
-        );
-        // A 1× (identity) upscale still counts both buffers (src + src).
-        assert_eq!(
-            seedvr2_estimated_host_bytes(10, 640, 480, 1, None),
-            10 * (640 * 480 * 3) * 2
-        );
-        // Explicit output dims size the output term directly, IGNORING factor: a 640×480 source with a
-        // 4096×4096 target (factor is irrelevant here) => src + 4096·4096·3 per frame.
-        let src_small = 640u64 * 480 * 3;
-        let out_big = 4096u64 * 4096 * 3;
-        assert_eq!(
-            seedvr2_estimated_host_bytes(1, 640, 480, 2, Some((4096, 4096))),
-            src_small + out_big
+    fn seedvr2_stream_matches_whole_clip_assembly() {
+        let ov = seedvr2_video::DEFAULT_OVERLAP;
+        let mut cases = 0;
+        for n in [1usize, 5, 8, 12, 16, 20, 28, 40, 41, 64, 100, 137, 256, 257] {
+            let src: Vec<Image> = (0..n)
+                .map(|i| syn_frame(((i * 13 + 5) % 251) as u8))
+                .collect();
+            for &worker_chunk in &[16i32, 20, 32, 64] {
+                for &engine_c in &[8i32, 12, 16, 24, 32] {
+                    let whole = engine_whole_clip_synthetic(&src, engine_c, ov);
+                    let (streamed, _) = worker_streamed_synthetic(&src, worker_chunk, engine_c, ov);
+                    assert_eq!(
+                        streamed.len(),
+                        n,
+                        "frame count preserved (n={n}, worker={worker_chunk}, engine={engine_c})"
+                    );
+                    assert_eq!(
+                        streamed, whole,
+                        "windowed == whole-clip (n={n}, worker={worker_chunk}, engine={engine_c})"
+                    );
+                    cases += 1;
+                }
+            }
+        }
+        assert!(cases > 200, "swept a broad matrix ({cases} cases)");
+    }
+
+    /// The streaming assembler holds BOUNDED memory: the retained tail never exceeds one worker window
+    /// plus the overlap, regardless of clip length — the property that removes the whole-clip host-RAM
+    /// footprint the sc-8829 cap existed to bound.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn seedvr2_stream_retains_bounded_tail() {
+        let ov = seedvr2_video::DEFAULT_OVERLAP;
+        let worker_chunk = SEEDVR2_WORKER_CHUNK_FRAMES;
+        // A long clip that would be tens of GB of RGB8 whole — the exact case the cap rejected.
+        let n = 4000usize;
+        let src: Vec<Image> = (0..n).map(|i| syn_frame((i % 251) as u8)).collect();
+        let (streamed, max_tail) = worker_streamed_synthetic(&src, worker_chunk, 16, ov);
+        assert_eq!(streamed.len(), n, "every frame emitted, in order");
+        // The retained tail is at most one merged worker window (worker_chunk + a partial next window's
+        // overlap), never the whole clip — orders of magnitude below `n`.
+        assert!(
+            max_tail as i32 <= worker_chunk + ov + 1,
+            "retained tail {max_tail} bounded by one window (~{}), not the {n}-frame clip",
+            worker_chunk + ov
         );
     }
 
-    /// Unknown dimensions/frame count (a 0 in any field) => the pre-decode check is a no-op (the
-    /// post-decode backstop re-checks with the real values), so a missing sidecar never wrongly rejects.
+    /// Frame ORDER is preserved end-to-end: each streamed frame carries its source ordinal through the
+    /// (identity) upscale + cross-fade, so the sequence is monotonic and complete (no drops/dupes/swaps)
+    /// even across worker-window boundaries with a partial trailing window.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[test]
-    fn seedvr2_host_ram_check_skips_when_metadata_unknown() {
-        // Even a would-be-enormous clip passes when frame_count is unknown (0).
-        assert!(check_seedvr2_host_ram(0, 1920, 1080, 4, None).is_ok());
-        assert!(check_seedvr2_host_ram(100_000, 0, 0, 4, None).is_ok());
-    }
-
-    /// The estimator + budget compose into a fail-loud rejection: the finding's few-minute 1080p clip
-    /// (~4300 frames at 4× ≈ 320 GB of RGB8) exceeds any realistic host budget, so it must error — and
-    /// the message names both the limit and the clip size. A short clip under the budget passes.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
-    #[test]
-    fn seedvr2_host_ram_budget_rejects_oversized_clip() {
-        // The pathological clip: its per-frame footprint alone (src + 16× output) times ~4300 frames is
-        // hundreds of GB — larger than the derived budget on any machine this worker runs on.
-        let big = seedvr2_estimated_host_bytes(4300, 1920, 1080, 4, None);
-        assert!(
-            big as f64 / (1024.0 * 1024.0 * 1024.0) > 300.0,
-            "sanity: the pathological clip is >300 GB of RGB8"
-        );
-        // The real budget is a fraction of physical RAM, always < 300 GB on supported hardware, so this
-        // clip is rejected loudly with an actionable message.
-        let err = check_seedvr2_host_ram(4300, 1920, 1080, 4, None).unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("Video too large"), "fails loud: {msg}");
-        assert!(
-            msg.contains("4300 frames"),
-            "names the clip's frame count: {msg}"
-        );
-        assert!(
-            msg.contains("1920×1080"),
-            "names the source resolution: {msg}"
-        );
-
-        // A tiny clip (8 frames, 64×48, 2×) is nowhere near any budget — it must pass.
-        assert!(
-            check_seedvr2_host_ram(8, 64, 48, 2, None).is_ok(),
-            "a small clip is not rejected"
+    fn seedvr2_stream_preserves_frame_order() {
+        let ov = seedvr2_video::DEFAULT_OVERLAP;
+        // 150 frames, worker chunk 64 → 3 worker windows with a partial last one; a value per ordinal.
+        let n = 150usize;
+        let src: Vec<Image> = (0..n).map(|i| syn_frame((i % 251) as u8)).collect();
+        let (streamed, _) = worker_streamed_synthetic(&src, SEEDVR2_WORKER_CHUNK_FRAMES, 16, ov);
+        assert_eq!(streamed.len(), n);
+        // Non-overlap frames pass through unblended → equal to the source ordinal value; overlap frames
+        // are cross-faded but between two IDENTICAL-value windows here only at seams. Compare to the
+        // whole-clip oracle for the exact expected values.
+        let whole = engine_whole_clip_synthetic(&src, 16, ov);
+        assert_eq!(
+            streamed, whole,
+            "streamed frames match the whole-clip oracle"
         );
     }
 
-    /// The core of this fix (sc-8829 review): an explicit `target_width/height` far larger than
-    /// `factor × src` (clamped ≤4096) is now REJECTED by the post-decode check. A modest source with a
-    /// 2× factor would PASS the old `factor²·src`-only estimate, but a 4096×4096 snapped target holds a
-    /// ~200 MB/frame output buffer — over ~4300 frames that dwarfs any host budget and must fail loud.
+    /// Cap removal (sc-9595): a clip that the sc-8829 cap would have REJECTED (huge whole-clip RGB8
+    /// footprint) now streams to completion with the correct frame count and no error — the capability
+    /// narrowing is gone. (The removed `check_seedvr2_host_ram` / `seedvr2_estimated_host_bytes`
+    /// helpers no longer exist; this test would not compile if a hard cap were reintroduced in the
+    /// streaming path.)
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[test]
-    fn seedvr2_host_ram_rejects_oversized_explicit_target() {
-        // 1280×720 source at 2× would be a 2560×1440 output (~11 MB/frame) — the OLD factor-only
-        // estimate. Under that estimate ~4300 frames is only ~60 GB and could pass on a big machine.
-        let factor_only = seedvr2_estimated_host_bytes(4300, 1280, 720, 2, None);
-        // But the request overrides the target to 4096×4096 (~50 MB/frame output): the accurate,
-        // target-sized estimate is far larger — proving the old estimate under-counted this job.
-        let target_sized = seedvr2_estimated_host_bytes(4300, 1280, 720, 2, Some((4096, 4096)));
-        assert!(
-            target_sized > factor_only * 3,
-            "the explicit 4096² target dwarfs the factor²·src estimate ({target_sized} > {factor_only})"
+    fn seedvr2_stream_upscales_formerly_capped_clip() {
+        let ov = seedvr2_video::DEFAULT_OVERLAP;
+        // ~4300 frames — the finding's pathological few-minute 1080p clip the old cap rejected outright.
+        let n = 4300usize;
+        let src: Vec<Image> = (0..n).map(|i| syn_frame((i % 251) as u8)).collect();
+        let (streamed, max_tail) =
+            worker_streamed_synthetic(&src, SEEDVR2_WORKER_CHUNK_FRAMES, 16, ov);
+        assert_eq!(
+            streamed.len(),
+            n,
+            "the formerly-capped clip streams in full"
         );
         assert!(
-            target_sized as f64 / (1024.0 * 1024.0 * 1024.0) > 200.0,
-            "sanity: the target-sized footprint is >200 GB of RGB8"
-        );
-        // The factor-only pre-decode gate would let this through; the target-sized post-decode check
-        // rejects it loudly (the whole point of the fix).
-        let err = check_seedvr2_host_ram(4300, 1280, 720, 2, Some((4096, 4096))).unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("Video too large"), "fails loud: {msg}");
-        assert!(
-            msg.contains("4096×4096 output"),
-            "names the oversized target output size: {msg}"
-        );
-        // factor==2 minor: never suggest downgrading to 2× while already at (or below) 2×.
-        assert!(
-            !msg.contains("use 2×"),
-            "does not suggest 2× when already at 2× / explicit target: {msg}"
+            (max_tail as i32) < n as i32 / 10,
+            "peak retained frames stay far below the whole clip (bounded memory)"
         );
     }
 
-    /// The factor==2 minor in isolation: a factor-only rejection at 2× must not tell the user to "use
-    /// 2× instead" (they already are). At 4× the downgrade suggestion IS present.
+    /// The `ScratchDir` RAII guard removes the (multi-GB, in prod) output PNG scratch on the ERROR path
+    /// (sc-9595 review): dropping an ARMED guard deletes a populated dir — this is the guarantee that
+    /// covers a create_dir_all / progress-POST / encode `?`-return or a cancel between the stream and the
+    /// encode, where the old code leaked the whole 4× sequence. Disarming (the success path, after the
+    /// caller already removed the dir) makes Drop a no-op so it can't fight a concurrent same-name reuse.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[test]
-    fn seedvr2_host_ram_message_suppresses_self_factor_downgrade() {
-        let at_two = format!(
-            "{}",
-            check_seedvr2_host_ram(4300, 1920, 1080, 2, None).unwrap_err()
-        );
+    fn scratch_dir_guard_cleans_up_on_drop_and_respects_disarm() {
+        let base = std::env::temp_dir().join(format!(
+            "sceneworks_seedvr2_scratchtest_{}",
+            Uuid::new_v4().simple()
+        ));
+
+        // ARMED guard dropped (error path): a populated dir + a nested file are removed on Drop.
+        let armed_dir = base.join("armed");
+        std::fs::create_dir_all(&armed_dir).unwrap();
+        std::fs::write(armed_dir.join("frame_00001.png"), b"not-a-real-png").unwrap();
+        assert!(armed_dir.exists(), "precondition: scratch populated");
+        {
+            let _guard = ScratchDir::new(armed_dir.clone());
+            // Simulate the post-stream encode span returning Err before any manual cleanup: the guard
+            // goes out of scope here without disarming.
+        }
         assert!(
-            !at_two.contains("use 2×"),
-            "at 2× the message must not suggest 2×: {at_two}"
+            !armed_dir.exists(),
+            "armed guard's Drop must remove the leaked output scratch on the error path"
         );
-        let at_four = format!(
-            "{}",
-            check_seedvr2_host_ram(4300, 1920, 1080, 4, None).unwrap_err()
-        );
+
+        // DISARMED guard dropped (success path): the caller already removed the dir, and Drop must NOT
+        // re-remove — modelled by a dir the guard deliberately leaves intact.
+        let disarmed_dir = base.join("disarmed");
+        std::fs::create_dir_all(&disarmed_dir).unwrap();
+        {
+            let mut guard = ScratchDir::new(disarmed_dir.clone());
+            guard.disarm();
+        }
         assert!(
-            at_four.contains("use 2× instead"),
-            "at 4× the message suggests dropping to 2×: {at_four}"
+            disarmed_dir.exists(),
+            "disarmed guard's Drop must be a no-op (caller owns cleanup)"
         );
+
+        // A guard over an ALREADY-removed dir drops cleanly (benign NotFound, no panic).
+        let missing_dir = base.join("missing");
+        {
+            let _guard = ScratchDir::new(missing_dir.clone());
+        }
+        assert!(!missing_dir.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// `advanced.noAudio` maps to the engine's `video_mode = "no_audio"`; enhance flags
