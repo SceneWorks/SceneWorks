@@ -1487,14 +1487,18 @@
           // variant can slot in alongside `bf16/` without a rename. Gated non-commercial.
           // sc-8508: this is a genuine per-tier quant variant (q4 vs bf16 of the same model), so it is
           // labeled `variant: bf16` — even though the two tiers happen to live in separate HF repos.
-          // sc-9092: macOS-only now. The off-Mac candle lane packed-loads the `SceneWorks/ideogram-4-mlx`
-          // q4 turnkey above (via the shared resolver), so the retired `candle_ideogram_repo` bf16 target
-          // resolves nothing off-Mac — the windows/linux platforms are dropped.
+          // sc-9650: installable on Windows/Linux too — the candle Ideogram loader reads this repo's
+          // `bf16/` single-file `transformer/model.safetensors` and dense-loads it via `linear_detect`
+          // (no `.scales` sibling → the dense arm), exactly like macOS/MLX; the worker resolves it off-Mac
+          // through the un-gated `IDEOGRAM_BF16_REPO` bf16 branch (GPU-validated on sm_120: renders a
+          // coherent 1024² image). ~55 GB on disk / ~80 GB MEASURED VRAM for the two-DiT path — a 96 GB-card
+          // tier (see the candle VRAM block below). The packed q4/q8 tiers above still come from the `-mlx`
+          // turnkey; `candle_ideogram_repo` stays retired.
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4",
           "variant": "bf16",
           "files": ["bf16/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 54760833024,
           "footprint": { "diskSizeBytes": 54760833024, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
@@ -1541,11 +1545,13 @@
       },
       // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
       // 1024²/10-step via the candle-gen nvidia-smi peak monitor: q4 packed overall-peak 38.5 GB (the
-      // two-DiT Ideogram path). minMemoryGb 46 covers it with headroom; q8 ESTIMATED (~44 GB) pending
-      // measurement (bf16 not hosted for this id).
+      // two-DiT Ideogram path). minMemoryGb 46 gates the DEFAULT (q4) tier and covers it with headroom;
+      // q8 ESTIMATED (~44 GB). bf16 (sc-9650, off-Mac dense tier) MEASURED ~80 GB overall-peak (RTX PRO
+      // 6000, 1024²/48-step — the two dense-bf16 DiTs dominate); a 96 GB-card tier, small cards see it
+      // gated by its `vramGbByTier` ceiling.
       "candle": {
         "minMemoryGb": 46,
-        "vramGbByTier": { "q4": 38.5, "q8": 44.0 },
+        "vramGbByTier": { "q4": 38.5, "q8": 44.0, "bf16": 80.0 },
         "measured": false
       },
       // Ideogram Non-Commercial Model Agreement (gated): accept the license at the source repo and
@@ -1638,8 +1644,12 @@
           // advanced mlxQuantize<=0, rather than duplicating it into the MLX turnkey repo. Same gated
           // non-commercial license.
           // sc-8508: genuine per-tier quant variant (q4 vs bf16 of the same model) → labeled `bf16`.
-          // sc-9092: macOS-only now — the off-Mac candle lane packed-loads the `SceneWorks/ideogram-4-mlx`
-          // q4 turnkey above, so the retired `candle_ideogram_repo` bf16 target resolves nothing off-Mac.
+          // bf16 (sc-8513): the separate `SceneWorks/ideogram-4` `bf16/` dense tier, carrying
+          // `turbo_lora.safetensors`. macOS-only FOR NOW: sc-9650 enabled candle bf16 for the base id, but
+          // the candle Turbo LoRA merge on a dense bf16 base hits a BF16/F32 dtype mismatch
+          // (`candle-gen-ideogram` adapters.rs: the merge adds an F32 delta to the as-is BF16 base). Flip
+          // this to all-platforms once that candle-gen fix lands + the pin bumps. (Base q4/q8 come from the
+          // `-mlx` turnkey.)
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4",
           "variant": "bf16",
