@@ -928,6 +928,34 @@ pub(crate) async fn run_pose_detect_job(
         .map(|s| resolve_source(s, &store, settings, project_id, project_path.as_deref()))
         .collect::<WorkerResult<_>>()?;
 
+    // Snapshot the staged File-Upload temp paths up front so cleanup runs on EVERY exit
+    // path — success, cancel, or an intervening error (sc-8912). The old code only cleaned
+    // up after the render finished, so a cancel/detect/render failure leaked the staged
+    // uploads. `resolved` is later moved into the render task, so this list (cheap: just
+    // the temp paths) is what the deferred cleanup keys off, independent of `resolved`.
+    let temp_upload_paths: Vec<PathBuf> = resolved
+        .iter()
+        .filter(|s| s.temp)
+        .filter_map(|s| s.path.clone())
+        .collect();
+
+    // Run the fallible body, then clean up the temp uploads regardless of outcome before
+    // propagating (defer-style). Cleanup is confined to the pose-uploads cache inside
+    // `cleanup_temp_uploads`, so a project asset resolved by id is never touched.
+    let result = run_pose_detect_inner(api, settings, http_client, job, resolved, min_conf).await;
+    cleanup_temp_uploads(settings, &temp_upload_paths).await;
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_pose_detect_inner(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+    resolved: Vec<PoseSource>,
+    min_conf: f64,
+) -> WorkerResult<()> {
     update_job(
         api,
         &job.id,
@@ -994,13 +1022,14 @@ pub(crate) async fn run_pose_detect_job(
     // thread and grows the silent window toward the 90s stale-sweep on large multi-person high-res
     // batches — the same failure class sc-8390 fixed for the inference half. Fold it into a
     // `spawn_blocking` under `run_blocking_with_heartbeat` so it's both off-thread AND heartbeat-
-    // covered (sc-8848). `resolved` is moved in for the render and handed back out so the subsequent
-    // `cleanup_temp_sources` still sees it. The render loop is worker code too, so it shares the
-    // detect stage's `CancelFlag` (sc-9123) and bails between sources AND between per-person
-    // rasters (each is a `max(w,h)²` canvas + PNG encode — the expensive unit) with the typed
-    // `Canceled`; any skeleton PNGs already written sit in the job-scoped cache dir and are inert.
+    // covered (sc-8848). `resolved` is moved into the render task (it owns the source paths + asset
+    // ids for the output records); temp-upload cleanup keys off the snapshot the caller took before
+    // this move (sc-8912), so it doesn't need handing back. The render loop is worker code too, so it
+    // shares the detect stage's `CancelFlag` (sc-9123) and bails between sources AND between
+    // per-person rasters (each is a `max(w,h)²` canvas + PNG encode — the expensive unit) with the
+    // typed `Canceled`; any skeleton PNGs already written sit in the job-scoped cache dir and are inert.
     let render_cancel = cancel.clone();
-    let (out_sources, resolved) = run_blocking_with_heartbeat(
+    let out_sources = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
@@ -1090,14 +1119,10 @@ pub(crate) async fn run_pose_detect_job(
                     "poses": poses,
                 }));
             }
-            Ok((out_sources, resolved))
+            Ok(out_sources)
         }),
     )
     .await?;
-
-    // Delete File-Upload temp sources now detection is done (guarded to the
-    // pose-uploads cache so a project asset resolved by id is never removed).
-    cleanup_temp_sources(settings, &resolved).await;
 
     let mut result = JsonObject::new();
     result.insert("sources".to_owned(), Value::Array(out_sources));
@@ -1124,16 +1149,20 @@ pub(crate) async fn run_pose_detect_job(
     Ok(())
 }
 
-async fn cleanup_temp_sources(settings: &Settings, sources: &[PoseSource]) {
+/// Delete the staged File-Upload temp sources, confined to the pose-uploads cache so a
+/// project asset resolved by id is never removed. Takes the pre-computed temp paths (the
+/// caller snapshots them before `resolved` is moved into the render task) so this runs on
+/// every exit path — success OR error (sc-8912). Best-effort; a missing/already-removed
+/// file is a no-op.
+async fn cleanup_temp_uploads(settings: &Settings, temp_paths: &[PathBuf]) {
+    if temp_paths.is_empty() {
+        return;
+    }
     let uploads_root = settings.data_dir.join("cache").join("pose-uploads");
     let Ok(uploads_root) = uploads_root.canonicalize() else {
         return;
     };
-    for src in sources {
-        if !src.temp {
-            continue;
-        }
-        let Some(path) = &src.path else { continue };
+    for path in temp_paths {
         if let Ok(resolved) = path.canonicalize() {
             if resolved.starts_with(&uploads_root) {
                 let _ = tokio::fs::remove_file(&resolved).await;
