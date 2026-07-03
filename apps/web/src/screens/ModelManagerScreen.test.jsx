@@ -1,17 +1,12 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { click } from "../testUtils/dom.js";
 
 // ModelManagerScreen reads `window.__TAURI__` at module load (via ../credentials.js)
 // to pick the keychain transport, so we set the Tauri bridge and re-import the
 // module fresh in each test. Credentials are served by the mocked `list_credentials`
 // command. AppContext is imported from the same fresh graph so the provider matches.
-async function click(element) {
-  await act(async () => {
-    element.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  });
-}
-
 const GATED_MODEL = {
   id: "flux_dev",
   name: "FLUX.1 [dev]",

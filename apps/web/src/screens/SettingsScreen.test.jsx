@@ -1,6 +1,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { click } from "../testUtils/dom.js";
 
 // SettingsScreen computes `isDesktop` from window.__TAURI__ at module load, so we
 // set the Tauri bridge and re-import the module fresh in each test.
@@ -11,12 +12,6 @@ async function changeField(input, value) {
     input.dispatchEvent(
       new window.Event(input.tagName === "SELECT" ? "change" : "input", { bubbles: true }),
     );
-  });
-}
-
-async function click(element) {
-  await act(async () => {
-    element.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   });
 }
 

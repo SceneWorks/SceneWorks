@@ -1,6 +1,6 @@
 import React, { act } from "react";
-import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
 
 // Control the mocked API: GET /assets returns `poseAssets`, mutations resolve and are
 // recorded in `apiCalls`.
@@ -48,12 +48,6 @@ function poseAsset(overrides = {}) {
   };
 }
 
-async function click(element) {
-  await act(async () => {
-    element.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  });
-}
-
 describe("PoseLibraryScreen", () => {
   let container;
   let root;
@@ -62,14 +56,11 @@ describe("PoseLibraryScreen", () => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     apiCalls.length = 0;
     poseAssets = [];
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -192,14 +183,11 @@ describe("PoseLibraryScreen — Create tab", () => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     apiCalls.length = 0;
     poseAssets = [];
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 

@@ -76,14 +76,9 @@ function defaultCharacterPrompt(character) {
   }
 }
 import {
-  applyPresetDefault,
-  buildStudioPresetPayload,
   finiteNumberOrUndefined,
-  presetNameTaken,
   serializeLora,
-  clearPresetDefault,
   noPresetId,
-  slugifyPresetId,
 } from "../presetUtils.js";
 import {
   LoraPickerSection,
@@ -92,6 +87,7 @@ import {
   PresetValidationWarnings,
   SavePresetPanel,
   useGenerationStudio,
+  useSavePreset,
 } from "./generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
@@ -440,14 +436,6 @@ export function ImageStudio() {
   const [expanding, setExpanding] = useState(false);
   const [submitError, setSubmitError] = useState("");
   const [guideOpen, setGuideOpen] = useState(false);
-  // "Save as Preset" sidebar control — snapshots the current config into the
-  // workspace preset library. Defaults to project scope, falling back to global
-  // when no project is open (project-scoped presets require a project).
-  const [presetName, setPresetName] = useState("");
-  const [presetScope, setPresetScope] = useState(activeProject ? "project" : "global");
-  const [savingPreset, setSavingPreset] = useState(false);
-  const [presetSaveMessage, setPresetSaveMessage] = useState({ tone: "neutral", text: "" });
-  const presetDefaultSnapshots = useRef({});
   const editImageAssets = useMemo(
     () =>
       assets.filter(
@@ -1125,67 +1113,87 @@ export function ImageStudio() {
     [imageDescribe, activeProject?.id, describeCaptionStyle],
   );
 
-  // When restoring a snapshot, the saved count/resolution/negativePrompt already
-  // reflect the user's last state — skip the one preset-default pass that fires as the
-  // restored preset resolves so it doesn't overwrite them. "None" applies no defaults,
-  // so no guard is needed there.
-  const skipPresetDefaultsOnHydrate = useRef(
-    Object.keys(saved).length > 0 && saved.selectedPresetId !== noPresetId,
-  );
-  // [defaults key, setter] pairs restored through the remember/clear snapshot
-  // machinery, so switching to None (or another preset) puts the user's prior
-  // value back. Only keys the preset actually carries are applied, so older
-  // presets (which only stored count/resolution/negativePrompt) keep working and
-  // full-snapshot presets restore the prompt, cfg, sampler, reference + upscale
-  // knobs. The model is intentionally absent — presets never switch the model.
-  const presetDefaultFields = [
-    ["prompt", setPrompt],
-    ["negativePrompt", setNegativePrompt],
-    ["resolution", setResolution],
-    ["count", setCount],
-    ["guidanceScale", setGuidanceOverride],
-    ["steps", setStepsOverride],
-    ["sampler", setSampler],
-    ["scheduler", setScheduler],
-    ["schedulerShift", setSchedulerShift],
-    ["guidanceMethod", setGuidanceMethod],
-    ["ipAdapterScale", setIpAdapterScale],
-    ["controlnetScale", setControlnetScale],
-    ["trueCfgScale", setTrueCfgScale],
-    ["viewAngle", setViewAngle],
-    ["upscaleEnabled", setUpscaleEnabled],
-    ["upscaleFactor", setUpscaleFactor],
-    ["upscaleEngine", setUpscaleEngine],
-    ["upscaleSoftness", setUpscaleSoftness],
-  ];
-  useEffect(() => {
-    if (skipPresetDefaultsOnHydrate.current && selectedPreset) {
-      skipPresetDefaultsOnHydrate.current = false;
-      return;
-    }
-    if (!selectedPreset) {
-      for (const [key, setter] of presetDefaultFields) {
-        clearPresetDefault(setter, presetDefaultSnapshots, key);
+  // Save-as-Preset + the preset-default hydrate pass (sc-8937 — shared with the Video
+  // studio via useSavePreset). The [key, setter] pairs are restored through the
+  // remember/clear snapshot machinery, so switching to None (or another preset) puts
+  // the user's prior value back. Only keys the preset actually carries are applied, so
+  // older presets (which only stored count/resolution/negativePrompt) keep working and
+  // full-snapshot presets restore the prompt, cfg, sampler, reference + upscale knobs.
+  // The model is intentionally absent — presets never switch the model.
+  const {
+    presetName,
+    setPresetName,
+    presetScope,
+    setPresetScope,
+    savingPreset,
+    presetSaveMessage,
+    setPresetSaveMessage,
+    handleSaveAsPreset,
+  } = useSavePreset({
+    saved,
+    selectedPreset,
+    setSelectedPresetId,
+    presets,
+    mode,
+    model,
+    selectedLoras,
+    effectiveLoraWeight,
+    createPreset,
+    activeProject,
+    setMode,
+    presetDefaultFields: [
+      ["prompt", setPrompt],
+      ["negativePrompt", setNegativePrompt],
+      ["resolution", setResolution],
+      ["count", setCount],
+      ["guidanceScale", setGuidanceOverride],
+      ["steps", setStepsOverride],
+      ["sampler", setSampler],
+      ["scheduler", setScheduler],
+      ["schedulerShift", setSchedulerShift],
+      ["guidanceMethod", setGuidanceMethod],
+      ["ipAdapterScale", setIpAdapterScale],
+      ["controlnetScale", setControlnetScale],
+      ["trueCfgScale", setTrueCfgScale],
+      ["viewAngle", setViewAngle],
+      ["upscaleEnabled", setUpscaleEnabled],
+      ["upscaleFactor", setUpscaleFactor],
+      ["upscaleEngine", setUpscaleEngine],
+      ["upscaleSoftness", setUpscaleSoftness],
+    ],
+    // Restore the saved sub-mode ("type"). Edit presets only surface in edit mode, so
+    // this only ever flips between text/character within one workflow.
+    modeIsPresetable: (savedMode) => IMAGE_MODES.includes(savedMode),
+    onApplyDefaults: (defaults) => {
+      // Filling the prompt box counts as a user edit, so character mode's default
+      // prompt won't clobber the restored prompt.
+      if (Object.prototype.hasOwnProperty.call(defaults, "prompt")) {
+        promptEdited.current = true;
       }
-      return;
-    }
-    const defaults = selectedPreset.defaults ?? {};
-    for (const [key, setter] of presetDefaultFields) {
-      if (Object.prototype.hasOwnProperty.call(defaults, key)) {
-        applyPresetDefault(presetDefaultSnapshots, key, setter, defaults[key]);
-      }
-    }
-    // Filling the prompt box counts as a user edit, so character mode's default
-    // prompt won't clobber the restored prompt.
-    if (Object.prototype.hasOwnProperty.call(defaults, "prompt")) {
-      promptEdited.current = true;
-    }
-    // Restore the saved sub-mode ("type"). Edit presets only surface in edit
-    // mode, so this only ever flips between text/character within one workflow.
-    if (IMAGE_MODES.includes(defaults.mode)) {
-      setMode(defaults.mode);
-    }
-  }, [selectedPreset?.id]);
+    },
+    buildDefaults: () => ({
+      prompt,
+      negativePrompt,
+      resolution,
+      count,
+      mode,
+      guidanceScale: finiteNumberOrUndefined(guidanceOverride),
+      steps: finiteNumberOrUndefined(stepsOverride),
+      sampler,
+      scheduler,
+      schedulerShift,
+      guidanceMethod,
+      upscaleEnabled,
+      upscaleFactor,
+      upscaleEngine,
+      upscaleSoftness,
+      // Reference/identity knobs only matter for the character flow; keep them
+      // out of plain text/edit presets so they don't carry irrelevant state.
+      ...(mode === "character_image"
+        ? { ipAdapterScale, controlnetScale, trueCfgScale, viewAngle }
+        : {}),
+    }),
+  });
 
   useStudioSettingsWriter("image", activeProject?.id ?? null, {
     mode,
@@ -1225,75 +1233,6 @@ export function ImageStudio() {
     usePid,
     lastUsedTiers,
   });
-
-  // Snapshot the current working config into a named recipe preset in the
-  // workspace library. Captures the literal prompt + every visible knob + the
-  // selected LoRAs with their weights; the seed is intentionally left out so the
-  // preset stays reusable. The backend additionally enforces id uniqueness and
-  // model/workflow + LoRA compatibility, surfaced here via err.message.
-  async function handleSaveAsPreset() {
-    const trimmed = presetName.trim();
-    if (!trimmed) {
-      setPresetSaveMessage({ tone: "error", text: "Name the preset before saving." });
-      return;
-    }
-    if (!slugifyPresetId(trimmed)) {
-      setPresetSaveMessage({ tone: "error", text: "Use letters or numbers in the preset name." });
-      return;
-    }
-    if (presetScope === "project" && !activeProject) {
-      setPresetSaveMessage({ tone: "error", text: "Open a project first, or save to all projects." });
-      return;
-    }
-    if (presetNameTaken(trimmed, presets)) {
-      setPresetSaveMessage({ tone: "error", text: `"${trimmed}" already exists — pick a unique name.` });
-      return;
-    }
-    const payload = buildStudioPresetPayload({
-      name: trimmed,
-      scope: presetScope,
-      mode,
-      model,
-      loras: selectedLoras.map((lora) => ({ id: lora.id, weight: effectiveLoraWeight(lora) })),
-      defaults: {
-        prompt,
-        negativePrompt,
-        resolution,
-        count,
-        mode,
-        guidanceScale: finiteNumberOrUndefined(guidanceOverride),
-        steps: finiteNumberOrUndefined(stepsOverride),
-        sampler,
-        scheduler,
-        schedulerShift,
-        guidanceMethod,
-        upscaleEnabled,
-        upscaleFactor,
-        upscaleEngine,
-        upscaleSoftness,
-        // Reference/identity knobs only matter for the character flow; keep them
-        // out of plain text/edit presets so they don't carry irrelevant state.
-        ...(mode === "character_image"
-          ? { ipAdapterScale, controlnetScale, trueCfgScale, viewAngle }
-          : {}),
-      },
-    });
-    setSavingPreset(true);
-    setPresetSaveMessage({ tone: "neutral", text: "" });
-    try {
-      const created = await createPreset(payload);
-      setSelectedPresetId(created?.id ?? payload.id);
-      setPresetName("");
-      setPresetSaveMessage({
-        tone: "success",
-        text: `Saved "${trimmed}" to ${presetScope === "project" ? "this project" : "all projects"}.`,
-      });
-    } catch (err) {
-      setPresetSaveMessage({ tone: "error", text: err.message });
-    } finally {
-      setSavingPreset(false);
-    }
-  }
 
   // Each stacked run carries its already-resolved completed assets + the
   // expected count, which the WorkerProgressCard image-grid variant uses to

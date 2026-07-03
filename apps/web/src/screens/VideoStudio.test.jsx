@@ -1,6 +1,6 @@
 import React, { act } from "react";
-import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { click, mountRoot, setInput, unmountRoot } from "../testUtils/dom.js";
 
 vi.mock("../api.js", async (importOriginal) => {
   const actual = await importOriginal();
@@ -64,12 +64,6 @@ function baseContext(overrides = {}) {
   };
 }
 
-async function click(element) {
-  await act(async () => {
-    element.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  });
-}
-
 async function doubleClick(element) {
   await act(async () => {
     element.dispatchEvent(new window.MouseEvent("dblclick", { bubbles: true }));
@@ -78,12 +72,6 @@ async function doubleClick(element) {
 
 const buttonWithText = (root, text) =>
   [...root.querySelectorAll("button")].find((b) => b.textContent.trim() === text);
-
-function setInput(element, value) {
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-  setter.call(element, value);
-  element.dispatchEvent(new window.Event("input", { bubbles: true }));
-}
 
 const saveButton = (container) =>
   [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Save as Preset"));
@@ -96,14 +84,11 @@ describe("VideoStudio Save as Preset", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -191,14 +176,11 @@ describe("VideoStudio video_bridge", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -257,14 +239,11 @@ describe("VideoStudio fit mode (sc-6139)", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -360,14 +339,11 @@ describe("VideoStudio Bernini task modes", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -605,14 +581,11 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -772,14 +745,11 @@ describe("VideoStudio Mac mode gating (sc-5716)", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 

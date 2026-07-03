@@ -57,6 +57,21 @@ mod credentials_ipc;
 // the production caller is cfg'd out, so allow dead_code there (the engines.rs precedent).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod generator_cache;
+// Resident-model cache for the native prompt-refine / caption / describe LLM (sc-8840, F-038): the
+// text-LLM sibling of `generator_cache`. Typed entirely against the tensor-free
+// `gen_core::core_llm::*` contract, so it links on ALL targets — the production seam
+// (`with_cached_refiner`) is reached only from the native refine path (macOS MLX / Windows candle),
+// so off both natives it is dead (allow it, mirroring the `generator_cache` precedent). Caches the
+// ~16 GB refine model keyed by weights dir + selection reqs with the SAME idle-eviction window as
+// `generator_cache` so a single setting bounds resident model memory across both lanes.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+mod refine_model_cache;
 use api_client::*;
 // Backend-neutral engine dispatch table + registry-derived capability advertisement
 // (sc-3723). All-targets: the table is pure data and the derivation runs off-macOS off an
