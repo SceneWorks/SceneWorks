@@ -529,6 +529,41 @@ async fn request_with_headers(
     (status, value)
 }
 
+/// Drive a request through the router with a simulated peer `SocketAddr` in the
+/// request extensions, so the `Option<ConnectInfo<SocketAddr>>` extractor in the
+/// auth middleware resolves to that peer (the plain `oneshot` path has no connect
+/// info and so is never loopback-trusted). Used to exercise the epic-4484
+/// loopback-trust bypass end-to-end (sc-8869).
+async fn request_with_peer(
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    body: Value,
+    peer: &str,
+) -> (StatusCode, Value) {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request builds");
+    let addr: SocketAddr = peer.parse().expect("peer addr parses");
+    request.extensions_mut().insert(ConnectInfo(addr));
+    let response = app.oneshot(request).await.expect("response returns");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body buffers");
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("json body parses")
+    };
+    (status, value)
+}
+
 async fn request_raw(
     app: axum::Router,
     method: &str,
@@ -9097,17 +9132,139 @@ async fn worker_restart_requires_token() {
     assert_eq!(body["ok"], true);
 }
 
+#[tokio::test]
+async fn ui_preferences_get_is_public_but_put_requires_token() {
+    // sc-8869 (F-067): with a token configured, the pre-auth theme READ (GET) stays
+    // public so the UI can load the theme before auth, but the PUT writes
+    // `ui-preferences.json` to disk and must present the token — an unauthenticated
+    // LAN caller can no longer overwrite the file (epic 4484: every write authenticated).
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+
+    // GET without a token: still public (theme read loads before auth).
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(prefs.get("theme").is_none());
+
+    // PUT without a token: rejected (disk write is now authenticated).
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "dark", "accent": "coral" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // The rejected write must not have touched the stored preferences.
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(prefs.get("theme").is_none());
+
+    // PUT with the correct token: accepted, and the write persists.
+    let (status, saved) = request_with_headers(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "dark", "accent": "coral" }),
+        &[("x-sceneworks-token", "secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["theme"], "dark");
+    assert_eq!(saved["accent"], "coral");
+
+    let (status, prefs) = request(app, "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["theme"], "dark");
+    assert_eq!(prefs["accent"], "coral");
+}
+
+#[tokio::test]
+async fn ui_preferences_put_allowed_via_loopback_trust() {
+    // sc-8869 (F-067) / epic 4484: the method-aware gate must not break the
+    // loopback-trust bypass. A loopback peer (the embedded desktop UI/worker) with
+    // `trust_loopback` on writes preferences without a token, exactly as before, while
+    // a LAN peer with no token is still rejected.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    settings.trust_loopback = true;
+    let app = create_app(settings).expect("app creates");
+
+    // Loopback peer, no token → allowed (desktop bypass preserved).
+    let (status, saved) = request_with_peer(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "light" }),
+        "127.0.0.1:51234",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["theme"], "light");
+
+    // LAN peer, no token → still rejected even with trust_loopback on.
+    let (status, _) = request_with_peer(
+        app,
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "dark" }),
+        "192.168.1.5:51234",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn ui_preferences_put_open_when_no_token_configured() {
+    // Behavior with NO token configured must be unchanged: everything is open, so an
+    // unauthenticated PUT still succeeds (the gate only bites when a token is set).
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    assert!(settings.access_token.is_empty());
+    let app = create_app(settings).expect("app creates");
+
+    let (status, saved) = request(
+        app,
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "dark" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["theme"], "dark");
+}
+
 #[test]
 fn requires_token_only_gates_api_paths() {
+    use axum::http::Method;
     // Non-API paths (embedded UI / SPA fallback) must never require a token,
     // or the browser cannot load the bundle to prompt for one.
-    assert!(!requires_token("/"));
-    assert!(!requires_token("/assets/index-abc.js"));
-    assert!(!requires_token("/projects/some-id"));
+    assert!(!requires_token(&Method::GET, "/"));
+    assert!(!requires_token(&Method::GET, "/assets/index-abc.js"));
+    assert!(!requires_token(&Method::GET, "/projects/some-id"));
     // Public API paths stay open; other API paths stay gated.
-    assert!(!requires_token("/api/v1/health"));
-    assert!(requires_token("/api/v1/jobs"));
-    assert!(requires_token("/api/v1/projects"));
+    assert!(!requires_token(&Method::GET, "/api/v1/health"));
+    assert!(requires_token(&Method::GET, "/api/v1/jobs"));
+    assert!(requires_token(&Method::GET, "/api/v1/projects"));
+}
+
+#[test]
+fn requires_token_ui_preferences_is_method_aware() {
+    use axum::http::Method;
+    // sc-8869 (F-067): the theme-preferences route shares a GET (pre-auth theme
+    // read, public) and a PUT (disk write, must be authenticated). Only the GET is
+    // exempt; the PUT — and any other method — is gated when a token is configured.
+    assert!(!requires_token(&Method::GET, "/api/v1/ui-preferences"));
+    assert!(requires_token(&Method::PUT, "/api/v1/ui-preferences"));
+    assert!(requires_token(&Method::POST, "/api/v1/ui-preferences"));
+    // Other single-method public paths stay exempt regardless of method (they
+    // only wire one route method each), and non-public API paths stay gated.
+    assert!(!requires_token(&Method::POST, "/api/v1/auth/verify"));
+    assert!(requires_token(&Method::PUT, "/api/v1/credentials"));
 }
 
 #[tokio::test]

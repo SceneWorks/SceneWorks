@@ -13,7 +13,7 @@ pub(crate) async fn access_control(
 ) -> Response {
     let peer = connect_info.map(|ConnectInfo(addr)| addr);
     if request.method() == Method::OPTIONS
-        || !requires_token(request.uri().path())
+        || !requires_token(request.method(), request.uri().path())
         || loopback_trusted(state.settings.trust_loopback, peer)
         || is_authorized(request.headers(), &state.settings)
         || media_ticket_authorized(&state, &request)
@@ -66,12 +66,29 @@ pub(crate) fn cors_layer(settings: &Settings) -> CorsLayer {
         ])
 }
 
-/// Whether a path is gated by the access token. Only `/api/*` routes are
+/// Whether a request is gated by the access token. Only `/api/*` routes are
 /// protected (minus the explicitly public ones); everything else is the
 /// embedded web bundle / SPA fallback, which a browser must be able to load
 /// before it can attach the token header.
-pub(crate) fn requires_token(path: &str) -> bool {
-    path.starts_with("/api/") && !PUBLIC_PATHS.contains(&path)
+///
+/// The exemption is method-aware, not path-only (sc-8869, F-067): a public path
+/// is only exempt for the read-safe method(s) it was whitelisted for. The theme
+/// preferences path (`/api/v1/ui-preferences`) shares its route between a
+/// pre-auth GET (the theme read that loads before auth, to avoid a flash) and a
+/// PUT that writes `ui-preferences.json` to disk. Only the GET stays public; the
+/// disk-writing PUT must still present the token when one is configured, so an
+/// unauthenticated LAN caller can't overwrite the file (epic 4484: every write is
+/// authenticated). All other `PUBLIC_PATHS` entries expose a single route method,
+/// so a path-only exemption for them is already method-correct.
+pub(crate) fn requires_token(method: &Method, path: &str) -> bool {
+    if !path.starts_with("/api/") {
+        return false;
+    }
+    if path == UI_PREFERENCES_PATH {
+        // Only the pre-auth theme READ is public; the disk-writing PUT is gated.
+        return method != Method::GET;
+    }
+    !PUBLIC_PATHS.contains(&path)
 }
 
 /// Whether a request should bypass the access token because it originates from this
