@@ -153,9 +153,12 @@ struct RenderedFrame {
 /// `Saving` progress update, guards the promotion with a cancel check that cleans up the frame on
 /// cancel, then lets `build_asset` produce the full asset JSON (it runs *after* the frame exists, so
 /// person-detect can run its detector on the rendered PNG). Writes the sidecar + recipe and indexes
-/// the asset. Returns the built asset JSON and its id for the caller's result payload.
+/// the asset. Returns the asset id, the built asset JSON, and any per-handler `extra` the builder
+/// produced alongside it (the detection payload for person-detect, `()` for frame-extract) — passed
+/// back through the return value rather than stashed in an interior-mutability cell, so the handler
+/// future stays `Send` for the job dispatcher's `tokio::spawn`.
 #[allow(clippy::too_many_arguments)]
-async fn render_frame_asset<F, Fut>(
+async fn render_frame_asset<F, Fut, T>(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -169,10 +172,10 @@ async fn render_frame_asset<F, Fut>(
     saving_message: &str,
     promotion_cancel_message: &str,
     build_asset: F,
-) -> WorkerResult<(String, Value)>
+) -> WorkerResult<(String, Value, T)>
 where
     F: FnOnce(RenderedFrame) -> Fut,
-    Fut: std::future::Future<Output = WorkerResult<Value>>,
+    Fut: std::future::Future<Output = WorkerResult<(Value, T)>>,
 {
     let project_path = &source.project_path;
     tokio::fs::create_dir_all(project_path.join("assets").join("frames")).await?;
@@ -208,7 +211,7 @@ where
 
     let source_rel = relative_path(project_path, &source.source_media_path)?;
     // Build the asset JSON now that the frame exists on disk (person-detect runs its detector here).
-    let asset = build_asset(RenderedFrame {
+    let (asset, extra) = build_asset(RenderedFrame {
         asset_id: asset_id.clone(),
         created_at,
         media_rel,
@@ -250,7 +253,7 @@ where
         .store
         .index_asset_sidecar(project_id, &sidecar_path)?;
 
-    Ok((asset_id, asset))
+    Ok((asset_id, asset, extra))
 }
 
 pub(crate) async fn run_frame_extract(
@@ -270,7 +273,7 @@ pub(crate) async fn run_frame_extract(
         .and_then(Value::as_str)
         .unwrap_or("clip")
         .to_owned();
-    let (asset_id, asset) = render_frame_asset(
+    let (asset_id, asset, ()) = render_frame_asset(
         api,
         settings,
         job,
@@ -299,7 +302,8 @@ pub(crate) async fn run_frame_extract(
                 .get("playheadSeconds")
                 .cloned()
                 .unwrap_or(Value::Null);
-            Ok(json!({
+            Ok((
+                json!({
                 "schemaVersion": 1,
                 "id": frame.asset_id,
                 "projectId": project_id,
@@ -348,7 +352,9 @@ pub(crate) async fn run_frame_extract(
                     "intendedUse": intended_use,
                     "jobId": job.id
                 }
-            }))
+                }),
+                (),
+            ))
         },
     )
     .await?;
@@ -500,16 +506,10 @@ pub(crate) async fn run_person_detect(
         .unwrap_or("clip")
         .to_owned();
 
-    // The detector runs inside the asset-builder (it needs the rendered frame on disk), but its
-    // outputs also feed the outer result payload — stash them through a `RefCell` (the builder future
-    // is awaited inline on this task, never spawned, so no `Send`/thread-safety is needed).
-    let detections_out: std::cell::RefCell<Vec<Value>> = std::cell::RefCell::new(Vec::new());
-    let detection_active_out = std::cell::Cell::new(false);
-    // Capture the stash cells by reference so the `async move` builder body can `move` the owned
-    // `frame` fields in without also consuming the cells (read back after the builder returns).
-    let detections_out_ref = &detections_out;
-    let detection_active_out_ref = &detection_active_out;
-    let (asset_id, asset) = render_frame_asset(
+    // The detector runs inside the asset-builder (it needs the rendered frame on disk); its outputs
+    // also feed the outer result payload, so the builder returns them as the `extra` tuple alongside
+    // the asset JSON (keeping the handler future `Send` for the dispatcher's `tokio::spawn`).
+    let (asset_id, asset, (detections, detection_active)) = render_frame_asset(
         api,
         settings,
         job,
@@ -597,14 +597,10 @@ pub(crate) async fn run_person_detect(
                     "jobId": job.id
                 }
             });
-            *detections_out_ref.borrow_mut() = detections;
-            detection_active_out_ref.set(detection_active);
-            Ok(asset)
+            Ok((asset, (detections, detection_active)))
         },
     )
     .await?;
-    let detections = detections_out.into_inner();
-    let detection_active = detection_active_out.get();
 
     let mut result = JsonObject::new();
     result.insert("frameAssetId".to_owned(), Value::String(asset_id));
