@@ -3,10 +3,6 @@ import { API_BASE_URL, withMediaTicket } from "../api.js";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 
-export function findReplacementModel(videoModels) {
-  return videoModels.find((item) => item.capabilities?.includes("replace_person")) ?? null;
-}
-
 const MASK_STATE_COPY = {
   active: "Per-frame segmentation masks generated for tracked frames.",
   generated: "Per-frame segmentation masks generated for most tracked frames.",
