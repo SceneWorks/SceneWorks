@@ -170,6 +170,116 @@ impl ImageRoute {
     }
 }
 
+/// The candle (Windows/CUDA/Linux) image engine a `run_image_generate_job` request routes to — the
+/// candle-lane sibling of [`ImageRoute`] (sc-8828, F-026). Each variant maps 1:1 to a bespoke candle
+/// stream handler with the uniform `(api, settings, job, &plan, &project_path, backend, &mut asset_writes)`
+/// signature; [`CandleImageRoute::PoseReject`] is the no-silent-T2I reject arm (sc-5968). Every arm is
+/// gated on `settings.backend_candle_enabled`; when off (default) the resolver returns `None` so the job
+/// falls through to the stub, exactly as before.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandleImageRoute {
+    /// InstantID identity (sc-5491) — the off-Mac sibling of `ImageRoute::InstantId`. Checked first
+    /// because `instantid_realvisxl` is not an `is_candle_engine` txt2img id.
+    InstantId,
+    /// SDXL img2img / inpaint / outpaint edit (sc-5487).
+    SdxlEdit,
+    /// FLUX.2-klein reference / img2img edit (sc-5487).
+    Flux2Edit,
+    /// Qwen-Image-Edit reference / dual-latent edit (sc-5487).
+    QwenEdit,
+    /// Z-Image img2img / edit (sc-6595).
+    ZimageEdit,
+    /// Z-Image identity-init for Image Studio "With Character" (sc-8409).
+    ZimageIdentity,
+    /// SDXL IP-Adapter-Plus reference conditioning (sc-5488).
+    SdxlIpAdapter,
+    /// Kolors IP-Adapter-Plus reference conditioning (sc-5488).
+    KolorsIpAdapter,
+    /// FLUX XLabs IP-Adapter reference conditioning (sc-5872).
+    FluxIpAdapter,
+    /// PuLID-FLUX face identity (sc-5492).
+    Pulid,
+    /// Qwen-Image strict-pose ControlNet (sc-5489).
+    QwenControl,
+    /// Kolors strict-pose ControlNet (sc-5489).
+    KolorsControl,
+    /// Z-Image strict-pose Fun-ControlNet (sc-5489).
+    ZimageControl,
+    /// FLUX.2-dev strict-pose Fun-Controlnet-Union (sc-7736).
+    Flux2Control,
+    /// FLUX.1-dev strict-control Shakker Union-Pro-2.0 (sc-8412).
+    Flux1Control,
+    /// A strict-pose job on a candle model with NO pose lane → reject loudly, never silent T2I (sc-5968).
+    PoseReject,
+    /// A plain candle txt2img engine id → `generate_candle_stream`.
+    CandleTxt2Img,
+}
+
+/// Run the candle image dispatch predicate ladder ONCE and return the [`CandleImageRoute`] (or `None`
+/// when candle is disabled / no candle engine matches → the job stubs). Mirrors the historical inline
+/// `else if settings.backend_candle_enabled && <predicate>` ladder EXACTLY — same predicate order,
+/// same `backend_candle_enabled` gating, same handler per family — so routing is byte-identical
+/// (sc-8828). Pure decision: no I/O, no generation.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_candle_image_route(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> Option<CandleImageRoute> {
+    if !settings.backend_candle_enabled {
+        return None;
+    }
+    // Order matches the historical ladder: the edit / reference / identity / control lanes are all
+    // checked BEFORE the generic `is_candle_engine` txt2img arm (they share candle txt2img model ids, so
+    // without diverting first they'd be silently rendered as plain txt2img, dropping the source / poses).
+    if instantid_available(request, settings) {
+        Some(CandleImageRoute::InstantId)
+    } else if sdxl_edit_candle_available(request, settings) {
+        Some(CandleImageRoute::SdxlEdit)
+    } else if flux2_edit_candle_available(request, settings) {
+        Some(CandleImageRoute::Flux2Edit)
+    } else if qwen_edit_candle_available(request, settings) {
+        Some(CandleImageRoute::QwenEdit)
+    } else if zimage_edit_candle_available(request, settings) {
+        Some(CandleImageRoute::ZimageEdit)
+    } else if zimage_identity_candle_available(request, settings) {
+        Some(CandleImageRoute::ZimageIdentity)
+    } else if sdxl_ipadapter_available(request, settings) {
+        Some(CandleImageRoute::SdxlIpAdapter)
+    } else if kolors_ipadapter_available(request, settings) {
+        Some(CandleImageRoute::KolorsIpAdapter)
+    } else if flux_ipadapter_available(request, settings) {
+        Some(CandleImageRoute::FluxIpAdapter)
+    } else if pulid_candle_available(request, settings) {
+        Some(CandleImageRoute::Pulid)
+    } else if qwen_control_available(request, settings) {
+        Some(CandleImageRoute::QwenControl)
+    } else if kolors_control_available(request, settings) {
+        Some(CandleImageRoute::KolorsControl)
+    } else if zimage_control_available(request, settings) {
+        Some(CandleImageRoute::ZimageControl)
+    } else if flux2_control_candle_available(request, settings) {
+        Some(CandleImageRoute::Flux2Control)
+    } else if flux1_control_candle_available(request, settings) {
+        Some(CandleImageRoute::Flux1Control)
+    } else if is_candle_engine(&request.model)
+        && !matches!(
+            request.model.as_str(),
+            "qwen_image" | "kolors" | "z_image_turbo" | "z_image" | "flux2_dev" | "flux_dev"
+        )
+        && request.mode != "edit_image"
+        && !pose_entries(request).is_empty()
+    {
+        // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane (e.g. sdxl) must
+        // be REJECTED, not silently rendered as plain txt2img. Checked BEFORE the txt2img arm below.
+        Some(CandleImageRoute::PoseReject)
+    } else if is_candle_engine(&request.model) {
+        Some(CandleImageRoute::CandleTxt2Img)
+    } else {
+        None
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn grouped_edit_image_count(request: &ImageRequest) -> u32 {
     match flux2_grouping(request) {
@@ -2164,6 +2274,137 @@ fn augment_prompt_for_angle(base: &str, angle: &str) -> String {
     }
 }
 
+/// Per-family reference conditioning for the generic MLX lane (`generate_stream`), resolved once
+/// (constant across the generation set). Bundles the four values the family dispatch produces so the
+/// caller does one `resolve_generic_lane_conditioning(..)` call instead of the inline 5-way match —
+/// the historical place per-family drift bugs land (sc-8828, F-026). The families served:
+///  • Z-Image reference-identity img2img-init / edit-init (sc-3619 / epic 3529),
+///  • FLUX.1 XLabs IP-Adapter (epic 3621 — schnell + dev; `strength = ipAdapterScale`, real CFG via
+///    `trueCfgScale` on dev),
+///  • Kolors img2img (sc-4765) + IP-Adapter-Plus reference (sc-4767), and
+///  • Ideogram 4 img2img (Remix) + mask inpaint/outpaint (sc-6303).
+/// Every other family (plain t2i, Boogu multi-reference) resolves to the all-`None`/`Vec::new` default.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct LaneConditioning {
+    /// Single img2img-init / IP-Adapter reference image + strength (Z-Image, FLUX.1 IP, Kolors,
+    /// Ideogram) fed to the engine as `Conditioning::Reference`. `None` for plain t2i.
+    identity_init: Option<(Image, f32)>,
+    /// FLUX.1 / Kolors IP-Adapter weights directory threaded into the [`load_spec`]. `None` unless the
+    /// IP-Adapter reference path is active.
+    flux_ip_dir: Option<PathBuf>,
+    /// FLUX.1-dev reference path's real-CFG scale (`trueCfgScale`). `None` for distilled/guidance-scalar
+    /// families; the caller folds it into the effective `true_cfg` alongside the true-CFG-family scale.
+    flux_true_cfg: Option<f32>,
+    /// Ideogram 4 inpaint/outpaint mask (white = repaint) threaded to `generate_one` as
+    /// `Conditioning::Mask`. `None` for every other family / plain img2img.
+    ideogram_edit_mask: Option<Image>,
+}
+
+/// Resolve the [`LaneConditioning`] for `request` on the generic MLX lane. Mirrors the historical
+/// inline family dispatch EXACTLY — same predicate order, same per-family values — so routing is
+/// byte-identical (sc-8828). The strict-pose ControlNet / edit tiers divert earlier (in
+/// `resolve_image_route`), so only the reference/identity/img2img families reach here.
+#[cfg(target_os = "macos")]
+fn resolve_generic_lane_conditioning(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+    has_reference: bool,
+) -> WorkerResult<LaneConditioning> {
+    if matches!(request.model.as_str(), "z_image_turbo" | "z_image_edit") {
+        // Z-Image base path: `edit_image` → img2img-edit (sourceAssetId + strength, epic 3529);
+        // otherwise the identity-init reference (referenceAssetId + referenceStrength, sc-3619).
+        // Both feed the engine's single `Reference` conditioning; only the source + strength
+        // keying differs. The strict-pose ControlNet tier diverts earlier (zimage_control_available).
+        let init = if request.mode == "edit_image" {
+            resolve_zimage_edit_init(request, settings, project_path)?
+        } else {
+            resolve_zimage_identity_init(request, settings, project_path)?
+        };
+        Ok(LaneConditioning {
+            identity_init: init,
+            ..Default::default()
+        })
+    } else if is_flux_model(&request.model) && has_reference && request.mode != "edit_image" {
+        let reference_id = request
+            .reference_asset_id
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_owned();
+        let image = load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            &reference_id,
+            project_path,
+        )?;
+        let scale = advanced::f32_clamped(
+            &request.advanced,
+            "ipAdapterScale",
+            FLUX_IP_SCALE,
+            0.0..=1.0,
+        );
+        let ip_dir = resolve_flux_ip_adapter_dir(settings)?;
+        // Real CFG only on dev (schnell is distilled — no CFG).
+        let true_cfg = (request.model == "flux_dev").then(|| {
+            advanced::f32_clamped(
+                &request.advanced,
+                "trueCfgScale",
+                FLUX_IP_TRUE_CFG,
+                1.0..=10.0,
+            )
+        });
+        Ok(LaneConditioning {
+            identity_init: Some((image, scale)),
+            flux_ip_dir: Some(ip_dir),
+            flux_true_cfg: true_cfg,
+            ideogram_edit_mask: None,
+        })
+    } else if request.model == "kolors" && request.mode == "edit_image" {
+        // Kolors img2img (sc-4765): `sourceAssetId` + `strength` → the engine's `Reference`
+        // (img2img init, no IP-Adapter loaded). Kolors carries CFG through `guidance` + negative
+        // prompt (resolved above), not `true_cfg`.
+        let init = resolve_kolors_edit_init(request, settings, project_path)?;
+        Ok(LaneConditioning {
+            identity_init: init,
+            ..Default::default()
+        })
+    } else if request.model == "kolors" && has_reference {
+        // Kolors IP-Adapter-Plus reference (sc-4767): `referenceAssetId` → the IP image prompt at
+        // `ipAdapterScale`. `with_ip_adapter` makes the engine treat the `Reference` as the image
+        // prompt (decoupled cross-attn) rather than an img2img init.
+        let (image, scale) = resolve_kolors_ip_reference(request, settings, project_path)?;
+        let ip_dir = resolve_kolors_ip_adapter_dir(settings)?;
+        Ok(LaneConditioning {
+            identity_init: Some((image, scale)),
+            flux_ip_dir: Some(ip_dir),
+            flux_true_cfg: None,
+            ideogram_edit_mask: None,
+        })
+    } else if matches!(request.model.as_str(), "ideogram_4" | "ideogram_4_turbo")
+        && request.mode == "edit_image"
+    {
+        // Ideogram 4 img2img (Remix) + mask inpaint / outpaint (Edit), sc-6303: `sourceAssetId` →
+        // the engine's `Reference` (img2img init); a `maskAssetId` (inpaint) or `fit_mode ==
+        // "outpaint"` adds a `Conditioning::Mask` (white = repaint), threaded via `ideogram_edit_mask`.
+        // Works in both quality (`ideogram_4`) and turbo (same base + TurboTime LoRA). No IP-Adapter.
+        match resolve_ideogram_edit(request, settings, project_path)? {
+            Some((source, strength, mask)) => Ok(LaneConditioning {
+                identity_init: Some((source, strength)),
+                flux_ip_dir: None,
+                flux_true_cfg: None,
+                ideogram_edit_mask: mask,
+            }),
+            None => Ok(LaneConditioning::default()),
+        }
+    } else {
+        // Boogu instruction edit resolves its (1..5) references separately into `boogu_refs` below —
+        // it uses the `MultiReference`-capable path, not the single `identity_init` reference.
+        Ok(LaneConditioning::default())
+    }
+}
+
 /// Real MLX generation: load once on a blocking thread, generate each image, and
 /// stream step/decode/image events back to the async worker (which saves PNGs, emits
 /// `assetWrites`, and polls cancel). MLX runs entirely on the blocking thread (the
@@ -2304,86 +2545,16 @@ async fn generate_stream(
         .reference_asset_id
         .as_deref()
         .is_some_and(|id| !id.trim().is_empty());
-    // Ideogram 4 inpaint/outpaint mask (sc-6303), set by the ideogram edit branch below and threaded
-    // to `generate_one` as a `Conditioning::Mask`. `None` for every other family / plain img2img.
-    let mut ideogram_edit_mask: Option<Image> = None;
-    let (identity_init, flux_ip_dir, flux_true_cfg): (
-        Option<(Image, f32)>,
-        Option<PathBuf>,
-        Option<f32>,
-    ) = if matches!(request.model.as_str(), "z_image_turbo" | "z_image_edit") {
-        // Z-Image base path: `edit_image` → img2img-edit (sourceAssetId + strength, epic 3529);
-        // otherwise the identity-init reference (referenceAssetId + referenceStrength, sc-3619).
-        // Both feed the engine's single `Reference` conditioning; only the source + strength
-        // keying differs. The strict-pose ControlNet tier diverts earlier (zimage_control_available).
-        let init = if request.mode == "edit_image" {
-            resolve_zimage_edit_init(request, settings, project_path)?
-        } else {
-            resolve_zimage_identity_init(request, settings, project_path)?
-        };
-        (init, None, None)
-    } else if is_flux_model(&request.model) && has_reference && request.mode != "edit_image" {
-        let reference_id = request
-            .reference_asset_id
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or_default()
-            .to_owned();
-        let image = load_reference_image(
-            &settings.data_dir,
-            &request.project_id,
-            &reference_id,
-            project_path,
-        )?;
-        let scale = advanced::f32_clamped(
-            &request.advanced,
-            "ipAdapterScale",
-            FLUX_IP_SCALE,
-            0.0..=1.0,
-        );
-        let ip_dir = resolve_flux_ip_adapter_dir(settings)?;
-        // Real CFG only on dev (schnell is distilled — no CFG).
-        let true_cfg = (request.model == "flux_dev").then(|| {
-            advanced::f32_clamped(
-                &request.advanced,
-                "trueCfgScale",
-                FLUX_IP_TRUE_CFG,
-                1.0..=10.0,
-            )
-        });
-        (Some((image, scale)), Some(ip_dir), true_cfg)
-    } else if request.model == "kolors" && request.mode == "edit_image" {
-        // Kolors img2img (sc-4765): `sourceAssetId` + `strength` → the engine's `Reference`
-        // (img2img init, no IP-Adapter loaded). Kolors carries CFG through `guidance` + negative
-        // prompt (resolved above), not `true_cfg`.
-        let init = resolve_kolors_edit_init(request, settings, project_path)?;
-        (init, None, None)
-    } else if request.model == "kolors" && has_reference {
-        // Kolors IP-Adapter-Plus reference (sc-4767): `referenceAssetId` → the IP image prompt at
-        // `ipAdapterScale`. `with_ip_adapter` makes the engine treat the `Reference` as the image
-        // prompt (decoupled cross-attn) rather than an img2img init.
-        let (image, scale) = resolve_kolors_ip_reference(request, settings, project_path)?;
-        let ip_dir = resolve_kolors_ip_adapter_dir(settings)?;
-        (Some((image, scale)), Some(ip_dir), None)
-    } else if matches!(request.model.as_str(), "ideogram_4" | "ideogram_4_turbo")
-        && request.mode == "edit_image"
-    {
-        // Ideogram 4 img2img (Remix) + mask inpaint / outpaint (Edit), sc-6303: `sourceAssetId` →
-        // the engine's `Reference` (img2img init); a `maskAssetId` (inpaint) or `fit_mode ==
-        // "outpaint"` adds a `Conditioning::Mask` (white = repaint), threaded via `ideogram_edit_mask`.
-        // Works in both quality (`ideogram_4`) and turbo (same base + TurboTime LoRA). No IP-Adapter.
-        match resolve_ideogram_edit(request, settings, project_path)? {
-            Some((source, strength, mask)) => {
-                ideogram_edit_mask = mask;
-                (Some((source, strength)), None, None)
-            }
-            None => (None, None, None),
-        }
-    } else {
-        // Boogu instruction edit resolves its (1..5) references separately into `boogu_refs` below —
-        // it uses the `MultiReference`-capable path, not the single `identity_init` reference.
-        (None, None, None)
-    };
+    // Per-family reference conditioning (Z-Image identity/edit-init, FLUX.1/Kolors IP-Adapter, Kolors
+    // img2img, Ideogram edit + mask), resolved once — same predicate order + per-family values as the
+    // historical inline 5-way match, now table-ized into one resolver (sc-8828, F-026). The strict-pose
+    // ControlNet / edit tiers divert earlier in `resolve_image_route`.
+    let LaneConditioning {
+        identity_init,
+        flux_ip_dir,
+        flux_true_cfg,
+        ideogram_edit_mask,
+    } = resolve_generic_lane_conditioning(request, settings, project_path, has_reference)?;
     // Boogu instruction edit (epic 6387, multi-reference sc-7645): resolve the 1..5 source references
     // (the Qwen3-VL vision tower reads each + they VAE-encode into the DiT spatial sequence); the prompt
     // is the edit instruction. Threaded to `generate_one` as `Conditioning::Reference` (one reference) /

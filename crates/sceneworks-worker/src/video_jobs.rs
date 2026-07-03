@@ -147,6 +147,136 @@ struct AudioTrack {
     channels: u16,
 }
 
+/// The native (MLX) video engine a `run_video_generate_job` request routes to — the routing DECISION,
+/// separated from execution (sc-8828, F-026; mirrors the image lane's `ImageRoute`). `resolve_video_route`
+/// runs the predicate ladder ONCE and returns this; the caller `match`es to run the (non-uniformly-typed)
+/// generators. Preserves the historical predicate order + per-family engine exactly, so routing is
+/// byte-identical. `replace_person` (mode-gated, resolve-or-error) is three distinct variants — SCAIL-2,
+/// dual-expert Wan2.2 VACE-Fun, single-expert Wan-VACE — because each drives a different backend/checkpoint.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VideoRoute {
+    /// `replace_person` on a `scail2_*` model → SCAIL-2 cross-identity replacement (sc-5452). Carries the
+    /// resolved engine id.
+    ReplacePersonScail2(&'static str),
+    /// `replace_person` on `wan_2_2_vace_fun_14b` → the dual-expert Wan2.2 VACE-Fun engine (sc-3459).
+    ReplacePersonWanVaceFun,
+    /// `replace_person` on any other replace-capable model → single-expert Wan-VACE (sc-3521).
+    ReplacePersonWanVace,
+    /// `extend_clip` / `video_bridge` on `wan_2_2_ti2v_5b` (weights available) → native Wan-VACE
+    /// extend/bridge, falling back to the TI2V-5B keyframe path if the VACE snapshot is unprovisioned
+    /// (sc-3812). The fallback is an execution-time detail handled in the dispatch arm.
+    WanVaceExtendBridge,
+    /// Wan txt2video / i2v on a resolvable Wan model (sc-3034). Carries the resolved engine id.
+    Wan(&'static str),
+    /// LTX+audio (sc-3035). Carries the resolved engine id.
+    Ltx(&'static str),
+    /// Stable Video Diffusion. Carries the resolved engine id.
+    Svd(&'static str),
+    /// Bernini (epic 4699): Qwen2.5-VL planner + Wan2.2-T2V-A14B renderer. Carries the resolved engine id.
+    Bernini(&'static str),
+    /// SCAIL-2 standalone character animation (epic 5439). Carries the resolved engine id.
+    Scail2(&'static str),
+    /// No native engine matched (or weights unresolved) → the procedural stub, after
+    /// `ensure_video_engine_weights` fails a known-but-unprovisioned engine loudly (sc-4176).
+    Stub,
+}
+
+/// Run the native video dispatch predicate ladder ONCE and return the [`VideoRoute`]. Mirrors the
+/// historical inline ladder EXACTLY — same predicate order, same per-family engine — so routing is
+/// byte-identical (sc-8828). Pure decision: no I/O, no generation. `replace_person` is dispatched by
+/// mode first (resolve-or-error semantics live in the execution arms), then the engine-id/availability
+/// ladder for every other mode.
+#[cfg(target_os = "macos")]
+fn resolve_video_route(request: &VideoRequest, settings: &Settings) -> VideoRoute {
+    if request.mode == "replace_person" {
+        if let Some(engine_id) = scail2_engine_id(&request.model) {
+            VideoRoute::ReplacePersonScail2(engine_id)
+        } else if request.model == "wan_2_2_vace_fun_14b" {
+            VideoRoute::ReplacePersonWanVaceFun
+        } else {
+            VideoRoute::ReplacePersonWanVace
+        }
+    } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge")
+        && wan_engine_id(&request.model) == Some("wan2_2_ti2v_5b")
+        && wan_available(request, settings)
+    {
+        VideoRoute::WanVaceExtendBridge
+    } else if let Some(engine_id) =
+        wan_engine_id(&request.model).filter(|_| wan_available(request, settings))
+    {
+        VideoRoute::Wan(engine_id)
+    } else if let Some(engine_id) =
+        ltx_engine_id(&request.model).filter(|_| ltx_available(request, settings))
+    {
+        VideoRoute::Ltx(engine_id)
+    } else if let Some(engine_id) =
+        svd_engine_id(&request.model).filter(|_| svd_available(request, settings))
+    {
+        VideoRoute::Svd(engine_id)
+    } else if let Some(engine_id) =
+        bernini_engine_id(&request.model).filter(|_| bernini_available(request, settings))
+    {
+        VideoRoute::Bernini(engine_id)
+    } else if let Some(engine_id) =
+        scail2_engine_id(&request.model).filter(|_| scail2_available(request, settings))
+    {
+        VideoRoute::Scail2(engine_id)
+    } else {
+        VideoRoute::Stub
+    }
+}
+
+/// The candle (Windows/CUDA/Linux) video engine a `run_video_generate_job` request routes to — the
+/// candle-lane sibling of [`VideoRoute`] (sc-8828, F-026). Every arm is gated on
+/// `settings.backend_candle_enabled`; when that is off (default) the resolver returns
+/// [`CandleVideoRoute::Stub`] so routing is unchanged until parity is accepted. Conditioning shapes
+/// never reach the candle lane — the router's `video_job_is_candle_eligible` confines it — so this is
+/// a narrow replace/animate/extend/txt2video ladder.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandleVideoRoute {
+    /// `replace_person` on a `scail2_*` model → candle SCAIL-2 replacement (sc-6837). Carries the id.
+    ReplacePersonScail2(&'static str),
+    /// `replace_person` on any other candle-VACE model → candle Wan-VACE replacement (sc-5494).
+    ReplacePersonWanVace,
+    /// `animate_character` on a `scail2_*` model → candle SCAIL-2 animation (sc-6837). Carries the id.
+    AnimateScail2(&'static str),
+    /// `extend_clip` / `video_bridge` → candle Wan-VACE extend/bridge (sc-5494).
+    WanVaceExtendBridge,
+    /// A candle txt2video engine id → `generate_candle_video` (sc-5097).
+    CandleVideo,
+    /// Candle disabled, or no candle engine matched → the procedural stub.
+    Stub,
+}
+
+/// Run the candle video dispatch predicate ladder ONCE and return the [`CandleVideoRoute`]. Mirrors the
+/// historical inline ladder EXACTLY — same predicate order + `backend_candle_enabled` gating — so
+/// routing is byte-identical (sc-8828). Pure decision: no I/O, no generation.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> CandleVideoRoute {
+    if !settings.backend_candle_enabled {
+        return CandleVideoRoute::Stub;
+    }
+    if request.mode == "replace_person" {
+        match candle_scail2_engine_id(&request.model) {
+            Some(engine_id) => CandleVideoRoute::ReplacePersonScail2(engine_id),
+            None => CandleVideoRoute::ReplacePersonWanVace,
+        }
+    } else if request.mode == "animate_character"
+        && candle_scail2_engine_id(&request.model).is_some()
+    {
+        let engine_id = candle_scail2_engine_id(&request.model).expect("scail2 model");
+        CandleVideoRoute::AnimateScail2(engine_id)
+    } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge") {
+        CandleVideoRoute::WanVaceExtendBridge
+    } else if is_candle_video_engine(&request.model) {
+        CandleVideoRoute::CandleVideo
+    } else {
+        CandleVideoRoute::Stub
+    }
+}
+
 /// Dispatch handler for `JobType::VideoGenerate`: generate, encode, and stream a
 /// single video asset through the Rust GPU worker.
 pub(crate) async fn run_video_generate_job(
@@ -225,85 +355,155 @@ pub(crate) async fn run_video_generate_job(
     // procedural stub (a stubbed person-replace would be meaningless). It also reports the honest
     // `replacementStatus` the asset sidecar folds in (project_store::build_video_sidecar_parts).
     #[cfg(target_os = "macos")]
-    let (decoded, adapter, raw_settings, replacement_status) = if request.mode == "replace_person" {
-        // sc-5452: SCAIL-2 is a higher-quality cross-identity replacement backend behind the same
-        // YOLO11 → ByteTrack → SAM3 person-track pipeline. A `scail2_14b` person-replace job routes
-        // to SCAIL-2 (the tracked person's masks + the character reference → the engine's
-        // replacement conditioning, `replace_flag = true`); every other replace-capable model keeps
-        // native Wan-VACE (sc-3521). Routed by model id, not weight availability: like the Wan-VACE
-        // path, `generate_scail2_replace` resolves-or-errors loudly if the snapshot is unprovisioned
-        // (a person-replace must never silently degrade to a different backend or the stub). Both
-        // report the honest `replacementStatus` the asset sidecar folds in.
-        if let Some(engine_id) = scail2_engine_id(&request.model) {
-            let (decoded, status) = generate_scail2_replace(
-                api,
-                settings,
-                job,
-                &request,
-                &project_path,
-                engine_id,
-                backend,
-            )
-            .await?;
-            (
-                // The replace_person path doesn't resolve user LoRAs (sc-5452), so no lightning recipe.
-                decoded,
-                SCAIL2_ADAPTER,
-                scail2_raw_settings(&request, false),
-                Some(status),
-            )
-        } else if request.model == "wan_2_2_vace_fun_14b" {
-            // sc-3459: the native dual-expert Wan2.2 VACE-Fun engine (`wan2_2_vace_fun_14b`,
-            // mlx-gen sc-6604). Same replace_person conditioning as single-expert Wan-VACE, but the
-            // dual-expert snapshot + engine — `generate_wan_vace_fun` resolves-or-errors loudly,
-            // never falling back to the Wan2.1 `wan_vace` checkpoint.
-            let (decoded, status) =
-                generate_wan_vace_fun(api, settings, job, &request, &project_path, backend).await?;
-            (
-                decoded,
-                WAN_VACE_FUN_ADAPTER,
-                wan_vace_raw_settings(&request, "wan2_2_vace_fun_14b"),
-                Some(status),
-            )
-        } else {
-            let (decoded, status) =
-                generate_wan_vace(api, settings, job, &request, &project_path, backend).await?;
-            (
-                decoded,
-                WAN_VACE_ADAPTER,
-                wan_vace_raw_settings(&request, "wan_vace"),
-                Some(status),
-            )
-        }
-    } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge")
-        && wan_engine_id(&request.model) == Some("wan2_2_ti2v_5b")
-        && wan_available(&request, settings)
-    {
-        // sc-3812 (tier C): route Wan extend/bridge to native Wan-VACE for genuine motion
-        // continuity (the model attends to real source frames, not one boundary still). Falls
-        // back to the sc-3357 single-frame TI2V-5B keyframe path when the VACE snapshot is
-        // unprovisioned, so the mode keeps working on the weights the user already has. The
-        // engine substitution under the `wan_2_2` pick is recorded honestly in raw-settings.
-        match resolve_wan_vace_model_dir(settings) {
-            Ok(model_dir) => (
-                generate_wan_vace_extend_bridge(
+    let (decoded, adapter, raw_settings, replacement_status) =
+        match resolve_video_route(&request, settings) {
+            // sc-5452: SCAIL-2 is a higher-quality cross-identity replacement backend behind the same
+            // YOLO11 → ByteTrack → SAM3 person-track pipeline. A `scail2_14b` person-replace job routes
+            // to SCAIL-2 (the tracked person's masks + the character reference → the engine's
+            // replacement conditioning, `replace_flag = true`); every other replace-capable model keeps
+            // native Wan-VACE (sc-3521). Routed by model id, not weight availability: like the Wan-VACE
+            // path, `generate_scail2_replace` resolves-or-errors loudly if the snapshot is unprovisioned
+            // (a person-replace must never silently degrade to a different backend or the stub). Both
+            // report the honest `replacementStatus` the asset sidecar folds in.
+            VideoRoute::ReplacePersonScail2(engine_id) => {
+                let (decoded, status) = generate_scail2_replace(
                     api,
                     settings,
                     job,
                     &request,
                     &project_path,
+                    engine_id,
                     backend,
-                    model_dir,
+                )
+                .await?;
+                (
+                    // The replace_person path doesn't resolve user LoRAs (sc-5452), so no lightning recipe.
+                    decoded,
+                    SCAIL2_ADAPTER,
+                    scail2_raw_settings(&request, false),
+                    Some(status),
+                )
+            }
+            VideoRoute::ReplacePersonWanVaceFun => {
+                // sc-3459: the native dual-expert Wan2.2 VACE-Fun engine (`wan2_2_vace_fun_14b`,
+                // mlx-gen sc-6604). Same replace_person conditioning as single-expert Wan-VACE, but the
+                // dual-expert snapshot + engine — `generate_wan_vace_fun` resolves-or-errors loudly,
+                // never falling back to the Wan2.1 `wan_vace` checkpoint.
+                let (decoded, status) =
+                    generate_wan_vace_fun(api, settings, job, &request, &project_path, backend)
+                        .await?;
+                (
+                    decoded,
+                    WAN_VACE_FUN_ADAPTER,
+                    wan_vace_raw_settings(&request, "wan2_2_vace_fun_14b"),
+                    Some(status),
+                )
+            }
+            VideoRoute::ReplacePersonWanVace => {
+                let (decoded, status) =
+                    generate_wan_vace(api, settings, job, &request, &project_path, backend).await?;
+                (
+                    decoded,
+                    WAN_VACE_ADAPTER,
+                    wan_vace_raw_settings(&request, "wan_vace"),
+                    Some(status),
+                )
+            }
+            VideoRoute::WanVaceExtendBridge => {
+                // sc-3812 (tier C): route Wan extend/bridge to native Wan-VACE for genuine motion
+                // continuity (the model attends to real source frames, not one boundary still). Falls
+                // back to the sc-3357 single-frame TI2V-5B keyframe path when the VACE snapshot is
+                // unprovisioned, so the mode keeps working on the weights the user already has. The
+                // engine substitution under the `wan_2_2` pick is recorded honestly in raw-settings.
+                match resolve_wan_vace_model_dir(settings) {
+                    Ok(model_dir) => (
+                        generate_wan_vace_extend_bridge(
+                            api,
+                            settings,
+                            job,
+                            &request,
+                            &project_path,
+                            backend,
+                            model_dir,
+                        )
+                        .await?,
+                        WAN_VACE_ADAPTER,
+                        wan_vace_extend_raw_settings(&request),
+                        None,
+                    ),
+                    Err(_) => {
+                        let engine_id = "wan2_2_ti2v_5b";
+                        (
+                            generate_wan(
+                                api,
+                                settings,
+                                job,
+                                &request,
+                                &project_path,
+                                engine_id,
+                                backend,
+                            )
+                            .await?,
+                            WAN_ADAPTER,
+                            wan_raw_settings(&request, engine_id),
+                            None,
+                        )
+                    }
+                }
+            }
+            VideoRoute::Wan(engine_id) => (
+                generate_wan(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
                 )
                 .await?,
-                WAN_VACE_ADAPTER,
-                wan_vace_extend_raw_settings(&request),
+                WAN_ADAPTER,
+                wan_raw_settings(&request, engine_id),
                 None,
             ),
-            Err(_) => {
-                let engine_id = "wan2_2_ti2v_5b";
+            VideoRoute::Ltx(engine_id) => (
+                generate_ltx(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
+                )
+                .await?,
+                LTX_ADAPTER,
+                ltx_raw_settings(&request),
+                None,
+            ),
+            VideoRoute::Svd(engine_id) => (
+                generate_svd(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
+                )
+                .await?,
+                SVD_ADAPTER,
+                svd_raw_settings(&request),
+                None,
+            ),
+            VideoRoute::Bernini(engine_id) => {
+                // Bernini (epic 4699 / sc-4707 + sc-4703): the full Qwen2.5-VL planner + Wan2.2-T2V-A14B
+                // renderer. Serves text_to_video + the editing/reference video modes (video_to_video /
+                // reference_to_video / reference_video_to_video); `generate_bernini` maps the SceneWorks mode
+                // to the engine guidance task and resolves the source media into the planner conditioning.
+                // (t2i/i2i image companion = a separate image-typed catalog id, tracked under epic 4699.)
                 (
-                    generate_wan(
+                    generate_bernini(
                         api,
                         settings,
                         job,
@@ -313,133 +513,55 @@ pub(crate) async fn run_video_generate_job(
                         backend,
                     )
                     .await?,
-                    WAN_ADAPTER,
-                    wan_raw_settings(&request, engine_id),
+                    BERNINI_ADAPTER,
+                    bernini_raw_settings(&request),
                     None,
                 )
             }
-        }
-    } else if let Some(engine_id) =
-        wan_engine_id(&request.model).filter(|_| wan_available(&request, settings))
-    {
-        (
-            generate_wan(
-                api,
-                settings,
-                job,
-                &request,
-                &project_path,
-                engine_id,
-                backend,
-            )
-            .await?,
-            WAN_ADAPTER,
-            wan_raw_settings(&request, engine_id),
-            None,
-        )
-    } else if let Some(engine_id) =
-        ltx_engine_id(&request.model).filter(|_| ltx_available(&request, settings))
-    {
-        (
-            generate_ltx(
-                api,
-                settings,
-                job,
-                &request,
-                &project_path,
-                engine_id,
-                backend,
-            )
-            .await?,
-            LTX_ADAPTER,
-            ltx_raw_settings(&request),
-            None,
-        )
-    } else if let Some(engine_id) =
-        svd_engine_id(&request.model).filter(|_| svd_available(&request, settings))
-    {
-        (
-            generate_svd(
-                api,
-                settings,
-                job,
-                &request,
-                &project_path,
-                engine_id,
-                backend,
-            )
-            .await?,
-            SVD_ADAPTER,
-            svd_raw_settings(&request),
-            None,
-        )
-    } else if let Some(engine_id) =
-        bernini_engine_id(&request.model).filter(|_| bernini_available(&request, settings))
-    {
-        // Bernini (epic 4699 / sc-4707 + sc-4703): the full Qwen2.5-VL planner + Wan2.2-T2V-A14B
-        // renderer. Serves text_to_video + the editing/reference video modes (video_to_video /
-        // reference_to_video / reference_video_to_video); `generate_bernini` maps the SceneWorks mode
-        // to the engine guidance task and resolves the source media into the planner conditioning.
-        // (t2i/i2i image companion = a separate image-typed catalog id, tracked under epic 4699.)
-        (
-            generate_bernini(
-                api,
-                settings,
-                job,
-                &request,
-                &project_path,
-                engine_id,
-                backend,
-            )
-            .await?,
-            BERNINI_ADAPTER,
-            bernini_raw_settings(&request),
-            None,
-        )
-    } else if let Some(engine_id) =
-        scail2_engine_id(&request.model).filter(|_| scail2_available(&request, settings))
-    {
-        // SCAIL-2 (epic 5439 / sc-5448): Wan2.1-14B I2V character animation. `generate_scail2`
-        // segments the reference image + driving frames with native SAM3, paints the color-coded
-        // masks, and maps the SceneWorks mode to the engine task (animate_character → animation;
-        // replace_person → replacement is wired in sc-5452). No torch path (mac-only engine).
-        (
-            generate_scail2(
-                api,
-                settings,
-                job,
-                &request,
-                &project_path,
-                engine_id,
-                backend,
-            )
-            .await?,
-            SCAIL2_ADAPTER,
-            // Best-effort lightning detection for the asset's effective-recipe record (the adapter
-            // file is already resolved by generate_scail2 above; re-reading its header is cheap).
-            scail2_raw_settings(
-                &request,
-                scail2_adapters_have_lightning(
-                    &resolve_scail2_adapters(settings, &request).unwrap_or_default(),
-                ),
-            ),
-            None,
-        )
-    } else {
-        // An MLX-routed video model whose snapshot didn't resolve must fail
-        // loudly with the resolver's precise error instead of completing with
-        // procedural stub output (sc-4176, epic 3482 "unsupported jobs error
-        // loudly"). replace_person above already follows this rule; the stub
-        // remains only for ids outside the engine families (test models,
-        // not-yet-ported families).
-        ensure_video_engine_weights(&request, settings)?;
-        (
-            generate_stub_video(&request, seed),
-            STUB_ADAPTER,
-            stub_raw_settings(&request),
-            None,
-        )
-    };
+            VideoRoute::Scail2(engine_id) => {
+                // SCAIL-2 (epic 5439 / sc-5448): Wan2.1-14B I2V character animation. `generate_scail2`
+                // segments the reference image + driving frames with native SAM3, paints the color-coded
+                // masks, and maps the SceneWorks mode to the engine task (animate_character → animation;
+                // replace_person → replacement is wired in sc-5452). No torch path (mac-only engine).
+                (
+                    generate_scail2(
+                        api,
+                        settings,
+                        job,
+                        &request,
+                        &project_path,
+                        engine_id,
+                        backend,
+                    )
+                    .await?,
+                    SCAIL2_ADAPTER,
+                    // Best-effort lightning detection for the asset's effective-recipe record (the adapter
+                    // file is already resolved by generate_scail2 above; re-reading its header is cheap).
+                    scail2_raw_settings(
+                        &request,
+                        scail2_adapters_have_lightning(
+                            &resolve_scail2_adapters(settings, &request).unwrap_or_default(),
+                        ),
+                    ),
+                    None,
+                )
+            }
+            VideoRoute::Stub => {
+                // An MLX-routed video model whose snapshot didn't resolve must fail
+                // loudly with the resolver's precise error instead of completing with
+                // procedural stub output (sc-4176, epic 3482 "unsupported jobs error
+                // loudly"). replace_person above already follows this rule; the stub
+                // remains only for ids outside the engine families (test models,
+                // not-yet-ported families).
+                ensure_video_engine_weights(&request, settings)?;
+                (
+                    generate_stub_video(&request, seed),
+                    STUB_ADAPTER,
+                    stub_raw_settings(&request),
+                    None,
+                )
+            }
+        };
     // Windows/CUDA candle video lane (sc-5097): a real wan/ltx txt2video job runs through
     // `generate_candle_video` (the same neutral encode/mux path as MLX + the stub); anything the
     // candle lane doesn't serve stubs exactly as before. Gated on `backend_candle_enabled` (default
@@ -447,14 +569,14 @@ pub(crate) async fn run_video_generate_job(
     // `video_job_is_candle_eligible` confines the candle worker to txt2video.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let (decoded, adapter, raw_settings, replacement_status) =
-        if settings.backend_candle_enabled && request.mode == "replace_person" {
+        match resolve_candle_video_route(&request, settings) {
             // sc-6837 (epic 6563): SCAIL-2 is a distinct cross-identity replacement backend (NOT Wan-VACE)
             // behind the same person-track pipeline. A `scail2_14b` replace_person job routes to the candle
             // SCAIL-2 engine (the character reference + the tracked person's color masks, `replace_flag`),
             // mirroring the macOS `generate_scail2_replace` dispatch; every other replace-capable model
             // keeps candle Wan-VACE. Routed by model id, not weight availability — `generate_candle_scail2_
             // replace` resolves-or-errors loudly (a person-replace must never silently degrade to a stub).
-            if let Some(engine_id) = candle_scail2_engine_id(&request.model) {
+            CandleVideoRoute::ReplacePersonScail2(engine_id) => {
                 let (decoded, status) = generate_candle_scail2_replace(
                     api,
                     settings,
@@ -472,7 +594,8 @@ pub(crate) async fn run_video_generate_job(
                     candle_scail2_raw_settings(&request, false),
                     Some(status),
                 )
-            } else {
+            }
+            CandleVideoRoute::ReplacePersonWanVace => {
                 // Candle Wan-VACE person replacement (sc-5494) — the candle equivalent of the MLX
                 // `wan_vace` path. The router (`video_request_candle_vace_eligible`) already confirmed the
                 // candle-VACE model + the source clip + person track before this job reached the candle
@@ -488,58 +611,55 @@ pub(crate) async fn run_video_generate_job(
                     Some(status),
                 )
             }
-        } else if settings.backend_candle_enabled
-            && request.mode == "animate_character"
-            && candle_scail2_engine_id(&request.model).is_some()
-        {
-            // sc-6837: SCAIL-2 standalone character animation — a reference character + a driving video →
-            // an animated clip. `generate_candle_scail2` segments the reference + driving frames with the
-            // candle SAM3 segmenter, paints the color-coded masks, and runs the `scail2_14b` engine
-            // (`animate_character` → engine task `animation`). The candle sibling of the macOS
-            // `generate_scail2`; resolves-or-errors loudly (no torch fallback — a distinct candle engine).
-            let engine_id = candle_scail2_engine_id(&request.model).expect("scail2 model");
-            let (decoded, adapter, raw_settings) = generate_candle_scail2(
-                api,
-                settings,
-                job,
-                &request,
-                &project_path,
-                engine_id,
-                backend,
-            )
-            .await?;
-            (decoded, adapter, raw_settings, None::<Value>)
-        } else if settings.backend_candle_enabled
-            && matches!(request.mode.as_str(), "extend_clip" | "video_bridge")
-        {
-            // Candle Wan-VACE extend/bridge (sc-5494): real source frames pinned at the kept positions +
-            // a generated span (the candle equivalent of the MLX `generate_wan_vace_extend_bridge`).
-            let decoded = generate_candle_wan_vace_extend_bridge(
-                api,
-                settings,
-                job,
-                &request,
-                &project_path,
-                backend,
-            )
-            .await?;
-            (
-                decoded,
-                CANDLE_WAN_VACE_ADAPTER,
-                wan_vace_extend_raw_settings(&request),
-                None::<Value>,
-            )
-        } else if settings.backend_candle_enabled && is_candle_video_engine(&request.model) {
-            let (decoded, adapter, raw_settings) =
-                generate_candle_video(api, settings, job, &request, &project_path, backend).await?;
-            (decoded, adapter, raw_settings, None::<Value>)
-        } else {
-            (
+            CandleVideoRoute::AnimateScail2(engine_id) => {
+                // sc-6837: SCAIL-2 standalone character animation — a reference character + a driving video →
+                // an animated clip. `generate_candle_scail2` segments the reference + driving frames with the
+                // candle SAM3 segmenter, paints the color-coded masks, and runs the `scail2_14b` engine
+                // (`animate_character` → engine task `animation`). The candle sibling of the macOS
+                // `generate_scail2`; resolves-or-errors loudly (no torch fallback — a distinct candle engine).
+                let (decoded, adapter, raw_settings) = generate_candle_scail2(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
+                )
+                .await?;
+                (decoded, adapter, raw_settings, None::<Value>)
+            }
+            CandleVideoRoute::WanVaceExtendBridge => {
+                // Candle Wan-VACE extend/bridge (sc-5494): real source frames pinned at the kept positions +
+                // a generated span (the candle equivalent of the MLX `generate_wan_vace_extend_bridge`).
+                let decoded = generate_candle_wan_vace_extend_bridge(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    backend,
+                )
+                .await?;
+                (
+                    decoded,
+                    CANDLE_WAN_VACE_ADAPTER,
+                    wan_vace_extend_raw_settings(&request),
+                    None::<Value>,
+                )
+            }
+            CandleVideoRoute::CandleVideo => {
+                let (decoded, adapter, raw_settings) =
+                    generate_candle_video(api, settings, job, &request, &project_path, backend)
+                        .await?;
+                (decoded, adapter, raw_settings, None::<Value>)
+            }
+            CandleVideoRoute::Stub => (
                 generate_stub_video(&request, seed),
                 STUB_ADAPTER,
                 stub_raw_settings(&request),
                 None::<Value>,
-            )
+            ),
         };
     #[cfg(not(any(
         target_os = "macos",
@@ -2796,35 +2916,35 @@ async fn generate_video(
                     if canceled {
                         continue; // drain so the blocking sender never blocks.
                     }
-            if last_cancel.elapsed() >= Duration::from_secs(2) {
-                last_cancel = Instant::now();
-                if cancel_requested_peek(api, &job.id).await {
-                    begin_video_cancel(api, &job.id, &cancel, backend).await;
-                    canceled = true;
-                    continue;
-                }
-                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-            }
-            let (fraction, message) = match progress {
-                Progress::Step { current, total } => (
-                    0.25 + 0.30 * (current as f64 / total.max(1) as f64),
-                    format!("Generating frames — step {current}/{total}."),
-                ),
-                Progress::Decoding => (0.58, "Decoding frames.".to_owned()),
-            };
-            update_job(
-                api,
-                &job.id,
-                video_progress(
-                    JobStatus::Running,
-                    ProgressStage::Generating,
-                    fraction,
-                    &message,
-                    None,
-                    backend,
-                ),
-            )
-            .await?;
+                    if last_cancel.elapsed() >= Duration::from_secs(2) {
+                        last_cancel = Instant::now();
+                        if cancel_requested_peek(api, &job.id).await {
+                            begin_video_cancel(api, &job.id, &cancel, backend).await;
+                            canceled = true;
+                            continue;
+                        }
+                        heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                    }
+                    let (fraction, message) = match progress {
+                        Progress::Step { current, total } => (
+                            0.25 + 0.30 * (current as f64 / total.max(1) as f64),
+                            format!("Generating frames — step {current}/{total}."),
+                        ),
+                        Progress::Decoding => (0.58, "Decoding frames.".to_owned()),
+                    };
+                    update_job(
+                        api,
+                        &job.id,
+                        video_progress(
+                            JobStatus::Running,
+                            ProgressStage::Generating,
+                            fraction,
+                            &message,
+                            None,
+                            backend,
+                        ),
+                    )
+                    .await?;
                 }
                 _ = interval.tick() => {
                     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -6877,6 +6997,85 @@ mod tests {
 
     fn request(value: Value) -> VideoRequest {
         VideoRequest::from_payload(&value.as_object().cloned().unwrap())
+    }
+
+    // sc-8828 (F-026): `resolve_video_route` is the extracted native (MLX) dispatch decision — the
+    // predicate ladder pulled out of `run_video_generate_job`'s 4-tuple match. These lock the branches
+    // whose routing depends only on the mode + model id (not on staged weights), so a future family edit
+    // that reorders the ladder or mis-routes `replace_person` fails loudly here.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn video_route_replace_person_dispatches_by_model() {
+        let settings = Settings::from_env();
+
+        // `replace_person` on the SCAIL-2 model → the SCAIL-2 replacement backend (sc-5452), carrying
+        // the resolved engine id — NOT Wan-VACE.
+        let scail2 = request(json!({
+            "projectId": "p", "model": "scail2_14b", "mode": "replace_person",
+        }));
+        assert_eq!(
+            resolve_video_route(&scail2, &settings),
+            VideoRoute::ReplacePersonScail2("scail2_14b"),
+        );
+
+        // `replace_person` on the dual-expert Wan2.2 VACE-Fun model → its own variant (sc-3459), never
+        // the single-expert Wan-VACE checkpoint.
+        let vace_fun = request(json!({
+            "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": "replace_person",
+        }));
+        assert_eq!(
+            resolve_video_route(&vace_fun, &settings),
+            VideoRoute::ReplacePersonWanVaceFun,
+        );
+
+        // `replace_person` on any other replace-capable model → single-expert Wan-VACE (sc-3521).
+        let other = request(json!({
+            "projectId": "p", "model": "wan_2_2_ti2v_5b", "mode": "replace_person",
+        }));
+        assert_eq!(
+            resolve_video_route(&other, &settings),
+            VideoRoute::ReplacePersonWanVace,
+        );
+
+        // An unknown model with no engine + no resolvable weights → the stub (the loud-fail path lives in
+        // the execution arm via `ensure_video_engine_weights`).
+        let unknown = request(json!({
+            "projectId": "p", "model": "definitely_not_a_video_engine", "mode": "text_to_video",
+        }));
+        assert_eq!(resolve_video_route(&unknown, &settings), VideoRoute::Stub);
+    }
+
+    // sc-8828 (F-026): the candle sibling — `resolve_candle_video_route`. Locks the `backend_candle_enabled`
+    // gate (off → Stub, so routing is unchanged until parity) + the mode/model dispatch.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn candle_video_route_gates_on_backend_flag_then_mode() {
+        let mut settings = Settings::from_env();
+
+        // Candle disabled (default) → always the stub, regardless of model/mode.
+        settings.backend_candle_enabled = false;
+        let scail2_replace = request(json!({
+            "projectId": "p", "model": "scail2_14b", "mode": "replace_person",
+        }));
+        assert_eq!(
+            resolve_candle_video_route(&scail2_replace, &settings),
+            CandleVideoRoute::Stub,
+        );
+
+        // Enabled: `replace_person` on the candle SCAIL-2 model → the SCAIL-2 replacement variant;
+        // any other replace-capable model → candle Wan-VACE.
+        settings.backend_candle_enabled = true;
+        assert_eq!(
+            resolve_candle_video_route(&scail2_replace, &settings),
+            CandleVideoRoute::ReplacePersonScail2(candle_scail2_engine_id("scail2_14b").unwrap()),
+        );
+        let extend = request(json!({
+            "projectId": "p", "model": "wan_2_2_ti2v_5b", "mode": "extend_clip",
+        }));
+        assert_eq!(
+            resolve_candle_video_route(&extend, &settings),
+            CandleVideoRoute::WanVaceExtendBridge,
+        );
     }
 
     #[cfg(target_os = "macos")]
