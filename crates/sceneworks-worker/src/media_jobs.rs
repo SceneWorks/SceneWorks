@@ -2345,30 +2345,60 @@ pub(crate) async fn render_item_segment(
         return Ok(duration);
     }
 
+    let args = video_segment_args(
+        ffmpeg,
+        &media_path,
+        output_path,
+        source_in,
+        speed,
+        duration,
+        vf,
+    );
+    run_ffmpeg(args, context).await?;
+    Ok(duration)
+}
+
+/// Builds the ffmpeg args for the slow/fast video branch of [`render_item_segment`].
+///
+/// The `setpts={1/speed}*PTS` filter rescales the source timeline so the output
+/// length becomes `source_duration / speed`, which is exactly the timeline
+/// `duration` the function returns and that `crossfade_filter_complex` uses to
+/// compute xfade offsets. The `-t` output limit MUST therefore be `duration`
+/// (the declared timeline length), not the pre-rescale `source_duration`.
+///
+/// - speed < 1 (slow-mo): duration > source_duration; `-t source_duration` would
+///   truncate the stretched output and desync every later crossfade (sc-8832).
+/// - speed > 1 (fast): duration < source_duration; `-t duration` correctly caps
+///   the shortened output.
+/// - speed == 1: duration == source_duration; unchanged.
+fn video_segment_args(
+    ffmpeg: &str,
+    media_path: &Path,
+    output_path: &Path,
+    source_in: f64,
+    speed: f64,
+    duration: f64,
+    vf: Vec<String>,
+) -> Vec<String> {
     let setpts = format!("setpts={:.6}*PTS", 1.0 / speed);
     let filters = std::iter::once(setpts)
         .chain(vf)
         .collect::<Vec<_>>()
         .join(",");
-    run_ffmpeg(
-        vec![
-            ffmpeg.to_owned(),
-            "-y".to_owned(),
-            "-ss".to_owned(),
-            format!("{source_in:.3}"),
-            "-i".to_owned(),
-            media_path.display().to_string(),
-            "-t".to_owned(),
-            format!("{source_duration:.3}"),
-            "-vf".to_owned(),
-            filters,
-            "-an".to_owned(),
-            output_path.display().to_string(),
-        ],
-        context,
-    )
-    .await?;
-    Ok(duration)
+    vec![
+        ffmpeg.to_owned(),
+        "-y".to_owned(),
+        "-ss".to_owned(),
+        format!("{source_in:.3}"),
+        "-i".to_owned(),
+        media_path.display().to_string(),
+        "-t".to_owned(),
+        format!("{duration:.3}"),
+        "-vf".to_owned(),
+        filters,
+        "-an".to_owned(),
+        output_path.display().to_string(),
+    ]
 }
 
 pub(crate) async fn mux_segments(
@@ -3328,5 +3358,92 @@ mod crossfade_mux_tests {
         assert!(error
             .to_string()
             .contains("Timeline has no rendered segments"));
+    }
+
+    fn t_value(args: &[String]) -> f64 {
+        let idx = args.iter().position(|arg| arg == "-t").expect("-t present") + 1;
+        args[idx].parse().expect("-t is a number")
+    }
+
+    #[test]
+    fn slow_motion_segment_output_limit_matches_timeline_duration() {
+        // speed=0.5 stretches a 2s source to a 4s timeline via setpts=2.0*PTS.
+        // -t must be the 4s timeline duration, NOT the 2s source_duration, or the
+        // stretched output is truncated and every later crossfade desyncs (sc-8832).
+        let source_duration = 2.0_f64;
+        let speed = 0.5_f64;
+        let duration = source_duration / speed; // 4.0
+
+        let args = video_segment_args(
+            "ffmpeg",
+            Path::new("in.mp4"),
+            Path::new("out.mp4"),
+            0.0,
+            speed,
+            duration,
+            vec!["format=yuv420p".to_owned()],
+        );
+
+        assert!(
+            (t_value(&args) - duration).abs() < 1e-6,
+            "-t must equal timeline duration {duration}, got {}",
+            t_value(&args)
+        );
+        assert!(
+            (t_value(&args) - source_duration).abs() > 1e-6,
+            "-t must NOT be the truncating source_duration {source_duration}"
+        );
+        // setpts stretches: 1/0.5 = 2.0
+        assert!(args.iter().any(|arg| arg.contains("setpts=2.000000*PTS")));
+    }
+
+    #[test]
+    fn fast_motion_segment_output_limit_matches_timeline_duration() {
+        // speed=2.0 compresses a 2s source to a 1s timeline via setpts=0.5*PTS.
+        // -t must be the 1s timeline duration (source_duration/speed).
+        let source_duration = 2.0_f64;
+        let speed = 2.0_f64;
+        let duration = source_duration / speed; // 1.0
+
+        let args = video_segment_args(
+            "ffmpeg",
+            Path::new("in.mp4"),
+            Path::new("out.mp4"),
+            0.0,
+            speed,
+            duration,
+            vec!["format=yuv420p".to_owned()],
+        );
+
+        assert!(
+            (t_value(&args) - duration).abs() < 1e-6,
+            "-t must equal timeline duration {duration}, got {}",
+            t_value(&args)
+        );
+        assert!(args.iter().any(|arg| arg.contains("setpts=0.500000*PTS")));
+    }
+
+    #[test]
+    fn unit_speed_segment_output_limit_equals_source_duration() {
+        // speed=1.0: duration == source_duration; behaviour unchanged.
+        let source_duration = 3.0_f64;
+        let speed = 1.0_f64;
+        let duration = source_duration / speed; // 3.0
+
+        let args = video_segment_args(
+            "ffmpeg",
+            Path::new("in.mp4"),
+            Path::new("out.mp4"),
+            0.5,
+            speed,
+            duration,
+            vec!["format=yuv420p".to_owned()],
+        );
+
+        assert!((t_value(&args) - duration).abs() < 1e-6);
+        assert!((t_value(&args) - source_duration).abs() < 1e-6);
+        // source_in preserved as -ss.
+        let ss_idx = args.iter().position(|arg| arg == "-ss").unwrap() + 1;
+        assert_eq!(args[ss_idx], "0.500");
     }
 }
