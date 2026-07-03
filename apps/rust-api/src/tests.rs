@@ -9629,6 +9629,66 @@ async fn event_tickets_are_protected_and_match_contract_shape() {
     assert_eq!(error["detail"], "Invalid or expired event stream ticket");
 }
 
+/// Drive a request but read only the status line, dropping the body. Needed for the
+/// SSE stream endpoint whose successful response body never ends (buffering it would
+/// hang the test).
+async fn request_status_only(app: axum::Router, method: &str, uri: &str) -> StatusCode {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .expect("request builds");
+    app.oneshot(request)
+        .await
+        .expect("response returns")
+        .status()
+}
+
+#[tokio::test]
+async fn sse_event_ticket_is_single_use_at_the_endpoint() {
+    // sc-8947 (F-146): the SSE ticket rides in the `?ticket=` query string because
+    // EventSource can't set headers. The accepted control that bounds a leaked URL is
+    // that the ticket is single-use (and short-TTL): the first `GET /jobs/events`
+    // redeems it, a replay of the same ticket is rejected. This pins that invariant at
+    // the HTTP layer (not just the ticket store) so nobody loosens the SSE gate.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+
+    let (status, ticket) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/events/ticket",
+        Value::Null,
+        &[("x-sceneworks-token", "secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ticket_value = ticket["ticket"].as_str().expect("ticket value").to_owned();
+
+    // First redemption connects the stream (200 OK, then the SSE body streams — we
+    // only read the status so the never-ending body doesn't hang the test).
+    let status = request_status_only(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/events?ticket={ticket_value}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Replaying the same ticket is rejected — a leaked URL can't be reused.
+    let (status, error) = request(
+        app,
+        "GET",
+        &format!("/api/v1/jobs/events?ticket={ticket_value}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error["detail"], "Invalid or expired event stream ticket");
+}
+
 #[tokio::test]
 async fn media_tickets_authenticate_project_file_urls() {
     // sc-8810: element-driven media requests (<img>/<video>/<a download>) cannot
