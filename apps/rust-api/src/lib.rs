@@ -801,6 +801,11 @@ where
 /// that had already drifted (some skipped non-directories, some didn't). Handles both
 /// files and directories so a staging area holding either is fully reclaimed. A missing
 /// root is not an error (nothing was ever staged). Returns the number of entries removed.
+///
+/// Per-entry reclamation is best-effort: a single unremovable stale entry (locked,
+/// permission-denied) is logged and skipped so the rest of the sweep still runs — the
+/// original per-area sweepers used `let _ =` and continued the loop. Only the outer
+/// `read_dir` failure remains fatal (nothing else could have been reclaimed anyway).
 pub(crate) fn sweep_stale_uploads(
     data_dir: &FsPath,
     subdir: &str,
@@ -814,18 +819,68 @@ pub(crate) fn sweep_stale_uploads(
     };
     let mut removed = 0usize;
     for entry in entries {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(
+                    event = "stale_upload_entry_read_failed",
+                    sweep = subdir,
+                    error = %error,
+                    "could not read a stale-upload dir entry; skipping it"
+                );
+                continue;
+            }
+        };
         if !entry.file_name().to_string_lossy().starts_with("upload-") {
             continue;
         }
-        let modified = entry.metadata()?.modified().unwrap_or(UNIX_EPOCH);
-        if modified <= cutoff {
-            if entry.file_type()?.is_dir() {
-                std::fs::remove_dir_all(entry.path())?;
-            } else {
-                std::fs::remove_file(entry.path())?;
+        let is_dir = match entry.file_type() {
+            Ok(file_type) => file_type.is_dir(),
+            Err(error) => {
+                tracing::warn!(
+                    event = "stale_upload_stat_failed",
+                    sweep = subdir,
+                    path = %entry.path().display(),
+                    error = %error,
+                    "could not stat a stale-upload entry; skipping it"
+                );
+                continue;
             }
-            removed += 1;
+        };
+        let modified = match entry.metadata() {
+            Ok(metadata) => metadata.modified().unwrap_or(UNIX_EPOCH),
+            Err(error) => {
+                tracing::warn!(
+                    event = "stale_upload_stat_failed",
+                    sweep = subdir,
+                    path = %entry.path().display(),
+                    error = %error,
+                    "could not read a stale-upload entry's mtime; skipping it"
+                );
+                continue;
+            }
+        };
+        if modified <= cutoff {
+            let path = entry.path();
+            let removal = if is_dir {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            match removal {
+                Ok(()) => removed += 1,
+                Err(error) => {
+                    // Best-effort: one locked/permission-denied temp must not block
+                    // reclaiming the rest of the stale entries in this sweep.
+                    tracing::warn!(
+                        event = "stale_upload_remove_failed",
+                        sweep = subdir,
+                        path = %path.display(),
+                        error = %error,
+                        "could not remove a stale upload entry; leaving it and continuing"
+                    );
+                }
+            }
         }
     }
     Ok(removed)

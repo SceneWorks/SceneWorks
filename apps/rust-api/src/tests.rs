@@ -896,6 +896,63 @@ fn shared_sweep_removes_stale_files_and_dirs_leaves_fresh_and_unrelated() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn shared_sweep_is_best_effort_when_one_entry_cannot_be_removed() {
+    // sc-8885 (F-083): per-entry reclamation is best-effort — a single unremovable
+    // stale entry (here a directory whose contents can't be deleted) is logged and
+    // skipped so every other stale entry in the sweep is still reclaimed. The original
+    // per-area sweepers used `let _ =` and continued; the unified helper must too.
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let root = temp_dir.path().join("data/cache/pose-uploads");
+    std::fs::create_dir_all(&root).expect("root creates");
+
+    // Two removable stale entries flanking one that cannot be removed.
+    let ok_file_a = root.join("upload-a.tmp");
+    let ok_file_b = root.join("upload-b.tmp");
+    std::fs::write(&ok_file_a, b"a").expect("a writes");
+    std::fs::write(&ok_file_b, b"b").expect("b writes");
+
+    // An unremovable stale directory: it holds an inner file, then we strip write
+    // permission on the directory itself so `remove_dir_all` fails (deleting the inner
+    // entry requires write on its parent) without touching the siblings' removability.
+    let locked_dir = root.join("upload-locked-dir");
+    std::fs::create_dir_all(&locked_dir).expect("locked dir creates");
+    std::fs::write(locked_dir.join("inner"), b"x").expect("inner writes");
+    std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o500))
+        .expect("chmod locked dir");
+
+    // Cutoff in the future -> every upload-* entry qualifies as stale.
+    let removed = sweep_stale_uploads(
+        &temp_dir.path().join("data"),
+        "pose-uploads",
+        SystemTime::now() + Duration::from_secs(1),
+    )
+    .expect("sweep does not abort on a single unremovable entry");
+
+    // Restore permissions so the tempdir can be torn down cleanly.
+    let _ = std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o700));
+
+    assert_eq!(
+        removed, 2,
+        "both removable stale entries are reclaimed despite the locked directory"
+    );
+    assert!(
+        !ok_file_a.exists(),
+        "sibling before the locked entry removed"
+    );
+    assert!(
+        !ok_file_b.exists(),
+        "sibling after the locked entry removed"
+    );
+    assert!(
+        locked_dir.exists(),
+        "the unremovable entry is left in place, not aborting the sweep"
+    );
+}
+
 #[tokio::test]
 async fn create_image_job_rejects_over_length_negative_prompt() {
     // sc-8884 (F-082): negativePrompt now shares the prompt char cap.
