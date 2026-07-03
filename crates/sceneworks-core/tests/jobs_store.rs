@@ -5163,6 +5163,101 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
     assert_eq!(unique.len(), JOBS, "no job claimed twice");
 }
 
+/// sc-8950 / F-148 — read-only methods (list_jobs/get_job/list_workers/
+/// get_worker/queue_summary) no longer take the process-wide write mutex; they
+/// rely on WAL reader isolation instead. This pins the property the change
+/// depends on: a reader returns correct, committed data promptly even while a
+/// writer is mid-transaction holding the SQLite write lock — it takes the WAL
+/// snapshot rather than blocking until the writer commits.
+#[test]
+fn reads_proceed_while_a_writer_holds_the_write_lock() {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let path = temp_db("read-during-write");
+    let store = JobsStore::new(path.clone());
+    store.initialize().expect("store initializes");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(object(json!({ "prompt": "committed" }))))
+        .expect("job creates");
+    // The committed message right after create — the reader must observe this,
+    // never the writer's uncommitted overwrite below.
+    let committed_message = created.message.clone();
+
+    // A separate connection opens a BEGIN IMMEDIATE transaction (acquiring the
+    // SQLite write lock) and holds it open for a beat WITHOUT committing, so its
+    // pending mutation is invisible to snapshots. This models a real in-flight
+    // writer; crucially it does NOT touch our JobsStore mutex, so a mutex-taking
+    // reader could only stall on the SQLite lock — which WAL lets a reader skip.
+    let (holding_tx, holding_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let writer_path = path.clone();
+    let writer_job_id = created.id.clone();
+    let writer = thread::spawn(move || {
+        let connection = Connection::open(&writer_path).expect("writer db opens");
+        connection
+            .busy_timeout(Duration::from_millis(5000))
+            .expect("busy timeout set");
+        connection
+            .execute_batch("begin immediate")
+            .expect("write lock acquired");
+        connection
+            .execute(
+                "update jobs set message = 'uncommitted' where id = ?1",
+                params![writer_job_id],
+            )
+            .expect("uncommitted write applied");
+        holding_tx.send(()).expect("signal holding");
+        // Hold the write lock until the reader has finished.
+        release_rx.recv().expect("await release");
+        connection.execute_batch("rollback").expect("rollback");
+    });
+
+    holding_rx.recv().expect("writer holds the lock");
+
+    // The read must return the COMMITTED snapshot (original message), quickly,
+    // without waiting on the writer to release. A generous bound catches a
+    // regression where a reader serializes behind the writer.
+    let started = Instant::now();
+    let loaded = store
+        .get_job(&created.id)
+        .expect("read while write in flight");
+    let jobs = store
+        .list_jobs(None, None, 100)
+        .expect("list while write in flight");
+    let summary = store
+        .queue_summary()
+        .expect("summary while write in flight");
+    let elapsed = started.elapsed();
+
+    release_tx.send(()).expect("release writer");
+    writer.join().expect("writer thread joins");
+
+    assert_eq!(
+        loaded.message, committed_message,
+        "reader must see the committed snapshot, not the writer's uncommitted change"
+    );
+    assert_ne!(
+        loaded.message, "uncommitted",
+        "reader must never observe the writer's uncommitted overwrite"
+    );
+    assert_eq!(
+        jobs.len(),
+        1,
+        "the one committed job is visible to the reader"
+    );
+    assert!(
+        summary.active_jobs.iter().any(|job| job.id == created.id),
+        "queue summary reflects the committed job"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "reads must not block for the writer's full hold; took {elapsed:?}"
+    );
+}
+
 /// sc-4172 — a zombie worker's late progress report must not resurrect a job
 /// the stale sweep marked `interrupted`; terminal statuses are immutable except
 /// for an idempotent re-report of the same terminal status.
