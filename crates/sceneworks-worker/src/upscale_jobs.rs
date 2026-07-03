@@ -62,8 +62,8 @@ use serde_json::{json, Value};
 
 use crate::{
     cancel_requested_peek, fresh_asset_id, heartbeat, mark_job_canceled, now_rfc3339,
-    progress_payload, progress_report_interval, task_join_error, update_job, ApiClient,
-    CancelJoinGuard, Settings, WorkerError, WorkerResult,
+    progress_payload, progress_report_interval, resolve_dataset_item_path, safe_project_path,
+    task_join_error, update_job, ApiClient, CancelJoinGuard, Settings, WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
@@ -1096,29 +1096,49 @@ struct DatasetUpscaleItem {
     image_path: PathBuf,
 }
 
-/// Parse the `items` array of a `dataset_upscale` job into typed entries (pure). Each entry needs a
-/// non-empty `itemId` + `imagePath`; malformed entries are skipped.
-fn parse_dataset_upscale_items(payload: &JsonObject) -> Vec<DatasetUpscaleItem> {
-    payload
-        .get("items")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    let item_id = item.get("itemId").and_then(Value::as_str)?;
-                    let image_path = item.get("imagePath").and_then(Value::as_str)?;
-                    if item_id.is_empty() || image_path.is_empty() {
-                        return None;
-                    }
-                    Some(DatasetUpscaleItem {
-                        item_id: item_id.to_owned(),
-                        image_path: PathBuf::from(image_path),
-                    })
-                })
-                .collect()
+/// Parse the `items` array of a `dataset_upscale` job into typed entries. Each entry needs a
+/// non-empty `itemId` + `imagePath`; malformed entries are skipped. Every `imagePath` is confined
+/// to the payload's app-managed `datasetRoot` via [`resolve_dataset_item_path`] (sc-8842 / F-040):
+/// the `imagePath` is client-supplied and reaches an on-disk read, so an unconfined path would be an
+/// arbitrary-file-read/exfiltration primitive — a path escaping the dataset root fails the job.
+fn parse_dataset_upscale_items(
+    settings: &Settings,
+    payload: &JsonObject,
+) -> WorkerResult<Vec<DatasetUpscaleItem>> {
+    let dataset_root = payload
+        .get("datasetRoot")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Dataset upscale payload.datasetRoot must be an app-managed dataset path."
+                    .to_owned(),
+            )
+        })?;
+    let Some(items) = payload.get("items").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let item_id = item.get("itemId").and_then(Value::as_str)?;
+            let image_path = item.get("imagePath").and_then(Value::as_str)?;
+            if item_id.is_empty() || image_path.is_empty() {
+                return None;
+            }
+            let resolved = resolve_dataset_item_path(
+                settings,
+                dataset_root,
+                image_path,
+                &format!("Dataset upscale item {item_id} imagePath"),
+            );
+            Some(resolved.map(|image_path| DatasetUpscaleItem {
+                item_id: item_id.to_owned(),
+                image_path,
+            }))
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 /// Build the `/repoint` request body from `(item_id, project-relative source path)` results (pure).
@@ -1162,7 +1182,7 @@ pub(crate) async fn run_dataset_upscale_job(
             WorkerError::InvalidPayload("Dataset upscale jobs require a datasetId.".to_owned())
         })?
         .to_owned();
-    let items = parse_dataset_upscale_items(payload);
+    let items = parse_dataset_upscale_items(settings, payload)?;
     if items.is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Dataset upscale job has no items to upscale.".to_owned(),
@@ -1228,8 +1248,12 @@ pub(crate) async fn run_dataset_upscale_job(
         )
         .await?;
 
+        // sc-8842 / F-040: `dataset_id` and `item_id` are client-supplied and here reach a
+        // filesystem write (`save_with_format` overwrites), so route the project-relative output
+        // through `safe_project_path` — a `/`, `..`, or absolute component is rejected before the
+        // write instead of traversing out of the project tree.
         let rel = format!("{derived_dir_rel}/{}.png", item.item_id);
-        let abs = project_path.join(&rel);
+        let abs = safe_project_path(&project_path, &rel)?;
         if let Some(parent) = abs.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
