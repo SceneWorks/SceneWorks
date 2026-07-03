@@ -51,15 +51,10 @@ function jobVideoResultAssets(job, assets) {
   return resolveJobResultAssets(job, assets, { type: "video" });
 }
 import {
-  applyPresetDefault,
-  buildStudioPresetPayload,
-  clearPresetDefault,
   finiteNumberOrUndefined,
   loraLooksLikeIcLora,
   noPresetId,
-  presetNameTaken,
   serializeLora,
-  slugifyPresetId,
 } from "../presetUtils.js";
 import {
   LoraPickerSection,
@@ -68,6 +63,7 @@ import {
   PresetValidationWarnings,
   SavePresetPanel,
   useGenerationStudio,
+  useSavePreset,
 } from "./generationStudio.jsx";
 import { ReplacePersonPanel } from "./ReplacePersonPanel.jsx";
 import { useAppContext } from "../context/AppContext.js";
@@ -281,14 +277,6 @@ export function VideoStudio() {
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewTime, setPreviewTime] = useState(0);
   const [previewDuration, setPreviewDuration] = useState(0);
-  // "Save as Preset" sidebar control — snapshots the current config into the
-  // workspace preset library. Defaults to project scope, falling back to global
-  // when no project is open (project-scoped presets require a project).
-  const [presetName, setPresetName] = useState("");
-  const [presetScope, setPresetScope] = useState(activeProject ? "project" : "global");
-  const [savingPreset, setSavingPreset] = useState(false);
-  const [presetSaveMessage, setPresetSaveMessage] = useState({ tone: "neutral", text: "" });
-  const presetDefaultSnapshots = useRef({});
   const capabilities = selectedModel?.capabilities ?? [];
   const supportsMode = capabilities.includes(mode);
   // GGUF quantization variants the torch adapter can load (sc-1982). Declared in
@@ -391,79 +379,6 @@ export function VideoStudio() {
   const requiresLtxIcLora = selectedModel?.id === ltxVideoModelId && ltxIcLoraRequiredModes.has(mode);
   const hasLtxIcLora = presetLoraDetails.some((lora) => !lora.missing && loraLooksLikeIcLora(lora));
 
-  // Snapshot the current working config into a named recipe preset in the
-  // workspace library. Captures the literal prompt + every visible knob + the
-  // selected LoRAs with their weights; the seed is intentionally left out so the
-  // preset stays reusable. The backend additionally enforces id uniqueness and
-  // model/workflow + LoRA compatibility, surfaced here via err.message.
-  async function handleSaveAsPreset() {
-    const trimmed = presetName.trim();
-    if (!trimmed) {
-      setPresetSaveMessage({ tone: "error", text: "Name the preset before saving." });
-      return;
-    }
-    if (!slugifyPresetId(trimmed)) {
-      setPresetSaveMessage({ tone: "error", text: "Use letters or numbers in the preset name." });
-      return;
-    }
-    if (!VIDEO_PRESET_MODES.includes(mode)) {
-      setPresetSaveMessage({ tone: "error", text: "Switch to Image, Text, or First/Last mode to save a preset." });
-      return;
-    }
-    if (presetScope === "project" && !activeProject) {
-      setPresetSaveMessage({ tone: "error", text: "Open a project first, or save to all projects." });
-      return;
-    }
-    if (presetNameTaken(trimmed, presets)) {
-      setPresetSaveMessage({ tone: "error", text: `"${trimmed}" already exists — pick a unique name.` });
-      return;
-    }
-    const payload = buildStudioPresetPayload({
-      name: trimmed,
-      scope: presetScope,
-      mode,
-      model,
-      loras: selectedLoras.map((lora) => ({ id: lora.id, weight: effectiveLoraWeight(lora) })),
-      defaults: {
-        prompt,
-        negativePrompt,
-        resolution,
-        duration,
-        fps,
-        quality,
-        mode,
-        guidanceScale: finiteNumberOrUndefined(guidanceOverride),
-        steps: finiteNumberOrUndefined(stepsOverride),
-        sampler,
-        scheduler,
-        schedulerShift,
-        precision,
-        quantization,
-        ltxPipeline,
-        distilledVariant,
-        motion,
-        videoCfgGuidanceScale: finiteNumberOrUndefined(ltxVideoCfg),
-        videoStgGuidanceScale: finiteNumberOrUndefined(ltxVideoStg),
-        videoRescaleScale: finiteNumberOrUndefined(ltxVideoRescale),
-      },
-    });
-    setSavingPreset(true);
-    setPresetSaveMessage({ tone: "neutral", text: "" });
-    try {
-      const created = await createPreset(payload);
-      setSelectedPresetId(created?.id ?? payload.id);
-      setPresetName("");
-      setPresetSaveMessage({
-        tone: "success",
-        text: `Saved "${trimmed}" to ${presetScope === "project" ? "this project" : "all projects"}.`,
-      });
-    } catch (err) {
-      setPresetSaveMessage({ tone: "error", text: err.message });
-    } finally {
-      setSavingPreset(false);
-    }
-  }
-
   useEffect(() => {
     if (selectedAsset?.type === "image" || selectedAsset?.type === "frame") {
       setSourceAssetId(selectedAsset.id);
@@ -553,62 +468,85 @@ export function VideoStudio() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, model, selectedModel, videoModels, macCapabilities]);
 
-  // When restoring a snapshot, the saved length/fps/quality/resolution/negativePrompt
-  // already reflect the user's last state — skip the one preset-default pass that fires
-  // as the restored preset resolves so it doesn't overwrite them. "None" applies no
-  // defaults, so no guard is needed there.
-  const skipPresetDefaultsOnHydrate = useRef(
-    Object.keys(saved).length > 0 && saved.selectedPresetId !== noPresetId,
-  );
-  // [defaults key, setter] pairs restored through the remember/clear snapshot
-  // machinery, so switching to None (or another preset) puts the user's prior
-  // value back. Only keys the preset carries are applied, so older presets keep
-  // working and full-snapshot presets restore the prompt, cfg, sampler, and the
-  // native LTX guidance knobs. The model is intentionally absent — presets never
-  // switch the model.
-  const presetDefaultFields = [
-    ["prompt", setPrompt],
-    ["negativePrompt", setNegativePrompt],
-    ["resolution", setResolution],
-    ["duration", setDuration],
-    ["fps", setFps],
-    ["quality", setQuality],
-    ["guidanceScale", setGuidanceOverride],
-    ["steps", setStepsOverride],
-    ["sampler", setSampler],
-    ["scheduler", setScheduler],
-    ["schedulerShift", setSchedulerShift],
-    ["precision", setPrecision],
-    ["quantization", setQuantization],
-    ["ltxPipeline", setLtxPipeline],
-    ["distilledVariant", setDistilledVariant],
-    ["motion", setMotion],
-    ["videoCfgGuidanceScale", setLtxVideoCfg],
-    ["videoStgGuidanceScale", setLtxVideoStg],
-    ["videoRescaleScale", setLtxVideoRescale],
-  ];
-  useEffect(() => {
-    if (skipPresetDefaultsOnHydrate.current && selectedPreset) {
-      skipPresetDefaultsOnHydrate.current = false;
-      return;
-    }
-    if (!selectedPreset) {
-      for (const [key, setter] of presetDefaultFields) {
-        clearPresetDefault(setter, presetDefaultSnapshots, key);
-      }
-      return;
-    }
-    const defaults = selectedPreset.defaults ?? {};
-    for (const [key, setter] of presetDefaultFields) {
-      if (Object.prototype.hasOwnProperty.call(defaults, key)) {
-        applyPresetDefault(presetDefaultSnapshots, key, setter, defaults[key]);
-      }
-    }
+  // Save-as-Preset + the preset-default hydrate pass (sc-8937 — shared with the Image
+  // studio via useSavePreset). The [key, setter] pairs are restored through the
+  // remember/clear snapshot machinery, so switching to None (or another preset) puts
+  // the user's prior value back. Only keys the preset carries are applied, so older
+  // presets keep working and full-snapshot presets restore the prompt, cfg, sampler,
+  // and the native LTX guidance knobs. The model is intentionally absent — presets
+  // never switch the model.
+  const {
+    presetName,
+    setPresetName,
+    presetScope,
+    setPresetScope,
+    savingPreset,
+    presetSaveMessage,
+    setPresetSaveMessage,
+    handleSaveAsPreset,
+  } = useSavePreset({
+    saved,
+    selectedPreset,
+    setSelectedPresetId,
+    presets,
+    mode,
+    model,
+    selectedLoras,
+    effectiveLoraWeight,
+    createPreset,
+    activeProject,
+    setMode,
+    presetDefaultFields: [
+      ["prompt", setPrompt],
+      ["negativePrompt", setNegativePrompt],
+      ["resolution", setResolution],
+      ["duration", setDuration],
+      ["fps", setFps],
+      ["quality", setQuality],
+      ["guidanceScale", setGuidanceOverride],
+      ["steps", setStepsOverride],
+      ["sampler", setSampler],
+      ["scheduler", setScheduler],
+      ["schedulerShift", setSchedulerShift],
+      ["precision", setPrecision],
+      ["quantization", setQuantization],
+      ["ltxPipeline", setLtxPipeline],
+      ["distilledVariant", setDistilledVariant],
+      ["motion", setMotion],
+      ["videoCfgGuidanceScale", setLtxVideoCfg],
+      ["videoStgGuidanceScale", setLtxVideoStg],
+      ["videoRescaleScale", setLtxVideoRescale],
+    ],
     // Restore the saved sub-mode ("type") when it's a generatable video workflow.
-    if (VIDEO_PRESET_MODES.includes(defaults.mode)) {
-      setMode(defaults.mode);
-    }
-  }, [selectedPreset?.id]);
+    modeIsPresetable: (savedMode) => VIDEO_PRESET_MODES.includes(savedMode),
+    // Video gates saving to the presetable modes; blocks the rest with a message.
+    extraSaveGuard: () =>
+      VIDEO_PRESET_MODES.includes(mode)
+        ? null
+        : "Switch to Image, Text, or First/Last mode to save a preset.",
+    buildDefaults: () => ({
+      prompt,
+      negativePrompt,
+      resolution,
+      duration,
+      fps,
+      quality,
+      mode,
+      guidanceScale: finiteNumberOrUndefined(guidanceOverride),
+      steps: finiteNumberOrUndefined(stepsOverride),
+      sampler,
+      scheduler,
+      schedulerShift,
+      precision,
+      quantization,
+      ltxPipeline,
+      distilledVariant,
+      motion,
+      videoCfgGuidanceScale: finiteNumberOrUndefined(ltxVideoCfg),
+      videoStgGuidanceScale: finiteNumberOrUndefined(ltxVideoStg),
+      videoRescaleScale: finiteNumberOrUndefined(ltxVideoRescale),
+    }),
+  });
 
   useStudioSettingsWriter("video", activeProject?.id ?? null, {
     motion,

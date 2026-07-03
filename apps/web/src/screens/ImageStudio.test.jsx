@@ -1,6 +1,6 @@
 import React, { act } from "react";
-import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { click, mountRoot, setFileInput, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
 
 // Pose loaders fetch best-effort on mount; stub the API so render never touches
 // the network. The studio's own mutations go through context fns, not apiFetch.
@@ -65,32 +65,6 @@ function baseContext(overrides = {}) {
   };
 }
 
-async function click(element) {
-  await act(async () => {
-    element.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  });
-}
-
-function setInput(element, value) {
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-  setter.call(element, value);
-  element.dispatchEvent(new window.Event("input", { bubbles: true }));
-}
-
-function setSelect(element, value) {
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value").set;
-  setter.call(element, value);
-  element.dispatchEvent(new window.Event("change", { bubbles: true }));
-}
-
-function setFileInput(element, files) {
-  Object.defineProperty(element, "files", {
-    configurable: true,
-    value: files,
-  });
-  element.dispatchEvent(new window.Event("change", { bubbles: true }));
-}
-
 const saveButton = (container) =>
   [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Save as Preset"));
 const nameInput = (container) => container.querySelector('input[aria-label="Preset name"]');
@@ -108,14 +82,11 @@ describe("ImageStudio Save as Preset", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -184,14 +155,11 @@ describe("ImageStudio advanced model defaults", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -293,14 +261,11 @@ describe("ImageStudio guidance method picker (epic 7434, sc-7449)", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -399,14 +364,11 @@ describe("ImageStudio edit source picker", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -598,14 +560,11 @@ describe("ImageStudio model picker capability gating", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -956,14 +915,11 @@ describe("ImageStudio structured-prompt recipe round-trip (sc-6147)", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -1060,14 +1016,11 @@ describe("ImageStudio reference-image → JSON caption (epic 8102, sc-8108)", ()
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -1193,14 +1146,11 @@ describe("ImageStudio Ideogram 4 auto-expand on plain-text Generate (sc-6501)", 
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -1315,14 +1265,11 @@ describe("ImageStudio PiD decoder toggle (sc-7851)", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -1408,14 +1355,11 @@ describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 

@@ -1,6 +1,6 @@
 import React, { act } from "react";
-import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
 
 // Control the mocked API: GETs return the fixture lists; mutations resolve and are recorded.
 const apiCalls = [];
@@ -51,11 +51,6 @@ function customPreset(overrides = {}) {
   };
 }
 
-async function click(element) {
-  await act(async () => {
-    element.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  });
-}
 async function setInputValue(input, value) {
   await act(async () => {
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
@@ -81,14 +76,11 @@ describe("KeyPointLibraryScreen", () => {
     collections = [];
     window.URL.createObjectURL = () => "blob:test";
     window.URL.revokeObjectURL = () => {};
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
