@@ -730,6 +730,60 @@ async fn shutdown_signal() {
     }
 }
 
+/// Stream a multipart field to `temp_path`, enforcing `max_bytes` (returning
+/// `413` with `limit_msg` when exceeded), then flush. sc-8886 (F-084): the single
+/// implementation behind every multipart upload writer (asset / lora / model), which
+/// were three copy-pasted chunk loops differing only in cap source, destination, and
+/// message. On ANY error path (chunk read, write, flush, or size cap) the file handle
+/// is dropped and `cleanup` runs before the error is returned, so an aborted or
+/// malformed multi-gigabyte upload never leaks a temp file (sc-4204). `cleanup` lets a
+/// caller remove more than the file itself (e.g. the per-upload parent directory).
+/// The parent directory of `temp_path` must already exist.
+pub(crate) async fn stream_multipart_field_to_file<Fut>(
+    mut field: axum::extract::multipart::Field<'_>,
+    temp_path: &FsPath,
+    max_bytes: usize,
+    limit_msg: impl FnOnce() -> String,
+    cleanup: impl FnOnce() -> Fut,
+) -> Result<(), ApiError>
+where
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut file = match tokio::fs::File::create(temp_path).await {
+        Ok(file) => file,
+        Err(error) => {
+            cleanup().await;
+            return Err(ApiError::internal(error.to_string()));
+        }
+    };
+    let mut uploaded_bytes = 0usize;
+    let write_result = async {
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?
+        {
+            uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
+            if uploaded_bytes > max_bytes {
+                return Err(ApiError::payload_too_large(limit_msg()));
+            }
+            file.write_all(&chunk)
+                .await
+                .map_err(|error| ApiError::internal(error.to_string()))?;
+        }
+        file.flush()
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))
+    }
+    .await;
+    if let Err(error) = write_result {
+        drop(file);
+        cleanup().await;
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
     Ok(create_app_with_state(settings)?.0)
 }

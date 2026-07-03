@@ -201,7 +201,7 @@ pub(crate) fn sweep_stale_asset_uploads_before(
 /// pose-source uploads use `pose-uploads` so they can be swept independently).
 pub(crate) async fn write_upload_field_to_dir(
     state: &AppState,
-    mut field: axum::extract::multipart::Field<'_>,
+    field: axum::extract::multipart::Field<'_>,
     subdir: &str,
 ) -> Result<PathBuf, ApiError> {
     let upload_dir = state.settings.data_dir.join("cache").join(subdir);
@@ -209,37 +209,18 @@ pub(crate) async fn write_upload_field_to_dir(
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let temp_path = upload_dir.join(format!("upload-{}.tmp", Uuid::new_v4().simple()));
-    let mut file = tokio::fs::File::create(&temp_path)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    // sc-4204 (F-API-6): clean up the temp file on EVERY error path (chunk read,
-    // write, flush, or size cap), not just the size cap — an aborted or malformed
-    // multi-gigabyte upload otherwise leaks as an orphaned upload-*.tmp. Mirrors
-    // write_lora_upload_field_to_staged_file.
-    let mut uploaded_bytes = 0usize;
-    let write_result = async {
-        while let Some(chunk) = field
-            .chunk()
-            .await
-            .map_err(|error| ApiError::bad_request(error.to_string()))?
-        {
-            uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
-            if uploaded_bytes > MAX_UPLOAD_BYTES {
-                return Err(ApiError::payload_too_large("Uploaded file is too large"));
-            }
-            file.write_all(&chunk)
-                .await
-                .map_err(|error| ApiError::internal(error.to_string()))?;
-        }
-        file.flush()
-            .await
-            .map_err(|error| ApiError::internal(error.to_string()))
-    }
-    .await;
-    if let Err(error) = write_result {
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(error);
-    }
+    // sc-8886 (F-084): shared streaming writer. Cleanup removes only the temp file —
+    // the `cache/<subdir>` staging dir is shared, not per-upload, so it is left in place.
+    stream_multipart_field_to_file(
+        field,
+        &temp_path,
+        MAX_UPLOAD_BYTES,
+        || "Uploaded file is too large".to_owned(),
+        || async {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+        },
+    )
+    .await?;
     Ok(temp_path)
 }
 
