@@ -1850,7 +1850,7 @@
       "candle": {
         "minMemoryGb": 40,
         "vramGbByTier": { "q4": 32.7, "bf16": 48.0 },
-        "measured": true
+        "measured": false
       },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Turbo",
       "ui": {
@@ -3354,7 +3354,7 @@
       "candle": {
         "minMemoryGb": 36,
         "vramGbByTier": { "q4": 28.5, "bf16": 33.0 },
-        "measured": true
+        "measured": false
       },
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/sd3.5-medium-mlx/blob/main/LICENSE.md",

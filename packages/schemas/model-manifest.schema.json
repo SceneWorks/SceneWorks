@@ -218,7 +218,7 @@
               "minMemoryGb": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Minimum GPU VRAM (GB) to run this model on the candle/CUDA lane — the measured overall-peak of the heaviest hosted tier a user can select, plus headroom. Retires the epic 7982 SD3.5 'minMemoryGb under measured peak' follow-up: this is a real measured CUDA number, not the inherited unified-memory mlx value."
+                "description": "Minimum GPU VRAM (GB) to run this model on the candle/CUDA lane — the measured overall-peak of the DEFAULT (lightest, typically q4) hosted tier, plus headroom. This gates the default tier only, matching the established MLX default-tier-gating convention; heavier hosted tiers (q8 / bf16) can exceed this value, and their per-tier measured ceilings live in vramGbByTier. Retires the epic 7982 SD3.5 'minMemoryGb under measured peak' follow-up: this is a real measured CUDA number, not the inherited unified-memory mlx value."
               },
               "vramGbByTier": {
                 "type": "object",
