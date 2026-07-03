@@ -801,6 +801,62 @@ async fn import_asset_removes_staged_temp_file_when_a_later_field_errors() {
     );
 }
 
+#[tokio::test]
+async fn import_asset_rejects_duplicate_file_field_and_cleans_first_temp() {
+    // sc-8883 (F-081): a second `file` field must be rejected (400), and the first
+    // already-staged temp must be cleaned up rather than orphaned until the 24h sweep.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    let app = create_app(settings).expect("app creates");
+
+    let boundary = "SCENEWORKS_DUP_FILE_BOUNDARY";
+    let mut body = Vec::new();
+    for name in ["file", "file"] {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"x.png\"\r\n")
+                .as_bytes(),
+        );
+        body.extend_from_slice(b"Content-Type: image/png\r\n\r\n");
+        body.extend_from_slice(b"\x89PNG\r\n\x1a\n payload bytes");
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+    let (status, _, response) = request_raw(
+        app,
+        "POST",
+        "/api/v1/projects/project-1/assets",
+        body,
+        &[(
+            "content-type",
+            &format!("multipart/form-data; boundary={boundary}"),
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let value: Value = serde_json::from_slice(&response).expect("json body parses");
+    assert!(value["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("Only one file field is allowed")));
+
+    // The first staged temp must not leak under cache/uploads.
+    let upload_root = data_dir.join("cache").join("uploads");
+    let leaked: Vec<_> = std::fs::read_dir(&upload_root)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("upload-"))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        leaked.is_empty(),
+        "first staged temp file leaked on duplicate file field: {leaked:?}"
+    );
+}
+
 #[test]
 fn shared_sweep_removes_stale_files_and_dirs_leaves_fresh_and_unrelated() {
     // sc-8885 (F-083): the unified sweeper handles both loose files and per-upload

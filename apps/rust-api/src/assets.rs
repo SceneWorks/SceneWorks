@@ -86,6 +86,14 @@ pub(crate) async fn import_asset(
         {
             match field.name() {
                 Some("file") => {
+                    // sc-8883 (F-081): reject a second `file` field instead of
+                    // overwriting `file` — the old code dropped the first staged temp
+                    // path on the floor, leaking a multi-GB tmp until the 24h sweep (a
+                    // disk-exhaustion lever for an authenticated caller). Matches the
+                    // LoRA/model imports, which also reject a duplicate file field.
+                    if file.is_some() {
+                        return Err(ApiError::bad_request("Only one file field is allowed"));
+                    }
                     let filename = field.file_name().unwrap_or("upload").to_owned();
                     let content_type = field.content_type().map(str::to_owned);
                     let temp_path = write_upload_field_to_temp_file(&state, field).await?;
