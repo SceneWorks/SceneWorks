@@ -307,11 +307,16 @@ fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
 }
 
 /// The separate `SceneWorks/ideogram-4` repo that hosts Ideogram 4's bf16 tree under `bf16/`, the
-/// macOS selectable full-precision MLX tier (sc-8513). The MLX `q4/`/`q8/` turnkey lives in
-/// `SceneWorks/ideogram-4-mlx`; bf16 is resolved from THIS repo rather than duplicated. (Off-Mac the
-/// candle Ideogram lane packed-loads the `SceneWorks/ideogram-4-mlx` turnkey subdir directly via the
-/// shared `resolve_weights_dir`/`ideogram_model_subdir` since sc-9092 — no separate candle repo.)
-#[cfg(target_os = "macos")]
+/// selectable full-precision tier (sc-8513). The `q4/`/`q8/` packed turnkey lives in
+/// `SceneWorks/ideogram-4-mlx`; bf16 is resolved from THIS repo rather than duplicated. sc-9650 wires it
+/// on the candle lane too: the `bf16/` subdir is in the SAME single-file `transformer/model.safetensors`
+/// layout the candle loader reads, and `linear_detect` takes its dense arm (no `.scales` sibling), so
+/// candle dense-loads bf16 exactly like macOS/MLX — while the packed q4/q8 tiers still come from the
+/// `-mlx` turnkey via `ideogram_model_subdir`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 const IDEOGRAM_BF16_REPO: &str = "SceneWorks/ideogram-4";
 
 /// Resolve the weights snapshot directory: an explicit `modelPath` dir wins, else the
@@ -345,12 +350,16 @@ pub(crate) fn resolve_weights_dir(
     // `turbo_lora.safetensors` the `ideogram_4_turbo` engine installs at load.
     if request.model == "ideogram_4" || request.model == "ideogram_4_turbo" {
         // bf16 (sc-8513, epic 8506) is the SHARED `SceneWorks/ideogram-4` repo's `bf16/` subdir — NOT
-        // duplicated into the MLX turnkey. When the macOS request opts into bf16 (advanced mlxQuantize<=0)
-        // AND it is downloaded, resolve there (the dense weights load with no quantize); else the q4
-        // (default)/q8 turnkey subdir. A partial bf16 download falls back rather than half-loading.
-        // (macOS/MLX only — this `#[cfg(target_os = "macos")]` block is skipped on the candle lane, which
-        // shares the `ideogram_model_subdir` q4/q8 turnkey resolution below since sc-9092.)
-        #[cfg(target_os = "macos")]
+        // duplicated into the MLX turnkey. When a request opts into bf16 (advanced mlxQuantize<=0) AND it
+        // is downloaded, resolve there (the dense weights load with no quantize); else the q4 (default)/q8
+        // turnkey subdir. A partial bf16 download falls back rather than half-loading. sc-9650: wired on
+        // the candle lane too — the candle Ideogram loader reads the same `transformer/model.safetensors`
+        // layout and dense-loads bf16 via `linear_detect` (`resolve_quant` returns None for mlxQuantize<=0,
+        // so no on-the-fly quant runs). The packed q4/q8 tiers still resolve from the `-mlx` turnkey below.
+        #[cfg(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        ))]
         {
             let wants_bf16 = request
                 .advanced
