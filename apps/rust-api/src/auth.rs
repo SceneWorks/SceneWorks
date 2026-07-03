@@ -5,15 +5,18 @@ use std::net::{IpAddr, SocketAddr};
 // sc-8870 (F-068): failed-attempt throttle for the token oracle. `POST
 // /api/v1/auth/verify` is public and returns `{ok}` for any candidate token, and
 // every other gated route reveals validity via 401-vs-200; in LAN mode the token IS
-// the user's password, so with no lockout an attacker on the LAN can brute-force it
+// the user's password, so with no throttle an attacker on the LAN can brute-force it
 // at wire speed. This is a small, self-contained per-peer-IP rolling-window counter:
 // once an IP exceeds `AUTH_THROTTLE_MAX_FAILURES` failures inside
-// `AUTH_THROTTLE_WINDOW`, further token attempts from that IP are refused with 429
-// until the window rolls off (each new failure re-arms the window, so sustained
-// guessing stays locked out). It is advisory/anti-automation, not a crypto control:
-// a success clears the peer's record immediately, and loopback-trusted peers never
-// reach it (the bypass returns first), so legitimate desktop/worker traffic is
-// untouched.
+// `AUTH_THROTTLE_WINDOW`, further token attempts from that IP are refused with 429.
+// It rate-limits guessing to a sustained ceiling of ~`AUTH_THROTTLE_MAX_FAILURES`
+// failed attempts per `AUTH_THROTTLE_WINDOW` per peer IP — it is NOT a permanent
+// lockout. A blocked peer short-circuits at `is_blocked` before `record_failure`, so
+// its window is never re-armed once it trips: ~`AUTH_THROTTLE_WINDOW` after the
+// capping failure the record rolls off (via `prune_attempts`) and the peer may try
+// again. It is advisory/anti-automation, not a crypto control: a success clears the
+// peer's record immediately, and loopback-trusted peers never reach it (the bypass
+// returns first), so legitimate desktop/worker traffic is untouched.
 const AUTH_THROTTLE_MAX_FAILURES: u32 = 10;
 const AUTH_THROTTLE_WINDOW: Duration = Duration::from_secs(60);
 
@@ -122,12 +125,30 @@ pub(crate) async fn access_control(
         return throttled_response();
     }
 
+    // Unconditional bypasses — nothing to meter here: a preflight, a public/non-gated
+    // path, a loopback-trusted peer, or a valid media ticket. Loopback peers are never
+    // throttled, and none of these paths present the header token.
     if request.method() == Method::OPTIONS
         || !requires_token(request.method(), request.uri().path())
         || loopback_trusted(state.settings.trust_loopback, peer)
-        || is_authorized(request.headers(), &state.settings)
         || media_ticket_authorized(&state, &request)
     {
+        return next.run(request).await;
+    }
+
+    // A valid header token on a gated route passes auth — and, like `/auth/verify`,
+    // clears this peer's failure budget (sc-8870, F-068). Without this, a non-web
+    // LAN/API client (epic 4484) hitting gated routes directly with an occasionally
+    // wrong token could creep toward the cap with no path to reset it; only the
+    // `/auth/verify` endpoint cleared the budget before. Take + release the throttle
+    // lock inside `record_success` (no lock held across the `next.run` await), matching
+    // the rest of `AuthThrottle`. Loopback-trusted peers already returned above, so this
+    // only runs for the token-authenticated remote path.
+    if is_authorized(request.headers(), &state.settings) {
+        // Only meter when a token is configured; with auth off there is no budget.
+        if !state.settings.access_token.is_empty() {
+            state.auth_throttle.record_success(peer_ip);
+        }
         return next.run(request).await;
     }
 

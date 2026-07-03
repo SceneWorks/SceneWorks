@@ -9588,6 +9588,53 @@ async fn gated_route_brute_force_is_throttled_per_peer() {
 }
 
 #[tokio::test]
+async fn gated_route_success_clears_peer_throttle_budget() {
+    // sc-8870 (F-068): a valid token on a *gated route* must clear the peer's failure
+    // budget too, not only the `/auth/verify` endpoint. A non-web LAN/API client
+    // (epic 4484) hits gated routes directly with the token header; if it occasionally
+    // sends a wrong token it would creep toward the cap with no reset path unless a
+    // subsequent good request clears it. Accrue several misses, then one successful
+    // gated-route auth from the same peer, then confirm a full fresh window of misses
+    // is tolerated again (would have tripped at 10 total had success not reset it).
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+    let peer = "192.168.1.61:43000";
+    let bad = [("authorization", "Bearer wrong-token")];
+    let good = [("authorization", "Bearer secret-token")];
+
+    // Five misses (under the cap of 10) on a gated route.
+    for _ in 0..5 {
+        let (status, _) =
+            request_with_peer_headers(app.clone(), "GET", "/api/v1/jobs", Value::Null, peer, &bad)
+                .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // A valid token on the same gated route passes auth and resets the budget.
+    let (status, _) =
+        request_with_peer_headers(app.clone(), "GET", "/api/v1/jobs", Value::Null, peer, &good)
+            .await;
+    assert_ne!(status, StatusCode::UNAUTHORIZED);
+    assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    // With the budget reset, nine more misses are tolerated without an early lockout —
+    // without the gated-route `record_success` the 5 + 5th earlier miss would already
+    // have pushed this past 10 and returned 429 instead of 401.
+    for _ in 0..9 {
+        let (status, _) =
+            request_with_peer_headers(app.clone(), "GET", "/api/v1/jobs", Value::Null, peer, &bad)
+                .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "post-success budget must be reset on the gated-route path"
+        );
+    }
+}
+
+#[tokio::test]
 async fn event_tickets_are_protected_and_match_contract_shape() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let mut settings = test_settings(&temp_dir);
