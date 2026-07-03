@@ -549,25 +549,36 @@ fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
         .unwrap_or_else(|| root.to_path_buf())
 }
 
+/// The Ideogram 4 tier subdir a `mlxQuantize` request needs fetched ON DEMAND — `Some("q8")` when the
+/// request opts into Q8 (`> 4`), else `None` (the shipped default `q4/`, which the catalog download
+/// pulls; bf16 is a SEPARATE catalog repo the user opts into on the Models page, never an on-demand
+/// fetch). Shared by [`ideogram_model_subdir`] (which subdir to load) and [`ensure_ideogram_tier_present`]
+/// (which to fetch) so the two stay in lockstep, mirroring [`boogu_tier_subdir`].
+fn ideogram_tier_subdir(bits: Option<i64>) -> Option<&'static str> {
+    match bits {
+        Some(b) if b > 4 => Some("q8"),
+        _ => None,
+    }
+}
+
 /// Pick the engine-complete packed subdir of an Ideogram 4 turnkey `root`: `q8/` when the request
 /// opts into Q8 (`advanced.mlxQuantize: 8`) AND it is downloaded, else the default `q4/`. Falls back
 /// to `root` if neither subdir is present (a partially-downloaded bundle surfaces as a load error
-/// rather than a silent half-load). On-demand `q8/` download is a follow-up; `q4/` is the manifest
-/// default.
+/// rather than a silent half-load). The non-default `q8/` tier is an on-demand download fetched by
+/// [`ensure_ideogram_tier_present`] before this resolves (sc-9607); `q4/` is the manifest default.
 fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
-    let wants_q8 = request
+    let bits = request
         .advanced
         .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-        .is_some_and(|bits| bits > 4);
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
     let present = |name: &str| -> Option<PathBuf> {
         let dir = root.join(name);
         dir.join("transformer/model.safetensors")
             .is_file()
             .then_some(dir)
     };
-    if wants_q8 {
-        if let Some(dir) = present("q8") {
+    if let Some(tier) = ideogram_tier_subdir(bits) {
+        if let Some(dir) = present(tier) {
             return dir;
         }
     }
@@ -680,7 +691,15 @@ fn krea_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
 /// tier subfolder is already complete. Fails loud on a real download error — fast, before any compute;
 /// a missing `hf` CLI leaves the subfolder absent so the request gracefully falls back to Q8. Mirrors
 /// [`crate::video_jobs::ensure_ltx_q8_present`].
-#[cfg(target_os = "macos")]
+///
+/// sc-9607 (epic 9083): also runs on the candle lane (off-Mac) — `generate_candle_stream` calls it
+/// before snapshot resolution, so Windows/Linux users get the SAME on-demand `-q4/-bf16` fetch as
+/// macOS. Previously `#[cfg(target_os = "macos")]`, so off-Mac only the shipped Q8 `base/` default was
+/// installable and a non-default tier silently fell back to Q8.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 async fn ensure_boogu_tier_present(
     api: &ApiClient,
     settings: &Settings,
@@ -728,6 +747,73 @@ async fn ensure_boogu_tier_present(
         format!("{tier}/mllm/*"),
         format!("{tier}/vae/*"),
     ];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api,
+        settings,
+        job,
+        &model_repo(request, &model),
+        "main",
+        &files,
+        &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
+}
+
+/// On-demand fetch of Ideogram 4's non-default `q8/` tier (sc-9607, epic 9083). The catalog download
+/// pulls only the default `q4/` subdir (`files: ["q4/*"]`), so a job that opts into Q8
+/// ([`ideogram_tier_subdir`]: `> 4` → `q8/`) needs the `q8/` subdir pulled into the HF cache before
+/// [`ideogram_model_subdir`] can resolve it. No-op when the default q4 is requested, the model isn't
+/// Ideogram, the turnkey snapshot isn't downloaded yet (`ideogram_model_subdir` then falls back to q4 /
+/// surfaces the load error), or `q8/` is already complete. The `q8/*` glob is recursive (matches
+/// `q8/transformer/…`, and for `ideogram_4_turbo` the bundled `q8/turbo_lora.safetensors`), mirroring
+/// the catalog q4 entry and [`crate::video_jobs::ensure_ltx_q8_present`]. bf16 is NOT fetched here — it
+/// lives in the separate `SceneWorks/ideogram-4` catalog repo the user opts into on the Models page
+/// (and is macOS-only). This is the on-demand `q8/` download the [`ideogram_model_subdir`] docstring
+/// flagged as a follow-up; it runs on BOTH the MLX (`generate_stream`) and candle
+/// (`generate_candle_stream`) lanes, so off-Mac gets the same q4/q8 picker as macOS. Fails loud on a
+/// real download error; a missing `hf` CLI leaves `q8/` absent so the request gracefully falls back to q4.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn ensure_ideogram_tier_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &ImageRequest,
+) -> WorkerResult<()> {
+    if request.model != "ideogram_4" && request.model != "ideogram_4_turbo" {
+        return Ok(());
+    }
+    let bits = request.advanced.get("mlxQuantize").and_then(quant_int);
+    let Some(tier) = ideogram_tier_subdir(bits) else {
+        // Default q4 ships in the catalog download — nothing to fetch.
+        return Ok(());
+    };
+    let Some(model) = mlx_model(&request.model) else {
+        return Ok(());
+    };
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, &model_repo(request, &model))
+    else {
+        // Turnkey not downloaded at all → leave it to the load path's "weights not found" error.
+        return Ok(());
+    };
+    // Present already (the packed single-file transformer) → no fetch.
+    if root
+        .join(tier)
+        .join("transformer/model.safetensors")
+        .is_file()
+    {
+        return Ok(());
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".ideogram-tier-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec![format!("{tier}/*")];
     let result = crate::model_jobs::download_model_with_hf_cli(
         api,
         settings,
@@ -2438,8 +2524,10 @@ async fn generate_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
     // sc-6568: a bf16 opt-in for Boogu fetches the full-precision `<variant>-bf16/` subfolder on
     // demand (the catalog ships only the Q8 default) before snapshot resolution. No-op for every
-    // other model / the default Q8 path.
+    // other model / the default Q8 path. sc-9607: the same on-demand pattern for Ideogram's `q8/`
+    // tier (the catalog ships only q4) — was a documented follow-up, now wired on both lanes.
     ensure_boogu_tier_present(api, settings, job, request).await?;
+    ensure_ideogram_tier_present(api, settings, job, request).await?;
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("model weights not found".to_owned()))?;
     // sc-3723: surface the descriptor-derived backend ("mlx" for every linked family today; a
@@ -2914,6 +3002,15 @@ async fn generate_candle_stream(
     // requested `advanced.mlxQuantize` → q4/q8/bf16 tier — so the candle lane needs no bespoke repo
     // logic. `model` is already resolved via `mlx_model` above, so a `None` here means only the
     // snapshot is absent (unfetched turnkey), which stays a loud load error.
+    //
+    // sc-9607 (epic 9083): off-Mac on-demand fetch of the non-default Ideogram/Boogu tiers before
+    // resolution — the catalog pulls only the shipped default (ideogram q4, boogu Q8), so a candle
+    // job that opts into another tier (`advanced.mlxQuantize`) needs its subdir pulled first. These
+    // were `#[cfg(target_os = "macos")]` (boogu) / absent (ideogram), so off-Mac previously fell back
+    // to the default tier; now Windows/Linux gets the same q4/q8/bf16 picker as macOS. No-op for the
+    // default tier / every other family / an unfetched turnkey (falls through to the load error below).
+    ensure_boogu_tier_present(api, settings, job, request).await?;
+    ensure_ideogram_tier_present(api, settings, job, request).await?;
     let weights_dir = resolve_weights_dir(request, settings)?.ok_or_else(|| {
         let repo = model_repo(request, &model);
         WorkerError::InvalidPayload(format!("candle weights snapshot not found for {repo}"))

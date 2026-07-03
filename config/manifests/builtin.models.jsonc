@@ -1424,8 +1424,9 @@
           // (candle-gen sc-9412, both DiTs), so the off-Mac candle lane picks its tier at download
           // exactly like macOS via the shared `resolve_weights_dir`/`ideogram_model_subdir`, and the
           // separate off-Mac `SceneWorks/ideogram-4` bf16 diffusers entry (the retired
-          // `candle_ideogram_repo` target) is removed. q4 is the default off-Mac tier (q8 is a macOS-only
-          // on-demand fetch; off-Mac gracefully falls back to q4).
+          // `candle_ideogram_repo` target) is removed. q4 is the default tier; sc-9607 wires the `q8/`
+          // on-demand fetch (`ensure_ideogram_tier_present`) on BOTH lanes, so off-Mac now picks q8 too
+          // (previously off-Mac gracefully fell back to q4).
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4-mlx",
           "variant": "q4",
@@ -1664,8 +1665,9 @@
           // the Q8 `base/` subfolder (leaf-dir globs — the subfolder nests, so a single-level `base/*`
           // would miss the files). Apache-2.0, ungated.
           // sc-9092: installable on Windows/Linux too — the candle lane packed-loads this SAME Q8 `base/`
-          // subfolder (candle-gen sc-9410). The non-default `-bf16/` `-q4/` tiers are a macOS-only
-          // on-demand fetch (`ensure_boogu_tier_present`); off-Mac resolves the shipped Q8 default.
+          // subfolder (candle-gen sc-9410). sc-9607: the non-default `-bf16/` `-q4/` tiers are an
+          // on-demand fetch (`ensure_boogu_tier_present`) on BOTH lanes now — off-Mac gets the same
+          // multi-tier picker as macOS (previously off-Mac resolved only the shipped Q8 default).
           "provider": "huggingface",
           "repo": "SceneWorks/boogu-image-mlx",
           "files": ["base/transformer/*", "base/mllm/*", "base/vae/*"],

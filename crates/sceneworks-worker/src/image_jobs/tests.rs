@@ -5554,6 +5554,21 @@ fn ideogram_subdir_prefers_q4_and_opts_into_q8() {
     );
 }
 
+/// `ideogram_tier_subdir` (sc-9607) maps a `mlxQuantize` bit count to the tier that needs an ON-DEMAND
+/// fetch: `> 4` → `q8` (the catalog ships only q4, so q8 is pulled by `ensure_ideogram_tier_present`),
+/// everything else → `None`. The default q4 ships in the catalog download (no fetch), and bf16 (`<= 0`)
+/// lives in a separate catalog repo the user opts into on the Models page — so both map to `None` here.
+/// `ideogram_model_subdir` and the fetch share this fn so the load target and the fetch target agree.
+#[test]
+fn ideogram_tier_subdir_maps_q8_optin() {
+    assert_eq!(ideogram_tier_subdir(None), None);
+    assert_eq!(ideogram_tier_subdir(Some(8)), Some("q8"));
+    assert_eq!(ideogram_tier_subdir(Some(5)), Some("q8"));
+    assert_eq!(ideogram_tier_subdir(Some(4)), None);
+    assert_eq!(ideogram_tier_subdir(Some(0)), None);
+    assert_eq!(ideogram_tier_subdir(Some(-1)), None);
+}
+
 /// Boogu (epic 6387) resolves each of its three ids to its own engine + the reference defaults, and
 /// quant resolution returns Q8 — the catalog declares `mlx.quantize: 8` (the pre-packed Q8 turnkey
 /// default). Turbo is CFG-free so `resolve_guidance` returns None. Runs in CI on Mac (no weights).
