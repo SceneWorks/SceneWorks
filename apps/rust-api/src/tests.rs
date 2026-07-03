@@ -9139,9 +9139,13 @@ fn embedded_ui_csp_locks_down_scripts_but_allows_app_resources() {
     assert!(!csp.contains("unsafe-eval"));
     // Resources the app genuinely needs.
     assert!(csp.contains("default-src 'self'"));
-    assert!(csp.contains("font-src 'self' https://fonts.gstatic.com data:"));
-    assert!(csp.contains("https://fonts.googleapis.com"));
+    // Fonts are self-hosted (sc-8956): no third-party font host in the CSP.
+    assert!(csp.contains("style-src 'self' 'unsafe-inline'"));
+    assert!(csp.contains("font-src 'self'"));
     assert!(csp.contains("img-src 'self' data: blob:"));
+    // Guard against a regression that silently re-adds the Google font origins.
+    assert!(!csp.contains("fonts.googleapis.com"));
+    assert!(!csp.contains("fonts.gstatic.com"));
     // Tauri IPC for the navigated desktop webview.
     assert!(csp.contains("ipc:"));
     // Hardening directives.

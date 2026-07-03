@@ -9,9 +9,13 @@
 // accents.js is the source of truth; editing it alone keeps the pre-paint list
 // correct on the next dev-server start / build.
 
-// Match `{ id: "teal", ... }` entries inside the exported ACCENTS array. Kept as
-// a text parser (rather than importing accents.js) so it works in the vite
-// config's Node context without transpiling the ES module.
+// Isolate the exported `ACCENTS = [ ... ]` array literal so only its entries are
+// parsed — a stray `id:` in a comment or a second literal elsewhere in the file
+// must not pollute the list. Kept as a text parser (rather than importing
+// accents.js) so it works in the vite config's Node context without transpiling
+// the ES module.
+const ACCENTS_ARRAY_RE = /export\s+const\s+ACCENTS\s*=\s*\[([\s\S]*?)\]/;
+// Match `{ id: "teal", ... }` entries inside that array body.
 const ACCENT_ID_RE = /\bid\s*:\s*["']([^"']+)["']/g;
 
 /**
@@ -20,10 +24,15 @@ const ACCENT_ID_RE = /\bid\s*:\s*["']([^"']+)["']/g;
  * @returns {string[]} accent ids in declaration order
  */
 export function extractAccentIds(accentsSource) {
+  const arrayMatch = ACCENTS_ARRAY_RE.exec(accentsSource);
+  if (arrayMatch === null) {
+    return [];
+  }
+  const arrayBody = arrayMatch[1];
   const ids = [];
   let match;
   ACCENT_ID_RE.lastIndex = 0;
-  while ((match = ACCENT_ID_RE.exec(accentsSource)) !== null) {
+  while ((match = ACCENT_ID_RE.exec(arrayBody)) !== null) {
     ids.push(match[1]);
   }
   return ids;
