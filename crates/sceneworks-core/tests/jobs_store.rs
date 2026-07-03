@@ -1368,7 +1368,25 @@ fn heartbeat_only_refreshes_a_job_the_reporting_worker_owns() {
         "a non-owning heartbeat must not steal or clear ownership"
     );
 
-    // The owner can still refresh the job it owns.
+    // The owner can still refresh the job it owns — and the refresh must actually
+    // ADVANCE last_heartbeat_at, not just leave a non-null value (a no-op owner
+    // heartbeat would still read as `is_some()`). Timestamps are second-granular
+    // and the store stamps `utc_now()` with no injectable clock, so a real sleep
+    // would need to cross a whole-second boundary to be observable — flaky and
+    // slow. Instead, deterministically age the stored last_heartbeat_at back to a
+    // known OLD baseline via a test-only UPDATE, then require the owner heartbeat
+    // to stamp a strictly greater (current-wall-clock) value.
+    let old_baseline = "2000-01-01T00:00:00Z";
+    {
+        let connection = Connection::open(store.db_path()).expect("db opens");
+        let updated = connection
+            .execute(
+                "update jobs set last_heartbeat_at = ?1 where id = ?2",
+                params![old_baseline, created.id],
+            )
+            .expect("ages the stored heartbeat to a known baseline");
+        assert_eq!(updated, 1, "exactly the target job's heartbeat is aged");
+    }
     store
         .heartbeat_worker(WorkerHeartbeat {
             worker_id: "worker-1".to_owned(),
@@ -1379,9 +1397,14 @@ fn heartbeat_only_refreshes_a_job_the_reporting_worker_owns() {
         })
         .expect("owner heartbeat succeeds");
     let owner_refreshed = store.get_job(&created.id).expect("job loads");
+    let refreshed_heartbeat = owner_refreshed
+        .last_heartbeat_at
+        .as_deref()
+        .expect("the owning worker's heartbeat keeps refreshing the job it owns");
     assert!(
-        owner_refreshed.last_heartbeat_at.is_some(),
-        "the owning worker's heartbeat keeps refreshing the job it owns"
+        refreshed_heartbeat > old_baseline,
+        "the owning worker's heartbeat must ADVANCE last_heartbeat_at past the \
+         aged baseline, not leave it unchanged: got {refreshed_heartbeat:?}"
     );
 }
 
