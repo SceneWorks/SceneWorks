@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Stage, Layer, Image as KonvaImage, Line, Rect, Transformer } from "react-konva";
 import { apiFetch } from "../api.js";
@@ -1031,7 +1031,11 @@ export function ImageEditor() {
   useEffect(() => { aiOpRef.current = aiOp; }, [aiOp]);
   useEffect(() => { workingRef.current = working; }, [working]);
 
-  const imageAssets = (assets ?? []).filter(assetCanRenderAsImage);
+  // Memoize the image-renderable subset (sc-8939): the Image Editor re-renders on every
+  // pointermove of a brush stroke / box drag, and re-filtering the full catalog each time
+  // is needless work (jank on big projects). Only recompute when the catalog changes; this
+  // also stabilizes the identity `imageAssets` feeds into the open-from-asset callback dep.
+  const imageAssets = useMemo(() => (assets ?? []).filter(assetCanRenderAsImage), [assets]);
 
   // Track the container size so the Konva stage fills the available canvas area.
   // Measure once up front (a ResizeObserver alone can miss the first layout) and

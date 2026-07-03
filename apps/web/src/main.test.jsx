@@ -1336,6 +1336,46 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("does not mutate the API-returned asset record when flagging dataset-only (sc-8939)", async () => {
+    // Capture the exact object the upload transport returns so we can assert the import
+    // path treats it as immutable (the datasetOnly flag must land on a copy, not here).
+    const returnedAsset = {
+      id: "dataset-upload-mira",
+      displayName: "mira.png",
+      file: { path: "training/uploads/mira.png", mimeType: "image/png" },
+    };
+    const uploadDatasetItem = vi.fn(async () => returnedAsset);
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withTrainingDataSetsLibraryContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets: [],
+          datasets: [],
+          createDataset: vi.fn(async (payload) => ({ id: "dataset-new", name: payload.name, version: 1, items: payload.items })),
+          uploadDatasetItem,
+        }),
+      );
+    });
+
+    const imageFile = new File([new Uint8Array([1, 2, 3])], "mira.png", { type: "image/png" });
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add images").click();
+    });
+    const fileInput = document.body.querySelector(".dataset-add-dropzone input[type=file]");
+    await act(async () => {
+      Object.defineProperty(fileInput, "files", { configurable: true, value: [imageFile] });
+      fileInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+    await settle();
+
+    expect(uploadDatasetItem).toHaveBeenCalledTimes(1);
+    // The returned record is unchanged — no datasetOnly leaked onto the shared instance.
+    expect(returnedAsset).not.toHaveProperty("datasetOnly");
+    expect(Object.keys(returnedAsset)).toEqual(["id", "displayName", "file"]);
+  });
+
   it("opens and saves an existing training dataset membership", async () => {
     const loadDataset = vi.fn(async () => ({
       id: "dataset-a",
