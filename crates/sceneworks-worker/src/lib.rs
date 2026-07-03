@@ -406,9 +406,31 @@ const DEFAULT_MAX_MODEL_URL_BYTES: u64 = 256 * 1024 * 1024 * 1024;
 const DEFAULT_TRANSITION_DURATION_SECONDS: f64 = 0.5;
 // One source of truth for the person-track sample cadence (sc-8914 / F-112): the sidecar
 // `sampleRateFps` the media handlers record and the sampler `person_track` uses must never drift, so
-// both are these aliases to the `person_track` module constants rather than value-duplicated literals.
+// on the lanes that build `person_track` (macOS / off-Mac candle) these alias its constants directly.
+// The `person_track` module is cfg'd out on the bare parity lane (no MLX, no candle), so there the
+// aliases fall back to the literal values — kept in lockstep by
+// `person_track_sample_constants_are_a_single_source_of_truth`, which asserts the equality on the
+// lanes where both exist.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 const PERSON_TRACK_SAMPLE_RATE_FPS: f64 = person_track::SAMPLE_RATE_FPS;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 const PERSON_TRACK_MAX_SAMPLES: usize = person_track::MAX_SAMPLES;
+#[cfg(not(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+)))]
+const PERSON_TRACK_SAMPLE_RATE_FPS: f64 = 2.0;
+#[cfg(not(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+)))]
+const PERSON_TRACK_MAX_SAMPLES: usize = 24;
 const PERSON_TRACK_X_DRIFT: f64 = 0.018;
 
 #[derive(Debug, Clone, PartialEq)]
