@@ -1464,6 +1464,22 @@
           "footprint": { "diskSizeBytes": 15400562623, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
+          // q8 packed tier (sc-9642): the SAME `SceneWorks/ideogram-4-mlx` turnkey's `q8/` subdir (both
+          // DiTs + dense TE/VAE), installable on ALL platforms — candle packed-detects it exactly like q4
+          // (sc-9412), so off-Mac gets the real q4/q8 A-B picker instead of q4-only. Higher fidelity than
+          // q4 at ~2x the size / VRAM (see candle.minMemoryGb). The bundled `q8/turbo_lora.safetensors`
+          // rides the glob but is inert for the base (non-turbo) model. Size excludes the ~0.85 GB LoRA,
+          // mirroring the q4 estimate above. (Previously q8 was reachable ONLY via the sc-9607
+          // generation-time on-demand fetch — never a Models-page-installable variant.)
+          "provider": "huggingface",
+          "repo": "SceneWorks/ideogram-4-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 28682662418,
+          "footprint": { "diskSizeBytes": 28682662418, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
           // bf16 snapshot — shared from the separate `SceneWorks/ideogram-4` repo's `bf16/` subdir (the
           // MLX-quantized `ideogram-4-mlx` turnkey above is not bf16). On macOS it is the selectable
           // full-precision MLX tier (sc-8513, epic 8506) — the worker resolves this repo's `bf16/` subdir
@@ -1538,10 +1554,13 @@
       // private gated repo is tracked in sc-5999 (license/gating UI + credential flow).
       "gated": true,
       "credentialHost": "huggingface.co",
+      // licenseUrl is the upstream Ideogram license TEXT; the "Request access" button is derived
+      // separately from the download repo (`gatedRepoUrl` → SceneWorks/ideogram-4-mlx, sc-5999), so
+      // license and access are intentionally two different pages for this model. Leave as upstream.
       "licenseUrl": "https://huggingface.co/ideogram-ai/ideogram-4-fp8",
       "ui": {
         "label": "Ideogram 4",
-        "description": "Ideogram 4 — 9.3B flow-matching text-to-image with structured JSON-caption prompting (bounding-box layout + color palettes), MLX-only (Apple Silicon). Pre-quantized Q4 (~15 GB, default) / Q8. Distributed under the Ideogram Non-Commercial Model Agreement (gated): accept the license at huggingface.co/ideogram-ai/ideogram-4-fp8 and add a Hugging Face token under Settings → Service credentials before downloading. Trained on JSON captions — SceneWorks builds the caption from your prompt.",
+        "description": "Ideogram 4 — 9.3B flow-matching text-to-image with structured JSON-caption prompting (bounding-box layout + color palettes). Runs on Apple Silicon (MLX) and Windows/Linux (candle/CUDA). Pre-quantized Q4 (~15 GB, default) + Q8 (~29 GB) tiers. Distributed under the Ideogram Non-Commercial Model Agreement (gated): accept the license at huggingface.co/ideogram-ai/ideogram-4-fp8, then use Request access on the model page and add a Hugging Face token under Settings → Service credentials before downloading. Trained on JSON captions — SceneWorks builds the caption from your prompt.",
         "recommendedFor": ["text_to_image"],
         "pid": { "checkpointId": "pid_flux2" },
         "promptGuide": {
@@ -1600,6 +1619,19 @@
           "footprint": { "diskSizeBytes": 16247340792, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
+          // q8 packed tier (sc-9642): the SAME `SceneWorks/ideogram-4-mlx` turnkey's `q8/` subdir,
+          // carrying the bundled `turbo_lora.safetensors` (listed EXPLICITLY for the exact cache-health
+          // check, like q4). Installable on ALL platforms — candle packed-detects it like q4 (sc-9412),
+          // so off-Mac gets the real q4/q8 A-B picker. Size includes the ~0.85 GB LoRA (turbo uses it).
+          "provider": "huggingface",
+          "repo": "SceneWorks/ideogram-4-mlx",
+          "variant": "q8",
+          "files": ["q8/*", "q8/turbo_lora.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 29529440587,
+          "footprint": { "diskSizeBytes": 29529440587, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
           // bf16 snapshot — shared from the separate `SceneWorks/ideogram-4` repo's `bf16/` subdir,
           // which carries `turbo_lora.safetensors` (the turbo loader merges it at load). On macOS it is the
           // selectable full-precision MLX tier (sc-8513) — the worker resolves this repo's `bf16/` when
@@ -1648,10 +1680,12 @@
       },
       "gated": true,
       "credentialHost": "huggingface.co",
+      // See `ideogram_4`: licenseUrl is the upstream license TEXT; access is the separate "Request
+      // access" button (`gatedRepoUrl` → SceneWorks/ideogram-4-mlx, sc-5999). Leave as upstream.
       "licenseUrl": "https://huggingface.co/ideogram-ai/ideogram-4-fp8",
       "ui": {
         "label": "Ideogram 4 Turbo",
-        "description": "Ideogram 4 Turbo — the few-step (~8) fast variant of Ideogram 4: same 9.3B flow-matching model and structured JSON-caption prompting, distilled to a CFG-free single-DiT path (the ostris TurboTime LoRA) for ~2x faster renders. MLX-only (Apple Silicon). Shares the gated Ideogram 4 turnkey — accept the license at huggingface.co/ideogram-ai/ideogram-4-fp8 and add a Hugging Face token under Settings → Service credentials before downloading.",
+        "description": "Ideogram 4 Turbo — the few-step (~8) fast variant of Ideogram 4: same 9.3B flow-matching model and structured JSON-caption prompting, distilled to a CFG-free single-DiT path (the ostris TurboTime LoRA) for ~2x faster renders. Runs on Apple Silicon (MLX) and Windows/Linux (candle/CUDA). Shares the gated Ideogram 4 turnkey (Q4 default + Q8 selectable) — accept the license at huggingface.co/ideogram-ai/ideogram-4-fp8, then use Request access on the model page and add a Hugging Face token under Settings → Service credentials before downloading.",
         "recommendedFor": ["text_to_image"],
         "pid": { "checkpointId": "pid_flux2" },
         "promptGuide": {
