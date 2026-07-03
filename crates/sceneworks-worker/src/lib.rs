@@ -339,6 +339,16 @@ mod segment_jobs;
 // replace the SAM2 box-prompt STUB in the off-Mac person-track (`media_jobs` `maskState = "missing"`).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod person_segment_sam3_candle;
+// Backend-neutral SAM3 person-segmentation helpers (sc-8847, F-045): the weight resolution,
+// RGB→CHW normalization, and mask/association MATH shared VERBATIM by the two cfg-exclusive SAM3
+// modules (`person_segment_sam3` MLX / `person_segment_sam3_candle` candle). Extracted here ONCE so a
+// fix lands on both platforms and they cannot silently diverge; the per-backend files keep only their
+// tensor/model/device seam. Same superset gate as `scail2_masks` (both SAM3 modules or neither).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod person_segment_sam3_common;
 // SCAIL-2 color-coded segmentation-mask painting (epic 5439, sc-5448): turns native SAM3
 // per-person masks into the palette-painted RGB masks the SCAIL-2 engine consumes. Backend-neutral
 // (pure pixel painting over `AllPersonMasks`); available on both the macOS MLX lane (sc-5448) and the
