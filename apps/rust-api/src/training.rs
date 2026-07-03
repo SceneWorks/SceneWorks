@@ -1316,6 +1316,18 @@ pub(crate) async fn create_training_job(
 
     let plan_value =
         serde_json::to_value(&plan).map_err(|error| ApiError::internal(error.to_string()))?;
+
+    // A real run gets a human-readable copy of the resolved plan dropped into its output dir up
+    // front — before the worker even claims the job — so the settings that produced (or were
+    // attempted for) each adapter are visible as `training-config.json` next to it, even when the
+    // run later fails or is abandoned (exactly the run whose config you want to inspect). Dry runs
+    // produce no adapter, so they are skipped. Best-effort and purely informational: the worker
+    // and registration drive off the job payload, never this file, so a failure is logged and does
+    // not block the submit.
+    if !payload.dry_run {
+        write_training_config_snapshot(&output_dir, &plan_value).await;
+    }
+
     let mut job_payload = JsonObject::new();
     job_payload.insert("dryRun".to_owned(), Value::Bool(payload.dry_run));
     job_payload.insert("outputName".to_owned(), Value::String(output_name));
@@ -1341,6 +1353,47 @@ pub(crate) async fn create_training_job(
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// Write the resolved training plan to `<output_dir>/training-config.json` at submit time as a
+/// human-readable record of the settings for a run (config hyperparameters, dataset, target, and
+/// provenance snapshot) — the exact JSON otherwise trapped in the jobs store. Written up front so
+/// the file sits next to the produced adapter and survives even a run that later fails or is
+/// abandoned. Creates the output dir if the worker has not yet done so.
+///
+/// Best-effort and purely informational: the worker and LoRA registration both drive off the job
+/// payload, never this file, so any dir/serialize/write failure is logged and swallowed rather
+/// than failing the training submit.
+async fn write_training_config_snapshot(output_dir: &std::path::Path, plan: &Value) {
+    if let Err(error) = tokio::fs::create_dir_all(output_dir).await {
+        tracing::warn!(
+            event = "training_config_snapshot_dir_failed",
+            path = %output_dir.display(),
+            error = %error,
+            "failed to create output dir for training-config.json — skipping"
+        );
+        return;
+    }
+    let path = output_dir.join("training-config.json");
+    let bytes = match serde_json::to_vec_pretty(plan) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(
+                event = "training_config_snapshot_serialize_failed",
+                error = %error,
+                "failed to serialize training plan for training-config.json — skipping"
+            );
+            return;
+        }
+    };
+    if let Err(error) = tokio::fs::write(&path, bytes).await {
+        tracing::warn!(
+            event = "training_config_snapshot_write_failed",
+            path = %path.display(),
+            error = %error,
+            "failed to write training-config.json — skipping (training submit continues)"
+        );
+    }
 }
 
 /// Absolute path to the target's base model weights on the worker host. Prefers a
