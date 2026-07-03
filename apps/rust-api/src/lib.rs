@@ -823,6 +823,35 @@ pub(crate) fn sweep_stale_uploads(
     Ok(removed)
 }
 
+/// Log (but never fail on) a startup directory-creation error. sc-8882 (F-080): the
+/// old `let _ =` swallowed permissions/disk problems, so they only ever surfaced as
+/// downstream 500s. Startup stays best-effort — a missing dir errors where it is used.
+fn warn_on_startup_err(label: &str, path: &FsPath, result: std::io::Result<()>) {
+    if let Err(error) = result {
+        tracing::warn!(
+            event = "startup_create_dir_failed",
+            dir = label,
+            path = %path.display(),
+            error = %error,
+            "could not create startup directory"
+        );
+    }
+}
+
+/// Log (but never fail on) a stale-upload sweep error. sc-8882 (F-080): a failed sweep
+/// silently leaves leaked multi-GB upload temps unreclaimed; a warning makes that
+/// diagnosable without aborting startup.
+fn warn_on_sweep_err(kind: &str, result: std::io::Result<usize>) {
+    if let Err(error) = result {
+        tracing::warn!(
+            event = "stale_upload_sweep_failed",
+            sweep = kind,
+            error = %error,
+            "stale upload sweep failed; leaked temp uploads may remain"
+        );
+    }
+}
+
 pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
     Ok(create_app_with_state(settings)?.0)
 }
@@ -833,16 +862,33 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
 pub(crate) fn create_app_with_state(
     settings: Settings,
 ) -> Result<(Router, AppState), JobsStoreError> {
-    let _ = std::fs::create_dir_all(&settings.data_dir);
-    let _ = std::fs::create_dir_all(&settings.config_dir);
+    // sc-8882 (F-080): a permissions/disk failure here is otherwise invisible until a
+    // downstream 500 — surface it as a warning so it is diagnosable. Non-fatal: startup
+    // continues (a missing dir surfaces later where it is actually used).
+    warn_on_startup_err(
+        "data_dir",
+        &settings.data_dir,
+        std::fs::create_dir_all(&settings.data_dir),
+    );
+    warn_on_startup_err(
+        "config_dir",
+        &settings.config_dir,
+        std::fs::create_dir_all(&settings.config_dir),
+    );
     if let Some(jobs_db_parent) = settings.jobs_db_path.parent() {
-        let _ = std::fs::create_dir_all(jobs_db_parent);
+        warn_on_startup_err(
+            "jobs_db_parent",
+            jobs_db_parent,
+            std::fs::create_dir_all(jobs_db_parent),
+        );
     }
-    let _ = sweep_stale_lora_uploads(&settings.data_dir);
-    let _ = sweep_stale_pose_uploads(&settings.data_dir);
-    let _ = sweep_stale_keypoint_uploads(&settings.data_dir);
+    // sc-8882 (F-080): a failed sweep leaves leaked multi-GB upload temps unreclaimed
+    // and was previously silent. WARN (never fatal) so the operator can investigate.
+    warn_on_sweep_err("lora", sweep_stale_lora_uploads(&settings.data_dir));
+    warn_on_sweep_err("pose", sweep_stale_pose_uploads(&settings.data_dir));
+    warn_on_sweep_err("keypoint", sweep_stale_keypoint_uploads(&settings.data_dir));
     // sc-4204 (F-API-6): asset-import temp files (cache/uploads) had no startup sweep.
-    let _ = sweep_stale_asset_uploads(&settings.data_dir);
+    warn_on_sweep_err("asset", sweep_stale_asset_uploads(&settings.data_dir));
     let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
     jobs_store.initialize()?;
     let interrupted_jobs_on_startup = jobs_store.mark_interrupted_on_startup()?.len();
