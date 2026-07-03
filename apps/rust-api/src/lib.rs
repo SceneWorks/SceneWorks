@@ -1032,7 +1032,7 @@ pub(crate) fn create_app_with_state(
         )
         .route("/api/v1/credentials/:host", delete(delete_credential))
         .route(
-            "/api/v1/ui-preferences",
+            UI_PREFERENCES_PATH,
             get(get_ui_preferences).put(set_ui_preferences),
         )
         .route("/api/v1/models", get(list_models))
