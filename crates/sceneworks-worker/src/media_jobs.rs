@@ -713,13 +713,42 @@ struct RealPersonTrack {
     tracker_meta: Value,
 }
 
+/// The per-backend seam of [`assemble_real_person_track`] (sc-8833): everything the shared
+/// orchestrator can't infer from the tracking result. `device_default` is the fallback device label
+/// used only if no frame reports one (zero-frame case); every frame's real device overrides it.
+/// `backend_label` / `segmenter_label` populate `tracker_meta`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct PersonTrackBackend {
+    /// Fallback `tracker_meta.device` (macOS = `"mlx"`, off-Mac candle = `"cuda"`), overridden by
+    /// the detector's real per-frame device.
+    device_default: &'static str,
+    /// `tracker_meta.backend` (`"mlx"` / `"candle"`).
+    backend_label: &'static str,
+    /// `tracker_meta.segmenter` when segmentation is enabled (macOS = active SAM2/SAM3 id, off-Mac =
+    /// `"sam3"`); `"disabled"` is substituted by the orchestrator when `segment_enabled` is false.
+    segmenter_label: fn() -> &'static str,
+}
+
 /// Track the selected person through real source content: sample frames at the 2-FPS cadence, run
-/// the native-MLX YOLO11 detector (sc-3633) on each, associate the boxes into track identities with
-/// the SORT/ByteTrack tracker, and resample the chosen identity onto the sample cadence (sc-3634).
-/// macOS-only (MLX detector); the Python Ultralytics path serves Windows/Linux.
-#[cfg(target_os = "macos")]
+/// the YOLO11 detector (native-MLX on Mac sc-3633 / `ort`-CUDA off-Mac sc-5498) on each, associate
+/// the boxes into track identities with the pure-Rust SORT/ByteTrack tracker, resample the chosen
+/// identity onto the sample cadence (sc-3634), then fill per-frame masks with the SAM segmenter.
+///
+/// One cfg-free orchestrator shared by the macOS (native-MLX) and off-Mac candle lanes (sc-8833);
+/// the Python Ultralytics path is the fallback on a candle-disabled box. The only per-backend seams
+/// are the `backend` descriptor (device/backend/segmenter labels) and the `run_segmenter` closure —
+/// every rendered frame's real device overrides `device_default`, so the default only shows through
+/// in the (unreachable) zero-frame case. The work dir is cleaned up on both the not-found error path
+/// and the success path.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[allow(clippy::too_many_arguments)]
-async fn assemble_real_person_track(
+async fn assemble_real_person_track_shared<F, Fut>(
     api: &ApiClient,
     settings: &Settings,
     http_client: &reqwest::Client,
@@ -732,7 +761,13 @@ async fn assemble_real_person_track(
     duration: f64,
     confidence: f64,
     segment_enabled: bool,
-) -> WorkerResult<RealPersonTrack> {
+    backend: PersonTrackBackend,
+    run_segmenter: F,
+) -> WorkerResult<RealPersonTrack>
+where
+    F: FnOnce(SegmentClip) -> Fut,
+    Fut: std::future::Future<Output = SegmentOutcome>,
+{
     use crate::person_track as pt;
 
     let selected_box = pt::NormalizedBox::from_json(detection.get("box").unwrap_or(&Value::Null));
@@ -751,10 +786,11 @@ async fn assemble_real_person_track(
     let work_dir = std::env::temp_dir().join(format!("sw-person-track-{}", job.id));
     tokio::fs::create_dir_all(&work_dir).await?;
 
-    let mut device = "mlx";
-    // Keep each rendered frame (don't delete in-loop): the segmentation pass re-reads
-    // the detected target frames by the same sample index. They share the cadence, so
+    // The detector reports its real execution device per frame; `device_default` is the fallback for
+    // the zero-frame case. Keep each rendered frame (don't delete in-loop): the segmentation pass
+    // re-reads the detected target frames by the same sample index. They share the cadence, so
     // assembly frame `i` ↔ `timestamps[i]` ↔ `frame_paths[i]`.
+    let mut device = backend.device_default;
     let mut frame_paths: Vec<PathBuf> = Vec::with_capacity(timestamps.len());
     let mut per_frame: Vec<(f64, Vec<(pt::NormalizedBox, f64)>)> =
         Vec::with_capacity(timestamps.len());
@@ -816,22 +852,21 @@ async fn assemble_real_person_track(
         ));
     }
 
-    // SAM2 segmentation pass (sc-3709): write a per-frame mask for each detected target
+    // SAM2/SAM3 segmentation pass (sc-3709): write a per-frame mask for each detected target
     // frame and fold the result into `maskState`. Any segmenter unavailability degrades
     // gracefully to box-derived masks (handled by the replacement loader), never failing
     // a track that already located the person.
     let mut frames_json = pt::frames_to_json(&assembly.frames);
     let mask_state = segment_assembly_frames(
         api,
-        settings,
-        http_client,
-        job,
         project_path,
+        job,
         track_id,
         &assembly.frames,
         &frame_paths,
         &mut frames_json,
         segment_enabled,
+        run_segmenter,
     )
     .await?;
     let _ = tokio::fs::remove_dir_all(&work_dir).await;
@@ -842,11 +877,11 @@ async fn assemble_real_person_track(
         mask_state,
         quality: assembly.quality,
         tracker_meta: json!({
-            "backend": "mlx",
+            "backend": backend.backend_label,
             "device": device,
             "model": "yolo11m",
             "tracker": "sort_bytetrack",
-            "segmenter": if segment_enabled { person_segmenter_kind().meta_label() } else { "disabled" },
+            "segmenter": if segment_enabled { (backend.segmenter_label)() } else { "disabled" },
         }),
     })
 }
@@ -860,44 +895,103 @@ async fn assemble_real_person_track(
 ))]
 const TRACK_FRAME_SIZE: (u32, u32) = (1280, 720);
 
-/// Generate the selected person's track masks with the native-MLX SAM2 **video predictor**
-/// (sc-3715): prompt once on the first detected frame and propagate temporally-consistent masks
-/// across the `first..=last` detected span via the memory bank, so non-detected gap frames inside
-/// the span still get a mask (the "survives weak-detection frames" win). Masks are written under
-/// `person-tracks/{track_id}/masks/frame_{index:06}.png`, the frame's `mask` is set, and the
-/// outcome rolls up into a `maskState` (Python `segment_track`): `missing` (disabled / no detected
-/// frame), `degraded` (weights unavailable / propagation failed → box-mask fallback at replacement
-/// time), `generated` (some detected frames masked), `active` (all detected frames masked). The
-/// `generated`/`detected_total` rollup counts only detected frames, keeping the contract identical
-/// to the per-frame path; gap-frame masks are additive coverage.
-#[cfg(target_os = "macos")]
+/// The clip a segmenter backend is asked to mask: the `first..=last` detected-span frame paths and
+/// their per-frame ByteTrack box anchors (`None` on the gap frames a video predictor fills from its
+/// memory bank). Handed to the backend closure so it can drive its own model without knowing the
+/// span math, sidecar layout, or PNG contract.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) struct SegmentClip {
+    /// Rendered frame paths for `first..=last`, index-aligned with `anchors`.
+    pub(crate) clip_paths: Vec<PathBuf>,
+    /// `Some(x, y, width, height)` on detected frames, `None` on gap frames.
+    pub(crate) anchors: Vec<Option<(f64, f64, f64, f64)>>,
+}
+
+/// What a segmenter backend returns for a clip. Kept separate from `WorkerResult<Vec<_>>` so the
+/// shared orchestrator can distinguish the three outcomes without overloading `Ok(vec![])`:
+/// a user cancel is terminal for the whole job, a weights/engine failure degrades to box masks, and
+/// masks are the success path.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) enum SegmentOutcome {
+    /// One binary mask per clip frame (detected + gap), index-aligned with `SegmentClip::clip_paths`.
+    Masks(Vec<Vec<u8>>),
+    /// Segmenter unavailable / failed → fall back to box-derived masks at replacement time.
+    Degraded,
+    /// The user canceled the job mid-segmentation; terminal for the whole person-track job.
+    Canceled(String),
+}
+
+/// Roll the per-frame segmentation outcome into the sidecar `maskState` (Python `segment_track`):
+/// `generated` masks out of `detected_total` detected target frames → `degraded` (none written →
+/// box-mask fallback), `active` (every detected frame segmented), or `generated` (a partial subset).
+/// Kept cfg-free next to the shared orchestrator so both lanes roll up identically without reaching
+/// into a per-backend, per-lane segmenter module (`person_segment` is Mac-only; the candle rollup
+/// lives in `person_segment_sam3_candle`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn mask_rollup_state(generated: usize, detected_total: usize) -> &'static str {
+    if generated == 0 {
+        "degraded"
+    } else if generated >= detected_total {
+        "active"
+    } else {
+        "generated"
+    }
+}
+
+/// Generate the selected person's track masks, then roll the outcome into a sidecar `maskState`
+/// (Python `segment_track`): prompt/propagate across the `first..=last` detected span so non-detected
+/// gap frames inside the span still get a mask (the "survives weak-detection frames" win). Masks are
+/// written under `person-tracks/{track_id}/masks/frame_{index:06}.png`, each frame's `mask` is set,
+/// and the outcome rolls up to `missing` (disabled / no detected frame), `degraded` (segmenter
+/// unavailable / failed → box-mask fallback at replacement time), `generated` (some detected frames
+/// masked), or `active` (all detected frames masked). The `generated`/`detected_total` rollup counts
+/// only detected frames, keeping the contract identical to the per-frame path; gap-frame masks are
+/// additive coverage.
+///
+/// This is the single cfg-free orchestrator shared by the macOS (native-MLX SAM2/SAM3) and off-Mac
+/// candle (SAM3) person-track masking passes (sc-8833). Everything but the model call — span math,
+/// bounds guard, clip/anchor assembly, cancel checks, the `p > 127` mask threshold, the PNG-write
+/// dispatch, and the rollup — lives here exactly once. The `run_segmenter` closure is the only
+/// per-backend seam: it resolves that backend's weights and drives the blocking segment step under
+/// `run_blocking_with_heartbeat`, returning a [`SegmentOutcome`]. A cold-start propagate (multi-GB
+/// checkpoint parse + quantize + per-frame 1008² propagation) can exceed the API's 90s stale-sweep,
+/// so the keepalive inside the closure pings `Busy` every interval AND polls for a user cancel;
+/// that cancel is terminal for the whole job (never a degrade), any other failure keeps the degrade
+/// contract.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[allow(clippy::too_many_arguments)]
-async fn segment_assembly_frames(
+pub(crate) async fn segment_assembly_frames<F, Fut>(
     api: &ApiClient,
-    settings: &Settings,
-    http_client: &reqwest::Client,
-    job: &JobSnapshot,
     project_path: &std::path::Path,
+    job: &JobSnapshot,
     track_id: &str,
     frames: &[crate::person_track::TrackFrame],
     frame_paths: &[PathBuf],
     frames_json: &mut [Value],
     segment_enabled: bool,
-) -> WorkerResult<&'static str> {
+    run_segmenter: F,
+) -> WorkerResult<&'static str>
+where
+    F: FnOnce(SegmentClip) -> Fut,
+    Fut: std::future::Future<Output = SegmentOutcome>,
+{
     let detected_total = frames.iter().filter(|frame| frame.detected).count();
     if detected_total == 0 || !segment_enabled {
         return Ok("missing");
     }
 
-    // Resolve/download the segmenter weights once; any failure degrades to box masks.
-    let download_context = DownloadContext {
-        api,
-        client: http_client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Person segmentation canceled while fetching segmenter weights.",
-        fresh_download: false,
-    };
     let masks_dir = project_path
         .join("person-tracks")
         .join(track_id)
@@ -915,6 +1009,8 @@ async fn segment_assembly_frames(
 
     // Clip frame paths + per-frame ByteTrack box anchors (None on the gap frames the predictor
     // fills from memory). The shared sample index ties frame `i` ↔ `frame_paths[i]` ↔ mask `i + 1`.
+    // The bounds guard is load-bearing: a short `frame_paths` (fewer rendered frames than detected
+    // assembly frames) would otherwise slice past the end and panic (OOB).
     if frame_paths.len() <= last {
         return Ok("degraded");
     }
@@ -937,95 +1033,21 @@ async fn segment_assembly_frames(
     )
     .await?;
 
-    // Dispatch to the active segmenter (sc-4926): SAM3 text-concept PCS by default, the legacy
-    // SAM2 box-prompt path under `SCENEWORKS_PERSON_SEGMENTER=sam2` (kept for A/B parity +
-    // fallback during the cutover). Both return one binary mask per clip frame; either path's
+    // The only per-backend seam: resolve weights + drive the blocking segment step (macOS = native
+    // MLX SAM2/SAM3 per `SCENEWORKS_PERSON_SEGMENTER`; off-Mac = candle SAM3, sc-6247). Either path's
     // failure degrades to box masks (handled by the replacement loader) — a track that already
     // located the person is never failed by the mask pass.
-    //
-    // The blocking segment step runs under `run_blocking_with_heartbeat` (sc-8390 / sc-8807): a
-    // cold-start propagate (multi-GB checkpoint parse + quantize + per-frame 1008² propagation)
-    // can exceed the API's 90s stale-sweep, so the keepalive pings `Busy` every interval AND
-    // polls for a user cancel, tripping `cancel` — which the engine's per-frame propagate
-    // contract (gen-core d8038beb) observes between frames. A user cancel is terminal for the
-    // whole person-track job (never a degrade); any other failure keeps the degrade contract.
-    let cancel = gen_core::CancelFlag::new();
-    let cancel_message = "Person tracking canceled during segmentation.";
-    let outcome = match person_segmenter_kind() {
-        PersonSegmenter::Sam3 => {
-            let (model, tokenizer) = match crate::person_segment_sam3::ensure_segmenter_weights(
-                settings,
-                &download_context,
-            )
-            .await
-            {
-                Ok(pair) => pair,
-                Err(WorkerError::Canceled(message)) => return Err(WorkerError::Canceled(message)),
-                Err(_) => return Ok("degraded"),
-            };
-            let flag = cancel.clone();
-            run_blocking_with_heartbeat(
-                api,
-                settings,
-                &job.id,
-                Some(cancel),
-                cancel_message,
-                "person segment task",
-                tokio::task::spawn_blocking(move || {
-                    crate::person_segment_sam3::segment_track_blocking(
-                        model,
-                        tokenizer,
-                        clip_paths,
-                        anchors,
-                        Some(flag),
-                        Some(Box::new(|frame, total| {
-                            tracing::debug!(event = "sam3_propagate_progress", frame, total);
-                        })),
-                    )
-                }),
-            )
-            .await
-        }
-        PersonSegmenter::Sam2 => {
-            let weights =
-                match crate::person_segment::ensure_segmenter_weights(settings, &download_context)
-                    .await
-                {
-                    Ok(path) => path,
-                    Err(WorkerError::Canceled(message)) => {
-                        return Err(WorkerError::Canceled(message))
-                    }
-                    Err(_) => return Ok("degraded"),
-                };
-            let flag = cancel.clone();
-            run_blocking_with_heartbeat(
-                api,
-                settings,
-                &job.id,
-                Some(cancel),
-                cancel_message,
-                "person segment task",
-                tokio::task::spawn_blocking(move || {
-                    crate::person_segment::propagate_track_blocking(
-                        weights,
-                        clip_paths,
-                        anchors,
-                        Some(flag),
-                        Some(Box::new(|frame, total| {
-                            tracing::debug!(event = "sam2_propagate_progress", frame, total);
-                        })),
-                    )
-                }),
-            )
-            .await
-        }
-    };
-    let masks = match outcome {
-        Ok(masks) => masks,
+    let masks = match run_segmenter(SegmentClip {
+        clip_paths,
+        anchors,
+    })
+    .await
+    {
+        SegmentOutcome::Masks(masks) => masks,
         // The keepalive posted the terminal `Canceled` already; propagate it (job canceled).
-        Err(WorkerError::Canceled(message)) => return Err(WorkerError::Canceled(message)),
-        // Any other failure (engine error, task join) degrades to box masks, as before.
-        Err(_) => return Ok("degraded"),
+        SegmentOutcome::Canceled(message) => return Err(WorkerError::Canceled(message)),
+        // Any other failure (weights unavailable, engine error, task join) degrades to box masks.
+        SegmentOutcome::Degraded => return Ok("degraded"),
     };
 
     // Write every clip frame's non-empty mask (detected + gap) and set its sidecar `mask`. All the
@@ -1067,10 +1089,176 @@ async fn segment_assembly_frames(
         }
     }
 
-    Ok(crate::person_segment::rollup_mask_state(
-        generated,
-        detected_total,
-    ))
+    Ok(mask_rollup_state(generated, detected_total))
+}
+
+/// The native-MLX person-segmenter closure (sc-8833): dispatch to the active backend (SAM3 text-
+/// concept PCS by default, the legacy SAM2 box-prompt path under `SCENEWORKS_PERSON_SEGMENTER=sam2`,
+/// kept for A/B parity + fallback during the cutover, sc-4926) and drive the blocking segment step
+/// under `run_blocking_with_heartbeat` (sc-8390 / sc-8807). Both return one binary mask per clip
+/// frame; a user cancel is terminal, any other failure degrades to box masks.
+#[cfg(target_os = "macos")]
+async fn run_macos_segmenter(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+    clip: SegmentClip,
+) -> SegmentOutcome {
+    let download_context = DownloadContext {
+        api,
+        client: http_client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "Person segmentation canceled while fetching segmenter weights.",
+        fresh_download: false,
+    };
+    let SegmentClip {
+        clip_paths,
+        anchors,
+    } = clip;
+    let cancel = gen_core::CancelFlag::new();
+    let cancel_message = "Person tracking canceled during segmentation.";
+    let outcome = match person_segmenter_kind() {
+        PersonSegmenter::Sam3 => {
+            let (model, tokenizer) = match crate::person_segment_sam3::ensure_segmenter_weights(
+                settings,
+                &download_context,
+            )
+            .await
+            {
+                Ok(pair) => pair,
+                Err(WorkerError::Canceled(message)) => return SegmentOutcome::Canceled(message),
+                Err(_) => return SegmentOutcome::Degraded,
+            };
+            let flag = cancel.clone();
+            run_blocking_with_heartbeat(
+                api,
+                settings,
+                &job.id,
+                Some(cancel),
+                cancel_message,
+                "person segment task",
+                tokio::task::spawn_blocking(move || {
+                    crate::person_segment_sam3::segment_track_blocking(
+                        model,
+                        tokenizer,
+                        clip_paths,
+                        anchors,
+                        Some(flag),
+                        Some(Box::new(|frame, total| {
+                            tracing::debug!(event = "sam3_propagate_progress", frame, total);
+                        })),
+                    )
+                }),
+            )
+            .await
+        }
+        PersonSegmenter::Sam2 => {
+            let weights =
+                match crate::person_segment::ensure_segmenter_weights(settings, &download_context)
+                    .await
+                {
+                    Ok(path) => path,
+                    Err(WorkerError::Canceled(message)) => {
+                        return SegmentOutcome::Canceled(message)
+                    }
+                    Err(_) => return SegmentOutcome::Degraded,
+                };
+            let flag = cancel.clone();
+            run_blocking_with_heartbeat(
+                api,
+                settings,
+                &job.id,
+                Some(cancel),
+                cancel_message,
+                "person segment task",
+                tokio::task::spawn_blocking(move || {
+                    crate::person_segment::propagate_track_blocking(
+                        weights,
+                        clip_paths,
+                        anchors,
+                        Some(flag),
+                        Some(Box::new(|frame, total| {
+                            tracing::debug!(event = "sam2_propagate_progress", frame, total);
+                        })),
+                    )
+                }),
+            )
+            .await
+        }
+    };
+    match outcome {
+        Ok(masks) => SegmentOutcome::Masks(masks),
+        Err(WorkerError::Canceled(message)) => SegmentOutcome::Canceled(message),
+        Err(_) => SegmentOutcome::Degraded,
+    }
+}
+
+/// The off-Mac candle SAM3 person-segmenter closure (sc-6247 / sc-8833): SAM3 is the only off-Mac
+/// segmenter (no SAM2 box-prompt fallback — that's the native-MLX `mlx-gen-sam2`). Resolves the
+/// candle SAM3 weights and drives the blocking segment step under `run_blocking_with_heartbeat`
+/// (sc-8390 / sc-8807), mirroring the macOS closure: the keepalive's cancel poll trips `cancel`,
+/// which the engine's per-frame propagate contract (sc-8972, the candle sibling of gen-core
+/// d8038beb) observes between frames — not just at the coarse seams (cold parse / model build).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn run_candle_segmenter(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+    clip: SegmentClip,
+) -> SegmentOutcome {
+    let download_context = DownloadContext {
+        api,
+        client: http_client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "Person segmentation canceled while fetching segmenter weights.",
+        fresh_download: false,
+    };
+    let SegmentClip {
+        clip_paths,
+        anchors,
+    } = clip;
+    let (model, tokenizer) = match crate::person_segment_sam3_candle::ensure_segmenter_weights(
+        settings,
+        &download_context,
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(WorkerError::Canceled(message)) => return SegmentOutcome::Canceled(message),
+        Err(_) => return SegmentOutcome::Degraded,
+    };
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
+    let outcome = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        "Person tracking canceled during segmentation.",
+        "person segment task",
+        tokio::task::spawn_blocking(move || {
+            crate::person_segment_sam3_candle::segment_track_blocking(
+                model,
+                tokenizer,
+                clip_paths,
+                anchors,
+                Some(flag),
+                Some(Box::new(|frame, total| {
+                    tracing::debug!(event = "sam3_propagate_progress", frame, total);
+                })),
+            )
+        }),
+    )
+    .await;
+    match outcome {
+        Ok(masks) => SegmentOutcome::Masks(masks),
+        Err(WorkerError::Canceled(message)) => SegmentOutcome::Canceled(message),
+        Err(_) => SegmentOutcome::Degraded,
+    }
 }
 
 /// Encode each `(assembly_idx, rel, out_path, pixels)` mask as an `L` (8-bit grayscale) PNG,
@@ -1098,169 +1286,51 @@ fn write_track_mask_pngs(
     written
 }
 
-/// Off-Mac candle SAM3 segmentation pass (sc-6247): the Windows/CUDA sibling of the macOS
-/// [`segment_assembly_frames`], driving `candle-gen-sam3`'s text-concept (PCS) video pipeline to
-/// write a per-frame mask for each detected target frame. SAM3 is the only off-Mac segmenter (no
-/// SAM2 box-prompt fallback — that's the native-MLX `mlx-gen-sam2`); any unavailability degrades to
-/// box-derived masks (handled by the replacement loader), never failing a track that already located
-/// the person. Mirrors the macOS orchestration exactly.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+/// macOS entry point for [`assemble_real_person_track_shared`] (sc-8833): supplies the native-MLX
+/// backend descriptor (device `mlx`, active SAM2/SAM3 segmenter id) and the MLX segmenter closure.
+#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
-async fn segment_assembly_frames(
+async fn assemble_real_person_track(
     api: &ApiClient,
     settings: &Settings,
     http_client: &reqwest::Client,
     job: &JobSnapshot,
     project_path: &std::path::Path,
+    source_media_path: &std::path::Path,
+    detection: &Value,
     track_id: &str,
-    frames: &[crate::person_track::TrackFrame],
-    frame_paths: &[PathBuf],
-    frames_json: &mut [Value],
+    selected_timestamp: f64,
+    duration: f64,
+    confidence: f64,
     segment_enabled: bool,
-) -> WorkerResult<&'static str> {
-    let detected_total = frames.iter().filter(|frame| frame.detected).count();
-    if detected_total == 0 || !segment_enabled {
-        return Ok("missing");
-    }
-
-    let download_context = DownloadContext {
+) -> WorkerResult<RealPersonTrack> {
+    assemble_real_person_track_shared(
         api,
-        client: http_client,
         settings,
-        job_id: &job.id,
-        cancel_message: "Person segmentation canceled while fetching segmenter weights.",
-        fresh_download: false,
-    };
-    let masks_dir = project_path
-        .join("person-tracks")
-        .join(track_id)
-        .join("masks");
-    if tokio::fs::create_dir_all(&masks_dir).await.is_err() {
-        return Ok("degraded");
-    }
-
-    let Some(first) = frames.iter().position(|f| f.detected) else {
-        return Ok("missing");
-    };
-    let last = frames.iter().rposition(|f| f.detected).unwrap_or(first);
-    if frame_paths.len() <= last {
-        return Ok("degraded");
-    }
-    let mut clip_paths = Vec::with_capacity(last - first + 1);
-    let mut anchors = Vec::with_capacity(last - first + 1);
-    for (frame, path) in frames[first..=last].iter().zip(&frame_paths[first..=last]) {
-        clip_paths.push(path.clone());
-        anchors.push(frame.detected.then_some((
-            frame.box_.x,
-            frame.box_.y,
-            frame.box_.width,
-            frame.box_.height,
-        )));
-    }
-
-    check_cancel(
-        api,
-        &job.id,
-        "Person tracking canceled during segmentation.",
-    )
-    .await?;
-
-    let (model, tokenizer) = match crate::person_segment_sam3_candle::ensure_segmenter_weights(
-        settings,
-        &download_context,
+        http_client,
+        job,
+        project_path,
+        source_media_path,
+        detection,
+        track_id,
+        selected_timestamp,
+        duration,
+        confidence,
+        segment_enabled,
+        PersonTrackBackend {
+            device_default: "mlx",
+            backend_label: "mlx",
+            segmenter_label: || person_segmenter_kind().meta_label(),
+        },
+        |clip| run_macos_segmenter(api, settings, http_client, job, clip),
     )
     .await
-    {
-        Ok(pair) => pair,
-        Err(WorkerError::Canceled(message)) => return Err(WorkerError::Canceled(message)),
-        Err(_) => return Ok("degraded"),
-    };
-    // Keepalive + user cancel across the blocking segment step (sc-8390 / sc-8807), mirroring the
-    // macOS twin: the keepalive's cancel poll trips `cancel`, which the engine's per-frame
-    // propagate contract (sc-8972, the candle sibling of gen-core d8038beb) observes between
-    // frames — not just at the coarse seams (cold parse / model build).
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
-    let outcome = run_blocking_with_heartbeat(
-        api,
-        settings,
-        &job.id,
-        Some(cancel),
-        "Person tracking canceled during segmentation.",
-        "person segment task",
-        tokio::task::spawn_blocking(move || {
-            crate::person_segment_sam3_candle::segment_track_blocking(
-                model,
-                tokenizer,
-                clip_paths,
-                anchors,
-                Some(flag),
-                Some(Box::new(|frame, total| {
-                    tracing::debug!(event = "sam3_propagate_progress", frame, total);
-                })),
-            )
-        }),
-    )
-    .await;
-    let masks = match outcome {
-        Ok(masks) => masks,
-        // The keepalive posted the terminal `Canceled` already; propagate it (job canceled).
-        Err(WorkerError::Canceled(message)) => return Err(WorkerError::Canceled(message)),
-        // Any other failure (engine error, task join) degrades to box masks, as before.
-        Err(_) => return Ok("degraded"),
-    };
-
-    // Write every clip frame's non-empty mask (detected + gap) and set its sidecar `mask`.
-    let pending: Vec<(usize, String, PathBuf, Vec<u8>)> = masks
-        .into_iter()
-        .enumerate()
-        .filter(|(_, pixels)| pixels.iter().any(|&p| p > 127))
-        .map(|(clip_idx, pixels)| {
-            let assembly_idx = first + clip_idx;
-            let rel = format!(
-                "person-tracks/{track_id}/masks/frame_{:06}.png",
-                assembly_idx + 1
-            );
-            let out_path = project_path.join(&rel);
-            (assembly_idx, rel, out_path, pixels)
-        })
-        .collect();
-    let (width, height) = TRACK_FRAME_SIZE;
-    let written =
-        match tokio::task::spawn_blocking(move || write_track_mask_pngs(width, height, pending))
-            .await
-        {
-            Ok(written) => written,
-            Err(_) => return Ok("degraded"),
-        };
-
-    let mut generated = 0usize;
-    for (assembly_idx, rel) in written {
-        if let Some(entry) = frames_json.get_mut(assembly_idx) {
-            entry["mask"] = Value::String(rel);
-        }
-        if frames
-            .get(assembly_idx)
-            .map(|f| f.detected)
-            .unwrap_or(false)
-        {
-            generated += 1;
-        }
-    }
-
-    Ok(crate::person_segment_sam3_candle::rollup_mask_state(
-        generated,
-        detected_total,
-    ))
 }
 
-/// Track the selected person through real source content on the off-Mac candle GPU-worker lane
-/// (sc-5498): sample frames at the 2-FPS cadence, run the `ort`/CUDA YOLO11 detector on each,
-/// associate the boxes into track identities with the pure-Rust SORT/ByteTrack tracker
-/// (sc-3634, `person_track`), and resample the chosen identity onto the sample cadence. The candle
-/// SAM3 text-concept segmenter then fills per-frame masks (sc-6247) — at parity with the macOS SAM3
-/// path — so off-Mac tracks are no longer box-only. Mirrors the macOS `assemble_real_person_track`;
-/// the Python Ultralytics path is the fallback on a candle-disabled box.
+/// Off-Mac candle GPU-worker entry point for [`assemble_real_person_track_shared`] (sc-5498 /
+/// sc-8833): supplies the candle backend descriptor (device `cuda`, SAM3-only segmenter, sc-6247)
+/// and the candle SAM3 segmenter closure. The Python Ultralytics path is the fallback on a
+/// candle-disabled box.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[allow(clippy::too_many_arguments)]
 async fn assemble_real_person_track(
@@ -1277,122 +1347,27 @@ async fn assemble_real_person_track(
     confidence: f64,
     segment_enabled: bool,
 ) -> WorkerResult<RealPersonTrack> {
-    use crate::person_track as pt;
-
-    let selected_box = pt::NormalizedBox::from_json(detection.get("box").unwrap_or(&Value::Null));
-    let download_context = DownloadContext {
-        api,
-        client: http_client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Person tracking canceled while fetching detector weights.",
-        fresh_download: false,
-    };
-    let weights = crate::person_jobs::ensure_detector_weights(settings, &download_context).await?;
-    let conf = confidence as f32;
-    let timestamps = pt::sample_timestamps(duration);
-
-    let work_dir = std::env::temp_dir().join(format!("sw-person-track-{}", job.id));
-    tokio::fs::create_dir_all(&work_dir).await?;
-
-    // The detector reports its real execution device per frame (cuda / cpu, per the `ort` EP).
-    // Keep each rendered frame (don't delete in-loop): the SAM3 segmentation pass re-reads them by
-    // the same sample index (assembly frame `i` ↔ `timestamps[i]` ↔ `frame_paths[i]`).
-    let mut device = "cuda";
-    let mut frame_paths: Vec<PathBuf> = Vec::with_capacity(timestamps.len());
-    let mut per_frame: Vec<(f64, Vec<(pt::NormalizedBox, f64)>)> =
-        Vec::with_capacity(timestamps.len());
-    for (index, &timestamp) in timestamps.iter().enumerate() {
-        check_cancel(api, &job.id, "Person tracking canceled during sampling.").await?;
-        let frame_path = work_dir.join(format!("frame_{index:04}.png"));
-        let ffmpeg_context = FfmpegContext {
-            api,
-            settings,
-            job_id: &job.id,
-            cancel_message: "Person tracking canceled by user.",
-        };
-        render_frame_png(
-            "ffmpeg",
-            source_media_path,
-            &frame_path,
-            frame_seek_timestamp(timestamp, duration),
-            1280,
-            720,
-            Some(ffmpeg_context),
-        )
-        .await?;
-        let weights_for_frame = weights.clone();
-        let frame_for_task = frame_path.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            crate::person_jobs::detect_people_blocking(weights_for_frame, frame_for_task, conf)
-        })
-        .await
-        .map_err(|error| task_join_error("person track detect task", error))??;
-        device = result.device;
-        let boxes = result
-            .detections
-            .iter()
-            .map(|d| {
-                (
-                    pt::xyxy_to_normalized(
-                        d.x1 as f64,
-                        d.y1 as f64,
-                        d.x2 as f64,
-                        d.y2 as f64,
-                        result.width,
-                        result.height,
-                    ),
-                    d.score as f64,
-                )
-            })
-            .collect::<Vec<_>>();
-        per_frame.push((timestamp, boxes));
-        frame_paths.push(frame_path);
-    }
-
-    let observations = pt::observe(per_frame);
-    let assembly = pt::assemble_track(&observations, selected_box, selected_timestamp, &timestamps);
-    if assembly.target_track_id.is_none() || assembly.detected_frames == 0 {
-        let _ = tokio::fs::remove_dir_all(&work_dir).await;
-        return Err(WorkerError::InvalidPayload(
-            "Selected person was not found in the source video. Re-run detection or adjust the selection."
-                .to_owned(),
-        ));
-    }
-
-    // Candle SAM3 segmentation pass (sc-6247): write a per-frame mask for each detected target frame
-    // and fold the result into `maskState`. Any segmenter unavailability degrades gracefully to
-    // box-derived masks (handled by the replacement loader), never failing a track that already
-    // located the person.
-    let mut frames_json = pt::frames_to_json(&assembly.frames);
-    let mask_state = segment_assembly_frames(
+    assemble_real_person_track_shared(
         api,
         settings,
         http_client,
         job,
         project_path,
+        source_media_path,
+        detection,
         track_id,
-        &assembly.frames,
-        &frame_paths,
-        &mut frames_json,
+        selected_timestamp,
+        duration,
+        confidence,
         segment_enabled,
+        PersonTrackBackend {
+            device_default: "cuda",
+            backend_label: "candle",
+            segmenter_label: || "sam3",
+        },
+        |clip| run_candle_segmenter(api, settings, http_client, job, clip),
     )
-    .await?;
-    let _ = tokio::fs::remove_dir_all(&work_dir).await;
-
-    Ok(RealPersonTrack {
-        frames: frames_json,
-        average_confidence: pt::average_confidence(&assembly.frames),
-        mask_state,
-        quality: assembly.quality,
-        tracker_meta: json!({
-            "backend": "candle",
-            "device": device,
-            "model": "yolo11m",
-            "tracker": "sort_bytetrack",
-            "segmenter": if segment_enabled { "sam3" } else { "disabled" },
-        }),
-    })
+    .await
 }
 
 #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
@@ -3036,7 +3011,7 @@ mod person_track_e2e_tests {
 
             // 4. The maskState rollup must report `active` — every detected frame masked — which
             //    is the success signal `run_person_track` writes to the sidecar.
-            let mask_state = crate::person_segment::rollup_mask_state(generated, detected_total);
+            let mask_state = mask_rollup_state(generated, detected_total);
             eprintln!(
                 "person-track E2E: sampled={} detected={} span={}..={} gapFrames={} segmented={} maskState={}",
                 timestamps.len(),
@@ -3223,7 +3198,7 @@ mod person_track_e2e_tests {
                     sam3_generated += 1;
                 }
             }
-            let sam3_state = crate::person_segment::rollup_mask_state(sam3_generated, detected_total);
+            let sam3_state = mask_rollup_state(sam3_generated, detected_total);
             // SAM3 masking every detected frame is the hard acceptance gate for the cutover.
             assert_eq!(
                 sam3_state, "active",

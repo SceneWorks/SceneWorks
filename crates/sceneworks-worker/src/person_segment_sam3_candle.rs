@@ -152,19 +152,6 @@ pub(crate) async fn ensure_segmenter_weights(
     Ok((model, tokenizer))
 }
 
-/// Roll the per-clip mask outcome into the sidecar `maskState`: `degraded` (no frame masked → box
-/// fallback), `active` (every detected frame masked), else `generated`. Mirrors
-/// `person_segment::rollup_mask_state` (Mac-only) so the off-Mac contract is identical.
-pub(crate) fn rollup_mask_state(generated: usize, detected_total: usize) -> &'static str {
-    if generated == 0 {
-        "degraded"
-    } else if generated >= detected_total {
-        "active"
-    } else {
-        "generated"
-    }
-}
-
 /// Preprocess an RGB frame to the SAM3 input tensor: resize to a 1008×1008 square (bilinear, fixed-
 /// square — *not* aspect-preserving), normalize by mean/std `0.5` to `[-1,1]`, packed NCHW
 /// `[1,3,1008,1008]` f32 on `device`.
@@ -619,14 +606,6 @@ mod tests {
             matches!(all, Err(WorkerError::Canceled(_))),
             "segment_all_persons_in_memory: expected Canceled"
         );
-    }
-
-    #[test]
-    fn rollup_maps_generated_counts() {
-        assert_eq!(rollup_mask_state(0, 5), "degraded");
-        assert_eq!(rollup_mask_state(3, 5), "generated");
-        assert_eq!(rollup_mask_state(5, 5), "active");
-        assert_eq!(rollup_mask_state(6, 5), "active");
     }
 
     #[test]
