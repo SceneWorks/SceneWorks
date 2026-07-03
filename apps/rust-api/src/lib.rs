@@ -117,6 +117,15 @@ mod keypoints;
 use keypoints::*;
 mod logs;
 use logs::*;
+// The shared HTTP error type (sc-8890, F-088), re-exported so the `use super::*`
+// in every handler module keeps resolving `ApiError` unchanged.
+mod error;
+pub(crate) use error::ApiError;
+// Serde `#[serde(default = "...")]` value providers for the DTOs (sc-8890, F-088),
+// re-exported so the `#[serde(default = "default_x")]` string paths and sibling
+// call sites keep resolving unchanged.
+mod defaults;
+pub(crate) use defaults::*;
 
 // The theme-preferences route. Its GET (the pre-auth theme read) is public, but its
 // PUT writes `ui-preferences.json` to disk, so the exemption is method-aware — the
@@ -2705,148 +2714,6 @@ fn required_finite_f64_field(payload: &Value, field: &str) -> Result<f64, ApiErr
     Ok(value)
 }
 
-fn default_timeline_name() -> String {
-    "Main timeline".to_owned()
-}
-
-fn default_aspect_ratio() -> String {
-    "16:9".to_owned()
-}
-
-fn default_timeline_fps() -> u32 {
-    30
-}
-
-fn default_export_resolution() -> u32 {
-    720
-}
-
-fn default_frame_intended_use() -> String {
-    "reuse".to_owned()
-}
-
-fn default_requested_gpu() -> String {
-    "auto".to_owned()
-}
-
-fn default_training_captioner() -> String {
-    "joy_caption".to_owned()
-}
-
-fn default_training_caption_model() -> String {
-    "fancyfeast/llama-joycaption-beta-one-hf-llava".to_owned()
-}
-
-fn default_dataset_analysis_embedder() -> String {
-    "clip_vit_l14".to_owned()
-}
-
-fn default_training_caption_type() -> String {
-    "Descriptive".to_owned()
-}
-
-fn default_training_caption_length() -> String {
-    "long".to_owned()
-}
-
-fn default_training_caption_temperature() -> f64 {
-    0.6
-}
-
-fn default_training_caption_top_p() -> f64 {
-    0.9
-}
-
-fn default_training_caption_max_new_tokens() -> u32 {
-    256
-}
-
-fn default_lora_scope() -> String {
-    "global".to_owned()
-}
-
-fn bool_is_false(value: &bool) -> bool {
-    !*value
-}
-
-fn default_project_lora_scope() -> String {
-    "project".to_owned()
-}
-
-fn default_character_type() -> String {
-    "person".to_owned()
-}
-
-fn default_reference_role() -> String {
-    "reference".to_owned()
-}
-
-fn default_character_lora_weight() -> f64 {
-    0.8
-}
-
-fn default_track_name() -> String {
-    "Selected person".to_owned()
-}
-
-fn default_image_mode() -> String {
-    "text_to_image".to_owned()
-}
-
-fn default_image_model() -> String {
-    "z_image_turbo".to_owned()
-}
-
-fn default_image_count() -> u32 {
-    4
-}
-
-fn default_image_size() -> u32 {
-    1024
-}
-
-fn default_style_preset() -> String {
-    "cinematic".to_owned()
-}
-
-fn default_fit_mode() -> String {
-    // epic 2551: never stretch by default. "crop" covers the frame undistorted; the
-    // worker normalizes unknown values back to crop, so this is just the wire default.
-    "crop".to_owned()
-}
-
-fn default_video_mode() -> String {
-    "image_to_video".to_owned()
-}
-
-fn default_video_model() -> String {
-    "ltx_2_3".to_owned()
-}
-
-fn default_video_duration() -> ContractNumber {
-    ContractNumber::from(6)
-}
-
-fn default_video_fps() -> u32 {
-    25
-}
-
-fn default_video_width() -> u32 {
-    768
-}
-
-fn default_video_height() -> u32 {
-    512
-}
-
-fn default_video_quality() -> String {
-    "balanced".to_owned()
-}
-
-fn default_replacement_mode() -> String {
-    "face_only".to_owned()
-}
-
 fn env_string(name: &str, default: &str) -> String {
     std::env::var(name)
         .ok()
@@ -2861,123 +2728,6 @@ fn env_path_or(name: &str, default: &FsPath) -> PathBuf {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| default.to_path_buf())
-}
-
-#[derive(Debug)]
-struct ApiError {
-    status: StatusCode,
-    detail: String,
-}
-
-impl ApiError {
-    fn bad_request(detail: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            detail: detail.into(),
-        }
-    }
-
-    fn unauthorized(detail: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::UNAUTHORIZED,
-            detail: detail.into(),
-        }
-    }
-
-    fn forbidden(detail: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::FORBIDDEN,
-            detail: detail.into(),
-        }
-    }
-
-    fn payload_too_large(detail: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::PAYLOAD_TOO_LARGE,
-            detail: detail.into(),
-        }
-    }
-
-    fn internal(detail: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            detail: detail.into(),
-        }
-    }
-}
-
-impl From<JobsStoreError> for ApiError {
-    fn from(error: JobsStoreError) -> Self {
-        match error {
-            JobsStoreError::NotFound(_) => Self {
-                status: StatusCode::NOT_FOUND,
-                detail: "Record not found".to_owned(),
-            },
-            JobsStoreError::InvalidStatus(status) => Self {
-                status: StatusCode::BAD_REQUEST,
-                detail: format!("Unsupported job status: {status}"),
-            },
-            JobsStoreError::InvalidNumber(field) => {
-                Self::bad_request(format!("Invalid numeric value for {field}"))
-            }
-            JobsStoreError::InvalidRequestedGpu(detail) => Self::bad_request(detail),
-            JobsStoreError::RetryLimit { max_attempts } => Self {
-                status: StatusCode::BAD_REQUEST,
-                detail: format!("Job retry limit reached after {max_attempts} attempts."),
-            },
-            // 409 tells the worker its report lost a race with cancel/sweep/
-            // reclaim: abandon the job instead of retrying (sc-4172).
-            JobsStoreError::TerminalJobImmutable { job_id, status } => Self {
-                status: StatusCode::CONFLICT,
-                detail: format!(
-                    "Job {job_id} is already {status}; terminal jobs cannot be updated."
-                ),
-            },
-            JobsStoreError::NotJobOwner { job_id } => Self {
-                status: StatusCode::CONFLICT,
-                detail: format!(
-                    "Progress rejected: the reporting worker no longer owns job {job_id}."
-                ),
-            },
-            other => Self::internal(other.to_string()),
-        }
-    }
-}
-
-impl From<ProjectStoreError> for ApiError {
-    fn from(error: ProjectStoreError) -> Self {
-        match error {
-            ProjectStoreError::BadRequest(detail) => Self::bad_request(detail),
-            ProjectStoreError::NotFound(detail) => Self {
-                status: StatusCode::NOT_FOUND,
-                detail,
-            },
-            other => Self::internal(other.to_string()),
-        }
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        // Make every 5xx leave a server-side trace (it previously returned `{detail}`
-        // to the client and logged nothing). Expected/normal typed 4xx domain errors
-        // stay at debug to avoid drowning the error level in routine validation noise.
-        if self.status.is_server_error() {
-            tracing::error!(
-                event = "api_error",
-                status = self.status.as_u16(),
-                detail = %self.detail,
-                "API request failed"
-            );
-        } else if self.status.is_client_error() {
-            tracing::debug!(
-                event = "api_error",
-                status = self.status.as_u16(),
-                detail = %self.detail,
-            );
-        }
-        (self.status, Json(json!({ "detail": self.detail }))).into_response()
-    }
 }
 
 #[cfg(test)]
