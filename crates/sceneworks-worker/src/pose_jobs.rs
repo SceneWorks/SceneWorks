@@ -643,6 +643,29 @@ async fn ensure_weights(
     Ok((det, pose))
 }
 
+/// Resolve an explicit env-pinned weight path (sc-8911). Unset → `Ok(None)` (fall through
+/// to cache/download). Set and existing → `Ok(Some(path))`. Set but missing → an
+/// `InvalidPayload` error, so an operator's typo fails loudly rather than silently
+/// loading whatever the download path resolves. Takes the raw value explicitly so it's
+/// unit-testable without mutating the process environment.
+fn resolve_pinned_weight(
+    env_key: &str,
+    value: Option<std::ffi::OsString>,
+    file: &str,
+) -> WorkerResult<Option<PathBuf>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(&value);
+    if path.exists() {
+        return Ok(Some(path));
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "{env_key} is set to {} but that path does not exist. Point it at the local {file}, or unset it to download on first use.",
+        path.display()
+    )))
+}
+
 async fn ensure_one(
     env_key: &str,
     file: &str,
@@ -651,11 +674,12 @@ async fn ensure_one(
     cache: &Path,
     context: &DownloadContext<'_>,
 ) -> WorkerResult<PathBuf> {
-    if let Ok(pinned) = std::env::var(env_key) {
-        let path = PathBuf::from(pinned);
-        if path.exists() {
-            return Ok(path);
-        }
+    // An explicitly-set env pin must resolve to an existing file. If it's set but the
+    // path is missing, that's an operator error — surface it instead of silently falling
+    // through to the cache/network (sc-8911), which would mask a typo and load different
+    // weights than the operator intended.
+    if let Some(path) = resolve_pinned_weight(env_key, std::env::var_os(env_key), file)? {
+        return Ok(path);
     }
     let target = cache.join(file);
     if target.exists() {
