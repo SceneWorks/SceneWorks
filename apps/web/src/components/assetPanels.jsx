@@ -2,7 +2,7 @@ import React from "react";
 import { isAbortError } from "../api.js";
 import { assetMatchesCharacter } from "../characterMembership.js";
 import { saveAssetAs, revealAsset } from "../assetActions.js";
-import { isDesktop } from "../runtime.js";
+import { isDesktop, isPageFullscreen, setViewerFullscreen } from "../runtime.js";
 import { AssetMedia, assetCanRenderAsVideo, assetUrl, suppressThumbnailContextMenu } from "./assetMedia.jsx";
 import { DocumentView } from "./DocumentView.jsx";
 import { Icon } from "./Icons.jsx";
@@ -800,6 +800,80 @@ export function FullscreenPreview({
   const [contextMenu, setContextMenu] = React.useState(null);
   const closeContextMenu = React.useCallback(() => setContextMenu(null), []);
 
+  // True-fullscreen mode for the viewer. In fullscreen every chrome affordance is
+  // hidden EXCEPT prev/next nav and the zoom controls; the right-click menu still
+  // works and Esc exits. Desktop drives the native Tauri window; a remote browser
+  // uses the HTML5 Fullscreen API (both live in runtime.js:setViewerFullscreen).
+  const [isFullscreen, setIsFullscreen] = React.useState(false);
+  // Mirror into a ref so the unmount cleanup can exit fullscreen without re-running
+  // its effect on every toggle.
+  const fullscreenRef = React.useRef(false);
+  React.useEffect(() => {
+    fullscreenRef.current = isFullscreen;
+  }, [isFullscreen]);
+
+  const enterFullscreen = React.useCallback(async () => {
+    try {
+      await setViewerFullscreen(true);
+      setIsFullscreen(true);
+    } catch {
+      // Entering fullscreen failed (unsupported / permission) — stay windowed.
+      setIsFullscreen(false);
+    }
+  }, []);
+
+  const exitFullscreen = React.useCallback(async () => {
+    setIsFullscreen(false);
+    try {
+      await setViewerFullscreen(false);
+    } catch {
+      // Nothing actionable if the window/page won't leave fullscreen.
+    }
+  }, []);
+
+  // Browser path only: the engine owns Esc-to-exit and emits `fullscreenchange`, so
+  // sync our state when the user leaves fullscreen natively (Esc, F11, browser UI).
+  // Desktop never enters HTML5 fullscreen, so this stays a no-op there.
+  React.useEffect(() => {
+    if (isDesktop || typeof document === "undefined") {
+      return undefined;
+    }
+    const onChange = () => setIsFullscreen(isPageFullscreen());
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+
+  // Esc exits fullscreen on the desktop path: native macOS window fullscreen does not
+  // consume Esc, so we handle it here. Capture phase + stopPropagation so it beats the
+  // Modal's Escape-to-close — the FIRST Esc drops out of fullscreen, a SECOND closes
+  // the preview. When a context menu is open we defer to it (it closes on Esc first).
+  React.useEffect(() => {
+    if (!isFullscreen || typeof document === "undefined") {
+      return undefined;
+    }
+    const onKeyDown = (event) => {
+      if (event.key !== "Escape" || contextMenu) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      exitFullscreen();
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [isFullscreen, contextMenu, exitFullscreen]);
+
+  // Never leave the OS window/page stuck in fullscreen if the preview unmounts while
+  // active (collection exhausted mid-fullscreen, external close).
+  React.useEffect(
+    () => () => {
+      if (fullscreenRef.current) {
+        setViewerFullscreen(false).catch(() => {});
+      }
+    },
+    [],
+  );
+
   // Rebuild the menu items on open so the actions close over the current asset.
   // Image gets the zoom rows; video omits them. Reveal is desktop-only.
   const openContextMenu = React.useCallback(
@@ -814,6 +888,13 @@ export function FullscreenPreview({
       if (isDesktop) {
         items.push({ key: "reveal", label: "Reveal in Finder/Explorer", onSelect: () => revealAsset(displayedAsset) });
       }
+      // Fullscreen toggle stays in the menu in BOTH states so it is always mouse-
+      // reachable — the enter button in the top bar is hidden once fullscreen.
+      items.push({
+        key: "fullscreen",
+        label: isFullscreen ? "Exit full screen" : "Full screen",
+        onSelect: isFullscreen ? exitFullscreen : enterFullscreen,
+      });
       if (!isVideo) {
         items.push({ key: "zoom-in", label: "Zoom In", onSelect: zoomIn });
         items.push({ key: "zoom-out", label: "Zoom Out", onSelect: zoomOut });
@@ -829,14 +910,42 @@ export function FullscreenPreview({
       const submenu = submenuItems.length ? { label: "Edit in", items: submenuItems } : null;
       setContextMenu({ x: event.clientX, y: event.clientY, items, submenu });
     },
-    [asset, displayedAsset, isVideo, zoomIn, zoomOut, fitToView, onEditImage, onEditInStudio],
+    [
+      asset,
+      displayedAsset,
+      isVideo,
+      isFullscreen,
+      enterFullscreen,
+      exitFullscreen,
+      zoomIn,
+      zoomOut,
+      fitToView,
+      onEditImage,
+      onEditInStudio,
+    ],
   );
 
   return (
-    <Modal className="preview-modal" label="Asset preview" onClose={onClose}>
-      <button className="modal-close" onClick={onClose} type="button">
-        Close
-      </button>
+    <Modal
+      className={`preview-modal${isFullscreen ? " is-fullscreen" : ""}`}
+      label="Asset preview"
+      onClose={onClose}
+    >
+      <div className="preview-modal-topbar">
+        <button
+          aria-label="Enter full screen"
+          className="preview-fullscreen-button"
+          onClick={enterFullscreen}
+          title="Full screen"
+          type="button"
+        >
+          <Icon.Maximize size={16} />
+          <span>Full screen</span>
+        </button>
+        <button className="modal-close" onClick={onClose} type="button">
+          Close
+        </button>
+      </div>
       <div className="preview-modal-stage" onContextMenu={openContextMenu}>
           <button
             aria-label="Previous asset"
@@ -909,6 +1018,11 @@ export function FullscreenPreview({
               submenu={contextMenu.submenu}
               onClose={closeContextMenu}
             />
+          ) : null}
+          {isFullscreen ? (
+            <div className="preview-fullscreen-hint" role="status">
+              Press <kbd>Esc</kbd> to exit full screen
+            </div>
           ) : null}
         </div>
         <footer>

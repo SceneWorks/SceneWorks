@@ -7767,6 +7767,102 @@ details[open] > summary.lora-scope-group-heading::before,
   justify-self: end;
 }
 
+/* Top bar holding the enter-fullscreen affordance beside Close. Hidden entirely in
+   fullscreen — Esc (desktop) or the right-click menu exits from there. */
+.preview-modal-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.preview-fullscreen-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+/* True-fullscreen viewer. The modal escapes its centered backdrop to cover the whole
+   (already OS-fullscreen) viewport; all chrome except nav + zoom is hidden. The
+   zoom/pan viewport itself is untouched so the sc-8728 pan math still holds. */
+.preview-modal.is-fullscreen {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  gap: 0;
+  border: 0;
+  border-radius: 0;
+  background: #000;
+  grid-template-rows: 1fr;
+}
+
+.preview-modal.is-fullscreen .preview-modal-topbar,
+.preview-modal.is-fullscreen > footer {
+  display: none;
+}
+
+.preview-modal.is-fullscreen .likeness-badge {
+  display: none;
+}
+
+.preview-modal.is-fullscreen .preview-modal-stage {
+  height: 100vh;
+  padding: 0 8px;
+}
+
+.preview-modal.is-fullscreen .preview-modal-stage img,
+.preview-modal.is-fullscreen .preview-modal-stage video {
+  max-height: 100vh;
+}
+
+/* Auto-fading "Press Esc to exit" hint shown on entering fullscreen. */
+.preview-fullscreen-hint {
+  position: absolute;
+  bottom: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: color-mix(in oklch, #000 62%, transparent);
+  color: #fff;
+  font-size: 12.5px;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+  animation: previewHintFade 0.5s ease 3.2s forwards;
+}
+
+.preview-fullscreen-hint kbd {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.16);
+  font: inherit;
+  font-weight: 700;
+}
+
+@keyframes previewHintFade {
+  to {
+    opacity: 0;
+    visibility: hidden;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .preview-fullscreen-hint {
+    animation-delay: 5s;
+    animation-duration: 0.01s;
+  }
+}
+
 /* Batch operations modal (sc-6112). */
 .batch-ops-modal {
   display: grid;
