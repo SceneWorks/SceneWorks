@@ -2,6 +2,8 @@ import { fileURLToPath } from "node:url";
 
 import { defineConfig, searchForWorkspaceRoot } from "vite";
 
+import themeInitPlugin from "./vite-plugin-theme-init.js";
+
 // The About → Licenses screen (sc-3778) imports the bundled-license corpus
 // directly from apps/desktop/licenses/ (single source of truth, no second copy).
 // That dir is outside the web project root, so the dev server / vitest module
@@ -10,6 +12,9 @@ import { defineConfig, searchForWorkspaceRoot } from "vite";
 const licensesDir = fileURLToPath(new URL("../desktop/licenses", import.meta.url));
 
 export default defineConfig({
+  // Generate the pre-paint /theme-init.js from src/accents.js at dev/build time
+  // (single source of truth for the accent-id list). See vite-plugin-theme-init.js.
+  plugins: [themeInitPlugin()],
   // react-konva pulls its own react-reconciler; without deduping, Vite's dep
   // optimizer can hand it a second React copy, tripping "Invalid hook call /
   // cannot read useRef of null" when the canvas <Stage> mounts. Force a single
