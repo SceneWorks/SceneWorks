@@ -564,6 +564,44 @@ async fn request_with_peer(
     (status, value)
 }
 
+/// Like `request_with_peer` but also attaches request headers (e.g. an
+/// `authorization` token candidate), so the per-IP auth throttle (sc-8870) can be
+/// exercised against the token oracle with a simulated remote peer.
+async fn request_with_peer_headers(
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    body: Value,
+    peer: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, Value) {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let mut request = builder
+        .body(Body::from(body.to_string()))
+        .expect("request builds");
+    let addr: SocketAddr = peer.parse().expect("peer addr parses");
+    request.extensions_mut().insert(ConnectInfo(addr));
+    let response = app.oneshot(request).await.expect("response returns");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body buffers");
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("json body parses")
+    };
+    (status, value)
+}
+
 async fn request_raw(
     app: axum::Router,
     method: &str,
@@ -9339,6 +9377,199 @@ async fn bearer_token_is_accepted_for_access_verification() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(verified["ok"], true);
+}
+
+#[tokio::test]
+async fn auth_verify_oracle_throttles_repeated_failures_per_peer() {
+    // sc-8870 (F-068): the public `/api/v1/auth/verify` oracle returns `{ok}` for any
+    // candidate token, so without a lockout a LAN attacker can brute-force the token
+    // (which IS the password in LAN mode) at wire speed. After a burst of wrong-token
+    // attempts from one peer IP, further attempts from that IP are refused with 429,
+    // while a fresh IP and the valid token are unaffected.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+    let attacker = "192.168.1.50:40000";
+    let bad = [("authorization", "Bearer wrong-token")];
+
+    // The first `AUTH_THROTTLE_MAX_FAILURES` (10) wrong guesses answer normally with
+    // `{ok:false}` — the oracle still works, it just counts each miss.
+    for _ in 0..10 {
+        let (status, verified) = request_with_peer_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/verify",
+            Value::Null,
+            attacker,
+            &bad,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(verified["ok"], false);
+    }
+
+    // The next attempt from the same peer is refused before the oracle answers.
+    let (status, body) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/verify",
+        Value::Null,
+        attacker,
+        &bad,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        body["detail"], "Too many authentication attempts; try again later",
+        "throttled response must not leak validity",
+    );
+
+    // Even a *correct* token from the now-blocked peer is refused: the lockout is by
+    // IP, so an attacker can't slip a lucky guess past the throttle.
+    let (status, _) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/verify",
+        Value::Null,
+        attacker,
+        &[("authorization", "Bearer secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    // A different peer IP is untouched and the valid token still verifies — a single
+    // brute-forcer can't lock out the whole deployment, and legitimate use is fine.
+    let (status, verified) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/verify",
+        Value::Null,
+        "10.0.0.9:55555",
+        &[("authorization", "Bearer secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(verified["ok"], true);
+}
+
+#[tokio::test]
+async fn auth_verify_success_clears_peer_throttle_budget() {
+    // sc-8870: a legitimate user who mistypes a few times must not get locked out once
+    // they authenticate — a valid token clears the peer's failure record.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+    let peer = "192.168.1.77:41000";
+
+    // A handful of misses (under the cap of 10), then a success that resets the count.
+    for _ in 0..5 {
+        let (status, _) = request_with_peer_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/verify",
+            Value::Null,
+            peer,
+            &[("authorization", "Bearer wrong-token")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, verified) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/verify",
+        Value::Null,
+        peer,
+        &[("authorization", "Bearer secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(verified["ok"], true);
+
+    // With the budget reset, another full window of misses is tolerated again without
+    // an early lockout (would have tripped at 10 total had the success not cleared it).
+    for _ in 0..9 {
+        let (status, verified) = request_with_peer_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/verify",
+            Value::Null,
+            peer,
+            &[("authorization", "Bearer wrong-token")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "post-success budget must be reset");
+        assert_eq!(verified["ok"], false);
+    }
+}
+
+#[tokio::test]
+async fn loopback_trusted_peer_is_never_throttled() {
+    // sc-8870: the epic-4484 loopback-trust bypass must not accrue throttle failures —
+    // the desktop UI/worker reach the API over loopback with no token, and that must
+    // keep working no matter how many times it happens.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    settings.trust_loopback = true;
+    let app = create_app(settings).expect("app creates");
+
+    // Far more than the cap of gated requests with no token, all over loopback → all
+    // served (the bypass returns before the throttle ever sees them).
+    for _ in 0..20 {
+        let (status, _) = request_with_peer(
+            app.clone(),
+            "GET",
+            "/api/v1/jobs",
+            Value::Null,
+            "127.0.0.1:51234",
+        )
+        .await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+        assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
+}
+
+#[tokio::test]
+async fn gated_route_brute_force_is_throttled_per_peer() {
+    // sc-8870: the throttle also covers the token oracle exposed by every gated route
+    // (401-vs-200 reveals a valid token), not just `/auth/verify`. A LAN peer hammering
+    // a gated route with a bad token gets locked out with 429 after the failure cap.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+    let attacker = "192.168.1.60:42000";
+    let bad = [("authorization", "Bearer wrong-token")];
+
+    for _ in 0..10 {
+        let (status, _) = request_with_peer_headers(
+            app.clone(),
+            "GET",
+            "/api/v1/jobs",
+            Value::Null,
+            attacker,
+            &bad,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, body) = request_with_peer_headers(
+        app.clone(),
+        "GET",
+        "/api/v1/jobs",
+        Value::Null,
+        attacker,
+        &bad,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        body["detail"],
+        "Too many authentication attempts; try again later"
+    );
 }
 
 #[tokio::test]
