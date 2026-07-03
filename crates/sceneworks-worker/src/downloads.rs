@@ -20,6 +20,25 @@ pub(crate) async fn ensure_cached_file(
     label: &str,
     expected_size: Option<u64>,
 ) -> WorkerResult<PathBuf> {
+    ensure_cached_file_verified(context, url, target, label, expected_size, None).await
+}
+
+/// [`ensure_cached_file`] that additionally verifies the completed file against an
+/// `expected_sha256` (a content digest — e.g. an HF `lfs.oid`) before returning
+/// (sc-8879). A malformed/absent digest is skipped by `verify_file_sha256`, so callers
+/// can pass whatever the source advertises; a mismatch removes the file and errors.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) async fn ensure_cached_file_verified(
+    context: &DownloadContext<'_>,
+    url: &str,
+    target: &Path,
+    label: &str,
+    expected_size: Option<u64>,
+    expected_sha256: Option<&str>,
+) -> WorkerResult<PathBuf> {
     let expected_size = match expected_size {
         Some(size) => Some(size),
         None => remote_content_length(context.client, url).await?,
@@ -29,10 +48,18 @@ pub(crate) async fn ensure_cached_file(
             .map(|expected| metadata.len() == expected)
             .unwrap_or(true)
         {
+            // A cached file that already matches the expected length still gets its
+            // digest checked so a size-colliding tampered artifact can't be reused.
+            if let Some(expected) = expected_sha256 {
+                verify_file_sha256(target, expected, label).await?;
+            }
             return Ok(target.to_path_buf());
         }
     }
     if expected_size.is_none() && target.exists() {
+        if let Some(expected) = expected_sha256 {
+            verify_file_sha256(target, expected, label).await?;
+        }
         return Ok(target.to_path_buf());
     }
     if let Some(parent) = target.parent() {
@@ -50,7 +77,7 @@ pub(crate) async fn ensure_cached_file(
         url,
         target,
         expected_size,
-        None,
+        expected_sha256,
         label,
         &mut progress,
     )
@@ -108,12 +135,16 @@ pub(crate) async fn ensure_hf_cached_file(
             "Hugging Face file {file} not found in {repo}."
         )));
     };
-    ensure_cached_file(
+    ensure_cached_file_verified(
         context,
         &snapshot_file.download_url,
         target,
         &snapshot_file.path,
         snapshot_file.size,
+        // Verify the content against HF's `lfs.oid` (present for the LFS-tracked
+        // weights) so a pinned-revision download is integrity-checked, not just
+        // length-checked (sc-8879).
+        snapshot_file.sha256.as_deref(),
     )
     .await
 }

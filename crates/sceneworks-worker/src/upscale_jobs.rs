@@ -443,6 +443,13 @@ fn manifest_onnx_resource(manifest_entry: &Value, factor: u8) -> Option<(String,
 /// registry loads it directly (converts to MLX layout in-memory, no Python). Public; downloaded on
 /// first use. Overridable via the manifest `seedvr2` resource or `SCENEWORKS_SEEDVR2_CHECKPOINT`.
 const SEEDVR2_REPO: &str = "numz/SeedVR2_comfyUI";
+/// Pinned SeedVR2 checkpoint revision (sc-8879). `numz/SeedVR2_comfyUI` is a third-party
+/// mirror; fetching the mutable `main` branch means an upstream re-push would silently
+/// change the weights we load. Pin the exact commit that carries the 3B fp16 DiT + VAE
+/// (`seedvr2_ema_3b_fp16.safetensors` / `ema_vae_fp16.safetensors`) so downloads are
+/// reproducible. HF's tree API still reports each file's `lfs.oid`, which
+/// `ensure_hf_cached_file` verifies the content against.
+const SEEDVR2_REVISION: &str = "09ced71023636e9bc8cdf9cdecfb2625d1e691e8";
 /// The exact filenames `Seedvr2Pipeline::load` expects in the checkpoint dir (3B fp16 DiT + VAE).
 const SEEDVR2_DIT_FILE: &str = "seedvr2_ema_3b_fp16.safetensors";
 const SEEDVR2_VAE_FILE: &str = "ema_vae_fp16.safetensors";
@@ -525,7 +532,15 @@ async fn ensure_seedvr2_checkpoint(
         if target.exists() {
             continue;
         }
-        ensure_hf_cached_file(&context, &repo, "main", src_file, &target)
+        // Pin the exact commit for the default third-party mirror so `main` moving under
+        // us can't swap the weights (sc-8879). A manifest-supplied override repo may carry
+        // its own revision layout, so only pin when we're using the default repo.
+        let revision = if repo == SEEDVR2_REPO {
+            SEEDVR2_REVISION
+        } else {
+            "main"
+        };
+        ensure_hf_cached_file(&context, &repo, revision, src_file, &target)
             .await
             .map_err(|error| {
                 let detail = match &error {
