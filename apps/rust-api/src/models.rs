@@ -175,7 +175,81 @@ pub(crate) async fn create_model_download_job(
             ApiError::bad_request("Model does not define a Hugging Face download")
         })?,
     };
-    let repo = required_string_field(&download, "repo")?.to_owned();
+    // The selected `download` is always the primary/tier entry — `model_download` and
+    // `model_download_for_variant` skip co-requisites (sc-9696), so a co-requisite can never be
+    // installed as if it were the model itself.
+    let requested_variant = payload
+        .variant
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let job_payload = build_model_download_job_payload(
+        &model,
+        &model_id,
+        &download,
+        requested_variant,
+        true,
+        &state.settings.data_dir,
+    )?;
+
+    // Co-requisites (sc-9696): dependencies that must install ALONGSIDE the primary — e.g. the PiD
+    // decoder's shared gemma-2-2b-it caption encoder, or 10Eros's cond_safe distill LoRA. Without
+    // them the feature silently no-ops (for PiD, `resolve_pid_weights` falls back to the native VAE
+    // with no error). The catalog already filtered `downloads` to this OS, so every co-requisite
+    // here applies. Each is queued as its own ModelDownload job (the worker is one-repo-per-job);
+    // the catalog reports the entry installed only once all of them are cached
+    // (`install_state_for`). `include_family: false` because a co-requisite (e.g. a text encoder)
+    // is a different artifact than the model's primary checkpoint and must not be reconciled
+    // against the model's family.
+    let requested_gpu = requested_gpu_or_auto(payload.requested_gpu);
+    for co_requisite in model_co_requisite_downloads(&model) {
+        let co_payload = build_model_download_job_payload(
+            &model,
+            &model_id,
+            &co_requisite,
+            None,
+            false,
+            &state.settings.data_dir,
+        )?;
+        create_generation_job(
+            state.clone(),
+            JobType::ModelDownload,
+            None,
+            None,
+            co_payload,
+            requested_gpu.clone(),
+        )
+        .await?;
+    }
+
+    // The primary job is the one returned to the caller (its id is what the download UI tracks).
+    let job = create_generation_job(
+        state,
+        JobType::ModelDownload,
+        None,
+        None,
+        job_payload,
+        requested_gpu,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// Build the worker `ModelDownload` job payload for one `download` entry of `model`. Factored out
+/// (sc-9696) so the primary download and each co-requisite share identical payload shaping.
+/// `explicit_variant` records a request-selected quant tier (falling back to the entry's own
+/// `variant`); `include_family` forwards the model's declared family for the worker's post-download
+/// family reconcile (sc-1663) — pass `false` for co-requisites, whose weights are a different artifact
+/// than the model's primary checkpoint.
+fn build_model_download_job_payload(
+    model: &Value,
+    model_id: &str,
+    download: &Value,
+    explicit_variant: Option<&str>,
+    include_family: bool,
+    data_dir: &FsPath,
+) -> Result<JsonObject, ApiError> {
+    let repo = required_string_field(download, "repo")?.to_owned();
     let files = download
         .get("files")
         .and_then(Value::as_array)
@@ -188,29 +262,27 @@ pub(crate) async fn create_model_download_job(
         })
         .unwrap_or_default();
     let mut job_payload = JsonObject::new();
-    job_payload.insert("modelId".to_owned(), Value::String(model_id.clone()));
+    job_payload.insert("modelId".to_owned(), Value::String(model_id.to_owned()));
     job_payload.insert(
         "modelName".to_owned(),
         Value::String(
             model
                 .get("name")
                 .and_then(Value::as_str)
-                .unwrap_or(&model_id)
+                .unwrap_or(model_id)
                 .to_owned(),
         ),
     );
     job_payload.insert(
         "provider".to_owned(),
-        Value::String(required_string_field(&download, "provider")?.to_owned()),
+        Value::String(required_string_field(download, "provider")?.to_owned()),
     );
     job_payload.insert("repo".to_owned(), Value::String(repo.clone()));
     job_payload.insert("files".to_owned(), json!(files));
     // Record which quant tier this job installs (sc-8508) so the download record + per-variant
     // install tracking agree on the tier. Falls back to the selected entry's own `variant` when the
     // request omitted one (the default tier may still be a labeled variant).
-    if let Some(variant) = payload
-        .variant
-        .as_deref()
+    if let Some(variant) = explicit_variant
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
@@ -227,34 +299,24 @@ pub(crate) async fn create_model_download_job(
     // weights match it (parity with model import). The catalog is project-curated, but
     // a mis-declared family would otherwise silently mismatch downstream adapter
     // selection; the worker reconciles and fails on a confident conflict (sc-1663).
-    if let Some(family) = model.get("family").and_then(Value::as_str) {
-        if !family.trim().is_empty() {
-            job_payload.insert("family".to_owned(), Value::String(family.to_owned()));
+    if include_family {
+        if let Some(family) = model.get("family").and_then(Value::as_str) {
+            if !family.trim().is_empty() {
+                job_payload.insert("family".to_owned(), Value::String(family.to_owned()));
+            }
         }
     }
     job_payload.insert(
         "targetDir".to_owned(),
         Value::String(
-            state
-                .settings
-                .data_dir
+            data_dir
                 .join("models")
                 .join(safe_download_dir(&repo))
                 .display()
                 .to_string(),
         ),
     );
-
-    let job = create_generation_job(
-        state,
-        JobType::ModelDownload,
-        None,
-        None,
-        job_payload,
-        requested_gpu_or_auto(payload.requested_gpu),
-    )
-    .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok(job_payload)
 }
 
 /// Convert a model's native checkpoint into the local MLX format (macOS/Apple
@@ -900,21 +962,53 @@ fn install_state_for(
         let cache_incomplete = cache_health
             .as_ref()
             .is_some_and(|health| health.incomplete);
-        let missing_required_files = cache_health
+        let mut missing_required_files = cache_health
             .as_ref()
             .map(|health| health.missing_files.clone())
             .unwrap_or_default();
         let managed_installed = model_is_installed(&managed_path);
+        let primary_installed = managed_installed || cache_installed;
         let installed_path = if cache_installed || cache_incomplete {
             cache_path.clone()
         } else {
             Some(managed_path)
         };
+        // Co-requisites (sc-9696): the entry counts as installed only when the primary AND every
+        // co-requisite dependency (e.g. the PiD decoder's shared gemma-2-2b-it caption encoder) are
+        // cached. Gating on this keeps a feature that silently no-ops without its dependency (PiD →
+        // native VAE) from advertising as ready, and a present primary with a missing/partial
+        // co-requisite surfaces as a repairable partial install (cache_incomplete → repairAvailable),
+        // whose repair re-runs the download job that now fetches the co-requisite too.
+        let mut co_requisites_installed = true;
+        let mut co_requisite_incomplete = false;
+        for co_requisite in model_co_requisite_downloads(model) {
+            let Some(repo) = co_requisite.get("repo").and_then(Value::as_str) else {
+                continue;
+            };
+            let files = string_array_field(&co_requisite, "files");
+            let health = huggingface_repo_cache_path(data_dir, repo)
+                .map(|path| huggingface_cache_health(&path, &files));
+            if health.as_ref().is_some_and(|health| health.installed) {
+                continue;
+            }
+            co_requisites_installed = false;
+            co_requisite_incomplete |= health.as_ref().is_some_and(|health| health.incomplete);
+            match health
+                .as_ref()
+                .map(|health| health.missing_files.as_slice())
+            {
+                Some(missing) if !missing.is_empty() => missing_required_files
+                    .extend(missing.iter().map(|file| format!("{repo}/{file}"))),
+                _ => missing_required_files.push(repo.to_owned()),
+            }
+        }
         ModelCatalogEntryState {
             downloadable: true,
             installed_path: installed_path.map(|path| path.display().to_string()),
-            installed: managed_installed || cache_installed,
-            cache_incomplete,
+            installed: primary_installed && co_requisites_installed,
+            cache_incomplete: cache_incomplete
+                || (primary_installed && !co_requisites_installed)
+                || co_requisite_incomplete,
             missing_required_files,
         }
     } else if let Some(installed_path) = model_manifest_installed_path(model, data_dir) {
@@ -972,7 +1066,7 @@ fn model_has_variant_matrix(model: &Value) -> bool {
     };
     downloads
         .iter()
-        .filter(|entry| is_supported_model_download(entry))
+        .filter(|entry| is_supported_model_download(entry) && !is_co_requisite_download(entry))
         .any(|entry| {
             entry
                 .get("variant")
@@ -997,7 +1091,8 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
     let mut seen_variants = std::collections::HashSet::new();
     downloads
         .iter()
-        .filter(|entry| is_supported_model_download(entry))
+        // Co-requisites (sc-9696) are dependencies, not selectable tiers — never a variant state.
+        .filter(|entry| is_supported_model_download(entry) && !is_co_requisite_download(entry))
         .filter(|entry| {
             let key = entry
                 .get("variant")
@@ -1221,9 +1316,21 @@ async fn model_catalog_inner(
             let fallback_size_bytes = download_context
                 .as_ref()
                 .and_then(|context| context.fallback_size_bytes);
-            let effective_download_size_bytes = download_size_bytes.or(fallback_size_bytes);
+            let primary_size_bytes = download_size_bytes.or(fallback_size_bytes);
             let download_size_estimated =
                 download_size_bytes.is_none() && fallback_size_bytes.is_some();
+            // Co-requisites (sc-9696) install alongside the primary, so the displayed footprint must
+            // include them (e.g. PiD's ~2.7 GB checkpoint + ~5.2 GB gemma-2-2b-it). Their sizes come
+            // from the manifest (the live HF estimate above only sizes the primary repo).
+            let co_requisite_size_bytes: u64 = model_co_requisite_downloads(model)
+                .iter()
+                .filter_map(|download| manifest_download_size_bytes(model, download))
+                .sum();
+            let effective_download_size_bytes = match primary_size_bytes {
+                Some(primary) => Some(primary + co_requisite_size_bytes),
+                None if co_requisite_size_bytes > 0 => Some(co_requisite_size_bytes),
+                None => None,
+            };
             let state = install_state_for(download_context, model, &data_dir);
             let object = model
                 .as_object_mut()
@@ -1461,7 +1568,9 @@ pub(crate) fn model_download(model: &Value) -> Option<Value> {
     let downloads = model.get("downloads")?.as_array()?;
     let mut fallback = None;
     for download in downloads {
-        if !is_supported_model_download(download) {
+        // Co-requisites (sc-9696) install alongside the primary, never AS it — skip them when
+        // choosing the canonical entry for size/install-path/download.
+        if !is_supported_model_download(download) || is_co_requisite_download(download) {
             continue;
         }
         fallback.get_or_insert(download);
@@ -1470,6 +1579,33 @@ pub(crate) fn model_download(model: &Value) -> Option<Value> {
         }
     }
     fallback.cloned()
+}
+
+/// True when a download entry is a co-requisite dependency (sc-9696): fetched ALONGSIDE the primary
+/// download rather than as a pick-one alternate, and gating the entry's install state. See the
+/// manifest schema `downloads[].coRequisite`.
+pub(crate) fn is_co_requisite_download(download: &Value) -> bool {
+    download.get("coRequisite").and_then(Value::as_bool) == Some(true)
+}
+
+/// The co-requisite download entries for `model` (sc-9696) — the dependencies that must install
+/// alongside the primary (e.g. the PiD decoder's shared gemma-2-2b-it caption encoder). The catalog
+/// has already restricted `downloads` to the current OS (`retain_downloads_for_os`), so every entry
+/// returned applies to this platform. Only provider-supported entries are returned.
+pub(crate) fn model_co_requisite_downloads(model: &Value) -> Vec<Value> {
+    model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .map(|downloads| {
+            downloads
+                .iter()
+                .filter(|download| {
+                    is_co_requisite_download(download) && is_supported_model_download(download)
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Select a specific quant tier's download entry for a quant-matrix model (sc-8508). Returns the
@@ -1483,6 +1619,7 @@ pub(crate) fn model_download_for_variant(model: &Value, variant: &str) -> Option
         .iter()
         .find(|download| {
             is_supported_model_download(download)
+                && !is_co_requisite_download(download)
                 && download
                     .get("variant")
                     .and_then(Value::as_str)
