@@ -9,7 +9,7 @@ uses (and that ort 2.0.0-rc.12's ORT API 24 accepts), so we download that wheel 
 zip) from a pinned PyPI CDN URL, verify its sha256, and extract its
 `capi/libonnxruntime*.dylib`.
 
-onnxruntime wheels are CPython-ABI-tagged (cp312/cp313/cp314), so unlike
+onnxruntime wheels are CPython-ABI-tagged (cp311/cp312/cp313/cp314), so unlike
 imageio-ffmpeg's single `py3-none` wheel we pin a small URL+sha256 table keyed by
 the build host's interpreter tag and verify against the matching entry. Pinning
 URL+sha256 (not just a version) keeps a compromised PyPI/CDN from flowing a
@@ -41,6 +41,14 @@ ONNXRUNTIME_VERSION = "1.26.0"
 # together on any version bump; a mismatch fails the build loudly rather than
 # shipping an unverified dylib into a signed release.
 WHEELS: dict[str, dict[str, str]] = {
+    "cp311": {
+        "url": (
+            "https://files.pythonhosted.org/packages/d4/81/"
+            "29a9eb470994a75eb7b3ccf32be314d7c66675a00ac7b50294816cc2db27/"
+            "onnxruntime-1.26.0-cp311-cp311-macosx_14_0_arm64.whl"
+        ),
+        "sha256": "ee1109ef4ef27cad90e823399e61e03b3c6c7bfe0fb820b4baf3678c15be8b3c",
+    },
     "cp312": {
         "url": (
             "https://files.pythonhosted.org/packages/81/b1/"
