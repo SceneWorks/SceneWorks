@@ -66,19 +66,10 @@ pub(crate) async fn update_character(
     ))
 }
 
+// Serves both `DELETE /characters/:id` and `POST /characters/:id/archive`
+// (the explicit-verb alias); the two routes share this single handler
+// (sc-8888, F-086) so archive behavior lives in one place.
 pub(crate) async fn archive_character(
-    State(state): State<AppState>,
-    Path((project_id, character_id)): Path<(String, String)>,
-) -> Result<Json<sceneworks_core::project_store::CharacterMutationResult>, ApiError> {
-    Ok(Json(
-        project_call(state, move |store| {
-            store.archive_character(&project_id, &character_id)
-        })
-        .await?,
-    ))
-}
-
-pub(crate) async fn archive_character_explicit(
     State(state): State<AppState>,
     Path((project_id, character_id)): Path<(String, String)>,
 ) -> Result<Json<sceneworks_core::project_store::CharacterMutationResult>, ApiError> {

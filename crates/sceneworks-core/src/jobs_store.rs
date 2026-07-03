@@ -14,7 +14,7 @@ use crate::contracts::{
     ContractNumber, JobSnapshot, JobStatus, JobType, ProgressStage, QueueSummary, WorkerCapability,
     WorkerSnapshot, WorkerStatus, WorkerUtilizationSnapshot,
 };
-use crate::store_util::{ensure_column, parse_string_enum};
+use crate::store_util::{ensure_column, parse_string_enum, random_hex};
 use crate::time::{format_unix_seconds, now_unix_seconds, parse_utc_seconds, utc_now};
 
 mod routing;
@@ -1519,9 +1519,14 @@ impl JobsStore {
         let job_id = match job_id {
             Some(job_id) => job_id,
             None => {
-                let job_hex: String =
-                    connection
-                        .query_row("select lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+                // sc-4209 / sc-8888 (F-086): pull the id from the OS CSPRNG via the
+                // shared `random_hex` helper instead of a per-call SQLite
+                // `hex(randomblob(16))`, which turned id generation into a SQLite
+                // failure surface. `random_hex` fails only if the OS CSPRNG does;
+                // fold that into `Io` so the caller's error type is unchanged.
+                let job_hex = random_hex(16).map_err(|error| {
+                    JobsStoreError::Io(std::io::Error::other(error.to_string()))
+                })?;
                 format!("job_{job_hex}")
             }
         };

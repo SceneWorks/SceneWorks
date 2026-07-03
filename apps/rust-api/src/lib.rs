@@ -1132,7 +1132,7 @@ pub(crate) fn create_app_with_state(
         )
         .route(
             "/api/v1/projects/:project_id/characters/:character_id/archive",
-            post(archive_character_explicit),
+            post(archive_character),
         )
         .route(
             "/api/v1/projects/:project_id/characters/:character_id/purge",
