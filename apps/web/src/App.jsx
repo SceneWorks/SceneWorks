@@ -42,6 +42,7 @@ import {
 import { buildWorkersById } from "./workers.js";
 import { createEditorScratchRegistry } from "./editorScratch.js";
 import { isDesktop as isDesktopShell, tauriInvoke } from "./runtime.js";
+import { readAccessToken, storeAccessToken, clearAccessToken } from "./accessToken.js";
 
 // Desktop (Tauri) shell detection (unified helper, epic 4484 story 6). The first-run
 // setup wizard is desktop-only; web/Docker (and a remote LAN browser) keep the
@@ -457,7 +458,10 @@ export function App() {
   // otherwise they fire optimistically, 401, and bury the password prompt under a band
   // of "access token required" errors (epic 4484).
   const [accessResolved, setAccessResolved] = useState(false);
-  const [token, setToken] = useState(() => window.localStorage.getItem("sceneworks-token") ?? "");
+  // The remote-access token (= host password). Storage key + threat-model note live in
+  // accessToken.js (sc-8880); it is persisted verbatim in localStorage so it survives
+  // reloads (a LAN remote-access requirement — see that module for the accepted XSS tradeoff).
+  const [token, setToken] = useState(() => readAccessToken());
   // What the user is typing into the login gate (sc-8808). Kept separate from the
   // live `token` so keystrokes never flip `authenticated` or churn the data/SSE
   // effects; `token` only changes once /api/v1/auth/verify accepts the draft.
@@ -1549,7 +1553,7 @@ export function App() {
       setAuthError("Couldn't reach the host to verify the password.");
       return;
     }
-    window.localStorage.setItem("sceneworks-token", candidate);
+    storeAccessToken(candidate);
     setToken(candidate);
     setPasswordDraft("");
     setAuthError("");
@@ -1560,7 +1564,7 @@ export function App() {
   // epic 4484 story 7). Setting the token state to "" re-renders the gate, which
   // keys off the token state (sc-8808).
   function lockRemote() {
-    window.localStorage.removeItem("sceneworks-token");
+    clearAccessToken();
     setToken("");
     setPasswordDraft("");
     setAuthError("");
