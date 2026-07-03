@@ -783,7 +783,12 @@ where
     let conf = confidence as f32;
     let timestamps = pt::sample_timestamps(duration);
 
-    let work_dir = std::env::temp_dir().join(format!("sw-person-track-{}", job.id));
+    // Sanitize the job id before it becomes a temp-dir path component (F-111): a hostile id
+    // (`../…`, absolute, separators) would otherwise escape `temp_dir()` and stage frames at an
+    // attacker-chosen path. `safe_download_dir` slugs every non-`[A-Za-z0-9_.-]` char, matching
+    // the timeline-export convention (`sceneworks_export_{safe_download_dir(job.id)}` above).
+    let work_dir =
+        std::env::temp_dir().join(format!("sw-person-track-{}", safe_download_dir(&job.id)));
     tokio::fs::create_dir_all(&work_dir).await?;
 
     // Run the fallible sampling/assembly/segmentation body, then remove `work_dir` on EVERY

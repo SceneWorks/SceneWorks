@@ -458,6 +458,46 @@ fn pattern_filtering_and_download_dir_match_python_behavior() {
     assert_eq!(safe_download_dir("///"), "download");
 }
 
+/// F-111 (sc-8913): a hostile job id must never let a person-track / frame-extract work dir
+/// escape `temp_dir()`. The handlers build the dir as `temp_dir().join(format!("sw-…-{}",
+/// safe_download_dir(&job.id)))`, so the sanitized id must always be a single path component
+/// that stays confined under the temp root — no `/`, `\`, `..`, or absolute-root traversal.
+#[test]
+fn safe_download_dir_confines_hostile_job_ids_to_the_temp_root() {
+    let temp_root = std::env::temp_dir();
+    for hostile in [
+        "../../etc/passwd",
+        "/etc/passwd",
+        "..\\..\\windows\\system32",
+        "a/../../b",
+        "....//....//x",
+        "job\0id",
+        "  ../secret  ",
+    ] {
+        let sanitized = safe_download_dir(hostile);
+        // The sanitized id is a single normal path component (no separators, not `..`/`.`).
+        assert!(
+            !sanitized.contains('/')
+                && !sanitized.contains('\\')
+                && sanitized != ".."
+                && sanitized != ".",
+            "sanitized job id {sanitized:?} (from {hostile:?}) is not a single safe component"
+        );
+        // Joining it under the temp root yields a path whose only new component sits directly
+        // under `temp_dir()` — it can never traverse above the temp root.
+        let work_dir = temp_root.join(format!("sw-person-track-{sanitized}"));
+        assert_eq!(
+            work_dir.parent(),
+            Some(temp_root.as_path()),
+            "hostile job id {hostile:?} escaped the temp root: {work_dir:?}"
+        );
+        assert!(
+            work_dir.starts_with(&temp_root),
+            "hostile job id {hostile:?} produced a path outside the temp root: {work_dir:?}"
+        );
+    }
+}
+
 #[test]
 fn huggingface_cache_paths_follow_hub_layout() {
     let root = tempdir().expect("temp dir creates");
