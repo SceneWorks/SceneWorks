@@ -129,9 +129,11 @@ pub(crate) async fn run_dataset_analysis_job(
     .await?;
 
     let cancel = CancelFlag::new();
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<usize>(64);
+    let (tx, rx) = tokio::sync::mpsc::channel::<usize>(64);
     let blocking_cancel = cancel.clone();
-    let blocking_items = items.clone();
+    // Move (not clone) the items into the blocking task: `total` is already captured above, so the
+    // async body needs nothing from `items` afterward — matching the face-analysis job (sc-8836).
+    let blocking_items = items;
     let job_id = job.id.clone();
     let blocking =
         tokio::task::spawn_blocking(move || -> WorkerResult<Vec<AnalysisEmbeddingRecord>> {
@@ -211,99 +213,39 @@ pub(crate) async fn run_dataset_analysis_job(
             Ok(out)
         });
 
-    // Bind the blocking analysis task to its cancel flag (sc-8804, F-003): every `update_job`/
-    // `heartbeat` `?` below returns early on a transient POST failure or a 409 (stale-sweep
-    // reclaim); on that early return this guard trips `cancel` and aborts the analysis thread
-    // instead of leaving it running on a job nobody is consuming. `cancel` is kept alongside (it's
-    // `Clone`) for the in-loop cancel poll; the guard drives only the drop-time teardown.
-    let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
-    let mut interval = tokio::time::interval(progress_report_interval(settings));
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    // Run the stream loop capturing its Result so any `?`-error path performs the explicit awaited
-    // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
-    let loop_result: WorkerResult<()> = async {
-        loop {
-            tokio::select! {
-                event = rx.recv() => {
-                    match event {
-                        Some(index) => {
-                            let progress = 0.12 + 0.78 * ((index + 1) as f64 / total as f64);
-                            update_job(
-                                api,
-                                &job.id,
-                                analysis_progress(
-                                    JobStatus::Running,
-                                    ProgressStage::Running,
-                                    progress,
-                                    &format!("Analyzed image {} of {}.", index + 1, total),
-                                    None,
-                                    backend,
-                                ),
-                            )
-                            .await?;
-                        }
-                        None => break,
-                    }
-                }
-                _ = interval.tick() => {
-                    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                    match check_cancel(api, &job.id, CANCEL_MESSAGE).await {
-                        Ok(()) => {}
-                        Err(WorkerError::Canceled(_)) => cancel.cancel(),
-                        Err(error) => return Err(error),
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-    .await;
-    if let Err(error) = loop_result {
-        guard.cancel_and_join().await;
-        return Err(error);
-    }
-
-    // Loop exited cleanly (channel closed) — reclaim the handle (disarming the drop-guard) and join.
-    let embeddings = guard
-        .into_handle()
-        .await
-        .map_err(|error| task_join_error("dataset analysis task join", error))??;
-
-    update_job(
+    // Hand the spawned blocking task to the shared scaffold (sc-8836, F-034): it owns the
+    // `CancelJoinGuard`, the per-item progress select loop (with the sc-8835 cancel/heartbeat
+    // handling), the saving update, and the sidecar POST. Only the endpoint/space/messages and the
+    // record → payload fold differ here.
+    let dataset_id = required_payload_string(&job.payload, "datasetId")?.to_owned();
+    let cfg = AnalysisJobConfig {
+        endpoint_suffix: "analysis-embeddings",
+        space: EMBEDDING_SPACE,
+        cancel_message: CANCEL_MESSAGE,
+        saving_message: "Saving embeddings.",
+        item_message: &|index, total| format!("Analyzed image {} of {}.", index + 1, total),
+    };
+    run_batched_analysis_job(
         api,
-        &job.id,
-        analysis_progress(
-            JobStatus::Saving,
-            ProgressStage::Saving,
-            0.94,
-            "Saving embeddings.",
-            None,
-            backend,
-        ),
-    )
-    .await?;
-    let project_id = required_payload_string(&job.payload, "projectId")?;
-    let dataset_id = required_payload_string(&job.payload, "datasetId")?;
-    let records = analysis_embedding_records_payload(&embeddings);
-    let stored: Value = api
-        .post_json(
-            &format!(
-                "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/analysis-embeddings"
-            ),
-            &json!({ "space": EMBEDDING_SPACE, "items": records }),
-        )
-        .await?;
-    update_job(
-        api,
-        &job.id,
-        analysis_progress(
-            JobStatus::Completed,
-            ProgressStage::Completed,
-            1.0,
-            &format!("Embedded {} training item(s).", embeddings.len()),
-            Some(analysis_result(dataset_id, embeddings.len(), stored)),
-            backend,
-        ),
+        settings,
+        job,
+        &cfg,
+        total,
+        backend,
+        cancel,
+        rx,
+        blocking,
+        analysis_embedding_records_payload,
+        |embeddings, stored| {
+            analysis_progress(
+                JobStatus::Completed,
+                ProgressStage::Completed,
+                1.0,
+                &format!("Embedded {} training item(s).", embeddings.len()),
+                Some(analysis_result(&dataset_id, embeddings.len(), stored)),
+                backend,
+            )
+        },
     )
     .await?;
     Ok(())
@@ -431,34 +373,6 @@ fn load_analysis_image(path: &Path) -> WorkerResult<Image> {
         height: decoded.height(),
         pixels: decoded.into_raw(),
     })
-}
-
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn analysis_progress(
-    status: JobStatus,
-    stage: ProgressStage,
-    progress: f64,
-    message: &str,
-    result: Option<JsonObject>,
-    backend: &str,
-) -> ProgressRequest {
-    ProgressRequest {
-        status,
-        stage,
-        progress: number_from_f64(progress),
-        message: message.to_owned(),
-        error: None,
-        result,
-        eta_seconds: None,
-        peak_gpu_memory_pct: None,
-        peak_gpu_load_pct: None,
-        backend: Some(backend.to_owned()),
-        worker_id: None,
-        extra: BTreeMap::new(),
-    }
 }
 
 #[cfg(any(

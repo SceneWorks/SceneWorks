@@ -107,6 +107,10 @@ mod training_jobs;
 use training_jobs::*;
 mod caption_jobs;
 use caption_jobs::*;
+// The shared scaffold both dataset-analysis jobs route through (sc-8836, F-034) — the `CancelJoinGuard`
+// select loop, per-item progress ramp, and sidecar POST extracted out of the two near-duplicate modules.
+mod analysis_jobs_common;
+use analysis_jobs_common::*;
 mod dataset_analysis_jobs;
 use dataset_analysis_jobs::*;
 mod face_analysis_jobs;
