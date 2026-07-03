@@ -119,11 +119,6 @@ const EDITOR_SHORTCUTS = [
   },
 ];
 
-// Future-tool scaffold (epic 2427) — rendered as inert buttons so the frame + the
-// next slices' insertion points stay in place. All current epic-2427 tools are live
-// (Move + Crop + Upscale + Color + AI Edit + Detail), so this is empty for now.
-const UPCOMING_TOOLS = [];
-
 // Upper bound on images in a FLUX.2 multi-reference edit, matching the worker's MAX_EDIT_REFERENCES
 // (image_jobs/flux2.rs). The working image takes one slot, so the editor allows up to 3 user refs.
 export const MAX_EDIT_REFERENCES = 4;
@@ -3178,17 +3173,6 @@ export function ImageEditor() {
             >
               Boxes
             </button>
-            {UPCOMING_TOOLS.map((upcoming) => (
-              <button
-                className="image-editor-tool"
-                disabled
-                key={upcoming.id}
-                title={`${upcoming.label} — coming soon (${upcoming.story})`}
-                type="button"
-              >
-                {upcoming.label}
-              </button>
-            ))}
           </aside>
         ) : null}
 

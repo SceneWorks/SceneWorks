@@ -108,12 +108,17 @@ const MODEL_TYPE_OPTIONS = [
   { value: "utility", label: "Utility" },
 ];
 
-// sc-7081 (epic 7080): model upload/import is hidden + disabled on every platform until a
+// sc-7081 (epic 7080, P0): model upload/import is hidden + disabled on every platform until a
 // real compatibility + conversion pipeline exists behind it. Today an imported checkpoint
 // has no runnable engine (macOS is MLX-only with a compile-time engine table; off-Mac only
 // loads full diffusers repos), so the form is kept in source but not rendered. The API
 // refuses the request too. Flip to true once the pipeline gates imports on a compatibility
 // verdict.
+//
+// KEEP, don't delete (sc-8941 / F-139): this is the deliberate P0-disabled scaffold that epic
+// 7080's P5 ("re-enable the UI behind the compat gate") restores — not accidental dead code.
+// The whole form + its state/handler below stay compile-time-gated by this flag so the
+// restoration point is preserved. Removing it would discard tracked, in-progress roadmap work.
 const MODEL_IMPORT_ENABLED = false;
 
 // Models render in type-grouped sections. Order is fixed; any model whose `type`
