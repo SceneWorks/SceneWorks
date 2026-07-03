@@ -11,7 +11,7 @@ import {
   trackItems,
   transitionOptions,
 } from "../timeline.js";
-import { useAppContext } from "../context/AppContext.js";
+import { useAppStatic } from "../context/AppContext.js";
 
 export function EditorScreen() {
   const {
@@ -30,7 +30,7 @@ export function EditorScreen() {
     setActiveTimeline,
     setSelectedTimelineId,
     timelines,
-  } = useAppContext();
+  } = useAppStatic();
   const assets = mediaAssets;
   const onPreview = setPreviewAsset;
   const onSendImage = (asset) => sendAssetToImage(asset, "edit_image");

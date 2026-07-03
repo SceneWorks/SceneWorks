@@ -10,7 +10,7 @@ import {
   workflowModelType,
   workflowModes,
 } from "../presetUtils.js";
-import { useAppContext } from "../context/AppContext.js";
+import { useAppStatic } from "../context/AppContext.js";
 import { qualityChoices } from "../jobTypes.js";
 
 const workflowCards = [
@@ -119,7 +119,7 @@ export function PresetManagerScreen() {
     updatePreset,
     videoModels,
     setActiveView,
-  } = useAppContext();
+  } = useAppStatic();
   const onOpenModels = () => setActiveView("Models");
   const models = useMemo(() => [...imageModels, ...videoModels], [imageModels, videoModels]);
   const [selectedPresetId, setSelectedPresetId] = useState(presets.find((preset) => preset.scope !== "builtin")?.id ?? "");

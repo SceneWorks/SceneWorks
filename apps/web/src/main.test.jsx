@@ -29,7 +29,7 @@ import { QueueScreen } from "./screens/QueueScreen.jsx";
 import { ReplacePersonPanel } from "./screens/ReplacePersonPanel.jsx";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
 import { TrainingDataSetsLibrary, TrainingStudio } from "./screens/TrainingStudio.jsx";
-import { AppContext } from "./context/AppContext.js";
+import { AppContext, AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { qualityChoices, GPU_REQUIRED_JOB_TYPES, errorStatuses } from "./jobTypes.js";
 
 // sc-1651 Phase B: screens converted to useAppContext() read their data from the
@@ -641,20 +641,23 @@ describe("SceneWorks app shell", () => {
     expect(queueChip()?.textContent).toContain("Queue 2");
   });
 
-  // sc-8811 regression (F-009): appContextValue must keep its identity across an App
-  // re-render that touches none of its entries. Before the fix, refreshData /
+  // sc-8811 regression (F-009): the STATIC context value must keep its identity across an
+  // App re-render that touches none of its entries. Before the fix, refreshData /
   // refreshDataWithLoraOverlay were plain per-render declarations passed into
   // useModelsAndLoras, so deleteModel/deleteLora — and therefore the whole memoized
   // context value — got a fresh identity on EVERY App render (each SSE tick, each
   // keystroke), silently defeating the sc-4194 memoization and re-rendering every
   // useAppContext consumer. A queue.updated event only changes queueSummary, which is
   // not part of the context value, so the provider value identity must survive it.
-  it("keeps appContextValue identity stable across an unrelated re-render (sc-8811)", async () => {
+  //
+  // sc-8855 (F-053): App now renders TWO providers (AppStaticContext + AppLiveContext).
+  // This asserts the STATIC value's identity, which must survive an unrelated re-render.
+  it("keeps the static context value identity stable across an unrelated re-render (sc-8811/sc-8855)", async () => {
     const providedValues = [];
-    const OriginalProvider = AppContext.Provider;
+    const OriginalProvider = AppStaticContext.Provider;
     // Swap in a recording pass-through provider so the test can observe the exact
-    // value identities App feeds the context on each committed render.
-    AppContext.Provider = function RecordingProvider({ value, children }) {
+    // static-value identities App feeds the context on each committed render.
+    AppStaticContext.Provider = function RecordingProvider({ value, children }) {
       providedValues.push(value);
       return <OriginalProvider value={value}>{children}</OriginalProvider>;
     };
@@ -670,7 +673,7 @@ describe("SceneWorks app shell", () => {
       expect(before).toBeTruthy();
 
       // Pure queue.updated (no workers array, no job.updated): re-renders App via
-      // setQueueSummary without changing anything appContextValue depends on.
+      // setQueueSummary without changing anything the static value depends on.
       await act(async () => {
         FakeEventSource.instances[0].listeners["queue.updated"]({
           data: JSON.stringify({ counts: { active: 2, queued: 2 }, activeJobs: [{ id: "job-a" }] }),
@@ -682,7 +685,64 @@ describe("SceneWorks app shell", () => {
       expect(providedValues.length).toBeGreaterThan(countBefore); // the event really re-rendered App
       expect(after).toBe(before); // identity preserved → consumer tree memoization holds
     } finally {
-      AppContext.Provider = OriginalProvider;
+      AppStaticContext.Provider = OriginalProvider;
+    }
+  });
+
+  // sc-8855 (F-053): a job/worker SSE tick must NOT change the STATIC context value's
+  // identity — that is the whole point of the split. The LIVE value's identity DOES
+  // change (it carries the churning jobs/workers fields), but static-only consumers
+  // (Settings, Presets, Logs, pose/keypoint pickers) subscribe to the static value and
+  // therefore skip re-render on every tick. We record both provider values and assert the
+  // static identity is preserved across a job.updated + workers.snapshot tick while the
+  // live identity changes.
+  it("static context value identity survives a job/worker SSE tick; live value changes (sc-8855)", async () => {
+    const staticValues = [];
+    const liveValues = [];
+    const OriginalStatic = AppStaticContext.Provider;
+    const OriginalLive = AppLiveContext.Provider;
+    AppStaticContext.Provider = function RecordingStatic({ value, children }) {
+      staticValues.push(value);
+      return <OriginalStatic value={value}>{children}</OriginalStatic>;
+    };
+    AppLiveContext.Provider = function RecordingLive({ value, children }) {
+      liveValues.push(value);
+      return <OriginalLive value={value}>{children}</OriginalLive>;
+    };
+    try {
+      root = createRoot(container);
+      await act(async () => {
+        root.render(<App />);
+      });
+      await settle();
+
+      const staticBefore = staticValues[staticValues.length - 1];
+      const liveBefore = liveValues[liveValues.length - 1];
+      expect(staticBefore).toBeTruthy();
+      expect(liveBefore).toBeTruthy();
+
+      // A real job tick: job.updated changes the jobs list (LIVE), which must not touch
+      // the static value's identity.
+      await act(async () => {
+        FakeEventSource.instances[0].listeners["job.updated"]({
+          data: JSON.stringify({ id: "job-churn", status: "running", type: "image", projectId: "p1" }),
+        });
+      });
+      await settle();
+
+      const staticAfter = staticValues[staticValues.length - 1];
+      const liveAfter = liveValues[liveValues.length - 1];
+      // Static identity preserved: cold-only consumers do NOT re-render on the tick.
+      expect(staticAfter).toBe(staticBefore);
+      // Live identity changed: the jobs field really churned.
+      expect(liveAfter).not.toBe(liveBefore);
+      // And the static value never carried the churning live keys.
+      for (const key of ["jobs", "workersById", "visibleWorkers", "filteredJobs", "gpuOptions"]) {
+        expect(staticAfter).not.toHaveProperty(key);
+      }
+    } finally {
+      AppStaticContext.Provider = OriginalStatic;
+      AppLiveContext.Provider = OriginalLive;
     }
   });
 

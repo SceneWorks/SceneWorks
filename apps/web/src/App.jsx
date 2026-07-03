@@ -30,7 +30,7 @@ import { useTraining } from "./hooks/useTraining.js";
 import { useModelsAndLoras } from "./hooks/useModelsAndLoras.js";
 import { usePersonTracks } from "./hooks/usePersonTracks.js";
 import { useTimelines } from "./hooks/useTimelines.js";
-import { AppContext } from "./context/AppContext.js";
+import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import { ACCENTS, DEFAULT_ACCENT, isAccentId } from "./accents.js";
 import {
@@ -2170,9 +2170,35 @@ export function App() {
   // entries actually changes, instead of being a fresh ~120-key literal on every App
   // render (SSE job/worker/queue ticks re-render App continuously). The actions above
   // and the data-hook actions are useCallback-stable, so this holds across renders
-  // that don't change data. NOTE: this dependency array must mirror the object below —
-  // every value referenced here is a dependency.
-  const appContextValue = useMemo(() => ({
+  // that don't change data.
+  //
+  // sc-8855 (F-053): split into TWO memoized values behind two providers.
+  //   - appLiveValue: the high-churn fields derived from the SSE-updated jobs/workers
+  //     state (jobs/filteredJobs/*LocalJobs/visibleWorkers/workersById/personReadiness/
+  //     gpuOptions). These change identity on nearly every tick.
+  //   - appStaticValue: everything else (actions/catalogs/project/presets/characters/
+  //     training/timelines/models). Its dependency array MUST NOT reference jobs or
+  //     workersById (or anything derived from them) — that exclusion is the whole point:
+  //     cold-only consumers reading via useAppStatic() no longer re-render on job ticks.
+  // NOTE: each dependency array must mirror the corresponding object below.
+  const appLiveValue = useMemo(() => ({
+    // Jobs / queue (high-churn — new identity per SSE tick)
+    jobs,
+    filteredJobs,
+    imageLocalJobs,
+    videoLocalJobs,
+    documentLocalJobs,
+    // Workers / GPU (high-churn — new identity per worker SSE tick)
+    visibleWorkers,
+    workersById,
+    personReadiness,
+    gpuOptions,
+  }), [
+    jobs, filteredJobs, imageLocalJobs, videoLocalJobs, documentLocalJobs,
+    visibleWorkers, workersById, personReadiness, gpuOptions,
+  ]);
+
+  const appStaticValue = useMemo(() => ({
     activeProject,
     mediaAssets,
     setPreviewAsset: openPreview,
@@ -2199,21 +2225,17 @@ export function App() {
     updateAssetStatus,
     updateAssetTags,
     latestImageAssets,
-    // Jobs / queue
-    jobs,
+    // Job actions (creation/control — stable callbacks, NOT the churning jobs list)
     jobAction,
     createVqaJob,
     createInterleaveJob,
     // Queue screen (sc-1651 Phase B batch 2)
     createPlaceholderJob,
-    filteredJobs,
     jobPrompt,
     setJobPrompt,
     projectFilter,
     setProjectFilter,
     projects,
-    visibleWorkers,
-    workersById,
     // Generation studios (sc-1651 Phase B batch 3)
     createVideoJob,
     createVideoUpscaleJob,
@@ -2226,9 +2248,6 @@ export function App() {
     latestVideoAssets,
     recentImageAssets,
     recentVideoAssets,
-    videoLocalJobs,
-    imageLocalJobs,
-    documentLocalJobs,
     studioLaunch,
     // sc-8730: Image Editor launch channel + the two Edit paths. sendAssetToImageEditor
     // routes to the editor canvas (FullscreenPreview Edit button); sendAssetToImageEdit
@@ -2240,7 +2259,6 @@ export function App() {
     rememberLocalGenerationJob,
     // Person tracks (Video Studio + Replace Person)
     personTracks,
-    personReadiness,
     createPersonDetectionJob,
     createPersonTrackJob,
     saveTrackCorrections,
@@ -2258,7 +2276,6 @@ export function App() {
     createModelConvertJob,
     createLoraImportJob,
     createModelImportJob,
-    gpuOptions,
     requestedGpu,
     setRequestedGpu,
     // Presets
@@ -2330,15 +2347,15 @@ export function App() {
     createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
     assets, selectedAsset, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
-    jobs, jobAction, createVqaJob, createInterleaveJob, createPlaceholderJob, filteredJobs,
-    jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects, visibleWorkers, workersById,
+    jobAction, createVqaJob, createInterleaveJob, createPlaceholderJob,
+    jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects,
     createVideoJob, createVideoUpscaleJob, createImageJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
-    recentVideoAssets, videoLocalJobs, imageLocalJobs, documentLocalJobs, studioLaunch,
+    recentVideoAssets, studioLaunch,
     editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,
-    rememberLocalGenerationJob, personTracks, personReadiness, createPersonDetectionJob,
+    rememberLocalGenerationJob, personTracks, createPersonDetectionJob,
     createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, models, macCapabilities,
     loras, deleteLora, deleteModel, createModelDownloadJob, createLoraDownloadJob, createModelConvertJob,
-    createLoraImportJob, createModelImportJob, gpuOptions, requestedGpu, setRequestedGpu,
+    createLoraImportJob, createModelImportJob, requestedGpu, setRequestedGpu,
     presets, createPreset, updatePreset, deletePreset, duplicatePreset, token, authenticated,
     trainingDatasets, trainingDatasetsProjectId, trainingDatasetsError, loadingTrainingDatasets,
     refreshTrainingDatasets, loadTrainingDataset, loadTrainingDatasetReadiness, setTrainingDatasetItemQualityAck, createTrainingDataset, uploadTrainingDatasetItem,
@@ -2354,7 +2371,8 @@ export function App() {
   ]);
 
   return (
-    <AppContext.Provider value={appContextValue}>
+    <AppStaticContext.Provider value={appStaticValue}>
+    <AppLiveContext.Provider value={appLiveValue}>
     <main className="app">
       <aside className="sidebar" aria-label="Primary">
         <div className="brand">
@@ -2607,6 +2625,7 @@ export function App() {
         />
       ) : null}
     </main>
-    </AppContext.Provider>
+    </AppLiveContext.Provider>
+    </AppStaticContext.Provider>
   );
 }
