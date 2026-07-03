@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "../api.js";
-import { useAppContext } from "../context/AppContext.js";
+import { useAppContext, useAppStatic } from "../context/AppContext.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { KpsOverlay } from "../components/KpsOverlay.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
@@ -336,7 +336,7 @@ function KeypointCapturePanel({ hidden, onSaved }) {
 // --- Collections tab --------------------------------------------------------
 
 function KeypointCollectionsPanel({ hidden, presets, collections, collectionsLoading, onChanged }) {
-  const { token } = useAppContext();
+  const { token } = useAppStatic();
   const [name, setName] = useState("");
   const [orderedIds, setOrderedIds] = useState([]);
   const [editingId, setEditingId] = useState(null);
@@ -566,7 +566,7 @@ async function postExtractJob(token, requestedGpu, sourcePath) {
 
 export function KeyPointLibraryScreen() {
   const [activeTab, setActiveTab] = useState("library");
-  const { token } = useAppContext();
+  const { token } = useAppStatic();
   const { presets, loading: presetsLoading, error: presetsError, reload: reloadPresets } = useKeypointPresets();
   const {
     collections,
