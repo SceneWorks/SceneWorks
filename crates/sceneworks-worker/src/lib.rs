@@ -107,6 +107,20 @@ mod training_jobs;
 use training_jobs::*;
 mod caption_jobs;
 use caption_jobs::*;
+// The shared scaffold both dataset-analysis jobs route through (sc-8836, F-034) — the `CancelJoinGuard`
+// select loop, per-item progress ramp, and sidecar POST extracted out of the two near-duplicate modules.
+// Gated to the same lanes as its only callers (the real `run_*_analysis_job` in the two modules below);
+// on the parity lane those fall back to no-op stubs, so the scaffold has no consumer and must not compile.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod analysis_jobs_common;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use analysis_jobs_common::*;
 mod dataset_analysis_jobs;
 use dataset_analysis_jobs::*;
 mod face_analysis_jobs;
