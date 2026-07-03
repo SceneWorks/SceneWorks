@@ -1268,13 +1268,14 @@ mod web_assets {
     // The desktop shell navigates its privileged webview to this server, so the embedded
     // UI runs from this origin and its CSP must come from here (tauri.conf.json only
     // governs the bundled setup screen). Kept narrow: scripts only from this origin (the
-    // theme bootstrap was moved to /theme-init.js so no inline script is needed), Google
-    // Fonts allowed, images/media as self/data/blob, IPC for the Tauri webview. Same-origin
-    // API + SSE are covered by connect-src 'self'.
+    // theme bootstrap was moved to /theme-init.js so no inline script is needed), fonts
+    // self-hosted from this origin (no third-party font host — sc-8956), images/media as
+    // self/data/blob, IPC for the Tauri webview. Same-origin API + SSE are covered by
+    // connect-src 'self'.
     pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
 script-src 'self'; \
-style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
-font-src 'self' https://fonts.gstatic.com data:; \
+style-src 'self' 'unsafe-inline'; \
+font-src 'self'; \
 img-src 'self' data: blob:; \
 media-src 'self' data: blob:; \
 connect-src 'self' ipc: http://ipc.localhost; \
