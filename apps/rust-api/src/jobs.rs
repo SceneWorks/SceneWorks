@@ -124,7 +124,12 @@ pub(crate) async fn claim_job(
         || !candle_stranded.is_empty()
         || !candle_unsupported.is_empty()
     {
-        publish_queue(&state).await?;
+        // claim_job already ran mark_stale_workers_interrupted above (its own
+        // transaction), so refresh the queue WITHOUT sweeping a second time
+        // (sc-8889 / F-087). The old publish_queue path swept again on every
+        // claim; that second sweep found nothing (the first already interrupted
+        // the stale jobs) yet still cost a blocking round-trip.
+        publish_queue_skip_sweep(&state).await?;
     }
     Ok(Json(ClaimResponse {
         job: response,

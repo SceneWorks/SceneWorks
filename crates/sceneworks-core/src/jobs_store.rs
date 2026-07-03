@@ -287,7 +287,7 @@ pub struct ProgressUpdate {
     pub worker_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct StaleSweep {
     pub workers: Vec<WorkerSnapshot>,
     pub jobs: Vec<JobSnapshot>,
