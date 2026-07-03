@@ -116,7 +116,16 @@ pub(crate) async fn get_pose_preview(
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok((
-        [(axum::http::header::CONTENT_TYPE, "image/png".to_owned())],
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png".to_owned()),
+            // sc-9674 (sc-8872 follow-up): sibling media-serve endpoint on the API
+            // origin — forbid MIME sniffing, matching get_project_file. Served inline
+            // for <img> preview, so no attachment disposition.
+            (
+                axum::http::header::X_CONTENT_TYPE_OPTIONS,
+                "nosniff".to_owned(),
+            ),
+        ],
         bytes,
     )
         .into_response())

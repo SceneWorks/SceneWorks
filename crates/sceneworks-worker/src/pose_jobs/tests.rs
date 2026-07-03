@@ -214,6 +214,158 @@ fn pose_detect_candle_real_weights_finds_person() {
     }
 }
 
+fn pose_test_settings(data_dir: &Path) -> Settings {
+    Settings {
+        api_url: "http://127.0.0.1".to_owned(),
+        access_token: None,
+        data_dir: data_dir.to_path_buf(),
+        config_dir: data_dir.join("config"),
+        worker_id: "test-worker".to_owned(),
+        gpu_id: "gpu-0".to_owned(),
+        is_child_worker: false,
+        poll_seconds: 1,
+        heartbeat_seconds: 1,
+        shutdown_timeout_seconds: 1,
+        huggingface_base_url: crate::DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
+        huggingface_token: None,
+        credentials: Vec::new(),
+        max_lora_url_bytes: crate::DEFAULT_MAX_LORA_URL_BYTES,
+        max_model_url_bytes: crate::DEFAULT_MAX_MODEL_URL_BYTES,
+        allow_private_lora_urls: false,
+        utility_workers: 1,
+        backend_mlx_enabled: true,
+        backend_candle_enabled: false,
+        gpu_memory_limit_bytes: 0,
+    }
+}
+
+/// sc-8912: temp-upload cleanup deletes staged files under the pose-uploads cache and
+/// leaves everything else alone — so it can be run unconditionally on every exit path
+/// (success OR error) without risking a project asset. The snapshot-of-paths signature is
+/// exactly what the caller runs after the fallible body.
+#[tokio::test]
+async fn cleanup_temp_uploads_removes_only_pose_upload_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let settings = pose_test_settings(dir.path());
+
+    let uploads_root = dir.path().join("cache").join("pose-uploads");
+    std::fs::create_dir_all(&uploads_root).expect("mk uploads root");
+    let staged = uploads_root.join("upload-abc.png");
+    std::fs::write(&staged, b"staged").expect("write staged");
+
+    // A file OUTSIDE the uploads cache (e.g. a project asset) must never be removed.
+    let outside = dir.path().join("projects").join("p1");
+    std::fs::create_dir_all(&outside).expect("mk outside");
+    let asset = outside.join("asset.png");
+    std::fs::write(&asset, b"asset").expect("write asset");
+
+    cleanup_temp_uploads(&settings, &[staged.clone(), asset.clone()]).await;
+
+    assert!(!staged.exists(), "a staged pose-upload must be removed");
+    assert!(
+        asset.exists(),
+        "a file outside the pose-uploads cache must be left alone"
+    );
+
+    // Re-running on an already-removed file is a harmless no-op (error-path safety).
+    cleanup_temp_uploads(&settings, &[staged]).await;
+}
+
+/// sc-8879: the openmmlab DWPose bundle digests must be real, distinct 64-hex SHA-256
+/// values (not a placeholder) so the download integrity check actually enforces a pin.
+#[test]
+fn dwpose_zip_digests_are_pinned_sha256() {
+    for (label, digest) in [("det", DET_ZIP_SHA256), ("pose", POSE_ZIP_SHA256)] {
+        assert_eq!(digest.len(), 64, "{label} digest must be 64-hex sha256");
+        assert!(
+            digest
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "{label} digest must be lowercase hex, got {digest}"
+        );
+    }
+    assert_ne!(
+        DET_ZIP_SHA256, POSE_ZIP_SHA256,
+        "det and pose bundles are different files with different digests"
+    );
+}
+
+/// sc-8911: an env-pinned weight path that is set-but-missing must error, not silently
+/// fall through to the cache/download. Unset → `None`; set + existing → `Some(path)`.
+#[test]
+fn resolve_pinned_weight_errors_on_missing_env_path() {
+    use std::ffi::OsString;
+
+    // Unset: fall through.
+    assert_eq!(
+        resolve_pinned_weight("SCENEWORKS_DWPOSE_DET", None, DET_FILE).expect("unset ok"),
+        None,
+        "an unset pin must fall through"
+    );
+
+    // Set but nonexistent: error (not a silent fall-through).
+    let missing = resolve_pinned_weight(
+        "SCENEWORKS_DWPOSE_DET",
+        Some(OsString::from("/nonexistent/dwpose/yolox.onnx")),
+        DET_FILE,
+    );
+    assert!(
+        matches!(missing, Err(WorkerError::InvalidPayload(ref m)) if m.contains("SCENEWORKS_DWPOSE_DET") && m.contains("does not exist")),
+        "a set-but-missing pin must error, got {missing:?}"
+    );
+
+    // Set and existing: resolve to that path. Write a real temp file to point at.
+    let existing_path =
+        std::env::temp_dir().join(format!("sw-dwpose-pin-test-{}.onnx", std::process::id()));
+    std::fs::write(&existing_path, b"onnx").expect("write temp weight");
+    let resolved = resolve_pinned_weight(
+        "SCENEWORKS_DWPOSE_DET",
+        Some(existing_path.as_os_str().to_owned()),
+        DET_FILE,
+    )
+    .expect("existing pin ok");
+    assert_eq!(
+        resolved.as_deref(),
+        Some(existing_path.as_path()),
+        "existing pin resolves"
+    );
+    let _ = std::fs::remove_file(&existing_path);
+}
+
+/// sc-8875: a project-relative source path is confined to the project tree — any `..`
+/// (or absolute/prefix) component must reject the join so a crafted `../../secret.png`
+/// can't escape `project_path`. Plain `Normal` segments still resolve under the project.
+#[test]
+fn join_project_relative_rejects_parent_escape() {
+    let proj = Path::new("/data/projects/p1");
+
+    // A benign relative path resolves under the project root.
+    assert_eq!(
+        join_project_relative(proj, "assets/img.png"),
+        Some(PathBuf::from("/data/projects/p1/assets/img.png")),
+        "a plain relative path must resolve under the project"
+    );
+
+    // `..` traversal is rejected outright (no escape, no lexical resolution).
+    assert_eq!(
+        join_project_relative(proj, "../../../../etc/passwd"),
+        None,
+        "a `..` escape must be rejected"
+    );
+    assert_eq!(
+        join_project_relative(proj, "assets/../../secret.png"),
+        None,
+        "an interior `..` must be rejected"
+    );
+
+    // An absolute path (RootDir component) is rejected — it must not override the base.
+    assert_eq!(
+        join_project_relative(proj, "/etc/passwd"),
+        None,
+        "an absolute path must be rejected"
+    );
+}
+
 /// sc-9123: the between-iteration cancel check used by both worker-side pose loops (batch detect +
 /// skeleton render) must surface the TYPED `Canceled` carrying the shared terminal message — that
 /// is what `run_blocking_with_heartbeat` maps to the terminal `Canceled` post instead of a failure

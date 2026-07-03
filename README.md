@@ -178,6 +178,26 @@ Compose to the LAN; control access with `SCENEWORKS_ACCESS_TOKEN` and extend
 `SCENEWORKS_CORS_ORIGINS` with LAN hostnames or IP origins when the web app is opened
 from another machine.
 
+### Loopback trust and the multi-user-machine caveat
+
+When LAN remote access is on, the desktop launcher binds `0.0.0.0` and uses the
+pairing password as the API's access token, but the embedded desktop UI and the
+local GPU worker(s) reach the API over loopback (`127.0.0.1`/`::1`) with no password
+to send. To keep local use password-free while still gating LAN callers, the desktop
+sets `SCENEWORKS_TRUST_LOOPBACK`, which **trusts any loopback peer to bypass the
+access token** (epic 4484). Docker/server deployments never set it, so a
+reverse-proxied install — where every request appears to come from loopback — stays
+fail-closed.
+
+**Caveat (deliberate tradeoff):** loopback trust is per-connection, not per-OS-user.
+On a **shared/multi-user machine**, *any* local OS user or local process — not just
+the account running SceneWorks — can reach the API over `127.0.0.1` and inherit the
+same token-free access (project file reads, credential writes, job creation, model
+uploads). This is intentional for the single-user desktop it targets. If you run
+SceneWorks in remote-access mode on a machine other users can log into, either do not
+set `SCENEWORKS_TRUST_LOOPBACK` (so even loopback callers must present the token), or
+treat every local user on that host as fully trusted.
+
 For offline development or deterministic Rust API tests, set `SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE=1` to skip live Hugging Face model size lookups. The catalog still returns the same fields with unknown sizes.
 
 ## Service Credentials (API tokens)

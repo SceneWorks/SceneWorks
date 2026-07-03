@@ -777,6 +777,16 @@ impl ProjectStore {
     ) -> ProjectStoreResult<Value> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         let timeline_id = required_str(&timeline, "id")?.to_owned();
+        // The client supplies `id`, and `timeline_file_path` embeds its last 8
+        // chars into the write path while `relative_string`'s lexical strip lets
+        // an unnormalized `..`-bearing id through — charset-check it (matching the
+        // asset/character/track/dataset guards) BEFORE any path is derived so the
+        // write can never escape the project dir (sc-8871 / F-069).
+        if !is_safe_id(&timeline_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid timeline id".to_owned(),
+            ));
+        }
         let timeline_project_id = required_str(&timeline, "projectId")?;
         if timeline_project_id != project_id {
             return Err(ProjectStoreError::BadRequest(
@@ -4375,6 +4385,83 @@ mod tests {
             .persist_generated_asset(&project.id, "job-1", "genset_x", &safe_fact)
             .expect("safe media path persists");
         assert_eq!(safe["id"], json!("asset_safe1"));
+    }
+
+    /// sc-8871 (F-069): `save_timeline` derives the write path from the
+    /// client-supplied `id` (last 8 chars slugged into the filename) and
+    /// `relative_string`'s lexical strip lets an unnormalized `..`-bearing id
+    /// through, so — matching the asset/character/track/dataset guards — the id
+    /// must be charset-checked before any path is derived. A traversal or
+    /// separator-bearing id is rejected with `BadRequest` and writes nothing;
+    /// a normal id still saves under the project's `timelines/` dir.
+    #[test]
+    fn save_timeline_rejects_unsafe_id_before_deriving_path() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Boundary").expect("project creates");
+        let timelines_dir = std::path::Path::new(&project.path).join("timelines");
+
+        let timeline_with = |id: &str| {
+            json!({
+                "id": id,
+                "projectId": project.id,
+                "name": "My Timeline",
+            })
+        };
+
+        for unsafe_id in [
+            "../../../../tmp/escape",
+            "timeline/../../escape",
+            "a/b/c",
+            "id.with.dots",
+            "  ",
+            "",
+        ] {
+            let result = store.save_timeline(&project.id, timeline_with(unsafe_id));
+            assert!(
+                matches!(result, Err(ProjectStoreError::BadRequest(_))),
+                "expected id {unsafe_id:?} to be rejected, got {result:?}"
+            );
+        }
+
+        // Nothing should have been written for any rejected id — no file can land
+        // inside (or escape) the timelines dir.
+        let timeline_files: Vec<_> = std::fs::read_dir(&timelines_dir)
+            .map(|entries| entries.filter_map(Result::ok).collect())
+            .unwrap_or_default();
+        assert!(
+            timeline_files.is_empty(),
+            "rejected ids must not write any timeline file, found {timeline_files:?}"
+        );
+        // And the traversal target above the project root must not exist either.
+        assert!(
+            !temp_dir
+                .path()
+                .join("escape.sceneworks.timeline.json")
+                .exists(),
+            "traversal id must not write outside the project dir"
+        );
+
+        // A normal safe id still saves correctly under timelines/.
+        let saved = store
+            .save_timeline(&project.id, timeline_with("timeline_abc123"))
+            .expect("safe timeline id persists");
+        assert_eq!(saved["id"], json!("timeline_abc123"));
+        let written: Vec<_> = std::fs::read_dir(&timelines_dir)
+            .expect("timelines dir exists after save")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(".sceneworks.timeline.json"))
+            })
+            .collect();
+        assert_eq!(
+            written.len(),
+            1,
+            "exactly one timeline file should be written for the safe id, found {written:?}"
+        );
     }
 
     #[test]

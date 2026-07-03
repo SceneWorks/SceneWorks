@@ -1645,16 +1645,16 @@
           // non-commercial license.
           // sc-8508: genuine per-tier quant variant (q4 vs bf16 of the same model) → labeled `bf16`.
           // bf16 (sc-8513): the separate `SceneWorks/ideogram-4` `bf16/` dense tier, carrying
-          // `turbo_lora.safetensors`. macOS-only FOR NOW: sc-9650 enabled candle bf16 for the base id, but
-          // the candle Turbo LoRA merge on a dense bf16 base hits a BF16/F32 dtype mismatch
-          // (`candle-gen-ideogram` adapters.rs: the merge adds an F32 delta to the as-is BF16 base). Flip
-          // this to all-platforms once that candle-gen fix lands + the pin bumps. (Base q4/q8 come from the
-          // `-mlx` turnkey.)
+          // `turbo_lora.safetensors`. sc-9654: installable on Windows/Linux too — the candle Ideogram-Turbo
+          // loader dense-loads this `bf16/` (same layout as the base) and merges the LoRA. The two dense-tier
+          // merge bugs (BF16/F32 fold + the CPU-override device move) are fixed in candle-gen #334, now
+          // pinned above; GPU-validated on sm_120 (a coherent 8-step 1024² render). ~55 GB / ~80 GB VRAM →
+          // a large-card tier (see the candle VRAM block). (Base q4/q8 come from the `-mlx` turnkey.)
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4",
           "variant": "bf16",
           "files": ["bf16/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 54760833024,
           "footprint": { "diskSizeBytes": 54760833024, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
@@ -1687,6 +1687,16 @@
         "minMemoryGb": 48,
         "quantize": 4,
         "repo": "SceneWorks/ideogram-4-mlx"
+      },
+      // candle/CUDA VRAM gate (sc-9654). Turbo is CFG-free single-DiT, so it runs LIGHTER than the two-DiT
+      // base: bf16 MEASURED ~46 GB overall-peak on an RTX PRO 6000 (sm_120, 1024²/8-step) vs the base's ~80
+      // GB. q4/q8 ESTIMATED below the base's (24/28 vs base 38.5/44 — the MLX active floor is ~24 GiB Q4),
+      // pending a candle measurement. bf16 is a large-card tier; small cards see it gated by its
+      // `vramGbByTier` ceiling. minMemoryGb 30 gates the default (q4) tier with headroom.
+      "candle": {
+        "minMemoryGb": 30,
+        "vramGbByTier": { "q4": 24.0, "q8": 28.0, "bf16": 46.0 },
+        "measured": false
       },
       "gated": true,
       "credentialHost": "huggingface.co",
