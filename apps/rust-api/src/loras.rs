@@ -714,7 +714,7 @@ pub(crate) async fn lora_import_request_from_multipart(
 
 pub(crate) async fn write_lora_upload_field_to_staged_file(
     state: &AppState,
-    mut field: axum::extract::multipart::Field<'_>,
+    field: axum::extract::multipart::Field<'_>,
     filename: &str,
 ) -> Result<PathBuf, ApiError> {
     let upload_dir = state
@@ -727,35 +727,16 @@ pub(crate) async fn write_lora_upload_field_to_staged_file(
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let temp_path = upload_dir.join(filename);
-    let mut file = tokio::fs::File::create(&temp_path)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let mut uploaded_bytes = 0usize;
-    let write_result = async {
-        while let Some(chunk) = field
-            .chunk()
-            .await
-            .map_err(|error| ApiError::bad_request(error.to_string()))?
-        {
-            uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
-            if uploaded_bytes > max_lora_upload_bytes() {
-                return Err(ApiError::payload_too_large(
-                    "Uploaded LoRA file exceeds the 2GB limit",
-                ));
-            }
-            file.write_all(&chunk)
-                .await
-                .map_err(|error| ApiError::internal(error.to_string()))?;
-        }
-        file.flush()
-            .await
-            .map_err(|error| ApiError::internal(error.to_string()))
-    }
-    .await;
-    if let Err(error) = write_result {
-        cleanup_staged_lora_upload(&temp_path).await;
-        return Err(error);
-    }
+    // sc-8886 (F-084): shared streaming writer. Cleanup removes the staged file AND its
+    // per-upload parent directory, so an aborted upload leaves no `upload-<uuid>/` dir.
+    stream_multipart_field_to_file(
+        field,
+        &temp_path,
+        max_lora_upload_bytes(),
+        || "Uploaded LoRA file exceeds the 2GB limit".to_owned(),
+        || cleanup_staged_lora_upload(&temp_path),
+    )
+    .await?;
     Ok(temp_path)
 }
 
@@ -1017,7 +998,7 @@ pub(crate) fn read_safetensors_header_for_api(
 pub(crate) fn sweep_stale_lora_uploads(data_dir: &FsPath) -> std::io::Result<usize> {
     sweep_stale_lora_uploads_before(
         data_dir,
-        SystemTime::now() - Duration::from_secs(STALE_LORA_UPLOAD_SECONDS),
+        SystemTime::now() - Duration::from_secs(STALE_UPLOAD_SECONDS),
     )
 }
 
@@ -1025,31 +1006,9 @@ pub(crate) fn sweep_stale_lora_uploads_before(
     data_dir: &FsPath,
     cutoff: SystemTime,
 ) -> std::io::Result<usize> {
-    let upload_root = data_dir.join("cache").join("lora-uploads");
-    let entries = match std::fs::read_dir(upload_root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error),
-    };
-    let mut removed = 0usize;
-    for entry in entries {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if !file_type.is_dir() {
-            continue;
-        }
-        let filename = entry.file_name();
-        let filename = filename.to_string_lossy();
-        if !filename.starts_with("upload-") {
-            continue;
-        }
-        let modified = entry.metadata()?.modified().unwrap_or(UNIX_EPOCH);
-        if modified <= cutoff {
-            std::fs::remove_dir_all(entry.path())?;
-            removed += 1;
-        }
-    }
-    Ok(removed)
+    // sc-8885 (F-083): LoRA uploads only ever stage per-upload directories, so the
+    // shared sweeper's file+dir handling is a strict superset of the old dir-only loop.
+    sweep_stale_uploads(data_dir, "lora-uploads", cutoff)
 }
 
 pub(crate) fn lora_source_provider(payload: &LoraImportRequest) -> &'static str {

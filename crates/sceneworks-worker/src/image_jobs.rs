@@ -1536,8 +1536,14 @@ include!("image_jobs/stream.rs");
 ))]
 // base image routing (MLX) + neutral txt2img generation harness + the candle execution path.
 include!("image_jobs/base.rs");
-#[cfg(target_os = "macos")]
-// Per-generation PiD (pixel-diffusion) super-resolving decoder routing (epic 7840, sc-7849).
+// Per-generation PiD (pixel-diffusion) super-resolving decoder routing (epic 7840, sc-7849). The
+// weight-resolution helper (`resolve_pid_weights`) is backend-neutral, so it compiles on BOTH face
+// backends: the generic MLX lanes (base.rs/qwen.rs `generate*`, macOS-only) AND the candle InstantID
+// Angles/Poses lane (instantid.rs, sc-8373), which now decodes through the `sdxl` PiD student off-Mac.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 include!("image_jobs/pid.rs");
 // Shared strict-control driver (epic 8236, sc-8243): the `(engine_id, control_repo, supported_kinds)`
 // single source of truth + the preprocess (pose/canny/depth/user-passthrough) → `Conditioning::Control`

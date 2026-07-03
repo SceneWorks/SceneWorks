@@ -578,16 +578,16 @@ async fn generate_instantid_stream(
         0.0..=2.0,
     );
     let face_restore = advanced::flag(&request.advanced, "faceRestore");
-    // PiD decoder overlay (epic 7840, sc-8371): decode Angles/Poses through the `sdxl` PiD
-    // super-resolving student (2K/4K) instead of the SDXL VAE when the request opted in
+    // PiD decoder overlay (epic 7840, sc-8371 mlx / sc-8373 candle): decode Angles/Poses through the
+    // `sdxl` PiD super-resolving student (2K/4K) instead of the SDXL VAE when the request opted in
     // (`advanced.usePid`) AND the checkpoint + Gemma snapshots are cached. `resolve_pid_weights`
     // returns `None` for a non-eligible model / missing opt-in / absent snapshots → native VAE.
-    // InstantID composes the SDXL VAE, so it shares the one `sdxl` student via the engine's
-    // `with_pid`. The candle InstantID lane has no PiD decode yet (sc-8373), so this is macOS-only —
-    // `use_pid` never reaches the candle engine (whose `InstantIdRequest` has no such field).
-    #[cfg(target_os = "macos")]
+    // InstantID composes the SDXL VAE, so BOTH the mlx and candle engines share the one `sdxl` student
+    // via `with_pid` — the candle lane (sc-8373) now carries the same `InstantId::with_pid` +
+    // `InstantIdRequest.use_pid` seam as macOS, so this resolves on either face backend.
+    #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
     let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
     let use_pid = pid_weights.is_some();
     // Load the xinsir OpenPose ControlNet only for pose mode (it is the MultiControlNet second
     // branch; identity/angle modes don't need it).
@@ -616,7 +616,7 @@ async fn generate_instantid_stream(
     }
     // Mark PiD output on the asset sidecar (epic 7840): the NSCLv1 non-commercial restriction flows
     // to PiD-decoded output, distinct from the rest of the pipeline. Only set when PiD actually ran.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
     if use_pid {
         raw_settings.insert("usePid".to_owned(), Value::Bool(true));
     }
@@ -789,11 +789,12 @@ async fn generate_instantid_stream(
                     WorkerError::Engine(format!("InstantID face stack: {error}"))
                 })?
             };
-            // Attach the optional PiD super-resolving decoder (epic 7840, sc-8371): the `sdxl` student
-            // InstantID reuses (it composes the SDXL VAE). `pid_weights` is `Some` only when this
-            // generation opted in AND the snapshots are cached, so this is a no-op for a native-VAE
-            // generation. macOS/mlx only — the candle lane lands in sc-8373.
-            #[cfg(target_os = "macos")]
+            // Attach the optional PiD super-resolving decoder (epic 7840, sc-8371 mlx / sc-8373 candle):
+            // the `sdxl` student InstantID reuses (it composes the SDXL VAE). `pid_weights` is `Some`
+            // only when this generation opted in AND the snapshots are cached, so this is a no-op for a
+            // native-VAE generation. Both face backends expose the same `with_pid(&PidWeights)` seam, so
+            // one arm serves the mlx and candle lanes.
+            #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
             let model = match &pid_weights {
                 Some(pid) => model.with_pid(pid).map_err(|error| {
                     WorkerError::Engine(format!("InstantID PiD decoder load failed: {error}"))
@@ -889,10 +890,10 @@ async fn generate_instantid_stream(
                         controlnet_scale,
                         openpose_scale,
                         seed: seed as u64,
-                        // PiD opt-in (sc-8371): macOS/mlx-only field (the candle `InstantIdRequest`
-                        // has none); the engine errors if set without a `with_pid` load, so the two
-                        // stay in lockstep — `use_pid` is `pid_weights.is_some()`.
-                        #[cfg(target_os = "macos")]
+                        // PiD opt-in (sc-8371 mlx / sc-8373 candle): both engines' `InstantIdRequest`
+                        // carry this field; the engine errors if set without a `with_pid` load, so the
+                        // two stay in lockstep — `use_pid` is `pid_weights.is_some()`.
+                        #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
                         use_pid,
                         sampler: sampler.clone(),
                         scheduler: scheduler.clone(),
@@ -934,10 +935,11 @@ async fn generate_instantid_stream(
                             controlnet_scale,
                             openpose_scale,
                             seed: seed as u64,
-                            // Face-restore re-render always decodes on the native VAE (sc-8371): the
-                            // engine forces this internally too (its paste-back assumes a side×side
-                            // crop a 4× PiD decode would corrupt), but be explicit at the seam.
-                            #[cfg(target_os = "macos")]
+                            // Face-restore re-render always decodes on the native VAE (sc-8371 mlx /
+                            // sc-8373 candle): the engine forces this internally too (its paste-back
+                            // assumes a side×side crop a 4× PiD decode would corrupt), but be explicit
+                            // at the seam.
+                            #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
                             use_pid: false,
                             sampler: sampler.clone(),
                             scheduler: scheduler.clone(),

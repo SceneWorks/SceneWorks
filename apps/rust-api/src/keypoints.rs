@@ -104,30 +104,6 @@ pub(crate) async fn delete_keypoint_collection(
 /// Remove stale keypoint-source temp uploads at startup (the backstop for captures that were
 /// never saved). Mirrors `sweep_stale_pose_uploads`.
 pub(crate) fn sweep_stale_keypoint_uploads(data_dir: &FsPath) -> std::io::Result<usize> {
-    let cutoff = SystemTime::now() - Duration::from_secs(STALE_LORA_UPLOAD_SECONDS);
-    let upload_root = data_dir.join("cache").join("keypoint-uploads");
-    let entries = match std::fs::read_dir(upload_root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error),
-    };
-    let mut removed = 0usize;
-    for entry in entries {
-        let entry = entry?;
-        let filename = entry.file_name();
-        if !filename.to_string_lossy().starts_with("upload-") {
-            continue;
-        }
-        let modified = entry.metadata()?.modified().unwrap_or(UNIX_EPOCH);
-        if modified <= cutoff {
-            let path = entry.path();
-            let _ = if entry.file_type()?.is_dir() {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_file(&path)
-            };
-            removed += 1;
-        }
-    }
-    Ok(removed)
+    let cutoff = SystemTime::now() - Duration::from_secs(STALE_UPLOAD_SECONDS);
+    sweep_stale_uploads(data_dir, "keypoint-uploads", cutoff)
 }

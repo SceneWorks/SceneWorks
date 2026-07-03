@@ -166,7 +166,18 @@ const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_MODEL_UPLOAD_BYTES: usize = 256 * 1024 * 1024 * 1024;
 const MAX_LORA_MULTIPART_BODY_BYTES: usize = MAX_UPLOAD_BYTES + 16 * 1024 * 1024;
 const MAX_MODEL_MULTIPART_BODY_BYTES: usize = MAX_MODEL_UPLOAD_BYTES + 16 * 1024 * 1024;
-const STALE_LORA_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
+// sc-8885 (F-083): the shared max age for every `cache/*-uploads` staging area (asset,
+// lora, model, pose, keypoint) before the startup sweep reclaims it. Named for uploads
+// in general — the old `STALE_LORA_UPLOAD_SECONDS` misleadingly implied LoRA-only.
+const STALE_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
+// sc-8884 (F-082): the char cap applied to every free-text prompt field (`prompt` and
+// `negativePrompt`). Both are persisted into jobs.db and re-broadcast over SSE on every
+// `job.updated`, so an uncapped field bloats the row and every subscriber's payload.
+const MAX_PROMPT_CHARS: usize = 4000;
+// sc-8884 (F-082): serialized-size ceiling for the free-form `advanced` object. It is a
+// pass-through bag threaded to the worker, so it has no per-key schema — bound its total
+// serialized size instead. 64 KiB is generous for legitimate advanced settings.
+const MAX_ADVANCED_JSON_BYTES: usize = 64 * 1024;
 // Thread-local (not a process-global atomic) so a test overriding the cap to
 // exercise the size limit can't leak that value into other LoRA-upload tests
 // running concurrently on sibling threads. `#[tokio::test]` uses a current-thread
@@ -730,6 +741,180 @@ async fn shutdown_signal() {
     }
 }
 
+/// Stream a multipart field to `temp_path`, enforcing `max_bytes` (returning
+/// `413` with `limit_msg` when exceeded), then flush. sc-8886 (F-084): the single
+/// implementation behind every multipart upload writer (asset / lora / model), which
+/// were three copy-pasted chunk loops differing only in cap source, destination, and
+/// message. On ANY error path (chunk read, write, flush, or size cap) the file handle
+/// is dropped and `cleanup` runs before the error is returned, so an aborted or
+/// malformed multi-gigabyte upload never leaks a temp file (sc-4204). `cleanup` lets a
+/// caller remove more than the file itself (e.g. the per-upload parent directory).
+/// The parent directory of `temp_path` must already exist.
+pub(crate) async fn stream_multipart_field_to_file<Fut>(
+    mut field: axum::extract::multipart::Field<'_>,
+    temp_path: &FsPath,
+    max_bytes: usize,
+    limit_msg: impl FnOnce() -> String,
+    cleanup: impl FnOnce() -> Fut,
+) -> Result<(), ApiError>
+where
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut file = match tokio::fs::File::create(temp_path).await {
+        Ok(file) => file,
+        Err(error) => {
+            cleanup().await;
+            return Err(ApiError::internal(error.to_string()));
+        }
+    };
+    let mut uploaded_bytes = 0usize;
+    let write_result = async {
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?
+        {
+            uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
+            if uploaded_bytes > max_bytes {
+                return Err(ApiError::payload_too_large(limit_msg()));
+            }
+            file.write_all(&chunk)
+                .await
+                .map_err(|error| ApiError::internal(error.to_string()))?;
+        }
+        file.flush()
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))
+    }
+    .await;
+    if let Err(error) = write_result {
+        drop(file);
+        cleanup().await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Remove stale `upload-*` entries under `<data_dir>/cache/<subdir>` older than
+/// `cutoff`. sc-8885 (F-083): the single implementation behind every per-area startup
+/// sweep (asset, lora, model, pose, keypoint) — previously four/five copy-pasted loops
+/// that had already drifted (some skipped non-directories, some didn't). Handles both
+/// files and directories so a staging area holding either is fully reclaimed. A missing
+/// root is not an error (nothing was ever staged). Returns the number of entries removed.
+///
+/// Per-entry reclamation is best-effort: a single unremovable stale entry (locked,
+/// permission-denied) is logged and skipped so the rest of the sweep still runs — the
+/// original per-area sweepers used `let _ =` and continued the loop. Only the outer
+/// `read_dir` failure remains fatal (nothing else could have been reclaimed anyway).
+pub(crate) fn sweep_stale_uploads(
+    data_dir: &FsPath,
+    subdir: &str,
+    cutoff: SystemTime,
+) -> std::io::Result<usize> {
+    let upload_root = data_dir.join("cache").join(subdir);
+    let entries = match std::fs::read_dir(upload_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut removed = 0usize;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(
+                    event = "stale_upload_entry_read_failed",
+                    sweep = subdir,
+                    error = %error,
+                    "could not read a stale-upload dir entry; skipping it"
+                );
+                continue;
+            }
+        };
+        if !entry.file_name().to_string_lossy().starts_with("upload-") {
+            continue;
+        }
+        let is_dir = match entry.file_type() {
+            Ok(file_type) => file_type.is_dir(),
+            Err(error) => {
+                tracing::warn!(
+                    event = "stale_upload_stat_failed",
+                    sweep = subdir,
+                    path = %entry.path().display(),
+                    error = %error,
+                    "could not stat a stale-upload entry; skipping it"
+                );
+                continue;
+            }
+        };
+        let modified = match entry.metadata() {
+            Ok(metadata) => metadata.modified().unwrap_or(UNIX_EPOCH),
+            Err(error) => {
+                tracing::warn!(
+                    event = "stale_upload_stat_failed",
+                    sweep = subdir,
+                    path = %entry.path().display(),
+                    error = %error,
+                    "could not read a stale-upload entry's mtime; skipping it"
+                );
+                continue;
+            }
+        };
+        if modified <= cutoff {
+            let path = entry.path();
+            let removal = if is_dir {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            match removal {
+                Ok(()) => removed += 1,
+                Err(error) => {
+                    // Best-effort: one locked/permission-denied temp must not block
+                    // reclaiming the rest of the stale entries in this sweep.
+                    tracing::warn!(
+                        event = "stale_upload_remove_failed",
+                        sweep = subdir,
+                        path = %path.display(),
+                        error = %error,
+                        "could not remove a stale upload entry; leaving it and continuing"
+                    );
+                }
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// Log (but never fail on) a startup directory-creation error. sc-8882 (F-080): the
+/// old `let _ =` swallowed permissions/disk problems, so they only ever surfaced as
+/// downstream 500s. Startup stays best-effort — a missing dir errors where it is used.
+fn warn_on_startup_err(label: &str, path: &FsPath, result: std::io::Result<()>) {
+    if let Err(error) = result {
+        tracing::warn!(
+            event = "startup_create_dir_failed",
+            dir = label,
+            path = %path.display(),
+            error = %error,
+            "could not create startup directory"
+        );
+    }
+}
+
+/// Log (but never fail on) a stale-upload sweep error. sc-8882 (F-080): a failed sweep
+/// silently leaves leaked multi-GB upload temps unreclaimed; a warning makes that
+/// diagnosable without aborting startup.
+fn warn_on_sweep_err(kind: &str, result: std::io::Result<usize>) {
+    if let Err(error) = result {
+        tracing::warn!(
+            event = "stale_upload_sweep_failed",
+            sweep = kind,
+            error = %error,
+            "stale upload sweep failed; leaked temp uploads may remain"
+        );
+    }
+}
+
 pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
     Ok(create_app_with_state(settings)?.0)
 }
@@ -740,16 +925,33 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
 pub(crate) fn create_app_with_state(
     settings: Settings,
 ) -> Result<(Router, AppState), JobsStoreError> {
-    let _ = std::fs::create_dir_all(&settings.data_dir);
-    let _ = std::fs::create_dir_all(&settings.config_dir);
+    // sc-8882 (F-080): a permissions/disk failure here is otherwise invisible until a
+    // downstream 500 — surface it as a warning so it is diagnosable. Non-fatal: startup
+    // continues (a missing dir surfaces later where it is actually used).
+    warn_on_startup_err(
+        "data_dir",
+        &settings.data_dir,
+        std::fs::create_dir_all(&settings.data_dir),
+    );
+    warn_on_startup_err(
+        "config_dir",
+        &settings.config_dir,
+        std::fs::create_dir_all(&settings.config_dir),
+    );
     if let Some(jobs_db_parent) = settings.jobs_db_path.parent() {
-        let _ = std::fs::create_dir_all(jobs_db_parent);
+        warn_on_startup_err(
+            "jobs_db_parent",
+            jobs_db_parent,
+            std::fs::create_dir_all(jobs_db_parent),
+        );
     }
-    let _ = sweep_stale_lora_uploads(&settings.data_dir);
-    let _ = sweep_stale_pose_uploads(&settings.data_dir);
-    let _ = sweep_stale_keypoint_uploads(&settings.data_dir);
+    // sc-8882 (F-080): a failed sweep leaves leaked multi-GB upload temps unreclaimed
+    // and was previously silent. WARN (never fatal) so the operator can investigate.
+    warn_on_sweep_err("lora", sweep_stale_lora_uploads(&settings.data_dir));
+    warn_on_sweep_err("pose", sweep_stale_pose_uploads(&settings.data_dir));
+    warn_on_sweep_err("keypoint", sweep_stale_keypoint_uploads(&settings.data_dir));
     // sc-4204 (F-API-6): asset-import temp files (cache/uploads) had no startup sweep.
-    let _ = sweep_stale_asset_uploads(&settings.data_dir);
+    warn_on_sweep_err("asset", sweep_stale_asset_uploads(&settings.data_dir));
     let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
     jobs_store.initialize()?;
     let interrupted_jobs_on_startup = jobs_store.mark_interrupted_on_startup()?.len();
@@ -2205,15 +2407,39 @@ fn validate_person_track_job(payload: &PersonTrackJobRequest) -> Result<(), ApiE
     Ok(())
 }
 
+/// sc-8884 (F-082): `negativePrompt` and the free-form `advanced` bag previously escaped
+/// all length validation (only `prompt` was capped), so an oversized field was persisted
+/// to jobs.db and re-serialized to every SSE subscriber on each status change. Cap the
+/// negative prompt at the same char limit as `prompt` and bound `advanced`'s serialized
+/// size. Shared by `validate_image_job` / `validate_video_job`.
+fn validate_prompt_extras(negative_prompt: &str, advanced: &JsonObject) -> Result<(), ApiError> {
+    if negative_prompt.chars().count() > MAX_PROMPT_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "negativePrompt must be at most {MAX_PROMPT_CHARS} characters"
+        )));
+    }
+    // Serialize once to measure the on-the-wire size of the pass-through bag.
+    let advanced_bytes = serde_json::to_vec(advanced)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    if advanced_bytes > MAX_ADVANCED_JSON_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "advanced settings must serialize to at most {MAX_ADVANCED_JSON_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
     }
-    if payload.prompt.is_empty() || payload.prompt.chars().count() > 4000 {
+    if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
         return Err(ApiError::bad_request(
             "prompt must be between 1 and 4000 characters",
         ));
     }
+    validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
     if ![
         "text_to_image",
         "edit_image",
@@ -2258,11 +2484,12 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
     }
-    if payload.prompt.is_empty() || payload.prompt.chars().count() > 4000 {
+    if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
         return Err(ApiError::bad_request(
             "prompt must be between 1 and 4000 characters",
         ));
     }
+    validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
     if ![
         "image_to_video",
         "text_to_video",

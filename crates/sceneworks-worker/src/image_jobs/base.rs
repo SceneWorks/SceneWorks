@@ -3160,7 +3160,19 @@ async fn generate_candle_stream(
     // sc-9092) — the same `model_repo` the MLX path records.
     let repo = model_repo(request, &model);
     let raw_settings = mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
-    let spec = load_spec(weights_dir, quant, adapters, None);
+    // Per-generation PiD decode (epic 7840): resolve the PiD checkpoint + Gemma for this model's latent
+    // space when `advanced.usePid` is set and the snapshots are cached; otherwise keep the native VAE.
+    // `use_pid` and `spec.pid` stay in lockstep (the engine rejects a mismatch). Every candle image
+    // provider reads `spec.pid` (candle-gen sc-7853: sdxl/flux/flux2/qwen-image/z-image/chroma/boogu/
+    // ideogram/kolors/krea/lens), so this un-gates the toggle across the whole off-Mac catalog — using the
+    // SAME `resolve_pid_weights` model→backbone gate as the macOS lane (a non-eligible model → `None` →
+    // native VAE, so this is a no-op for anything without a PiD backbone).
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+    let mut spec = load_spec(weights_dir, quant, adapters, None);
+    if let Some(pid) = pid_weights {
+        spec = spec.with_pid(pid.checkpoint, pid.gemma);
+    }
 
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
@@ -3195,8 +3207,11 @@ async fn generate_candle_stream(
                         // (sc-7448). candle adopts cfg_pp/cfg_rescale/apg in P4; until then an unsupported
                         // method was already dropped to `None` (the engine default) before reaching here.
                         guidance_method.as_deref(),
-                        // candle PiD is Phase 4 (sc-7853); the off-Mac lane never requests it.
-                        false,
+                        // Per-generation PiD decode (epic 7840): route the final latent through the
+                        // `spec.pid` super-resolving student when resolved (opt-in + snapshots cached),
+                        // else the native VAE. Every candle image provider reads `spec.pid` (sc-7853), so
+                        // the whole off-Mac catalog honors the toggle in lockstep with `spec.pid` above.
+                        use_pid,
                         &enhance,
                         &cancel,
                         on_progress,

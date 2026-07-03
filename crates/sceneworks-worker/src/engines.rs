@@ -838,10 +838,11 @@ mod tests {
     // checks `mlx` on macOS (where the MLX provider crates are linked) and `candle` on the
     // `backend-candle` build — whichever registry is active — so each backend's truthfulness is enforced
     // on its own lane. `"default"` is the engine-default sentinel, always allowed.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    // All-targets (no cfg gate): the embedded manifest + jsonc strip live in `sceneworks_core`, which
+    // compiles on every platform, so this parses on the plain Linux/Windows check lane too. The
+    // sampler/scheduler drift guards below still gate themselves on macos/candle (they need a linked
+    // provider registry), but the character_image engine-wiring guards (sc-9513) read only the manifest
+    // + the declarative wiring table, so they run everywhere `cargo test` does — including CI's ubuntu lane.
     fn parse_builtin_models() -> serde_json::Value {
         let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
@@ -850,6 +851,188 @@ mod tests {
             .1;
         let stripped = sceneworks_core::jsonc::strip_jsonc_comments(text);
         serde_json::from_str(&stripped).expect("parse builtin.models.jsonc")
+    }
+
+    // ── sc-9513 (F-059 follow-up of sc-8861): character_image ⇄ engine-wiring honesty guards ─────────
+    //
+    // These three guards were extracted to `tests/test_builtin_manifest_audit.py` by sc-8861 but still
+    // cross-referenced the retired Python worker's `scene_worker.image_adapters.MODEL_TARGETS` engine
+    // table via a lazy `importorskip` — so once epic-8283 deletes `apps/worker` they degrade to a clean
+    // SKIP and their coverage is lost. They are reimplemented here against the Rust worker's own engine
+    // wiring, reading the SAME embedded `config/manifests/builtin.models.jsonc` the Python audit parsed,
+    // so the character_image ⇄ engine-declaration invariants keep running Python-free (and on CI's ubuntu
+    // lane, since they need neither a linked provider registry nor a macos/candle build).
+    //
+    // Source of truth for the engine facts: the worker's character-image identity/pose engine wiring —
+    // the bespoke identity/pose providers `resolve_image_route` / `resolve_candle_image_route`
+    // (`image_jobs/base.rs`) dispatch to. That dispatch ladder is `#[cfg]`-gated to the macOS (MLX) and
+    // `backend-candle` builds, so it is not even compiled on the plain check lane; this small declarative
+    // table restates its identity/pose facts as all-targets data (the Rust analog of the Python
+    // `ipAdapter`/`instantId`/`pulidFlux`/`controlNetPose` blocks). Keep it in sync when a model gains or
+    // loses an identity/pose backbone:
+    //   * `flux_dev`            → XLabs FLUX IP-Adapter          (image_jobs/flux_ipadapter.rs)
+    //   * `sdxl` / `realvisxl`  → h94 IP-Adapter-plus-face        (image_jobs/sdxl_ipadapter.rs)
+    //   * `kolors`              → Kolors IP-Adapter-Plus + pose CN (image_jobs/kolors_ipadapter.rs + kolors_control.rs)
+    //   * `instantid_realvisxl` → InstantID IdentityNet           (image_jobs/instantid.rs)
+    //   * `pulid_flux_dev`      → PuLID-FLUX face identity          (image_jobs/pulid.rs + pulid_candle.rs)
+    // (Base `qwen_image` also carries a strict-pose ControlNet, but it is NOT a reference-identity engine
+    // and its pose picker is gated by manifest `ui.poseLibrary` alone — not `character_image` — so it is
+    // outside these identity-honesty guards and intentionally not a row here.)
+    struct CharacterEngineWiring {
+        sceneworks_id: &'static str,
+        /// A dedicated reference-identity backbone (IP-Adapter / InstantID / PuLID-FLUX) — the Rust
+        /// equivalent of Python `bool(MODEL_TARGETS[id].ipAdapter or .instantId or .pulidFlux)`.
+        identity_engine: bool,
+        /// The strict-pose ControlNet repo the model carries, if any (Python `controlNetPose.repo`).
+        control_net_pose_repo: Option<&'static str>,
+    }
+
+    const CHARACTER_IMAGE_ENGINE_WIRING: &[CharacterEngineWiring] = &[
+        CharacterEngineWiring {
+            sceneworks_id: "flux_dev",
+            identity_engine: true,
+            control_net_pose_repo: None,
+        },
+        CharacterEngineWiring {
+            sceneworks_id: "sdxl",
+            identity_engine: true,
+            control_net_pose_repo: None,
+        },
+        CharacterEngineWiring {
+            sceneworks_id: "realvisxl",
+            identity_engine: true,
+            control_net_pose_repo: None,
+        },
+        CharacterEngineWiring {
+            sceneworks_id: "kolors",
+            identity_engine: true,
+            control_net_pose_repo: Some("Kwai-Kolors/Kolors-ControlNet-Pose"),
+        },
+        CharacterEngineWiring {
+            sceneworks_id: "instantid_realvisxl",
+            identity_engine: true,
+            control_net_pose_repo: None,
+        },
+        CharacterEngineWiring {
+            sceneworks_id: "pulid_flux_dev",
+            identity_engine: true,
+            control_net_pose_repo: None,
+        },
+    ];
+
+    fn character_engine_wiring(id: &str) -> Option<&'static CharacterEngineWiring> {
+        CHARACTER_IMAGE_ENGINE_WIRING
+            .iter()
+            .find(|row| row.sceneworks_id == id)
+    }
+
+    /// True iff the manifest `model` lists `capability` in its `capabilities` array.
+    fn advertises_capability(model: &serde_json::Value, capability: &str) -> bool {
+        model["capabilities"]
+            .as_array()
+            .is_some_and(|caps| caps.iter().any(|c| c.as_str() == Some(capability)))
+    }
+
+    // Guard 1 (was `test_character_image_capability_implies_engine_or_tuning_declaration`, sc-2018): every
+    // builtin that advertises `character_image` must have EITHER a worker identity engine (IP-Adapter /
+    // InstantID / PuLID-FLUX) OR a `ui.variationStrength` declaration. Otherwise the capability flag is
+    // dishonest — the picker shows the model in "With character" mode but the worker silently ignores the
+    // reference (the shape of z_image_turbo's pre-sc-2005 bug). The cross-backbone guard: a future
+    // character_image backbone added without engine wiring fails here before it ever reaches a user.
+    #[test]
+    fn character_image_capability_implies_engine_or_tuning_declaration() {
+        let manifest = parse_builtin_models();
+        let models = manifest["models"].as_array().expect("models array");
+        let mut misleading: Vec<String> = Vec::new();
+        for model in models {
+            let Some(id) = model["id"].as_str() else {
+                continue;
+            };
+            if !advertises_capability(model, "character_image") {
+                continue;
+            }
+            let has_engine = character_engine_wiring(id).is_some_and(|w| w.identity_engine);
+            let has_variation_ui = model
+                .get("ui")
+                .and_then(|ui| ui.get("variationStrength"))
+                .is_some_and(|v| !v.is_null());
+            if !(has_engine || has_variation_ui) {
+                misleading.push(id.to_owned());
+            }
+        }
+        assert!(
+            misleading.is_empty(),
+            "Models advertise `character_image` without an identity engine (IP-Adapter / InstantID / \
+             PuLID-FLUX in CHARACTER_IMAGE_ENGINE_WIRING) or a `ui.variationStrength` declaration: {misleading:?}. \
+             Wire an identity engine for a reference/face-ID backbone, or declare `ui.variationStrength` \
+             for an edit-style backbone (sc-2017), or drop the capability flag (the z_image_turbo bug, sc-2005)."
+        );
+    }
+
+    // Guard 2 (was `test_kolors_declares_strict_pose_controlnet`, sc-2264): Kolors is the strict pose
+    // tier — the manifest must advertise `ui.poseLibrary` AND the worker wiring must carry the
+    // Kolors-ControlNet-Pose repo so the pose picker offers it and the adapter can load the pose
+    // ControlNet. Identity still rides the IP-Adapter; the pose path composes both.
+    #[test]
+    fn kolors_declares_strict_pose_controlnet() {
+        let manifest = parse_builtin_models();
+        let models = manifest["models"].as_array().expect("models array");
+        let kolors = models
+            .iter()
+            .find(|m| m["id"].as_str() == Some("kolors"))
+            .expect("kolors manifest entry");
+        assert_eq!(
+            kolors
+                .get("ui")
+                .and_then(|ui| ui.get("poseLibrary"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "kolors must declare ui.poseLibrary so the pose picker offers the strict tier (sc-2264)."
+        );
+        let wiring = character_engine_wiring("kolors").expect("kolors character-engine wiring");
+        assert_eq!(
+            wiring.control_net_pose_repo,
+            Some("Kwai-Kolors/Kolors-ControlNet-Pose"),
+            "kolors wiring must carry the Kolors-ControlNet-Pose repo for the strict pose path."
+        );
+        assert!(
+            wiring.identity_engine,
+            "kolors pose path needs the IP-Adapter for identity."
+        );
+    }
+
+    // Guard 3 (was `test_models_with_engine_block_advertise_character_image`): the reverse-drift guard.
+    // Any model that ships an identity engine exists to serve Character Studio's reference flow — the
+    // manifest MUST advertise `character_image` so the picker surfaces it. Catches the case where someone
+    // wires the worker engine but forgets to flip the manifest flag, leaving the engine unreachable.
+    #[test]
+    fn models_with_engine_block_advertise_character_image() {
+        let manifest = parse_builtin_models();
+        let models = manifest["models"].as_array().expect("models array");
+        let mut unreachable_ids: Vec<String> = Vec::new();
+        for wiring in CHARACTER_IMAGE_ENGINE_WIRING {
+            if !wiring.identity_engine {
+                continue;
+            }
+            let Some(model) = models
+                .iter()
+                .find(|m| m["id"].as_str() == Some(wiring.sceneworks_id))
+            else {
+                // Identity engine wired but not exposed as a built-in (unwired path) — mirrors the
+                // Python guard's `if builtin is None: continue`.
+                continue;
+            };
+            if !advertises_capability(model, "character_image") {
+                unreachable_ids.push(wiring.sceneworks_id.to_owned());
+            }
+        }
+        assert!(
+            unreachable_ids.is_empty(),
+            "Models have an identity engine in CHARACTER_IMAGE_ENGINE_WIRING but the builtin manifest \
+             does not advertise `character_image`: {unreachable_ids:?}. Add the capability to \
+             `capabilities` and `ui.recommendedFor` so the Image Studio \"With character\" picker surfaces \
+             the model."
+        );
     }
 
     // The effective `limits[key]` list for `backend`: the per-backend `<backend>.limits[key]` override

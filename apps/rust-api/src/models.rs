@@ -804,7 +804,7 @@ pub(crate) async fn model_import_request_from_multipart(
 
 pub(crate) async fn write_model_upload_field_to_staged_file(
     state: &AppState,
-    mut field: axum::extract::multipart::Field<'_>,
+    field: axum::extract::multipart::Field<'_>,
     filename: &str,
 ) -> Result<PathBuf, ApiError> {
     let upload_dir = state
@@ -817,38 +817,21 @@ pub(crate) async fn write_model_upload_field_to_staged_file(
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let temp_path = upload_dir.join(filename);
-    let mut file = tokio::fs::File::create(&temp_path)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let mut uploaded_bytes = 0usize;
-    let write_result = async {
-        while let Some(chunk) = field
-            .chunk()
-            .await
-            .map_err(|error| ApiError::bad_request(error.to_string()))?
-        {
-            uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
-            if uploaded_bytes > max_model_upload_bytes() {
-                return Err(ApiError::payload_too_large(format!(
-                    "Uploaded model file exceeds the {} limit",
-                    format_bytes(max_model_upload_bytes() as u64)
-                )));
-            }
-            file.write_all(&chunk)
-                .await
-                .map_err(|error| ApiError::internal(error.to_string()))?;
-        }
-        file.flush()
-            .await
-            .map_err(|error| ApiError::internal(error.to_string()))?;
-        Ok(())
-    }
-    .await;
-    if let Err(error) = write_result {
-        drop(file);
-        cleanup_staged_model_upload(&temp_path).await;
-        return Err(error);
-    }
+    // sc-8886 (F-084): shared streaming writer. Cleanup removes the staged file AND its
+    // per-upload parent directory.
+    stream_multipart_field_to_file(
+        field,
+        &temp_path,
+        max_model_upload_bytes(),
+        || {
+            format!(
+                "Uploaded model file exceeds the {} limit",
+                format_bytes(max_model_upload_bytes() as u64)
+            )
+        },
+        || cleanup_staged_model_upload(&temp_path),
+    )
+    .await?;
     Ok(temp_path)
 }
 
