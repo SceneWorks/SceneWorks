@@ -5559,6 +5559,12 @@ fn ideogram_subdir_prefers_q4_and_opts_into_q8() {
 /// everything else → `None`. The default q4 ships in the catalog download (no fetch), and bf16 (`<= 0`)
 /// lives in a separate catalog repo the user opts into on the Models page — so both map to `None` here.
 /// `ideogram_model_subdir` and the fetch share this fn so the load target and the fetch target agree.
+/// Gated to the lanes where `base.rs` (and thus `ideogram_tier_subdir`) is compiled — the same cfg as
+/// its `include!`; the default/Linux no-candle `parity` build excludes base.rs, so this must too.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn ideogram_tier_subdir_maps_q8_optin() {
     assert_eq!(ideogram_tier_subdir(None), None);
