@@ -28,13 +28,22 @@ export function CurveEditor({ points, onChange, stroke = "var(--accent)" }) {
     return { x: clamp(x), y: clamp(y) };
   };
 
+  // sc-8940: The window drag listeners are registered ONCE (below, `[]` deps) so they
+  // aren't torn down and re-added on every render — including every drag-tick onChange.
+  // The move handler needs the latest points and onChange, so we stash them in a ref that
+  // is refreshed each render; the handler reads `latestRef.current` at fire time rather
+  // than closing over a snapshot that would go stale between re-subscriptions.
+  const latestRef = useRef({ pts, onChange });
+  latestRef.current = { pts, onChange };
+
   // Drag a point, keeping the list ordered: endpoints move in y only; interior
   // points clamp x strictly between their neighbors so the index stays stable.
   useEffect(() => {
     const onMove = (event) => {
       const i = dragRef.current;
       if (i == null) return;
-      const next = pts.map((p) => ({ ...p }));
+      const { pts: curPts, onChange: curOnChange } = latestRef.current;
+      const next = curPts.map((p) => ({ ...p }));
       const c = toCurve(event);
       if (i === 0) next[i] = { x: 0, y: c.y };
       else if (i === next.length - 1) next[i] = { x: 255, y: c.y };
@@ -43,7 +52,7 @@ export function CurveEditor({ points, onChange, stroke = "var(--accent)" }) {
         const hi = next[i + 1].x - 1;
         next[i] = { x: Math.min(hi, Math.max(lo, c.x)), y: c.y };
       }
-      onChange(next);
+      curOnChange(next);
     };
     const onUp = () => {
       dragRef.current = null;
@@ -54,7 +63,8 @@ export function CurveEditor({ points, onChange, stroke = "var(--accent)" }) {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
-  });
+    // Registered once — the handlers read live state via `latestRef`/`dragRef`.
+  }, []);
 
   // Click empty space → add a control point there (ignored if it lands on an x that
   // already has a point — normalizeCurvePoints would dedupe it anyway).
