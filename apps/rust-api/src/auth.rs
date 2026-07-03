@@ -219,6 +219,14 @@ pub(crate) fn requires_token(method: &Method, path: &str) -> bool {
 /// so a server deployment fronted by a reverse proxy — where every request would appear
 /// to come from loopback — stays fail-closed. Pure so the decision is unit-tested without
 /// a live listener; mirrors `should_warn_open_bind`.
+///
+/// Multi-user caveat (sc-8948, F-146 — accepted design tradeoff): this trust is
+/// per-connection, not per-OS-user. On a shared machine, ANY local user/process that
+/// can reach `127.0.0.1`/`::1` inherits the token bypass, not just the account running
+/// SceneWorks. Deliberate for the single-user desktop it targets; see the
+/// "Loopback trust and the multi-user-machine caveat" note in the root README's Local
+/// Access Control section. Do not set `SCENEWORKS_TRUST_LOOPBACK` on a host other local
+/// users can log into unless you trust them all.
 pub(crate) fn loopback_trusted(trust_loopback: bool, peer: Option<SocketAddr>) -> bool {
     trust_loopback && peer.is_some_and(|addr| addr.ip().is_loopback())
 }
