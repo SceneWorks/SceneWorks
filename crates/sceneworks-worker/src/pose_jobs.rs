@@ -29,7 +29,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use crate::downloads::{ensure_cached_file, DownloadContext};
+use crate::downloads::{ensure_cached_file, verify_file_sha256, DownloadContext};
 use image::RgbImage;
 #[cfg(not(target_os = "macos"))]
 use ort::execution_providers::CUDAExecutionProvider;
@@ -63,6 +63,14 @@ const DET_FILE: &str = "yolox_m_8xb8-300e_humanart-c2c7a14a.onnx";
 const POSE_FILE: &str = "rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.onnx";
 const DET_URL: &str = "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip";
 const POSE_URL: &str = "https://download.openmmlab.com/mmpose/v1/projects/rtmw/onnx_sdk/rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.zip";
+/// Pinned SHA-256 of the openmmlab .zip bundles (sc-8879). These runtime weights are
+/// fetched over the network from `download.openmmlab.com` with no digest advertised by
+/// the host, so the download is verified against these constants before extraction. A
+/// mismatch (host-side swap, corrupted transfer, MITM) fails the job with the
+/// integrity-check error instead of silently loading tampered weights. Digests were
+/// computed from the published bundles (94,223,081 B / 213,433,855 B respectively).
+const DET_ZIP_SHA256: &str = "a000224fd8ba283202bc62d4a5fcdfe353adb9f468777dbac1ea2ada2093adde";
+const POSE_ZIP_SHA256: &str = "a87e1af41a0a067776dba7d46e1c21c8f6e9f18e247e0e606718dd1f31e96ffd";
 const DETECTOR_ID: &str = "rtmw-dw-x-l/ort";
 
 /// The hardware execution provider this build registers before the CPU fallback:
@@ -618,6 +626,7 @@ async fn ensure_weights(
         "SCENEWORKS_DWPOSE_DET",
         DET_FILE,
         DET_URL,
+        DET_ZIP_SHA256,
         &cache,
         &download_context,
     )
@@ -626,6 +635,7 @@ async fn ensure_weights(
         "SCENEWORKS_DWPOSE_POSE",
         POSE_FILE,
         POSE_URL,
+        POSE_ZIP_SHA256,
         &cache,
         &download_context,
     )
@@ -637,6 +647,7 @@ async fn ensure_one(
     env_key: &str,
     file: &str,
     url: &str,
+    zip_sha256: &str,
     cache: &Path,
     context: &DownloadContext<'_>,
 ) -> WorkerResult<PathBuf> {
@@ -669,6 +680,11 @@ async fn ensure_one(
         None,
     )
     .await?;
+    // The openmmlab host advertises no digest and `ensure_cached_file` only checks the
+    // transfer length, so verify the fetched bundle against the pinned SHA-256 before
+    // extracting the weights it contains (sc-8879). A mismatch removes the file and
+    // fails the job with the integrity-check error.
+    verify_file_sha256(&zip_path, zip_sha256, &format!("DWPose {file} bundle")).await?;
     // The openmmlab bundle is a .zip containing a single .onnx; extract it.
     let target_clone = target.clone();
     let file_owned = file.to_owned();

@@ -214,6 +214,25 @@ fn pose_detect_candle_real_weights_finds_person() {
     }
 }
 
+/// sc-8879: the openmmlab DWPose bundle digests must be real, distinct 64-hex SHA-256
+/// values (not a placeholder) so the download integrity check actually enforces a pin.
+#[test]
+fn dwpose_zip_digests_are_pinned_sha256() {
+    for (label, digest) in [("det", DET_ZIP_SHA256), ("pose", POSE_ZIP_SHA256)] {
+        assert_eq!(digest.len(), 64, "{label} digest must be 64-hex sha256");
+        assert!(
+            digest
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "{label} digest must be lowercase hex, got {digest}"
+        );
+    }
+    assert_ne!(
+        DET_ZIP_SHA256, POSE_ZIP_SHA256,
+        "det and pose bundles are different files with different digests"
+    );
+}
+
 /// sc-8875: a project-relative source path is confined to the project tree — any `..`
 /// (or absolute/prefix) component must reject the join so a crafted `../../secret.png`
 /// can't escape `project_path`. Plain `Normal` segments still resolve under the project.
