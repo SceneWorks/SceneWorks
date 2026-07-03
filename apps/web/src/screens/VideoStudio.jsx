@@ -1651,19 +1651,6 @@ export function VideoStudio() {
                     <kbd>↵</kbd>
                   </span>
                 </div>
-                <div className="kbd-row">
-                  <span>Send to editor</span>
-                  <span className="kbd-keys">
-                    <kbd>⇧</kbd>
-                    <kbd>E</kbd>
-                  </span>
-                </div>
-                <div className="kbd-row">
-                  <span>Loop preview</span>
-                  <span className="kbd-keys">
-                    <kbd>L</kbd>
-                  </span>
-                </div>
               </dl>
             </aside>
           </div>

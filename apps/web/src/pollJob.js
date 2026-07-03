@@ -1,4 +1,5 @@
 import { apiFetch } from "./api.js";
+import { errorStatuses } from "./jobTypes.js";
 
 // Resolve after `ms`, or reject with an AbortError if `signal` fires (or is already
 // aborted). Shared by the poll-to-completion runners so a caller's AbortController
@@ -65,7 +66,7 @@ export async function pollJobToCompletion({
     if (job.status === "completed") {
       return resolveResult(job);
     }
-    if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
+    if (errorStatuses.has(job.status)) {
       throw new Error(job.message || job.error || failureError);
     }
   }

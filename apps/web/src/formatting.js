@@ -1,3 +1,5 @@
+import { terminalStatuses } from "./jobTypes.js";
+
 export function formatSeconds(seconds) {
   if (seconds === null || seconds === undefined) {
     return "0s";
@@ -12,7 +14,7 @@ export function percent(value) {
 }
 
 export function liveElapsedSeconds(job, nowMs = Date.now()) {
-  if (["completed", "failed", "canceled", "interrupted"].includes(job.status) || !job.startedAt) {
+  if (terminalStatuses.has(job.status) || !job.startedAt) {
     return job.elapsedSeconds;
   }
   const startedMs = Date.parse(job.startedAt);
