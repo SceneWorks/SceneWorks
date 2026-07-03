@@ -29,7 +29,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use crate::downloads::{ensure_cached_file, DownloadContext};
+use crate::downloads::{ensure_cached_file, verify_file_sha256, DownloadContext};
 use image::RgbImage;
 #[cfg(not(target_os = "macos"))]
 use ort::execution_providers::CUDAExecutionProvider;
@@ -63,6 +63,14 @@ const DET_FILE: &str = "yolox_m_8xb8-300e_humanart-c2c7a14a.onnx";
 const POSE_FILE: &str = "rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.onnx";
 const DET_URL: &str = "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip";
 const POSE_URL: &str = "https://download.openmmlab.com/mmpose/v1/projects/rtmw/onnx_sdk/rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.zip";
+/// Pinned SHA-256 of the openmmlab .zip bundles (sc-8879). These runtime weights are
+/// fetched over the network from `download.openmmlab.com` with no digest advertised by
+/// the host, so the download is verified against these constants before extraction. A
+/// mismatch (host-side swap, corrupted transfer, MITM) fails the job with the
+/// integrity-check error instead of silently loading tampered weights. Digests were
+/// computed from the published bundles (94,223,081 B / 213,433,855 B respectively).
+const DET_ZIP_SHA256: &str = "a000224fd8ba283202bc62d4a5fcdfe353adb9f468777dbac1ea2ada2093adde";
+const POSE_ZIP_SHA256: &str = "a87e1af41a0a067776dba7d46e1c21c8f6e9f18e247e0e606718dd1f31e96ffd";
 const DETECTOR_ID: &str = "rtmw-dw-x-l/ort";
 
 /// The hardware execution provider this build registers before the CPU fallback:
@@ -618,6 +626,7 @@ async fn ensure_weights(
         "SCENEWORKS_DWPOSE_DET",
         DET_FILE,
         DET_URL,
+        DET_ZIP_SHA256,
         &cache,
         &download_context,
     )
@@ -626,6 +635,7 @@ async fn ensure_weights(
         "SCENEWORKS_DWPOSE_POSE",
         POSE_FILE,
         POSE_URL,
+        POSE_ZIP_SHA256,
         &cache,
         &download_context,
     )
@@ -633,18 +643,43 @@ async fn ensure_weights(
     Ok((det, pose))
 }
 
+/// Resolve an explicit env-pinned weight path (sc-8911). Unset → `Ok(None)` (fall through
+/// to cache/download). Set and existing → `Ok(Some(path))`. Set but missing → an
+/// `InvalidPayload` error, so an operator's typo fails loudly rather than silently
+/// loading whatever the download path resolves. Takes the raw value explicitly so it's
+/// unit-testable without mutating the process environment.
+fn resolve_pinned_weight(
+    env_key: &str,
+    value: Option<std::ffi::OsString>,
+    file: &str,
+) -> WorkerResult<Option<PathBuf>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(&value);
+    if path.exists() {
+        return Ok(Some(path));
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "{env_key} is set to {} but that path does not exist. Point it at the local {file}, or unset it to download on first use.",
+        path.display()
+    )))
+}
+
 async fn ensure_one(
     env_key: &str,
     file: &str,
     url: &str,
+    zip_sha256: &str,
     cache: &Path,
     context: &DownloadContext<'_>,
 ) -> WorkerResult<PathBuf> {
-    if let Ok(pinned) = std::env::var(env_key) {
-        let path = PathBuf::from(pinned);
-        if path.exists() {
-            return Ok(path);
-        }
+    // An explicitly-set env pin must resolve to an existing file. If it's set but the
+    // path is missing, that's an operator error — surface it instead of silently falling
+    // through to the cache/network (sc-8911), which would mask a typo and load different
+    // weights than the operator intended.
+    if let Some(path) = resolve_pinned_weight(env_key, std::env::var_os(env_key), file)? {
+        return Ok(path);
     }
     let target = cache.join(file);
     if target.exists() {
@@ -669,12 +704,21 @@ async fn ensure_one(
         None,
     )
     .await?;
+    // The openmmlab host advertises no digest and `ensure_cached_file` only checks the
+    // transfer length, so verify the fetched bundle against the pinned SHA-256 before
+    // extracting the weights it contains (sc-8879). A mismatch removes the file and
+    // fails the job with the integrity-check error.
+    verify_file_sha256(&zip_path, zip_sha256, &format!("DWPose {file} bundle")).await?;
     // The openmmlab bundle is a .zip containing a single .onnx; extract it.
     let target_clone = target.clone();
+    let zip_for_extract = zip_path.clone();
     let file_owned = file.to_owned();
-    tokio::task::spawn_blocking(move || extract_onnx(&zip_path, &file_owned, &target_clone))
+    tokio::task::spawn_blocking(move || extract_onnx(&zip_for_extract, &file_owned, &target_clone))
         .await
         .map_err(|error| task_join_error("weight extract task", error))??;
+    // Drop the (large — ~90-210 MB) archive now the .onnx is extracted; keeping it just
+    // wastes cache disk (sc-8927). Best-effort: a failure here doesn't fail the job.
+    let _ = tokio::fs::remove_file(&zip_path).await;
     Ok(target)
 }
 
@@ -777,24 +821,43 @@ fn resolve_source(
             });
         }
     }
-    // project-relative path
+    // project-relative path, confined to the project tree: reject any `..`/root/prefix
+    // component so a crafted `../../<anything>` can't escape `proj` (sc-8875). The raw
+    // cwd-relative fallback is dropped for the same reason — an unresolved relative path
+    // would otherwise reach `decode_image_any` resolved against the worker's cwd.
     if let (Some(raw), Some(proj)) = (raw, project_path) {
-        let candidate = proj.join(raw);
-        if candidate.exists() {
-            return Ok(PoseSource {
-                asset_id,
-                display_name,
-                temp,
-                path: Some(candidate),
-            });
+        if let Some(candidate) = join_project_relative(proj, raw) {
+            if candidate.exists() {
+                return Ok(PoseSource {
+                    asset_id,
+                    display_name,
+                    temp,
+                    path: Some(candidate),
+                });
+            }
         }
     }
     Ok(PoseSource {
         asset_id,
         display_name,
         temp,
-        path: raw.map(PathBuf::from),
+        path: None,
     })
+}
+
+/// Join a project-relative source path under `project_path`, accepting only
+/// `Component::Normal` segments so a payload can never traverse out of the project
+/// tree with `..`, an absolute root, or a drive/UNC prefix (sc-8875). Returns `None`
+/// if any component is non-`Normal` (the caller then treats the source as unresolved).
+fn join_project_relative(project_path: &Path, raw: &str) -> Option<PathBuf> {
+    let mut path = project_path.to_path_buf();
+    for component in Path::new(raw).components() {
+        match component {
+            std::path::Component::Normal(value) => path.push(value),
+            _ => return None,
+        }
+    }
+    Some(path)
 }
 
 fn resolve_asset_path(
@@ -869,6 +932,34 @@ pub(crate) async fn run_pose_detect_job(
         .map(|s| resolve_source(s, &store, settings, project_id, project_path.as_deref()))
         .collect::<WorkerResult<_>>()?;
 
+    // Snapshot the staged File-Upload temp paths up front so cleanup runs on EVERY exit
+    // path — success, cancel, or an intervening error (sc-8912). The old code only cleaned
+    // up after the render finished, so a cancel/detect/render failure leaked the staged
+    // uploads. `resolved` is later moved into the render task, so this list (cheap: just
+    // the temp paths) is what the deferred cleanup keys off, independent of `resolved`.
+    let temp_upload_paths: Vec<PathBuf> = resolved
+        .iter()
+        .filter(|s| s.temp)
+        .filter_map(|s| s.path.clone())
+        .collect();
+
+    // Run the fallible body, then clean up the temp uploads regardless of outcome before
+    // propagating (defer-style). Cleanup is confined to the pose-uploads cache inside
+    // `cleanup_temp_uploads`, so a project asset resolved by id is never touched.
+    let result = run_pose_detect_inner(api, settings, http_client, job, resolved, min_conf).await;
+    cleanup_temp_uploads(settings, &temp_upload_paths).await;
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_pose_detect_inner(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+    resolved: Vec<PoseSource>,
+    min_conf: f64,
+) -> WorkerResult<()> {
     update_job(
         api,
         &job.id,
@@ -935,13 +1026,14 @@ pub(crate) async fn run_pose_detect_job(
     // thread and grows the silent window toward the 90s stale-sweep on large multi-person high-res
     // batches — the same failure class sc-8390 fixed for the inference half. Fold it into a
     // `spawn_blocking` under `run_blocking_with_heartbeat` so it's both off-thread AND heartbeat-
-    // covered (sc-8848). `resolved` is moved in for the render and handed back out so the subsequent
-    // `cleanup_temp_sources` still sees it. The render loop is worker code too, so it shares the
-    // detect stage's `CancelFlag` (sc-9123) and bails between sources AND between per-person
-    // rasters (each is a `max(w,h)²` canvas + PNG encode — the expensive unit) with the typed
-    // `Canceled`; any skeleton PNGs already written sit in the job-scoped cache dir and are inert.
+    // covered (sc-8848). `resolved` is moved into the render task (it owns the source paths + asset
+    // ids for the output records); temp-upload cleanup keys off the snapshot the caller took before
+    // this move (sc-8912), so it doesn't need handing back. The render loop is worker code too, so it
+    // shares the detect stage's `CancelFlag` (sc-9123) and bails between sources AND between
+    // per-person rasters (each is a `max(w,h)²` canvas + PNG encode — the expensive unit) with the
+    // typed `Canceled`; any skeleton PNGs already written sit in the job-scoped cache dir and are inert.
     let render_cancel = cancel.clone();
-    let (out_sources, resolved) = run_blocking_with_heartbeat(
+    let out_sources = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
@@ -1031,14 +1123,10 @@ pub(crate) async fn run_pose_detect_job(
                     "poses": poses,
                 }));
             }
-            Ok((out_sources, resolved))
+            Ok(out_sources)
         }),
     )
     .await?;
-
-    // Delete File-Upload temp sources now detection is done (guarded to the
-    // pose-uploads cache so a project asset resolved by id is never removed).
-    cleanup_temp_sources(settings, &resolved).await;
 
     let mut result = JsonObject::new();
     result.insert("sources".to_owned(), Value::Array(out_sources));
@@ -1065,16 +1153,20 @@ pub(crate) async fn run_pose_detect_job(
     Ok(())
 }
 
-async fn cleanup_temp_sources(settings: &Settings, sources: &[PoseSource]) {
+/// Delete the staged File-Upload temp sources, confined to the pose-uploads cache so a
+/// project asset resolved by id is never removed. Takes the pre-computed temp paths (the
+/// caller snapshots them before `resolved` is moved into the render task) so this runs on
+/// every exit path — success OR error (sc-8912). Best-effort; a missing/already-removed
+/// file is a no-op.
+async fn cleanup_temp_uploads(settings: &Settings, temp_paths: &[PathBuf]) {
+    if temp_paths.is_empty() {
+        return;
+    }
     let uploads_root = settings.data_dir.join("cache").join("pose-uploads");
     let Ok(uploads_root) = uploads_root.canonicalize() else {
         return;
     };
-    for src in sources {
-        if !src.temp {
-            continue;
-        }
-        let Some(path) = &src.path else { continue };
+    for path in temp_paths {
         if let Ok(resolved) = path.canonicalize() {
             if resolved.starts_with(&uploads_root) {
                 let _ = tokio::fs::remove_file(&resolved).await;

@@ -31,7 +31,11 @@ pub const DEFAULT_HIGH_THRESHOLD: f32 = 100.0;
 /// `cv2.cvtColor(..., COLOR_RGB2GRAY)` produces upstream so edge magnitudes land
 /// where the canny head was trained.
 fn to_gray(img: &RgbImage) -> GrayImage {
-    image::DynamicImage::ImageRgb8(img.clone()).to_luma8()
+    // `imageops::grayscale` reads the borrowed RGB buffer directly; the old
+    // `DynamicImage::ImageRgb8(img.clone())` path cloned the whole image (~tens of MB at
+    // typical control-image sizes) just to reach `to_luma8` (sc-8927). Both use the same
+    // Rec. 601 luma weighting, so the output is identical.
+    image::imageops::grayscale(img)
 }
 
 /// Broadcast a single-channel edge map (white edges on black) to an RGB control

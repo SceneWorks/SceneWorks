@@ -786,6 +786,68 @@ where
     let work_dir = std::env::temp_dir().join(format!("sw-person-track-{}", job.id));
     tokio::fs::create_dir_all(&work_dir).await?;
 
+    // Run the fallible sampling/assembly/segmentation body, then remove `work_dir` on EVERY
+    // outcome — success, the not-found error, a cancel, or a render/detect failure (sc-8912).
+    // Previously the cleanup lived only on the not-found and success paths, so an intervening
+    // `?` leaked the staged frame PNGs in the system temp dir. The body borrows the outer locals
+    // and consumes the `run_segmenter` FnOnce, so it's an inline `async` block whose result is
+    // captured before cleanup.
+    let outcome = assemble_real_person_track_body(
+        api,
+        settings,
+        job,
+        source_media_path,
+        project_path,
+        track_id,
+        &weights,
+        conf,
+        &timestamps,
+        selected_box,
+        selected_timestamp,
+        duration,
+        segment_enabled,
+        &backend,
+        run_segmenter,
+        &work_dir,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    outcome
+}
+
+/// The fallible body of [`assemble_real_person_track_shared`], factored out so the caller can
+/// remove the staged-frame `work_dir` on every exit path (success or error, sc-8912). Returns the
+/// assembled track; the not-found case is still a typed `InvalidPayload` error (cleanup now happens
+/// in the caller, so this no longer removes the dir itself).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[allow(clippy::too_many_arguments)]
+async fn assemble_real_person_track_body<F, Fut>(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    source_media_path: &std::path::Path,
+    project_path: &std::path::Path,
+    track_id: &str,
+    weights: &std::path::Path,
+    conf: f32,
+    timestamps: &[f64],
+    selected_box: crate::person_track::NormalizedBox,
+    selected_timestamp: f64,
+    duration: f64,
+    segment_enabled: bool,
+    backend: &PersonTrackBackend,
+    run_segmenter: F,
+    work_dir: &std::path::Path,
+) -> WorkerResult<RealPersonTrack>
+where
+    F: FnOnce(SegmentClip) -> Fut,
+    Fut: std::future::Future<Output = SegmentOutcome>,
+{
+    use crate::person_track as pt;
+
     // The detector reports its real execution device per frame; `device_default` is the fallback for
     // the zero-frame case. Keep each rendered frame (don't delete in-loop): the segmentation pass
     // re-reads the detected target frames by the same sample index. They share the cadence, so
@@ -813,7 +875,7 @@ where
             Some(ffmpeg_context),
         )
         .await?;
-        let weights_for_frame = weights.clone();
+        let weights_for_frame = weights.to_path_buf();
         let frame_for_task = frame_path.clone();
         let result = tokio::task::spawn_blocking(move || {
             crate::person_jobs::detect_people_blocking(weights_for_frame, frame_for_task, conf)
@@ -843,9 +905,9 @@ where
     }
 
     let observations = pt::observe(per_frame);
-    let assembly = pt::assemble_track(&observations, selected_box, selected_timestamp, &timestamps);
+    let assembly = pt::assemble_track(&observations, selected_box, selected_timestamp, timestamps);
     if assembly.target_track_id.is_none() || assembly.detected_frames == 0 {
-        let _ = tokio::fs::remove_dir_all(&work_dir).await;
+        // `work_dir` is removed by the caller on this (and every) exit path (sc-8912).
         return Err(WorkerError::InvalidPayload(
             "Selected person was not found in the source video. Re-run detection or adjust the selection."
                 .to_owned(),
@@ -869,7 +931,6 @@ where
         run_segmenter,
     )
     .await?;
-    let _ = tokio::fs::remove_dir_all(&work_dir).await;
 
     Ok(RealPersonTrack {
         frames: frames_json,

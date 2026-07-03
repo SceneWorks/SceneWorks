@@ -560,6 +560,95 @@ fn dataset_upscale_output_path_rejects_traversal_ids() {
     );
 }
 
+/// sc-8911: a set-but-missing Real-ESRGAN ONNX env pin must error, not silently fall
+/// through to the cache/HF download. Unset → `None`; set + existing → `Some(path)`.
+#[test]
+fn resolve_env_file_pin_errors_on_missing_path() {
+    use std::ffi::OsString;
+
+    assert_eq!(
+        resolve_env_file_pin("SCENEWORKS_REALESRGAN_ONNX", None, "the export").expect("unset ok"),
+        None,
+        "an unset pin must fall through"
+    );
+
+    let missing = resolve_env_file_pin(
+        "SCENEWORKS_REALESRGAN_X4_ONNX",
+        Some(OsString::from("/nonexistent/realesrgan_x4.onnx")),
+        "the local Real-ESRGAN x4 ONNX export",
+    );
+    assert!(
+        matches!(missing, Err(WorkerError::InvalidPayload(ref m)) if m.contains("SCENEWORKS_REALESRGAN_X4_ONNX") && m.contains("does not exist")),
+        "a set-but-missing pin must error, got {missing:?}"
+    );
+
+    let existing = std::env::temp_dir().join(format!(
+        "sw-realesrgan-pin-test-{}.onnx",
+        std::process::id()
+    ));
+    std::fs::write(&existing, b"onnx").expect("write temp onnx");
+    let resolved = resolve_env_file_pin(
+        "SCENEWORKS_REALESRGAN_ONNX",
+        Some(existing.as_os_str().to_owned()),
+        "the export",
+    )
+    .expect("existing pin ok");
+    assert_eq!(resolved.as_deref(), Some(existing.as_path()));
+    let _ = std::fs::remove_file(&existing);
+}
+
+/// sc-8911: a set `SCENEWORKS_SEEDVR2_CHECKPOINT` that is missing either checkpoint file
+/// must error; a complete dir resolves; unset falls through.
+#[test]
+fn resolve_seedvr2_dir_pin_errors_on_incomplete_dir() {
+    use std::ffi::OsString;
+
+    assert_eq!(
+        resolve_seedvr2_dir_pin(None).expect("unset ok"),
+        None,
+        "an unset pin must fall through"
+    );
+
+    // A temp dir missing both files → error.
+    let empty = std::env::temp_dir().join(format!("sw-seedvr2-pin-test-{}", std::process::id()));
+    std::fs::create_dir_all(&empty).expect("mkdir temp");
+    let incomplete = resolve_seedvr2_dir_pin(Some(OsString::from(empty.as_os_str())));
+    assert!(
+        matches!(incomplete, Err(WorkerError::InvalidPayload(ref m)) if m.contains("SCENEWORKS_SEEDVR2_CHECKPOINT") && m.contains("missing")),
+        "an incomplete checkpoint dir must error, got {incomplete:?}"
+    );
+
+    // Populate both canonical files → resolves.
+    std::fs::write(empty.join(SEEDVR2_DIT_FILE), b"dit").expect("write dit");
+    std::fs::write(empty.join(SEEDVR2_VAE_FILE), b"vae").expect("write vae");
+    let resolved =
+        resolve_seedvr2_dir_pin(Some(OsString::from(empty.as_os_str()))).expect("complete dir ok");
+    assert_eq!(resolved.as_deref(), Some(empty.as_path()));
+    let _ = std::fs::remove_dir_all(&empty);
+}
+
+/// sc-8879: the default third-party SeedVR2 mirror is fetched at a pinned commit, never
+/// the mutable `main` branch, so an upstream re-push can't silently swap the weights we
+/// load. Lock the constant to a real 40-hex commit id.
+#[test]
+fn seedvr2_revision_is_pinned_commit_not_main() {
+    assert_ne!(
+        SEEDVR2_REVISION, "main",
+        "SeedVR2 must pin a fixed revision"
+    );
+    assert_eq!(
+        SEEDVR2_REVISION.len(),
+        40,
+        "a pinned HF revision is a 40-char commit sha"
+    );
+    assert!(
+        SEEDVR2_REVISION
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "the pinned revision must be lowercase hex"
+    );
+}
+
 #[test]
 fn dataset_repoint_body_maps_records_with_a_null_asset_id() {
     let body = dataset_repoint_body(&[
