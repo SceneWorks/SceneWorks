@@ -1000,6 +1000,34 @@ fn bernini_image_i2i_real_weights_generates_one_image() {
     );
 }
 
+/// sc-8827 (F-025): the worker feeds the PuLID-FLUX engine its adapter / EVA / face-stack paths on
+/// `LoadSpec::identity` instead of mutating the process-global `PULID_*` env vars at job time. This
+/// asserts the mapping `PulidWeights -> IdentityWeights` (encoder=File(adapter), eva=File(eva),
+/// face_dir=Dir(face_dir)) so the paths now travel via config, not env. Non-ignored (no weights /
+/// device needed).
+#[cfg(target_os = "macos")]
+#[test]
+fn pulid_identity_weights_maps_paths_onto_loadspec_not_env() {
+    let weights = PulidWeights {
+        adapter: PathBuf::from("/cache/pulid-flux-mlx/pulid_flux_v0.9.1.safetensors"),
+        eva: PathBuf::from("/cache/pulid-flux-mlx/eva02_clip_l_336.safetensors"),
+        face_dir: PathBuf::from("/cache/pulid-flux-mlx"),
+    };
+    let id = pulid_identity_weights(&weights);
+    assert!(
+        matches!(id.encoder, Some(WeightsSource::File(ref p)) if *p == weights.adapter),
+        "adapter path rides identity.encoder as a File source"
+    );
+    assert!(
+        matches!(id.eva, Some(WeightsSource::File(ref p)) if *p == weights.eva),
+        "eva path rides identity.eva as a File source"
+    );
+    assert!(
+        matches!(id.face_dir, Some(WeightsSource::Dir(ref p)) if *p == weights.face_dir),
+        "face_dir rides identity.face_dir as a Dir source"
+    );
+}
+
 /// sc-3344 parity gate (worker path): drive the native `pulid_flux` registry generator through the
 /// SAME load seam the worker uses (`load_engine` → `gen_core::load("pulid_flux")` with the engine's
 /// env-var weight resolution filled from local caches) and confirm it produces an identity-preserving
