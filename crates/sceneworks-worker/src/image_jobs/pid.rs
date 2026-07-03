@@ -5,10 +5,12 @@
 // `vae.decode(latent)` for a PiD `decode + 4x super-resolve` pass (mlx-gen `PidEngine`, sc-7843/7845).
 // PiD is tied to a LATENT SPACE, not a model, so eligibility keys on the model's backbone.
 //
-// This file is `include!`d on macOS only (the MLX lane); the candle PiD duplicate is Phase 4 (sc-7853).
-// It threads the toggle into the load-time `LoadSpec::with_pid` aux-weights + the per-gen
-// `GenerationRequest.use_pid` flag; the engine errors loudly if `use_pid` is set without `spec.pid`, so
-// the caller resolves the two together (both set, or neither → native VAE).
+// This file is `include!`d on either face backend (macOS/MLX or off-Mac/candle). `resolve_pid_weights`
+// is backend-neutral (it only inspects the request + probes the HF cache), so it feeds BOTH the generic
+// MLX `generate*` lanes (base.rs/qwen.rs, macOS-only) and the candle InstantID Angles/Poses lane
+// (instantid.rs, sc-8373). It threads the toggle into the load-time `LoadSpec::with_pid` aux-weights +
+// the per-gen `GenerationRequest.use_pid` flag; the engine errors loudly if `use_pid` is set without
+// `spec.pid`, so the caller resolves the two together (both set, or neither → native VAE).
 
 // Default PiD checkpoint + Gemma-2 caption-encoder provisioning. These are the turnkey re-host
 // convention that the Phase-3 provisioning story (sc-7852) finalizes + makes downloadable; until then
