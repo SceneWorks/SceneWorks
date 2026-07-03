@@ -594,6 +594,46 @@ mod tests {
         );
     }
 
+    /// sc-9092 (epic 9083): the candle-lane A/B quant toggle must MISS the generator cache so the new
+    /// tier is loaded rather than the resident one reused. On the candle lane (now routed through the
+    /// shared `standard_tier_subdir`, sc-9092) toggling `advanced.mlxQuantize` changes BOTH the resolved
+    /// tier subdir (`q4/` ↔ `q8/` ↔ `bf16/`) AND the load `quantize` — either alone flips the key, so a
+    /// toggle can never collide with the cached generator (reload-always on toggle, epic 8506). This is
+    /// the candle sibling of the MLX A/B behaviour: `GeneratorCacheKey` already keys on both fields.
+    #[test]
+    fn cache_key_includes_quant_tier_toggle() {
+        // q4 tier: `<root>/q4` weights + Q4 load quant.
+        let mut q4 = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/lens/q4")));
+        q4.quantize = Some(Quant::Q4);
+        // q8 tier: `<root>/q8` weights + Q8 load quant (the A/B toggle target).
+        let mut q8 = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/lens/q8")));
+        q8.quantize = Some(Quant::Q8);
+        // bf16 tier: `<root>/bf16` weights, dense (no quant).
+        let bf16 = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/lens/bf16")));
+
+        // Every pairwise toggle is a distinct cache entry → a miss → a reload, never a wrong-tier reuse.
+        assert_ne!(
+            GeneratorCacheKey::from_load_spec("lens", &q4),
+            GeneratorCacheKey::from_load_spec("lens", &q8)
+        );
+        assert_ne!(
+            GeneratorCacheKey::from_load_spec("lens", &q8),
+            GeneratorCacheKey::from_load_spec("lens", &bf16)
+        );
+        assert_ne!(
+            GeneratorCacheKey::from_load_spec("lens", &q4),
+            GeneratorCacheKey::from_load_spec("lens", &bf16)
+        );
+        // The `quantize` field alone flips the key even if the tier dir were identical — the candle lane
+        // has always keyed on it (generator_cache.rs), so the A/B toggle is safe regardless of layout.
+        let mut same_dir_q8 = q4.clone();
+        same_dir_q8.quantize = Some(Quant::Q8);
+        assert_ne!(
+            GeneratorCacheKey::from_load_spec("lens", &q4),
+            GeneratorCacheKey::from_load_spec("lens", &same_dir_q8)
+        );
+    }
+
     #[test]
     fn cache_key_includes_control_and_ip_components() {
         let mut control = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/base")));
