@@ -1,4 +1,5 @@
 import { apiFetch } from "./api.js";
+import { readAccessToken } from "./accessToken.js";
 import { isDesktop, tauriInvoke } from "./runtime.js";
 
 // Service-credential transport shared by the Settings screen (where users manage
@@ -18,10 +19,9 @@ export const SCHEME_LABELS = {
 };
 
 // Server mode authenticates with the same access token the rest of the app uses.
+// The storage key + threat-model note live in accessToken.js (sc-8880).
 export function serverToken() {
-  return (
-    (typeof window !== "undefined" && window.localStorage.getItem("sceneworks-token")) || ""
-  );
+  return readAccessToken();
 }
 
 export async function loadCredentials() {
