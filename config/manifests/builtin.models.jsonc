@@ -710,13 +710,18 @@
         // artifact tagged with a `variant` key + a `footprint` (required on-disk diskSizeBytes;
         // resident/peak backfilled by sc-8770). diskSizeBytes are the EXACT summed on-disk bytes of
         // each SceneWorks/lens-mlx tier subdir. Replaces the dead whole-repo microsoft/Lens download.
+        // sc-9092 (epic 9083 gap #3): these per-tier MLX turnkey subdirs are now installable on
+        // Windows/Linux too — the candle Lens loader packed-detects the SAME `SceneWorks/lens-mlx`
+        // q4/q8/bf16 tier the macOS path loads (candle-gen sc-8799), so the off-Mac lane picks its tier
+        // at download exactly like macOS, and the separate `SceneWorks/Lens` bf16 diffusers INFERENCE
+        // entry (the retired `candle_lens_repo` target) is removed.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/lens-mlx",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 18998339228,
           "footprint": { "diskSizeBytes": 18998339228, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -725,7 +730,7 @@
           "repo": "SceneWorks/lens-mlx",
           "variant": "q8",
           "files": ["q8/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 29921486998,
           "footprint": { "diskSizeBytes": 29921486998, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -734,43 +739,27 @@
           "repo": "SceneWorks/lens-mlx",
           "variant": "bf16",
           "files": ["bf16/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 22347329085,
           "footprint": { "diskSizeBytes": 22347329085, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
-          // Off-Mac candle (Windows/Linux) diffusers rehost (sc-8799): the MLX turnkeys above are packed
-          // q4/q8/bf16 tiers the candle diffusers loader can't read, so the candle lane loads THIS
-          // self-contained diffusers snapshot (tokenizer/ text_encoder/ transformer/ vae/ at the repo
-          // root — what candle_gen_lens::Pipeline::load_components reads), rebuilt from Comfy-Org/Lens +
-          // openai/gpt-oss-20b (MXFP4) + FLUX.2-dev after the original microsoft/Lens went dead. Whole
-          // repo (files: []); the candle provider quantizes on-the-fly (Q4/Q8, descriptor-gated) at
-          // load, so the single bf16 source serves every candle quant tier. Mirrors ideogram_4's
-          // off-Mac bf16 entry + the Wan2.2 macOS-MLX/off-Mac-diffusers split. Resolved by
-          // `candle_lens_repo` (image_jobs/base.rs). Candle sibling of the MLX host sc-8767.
-          "provider": "huggingface",
-          "repo": "SceneWorks/Lens",
-          "variant": "bf16",
-          "files": [],
-          "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 22334041829,
-          "footprint": { "diskSizeBytes": 22334041829, "residentMemoryBytes": null, "peakMemoryBytes": null }
-        },
-        {
-          // macOS LoRA-training base (sc-8797): the same SceneWorks/Lens diffusers rehost the off-Mac
-          // entry above fetches, exposed as an installable variant on macOS. The MLX q4/q8/bf16 tiers
+          // LoRA-training base (sc-8797): the SceneWorks/Lens FLAT diffusers rehost, exposed as an
+          // installable variant. The MLX q4/q8/bf16 tiers
           // above are packed turnkey SUBDIRS the trainer's flat-diffusers loader doesn't read and the
           // training installed-gate (`training_base_model_installed`, keyed on the target's
           // `baseModelRepo` HF-cache presence) doesn't see — before the tier split (sc-8767) the lens
           // install WAS the flat microsoft/Lens repo, so one download served inference + training.
-          // Installing this variant restores that for macOS training; off-Mac needs nothing extra (the
-          // bf16 candle entry already fetches the whole repo). Per-variant install state probes this
-          // entry's own repo, so it tracks independently of the MLX tiers (sc-8508).
+          // sc-9092: candle inference now packed-loads the `SceneWorks/lens-mlx` turnkey tiers directly
+          // (the separate off-Mac bf16 diffusers INFERENCE entry is retired), so the flat-diffusers
+          // TRAINING base is exposed on Windows/Linux too (the candle LoRA trainer's flat loader still
+          // needs it) — not just macOS. Per-variant install state probes this entry's own repo, so it
+          // tracks independently of the MLX inference tiers (sc-8508).
           "provider": "huggingface",
           "repo": "SceneWorks/Lens",
           "variant": "training",
           "files": [],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 22334041829,
           "footprint": { "diskSizeBytes": 22334041829, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
@@ -848,13 +837,18 @@
         // on-disk from the SceneWorks/lens-turbo-mlx repo. Note the q8 text-encoder int8 up-cast of the
         // MXFP4 MoE is LARGER than bf16, so q8 > bf16 on disk here. Replaces the whole-repo dense
         // microsoft/Lens-Turbo download.
+        // sc-9092 (epic 9083 gap #3): installable on Windows/Linux too — the candle Lens-Turbo loader
+        // packed-detects the SAME `SceneWorks/lens-turbo-mlx` q4/q8/bf16 tier the macOS path loads
+        // (candle-gen sc-8799), so the off-Mac lane picks its tier at download exactly like macOS, and
+        // the separate `SceneWorks/Lens-Turbo` bf16 diffusers entry (the retired `candle_lens_repo`
+        // target) is removed.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/lens-turbo-mlx",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 21830326407,
           // Measured on-device (sc-8516, harness crates/sceneworks-worker/src/footprint_measure.rs):
           // Apple Silicon, 1024², fresh process, via mlx_rs::memory::{get_active_memory,get_peak_memory}.
@@ -870,7 +864,7 @@
           "repo": "SceneWorks/lens-turbo-mlx",
           "variant": "q8",
           "files": ["q8/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 32753474289,
           "footprint": { "diskSizeBytes": 32753474289, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -879,25 +873,9 @@
           "repo": "SceneWorks/lens-turbo-mlx",
           "variant": "bf16",
           "files": ["bf16/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 30651441376,
           "footprint": { "diskSizeBytes": 30651441376, "residentMemoryBytes": null, "peakMemoryBytes": null }
-        },
-        {
-          // Off-Mac candle (Windows/Linux) diffusers rehost (sc-8799): the distilled sibling of the
-          // base-Lens off-Mac entry above. The MLX turnkeys are packed q4/q8/bf16 tiers the candle
-          // diffusers loader can't read, so the candle lane loads THIS self-contained diffusers snapshot
-          // (tokenizer/ text_encoder/ transformer/ vae/ at the repo root), rebuilt from Comfy-Org/Lens'
-          // lens_turbo_bf16 DiT + openai/gpt-oss-20b (MXFP4) + FLUX.2-dev after microsoft/Lens-Turbo went
-          // dead. Whole repo (files: []); candle quantizes on-the-fly at load. Resolved by
-          // `candle_lens_repo`. Candle sibling of the MLX host sc-8763.
-          "provider": "huggingface",
-          "repo": "SceneWorks/Lens-Turbo",
-          "variant": "bf16",
-          "files": [],
-          "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 22334041788,
-          "footprint": { "diskSizeBytes": 22334041788, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -1412,9 +1390,8 @@
       "family": "ideogram",
       "type": "image",
       // Ideogram 4: 9.3B single-stream flow-matching DiT (asymmetric CFG — two DiTs) +
-      // Qwen3-VL-8B text encoder, native MLX only (no torch backend), so hidden off-Mac via
-      // macOnly. Dispatched through the engines::MODEL_TABLE / gen_core registry id `ideogram_4`
-      // (adapter label below is the asset stamp, mirrors mlx_<family>). Epic 4725.
+      // Qwen3-VL-8B text encoder. Dispatched through the engines::MODEL_TABLE / gen_core registry id
+      // `ideogram_4` (adapter label below is the asset stamp, mirrors mlx_<family>). Epic 4725.
       "adapter": "mlx_ideogram",
       // text_to_image + img2img/Remix edit + mask inpaint/outpaint (sc-6303): the native engine's
       // edit path VAE-encodes the source and denoises from a strength-derived step; `image_inpaint`
@@ -1422,7 +1399,13 @@
       // worker's `resolve_ideogram_edit` (base MLX path) builds the source `Reference` + optional
       // `Conditioning::Mask`; the Edit tab gates on `edit_image` + `macSupport.features.edit`.
       "capabilities": ["text_to_image", "edit_image", "image_inpaint"],
-      "macOnly": true,
+      // sc-9092 (epic 9083 gap #3): macOnly is now a no-op label (mirroring krea/lens/klein/flux2_dev) —
+      // candle availability is driven by the routing tables (`CANDLE_ROUTED_MODELS` / `is_candle_engine`),
+      // not this flag. The candle (Windows/Linux) lane packed-loads the SAME `SceneWorks/ideogram-4-mlx`
+      // q4/q8 turnkey the macOS path loads (candle-gen sc-9412), so the per-tier turnkey download above is
+      // installable off-Mac and the separate `SceneWorks/ideogram-4` bf16 diffusers off-Mac entry (the
+      // retired `candle_ideogram_repo` target) is removed.
+      "macOnly": false,
       // Ideogram 4 was trained on STRUCTURED JSON CAPTIONS, not free text — plain text is
       // out-of-distribution (coherent but prompt-agnostic). SceneWorks builds the JSON caption
       // (high-level description + style + compositional deconstruction with 0-1000 bounding boxes
@@ -1435,30 +1418,39 @@
           // packed `q4/` (default, ~15.4 GB) + `q8/` (~28.7 GB, opt-in via advanced mlxQuantize: 8)
           // subdirs, each a self-contained snapshot (2 DiTs + Qwen3-VL TE + VAE + tokenizer). The
           // worker (resolve_ideogram_model_dir, image_jobs) picks the quant subdir and fetches q8/
-          // on demand. Gated non-commercial license; macOS-only download.
+          // on demand. Gated non-commercial license.
+          // sc-9092 (epic 9083 gap #3): installable on Windows/Linux too — the candle Ideogram loader
+          // packed-detects the SAME `SceneWorks/ideogram-4-mlx` q4/q8 tier the macOS path loads
+          // (candle-gen sc-9412, both DiTs), so the off-Mac candle lane picks its tier at download
+          // exactly like macOS via the shared `resolve_weights_dir`/`ideogram_model_subdir`, and the
+          // separate off-Mac `SceneWorks/ideogram-4` bf16 diffusers entry (the retired
+          // `candle_ideogram_repo` target) is removed. q4 is the default off-Mac tier (q8 is a macOS-only
+          // on-demand fetch; off-Mac gracefully falls back to q4).
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4-mlx",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 15400562623,
           "footprint": { "diskSizeBytes": 15400562623, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
-          // bf16 snapshot — shared across backends from the separate `SceneWorks/ideogram-4` repo's
-          // `bf16/` subdir (the MLX-quantized `ideogram-4-mlx` turnkey above is not bf16). Off-Mac the
-          // candle provider loads it (epic 6561 / sc-6859, `candle_ideogram_subdir`); on macOS it is the
-          // selectable full-precision MLX tier (sc-8513, epic 8506) — the worker resolves this repo's
-          // `bf16/` subdir when advanced mlxQuantize<=0 (rather than a duplicate copy in the MLX repo).
-          // A later quant variant can slot in alongside `bf16/` without a rename. Gated non-commercial.
+          // bf16 snapshot — shared from the separate `SceneWorks/ideogram-4` repo's `bf16/` subdir (the
+          // MLX-quantized `ideogram-4-mlx` turnkey above is not bf16). On macOS it is the selectable
+          // full-precision MLX tier (sc-8513, epic 8506) — the worker resolves this repo's `bf16/` subdir
+          // when advanced mlxQuantize<=0 (rather than a duplicate copy in the MLX repo). A later quant
+          // variant can slot in alongside `bf16/` without a rename. Gated non-commercial.
           // sc-8508: this is a genuine per-tier quant variant (q4 vs bf16 of the same model), so it is
           // labeled `variant: bf16` — even though the two tiers happen to live in separate HF repos.
+          // sc-9092: macOS-only now. The off-Mac candle lane packed-loads the `SceneWorks/ideogram-4-mlx`
+          // q4 turnkey above (via the shared resolver), so the retired `candle_ideogram_repo` bf16 target
+          // resolves nothing off-Mac — the windows/linux platforms are dropped.
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4",
           "variant": "bf16",
           "files": ["bf16/*"],
-          "platforms": ["macos", "windows", "linux"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 54760833024,
           "footprint": { "diskSizeBytes": 54760833024, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
@@ -1541,7 +1533,9 @@
       // Same edit surface as the base (sc-6303): the shared denoise serves img2img/Remix + mask
       // inpaint/outpaint in the CFG-free turbo path too (only the initial latent + start step differ).
       "capabilities": ["text_to_image", "edit_image", "image_inpaint"],
-      "macOnly": true,
+      // sc-9092: macOnly is a no-op label (see `ideogram_4`) — the candle (Windows/Linux) lane packed-loads
+      // the SAME `SceneWorks/ideogram-4-mlx` q4 turnkey (with the bundled turbo LoRA) the macOS path loads.
+      "macOnly": false,
       // Same structured JSON-caption prompt surface as the base model (turbo distills the base, so
       // the caption contract is identical).
       "structuredPrompt": true,
@@ -1554,27 +1548,34 @@
           // BEFORE the LoRA was published shares this repo's snapshot, and a coarse `q4/*` glob is
           // already satisfied by the base files — so the missing LoRA would never flag "incomplete"
           // / show the Fix button. The specific path makes the check exact (apps/rust-api models.rs).
+          // sc-9092: installable on Windows/Linux too — the candle Ideogram-Turbo loader packed-detects
+          // the SAME `SceneWorks/ideogram-4-mlx` q4 turnkey (carrying the bundled `turbo_lora.safetensors`)
+          // the macOS path loads (candle-gen sc-9412), so the off-Mac candle lane picks its tier at
+          // download exactly like macOS, and the separate off-Mac `SceneWorks/ideogram-4` bf16 diffusers
+          // entry (the retired `candle_ideogram_repo` target) is removed.
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4-mlx",
           "variant": "q4",
           "default": true,
           "files": ["q4/*", "q4/turbo_lora.safetensors"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 16247340792,
           "footprint": { "diskSizeBytes": 16247340792, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           // bf16 snapshot — shared from the separate `SceneWorks/ideogram-4` repo's `bf16/` subdir,
-          // which carries `turbo_lora.safetensors` (the turbo loader merges it at load). Off-Mac the
-          // candle provider loads it (epic 6561 / sc-6859); on macOS it is the selectable full-precision
-          // MLX tier (sc-8513) — the worker resolves this repo's `bf16/` when advanced mlxQuantize<=0,
-          // rather than duplicating it into the MLX turnkey repo. Same gated non-commercial license.
+          // which carries `turbo_lora.safetensors` (the turbo loader merges it at load). On macOS it is the
+          // selectable full-precision MLX tier (sc-8513) — the worker resolves this repo's `bf16/` when
+          // advanced mlxQuantize<=0, rather than duplicating it into the MLX turnkey repo. Same gated
+          // non-commercial license.
           // sc-8508: genuine per-tier quant variant (q4 vs bf16 of the same model) → labeled `bf16`.
+          // sc-9092: macOS-only now — the off-Mac candle lane packed-loads the `SceneWorks/ideogram-4-mlx`
+          // q4 turnkey above, so the retired `candle_ideogram_repo` bf16 target resolves nothing off-Mac.
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4",
           "variant": "bf16",
           "files": ["bf16/*"],
-          "platforms": ["macos", "windows", "linux"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 54760833024,
           "footprint": { "diskSizeBytes": 54760833024, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
@@ -1646,33 +1647,30 @@
       // `adapter` is the asset stamp (mirrors mlx_<family>).
       "adapter": "mlx_boogu",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      // sc-9092 (epic 9083 gap #3): macOnly is now a no-op label (mirroring krea/lens/ideogram) — candle
+      // availability is driven by the routing tables (`CANDLE_ROUTED_MODELS` / `is_candle_engine`), not
+      // this flag. The candle (Windows/Linux) lane packed-loads the SAME `SceneWorks/boogu-image-mlx`
+      // Q8 `base/` subfolder the macOS path loads (candle-gen sc-9410 packed-detect, via the shared
+      // `resolve_weights_dir`/`boogu_model_subdir`), so the per-variant turnkey download below is
+      // installable off-Mac and the separate `Boogu/Boogu-Image-0.1-Base` diffusers entry (the retired
+      // `candle_boogu_repo` target) is removed.
+      "macOnly": false,
       "downloads": [
         {
           // Pre-converted MLX turnkey on the SceneWorks HF org (epic 6387 / sc-6397): ONE repo with
-          // Q8 `base/ turbo/ edit/` subfolders (the ship default) + `*-bf16/` full-precision
-          // subfolders. Each subfolder is a complete `transformer/` + `mllm/` (Qwen3-VL + tokenizer)
-          // + `vae/` snapshot loadable via BooguPipeline::from_snapshot. This entry pulls only the Q8
-          // `base/` subfolder (leaf-dir globs — the subfolder nests, so a single-level `base/*` would
-          // miss the files). Apache-2.0, ungated.
+          // Q8 `base/ turbo/ edit/` subfolders (the ship default) + `*-bf16/` `*-q4/` full-precision /
+          // packed subfolders. Each subfolder is a complete `transformer/` + `mllm/` (Qwen3-VL +
+          // tokenizer) + `vae/` snapshot loadable via BooguPipeline::from_snapshot. This entry pulls only
+          // the Q8 `base/` subfolder (leaf-dir globs — the subfolder nests, so a single-level `base/*`
+          // would miss the files). Apache-2.0, ungated.
+          // sc-9092: installable on Windows/Linux too — the candle lane packed-loads this SAME Q8 `base/`
+          // subfolder (candle-gen sc-9410). The non-default `-bf16/` `-q4/` tiers are a macOS-only
+          // on-demand fetch (`ensure_boogu_tier_present`); off-Mac resolves the shipped Q8 default.
           "provider": "huggingface",
           "repo": "SceneWorks/boogu-image-mlx",
           "files": ["base/transformer/*", "base/mllm/*", "base/vae/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 23380234752
-        },
-        {
-          // Candle (Windows/Linux CUDA) bf16 snapshot (sc-7524, epic 6831): the candle provider can't
-          // read the MLX-quantized turnkey above, so off-Mac loads bf16 from the ORIGINAL public repo
-          // `Boogu/Boogu-Image-0.1-Base` (Apache-2.0, ungated) — already a complete `mllm/ transformer/
-          // vae/` snapshot at the root (the worker's `candle_boogu_repo` loads from the snapshot root, no
-          // subfolder). Whole repo (empty files list). bf16 only (the candle provider rejects on-the-fly
-          // quant). Windows/Linux download.
-          "provider": "huggingface",
-          "repo": "Boogu/Boogu-Image-0.1-Base",
-          "files": [],
-          "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 38500000000
         }
       ],
       "paths": {
@@ -1748,26 +1746,20 @@
       // code (BooguPipeline::generate_turbo), the `turbo/` checkpoint.
       "adapter": "mlx_boogu",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      // sc-9092: macOnly is a no-op label (see `boogu_image`) — the candle (Windows/Linux) lane packed-loads
+      // the SAME `SceneWorks/boogu-image-mlx` Q8 `turbo/` subfolder the macOS path loads (candle-gen sc-9410).
+      "macOnly": false,
       "downloads": [
         {
           // Q8 `turbo/` subfolder of the shared SceneWorks/boogu-image-mlx turnkey (sc-6397).
+          // sc-9092: installable on Windows/Linux too — the candle lane packed-loads this SAME Q8 `turbo/`
+          // subfolder; the `Boogu/Boogu-Image-0.1-Turbo` off-Mac diffusers entry (retired
+          // `candle_boogu_repo` target) is removed.
           "provider": "huggingface",
           "repo": "SceneWorks/boogu-image-mlx",
           "files": ["turbo/transformer/*", "turbo/mllm/*", "turbo/vae/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 23380234586
-        },
-        {
-          // Candle (Windows/Linux CUDA) bf16 snapshot (sc-7524): off-Mac loads bf16 from the ORIGINAL
-          // public repo `Boogu/Boogu-Image-0.1-Turbo` (the DMD few-step distill — its own weights; same
-          // `mllm/ transformer/ vae/` root layout). Whole repo (empty files list). bf16 only (the candle
-          // provider rejects on-the-fly quant). Apache-2.0, ungated.
-          "provider": "huggingface",
-          "repo": "Boogu/Boogu-Image-0.1-Turbo",
-          "files": [],
-          "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 38500000000
         }
       ],
       "paths": {
@@ -1838,26 +1830,21 @@
       // only. Native MLX only; the `edit/` checkpoint (carries the lazily-loaded f32 vision tower).
       "adapter": "mlx_boogu",
       "capabilities": ["edit_image"],
-      "macOnly": true,
+      // sc-9092: macOnly is a no-op label (see `boogu_image`) — the candle (Windows/Linux) lane packed-loads
+      // the SAME `SceneWorks/boogu-image-mlx` Q8 `edit/` subfolder the macOS path loads (candle-gen sc-9410,
+      // which loads the Qwen3-VL vision tower off-Mac).
+      "macOnly": false,
       "downloads": [
         {
           // Q8 `edit/` subfolder of SceneWorks/boogu-image-mlx (sc-6397).
+          // sc-9092: installable on Windows/Linux too — the candle lane packed-loads this SAME Q8 `edit/`
+          // subfolder; the `Boogu/Boogu-Image-0.1-Edit` off-Mac diffusers entry (retired `candle_boogu_repo`
+          // target) is removed.
           "provider": "huggingface",
           "repo": "SceneWorks/boogu-image-mlx",
           "files": ["edit/transformer/*", "edit/mllm/*", "edit/vae/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 23380234314
-        },
-        {
-          // Candle (Windows/Linux CUDA) bf16 snapshot (sc-7524): off-Mac loads bf16 from the ORIGINAL
-          // public repo `Boogu/Boogu-Image-0.1-Edit` (the instruction-edit checkpoint — its `mllm/` carries
-          // the Qwen3-VL vision tower; same `mllm/ transformer/ vae/` root layout). Whole repo (empty files
-          // list). bf16 only (the candle provider rejects on-the-fly quant). Apache-2.0, ungated.
-          "provider": "huggingface",
-          "repo": "Boogu/Boogu-Image-0.1-Edit",
-          "files": [],
-          "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 38500000000
         }
       ],
       "paths": {
@@ -1925,8 +1912,11 @@
       "adapter": "mlx_krea",
       "capabilities": ["text_to_image"],
       // macOnly is now a no-op label (mirroring klein/flux2_dev): candle availability is driven by the
-      // routing tables (`CANDLE_ROUTED_MODELS` / `is_candle_engine`), not this flag. The candle
-      // (Windows/Linux) lane lights up off the bf16 download below (sc-7581).
+      // routing tables (`CANDLE_ROUTED_MODELS` / `is_candle_engine`), not this flag. sc-9092: the candle
+      // (Windows/Linux) lane now packed-loads the SAME `SceneWorks/krea-2-turbo-mlx` q4/q8/bf16 turnkey
+      // tiers the macOS path loads (candle-gen sc-9411 packed-detect via `krea_model_subdir`), so the
+      // per-tier turnkey downloads below are installable off-Mac and the separate `krea/Krea-2-Turbo`
+      // diffusers entry (the retired `candle_krea_repo` target) is removed.
       "macOnly": false,
       "downloads": [
         {
@@ -1944,7 +1934,7 @@
             "q8/scheduler/*",
             "q8/model_index.json"
           ],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 20600000000
         },
         {
@@ -1960,7 +1950,7 @@
             "q4/scheduler/*",
             "q4/model_index.json"
           ],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 12488709648
         },
         {
@@ -1977,20 +1967,8 @@
             "bf16/scheduler/*",
             "bf16/model_index.json"
           ],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 35678119918
-        },
-        {
-          // Candle (Windows/Linux CUDA) dense bf16 — the ungated public `krea/Krea-2-Turbo` diffusers tree
-          // (Krea 2 Community License). The native candle loader (`Weights::from_dir`) reads the diffusers
-          // subdirs from the snapshot ROOT (no quant subdir — the boogu pattern), so it does NOT use the
-          // MLX `q8/` turnkey above; `candle_krea_repo` reads this entry's `repo`. The repo also ships a
-          // redundant ~24 GB single-file `turbo.safetensors`; skip it (the loader reads only the subdirs).
-          "provider": "huggingface",
-          "repo": "krea/Krea-2-Turbo",
-          "files": ["model_index.json", "transformer/*", "text_encoder/*", "vae/*", "tokenizer/*"],
-          "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 33800000000
         }
       ],
       "paths": {

@@ -306,10 +306,11 @@ fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
         .to_owned()
 }
 
-/// The separate `SceneWorks/ideogram-4` repo that hosts Ideogram 4's bf16 tree under `bf16/` — shared
-/// by the candle off-Mac lane (sc-6859) and, on macOS, the selectable full-precision MLX tier
-/// (sc-8513). The MLX `q4/`/`q8/` turnkey lives in `SceneWorks/ideogram-4-mlx`; bf16 is resolved from
-/// THIS repo rather than duplicated. (The candle lane has its own cfg-gated [`CANDLE_IDEOGRAM_REPO`].)
+/// The separate `SceneWorks/ideogram-4` repo that hosts Ideogram 4's bf16 tree under `bf16/`, the
+/// macOS selectable full-precision MLX tier (sc-8513). The MLX `q4/`/`q8/` turnkey lives in
+/// `SceneWorks/ideogram-4-mlx`; bf16 is resolved from THIS repo rather than duplicated. (Off-Mac the
+/// candle Ideogram lane packed-loads the `SceneWorks/ideogram-4-mlx` turnkey subdir directly via the
+/// shared `resolve_weights_dir`/`ideogram_model_subdir` since sc-9092 — no separate candle repo.)
 #[cfg(target_os = "macos")]
 const IDEOGRAM_BF16_REPO: &str = "SceneWorks/ideogram-4";
 
@@ -343,12 +344,12 @@ pub(crate) fn resolve_weights_dir(
     // turbo variant (mlx-gen #488) shares the same turnkey — each subdir also carries the bundled
     // `turbo_lora.safetensors` the `ideogram_4_turbo` engine installs at load.
     if request.model == "ideogram_4" || request.model == "ideogram_4_turbo" {
-        // bf16 (sc-8513, epic 8506) is the SHARED `SceneWorks/ideogram-4` repo's `bf16/` subdir — the
-        // same full-precision tree the candle off-Mac lane loads (sc-6859) — NOT duplicated into the
-        // MLX turnkey. When the macOS request opts into bf16 (advanced mlxQuantize<=0) AND it is
-        // downloaded, resolve there (the dense weights load with no quantize); else the q4 (default)/q8
-        // turnkey subdir. A partial bf16 download falls back rather than half-loading. (macOS/MLX only —
-        // the candle lane resolves bf16 through its own `candle_ideogram_subdir` path, unchanged.)
+        // bf16 (sc-8513, epic 8506) is the SHARED `SceneWorks/ideogram-4` repo's `bf16/` subdir — NOT
+        // duplicated into the MLX turnkey. When the macOS request opts into bf16 (advanced mlxQuantize<=0)
+        // AND it is downloaded, resolve there (the dense weights load with no quantize); else the q4
+        // (default)/q8 turnkey subdir. A partial bf16 download falls back rather than half-loading.
+        // (macOS/MLX only — this `#[cfg(target_os = "macos")]` block is skipped on the candle lane, which
+        // shares the `ideogram_model_subdir` q4/q8 turnkey resolution below since sc-9092.)
         #[cfg(target_os = "macos")]
         {
             let wants_bf16 = request
@@ -437,6 +438,18 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     // weights, bf16 resolves to Quant::None). Replaces the gated BFL download + install-time quantize.
     "flux_schnell",
     "flux_dev",
+    // Lens / Lens-Turbo (sc-9092, epic 9083 gap #3): the SceneWorks re-hosted `SceneWorks/lens-mlx` /
+    // `SceneWorks/lens-turbo-mlx` turnkeys are standard q4/q8/bf16 tiers (their manifests already flag
+    // `mlx.standardTierLayout: true`, so `uses_standard_tier_layout` was already true via the manifest —
+    // registering them here is the zero-manifest-change form + documents the candle-lane opt-in). As of
+    // the candle-gen packed-load rollout (sc-8799) the candle Lens loader packed-detects the SAME
+    // turnkey subdir the macOS path loads, so the ad-hoc `candle_lens_repo` (a separate bf16 diffusers
+    // rehost) is retired and both lanes resolve Lens through `standard_tier_subdir`. Lens is the lone
+    // candle family that ALSO advertises `supported_quants` (Q4/Q8) today, so `resolve_quant` engages on
+    // its candle lane; ideogram/boogu/krea keep their legacy per-family subdir resolvers (non-standard
+    // q4-default / per-variant / q8-default layouts) and are NOT registered here.
+    "lens",
+    "lens_turbo",
 ];
 
 /// Standard-tier models whose text encoder ships DENSE bf16 in EVERY tier (epic 8506, sc-8711:
@@ -2793,12 +2806,14 @@ fn is_candle_engine(model: &str) -> bool {
             | "boogu_image_turbo"
             | "boogu_image_edit"
             // Krea 2 Turbo (sc-7581, epic 7565 P4): txt2img + inference LoRA/LoKr on the generic candle
-            // lane (CFG-free 8-step). Like Boogu, its MLX turnkey (`SceneWorks/krea-2-turbo-mlx`, q8/q4
-            // packed) isn't candle-readable, so the candle lane loads bf16 from the ungated public
-            // `krea/Krea-2-Turbo` snapshot root (no subdir). The `candle-gen-krea` descriptor advertises
-            // supports_lora/supports_lokr (sc-7836), so `generate_candle_stream` resolves a
+            // lane (CFG-free 8-step). sc-9092: the candle lane now packed-loads the SAME
+            // `SceneWorks/krea-2-turbo-mlx` q8/q4 turnkey subdir the macOS path loads (candle-gen sc-9411
+            // packed-detect, via the shared `resolve_weights_dir`/`krea_model_subdir`) — the ad-hoc
+            // `candle_krea_repo` bf16 diffusers rehost is retired. The `candle-gen-krea` descriptor
+            // advertises supports_lora/supports_lokr (sc-7836), so `generate_candle_stream` resolves a
             // `krea_2_raw`-trained adapter via `model.supports_adapters()`. No edit/reference/control
-            // shapes and no on-the-fly quant (dense bf16 only).
+            // shapes; on-the-fly quant stays descriptor-gated (`supported_quants` still `&[]` — the
+            // packed turnkey self-describes its tier at load).
             | "krea_2_turbo"
             // Stable Diffusion 3.5 (sc-7880, epic 7982): Large / Large Turbo / Medium all ride the generic
             // candle txt2img lane (the `candle-gen-sd3` provider). `generate_candle_stream` resolves Q4/Q8
@@ -2838,196 +2853,6 @@ fn candle_adapter_label(model: &str) -> &'static str {
         // sdxl / realvisxl share the candle "sdxl" engine.
         _ => CANDLE_ADAPTER,
     }
-}
-
-/// The candle Ideogram 4 weights repo (bf16). Ideogram is the lone candle image family whose upstream
-/// isn't candle-readable — the published `SceneWorks/ideogram-4-mlx` turnkey (the MODEL_TABLE default +
-/// the macOS MLX repo) is MLX-quantized — so the candle lane loads bf16 from a separate repo (sc-6859),
-/// the image sibling of the video `CANDLE_WAN_5B_REPO`. The bf16 weights live under the repo's `bf16/`
-/// subdir so quant variants (`q4/`/`q8/`) can slot in later without a rename (cf. the MLX turnkey).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const CANDLE_IDEOGRAM_REPO: &str = "SceneWorks/ideogram-4";
-
-/// Resolve the candle Ideogram weights repo: the off-Mac (`std::env::consts::OS`) download entry's
-/// `repo` from the manifest (the bf16 repo) — the single source of truth, also driving the downloader —
-/// else the [`CANDLE_IDEOGRAM_REPO`] default. Deliberately NOT the entry-level `repo`, which is the
-/// macOS MLX turnkey. Mirrors how `candle_video_repo` overrides the MLX repo with the diffusers one.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_ideogram_repo(request: &ImageRequest) -> String {
-    let os = std::env::consts::OS;
-    request
-        .model_manifest_entry
-        .get("downloads")
-        .and_then(Value::as_array)
-        .and_then(|downloads| {
-            downloads.iter().find_map(|entry| {
-                let matches_os = entry
-                    .get("platforms")
-                    .and_then(Value::as_array)
-                    .is_some_and(|platforms| platforms.iter().any(|p| p.as_str() == Some(os)));
-                if !matches_os {
-                    return None;
-                }
-                entry
-                    .get("repo")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|repo| !repo.is_empty())
-                    .map(str::to_owned)
-            })
-        })
-        .unwrap_or_else(|| CANDLE_IDEOGRAM_REPO.to_owned())
-}
-
-/// The precision subdir within the candle Ideogram repo snapshot. Candle is bf16-only today (the
-/// provider rejects on-the-fly quant), so this resolves the `bf16/` subdir (mirroring the MLX turnkey's
-/// `q4/`/`q8/`); a future candle quant variant slots in alongside it. Falls back to the snapshot root so
-/// a flat (subdir-less) layout still loads.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_ideogram_subdir(root: &Path) -> PathBuf {
-    let bf16 = root.join("bf16");
-    if bf16.join("transformer").join("model.safetensors").is_file() {
-        bf16
-    } else {
-        root.to_path_buf()
-    }
-}
-
-/// The default candle Boogu-Image-0.1 weights repo for a variant. The MLX turnkey
-/// (`SceneWorks/boogu-image-mlx`, the `MODEL_TABLE` default + the macOS MLX repo) is MLX-quantized and
-/// NOT candle-readable, but — unlike Ideogram — Boogu needs no re-hosted bf16 turnkey: the ORIGINAL
-/// public repos `Boogu/Boogu-Image-0.1-{Base,Turbo,Edit}` (Apache-2.0, ungated) are already bf16 and
-/// already laid out as a complete `mllm/ transformer/ vae/` snapshot at the repo root — exactly what the
-/// provider's `pipeline::load_components` reads. So the candle lane points straight at them (one repo per
-/// variant, loaded from the snapshot root — no `base/ turbo/ edit/` subfolder, unlike the MLX turnkey).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_boogu_default_repo(model: &str) -> &'static str {
-    match model {
-        "boogu_image_turbo" => "Boogu/Boogu-Image-0.1-Turbo",
-        "boogu_image_edit" => "Boogu/Boogu-Image-0.1-Edit",
-        _ => "Boogu/Boogu-Image-0.1-Base",
-    }
-}
-
-/// Resolve the candle Boogu weights repo for `request.model`: the off-Mac (`std::env::consts::OS`)
-/// download entry's `repo` from the manifest (the single source of truth, also driving the downloader) —
-/// else the per-variant [`candle_boogu_default_repo`]. Deliberately NOT the entry-level `repo` /
-/// `model_repo`, which is the macOS MLX turnkey. Mirrors `candle_ideogram_repo`.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_boogu_repo(request: &ImageRequest) -> String {
-    let os = std::env::consts::OS;
-    request
-        .model_manifest_entry
-        .get("downloads")
-        .and_then(Value::as_array)
-        .and_then(|downloads| {
-            downloads.iter().find_map(|entry| {
-                let matches_os = entry
-                    .get("platforms")
-                    .and_then(Value::as_array)
-                    .is_some_and(|platforms| platforms.iter().any(|p| p.as_str() == Some(os)));
-                if !matches_os {
-                    return None;
-                }
-                entry
-                    .get("repo")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|repo| !repo.is_empty())
-                    .map(str::to_owned)
-            })
-        })
-        .unwrap_or_else(|| candle_boogu_default_repo(&request.model).to_owned())
-}
-
-/// The candle Krea 2 Turbo weights repo (bf16). The MLX turnkey (`SceneWorks/krea-2-turbo-mlx`, the
-/// `MODEL_TABLE` default + the macOS MLX repo) ships packed `q8/`/`q4/` subdirs, which the candle
-/// provider (dense bf16, `supported_quants: &[]`) can't load — but, like Boogu, Krea needs no re-hosted
-/// bf16 turnkey: the ORIGINAL public `krea/Krea-2-Turbo` (Krea 2 Community License, ungated) is already a
-/// complete bf16 `transformer/ text_encoder/ vae/ tokenizer/` diffusers snapshot at the repo root —
-/// exactly what the provider's `pipeline::load_components` reads. So the candle lane points straight at it
-/// (loaded from the snapshot root — no subdir). Mirrors `candle_boogu_repo` / `candle_ideogram_repo`.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const CANDLE_KREA_REPO: &str = "krea/Krea-2-Turbo";
-
-/// Resolve the candle Krea weights repo: the off-Mac (`std::env::consts::OS`) download entry's `repo`
-/// from the manifest (the bf16 repo — the single source of truth, also driving the downloader) — else
-/// the [`CANDLE_KREA_REPO`] default. Deliberately NOT the entry-level `repo` / `model_repo`, which is the
-/// macOS MLX turnkey. Mirrors `candle_boogu_repo`.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_krea_repo(request: &ImageRequest) -> String {
-    let os = std::env::consts::OS;
-    request
-        .model_manifest_entry
-        .get("downloads")
-        .and_then(Value::as_array)
-        .and_then(|downloads| {
-            downloads.iter().find_map(|entry| {
-                let matches_os = entry
-                    .get("platforms")
-                    .and_then(Value::as_array)
-                    .is_some_and(|platforms| platforms.iter().any(|p| p.as_str() == Some(os)));
-                if !matches_os {
-                    return None;
-                }
-                entry
-                    .get("repo")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|repo| !repo.is_empty())
-                    .map(str::to_owned)
-            })
-        })
-        .unwrap_or_else(|| CANDLE_KREA_REPO.to_owned())
-}
-
-/// The default candle Lens / Lens-Turbo weights repo for a variant. Microsoft pulled the original
-/// `microsoft/Lens` + `microsoft/Lens-Turbo` from HF; the macOS/MLX path recovered them as the
-/// packed `SceneWorks/lens-mlx` / `SceneWorks/lens-turbo-mlx` tiers (sc-8767 — the `MODEL_TABLE`
-/// default + the macOS MLX repo), which are MLX-quantized (`bf16/`/`q8/`/`q4/` subdirs) and NOT
-/// candle-readable. The candle lane instead loads a re-assembled **self-contained diffusers** snapshot
-/// (`tokenizer/ text_encoder/ transformer/ vae/` at the repo root — exactly what `Pipeline::load_components`
-/// reads): `SceneWorks/Lens` (base) / `SceneWorks/Lens-Turbo` (distilled), rebuilt from the Comfy-Org/Lens
-/// DiT + stock `openai/gpt-oss-20b` (MXFP4) encoder/tokenizer + the FLUX.2-dev VAE (sc-8799 — the candle
-/// sibling of sc-8767). Loaded from the snapshot root, no subdir. Per-variant like `candle_boogu_default_repo`.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_lens_default_repo(model: &str) -> &'static str {
-    match model {
-        "lens_turbo" => "SceneWorks/Lens-Turbo",
-        _ => "SceneWorks/Lens",
-    }
-}
-
-/// Resolve the candle Lens weights repo for `request.model`: the off-Mac (`std::env::consts::OS`)
-/// download entry's `repo` from the manifest (the single source of truth, also driving the downloader) —
-/// else the per-variant [`candle_lens_default_repo`]. Deliberately NOT the entry-level `repo` /
-/// `model_repo`, which is the macOS MLX turnkey (`SceneWorks/lens-mlx`, unreadable by the candle
-/// diffusers loader). Mirrors `candle_boogu_repo` / `candle_krea_repo`.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_lens_repo(request: &ImageRequest) -> String {
-    let os = std::env::consts::OS;
-    request
-        .model_manifest_entry
-        .get("downloads")
-        .and_then(Value::as_array)
-        .and_then(|downloads| {
-            downloads.iter().find_map(|entry| {
-                let matches_os = entry
-                    .get("platforms")
-                    .and_then(Value::as_array)
-                    .is_some_and(|platforms| platforms.iter().any(|p| p.as_str() == Some(os)));
-                if !matches_os {
-                    return None;
-                }
-                entry
-                    .get("repo")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|repo| !repo.is_empty())
-                    .map(str::to_owned)
-            })
-        })
-        .unwrap_or_else(|| candle_lens_default_repo(&request.model).to_owned())
 }
 
 /// Windows/CUDA candle execution path (sc-3675 SDXL, generalized in sc-5096). The macOS dispatch is
@@ -3076,70 +2901,23 @@ async fn generate_candle_stream(
         model.backend()
     };
     let is_ideogram = crate::ideogram_caption::is_ideogram_model(&request.model);
-    // Boogu (sc-7524) is the second candle image family whose upstream turnkey isn't candle-readable: its
-    // `SceneWorks/boogu-image-mlx` turnkey is MLX-quantized, so the candle lane loads bf16 from the
-    // ORIGINAL public `Boogu/Boogu-Image-0.1-{Base,Turbo,Edit}` repos (per-variant; each a complete
-    // `mllm/ transformer/ vae/` snapshot at its root — loaded directly, no subfolder).
-    let is_boogu = matches!(
-        request.model.as_str(),
-        "boogu_image" | "boogu_image_turbo" | "boogu_image_edit"
-    );
-    // Krea 2 Turbo (sc-7581) is the third such family: its `SceneWorks/krea-2-turbo-mlx` turnkey is packed
-    // q8/q4, so the candle lane loads bf16 from the ungated public `krea/Krea-2-Turbo` (the boogu pattern —
-    // the diffusers snapshot root, no subdir).
-    let is_krea = request.model == "krea_2_turbo";
-    // Lens / Lens-Turbo (sc-8799) is the fourth such family: Microsoft pulled the original
-    // `microsoft/Lens*`, and the recovered `SceneWorks/lens-mlx` / `SceneWorks/lens-turbo-mlx` turnkeys
-    // (sc-8767) are MLX-packed q4/q8/bf16 tiers the candle diffusers loader can't read, so the candle lane
-    // loads the re-assembled self-contained diffusers snapshot `SceneWorks/Lens` / `SceneWorks/Lens-Turbo`
-    // (snapshot root, no subdir).
-    let is_lens = matches!(request.model.as_str(), "lens" | "lens_turbo");
-    // Ideogram + Boogu + Krea + Lens are the candle image families whose `MODEL_TABLE` turnkey isn't
-    // candle-readable: the published `SceneWorks/ideogram-4-mlx` / `SceneWorks/boogu-image-mlx` /
-    // `SceneWorks/krea-2-turbo-mlx` / `SceneWorks/lens{,-turbo}-mlx` (the macOS MLX repos) are
-    // MLX-quantized, so the candle lane loads from a different repo. Ideogram re-hosts a bf16 copy
-    // (`SceneWorks/ideogram-4`'s `bf16/` subdir, because the upstream is gated); Boogu + Krea point straight
-    // at their ungated public originals (`Boogu/Boogu-Image-0.1-*` / `krea/Krea-2-Turbo`); Lens loads a
-    // re-assembled diffusers rehost (`SceneWorks/Lens{,-Turbo}`, the original source being dead) — all from
-    // the snapshot root. macOS keeps the MLX turnkeys. Every other candle family shares its upstream
-    // diffusers repo via `model_repo`.
-    let repo = if is_ideogram {
-        candle_ideogram_repo(request)
-    } else if is_boogu {
-        candle_boogu_repo(request)
-    } else if is_krea {
-        candle_krea_repo(request)
-    } else if is_lens {
-        candle_lens_repo(request)
-    } else {
-        model_repo(request, &model)
-    };
-    // A convert-at-install model (FLUX.2-klein `_true_v2`, sc-7459) is a single-file fine-tune with no
-    // diffusers tree in its HF cache, so it loads from the locally-assembled converted dir via the
-    // `modelPath` seam (injected by the API's `inject_converted_model_path`), exactly like the MLX
-    // path's `resolve_weights_dir`. An explicit `modelPath` (advanced override or manifest) wins over
-    // the HF-cache snapshot; `resolve_app_managed_model_dir` constrains it to app-managed data.
-    let model_path = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|path| !path.is_empty());
-    let weights_dir = if let Some(model_path) = model_path {
-        resolve_app_managed_model_dir(settings, model_path, "Image modelPath")?
-    } else {
-        let snapshot = huggingface_snapshot_dir(&settings.data_dir, &repo).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!("candle weights snapshot not found for {repo}"))
-        })?;
-        // Ideogram nests its weights under a `bf16/` subdir; Boogu's originals (and every other family)
-        // are a complete snapshot at the root, so `weights_dir` is the snapshot itself.
-        if is_ideogram {
-            candle_ideogram_subdir(&snapshot)
-        } else {
-            snapshot
-        }
-    };
+    // Standard-tier weight resolution, SHARED with the MLX lane (sc-9092, epic 9083 gap #3). Every
+    // candle image family — Ideogram / Boogu / Krea / Lens included — now packed-loads the SAME
+    // SceneWorks MLX-packed per-tier turnkey the macOS path uses: as of the candle-gen rollout all 11
+    // packed-load-capable crates read a packed `q4/q8/bf16` (or the Ideogram/Boogu/Krea legacy-layout)
+    // turnkey subdir directly, so the four ad-hoc `candle_{ideogram,boogu,krea,lens}_repo` resolvers
+    // (which pointed candle at a SEPARATE bf16 diffusers rehost because it couldn't read the packed
+    // turnkeys) are retired. `resolve_weights_dir` applies the identical dispatch the MLX path uses —
+    // an explicit `modelPath` override (FLUX.2-klein `_true_v2` convert-at-install), then the Ideogram
+    // (`ideogram_model_subdir`) / Boogu (`boogu_model_subdir`) / Krea (`krea_model_subdir`) per-family
+    // subdir, then `standard_tier_subdir` (Lens + the STANDARD_TIER_MODELS registry) resolving the
+    // requested `advanced.mlxQuantize` → q4/q8/bf16 tier — so the candle lane needs no bespoke repo
+    // logic. `model` is already resolved via `mlx_model` above, so a `None` here means only the
+    // snapshot is absent (unfetched turnkey), which stays a loud load error.
+    let weights_dir = resolve_weights_dir(request, settings)?.ok_or_else(|| {
+        let repo = model_repo(request, &model);
+        WorkerError::InvalidPayload(format!("candle weights snapshot not found for {repo}"))
+    })?;
 
     // Descriptor-derived denoise/guidance surface (distilled families → no guidance/negative; guided
     // families → the scale + negative prompt). Identical to the MLX path; quant + LoRA are omitted.
@@ -3271,7 +3049,10 @@ async fn generate_candle_stream(
     // other candle family ignores the fields too.
     let enhance = PromptEnhance::from_advanced(&request.advanced);
     // Record the effective CFG knob (guidance for guided families, else true_cfg) + quant bits in the
-    // recipe, so a Lens asset's sidecar reflects the Q4/Q8 it ran at (parity with the MLX path).
+    // recipe, so a Lens asset's sidecar reflects the Q4/Q8 it ran at (parity with the MLX path). The
+    // recorded repo is the resolved model repo (the MLX turnkey the candle lane now packed-loads from,
+    // sc-9092) — the same `model_repo` the MLX path records.
+    let repo = model_repo(request, &model);
     let raw_settings = mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
     let spec = load_spec(weights_dir, quant, adapters, None);
 
@@ -3685,23 +3466,6 @@ mod candle_label_tests {
         assert_eq!(candle_adapter_label("sd3_5_medium"), "candle_sd3");
     }
 
-    // sc-8799: the candle Lens lane resolves the re-assembled diffusers rehost per variant (NOT the
-    // MLX-packed `SceneWorks/lens{,-turbo}-mlx` turnkey `model_repo` falls back to), since Microsoft
-    // pulled the original `microsoft/Lens*`. Base → `SceneWorks/Lens`, distilled → `SceneWorks/Lens-Turbo`.
-    // `candle_lens_repo` layers only a manifest-`downloads` override on top of this default (the exact
-    // shape unit-tested for the sibling `candle_ideogram_repo` lane), so the per-variant map is the crux.
-    #[test]
-    fn candle_lens_default_repo_is_per_variant_diffusers_rehost() {
-        assert_eq!(candle_lens_default_repo("lens"), "SceneWorks/Lens");
-        assert_eq!(
-            candle_lens_default_repo("lens_turbo"),
-            "SceneWorks/Lens-Turbo"
-        );
-        // Neither default is the MLX turnkey the entry-level `repo` / `model_repo` would supply.
-        assert!(!candle_lens_default_repo("lens").ends_with("-mlx"));
-        assert!(!candle_lens_default_repo("lens_turbo").ends_with("-mlx"));
-    }
-
     #[test]
     fn is_candle_engine_covers_only_the_wired_txt2img_families() {
         for model in [
@@ -4018,6 +3782,106 @@ mod standard_tier_tests {
             json!({ "denseTextEncoderTier": true })
         )));
         assert!(!is_dense_te_tier(&manifest_request("flux2_dev", json!({}))));
+    }
+
+    /// sc-9092 (epic 9083 gap #3): the candle Lens lane no longer resolves a SEPARATE bf16 diffusers
+    /// rehost (`SceneWorks/Lens{,-Turbo}`, the retired `candle_lens_repo`) — it packed-loads the SAME
+    /// `SceneWorks/lens{,-turbo}-mlx` MLX turnkey the macOS path uses, routed through the shared
+    /// `standard_tier_subdir` (`lens`/`lens_turbo` opt in via `mlx.standardTierLayout`, exactly like the
+    /// MLX lane). This proves the shared tier resolver picks the requested q4/q8/bf16 subdir of a Lens
+    /// turnkey snapshot off-Mac — the candle-lane sibling of the SD3.5 `standard_tier_subdir` tests
+    /// above — so the retired resolver is fully replaced by the standard machinery.
+    #[test]
+    fn candle_lens_resolves_packed_turnkey_tier_subdir() {
+        let lens_request = |bits: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": "lens", "advanced": { "mlxQuantize": bits } })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // A Lens turnkey ships packed per-tier subdirs (transformer + gpt-oss-20b MoE TE + FLUX.2 VAE).
+        seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
+
+        // A/B tier toggle: default (q4) / mlxQuantize:8 (q8) / mlxQuantize:0 (bf16) each resolve to
+        // their tier subdir — the same q4-default recipe the `lens` manifest declares (`mlx.quantize:4`).
+        assert_eq!(
+            standard_tier_subdir(root, &lens_request(json!(null))),
+            root.join("q4")
+        );
+        assert_eq!(
+            standard_tier_subdir(root, &lens_request(json!(8))),
+            root.join("q8")
+        );
+        assert_eq!(
+            standard_tier_subdir(root, &lens_request(json!(0))),
+            root.join("bf16")
+        );
+    }
+
+    /// sc-9092 (epic 9083 gap #3, review fix): Ideogram + Boogu were left `macOnly:true` with only
+    /// off-Mac diffusers download entries, which the PR deleted — so off-Mac they resolved to the MLX
+    /// turnkey (`SceneWorks/{ideogram-4,boogu-image}-mlx`) whose download entries were macOS-only and
+    /// thus never fetched (a "candle weights snapshot not found" load error). The fix flips them
+    /// `macOnly:false` and extends the turnkey download `platforms` to windows/linux, so both lanes
+    /// packed-load the SAME turnkey the macOS path uses (candle-gen sc-9412 / sc-9410). This asserts the
+    /// per-family subdir resolvers pick the shipped tier of a turnkey snapshot regardless of platform —
+    /// the ideogram/boogu sibling of `candle_lens_resolves_packed_turnkey_tier_subdir` above.
+    #[test]
+    fn candle_ideogram_boogu_resolve_packed_turnkey_tier_subdir() {
+        let model_request = |model: &str, bits: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": model, "advanced": { "mlxQuantize": bits } })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+
+        // Ideogram turnkey (`SceneWorks/ideogram-4-mlx`): q4 default (candle off-Mac tier) + on-demand
+        // q8. `ideogram_model_subdir` probes `<tier>/transformer/model.safetensors`.
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            seed_tier(root, "q4", "model.safetensors");
+            seed_tier(root, "q8", "model.safetensors");
+            for model in ["ideogram_4", "ideogram_4_turbo"] {
+                // Default → q4 (the shipped off-Mac tier).
+                assert_eq!(
+                    ideogram_model_subdir(root, &model_request(model, json!(null))),
+                    root.join("q4")
+                );
+                // mlxQuantize:8 → q8 when present.
+                assert_eq!(
+                    ideogram_model_subdir(root, &model_request(model, json!(8))),
+                    root.join("q8")
+                );
+            }
+        }
+
+        // Boogu turnkey (`SceneWorks/boogu-image-mlx`): Q8 `base/`/`turbo/`/`edit/` is the shipped
+        // (off-Mac) default. `boogu_model_subdir` probes `<variant>/transformer/diffusion_pytorch_model.safetensors`.
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            for variant in ["base", "turbo", "edit"] {
+                seed_tier(root, variant, "diffusion_pytorch_model.safetensors");
+            }
+            for (model, variant) in [
+                ("boogu_image", "base"),
+                ("boogu_image_turbo", "turbo"),
+                ("boogu_image_edit", "edit"),
+            ] {
+                // Default (no mlxQuantize) → the shipped Q8 `<variant>/` subfolder.
+                assert_eq!(
+                    boogu_model_subdir(root, &model_request(model, json!(null))),
+                    root.join(variant)
+                );
+            }
+        }
     }
 }
 
