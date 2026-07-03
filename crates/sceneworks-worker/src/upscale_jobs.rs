@@ -361,6 +361,46 @@ fn upscale_blocking(
 // ONNX weight provisioning (download-on-first-use, mirrors Python resolution order)
 // ---------------------------------------------------------------------------
 
+/// Resolve an explicit env-pinned weight *file* (sc-8911). Unset → `Ok(None)` (fall
+/// through to cache/download). Set + existing → `Ok(Some(path))`. Set but missing → an
+/// `InvalidPayload` error so a typo fails loudly instead of silently loading whatever the
+/// download resolves. `what` names the expected file in the error. Takes the raw value
+/// explicitly so it's unit-testable without mutating the process environment.
+fn resolve_env_file_pin(
+    key: &str,
+    value: Option<std::ffi::OsString>,
+    what: &str,
+) -> WorkerResult<Option<PathBuf>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(&value);
+    if path.exists() {
+        return Ok(Some(path));
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "{key} is set to {} but that path does not exist. Point it at {what}, or unset it to download on first use.",
+        path.display()
+    )))
+}
+
+/// Resolve the `SCENEWORKS_SEEDVR2_CHECKPOINT` dir pin (sc-8911). Unset → `Ok(None)`. Set
+/// and holding both checkpoint files → `Ok(Some(dir))`. Set but incomplete → an
+/// `InvalidPayload` error. Testable without env mutation via the explicit raw value.
+fn resolve_seedvr2_dir_pin(value: Option<std::ffi::OsString>) -> WorkerResult<Option<PathBuf>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let dir = PathBuf::from(&value);
+    if dir.join(SEEDVR2_DIT_FILE).exists() && dir.join(SEEDVR2_VAE_FILE).exists() {
+        return Ok(Some(dir));
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "SCENEWORKS_SEEDVR2_CHECKPOINT is set to {} but that directory is missing {SEEDVR2_DIT_FILE} and/or {SEEDVR2_VAE_FILE}. Point it at a complete checkpoint dir, or unset it to download on first use.",
+        dir.display()
+    )))
+}
+
 /// Resolve the ONNX for `factor`. Order: explicit env pin
 /// (`SCENEWORKS_REALESRGAN_X{factor}_ONNX`, then `SCENEWORKS_REALESRGAN_ONNX`), then the
 /// app cache `<data_dir>/cache/upscale/`, then a manifest `onnx` resource if the job
@@ -377,11 +417,15 @@ async fn ensure_onnx(
         format!("SCENEWORKS_REALESRGAN_X{factor}_ONNX"),
         "SCENEWORKS_REALESRGAN_ONNX".to_owned(),
     ] {
-        if let Ok(pinned) = std::env::var(&key) {
-            let path = PathBuf::from(pinned);
-            if path.exists() {
-                return Ok(path);
-            }
+        // A set-but-missing env pin is an operator error: fail loudly instead of silently
+        // falling through to the cache/HF download and loading different weights than the
+        // operator asked for (sc-8911).
+        if let Some(path) = resolve_env_file_pin(
+            &key,
+            std::env::var_os(&key),
+            &format!("the local Real-ESRGAN x{factor} ONNX export"),
+        )? {
+            return Ok(path);
         }
     }
 
@@ -494,11 +538,11 @@ async fn ensure_seedvr2_checkpoint(
     job: &JobSnapshot,
     manifest_entry: &Value,
 ) -> WorkerResult<PathBuf> {
-    if let Ok(pinned) = std::env::var("SCENEWORKS_SEEDVR2_CHECKPOINT") {
-        let dir = PathBuf::from(pinned);
-        if dir.join(SEEDVR2_DIT_FILE).exists() && dir.join(SEEDVR2_VAE_FILE).exists() {
-            return Ok(dir);
-        }
+    // A set env pin must resolve to a dir holding both checkpoint files; if it's set but
+    // incomplete, that's an operator error — fail loudly instead of silently downloading
+    // (sc-8911).
+    if let Some(dir) = resolve_seedvr2_dir_pin(std::env::var_os("SCENEWORKS_SEEDVR2_CHECKPOINT"))? {
+        return Ok(dir);
     }
 
     let dir = settings

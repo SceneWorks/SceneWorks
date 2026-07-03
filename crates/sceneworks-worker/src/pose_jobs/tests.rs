@@ -233,6 +233,48 @@ fn dwpose_zip_digests_are_pinned_sha256() {
     );
 }
 
+/// sc-8911: an env-pinned weight path that is set-but-missing must error, not silently
+/// fall through to the cache/download. Unset → `None`; set + existing → `Some(path)`.
+#[test]
+fn resolve_pinned_weight_errors_on_missing_env_path() {
+    use std::ffi::OsString;
+
+    // Unset: fall through.
+    assert_eq!(
+        resolve_pinned_weight("SCENEWORKS_DWPOSE_DET", None, DET_FILE).expect("unset ok"),
+        None,
+        "an unset pin must fall through"
+    );
+
+    // Set but nonexistent: error (not a silent fall-through).
+    let missing = resolve_pinned_weight(
+        "SCENEWORKS_DWPOSE_DET",
+        Some(OsString::from("/nonexistent/dwpose/yolox.onnx")),
+        DET_FILE,
+    );
+    assert!(
+        matches!(missing, Err(WorkerError::InvalidPayload(ref m)) if m.contains("SCENEWORKS_DWPOSE_DET") && m.contains("does not exist")),
+        "a set-but-missing pin must error, got {missing:?}"
+    );
+
+    // Set and existing: resolve to that path. Write a real temp file to point at.
+    let existing_path =
+        std::env::temp_dir().join(format!("sw-dwpose-pin-test-{}.onnx", std::process::id()));
+    std::fs::write(&existing_path, b"onnx").expect("write temp weight");
+    let resolved = resolve_pinned_weight(
+        "SCENEWORKS_DWPOSE_DET",
+        Some(existing_path.as_os_str().to_owned()),
+        DET_FILE,
+    )
+    .expect("existing pin ok");
+    assert_eq!(
+        resolved.as_deref(),
+        Some(existing_path.as_path()),
+        "existing pin resolves"
+    );
+    let _ = std::fs::remove_file(&existing_path);
+}
+
 /// sc-8875: a project-relative source path is confined to the project tree — any `..`
 /// (or absolute/prefix) component must reject the join so a crafted `../../secret.png`
 /// can't escape `project_path`. Plain `Normal` segments still resolve under the project.
