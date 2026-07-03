@@ -120,33 +120,36 @@ impl SessionLog {
         let guard = self.inner.lock().expect("session log lock");
         let limit = query.limit.unwrap_or(500).clamp(1, 5000);
         let search = query.search.as_deref().map(str::to_ascii_lowercase);
-        let mut matched: Vec<LogEntry> = guard
-            .entries
-            .iter()
+        let matches = |entry: &LogEntry| {
             // MSRV 1.80: `Option::is_none_or` is 1.82, so use `map_or(true, …)`.
-            .filter(|entry| query.after_seq.map_or(true, |seq| entry.seq > seq))
-            .filter(|entry| {
-                query
+            query.after_seq.map_or(true, |seq| entry.seq > seq)
+                && query
                     .source
                     .as_deref()
                     .map_or(true, |source| entry.source == source)
-            })
-            .filter(|entry| {
-                query
+                && query
                     .level
                     .as_deref()
                     .map_or(true, |level| entry.level == level)
-            })
-            .filter(|entry| {
-                search.as_deref().map_or(true, |needle| {
+                && search.as_deref().map_or(true, |needle| {
                     entry.raw.to_ascii_lowercase().contains(needle)
                 })
-            })
+        };
+        // F-093: walk newest→oldest and stop after cloning `limit` matches, instead
+        // of cloning every matching entry (up to the full 5000-deep buffer) and then
+        // `split_off`ing down to `limit`. This clones only what's returned and lets
+        // the buffer mutex — contended with `push_line` on the stdout capture threads
+        // — drop far sooner on the hot polling path.
+        let mut matched: Vec<LogEntry> = guard
+            .entries
+            .iter()
+            .rev()
+            .filter(|entry| matches(entry))
+            .take(limit)
             .cloned()
             .collect();
-        if matched.len() > limit {
-            matched = matched.split_off(matched.len() - limit);
-        }
+        // Collected newest→oldest above; restore the documented oldest→newest order.
+        matched.reverse();
         matched
     }
 
@@ -607,6 +610,27 @@ mod tests {
         });
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].seq, 4);
+    }
+
+    #[test]
+    fn query_limit_returns_newest_n_in_order() {
+        // F-093: with more matches than `limit`, return exactly the newest `limit`
+        // entries, still oldest→newest. Guards the reverse-take-reverse rewrite that
+        // avoids cloning the whole buffer.
+        let log = SessionLog::with_capacity(100);
+        for i in 0..20 {
+            log.push_line("api", &format!("line {i}"));
+        }
+        let limited = log.query(&LogQuery {
+            limit: Some(3),
+            ..Default::default()
+        });
+        assert_eq!(limited.len(), 3);
+        assert_eq!(limited[0].raw, "line 17");
+        assert_eq!(limited[1].raw, "line 18");
+        assert_eq!(limited[2].raw, "line 19");
+        // Ascending seq order preserved.
+        assert!(limited[0].seq < limited[1].seq && limited[1].seq < limited[2].seq);
     }
 
     #[test]
