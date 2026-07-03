@@ -118,13 +118,18 @@ use keypoints::*;
 mod logs;
 use logs::*;
 
+// The theme-preferences route. Its GET (the pre-auth theme read) is public, but its
+// PUT writes `ui-preferences.json` to disk, so the exemption is method-aware — the
+// PUT is gated when a token is configured (sc-8869, F-067). See `auth::requires_token`.
+const UI_PREFERENCES_PATH: &str = "/api/v1/ui-preferences";
 const PUBLIC_PATHS: &[&str] = &[
     "/api/v1/health",
     "/api/v1/access",
     "/api/v1/auth/verify",
     "/api/v1/jobs/events",
-    // Non-sensitive UI state (theme); loaded before auth to avoid a flash.
-    "/api/v1/ui-preferences",
+    // Non-sensitive UI state (theme); the GET is loaded before auth to avoid a
+    // flash. The PUT is method-gated in `auth::requires_token`, not here.
+    UI_PREFERENCES_PATH,
 ];
 const DEFAULT_CORS_ORIGINS: &str = concat!(
     "http://localhost:5173,http://127.0.0.1:5173,",
