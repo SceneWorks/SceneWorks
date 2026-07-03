@@ -125,20 +125,6 @@ pub(crate) fn box_norm_to_pixels(
     ]
 }
 
-/// Roll the per-frame segmentation outcome into the sidecar `maskState` (Python
-/// `segment_track`): `generated` masks out of `detected_total` detected target frames →
-/// `degraded` (none written → box-mask fallback at replacement time), `active` (every
-/// detected frame segmented), or `generated` (a partial subset).
-pub(crate) fn rollup_mask_state(generated: usize, detected_total: usize) -> &'static str {
-    if generated == 0 {
-        "degraded"
-    } else if generated >= detected_total {
-        "active"
-    } else {
-        "generated"
-    }
-}
-
 /// Fraction of a binary mask's foreground (`> 127`) that falls inside `box_norm` on a
 /// `width`×`height` frame. `0.0` when the mask is empty. Used to detect a propagated frame
 /// whose mask has drifted off the tracked person (low coverage → re-prompt with the box).
@@ -413,17 +399,5 @@ mod tests {
         // A box over the left half of the block → ~half the foreground inside.
         let half = mask_box_coverage(&pixels, (0.0, 0.0, 0.4, 1.0), w, h);
         assert!((half - 0.5).abs() < 1e-9, "half coverage was {half}");
-    }
-
-    #[test]
-    fn mask_state_rollup_matches_python_segment_track() {
-        // No masks written → degraded (box-mask fallback).
-        assert_eq!(rollup_mask_state(0, 4), "degraded");
-        // Every detected frame segmented → active.
-        assert_eq!(rollup_mask_state(4, 4), "active");
-        // A partial subset → generated.
-        assert_eq!(rollup_mask_state(2, 4), "generated");
-        // A single detected frame, segmented → active (not generated).
-        assert_eq!(rollup_mask_state(1, 1), "active");
     }
 }
