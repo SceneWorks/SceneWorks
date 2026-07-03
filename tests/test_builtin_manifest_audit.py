@@ -19,12 +19,16 @@ self-contained readers are inlined below rather than imported from
     inside an entry doesn't trip a naive comment strip; used by the per-model
     ``mlx`` block audits.
 
-The three character_image ENGINE-WIRING guards additionally cross-reference the
-worker's ``MODEL_TARGETS`` table (which is worker-owned config, not manifest
-data). They lazily ``importorskip`` it so they exercise the full manifest ↔
-worker cross-check while the worker still exists, and degrade to a clean SKIP
-(not a collection error) once ``apps/worker`` is deleted. Reimplementing those
-against the Rust engine table post-8283 is tracked as a follow-up.
+The three character_image ENGINE-WIRING guards that used to live here additionally
+cross-referenced the retired Python worker's ``MODEL_TARGETS`` table via a lazy
+``importorskip``, so they degraded to a clean SKIP once ``apps/worker`` was deleted
+(epic 8283) — losing their coverage. sc-9513 (F-059 follow-up) reimplemented them
+against the Rust worker's own character-image engine wiring, reading this SAME
+embedded manifest, in ``crates/sceneworks-worker/src/engines.rs`` (the tests
+``character_image_capability_implies_engine_or_tuning_declaration`` /
+``kolors_declares_strict_pose_controlnet`` /
+``models_with_engine_block_advertise_character_image``). This module now imports no
+``scene_worker`` symbol at all.
 """
 
 from __future__ import annotations
@@ -32,8 +36,6 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-
-import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "config" / "manifests" / "builtin.models.jsonc"
@@ -124,21 +126,6 @@ def _manifest_brace_walker():
         return find_balanced_block(mlx_open)
 
     return raw, find_entry_block, find_mlx_block
-
-
-def _model_targets() -> dict:
-    """Worker-owned engine table (`ipAdapter`/`instantId`/`pulidFlux`/
-    `controlNetPose`). This is the sole scene_worker dependency in this module
-    and is imported lazily so its removal (epic 8283) turns the three
-    engine-wiring cross-checks below into a SKIP rather than a collection error.
-    sc-8861 FOLLOW_UP: reimplement those three against the Rust engine table
-    (crates/sceneworks-worker) once apps/worker is deleted.
-    """
-    image_adapters = pytest.importorskip(
-        "scene_worker.image_adapters",
-        reason="scene_worker.image_adapters (MODEL_TARGETS) retired with apps/worker (epic 8283)",
-    )
-    return image_adapters.MODEL_TARGETS
 
 
 # ---------------------------------------------------------------------------
@@ -281,90 +268,16 @@ def test_sdxl_manifest_has_mlx_block():
 # ---------------------------------------------------------------------------
 # character_image capability / UI-wiring audits (manifest-parsed dict).
 # Extracted from tests/test_worker_image_adapters.py (sc-8861 / F-059).
-# The three engine-wiring guards also cross-reference the worker MODEL_TARGETS
-# table via the lazy `_model_targets()` importorskip above.
+#
+# The three character_image ENGINE-WIRING guards that used to live here
+# (test_character_image_capability_implies_engine_or_tuning_declaration /
+# test_kolors_declares_strict_pose_controlnet /
+# test_models_with_engine_block_advertise_character_image) cross-referenced the
+# retired Python worker's MODEL_TARGETS table, so they were reimplemented against
+# the Rust worker's own character-image engine wiring in
+# crates/sceneworks-worker/src/engines.rs (sc-9513). The manifest-only symmetry
+# guard below has no worker dependency and stays here.
 # ---------------------------------------------------------------------------
-
-
-def test_character_image_capability_implies_engine_or_tuning_declaration():
-    """Every builtin model that advertises `character_image` must have either
-    a worker engine block (`ipAdapter` / `instantId` in MODEL_TARGETS) OR a
-    `ui.variationStrength` declaration in the manifest. Otherwise the capability
-    flag is dishonest — the picker shows the model in "With character" mode but
-    the worker silently ignores the reference, the same shape as z_image_turbo's
-    pre-sc-2005 bug. This is the cross-backbone guard for epic 2003 (sc-2018):
-    adding a future character_image backbone without engine wiring will fail
-    here before it ever reaches a user.
-    """
-    model_targets = _model_targets()
-    manifest = _load_builtin_models_manifest()
-    misleading: list[str] = []
-    for model in manifest.get("models", []):
-        capabilities = model.get("capabilities") or []
-        if "character_image" not in capabilities:
-            continue
-        target = model_targets.get(model["id"], {})
-        ui = model.get("ui") or {}
-        has_engine = bool(target.get("ipAdapter") or target.get("instantId") or target.get("pulidFlux"))
-        has_variation_ui = bool(ui.get("variationStrength"))
-        if not (has_engine or has_variation_ui):
-            misleading.append(model["id"])
-    assert not misleading, (
-        f"Models advertise `character_image` without engine wiring or a "
-        f"`ui.variationStrength` declaration: {misleading}. Add an `ipAdapter`, "
-        f"`instantId`, or `pulidFlux` block in MODEL_TARGETS for an IP-Adapter / "
-        f"face-ID backbone, or declare `ui.variationStrength` for an edit-style "
-        f"backbone (sc-2017), or drop the capability flag (the z_image_turbo bug, "
-        f"sc-2005)."
-    )
-
-
-def test_kolors_declares_strict_pose_controlnet():
-    """sc-2264: Kolors is the strict pose tier — the manifest must advertise
-    ui.poseLibrary AND the worker target must carry the controlNetPose config so
-    the pose picker offers it and the adapter can load the pose ControlNet."""
-    model_targets = _model_targets()
-    manifest = _load_builtin_models_manifest()
-    manifest_by_id = {model["id"]: model for model in manifest.get("models", [])}
-    kolors = manifest_by_id.get("kolors", {})
-    assert kolors.get("ui", {}).get("poseLibrary") is True, (
-        "kolors must declare ui.poseLibrary so the pose picker offers the strict tier (sc-2264)."
-    )
-    target = model_targets.get("kolors", {})
-    assert target.get("controlNetPose", {}).get("repo") == "Kwai-Kolors/Kolors-ControlNet-Pose", (
-        "kolors MODEL_TARGETS must carry the Kolors-ControlNet-Pose repo for the strict pose path."
-    )
-    # Identity still rides the IP-Adapter; the pose path composes both.
-    assert target.get("ipAdapter"), "kolors pose path needs the IP-Adapter for identity."
-
-
-def test_models_with_engine_block_advertise_character_image():
-    """The reverse-drift guard. Any model that ships an `ipAdapter` or
-    `instantId` block in MODEL_TARGETS exists to serve Character Studio's
-    reference flow — the manifest must advertise the capability so the picker
-    surfaces it. Catches the case where someone wires the worker engine but
-    forgets to flip the manifest flag, leaving the engine unreachable.
-    """
-    model_targets = _model_targets()
-    manifest = _load_builtin_models_manifest()
-    manifest_by_id = {model["id"]: model for model in manifest.get("models", [])}
-    unreachable: list[str] = []
-    for model_id, target in model_targets.items():
-        if not (target.get("ipAdapter") or target.get("instantId") or target.get("pulidFlux")):
-            continue
-        builtin = manifest_by_id.get(model_id)
-        if builtin is None:
-            # Worker-only target not exposed as a built-in (unwired path).
-            continue
-        capabilities = builtin.get("capabilities") or []
-        if "character_image" not in capabilities:
-            unreachable.append(model_id)
-    assert not unreachable, (
-        f"Models have engine blocks in MODEL_TARGETS but the builtin manifest "
-        f"does not advertise `character_image`: {unreachable}. Add the capability "
-        f"to `capabilities` and `ui.recommendedFor` so the Image Studio "
-        f"\"With character\" picker surfaces the model."
-    )
 
 
 def test_hide_reference_strength_models_declare_a_variation_knob():
