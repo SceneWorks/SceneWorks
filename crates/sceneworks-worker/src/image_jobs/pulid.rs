@@ -180,36 +180,17 @@ fn pulid_weights_env_preset() -> Option<PulidWeights> {
     })
 }
 
-struct EnvRestore {
-    values: [(&'static str, Option<std::ffi::OsString>); 3],
-}
-
-impl Drop for EnvRestore {
-    fn drop(&mut self) {
-        for (key, value) in &self.values {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
+/// Build the engine's identity-weight seam from the resolved cache paths (sc-8827). The `pulid_flux`
+/// loader reads the PuLID adapter + EVA tower + native face stack from `LoadSpec::identity`, so the
+/// worker threads the paths through the spec instead of mutating the process-global `PULID_*` env vars
+/// at job time on the multithreaded tokio runtime (the old `set_var`/`remove_var` seam was unsound —
+/// F-025). The paths travel with the `LoadSpec` into the spawned load task, no env involved.
+fn pulid_identity_weights(weights: &PulidWeights) -> IdentityWeights {
+    IdentityWeights {
+        encoder: Some(WeightsSource::File(weights.adapter.clone())),
+        eva: Some(WeightsSource::File(weights.eva.clone())),
+        face_dir: Some(WeightsSource::Dir(weights.face_dir.clone())),
     }
-}
-
-fn set_pulid_weight_env(weights: &PulidWeights) -> EnvRestore {
-    let guard = EnvRestore {
-        values: [
-            ("PULID_FLUX_WEIGHTS", std::env::var_os("PULID_FLUX_WEIGHTS")),
-            ("PULID_EVA_WEIGHTS", std::env::var_os("PULID_EVA_WEIGHTS")),
-            (
-                "PULID_FACE_WEIGHTS_DIR",
-                std::env::var_os("PULID_FACE_WEIGHTS_DIR"),
-            ),
-        ],
-    };
-    std::env::set_var("PULID_FLUX_WEIGHTS", &weights.adapter);
-    std::env::set_var("PULID_EVA_WEIGHTS", &weights.eva);
-    std::env::set_var("PULID_FACE_WEIGHTS_DIR", &weights.face_dir);
-    guard
 }
 
 /// Resolve all PuLID-FLUX engine weight inputs, downloading the converted bundle + the PuLID
@@ -325,11 +306,11 @@ async fn generate_pulid_flux_stream(
     )?;
 
     let weights = ensure_pulid_weights(api, settings, job).await?;
-    // Feed the engine's weight seam from the resolved cache paths (the `pulid_flux` loader resolves
-    // the PuLID adapter + EVA + face stack from these env vars). Keep them scoped to this async job:
-    // the generator load happens inside the spawned stream task, so they must stay live through
-    // `consume_gen_events`, then `EnvRestore` removes/restores them before the next job.
-    let _pulid_env = set_pulid_weight_env(&weights);
+    // Feed the engine's weight seam from the resolved cache paths on the `LoadSpec` (the `pulid_flux`
+    // loader resolves the PuLID adapter + EVA + face stack from `LoadSpec::identity`, sc-8827). The
+    // paths ride the spec into the spawned load task — no process-global env mutation (the old
+    // `PULID_*` `set_var`/`remove_var` seam was unsound on the multithreaded runtime, F-025).
+    let identity = pulid_identity_weights(&weights);
 
     let steps = pulid_steps(request);
     let guidance = pulid_guidance(request);
@@ -402,7 +383,10 @@ async fn generate_pulid_flux_stream(
     let likeness_source = face_stack_dir.as_ref().map(|_| reference.clone());
     let likeness_source_ref = reference_id.to_owned();
 
-    let spec = load_spec(flux_base, quant, Vec::new(), None);
+    let mut spec = load_spec(flux_base, quant, Vec::new(), None);
+    // PuLID identity sub-model paths ride the spec (sc-8827) — the `pulid_flux` loader reads them from
+    // `LoadSpec::identity` instead of the process-global `PULID_*` env vars.
+    spec.identity = Some(identity);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         PULID_ENGINE_ID,

@@ -2417,6 +2417,11 @@ struct VideoGenInput {
     conditioning_fps: Option<u32>,
     // SeedVR2 input pre-blur (sc-4816); `None` on the other models.
     softness: Option<f32>,
+    // LTX-only external Gemma-3 text-encoder snapshot dir (sc-8827): rides `LoadSpec::text_encoder` so
+    // the LTX provider locates its Gemma encoder from the spec instead of the process-global
+    // `$LTX_GEMMA_DIR` env var (the old `set_var` seam was unsound on the multithreaded runtime,
+    // F-025). `None` on every other model (they bundle their TE) and when no override resolves.
+    text_encoder_dir: Option<PathBuf>,
 }
 
 #[cfg(any(
@@ -2454,6 +2459,7 @@ impl Default for VideoGenInput {
             decode_chunk_size: None,
             conditioning_fps: None,
             softness: None,
+            text_encoder_dir: None,
         }
     }
 }
@@ -2475,6 +2481,11 @@ fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
         // PiD super-resolving decode (epic 7840) is an image-only latent-space swap; video
         // providers have no PiD backbone, so never request it.
         pid: None,
+        // Video providers are not face-ID models — no identity sub-model weights.
+        identity: None,
+        // LTX's external Gemma-3 text encoder rides the spec (sc-8827); `None` ⇒ the provider's
+        // `$LTX_GEMMA_DIR` / `<root>/text_encoder` fallback.
+        text_encoder: input.text_encoder_dir.clone().map(WeightsSource::Dir),
     }
 }
 
@@ -2550,19 +2561,7 @@ fn run_loaded_video_generation(
 
 #[cfg(all(target_os = "macos", test))]
 fn load_video_generation_for_tests(input: &VideoGenInput) -> WorkerResult<Box<dyn Generator>> {
-    let spec = LoadSpec {
-        weights: WeightsSource::Dir(input.model_dir.clone()),
-        quantize: input.quant,
-        precision: Precision::Bf16,
-        control: None,
-        // MultiControlNet (sc-3378) is image-only; video providers ignore it.
-        extra_controls: Vec::new(),
-        ip_adapter: None,
-        adapters: input.adapters.clone(),
-        // PiD super-resolving decode (epic 7840) is an image-only latent-space swap; video
-        // providers have no PiD backbone, so never request it.
-        pid: None,
-    };
+    let spec = video_load_spec(input);
     gen_core::load(input.engine_id, &spec)
         .map_err(|error| WorkerError::Engine(format!("video load failed: {error}")))
 }
@@ -3052,19 +3051,19 @@ fn candle_video_snapshot_dir(settings: &Settings, repo: &str) -> WorkerResult<Pa
     })
 }
 
-/// Point the candle LTX provider at the Gemma-3-12B encoder snapshot via `LTX_GEMMA_DIR` (the env var
-/// the provider reads; it otherwise falls back to `<checkpoint>/text_encoder`). Best-effort: if the
-/// Gemma snapshot isn't in the HF cache we leave `LTX_GEMMA_DIR` unset so the provider tries its
-/// `<root>/text_encoder` fallback and emits its own clear "set LTX_GEMMA_DIR …" error. The worker runs
-/// video jobs sequentially, so the process-global env set is race-free.
+/// Resolve the Gemma-3-12B encoder snapshot dir for the candle LTX provider (sc-8827). Returns the
+/// HF-cache snapshot path so the caller can thread it onto `LoadSpec::text_encoder` — no more mutating
+/// the process-global `$LTX_GEMMA_DIR` at job time on the multithreaded runtime (the old `set_var`
+/// seam was unsound, F-025). Honors an explicit operator `$LTX_GEMMA_DIR` (returns `None` so the
+/// provider reads the env override itself). Best-effort: if the Gemma snapshot isn't in the HF cache
+/// we return `None` so the provider tries its `<root>/text_encoder` fallback and emits its own clear
+/// "set LTX_GEMMA_DIR …" error.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn ensure_ltx_gemma_dir(settings: &Settings) {
+fn resolve_ltx_gemma_dir(settings: &Settings) -> Option<PathBuf> {
     if std::env::var_os("LTX_GEMMA_DIR").is_some() {
-        return; // honor an explicit operator override.
+        return None; // honor an explicit operator override (the provider reads the env var).
     }
-    if let Some(dir) = huggingface_snapshot_dir(&settings.data_dir, CANDLE_LTX_GEMMA_REPO) {
-        std::env::set_var("LTX_GEMMA_DIR", dir);
-    }
+    huggingface_snapshot_dir(&settings.data_dir, CANDLE_LTX_GEMMA_REPO)
 }
 
 /// Raw-settings recorded on a candle video asset (mirrors `wan_raw_settings`, trimmed to the
@@ -3150,11 +3149,14 @@ async fn generate_candle_video(
     let adapter = candle_video_adapter_label(engine_id);
     let repo = candle_video_repo(request, engine_id);
     let model_dir = candle_video_snapshot_dir(settings, &repo)?;
-    // ltx needs the separate Gemma-3-12B encoder (its only conditioning input).
+    // ltx needs the separate Gemma-3-12B encoder (its only conditioning input). Resolve its snapshot
+    // dir here and thread it onto the LoadSpec below (sc-8827) instead of mutating `$LTX_GEMMA_DIR`.
     let is_ltx = engine_id == "ltx_2_3_distilled";
-    if is_ltx {
-        ensure_ltx_gemma_dir(settings);
-    }
+    let ltx_gemma_dir = if is_ltx {
+        resolve_ltx_gemma_dir(settings)
+    } else {
+        None
+    };
     // Wan 14B I2V conditions on a source image (`Conditioning::Reference`); every other candle video
     // engine is txt2video-only (empty conditioning).
     let conditioning =
@@ -3234,6 +3236,8 @@ async fn generate_candle_video(
         steps,
         guidance,
         seed: resolve_video_seed(request) as u64,
+        // ltx's Gemma-3 encoder dir rides the LoadSpec (sc-8827); `None` for wan (bundled TE).
+        text_encoder_dir: ltx_gemma_dir,
         ..VideoGenInput::default()
     };
     let raw_settings = candle_video_raw_settings(request, &repo);
@@ -4953,20 +4957,19 @@ fn bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
     gemma.is_dir().then_some(gemma)
 }
 
-/// Point the engine at the Gemma-3 text encoder bundled beside the resolved LTX dir (sc-5608).
-/// Setting `$LTX_GEMMA_DIR` (the var [`mlx-gen-ltx`'s `resolve_gemma_dir`] honors on every OS) makes
-/// a fresh install self-contained — no separate `mlx-community/gemma` download. Best-effort +
-/// non-destructive: honors an explicit operator `$LTX_GEMMA_DIR`, and skips when no bundled `gemma/`
-/// sibling exists ([`bundled_ltx_gemma_dir`]). The worker runs video jobs sequentially, so the env
-/// set is race-free.
+/// Resolve the Gemma-3 text encoder bundled beside the resolved LTX dir (sc-5608), returning it so the
+/// caller can thread it onto `LoadSpec::text_encoder` (sc-8827) — a fresh install is self-contained (no
+/// separate `mlx-community/gemma` download) without mutating the process-global `$LTX_GEMMA_DIR` at job
+/// time on the multithreaded runtime (the old `set_var` seam was unsound, F-025). Best-effort +
+/// non-destructive: returns `None` when an explicit operator `$LTX_GEMMA_DIR` is set (the provider
+/// reads the env var itself), and `None` when no bundled `gemma/` sibling exists
+/// ([`bundled_ltx_gemma_dir`]) so the provider falls back to the HF-cache gemma snapshot.
 #[cfg(target_os = "macos")]
-fn ensure_bundled_ltx_gemma_dir(model_dir: &Path) {
+fn resolve_bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
     if std::env::var_os("LTX_GEMMA_DIR").is_some() {
-        return; // honor an explicit operator override.
+        return None; // honor an explicit operator override (the provider reads the env var).
     }
-    if let Some(gemma) = bundled_ltx_gemma_dir(model_dir) {
-        std::env::set_var("LTX_GEMMA_DIR", gemma);
-    }
+    bundled_ltx_gemma_dir(model_dir)
 }
 
 /// On-demand fetch of the bundle's `q8/` subdir (sc-5679). The macOS default download is lean
@@ -5523,8 +5526,9 @@ async fn generate_ltx(
     ensure_ltx_q8_present(api, settings, job, request).await?;
     let model_dir = resolve_ltx_model_dir(settings, request)?;
     // When the resolved dir is the SceneWorks bundle subdir, its sibling `gemma/` is the text
-    // encoder — point the engine at it (sc-5608) before load. No-op for legacy/local conversions.
-    ensure_bundled_ltx_gemma_dir(&model_dir);
+    // encoder — thread it onto the LoadSpec (sc-8827, was `$LTX_GEMMA_DIR`). `None` for legacy/local
+    // conversions (no bundled sibling) ⇒ the engine falls back to the HF-cache gemma snapshot.
+    let text_encoder_dir = resolve_bundled_ltx_gemma_dir(&model_dir);
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -5548,6 +5552,7 @@ async fn generate_ltx(
         use_uncensored_enhancer: advanced::bool(&request.advanced, "useUncensoredEnhancer"),
         enhance_max_tokens,
         enhance_temperature,
+        text_encoder_dir,
         ..VideoGenInput::default()
     };
     generate_video(api, settings, job, backend, input).await
@@ -8775,6 +8780,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&bare);
     }
 
+    /// sc-8827 (F-025): the LTX Gemma-encoder dir rides `LoadSpec::text_encoder` (via
+    /// `VideoGenInput::text_encoder_dir`) instead of the process-global `$LTX_GEMMA_DIR`. This asserts
+    /// the path flows through `video_load_spec` onto the spec — `None` maps to `None` (env/`<root>`
+    /// fallback in the provider), a dir maps to `Some(WeightsSource::Dir(..))`.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn video_load_spec_threads_text_encoder_dir() {
+        let base = VideoGenInput {
+            engine_id: "ltx_2_3",
+            model_dir: PathBuf::from("/models/ltx/q4"),
+            ..VideoGenInput::default()
+        };
+        // No override → text_encoder None (the provider reads its env/`<root>` fallback).
+        assert!(
+            video_load_spec(&base).text_encoder.is_none(),
+            "no text_encoder_dir ⇒ no spec override"
+        );
+        // An explicit gemma dir rides the spec as a Dir source.
+        let gemma = PathBuf::from("/models/ltx/gemma");
+        let with_te = VideoGenInput {
+            text_encoder_dir: Some(gemma.clone()),
+            ..base
+        };
+        assert!(
+            matches!(video_load_spec(&with_te).text_encoder, Some(WeightsSource::Dir(ref p)) if *p == gemma),
+            "text_encoder_dir rides LoadSpec::text_encoder as a Dir source"
+        );
+    }
+
     /// Q8 opt-in detection (sc-5679): `advanced.mlxQuantize: 8` (int or string) → true; absent / Q4
     /// → false. Drives both the resolve quant preference and the on-demand q8 fetch.
     #[cfg(target_os = "macos")]
@@ -9409,9 +9446,9 @@ mod tests {
             eprintln!("skipping ltx_real_weights_with_audio: no complete LTX snapshot found");
             return;
         };
-        // The bundle ships gemma beside the q4/q8 dir; point the engine at it (matches the worker
-        // path) so the smoke needs no separate mlx-community/gemma snapshot in the HF cache.
-        ensure_bundled_ltx_gemma_dir(&model_dir);
+        // The bundle ships gemma beside the q4/q8 dir; thread it onto the LoadSpec (matches the worker
+        // path, sc-8827) so the smoke needs no separate mlx-community/gemma snapshot in the HF cache.
+        let text_encoder_dir = resolve_bundled_ltx_gemma_dir(&model_dir);
         let input = VideoGenInput {
             sampler: None,
             scheduler: None,
@@ -9423,6 +9460,7 @@ mod tests {
             frames: 9,
             fps: 24,
             seed: 7,
+            text_encoder_dir,
             ..VideoGenInput::default()
         };
         let cancel = CancelFlag::new();

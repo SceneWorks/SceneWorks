@@ -34,6 +34,10 @@ use gen_core::{
     AdapterKind, AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest,
     Generator, Image, LoadSpec, Progress, Quant, WeightsSource,
 };
+// `IdentityWeights` (the PuLID-FLUX `LoadSpec::identity` seam, sc-8827) is used only by the macOS MLX
+// PuLID path (`image_jobs/pulid.rs`); gate it so the candle lane's `-D warnings` sees no unused import.
+#[cfg(target_os = "macos")]
+use gen_core::IdentityWeights;
 // `AdapterKind` (LoRA/LoKr classification) was MLX-only until sc-5126: the candle Lens lane is the
 // first candle family to take LoRA/LoKr, so it now classifies adapters too and the import moved into
 // the shared block above. `ControlKind` (ControlNet conditioning) was MLX-only until sc-8304: the candle
