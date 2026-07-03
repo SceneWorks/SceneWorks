@@ -940,10 +940,12 @@ pub(crate) async fn run_prompt_refine_job(
                         .map_err(|error| task_join_error("prompt refine task join", error))??;
                     // Deliver the FINAL coalesced snapshot (the watch's resident terminal value — the
                     // last token count, never dropped) so the terminal progress is always correct even
-                    // if it landed between ticks.
-                    if let Some((current, total)) =
-                        next_progress_post(*progress_rx.borrow(), last_posted)
-                    {
+                    // if it landed between ticks. Copy the `(u32, u32)` out of the borrow into a plain
+                    // value FIRST so the non-`Send` `watch::Ref` guard is dropped before the `.await`
+                    // (holding it across the await would make `run_worker_loop`'s future `!Send` and
+                    // break the `tokio::spawn` in rust-api — build-windows caught this).
+                    let latest = *progress_rx.borrow();
+                    if let Some((current, total)) = next_progress_post(latest, last_posted) {
                         post_refine_progress(api, &job.id, current, total, work_message, backend)
                             .await?;
                     }
@@ -952,9 +954,10 @@ pub(crate) async fn run_prompt_refine_job(
                 _ = progress_interval.tick() => {
                     // Coalesced progress: post ONLY the latest token count, and only if it moved since
                     // the last post (a stalled decode holds the same value → no redundant re-POST).
-                    if let Some((current, total)) =
-                        next_progress_post(*progress_rx.borrow(), last_posted)
-                    {
+                    // Copy out of the borrow first so the non-`Send` `watch::Ref` is not held across
+                    // the `.await` (keeps `run_worker_loop`'s future `Send` for `tokio::spawn`).
+                    let latest = *progress_rx.borrow();
+                    if let Some((current, total)) = next_progress_post(latest, last_posted) {
                         post_refine_progress(api, &job.id, current, total, work_message, backend)
                             .await?;
                         last_posted = Some((current, total));
