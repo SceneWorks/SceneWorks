@@ -26,6 +26,101 @@ fn flux2_grouping(request: &ImageRequest) -> Flux2Grouping {
     Flux2Grouping::Plain
 }
 
+/// The per-iteration plan shared by every native edit stream (FLUX.2 / Qwen-Edit / SenseNova-U1,
+/// F-024 sc-8826): the `(seeds, prompts, pose_inputs)` grouping expansion, the
+/// `angleSet`/`poseLibrary` raw-settings stamping, and the identity-likeness gate. Built once by
+/// [`plan_edit_batch`] and consumed by all three lanes so a change to the plain-With-Character gate
+/// (sc-4411) lands in exactly one place.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct EditBatch {
+    /// Per-iteration seed (shared across an angle/pose set, per-image on the plain path).
+    seeds: Vec<i64>,
+    /// Per-iteration prompt (angle/pose augment on the set paths, the base prompt on plain).
+    prompts: Vec<String>,
+    /// Full `PoseInput`s (keypoints + hands + face) for the pose tier; `None` for angles/plain.
+    pose_inputs: Option<Vec<PoseInput>>,
+    /// The lane's base raw settings with `angleSet`/`poseLibrary` stamped per grouping.
+    raw_settings: JsonObject,
+    /// Whether this generation is identity-likeness scored (epic 4406): a Character-Studio angle
+    /// set, a pose-library set, OR a plain With-Character `character_image` job (sc-4411). Drives
+    /// the [`stage_likeness`] call each lane makes with `references[0]` as the scored source.
+    score_likeness: bool,
+}
+
+/// Build the [`EditBatch`] for a native edit stream from its resolved `grouping` and its
+/// lane-specific `raw_settings` (the per-lane `*_edit_raw_settings` output — the ONLY per-stream
+/// input, so the grouping/stamping/gating logic stays identical across FLUX.2 / Qwen / SenseNova).
+///
+/// Grouping expansion (parity with the `Mlx*Adapter` decision):
+/// - `Poses(n)`: shared seed, one `augment_prompt_for_pose` prompt per pose, full `PoseInput`s kept
+///   so whole-body poses thread hand/face articulation into the skeleton (sc-6702 / sc-6599).
+/// - `Angles`: shared seed so noise-derived attributes (hair, lighting) stay constant across angles
+///   — only the head pose changes (sc-2050 InstantID strategy) — with a per-angle prompt augment.
+/// - `Plain`: `count` independent per-image seeds, the base prompt each.
+///
+/// Likeness gate (epic 4406, sc-4409 angles / sc-4410 poses / sc-4411 plain With-Character): the
+/// generator-agnostic post-pass applies to EVERY character_image generation. `character_set` covers
+/// the angle + pose sets; `plain_with_character` is a `character_image` job (so NOT an `edit_image`,
+/// whose `Plain` grouping also lands here but carries a `sourceAssetId`, not an identity reference)
+/// whose `Plain` grouping is the general subject-variation case — for that lane the scored reference
+/// is `references[0]`, which for a `character_image` job IS the `referenceAssetId` (first in the
+/// lane's `*_edit_reference_ids`). `score_likeness` covers all three.
+#[cfg(target_os = "macos")]
+fn plan_edit_batch(
+    request: &ImageRequest,
+    grouping: &Flux2Grouping,
+    mut raw_settings: JsonObject,
+) -> EditBatch {
+    let set_seed = resolve_seed(request, 0);
+    let (seeds, prompts, pose_inputs): (Vec<i64>, Vec<String>, Option<Vec<PoseInput>>) =
+        match grouping {
+            Flux2Grouping::Poses(count) => {
+                let poses = parse_poses(request);
+                let prompts = vec![augment_prompt_for_pose(&request.prompt); *count];
+                (vec![set_seed; *count], prompts, Some(poses))
+            }
+            Flux2Grouping::Angles => {
+                let prompts = CHARACTER_ANGLE_SET_ORDER
+                    .iter()
+                    .map(|angle| augment_prompt_for_angle(&request.prompt, angle))
+                    .collect();
+                (
+                    vec![set_seed; CHARACTER_ANGLE_SET_ORDER.len()],
+                    prompts,
+                    None,
+                )
+            }
+            Flux2Grouping::Plain => {
+                let count = request.count as usize;
+                let seeds = (0..count).map(|index| resolve_seed(request, index)).collect();
+                (seeds, vec![request.prompt.clone(); count], None)
+            }
+        };
+
+    match grouping {
+        Flux2Grouping::Angles => {
+            raw_settings.insert("angleSet".to_owned(), Value::Bool(true));
+        }
+        Flux2Grouping::Poses(_) => {
+            raw_settings.insert("poseLibrary".to_owned(), Value::Bool(true));
+        }
+        Flux2Grouping::Plain => {}
+    }
+
+    let character_set = matches!(grouping, Flux2Grouping::Angles | Flux2Grouping::Poses(_));
+    let plain_with_character =
+        matches!(grouping, Flux2Grouping::Plain) && request.mode == "character_image";
+    let score_likeness = character_set || plain_with_character;
+
+    EditBatch {
+        seeds,
+        prompts,
+        pose_inputs,
+        raw_settings,
+        score_likeness,
+    }
+}
+
 /// True when the FLUX.2 Image-Edit source should be pre-fitted to W×H (parity with the
 /// `MlxFlux2Adapter` fit gate): `edit_image` mode, a source asset, no character
 /// `referenceAssetId`, and a non-`stretch` fit mode. The Character-Studio reference
@@ -378,96 +473,50 @@ async fn generate_flux2_edit_stream(
 
     // sc-3030 per-iteration grouping: a Character-Studio angle set (11 shared-seed,
     // per-angle prompt) / best-effort pose tier (one per pose, shared seed, each a
-    // `[skeleton, reference]` set) / else the plain per-image reference path.
+    // `[skeleton, reference]` set) / else the plain per-image reference path. The grouping
+    // expansion, angleSet/poseLibrary stamping, and the identity-likeness gate (incl. the sc-4411
+    // plain-With-Character case) are the shared `plan_edit_batch` builder (F-024 sc-8826). The
+    // whole-body pose PoseInputs thread their hand/face articulation into the skeleton below
+    // (sc-6702). Identity-likeness scoring (epic 4406, sc-4409 angles / sc-4410 poses / sc-4411
+    // plain With-Character) applies to EVERY character_image generation on this FLUX.2 edit lane,
+    // which produces the FINAL image directly (no face-restore pass), so scoring the generated
+    // image scores what the user sees.
     let grouping = flux2_grouping(request);
-    let set_seed = resolve_seed(request, 0);
-    let (seeds, prompts, pose_inputs): (
-        Vec<i64>,
-        Vec<String>,
-        Option<Vec<PoseInput>>,
-    ) = match &grouping {
-        Flux2Grouping::Poses(count) => {
-            // Shared seed so only the pose changes across the set (Python parity).
-            // Keep the full PoseInput (keypoints + hands + face) so whole-body poses
-            // thread their hand/face articulation into the skeleton below (sc-6702).
-            let poses = parse_poses(request);
-            let prompts = vec![augment_prompt_for_pose(&request.prompt); *count];
-            (vec![set_seed; *count], prompts, Some(poses))
-        }
-        Flux2Grouping::Angles => {
-            // Shared seed so noise-derived attributes (hair, lighting) stay constant
-            // across angles — only the head pose changes (sc-2050 InstantID strategy).
-            let prompts = CHARACTER_ANGLE_SET_ORDER
-                .iter()
-                .map(|angle| augment_prompt_for_angle(&request.prompt, angle))
-                .collect();
-            (
-                vec![set_seed; CHARACTER_ANGLE_SET_ORDER.len()],
-                prompts,
-                None,
-            )
-        }
-        Flux2Grouping::Plain => {
-            let count = request.count as usize;
-            let seeds = (0..count)
-                .map(|index| resolve_seed(request, index))
-                .collect();
-            (seeds, vec![request.prompt.clone(); count], None)
-        }
-    };
+    let EditBatch {
+        seeds,
+        prompts,
+        pose_inputs,
+        raw_settings,
+        score_likeness,
+    } = plan_edit_batch(
+        request,
+        &grouping,
+        flux2_edit_raw_settings(
+            request,
+            &repo,
+            engine_id,
+            steps,
+            quant_bits,
+            guidance,
+            references.len(),
+        ),
+    );
     let total = seeds.len();
 
-    let mut raw_settings = flux2_edit_raw_settings(
-        request,
-        &repo,
-        engine_id,
-        steps,
-        quant_bits,
-        guidance,
-        references.len(),
-    );
-    match grouping {
-        Flux2Grouping::Angles => {
-            raw_settings.insert("angleSet".to_owned(), Value::Bool(true));
-        }
-        Flux2Grouping::Poses(_) => {
-            raw_settings.insert("poseLibrary".to_owned(), Value::Bool(true));
-        }
-        Flux2Grouping::Plain => {}
-    }
-
-    // Identity-likeness scoring (epic 4406, sc-4409 angles / sc-4410 poses / sc-4411 plain
-    // With-Character): the generator-agnostic post-pass applies to EVERY character_image generation, not
-    // just InstantID-routed ones — a Character-Studio angle set, a pose-library set, OR a plain
-    // With-Character generation on a FLUX.2 edit model is scored through the same shared seam. The FLUX.2
-    // edit path produces the FINAL image directly (no face-restore pass on this lane), so scoring the
-    // generated image scores what the user sees. The PLAIN case (sc-4411) is scored only when this is a
-    // `character_image` job with a character `referenceAssetId` (NOT an `edit_image` job, whose `Plain`
-    // grouping also lands here but carries the `sourceAssetId`, not an identity reference). The angle +
-    // pose sets keep their existing scoring; this just adds the plain `character_image` case so the
-    // common With-Character generation is scored too — `score_likeness` covers all three. Stage the
-    // antelopev2 face stack (same bundle InstantID uses; a no-op if already cached) and capture the
-    // source identity reference + its asset id; the `!Send` scorer is built ONCE inside the
-    // generator-worker closure below and reused across all outputs. Staging is non-fatal (a failure → no
-    // scorer → scores omitted, the generation still renders).
-    let character_set = matches!(grouping, Flux2Grouping::Angles | Flux2Grouping::Poses(_));
-    // Plain With-Character: a `character_image` job (so NOT an `edit_image`) whose `Plain` grouping is the
-    // general subject-variation case (sc-4411). For this lane the scored reference is `references[0]` —
-    // for a character_image job that IS the `referenceAssetId` (it is first in `flux2_edit_reference_ids`).
-    let plain_with_character =
-        matches!(grouping, Flux2Grouping::Plain) && request.mode == "character_image";
-    let score_likeness = character_set || plain_with_character;
-    let face_stack_dir = if score_likeness {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // Stage the antelopev2 face stack (same bundle InstantID uses; a no-op if already cached) and
+    // capture the source identity reference + its asset id; the `!Send` scorer is built ONCE inside
+    // the generator-worker closure below and reused across all outputs. Staging is non-fatal (a
+    // failure → no scorer → scores omitted, the generation still renders). The scored reference is
+    // `references[0]` — for a character_image job that IS the `referenceAssetId` (first in
+    // `flux2_edit_reference_ids`).
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        score_likeness,
+        "character_image face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     let likeness_source = (score_likeness && face_stack_dir.is_some()).then(|| references[0].clone());
     let likeness_source_ref = reference_ids.first().cloned();
 
@@ -919,17 +968,14 @@ async fn generate_flux2_dev_control_stream(
     // set still renders). The `!Send` scorer is built ONCE in the closure (source embedded once, reused
     // across all poses).
     let likeness_source = resolve_control_identity_source(request, settings, project_path);
-    let face_stack_dir = if likeness_source.is_some() {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        likeness_source.is_some(),
+        "pose-set face-stack staging failed; likeness scores omitted",
+    )
+    .await;
 
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);

@@ -204,17 +204,14 @@ async fn generate_qwen_control_stream(
     // + face-stack staging are non-fatal; the `!Send` scorer is built ONCE in the closure (source
     // embedded once, reused across poses).
     let likeness_source = resolve_control_identity_source(request, settings, project_path);
-    let face_stack_dir = if likeness_source.is_some() {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        likeness_source.is_some(),
+        "pose-set face-stack staging failed; likeness scores omitted",
+    )
+    .await;
 
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
@@ -650,64 +647,29 @@ async fn generate_qwen_edit_stream(
             .collect::<WorkerResult<Vec<_>>>()?;
     }
 
-    // Per-iteration grouping (shared with the FLUX.2 edit path): a Character-Studio angle
-    // set (11 shared-seed, per-angle prompt) / best-effort pose tier (one per pose, shared
-    // seed, each a `[reference, skeleton]` set) / else the plain per-image reference path.
+    // Per-iteration grouping (shared with the FLUX.2 edit path via `plan_edit_batch`, F-024
+    // sc-8826): a Character-Studio angle set (11 shared-seed, per-angle prompt) / best-effort pose
+    // tier (one per pose, shared seed, each a `[reference, skeleton]` set) / else the plain
+    // per-image reference path. The whole-body pose PoseInputs thread their hand/face articulation
+    // into the skeleton below (sc-6599). The builder also stamps angleSet/poseLibrary and computes
+    // the identity-likeness gate (incl. the sc-4411 plain-With-Character case). Scoring (epic 4406,
+    // sc-4409 angles / sc-4410 poses / sc-4411 plain With-Character) is generator-agnostic — Qwen-Edit
+    // produces the FINAL image directly (no face-restore pass), so scoring the generated image scores
+    // what the user sees.
     let grouping = flux2_grouping(request);
-    let set_seed = resolve_seed(request, 0);
-    let (seeds, prompts, pose_inputs): (
-        Vec<i64>,
-        Vec<String>,
-        Option<Vec<PoseInput>>,
-    ) = match &grouping {
-        Flux2Grouping::Poses(count) => {
-            // Shared seed so only the pose changes across the set (Python parity).
-            // Keep the full PoseInput (keypoints + hands + face) so whole-body poses
-            // thread their hand/face articulation into the skeleton below (sc-6599).
-            let poses = parse_poses(request);
-            let prompts = vec![augment_prompt_for_pose(&request.prompt); *count];
-            (vec![set_seed; *count], prompts, Some(poses))
-        }
-        Flux2Grouping::Angles => {
-            // Shared seed so noise-derived attributes (hair, lighting) stay constant
-            // across angles — only the head pose changes.
-            let prompts = CHARACTER_ANGLE_SET_ORDER
-                .iter()
-                .map(|angle| augment_prompt_for_angle(&request.prompt, angle))
-                .collect();
-            (
-                vec![set_seed; CHARACTER_ANGLE_SET_ORDER.len()],
-                prompts,
-                None,
-            )
-        }
-        Flux2Grouping::Plain => {
-            let count = request.count as usize;
-            let seeds = (0..count)
-                .map(|index| resolve_seed(request, index))
-                .collect();
-            (seeds, vec![request.prompt.clone(); count], None)
-        }
-    };
+    let EditBatch {
+        seeds,
+        prompts,
+        pose_inputs,
+        mut raw_settings,
+        score_likeness,
+    } = plan_edit_batch(
+        request,
+        &grouping,
+        qwen_edit_raw_settings(request, &repo, steps, quant_bits, guidance, references.len()),
+    );
     let total = seeds.len();
 
-    let mut raw_settings = qwen_edit_raw_settings(
-        request,
-        &repo,
-        steps,
-        quant_bits,
-        guidance,
-        references.len(),
-    );
-    match grouping {
-        Flux2Grouping::Angles => {
-            raw_settings.insert("angleSet".to_owned(), Value::Bool(true));
-        }
-        Flux2Grouping::Poses(_) => {
-            raw_settings.insert("poseLibrary".to_owned(), Value::Bool(true));
-        }
-        Flux2Grouping::Plain => {}
-    }
     // Record the Lightning recipe for telemetry/A-B parity (matches the Python `distillLora`
     // key format `repo/file`); absent on the production multi-step variants.
     if let Some(distill) = &lightning {
@@ -721,34 +683,19 @@ async fn generate_qwen_edit_stream(
         );
     }
 
-    // Identity-likeness scoring (epic 4406, sc-4409 angles / sc-4410 poses / sc-4411 plain
-    // With-Character): generator-agnostic — a Character-Studio angle set, a pose-library set, OR a plain
-    // With-Character generation on Qwen-Edit is scored through the same shared seam as InstantID /
-    // FLUX.2. The Qwen edit path produces the FINAL image directly (no face-restore pass on this lane),
-    // so scoring the generated image scores what the user sees. The PLAIN case (sc-4411) is scored only
-    // when this is a `character_image` job with a character `referenceAssetId` (NOT an `edit_image` job,
-    // whose `Plain` grouping also lands here but carries `sourceAssetId`, not an identity reference).
-    // Stage the antelopev2 face stack (shared bundle, no-op if cached) and capture the source identity
-    // reference + asset id; the `!Send` scorer is built ONCE in the closure and reused across all
-    // outputs. Staging is non-fatal (failure → no scorer → scores omitted, generation still renders).
-    let character_set = matches!(grouping, Flux2Grouping::Angles | Flux2Grouping::Poses(_));
-    // Plain With-Character (sc-4411): a `character_image` job (so NOT an `edit_image`) whose `Plain`
-    // grouping is the general subject-variation case. The scored reference is `references[0]` — for a
-    // character_image job that IS the `referenceAssetId` (first in `flux2_edit_reference_ids`).
-    let plain_with_character =
-        matches!(grouping, Flux2Grouping::Plain) && request.mode == "character_image";
-    let score_likeness = character_set || plain_with_character;
-    let face_stack_dir = if score_likeness {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // Stage the antelopev2 face stack (shared bundle, no-op if cached) and capture the source
+    // identity reference + asset id; the `!Send` scorer is built ONCE in the closure and reused
+    // across all outputs. Staging is non-fatal (failure → no scorer → scores omitted, generation
+    // still renders). The scored reference is `references[0]` — for a character_image job that IS
+    // the `referenceAssetId` (first in `qwen_edit_reference_ids`).
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        score_likeness,
+        "character_image face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     let likeness_source = (score_likeness && face_stack_dir.is_some()).then(|| references[0].clone());
     let likeness_source_ref = reference_ids.first().cloned();
 

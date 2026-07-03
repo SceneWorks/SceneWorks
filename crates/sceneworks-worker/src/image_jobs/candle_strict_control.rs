@@ -128,17 +128,14 @@ async fn run_candle_strict_control<P: CandleStrictControl>(
     // `!Send` scorer is built ONCE in the load closure on the blocking thread (source embedded once,
     // reused across all poses).
     let likeness_source = resolve_control_identity_source(request, settings, project_path);
-    let face_stack_dir = if likeness_source.is_some() {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        likeness_source.is_some(),
+        "pose-set face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
 
     let engine_label = provider.engine_label();

@@ -2063,6 +2063,37 @@ fn parse_poses(request: &ImageRequest) -> Vec<PoseInput> {
         .collect()
 }
 
+/// Stage the antelopev2 face stack for identity-likeness scoring (epic 4406), collapsing the
+/// warn-and-`None` staging block duplicated across every scored image lane (F-024, sc-8826). When
+/// `should_stage` is false the stack is never fetched and this is `None`; when true it downloads the
+/// shared InstantID bundle (a no-op if already cached) and returns its dir. Staging is **non-fatal**:
+/// a download failure logs `warn_message` and yields `None`, so the scorer is simply skipped and the
+/// generation still renders (no scores). `warn_message` is the per-lane phrasing (e.g. the
+/// `character_image` edit streams vs. the `pose-set` control lanes) so the log line is unchanged from
+/// the hand-written blocks this replaces.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn stage_likeness(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    should_stage: bool,
+    warn_message: &'static str,
+) -> Option<PathBuf> {
+    if !should_stage {
+        return None;
+    }
+    match ensure_face_stack_dir(api, settings, job).await {
+        Ok(dir) => Some(dir),
+        Err(error) => {
+            tracing::warn!(error = %error, "{warn_message}");
+            None
+        }
+    }
+}
+
 /// The per-angle continuation clause appended to the user's prompt (parity with
 /// `character_studio_angles.ANGLE_PROMPT_AUGMENTS`). Unknown angle → empty.
 #[cfg(any(
@@ -2405,16 +2436,14 @@ async fn generate_stream(
     // which also resolves the CURRENT job's reference (so changing it changes the scored source) and is
     // non-fatal. The `!Send` scorer is built ONCE inside the closure and reused across the N outputs.
     let likeness_source = resolve_character_image_likeness_source(request, settings, project_path);
-    let face_stack_dir = match &likeness_source {
-        Some(_) => match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
-                None
-            }
-        },
-        None => None,
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        likeness_source.is_some(),
+        "character_image face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     // Keep the source only if the face stack staged (otherwise no scorer can be built).
     let likeness_source = face_stack_dir.as_ref().and(likeness_source);
 

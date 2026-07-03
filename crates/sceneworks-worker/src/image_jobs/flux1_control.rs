@@ -286,17 +286,14 @@ async fn generate_flux1_dev_control_stream(
     // (missing reference / failure → no scorer → scores omitted, set still renders). The `!Send` scorer
     // is built ONCE in the closure (source embedded once, reused across all poses).
     let likeness_source = resolve_control_identity_source(request, settings, project_path);
-    let face_stack_dir = if likeness_source.is_some() {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        likeness_source.is_some(),
+        "pose-set face-stack staging failed; likeness scores omitted",
+    )
+    .await;
 
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
