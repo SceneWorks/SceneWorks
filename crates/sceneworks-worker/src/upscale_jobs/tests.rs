@@ -427,26 +427,137 @@ fn real_esrgan_candle_real_weights_upscales() {
 
 // --- Dataset Doctor one-tap upscale plumbing (sc-6539), pure + weight-free ---
 
+#[cfg(test)]
+fn upscale_test_settings(data_dir: &std::path::Path) -> crate::Settings {
+    crate::Settings {
+        api_url: "http://127.0.0.1".to_owned(),
+        access_token: None,
+        data_dir: data_dir.to_path_buf(),
+        config_dir: data_dir.join("config"),
+        worker_id: "test-worker".to_owned(),
+        gpu_id: "gpu-0".to_owned(),
+        is_child_worker: false,
+        poll_seconds: 1,
+        heartbeat_seconds: 1,
+        shutdown_timeout_seconds: 1,
+        huggingface_base_url: crate::DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
+        huggingface_token: None,
+        credentials: Vec::new(),
+        max_lora_url_bytes: crate::DEFAULT_MAX_LORA_URL_BYTES,
+        max_model_url_bytes: crate::DEFAULT_MAX_MODEL_URL_BYTES,
+        allow_private_lora_urls: false,
+        utility_workers: 1,
+        backend_mlx_enabled: true,
+        backend_candle_enabled: false,
+        gpu_memory_limit_bytes: 0,
+    }
+}
+
 #[test]
 fn parse_dataset_upscale_items_reads_valid_entries_and_skips_malformed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let settings = upscale_test_settings(dir.path());
+    let dataset_root = dir.path().join("datasets").join("ds-1");
+    let a = dataset_root.join("a.png");
+    let d = dataset_root.join("d.jpg");
     let payload = json!({
+        "datasetRoot": dataset_root.display().to_string(),
         "items": [
-            { "itemId": "a", "imagePath": "/data/a.png", "assetId": "asset_a" },
-            { "itemId": "", "imagePath": "/data/blank.png" }, // empty id → skipped
-            { "itemId": "c" },                                // no imagePath → skipped
-            { "itemId": "d", "imagePath": "/data/d.jpg" },
+            { "itemId": "a", "imagePath": a.display().to_string(), "assetId": "asset_a" },
+            { "itemId": "", "imagePath": dataset_root.join("blank.png").display().to_string() }, // empty id → skipped
+            { "itemId": "c" },                                                                    // no imagePath → skipped
+            { "itemId": "d", "imagePath": d.display().to_string() },
         ],
     });
-    let items = parse_dataset_upscale_items(payload.as_object().unwrap());
+    let items =
+        parse_dataset_upscale_items(&settings, payload.as_object().unwrap()).expect("items parse");
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].item_id, "a");
-    assert_eq!(items[0].image_path, std::path::PathBuf::from("/data/a.png"));
+    assert_eq!(items[0].image_path, a);
     assert_eq!(items[1].item_id, "d");
 }
 
 #[test]
 fn parse_dataset_upscale_items_is_empty_without_an_items_array() {
-    assert!(parse_dataset_upscale_items(json!({}).as_object().unwrap()).is_empty());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let settings = upscale_test_settings(dir.path());
+    let dataset_root = dir.path().join("datasets").join("ds-1");
+    let payload = json!({ "datasetRoot": dataset_root.display().to_string() });
+    assert!(
+        parse_dataset_upscale_items(&settings, payload.as_object().unwrap())
+            .expect("empty parse")
+            .is_empty()
+    );
+}
+
+// sc-8842 / F-040: a client-supplied `imagePath` escaping the app-managed dataset root is an
+// arbitrary-file-read/exfil primitive; `resolve_dataset_item_path` must reject it so the job fails
+// rather than reading (and later re-pointing at) an out-of-tree file.
+#[test]
+fn parse_dataset_upscale_items_reject_image_path_outside_dataset_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let settings = upscale_test_settings(dir.path());
+    let dataset_root = dir.path().join("datasets").join("ds-1");
+    let payload = json!({
+        "datasetRoot": dataset_root.display().to_string(),
+        "items": [
+            {
+                "itemId": "item_1",
+                "imagePath": dataset_root.join("../../etc/secret.png").display().to_string(),
+            },
+        ],
+    });
+    let error = parse_dataset_upscale_items(&settings, payload.as_object().unwrap())
+        .expect_err("traversal image path rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("Dataset upscale item item_1 imagePath"),
+        "{error}"
+    );
+}
+
+#[test]
+fn parse_dataset_upscale_items_reject_missing_dataset_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let settings = upscale_test_settings(dir.path());
+    let payload = json!({ "items": [{ "itemId": "a", "imagePath": "a.png" }] });
+    let error = parse_dataset_upscale_items(&settings, payload.as_object().unwrap())
+        .expect_err("missing datasetRoot rejected");
+    assert!(error.to_string().contains("datasetRoot"), "{error}");
+}
+
+// sc-8842 / F-040: the output write path interpolates client-supplied `datasetId`/`itemId`; a
+// traversal component must be rejected by `safe_project_path` before `save_with_format` runs so a
+// crafted id cannot overwrite an arbitrary out-of-tree file with PNG bytes.
+#[test]
+fn dataset_upscale_output_path_rejects_traversal_ids() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let project_path = dir.path().join("project");
+    // itemId traversal
+    let rel = format!("training/datasets/ds-1/upscaled/{}.png", "../../escaped");
+    let error =
+        crate::safe_project_path(&project_path, &rel).expect_err("traversal itemId rejected");
+    assert!(
+        error.to_string().contains("Unsafe project-relative path"),
+        "{error}"
+    );
+    // datasetId traversal
+    let rel = format!("training/datasets/{}/upscaled/a.png", "../../../etc");
+    let error =
+        crate::safe_project_path(&project_path, &rel).expect_err("traversal datasetId rejected");
+    assert!(
+        error.to_string().contains("Unsafe project-relative path"),
+        "{error}"
+    );
+    // valid ids resolve inside the project tree
+    let rel = "training/datasets/ds-1/upscaled/item_1.png";
+    let abs = crate::safe_project_path(&project_path, rel).expect("valid path resolves");
+    assert!(abs.starts_with(&project_path), "{abs:?}");
+    assert!(
+        abs.ends_with("training/datasets/ds-1/upscaled/item_1.png"),
+        "{abs:?}"
+    );
 }
 
 #[test]
