@@ -1539,13 +1539,29 @@ impl JobsStore {
         connection: &Connection,
         statuses: &[&str],
     ) -> JobsStoreResult<Vec<JobSnapshot>> {
-        let mut jobs = Vec::new();
-        for status in statuses {
-            let mut statement = connection.prepare("select * from jobs where status = ?1")?;
-            jobs.extend(collect_jobs(
-                statement.query_map(params![status], row_to_job)?,
-            )?);
+        // One prepared statement + one table scan instead of preparing and
+        // executing `where status = ?` once per status (sc-8896 / F-094). The
+        // status list is quoted from the caller-provided `&[&str]` — always
+        // crate constants (e.g. ACTIVE_STATUSES), never user input — so direct
+        // interpolation is safe, matching active_statuses_sql()'s rationale.
+        // The old per-status loop returned rows grouped by status in the input
+        // order with no intra-group ordering; the single caller
+        // (mark_interrupted_on_startup) uses only the ids, so ordering is not
+        // load-bearing. We add an explicit `order by created_at desc` anyway to
+        // make the result deterministic and consistent with list_jobs/queue
+        // reads rather than leaving it to SQLite's unspecified row order.
+        if statuses.is_empty() {
+            return Ok(Vec::new());
         }
+        let status_list = statuses
+            .iter()
+            .map(|status| format!("'{status}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement = connection.prepare(&format!(
+            "select * from jobs where status in ({status_list}) order by created_at desc"
+        ))?;
+        let jobs = collect_jobs(statement.query_map([], row_to_job)?)?;
         Ok(jobs)
     }
 

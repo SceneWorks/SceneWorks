@@ -1059,6 +1059,102 @@ fn startup_interrupt_returns_post_update_job_snapshots() {
 }
 
 #[test]
+fn startup_interrupt_collects_every_active_status() {
+    // sc-8896 / F-094: mark_interrupted_on_startup selects the in-flight jobs via
+    // list_jobs_by_status_on_connection(ACTIVE_STATUSES), now a single
+    // `status in (...)` scan instead of a per-status loop. This pins that the fold
+    // still gathers jobs sitting in DIFFERENT active statuses (running vs saving),
+    // not just one, and leaves a queued (non-active) job alone.
+    let store = store("startup-interrupt-all-statuses");
+    register_image_worker(&store);
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-2".to_owned(),
+            gpu_id: "gpu-1".to_owned(),
+            gpu_name: Some("GPU 1".to_owned()),
+            capabilities: vec![WorkerCapability::ImageGenerate],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("second worker registers");
+
+    // Job A -> running (worker-1); Job B -> saving (worker-2). Both are active but
+    // in distinct statuses, so a per-status miss would drop one.
+    let running = store
+        .create_job(image_job(Map::new()))
+        .expect("job A creates");
+    store.claim_next_job("worker-1").expect("worker-1 claims A");
+    store
+        .update_job_progress(
+            &running.id,
+            ProgressUpdate {
+                status: JobStatus::Running,
+                stage: ProgressStage::Running,
+                progress: 0.4,
+                message: "running".to_owned(),
+                error: None,
+                result: None,
+                eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
+                backend: None,
+                worker_id: Some("worker-1".to_owned()),
+            },
+        )
+        .expect("A -> running");
+
+    let saving = store
+        .create_job(image_job(Map::new()))
+        .expect("job B creates");
+    store.claim_next_job("worker-2").expect("worker-2 claims B");
+    store
+        .update_job_progress(
+            &saving.id,
+            ProgressUpdate {
+                status: JobStatus::Saving,
+                stage: ProgressStage::Saving,
+                progress: 0.9,
+                message: "saving".to_owned(),
+                error: None,
+                result: None,
+                eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
+                backend: None,
+                worker_id: Some("worker-2".to_owned()),
+            },
+        )
+        .expect("B -> saving");
+
+    // A third job stays queued (not an active status) and must be left untouched.
+    let queued = store
+        .create_job(image_job(Map::new()))
+        .expect("job C creates");
+
+    let interrupted = store
+        .mark_interrupted_on_startup()
+        .expect("startup interrupt succeeds");
+    let interrupted_ids = interrupted
+        .iter()
+        .map(|job| job.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        interrupted.len(),
+        2,
+        "both active jobs across running+saving are collected, got {interrupted_ids:?}"
+    );
+    assert!(interrupted_ids.contains(&running.id.as_str()));
+    assert!(interrupted_ids.contains(&saving.id.as_str()));
+    for job in &interrupted {
+        assert_eq!(job.status, JobStatus::Interrupted);
+    }
+    // The queued job is untouched — not active, so not swept.
+    let queued = store.get_job(&queued.id).expect("queued job loads");
+    assert_eq!(queued.status, JobStatus::Queued);
+}
+
+#[test]
 fn signal_death_fails_active_job_with_attributed_error() {
     // sc-4881: a worker hard-killed by SIGKILL/OOM can't report its own death, so
     // the supervisor attributes it. The worker's active job must become a real
