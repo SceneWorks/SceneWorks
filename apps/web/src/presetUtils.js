@@ -1,5 +1,20 @@
 export const noPresetId = "__no_preset__";
 
+// LoRA-per-job / per-preset caps (sc-8936, F-134). Single source of truth for the web:
+// previously the same numbers were hand-copied as bare literals across the Image/Video
+// studios, the Character Studio picker, and the Preset Manager, so raising a cap (already
+// done once, 3 -> 4/5) meant hunting scattered magic numbers and left stale "/3" badges.
+//
+// These MUST stay in sync with the worker guards (single source of truth on that side):
+//   - MAX_JOB_LORAS_TOTAL == crates/sceneworks-worker/src/image_jobs.rs::MAX_JOB_LORAS (5):
+//     the hard per-job total the generation path rejects above (builtin + user combined).
+//   - MAX_USER_JOB_LORAS (4): the user-selectable cap the studio pickers enforce, leaving
+//     headroom for one auto-applied builtin LoRA within the total (pick 4 -> total 5).
+//   - MAX_PRESET_LORAS == the recipe-preset normalizer's cap (5): LoRAs a saved preset holds.
+export const MAX_JOB_LORAS_TOTAL = 5;
+export const MAX_USER_JOB_LORAS = 4;
+export const MAX_PRESET_LORAS = 5;
+
 export function rememberPresetDefault(snapshots, key, currentValue, appliedValue) {
   const previousSnapshot = snapshots.current[key];
   snapshots.current[key] = {

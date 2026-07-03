@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Icon } from "../components/Icons.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import {
+  MAX_USER_JOB_LORAS,
   applyPresetDefault,
   buildStudioPresetPayload,
   clearPresetDefault,
@@ -261,7 +262,7 @@ export function useGenerationStudio({
       }
       const selected = ids.map((id) => compatibleLoras.find((item) => item.id === id)).filter(Boolean);
       const userCount = selected.filter((item) => item.scope !== "builtin").length;
-      if (lora.scope !== "builtin" && userCount >= 4) {
+      if (lora.scope !== "builtin" && userCount >= MAX_USER_JOB_LORAS) {
         return ids;
       }
       return [...ids, lora.id];
@@ -476,7 +477,7 @@ export function LoraPickerSection({
         <div className="lora-choice-list">
           {compatibleLoras.map((lora) => {
             const checked = selectedLoraIds.includes(lora.id);
-            const userLimitReached = lora.scope !== "builtin" && !checked && userSelectedLoraCount >= 4;
+            const userLimitReached = lora.scope !== "builtin" && !checked && userSelectedLoraCount >= MAX_USER_JOB_LORAS;
             const weight = effectiveLoraWeight(lora);
             return (
               <div className="lora-choice-item" key={lora.id}>

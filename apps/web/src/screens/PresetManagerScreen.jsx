@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import {
+  MAX_PRESET_LORAS,
   compactModeList,
   loraMatchesModel,
   presetLoraId,
@@ -210,7 +211,7 @@ export function PresetManagerScreen() {
     }
     setForm((current) => {
       const hasLora = current.loras.some((lora) => lora.id === id);
-      if (hasLora || current.loras.length >= 5) {
+      if (hasLora || current.loras.length >= MAX_PRESET_LORAS) {
         return current;
       }
       const source = loras.find((lora) => lora.id === id);
@@ -844,7 +845,7 @@ export function PresetManagerScreen() {
                       ) : (
                         <button
                           className="lora-add"
-                          data-count={`${form.loras.length}/3`}
+                          data-count={`${form.loras.length}/${MAX_PRESET_LORAS}`}
                           disabled={!editable || !availableLoras.length}
                           onClick={() => setShowLoraPicker(true)}
                           type="button"
