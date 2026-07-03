@@ -159,6 +159,50 @@ function filterPickerAssets(assets, query, searchIndex) {
   return assets.filter((asset) => !needle || searchIndex.get(asset.id)?.includes(needle));
 }
 
+// The `role="listbox"` asset-card grid shared by all three pickers (sc-8937): the
+// thumbnail + title/type/source/date/id/status card, its selected styling, and the
+// empty-state row. The pickers differ only in selection model and activation, passed
+// as callbacks so markup/classes/aria/keyboard behavior stay identical:
+//   - `isSelected(asset)` — single-select (id equality) vs multi-select (membership),
+//   - `onSelect(asset)` — click handler (set the id, or toggle by asset/id),
+//   - `onActivate(asset)` — optional double-click confirm; omit for grids without one,
+//   - `ariaMultiselectable` — `undefined` (single), `true`, or `multiple || undefined`,
+//   - `emptyLabel` — the empty-state message.
+function PickerCardGrid({ assets, isSelected, onSelect, onActivate, ariaMultiselectable, emptyLabel }) {
+  return (
+    <div aria-multiselectable={ariaMultiselectable} className="asset-picker-grid" role="listbox">
+      {assets.map((asset) => {
+        const selected = isSelected(asset);
+        const status = statusLabel(asset);
+        return (
+          <button
+            aria-selected={selected}
+            className={selected ? "asset-picker-card selected" : "asset-picker-card"}
+            key={asset.id}
+            onClick={() => onSelect(asset)}
+            onDoubleClick={onActivate ? () => onActivate(asset) : undefined}
+            role="option"
+            type="button"
+          >
+            <AssetThumbnail asset={asset} />
+            <span className="asset-picker-card-copy">
+              <strong>{titleFor(asset)}</strong>
+              <small>
+                {typeLabel(asset)} | {sourceLabel(asset)}
+              </small>
+              <small title={asset.id}>
+                {compactDate(asset.createdAt ?? asset.updatedAt)} | ID {assetIdentity(asset)}
+                {status ? ` | ${status}` : ""}
+              </small>
+            </span>
+          </button>
+        );
+      })}
+      {assets.length ? null : <div className="empty-panel compact-panel">{emptyLabel}</div>}
+    </div>
+  );
+}
+
 export function AssetPreviewChips({ assets, emptyLabel = "No asset selected" }) {
   if (!assets.length) {
     return <div className="asset-picker-empty">{emptyLabel}</div>;
@@ -299,36 +343,14 @@ function ImageEditSourcePickerModal({ assets, characters, importAsset, initialSe
 
   function renderAssetGrid(emptyLabel) {
     return (
-      <div aria-multiselectable={undefined} className="asset-picker-grid" role="listbox">
-        {visibleAssets.map((asset) => {
-          const selected = selectedId === asset.id;
-          const status = statusLabel(asset);
-          return (
-            <button
-              aria-selected={selected}
-              className={selected ? "asset-picker-card selected" : "asset-picker-card"}
-              key={asset.id}
-              onClick={() => setSelectedId(asset.id)}
-              onDoubleClick={() => onConfirm(asset.id)}
-              role="option"
-              type="button"
-            >
-              <AssetThumbnail asset={asset} />
-              <span className="asset-picker-card-copy">
-                <strong>{titleFor(asset)}</strong>
-                <small>
-                  {typeLabel(asset)} | {sourceLabel(asset)}
-                </small>
-                <small title={asset.id}>
-                  {compactDate(asset.createdAt ?? asset.updatedAt)} | ID {assetIdentity(asset)}
-                  {status ? ` | ${status}` : ""}
-                </small>
-              </span>
-            </button>
-          );
-        })}
-        {visibleAssets.length ? null : <div className="empty-panel compact-panel">{emptyLabel}</div>}
-      </div>
+      <PickerCardGrid
+        ariaMultiselectable={undefined}
+        assets={visibleAssets}
+        emptyLabel={emptyLabel}
+        isSelected={(asset) => selectedId === asset.id}
+        onActivate={(asset) => onConfirm(asset.id)}
+        onSelect={(asset) => setSelectedId(asset.id)}
+      />
     );
   }
 
@@ -551,36 +573,14 @@ export function AssetPickerModal({
           />
         </div>
 
-        <div aria-multiselectable={multiple || undefined} className="asset-picker-grid" role="listbox">
-          {visibleAssets.map((asset) => {
-            const selected = selectedIds.includes(asset.id);
-            const status = statusLabel(asset);
-            return (
-              <button
-                aria-selected={selected}
-                className={selected ? "asset-picker-card selected" : "asset-picker-card"}
-                key={asset.id}
-                onClick={() => toggleAsset(asset)}
-                onDoubleClick={() => !multiple && onConfirm([asset.id])}
-                role="option"
-                type="button"
-              >
-                <AssetThumbnail asset={asset} />
-                <span className="asset-picker-card-copy">
-                  <strong>{titleFor(asset)}</strong>
-                  <small>
-                    {typeLabel(asset)} | {sourceLabel(asset)}
-                  </small>
-                  <small title={asset.id}>
-                    {compactDate(asset.createdAt ?? asset.updatedAt)} | ID {assetIdentity(asset)}
-                    {status ? ` | ${status}` : ""}
-                  </small>
-                </span>
-              </button>
-            );
-          })}
-          {visibleAssets.length ? null : <div className="empty-panel compact-panel">No assets match this view</div>}
-        </div>
+        <PickerCardGrid
+          ariaMultiselectable={multiple || undefined}
+          assets={visibleAssets}
+          emptyLabel="No assets match this view"
+          isSelected={(asset) => selectedIds.includes(asset.id)}
+          onActivate={(asset) => !multiple && onConfirm([asset.id])}
+          onSelect={(asset) => toggleAsset(asset)}
+        />
 
         <footer className="asset-picker-footer">
           <span>{selectedIds.length ? `${selectedIds.length} selected` : "No selection"}</span>
@@ -708,35 +708,13 @@ export function CharacterImportDialog({
 
   function renderGrid(emptyLabel) {
     return (
-      <div aria-multiselectable className="asset-picker-grid" role="listbox">
-        {visibleAssets.map((asset) => {
-          const selected = selectedIds.includes(asset.id);
-          const status = statusLabel(asset);
-          return (
-            <button
-              aria-selected={selected}
-              className={selected ? "asset-picker-card selected" : "asset-picker-card"}
-              key={asset.id}
-              onClick={() => toggleAsset(asset.id)}
-              role="option"
-              type="button"
-            >
-              <AssetThumbnail asset={asset} />
-              <span className="asset-picker-card-copy">
-                <strong>{titleFor(asset)}</strong>
-                <small>
-                  {typeLabel(asset)} | {sourceLabel(asset)}
-                </small>
-                <small title={asset.id}>
-                  {compactDate(asset.createdAt ?? asset.updatedAt)} | ID {assetIdentity(asset)}
-                  {status ? ` | ${status}` : ""}
-                </small>
-              </span>
-            </button>
-          );
-        })}
-        {visibleAssets.length ? null : <div className="empty-panel compact-panel">{emptyLabel}</div>}
-      </div>
+      <PickerCardGrid
+        ariaMultiselectable
+        assets={visibleAssets}
+        emptyLabel={emptyLabel}
+        isSelected={(asset) => selectedIds.includes(asset.id)}
+        onSelect={(asset) => toggleAsset(asset.id)}
+      />
     );
   }
 

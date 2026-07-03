@@ -1,15 +1,20 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import {
+  applyPresetDefault,
+  buildStudioPresetPayload,
+  clearPresetDefault,
   loraMatchesModel,
   loraWeight,
   noPresetId,
   presetLoraDetails as buildPresetLoraDetails,
   presetMatchesModel,
   presetMatchesWorkflow,
+  presetNameTaken,
   presetPromptParts as buildPresetPromptParts,
   presetValidation,
+  slugifyPresetId,
 } from "../presetUtils.js";
 
 const completedResultFallbackMs = 30000;
@@ -300,6 +305,140 @@ export function useGenerationStudio({
     toggleLora,
     effectiveLoraWeight,
     setLoraWeight,
+  };
+}
+
+// Save-as-Preset + preset-default hydrate machinery shared by the Image and Video
+// studios (sc-8937). Owns the save panel's state (name/scope/saving/message) and the
+// remember/restore snapshot ref, runs the one preset-default hydrate effect, and
+// exposes the save handler. The studios differ only in:
+//   - `presetDefaultFields`: the [key, setter] pairs the studio hydrates,
+//   - `buildDefaults()`: the raw defaults snapshot the save payload carries,
+//   - `modeIsPresetable(mode)`: which sub-modes a saved preset may restore ("type"),
+//   - `onApplyDefaults(defaults)`: optional per-studio side effect after hydrate
+//     (Image marks the prompt box edited so the character-mode default can't clobber
+//     the restored prompt),
+//   - `extraSaveGuard()`: optional pre-save gate (Video blocks non-video modes),
+// so those are passed in. Behavior (validation order, UX, saved/hydrated fields) is
+// identical to the per-studio copies this replaced.
+export function useSavePreset({
+  saved,
+  selectedPreset,
+  setSelectedPresetId,
+  presets,
+  mode,
+  model,
+  selectedLoras,
+  effectiveLoraWeight,
+  createPreset,
+  activeProject,
+  presetDefaultFields,
+  buildDefaults,
+  modeIsPresetable,
+  setMode,
+  onApplyDefaults = () => {},
+  extraSaveGuard = () => null,
+}) {
+  const [presetName, setPresetName] = useState("");
+  const [presetScope, setPresetScope] = useState(activeProject ? "project" : "global");
+  const [savingPreset, setSavingPreset] = useState(false);
+  const [presetSaveMessage, setPresetSaveMessage] = useState({ tone: "neutral", text: "" });
+  const presetDefaultSnapshots = useRef({});
+
+  // When restoring a snapshot, the saved knob values already reflect the user's last
+  // state — skip the one preset-default pass that fires as the restored preset resolves
+  // so it doesn't overwrite them. "None" applies no defaults, so no guard is needed there.
+  const skipPresetDefaultsOnHydrate = useRef(
+    Object.keys(saved).length > 0 && saved.selectedPresetId !== noPresetId,
+  );
+
+  useEffect(() => {
+    if (skipPresetDefaultsOnHydrate.current && selectedPreset) {
+      skipPresetDefaultsOnHydrate.current = false;
+      return;
+    }
+    if (!selectedPreset) {
+      for (const [key, setter] of presetDefaultFields) {
+        clearPresetDefault(setter, presetDefaultSnapshots, key);
+      }
+      return;
+    }
+    const defaults = selectedPreset.defaults ?? {};
+    for (const [key, setter] of presetDefaultFields) {
+      if (Object.prototype.hasOwnProperty.call(defaults, key)) {
+        applyPresetDefault(presetDefaultSnapshots, key, setter, defaults[key]);
+      }
+    }
+    onApplyDefaults(defaults);
+    // Restore the saved sub-mode ("type") when it's a presetable workflow.
+    if (modeIsPresetable(defaults.mode)) {
+      setMode(defaults.mode);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPreset?.id]);
+
+  // Snapshot the current working config into a named recipe preset in the workspace
+  // library. Captures the literal prompt + every visible knob + the selected LoRAs
+  // with their weights; the seed is intentionally left out so the preset stays
+  // reusable. The backend additionally enforces id uniqueness and model/workflow +
+  // LoRA compatibility, surfaced here via err.message.
+  async function handleSaveAsPreset() {
+    const trimmed = presetName.trim();
+    if (!trimmed) {
+      setPresetSaveMessage({ tone: "error", text: "Name the preset before saving." });
+      return;
+    }
+    if (!slugifyPresetId(trimmed)) {
+      setPresetSaveMessage({ tone: "error", text: "Use letters or numbers in the preset name." });
+      return;
+    }
+    const guardMessage = extraSaveGuard();
+    if (guardMessage) {
+      setPresetSaveMessage({ tone: "error", text: guardMessage });
+      return;
+    }
+    if (presetScope === "project" && !activeProject) {
+      setPresetSaveMessage({ tone: "error", text: "Open a project first, or save to all projects." });
+      return;
+    }
+    if (presetNameTaken(trimmed, presets)) {
+      setPresetSaveMessage({ tone: "error", text: `"${trimmed}" already exists — pick a unique name.` });
+      return;
+    }
+    const payload = buildStudioPresetPayload({
+      name: trimmed,
+      scope: presetScope,
+      mode,
+      model,
+      loras: selectedLoras.map((lora) => ({ id: lora.id, weight: effectiveLoraWeight(lora) })),
+      defaults: buildDefaults(),
+    });
+    setSavingPreset(true);
+    setPresetSaveMessage({ tone: "neutral", text: "" });
+    try {
+      const created = await createPreset(payload);
+      setSelectedPresetId(created?.id ?? payload.id);
+      setPresetName("");
+      setPresetSaveMessage({
+        tone: "success",
+        text: `Saved "${trimmed}" to ${presetScope === "project" ? "this project" : "all projects"}.`,
+      });
+    } catch (err) {
+      setPresetSaveMessage({ tone: "error", text: err.message });
+    } finally {
+      setSavingPreset(false);
+    }
+  }
+
+  return {
+    presetName,
+    setPresetName,
+    presetScope,
+    setPresetScope,
+    savingPreset,
+    presetSaveMessage,
+    setPresetSaveMessage,
+    handleSaveAsPreset,
   };
 }
 
