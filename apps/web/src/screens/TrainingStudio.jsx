@@ -1054,9 +1054,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
       for (const file of imageFiles) {
         const asset = await uploadDatasetItem(file);
         if (asset?.id) {
-          asset.datasetOnly = true;
-          imported.push(asset.id);
-          setUploadedDatasetAssets((current) => [asset, ...current.filter((item) => item.id !== asset.id)]);
+          // Flag the dataset-only origin on a COPY (sc-8939): mutating the API-returned
+          // record in place can leak the flag into any other holder of that instance
+          // (e.g. an asset cached in context). Build a fresh object instead.
+          const datasetAsset = { ...asset, datasetOnly: true };
+          imported.push(datasetAsset.id);
+          setUploadedDatasetAssets((current) => [datasetAsset, ...current.filter((item) => item.id !== datasetAsset.id)]);
           const caption = captionByStem.get(uploadFileStem(file.name));
           if (caption) {
             captionsByAssetId[asset.id] = { source: "imported", text: caption };

@@ -163,8 +163,15 @@ export function VideoStudio() {
   // by workspace in App.jsx, so this reads the right snapshot per workspace.
   const saved = useMemo(() => loadStudioSettings("video", activeProject?.id ?? null), [activeProject?.id]);
   const [motion, setMotion] = useState(saved.motion ?? "slow push-in");
-  const imageAssets = assets.filter((asset) => asset.type === "image" || asset.type === "frame");
-  const videoAssets = assets.filter((asset) => asset.type === "video");
+  // Memoize the per-type catalog splits (sc-8939): both feed a dozen pickers/trays and
+  // re-filtering the full catalog on every render (including unrelated state churn) is
+  // needless. Recompute only when the catalog changes; stable identities also keep the
+  // downstream memoized offers/consumers from thrashing.
+  const imageAssets = useMemo(
+    () => assets.filter((asset) => asset.type === "image" || asset.type === "frame"),
+    [assets],
+  );
+  const videoAssets = useMemo(() => assets.filter((asset) => asset.type === "video"), [assets]);
   // Open on Text→Video for parity with Image Studio's Text→Image default and the
   // launch-request fallback below (sc-5716); the prior image_to_video default was the odd one out.
   const [mode, setMode] = useState(saved.mode ?? "text_to_video");
