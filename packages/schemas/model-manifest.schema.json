@@ -211,6 +211,30 @@
               }
             }
           },
+          "candle": {
+            "type": "object",
+            "description": "candle/CUDA (Windows/Linux) variant metadata — the discrete-VRAM sibling of the mlx block (epic 9083, sc-9094). CUDA cards do NOT share system RAM the way Apple unified memory does, so the candle lane needs its OWN measured VRAM gate: the mlx.minMemoryGb (unified-memory OS peak on a Mac) does not describe the VRAM a discrete GPU must hold. Populated from the candle-gen VramProbe harness (sc-9094) at 1024² (video = default frames).",
+            "properties": {
+              "minMemoryGb": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Minimum GPU VRAM (GB) to run this model on the candle/CUDA lane — the measured overall-peak of the heaviest hosted tier a user can select, plus headroom. Retires the epic 7982 SD3.5 'minMemoryGb under measured peak' follow-up: this is a real measured CUDA number, not the inherited unified-memory mlx value."
+              },
+              "vramGbByTier": {
+                "type": "object",
+                "description": "Measured (or explicitly-estimated) candle/CUDA overall-peak VRAM (GB) at 1024², keyed by quant tier (q4 / q8 / bf16). The peak is the max across the whole generate (load + denoise + VAE decode); candle loads weights lazily on first forward, so load-peak is negligible and the denoise peak dominates (sc-9094).",
+                "additionalProperties": { "type": "number" }
+              },
+              "measured": {
+                "type": "boolean",
+                "description": "true when minMemoryGb / vramGbByTier were MEASURED on a real GPU (sc-9094); false when ESTIMATED (scaled from weight size + a measured sibling) pending a real measurement. An estimated entry is tracked for a follow-up measurement."
+              },
+              "limits": {
+                "$ref": "#/$defs/samplerLimits",
+                "description": "Per-backend candle/CUDA capability override, read by samplerOptionsFromModel(model, \"candle\"). The top-level limits.samplers/schedulers describe the default lane; this narrows/broadens them for the candle path."
+              }
+            }
+          },
           "downloads": {
             "type": "array",
             "description": "Download entries list alternate sources for the same model; at most one may be marked default: true. If none is marked, the first supported entry is used. When a model ships a quant matrix (epic 8506, sc-8508), each tier (bf16 / Q8 / Q4) is a SEPARATE download entry — same repo, distinct `files` filter and `variant` — so each tier is an independently installable artifact whose presence the catalog tracks per-variant.",
