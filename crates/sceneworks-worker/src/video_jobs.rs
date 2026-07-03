@@ -1422,11 +1422,14 @@ impl Seedvr2StreamAssembler {
     /// Emit finalized frames from the front of `retained`, keeping `keep` frames retained (and never
     /// emitting past the real frame count `n`).
     fn drain_prefix(&mut self, keep: usize) -> Vec<Image> {
-        let mut out = Vec::new();
-        while self.retained.len() > keep && self.retained_start < self.n {
-            out.push(self.retained.remove(0));
-            self.retained_start += 1;
-        }
+        // How many front frames are finalized this call: everything past `keep`, but never emitting
+        // past the real frame count `n` (`n - retained_start` remaining slots). `Vec::drain` shifts
+        // the tail once, so this is O(n) rather than the O(n²) of a `remove(0)`-per-frame loop.
+        let by_keep = self.retained.len().saturating_sub(keep);
+        let by_count = (self.n - self.retained_start).max(0) as usize;
+        let boundary = by_keep.min(by_count);
+        let out: Vec<Image> = self.retained.drain(..boundary).collect();
+        self.retained_start += boundary as i32;
         out
     }
 }
@@ -1684,6 +1687,52 @@ struct Seedvr2Stream {
     src_w: u32,
     src_h: u32,
     seed: u64,
+}
+
+/// RAII guard for a worker-owned scratch directory (sc-9595). The streamed 4× PNG sequence can be many
+/// GB, and it now outlives the stream call while the caller runs an `update_job` progress POST + an
+/// `ffmpeg` encode — a span where any `?` (a transient POST failure, a 409 stale-sweep reclaim, an
+/// encode error, or a between-step cancel) would otherwise leak the whole dir on disk. `Drop` removes
+/// it on EVERY exit path (success, encode/create_dir_all/update_job failure, cancel, panic) so cleanup
+/// can never be skipped. Call [`ScratchDir::disarm`] after the caller has already removed the dir to
+/// avoid a redundant (harmless) second removal. `Drop` must use the sync `std::fs` API.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct ScratchDir {
+    path: std::path::PathBuf,
+    armed: bool,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl ScratchDir {
+    /// Guard `path`. Does not create it — the caller populates it; the guard only guarantees removal.
+    fn new(path: std::path::PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    /// Stop guarding: the caller has already removed the dir (e.g. right after a successful encode, to
+    /// free disk before the mux step). A no-op `Drop` follows.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        if self.armed {
+            // Best-effort: a missing dir yields a benign NotFound we intentionally ignore.
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 /// Stream the SeedVR2 upscale in temporal worker windows (sc-9595). Decodes the source to disk, plans
@@ -1953,6 +2002,11 @@ pub(crate) async fn run_video_upscale_job(
     let src_frames_dir = std::env::temp_dir().join(format!("sceneworks_seedvr2_src_{}", job.id));
     let out_frames_dir = std::env::temp_dir().join(format!("sceneworks_seedvr2_out_{}", job.id));
     let _ = tokio::fs::remove_dir_all(&out_frames_dir).await;
+    // RAII-guard the output PNG scratch so it is removed on EVERY exit after the stream: not just the
+    // stream error arm, but the create_dir_all / update_job progress POST / encode span below, any of
+    // which can `?`-return (transient POST failure, 409 stale-sweep reclaim, encode error, cancel).
+    // Without this the full multi-GB 4× sequence would leak on those paths (sc-9595 review).
+    let mut out_scratch = ScratchDir::new(out_frames_dir.clone());
     let stream_result = run_seedvr2_stream(
         api,
         settings,
@@ -1967,16 +2021,10 @@ pub(crate) async fn run_video_upscale_job(
         weights_dir,
     )
     .await;
-    // Always drop the source PNG scratch (it's disk-only; the output dir is cleaned by the caller's
-    // encode step on success / here on failure).
+    // Always drop the source PNG scratch (it's disk-only; the output dir is owned by `out_scratch`).
     let _ = tokio::fs::remove_dir_all(&src_frames_dir).await;
-    let stream = match stream_result {
-        Ok(stream) => stream,
-        Err(error) => {
-            let _ = tokio::fs::remove_dir_all(&out_frames_dir).await;
-            return Err(error);
-        }
-    };
+    // On stream failure, `out_scratch`'s Drop removes the output dir as the function returns.
+    let stream = stream_result?;
     let Seedvr2Stream {
         frame_count: out_count,
         fps: out_fps,
@@ -2019,7 +2067,12 @@ pub(crate) async fn run_video_upscale_job(
     let ctx = FfmpegContext::new(api, settings, &job.id, SEEDVR2_CANCEL_MESSAGE);
     let encode_result =
         encode_seedvr2_stream(&media_path, &out_frames_dir, out_count, out_fps, Some(ctx)).await;
+    // Free the multi-GB PNG scratch as soon as the encode returns (before the mux step), on BOTH the
+    // ok and err arms; then disarm the guard so its Drop doesn't redundantly re-remove. `encode_result`
+    // is propagated AFTER cleanup — an encode error still leaves no scratch behind (and if this early
+    // removal is itself skipped by an unwind, the still-armed guard's Drop is the backstop).
     let _ = tokio::fs::remove_dir_all(&out_frames_dir).await;
+    out_scratch.disarm();
     encode_result?;
 
     // Source-audio passthrough: remux the source's audio onto the upscaled video. `-map 1:a:0?`
@@ -9883,6 +9936,60 @@ mod tests {
             (max_tail as i32) < n as i32 / 10,
             "peak retained frames stay far below the whole clip (bounded memory)"
         );
+    }
+
+    /// The `ScratchDir` RAII guard removes the (multi-GB, in prod) output PNG scratch on the ERROR path
+    /// (sc-9595 review): dropping an ARMED guard deletes a populated dir — this is the guarantee that
+    /// covers a create_dir_all / progress-POST / encode `?`-return or a cancel between the stream and the
+    /// encode, where the old code leaked the whole 4× sequence. Disarming (the success path, after the
+    /// caller already removed the dir) makes Drop a no-op so it can't fight a concurrent same-name reuse.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn scratch_dir_guard_cleans_up_on_drop_and_respects_disarm() {
+        let base = std::env::temp_dir().join(format!(
+            "sceneworks_seedvr2_scratchtest_{}",
+            Uuid::new_v4().simple()
+        ));
+
+        // ARMED guard dropped (error path): a populated dir + a nested file are removed on Drop.
+        let armed_dir = base.join("armed");
+        std::fs::create_dir_all(&armed_dir).unwrap();
+        std::fs::write(armed_dir.join("frame_00001.png"), b"not-a-real-png").unwrap();
+        assert!(armed_dir.exists(), "precondition: scratch populated");
+        {
+            let _guard = ScratchDir::new(armed_dir.clone());
+            // Simulate the post-stream encode span returning Err before any manual cleanup: the guard
+            // goes out of scope here without disarming.
+        }
+        assert!(
+            !armed_dir.exists(),
+            "armed guard's Drop must remove the leaked output scratch on the error path"
+        );
+
+        // DISARMED guard dropped (success path): the caller already removed the dir, and Drop must NOT
+        // re-remove — modelled by a dir the guard deliberately leaves intact.
+        let disarmed_dir = base.join("disarmed");
+        std::fs::create_dir_all(&disarmed_dir).unwrap();
+        {
+            let mut guard = ScratchDir::new(disarmed_dir.clone());
+            guard.disarm();
+        }
+        assert!(
+            disarmed_dir.exists(),
+            "disarmed guard's Drop must be a no-op (caller owns cleanup)"
+        );
+
+        // A guard over an ALREADY-removed dir drops cleanly (benign NotFound, no panic).
+        let missing_dir = base.join("missing");
+        {
+            let _guard = ScratchDir::new(missing_dir.clone());
+        }
+        assert!(!missing_dir.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// `advanced.noAudio` maps to the engine's `video_mode = "no_audio"`; enhance flags
