@@ -4106,6 +4106,72 @@ fn flux2_grouping_poses_over_angles_over_plain() {
     assert!(matches!(flux2_grouping(&edit), Flux2Grouping::Plain));
 }
 
+/// `plan_edit_batch` (F-024 sc-8826) is the shared grouping/stamping/gating builder for the FLUX.2 /
+/// Qwen / SenseNova edit streams. Angles → 11 shared-seed per-angle prompts, no poses, `angleSet`
+/// stamped, scored. Pose set → n shared-seed pose prompts WITH `PoseInput`s, `poseLibrary` stamped,
+/// scored. Plain `character_image` → per-image seeds, no stamp, scored (sc-4411). Plain `edit_image`
+/// → per-image seeds, no stamp, NOT scored (the `Plain` grouping that carries a `sourceAssetId`, not
+/// an identity reference). The lane's base `raw_settings` pass through untouched.
+#[cfg(target_os = "macos")]
+#[test]
+fn plan_edit_batch_expands_and_gates_per_grouping() {
+    let base_settings = || {
+        let mut map = JsonObject::new();
+        map.insert("laneKey".to_owned(), json!("kept"));
+        map
+    };
+
+    // Angles: 11 shared seeds, per-angle prompts, no pose inputs, angleSet stamped, scored.
+    let angles = request(json!({
+        "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
+        "advanced": { "angleSet": true, "seed": 7 }
+    }));
+    let batch = plan_edit_batch(&angles, &flux2_grouping(&angles), base_settings());
+    assert_eq!(batch.seeds.len(), CHARACTER_ANGLE_SET_ORDER.len());
+    assert_eq!(batch.prompts.len(), CHARACTER_ANGLE_SET_ORDER.len());
+    assert!(batch.seeds.iter().all(|&s| s == batch.seeds[0]));
+    assert!(batch.pose_inputs.is_none());
+    assert_eq!(batch.raw_settings.get("angleSet"), Some(&Value::Bool(true)));
+    assert!(batch.raw_settings.get("poseLibrary").is_none());
+    assert_eq!(batch.raw_settings.get("laneKey"), Some(&json!("kept")));
+    assert!(batch.score_likeness);
+
+    // Pose set: n shared seeds, pose inputs present, poseLibrary stamped, scored.
+    let poses = request(json!({
+        "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
+        "advanced": { "seed": 7, "poses": [{ "id": "a" }, { "id": "b" }] }
+    }));
+    let batch = plan_edit_batch(&poses, &flux2_grouping(&poses), base_settings());
+    assert_eq!(batch.seeds.len(), 2);
+    assert!(batch.seeds.iter().all(|&s| s == batch.seeds[0]));
+    assert_eq!(batch.pose_inputs.as_ref().map(Vec::len), Some(2));
+    assert_eq!(
+        batch.raw_settings.get("poseLibrary"),
+        Some(&Value::Bool(true))
+    );
+    assert!(batch.raw_settings.get("angleSet").is_none());
+    assert!(batch.score_likeness);
+
+    // Plain character_image: per-image seeds, no stamp, scored (sc-4411 plain With-Character).
+    let plain_char = request(json!({
+        "projectId": "p", "mode": "character_image", "referenceAssetId": "ref", "count": 3
+    }));
+    let batch = plan_edit_batch(&plain_char, &flux2_grouping(&plain_char), base_settings());
+    assert_eq!(batch.seeds.len(), 3);
+    assert!(batch.pose_inputs.is_none());
+    assert!(batch.raw_settings.get("angleSet").is_none());
+    assert!(batch.raw_settings.get("poseLibrary").is_none());
+    assert!(batch.score_likeness);
+
+    // Plain edit_image: per-image seeds, NOT scored (Plain grouping without an identity reference).
+    let plain_edit = request(json!({
+        "projectId": "p", "mode": "edit_image", "sourceAssetId": "src", "count": 2
+    }));
+    let batch = plan_edit_batch(&plain_edit, &flux2_grouping(&plain_edit), base_settings());
+    assert_eq!(batch.seeds.len(), 2);
+    assert!(!batch.score_likeness);
+}
+
 /// Minimal valid safetensors (8-byte LE header length + JSON header). No `networkType`, so
 /// `classify_adapter` reports `Lora`; the resolver only reads the header, so empty tensors are fine.
 #[cfg(any(

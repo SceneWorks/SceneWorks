@@ -398,16 +398,14 @@ async fn generate_sdxl_advanced_stream(
         matches!(sub_mode, SdxlSubMode::Ip).then(|| {
             resolve_character_image_likeness_source(request, settings, project_path)
         });
-    let face_stack_dir = match likeness {
-        Some(Some(_)) => match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
-                None
-            }
-        },
-        _ => None,
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        matches!(likeness, Some(Some(_))),
+        "character_image face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     let likeness_source = match (&face_stack_dir, likeness.flatten()) {
         (Some(_), Some((image, asset_id))) => Some((image, asset_id)),
         _ => None,

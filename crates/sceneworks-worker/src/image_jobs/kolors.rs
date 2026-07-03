@@ -380,13 +380,14 @@ async fn generate_kolors_control_stream(
     // closure (source embedded once, reused across all poses — the caching AC). This lane produces the
     // FINAL image directly (no face-restore pass), so scoring the generated image scores what the user
     // sees.
-    let face_stack_dir = match ensure_face_stack_dir(api, settings, job).await {
-        Ok(dir) => Some(dir),
-        Err(error) => {
-            tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
-            None
-        }
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        true,
+        "pose-set face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     let likeness_source_ref = reference_id.to_owned();
 
     let prompt = request.prompt.clone();

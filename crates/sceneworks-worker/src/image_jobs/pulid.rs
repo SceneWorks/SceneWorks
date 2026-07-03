@@ -391,13 +391,14 @@ async fn generate_pulid_flux_stream(
     // (source embedded once — the caching AC). The source is the CURRENT job's `referenceAssetId`, so
     // changing the reference changes the scored source. Staging is non-fatal (failure → no scorer →
     // scores omitted, generation still renders).
-    let face_stack_dir = match ensure_face_stack_dir(api, settings, job).await {
-        Ok(dir) => Some(dir),
-        Err(error) => {
-            tracing::warn!(error = %error, "PuLID-FLUX face-stack staging failed; likeness scores omitted");
-            None
-        }
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        true,
+        "PuLID-FLUX face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     let likeness_source = face_stack_dir.as_ref().map(|_| reference.clone());
     let likeness_source_ref = reference_id.to_owned();
 
