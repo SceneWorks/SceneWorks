@@ -404,8 +404,11 @@ const DEFAULT_HUGGINGFACE_BASE_URL: &str = "https://huggingface.co";
 const DEFAULT_MAX_LORA_URL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_MODEL_URL_BYTES: u64 = 256 * 1024 * 1024 * 1024;
 const DEFAULT_TRANSITION_DURATION_SECONDS: f64 = 0.5;
-const PERSON_TRACK_SAMPLE_RATE_FPS: f64 = 2.0;
-const PERSON_TRACK_MAX_SAMPLES: usize = 24;
+// One source of truth for the person-track sample cadence (sc-8914 / F-112): the sidecar
+// `sampleRateFps` the media handlers record and the sampler `person_track` uses must never drift, so
+// both are these aliases to the `person_track` module constants rather than value-duplicated literals.
+const PERSON_TRACK_SAMPLE_RATE_FPS: f64 = person_track::SAMPLE_RATE_FPS;
+const PERSON_TRACK_MAX_SAMPLES: usize = person_track::MAX_SAMPLES;
 const PERSON_TRACK_X_DRIFT: f64 = 0.018;
 
 #[derive(Debug, Clone, PartialEq)]
