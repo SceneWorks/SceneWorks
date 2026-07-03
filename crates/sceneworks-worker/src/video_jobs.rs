@@ -2200,6 +2200,243 @@ pub(crate) async fn run_video_upscale_job(
 }
 
 // ---------------------------------------------------------------------------
+// Backend-neutral video helpers shared by the MLX (macOS) and candle
+// (Windows/CUDA) lanes (sc-8830, F-028). These collapse the byte-identical
+// twin pairs that had drifted apart between the two backends: the dense-adapter
+// resolver, the LoRA-file resolver (path-confined + core `first_safetensors_path`),
+// the LoRA strength reader, the MLX quant reader, and the negative-prompt idiom.
+// Backend-specific behavior (which SAM3 module, which driving-clip loader) is
+// injected by the callers, never re-branched at runtime.
+// ---------------------------------------------------------------------------
+
+/// At most 5 user LoRAs per job (mirrors the image path's `MAX_JOB_LORAS`). Shared by every
+/// dense (single-transformer) video family on both backends.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const MAX_JOB_LORAS: usize = 5;
+
+/// The trimmed `negative_prompt`, or `None` when empty/whitespace — the single source for the
+/// idiom the video dispatchers all repeated (sc-8830). Empty negatives must be `None`, not
+/// `Some("")`, so the engines treat them as "no negative" rather than conditioning on the empty
+/// string.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn non_empty_negative_prompt(request: &VideoRequest) -> Option<String> {
+    let trimmed = request.negative_prompt.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+/// A LoRA spec's strength (`weight`, default 0.8 — matches the image path). Shared by both
+/// backends (sc-8830; formerly the byte-identical `lora_scale` / `candle_scail2_lora_scale`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn lora_scale(lora: &Value) -> f32 {
+    lora.get("weight")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .unwrap_or(0.8) as f32
+}
+
+/// Resolve a LoRA spec's file (a directory → its first `.safetensors`, recursively via core's
+/// [`first_safetensors_path`]), verifying it exists. The `path` originates from
+/// attacker-controllable job payload, so it is first confined to an app-managed root
+/// (sc-5723 / WKA-002) via [`normalize_app_managed_lora_path`] before any on-disk use.
+///
+/// Shared by both backends (sc-8830). The old candle twin `candle_resolve_lora_file`
+/// re-implemented the directory scan with a shallow (non-recursive) case-sensitive `read_dir`,
+/// which missed nested `subdir/model.safetensors` snapshots and uppercase `.SAFETENSORS`
+/// extensions that the macOS path (core `first_safetensors_path`) resolved. Converging on the
+/// core helper fixes that latent candle-lane bug; path confinement is preserved identically.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_lora_file(settings: &Settings, path: PathBuf) -> WorkerResult<PathBuf> {
+    let path = crate::normalize_app_managed_lora_path(settings, &path)?;
+    let file = if path.is_dir() {
+        first_safetensors_path(&path).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "LoRA has no .safetensors under {}",
+                path.display()
+            ))
+        })?
+    } else {
+        path
+    };
+    if !file.exists() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "LoRA file is missing: {}",
+            file.display()
+        )));
+    }
+    Ok(file)
+}
+
+/// Build the adapter specs for a **dense** (single-transformer) video family — Wan-VACE and
+/// SCAIL-2 (both backends). Unlike the MoE Wan path there is no Lightning distill pair and no
+/// high/low experts, so every user LoRA/LoKr/LoHa is applied shared (`moe_expert: None`); the
+/// engine sniffs the format and merges it. `classify_adapter` tags SceneWorks peft LoKr as
+/// `Lokr` and everything else (incl. third-party LyCORIS) as `Lora`. Parameterized by the
+/// per-family max-LoRA cap so the confinement + count guard lives in one place (sc-8830).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_dense_adapters(
+    settings: &Settings,
+    request: &VideoRequest,
+    max_loras: usize,
+) -> WorkerResult<Vec<AdapterSpec>> {
+    if request.loras.len() > max_loras {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Generation supports at most {max_loras} LoRAs per job."
+        )));
+    }
+    let mut specs: Vec<AdapterSpec> = Vec::new();
+    for lora in &request.loras {
+        let path = crate::image_jobs::lora_path(lora).ok_or_else(|| {
+            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
+        })?;
+        let file = resolve_lora_file(settings, path)?;
+        let kind = crate::image_jobs::classify_adapter(&file)?;
+        specs.push(AdapterSpec {
+            path: file,
+            scale: lora_scale(lora),
+            kind,
+            pass_scales: None,
+            moe_expert: None,
+        });
+    }
+    Ok(specs)
+}
+
+/// MLX quantization for a dense video load (Bernini / SCAIL-2): Q4 default (the validated tier),
+/// Q8 opt-in via the advanced `mlxQuantize: 8` control, explicit `<= 0` ⇒ bf16 (power users with
+/// ample RAM). Never defaults to bf16 — the bf16 snapshots are far too large for the default box.
+/// Shared by both MLX dense families (sc-8830; formerly the byte-identical `resolve_bernini_quant`
+/// / `resolve_scail2_quant`).
+#[cfg(target_os = "macos")]
+fn resolve_mlx_dense_quant(request: &VideoRequest) -> Option<Quant> {
+    match request.advanced.get("mlxQuantize").and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    }) {
+        Some(bits) if bits <= 0 => None,
+        Some(bits) if bits <= 4 => Some(Quant::Q4),
+        Some(_) => Some(Quant::Q8),
+        None => Some(Quant::Q4),
+    }
+}
+
+/// Cancel message shared by every SCAIL-2 person-segmentation pass (both backends).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const SCAIL2_SEGMENT_CANCEL_MESSAGE: &str = "SCAIL-2 canceled during person segmentation.";
+
+/// Run a SCAIL-2 person-segmentation-and-paint pass on the blocking pool under the heartbeat
+/// keepalive (sc-8390 / sc-8807). The cold multi-GB SAM3 checkpoint parse + per-frame propagation
+/// can exceed the API's 90s stale-sweep, so the keepalive drives progress and its cancel poll trips
+/// the flag the engine's per-frame propagate contract observes between frames. Backend-neutral
+/// (sc-8830): the caller's `segment` closure captures whichever SAM3 module the build links (MLX
+/// `person_segment_sam3` vs candle `person_segment_sam3_candle`) plus the paint background, so the
+/// heartbeat orchestration lives in exactly one place instead of a per-backend twin.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn scail2_segment_blocking<R, F>(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    task_label: &'static str,
+    segment: F,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+    F: FnOnce(gen_core::CancelFlag) -> WorkerResult<R> + Send + 'static,
+{
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
+    run_blocking_with_heartbeat(
+        api,
+        settings,
+        job_id,
+        Some(cancel),
+        SCAIL2_SEGMENT_CANCEL_MESSAGE,
+        task_label,
+        tokio::task::spawn_blocking(move || segment(flag)),
+    )
+    .await
+}
+
+/// Assemble the SCAIL-2 `animate_character` conditioning (`Reference` + reference `Mask` +
+/// `ControlClip`) from an already-loaded reference image + driving frames. The two SAM3
+/// segmentation passes (reference → single painted mask, driving clip → per-frame painted masks)
+/// are supplied as closures so the backend-specific SAM3 module + paint background convention live
+/// at the call site while this orchestration (heartbeat, `ControlClip` shape) is shared (sc-8830 —
+/// collapses the ~100-line MLX/candle `resolve_scail2_conditioning` twin).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn assemble_scail2_animate_conditioning<FR, FD>(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    reference: Image,
+    driving: Vec<Image>,
+    segment_reference: FR,
+    segment_driving: FD,
+) -> WorkerResult<Vec<Conditioning>>
+where
+    FR: FnOnce(gen_core::CancelFlag) -> WorkerResult<Image> + Send + 'static,
+    FD: FnOnce(gen_core::CancelFlag) -> WorkerResult<Vec<Image>> + Send + 'static,
+{
+    let ref_mask = scail2_segment_blocking(
+        api,
+        settings,
+        job_id,
+        "scail2 reference segment task",
+        segment_reference,
+    )
+    .await?;
+    let driving_mask = scail2_segment_blocking(
+        api,
+        settings,
+        job_id,
+        "scail2 driving segment task",
+        segment_driving,
+    )
+    .await?;
+    Ok(vec![
+        Conditioning::Reference {
+            image: reference,
+            strength: None,
+        },
+        Conditioning::Mask { image: ref_mask },
+        Conditioning::ControlClip {
+            frames: driving,
+            mask: driving_mask,
+            masking_strength: 1.0,
+            start_frame: 0,
+            mode: ReplacementMode::default(),
+        },
+    ])
+}
+
+// ---------------------------------------------------------------------------
 // Real MLX Wan2.2 generation (macOS, via mlx-gen-wan, sc-3034): T2V/TI2V (5B
 // dense, z48 VAE), T2V/I2V (A14B dual-expert MoE) + MoE/Lightning LoRA. Decodes
 // the engine's `GenerationOutput::Video { frames, fps, audio: None }` into a
@@ -2210,10 +2447,6 @@ pub(crate) async fn run_video_upscale_job(
 /// Adapter id recorded on a real MLX Wan asset (mirrors the image `mlx_*` convention).
 #[cfg(target_os = "macos")]
 const WAN_ADAPTER: &str = "mlx_wan";
-
-/// At most 5 user LoRAs per job (mirrors the image path's `MAX_JOB_LORAS`).
-#[cfg(target_os = "macos")]
-const MAX_JOB_LORAS: usize = 5;
 
 /// Raw-settings recorded on a real MLX Wan asset: the request's `advanced` knobs plus
 /// the real-inference markers (mirrors the image `mlx_raw_settings`). Also records the
@@ -2416,43 +2649,6 @@ fn wan_moe_low_noise_sibling(primary: &Path) -> Option<PathBuf> {
     sibling.is_file().then_some(sibling)
 }
 
-/// Resolve a LoRA spec's file (a directory → its first `.safetensors`), verifying it exists.
-/// The `path` originates from attacker-controllable job payload, so it is first confined to an
-/// app-managed root (sc-5723 / WKA-002) before any on-disk use.
-#[cfg(target_os = "macos")]
-fn resolve_lora_file(settings: &Settings, path: PathBuf) -> WorkerResult<PathBuf> {
-    let path = crate::normalize_app_managed_lora_path(settings, &path)?;
-    let file = if path.is_dir() {
-        first_safetensors_path(&path).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "LoRA has no .safetensors under {}",
-                path.display()
-            ))
-        })?
-    } else {
-        path
-    };
-    if !file.exists() {
-        return Err(WorkerError::InvalidPayload(format!(
-            "LoRA file is missing: {}",
-            file.display()
-        )));
-    }
-    Ok(file)
-}
-
-/// A LoRA spec's strength (`weight`, default 0.8 — matches the image path).
-#[cfg(target_os = "macos")]
-fn lora_scale(lora: &Value) -> f32 {
-    lora.get("weight")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .unwrap_or(0.8) as f32
-}
-
 /// Build the adapter specs for a Wan generation (sc-3034): the Lightning distill pair
 /// (both A14B MoE models — T2V + I2V — tagged high/low, sc-4997) followed by the user LoRAs.
 /// On the MoE models a user
@@ -2527,33 +2723,14 @@ fn moe_adapter(path: PathBuf, scale: f32, kind: AdapterKind, expert: MoeExpert) 
 /// So every user LoRA/LoKr is applied shared with `moe_expert: None` — the engine `wan_vace` provider
 /// merges diffusers-named LoRA/LoKr (mlx-gen #184) and rejects `moe_expert` tags. `classify_adapter`
 /// tags SceneWorks peft LoKr as `Lokr` and everything else (incl. third-party LyCORIS LoHa / non-peft
-/// LoKr) as `Lora`, which the engine then detects + merges by key sniff (epic 3641).
+/// LoKr) as `Lora`, which the engine then detects + merges by key sniff (epic 3641). Delegates to
+/// the shared [`resolve_dense_adapters`] (sc-8830).
 #[cfg(target_os = "macos")]
 fn resolve_wan_vace_adapters(
     settings: &Settings,
     request: &VideoRequest,
 ) -> WorkerResult<Vec<AdapterSpec>> {
-    if request.loras.len() > MAX_JOB_LORAS {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
-        )));
-    }
-    let mut specs: Vec<AdapterSpec> = Vec::new();
-    for lora in &request.loras {
-        let path = lora_path(lora).ok_or_else(|| {
-            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
-        })?;
-        let file = resolve_lora_file(settings, path)?;
-        let kind = classify_adapter(&file)?;
-        specs.push(AdapterSpec {
-            path: file,
-            scale: lora_scale(lora),
-            kind,
-            pass_scales: None,
-            moe_expert: None,
-        });
-    }
-    Ok(specs)
+    resolve_dense_adapters(settings, request, MAX_JOB_LORAS)
 }
 
 /// Build the adapter specs for a SCAIL-2 generation (sc-5451 inference LoRA path, mlx-gen #462).
@@ -2564,33 +2741,14 @@ fn resolve_wan_vace_adapters(
 /// (incl. third-party LyCORIS) as `Lora`. This carries both a user-selected SCAIL-2 LoRA and the
 /// bundled Bias-Aware DPO quality LoRA (both surface through `request.loras`). A lightx2v diff-patch
 /// "lightning" LoRA installs via the engine's in-place diff-patch merge (sc-5684); selecting it makes
-/// the worker apply the step-distill recipe (`scail2_sampling`, sc-5700).
+/// the worker apply the step-distill recipe (`scail2_sampling`, sc-5700). Delegates to the shared
+/// [`resolve_dense_adapters`] (sc-8830) — the MLX Wan-VACE / SCAIL-2 twin.
 #[cfg(target_os = "macos")]
 fn resolve_scail2_adapters(
     settings: &Settings,
     request: &VideoRequest,
 ) -> WorkerResult<Vec<AdapterSpec>> {
-    if request.loras.len() > MAX_JOB_LORAS {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
-        )));
-    }
-    let mut specs: Vec<AdapterSpec> = Vec::new();
-    for lora in &request.loras {
-        let path = lora_path(lora).ok_or_else(|| {
-            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
-        })?;
-        let file = resolve_lora_file(settings, path)?;
-        let kind = classify_adapter(&file)?;
-        specs.push(AdapterSpec {
-            path: file,
-            scale: lora_scale(lora),
-            kind,
-            pass_scales: None,
-            moe_expert: None,
-        });
-    }
-    Ok(specs)
+    resolve_dense_adapters(settings, request, MAX_JOB_LORAS)
 }
 
 /// The first-frame conditioning for a Wan generation: required for I2V-14B, optional for
@@ -3812,9 +3970,7 @@ async fn generate_candle_video(
         (None, None)
     } else {
         let guidance = advanced_opt_f32(request, "guidanceScale");
-        let trimmed = request.negative_prompt.trim();
-        let negative = (!trimmed.is_empty()).then(|| trimmed.to_owned());
-        (guidance, negative)
+        (guidance, non_empty_negative_prompt(request))
     };
     // Coerce the requested frame count onto each engine's temporal stride (wan: ≡1 mod 4; ltx: 8k+1).
     let frames = if is_ltx {
@@ -3938,10 +4094,6 @@ fn candle_scail2_raw_settings(request: &VideoRequest, lightning: bool) -> Value 
     Value::Object(raw)
 }
 
-/// Max LoRAs per candle SCAIL-2 job (matches the macOS `MAX_JOB_LORAS`).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const CANDLE_SCAIL2_MAX_LORAS: usize = 5;
-
 /// The lightx2v lightning step-distill recipe (sc-6838, the candle sibling of the MLX sc-5684/5700
 /// recipe): 8 steps, CFG off, scheduler shift 1.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -3951,81 +4103,21 @@ const CANDLE_SCAIL2_LIGHTNING_GUIDANCE: f32 = 1.0;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_SCAIL2_LIGHTNING_SHIFT: f32 = 1.0;
 
-/// A LoRA spec's strength (`weight`, default 0.8 — matches the macОS `lora_scale`).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_scail2_lora_scale(lora: &Value) -> f32 {
-    lora.get("weight")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .unwrap_or(0.8) as f32
-}
-
-/// Resolve a LoRA spec's file (a directory → its first `.safetensors`), confined to an app-managed root
-/// (sc-5723 / WKA-002) before any on-disk use — the candle sibling of the macOS `resolve_lora_file`.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_resolve_lora_file(settings: &Settings, path: PathBuf) -> WorkerResult<PathBuf> {
-    let path = crate::normalize_app_managed_lora_path(settings, &path)?;
-    let file = if path.is_dir() {
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(&path)
-            .map_err(|e| WorkerError::InvalidPayload(format!("LoRA dir {}: {e}", path.display())))?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|x| x == "safetensors"))
-            .collect();
-        entries.sort();
-        entries.into_iter().next().ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "LoRA has no .safetensors under {}",
-                path.display()
-            ))
-        })?
-    } else {
-        path
-    };
-    if !file.exists() {
-        return Err(WorkerError::InvalidPayload(format!(
-            "LoRA file is missing: {}",
-            file.display()
-        )));
-    }
-    Ok(file)
-}
-
 /// Build the candle SCAIL-2 adapter specs from `request.loras` — the candle sibling of the macOS
 /// `resolve_scail2_adapters` (sc-5451). SCAIL-2 is a single dense Wan2.1-14B-I2V transformer (no MoE
 /// high/low), so every adapter is shared (`moe_expert: None`); the engine merges LoRA / LoKr / LoHa and
 /// the lightx2v lightning diff-patch into the dense DiT before build ([`candle_gen_scail2::merge_adapters`]).
 /// Carries both a user-selected SCAIL-2 LoRA and the bundled Bias-Aware DPO quality LoRA (both surface
 /// through `request.loras`); selecting a lightning diff-patch LoRA makes the worker apply the
-/// step-distill recipe ([`candle_scail2_sampling`]).
+/// step-distill recipe ([`candle_scail2_sampling`]). Delegates to the shared [`resolve_dense_adapters`]
+/// (sc-8830) — the byte-identical MLX/candle twin, now one implementation whose LoRA-file resolver is
+/// core's recursive [`first_safetensors_path`] (the old candle twin's shallow scan is gone).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_resolve_scail2_adapters(
     settings: &Settings,
     request: &VideoRequest,
 ) -> WorkerResult<Vec<AdapterSpec>> {
-    if request.loras.len() > CANDLE_SCAIL2_MAX_LORAS {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Generation supports at most {CANDLE_SCAIL2_MAX_LORAS} LoRAs per job."
-        )));
-    }
-    let mut specs: Vec<AdapterSpec> = Vec::new();
-    for lora in &request.loras {
-        let path = crate::image_jobs::lora_path(lora).ok_or_else(|| {
-            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
-        })?;
-        let file = candle_resolve_lora_file(settings, path)?;
-        let kind = crate::image_jobs::classify_adapter(&file)?;
-        specs.push(AdapterSpec {
-            path: file,
-            scale: candle_scail2_lora_scale(lora),
-            kind,
-            pass_scales: None,
-            moe_expert: None,
-        });
-    }
-    Ok(specs)
+    resolve_dense_adapters(settings, request, MAX_JOB_LORAS)
 }
 
 /// `true` if any resolved adapter is a lightx2v diff-patch ("lightning") LoRA — the engine's own
@@ -4143,23 +4235,18 @@ async fn resolve_candle_scail2_conditioning(
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| WorkerError::InvalidPayload("scail2 driving frame is malformed".into()))?;
 
-    // Segment + paint the reference mask (animation keeps the reference's world → white background).
-    // Both SAM3 passes run under `run_blocking_with_heartbeat` (sc-8390 / sc-8807): the cold
-    // multi-GB checkpoint parse + per-frame propagation can exceed the API's 90s stale-sweep, and
-    // the keepalive's cancel poll trips `cancel`, which the engine's per-frame propagate contract
-    // (sc-8972, the candle sibling of gen-core d8038beb) observes between frames.
-    let scail2_cancel_message = "SCAIL-2 canceled during person segmentation.";
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
+    // Segment + paint via the shared orchestrator (sc-8830). Animation keeps the reference's world
+    // (ref bg white) and drops the driving world (driving bg black); the candle SAM3 module is the
+    // off-Mac twin, whose per-frame propagate contract (sc-8972) observes the tripped cancel flag
+    // between frames.
     let (rm, rt) = (sam_model.clone(), sam_tokenizer.clone());
-    let ref_mask = run_blocking_with_heartbeat(
+    assemble_scail2_animate_conditioning(
         api,
         settings,
         &job.id,
-        Some(cancel),
-        scail2_cancel_message,
-        "scail2 reference segment task",
-        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+        reference,
+        driving,
+        move |flag| {
             let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
                 &rm,
                 &rt,
@@ -4168,21 +4255,8 @@ async fn resolve_candle_scail2_conditioning(
                 None,
             )?;
             crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
-        }),
-    )
-    .await?;
-
-    // Segment + paint the per-frame driving masks (animation → black background).
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
-    let driving_mask = run_blocking_with_heartbeat(
-        api,
-        settings,
-        &job.id,
-        Some(cancel),
-        scail2_cancel_message,
-        "scail2 driving segment task",
-        tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+        },
+        move |flag| {
             let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
                 &sam_model,
                 &sam_tokenizer,
@@ -4196,24 +4270,9 @@ async fn resolve_candle_scail2_conditioning(
                 &masks,
                 crate::scail2_masks::BG_BLACK,
             ))
-        }),
+        },
     )
-    .await?;
-
-    Ok(vec![
-        Conditioning::Reference {
-            image: reference,
-            strength: None,
-        },
-        Conditioning::Mask { image: ref_mask },
-        Conditioning::ControlClip {
-            frames: driving,
-            mask: driving_mask,
-            masking_strength: 1.0,
-            start_frame: 0,
-            mode: ReplacementMode::default(),
-        },
-    ])
+    .await
 }
 
 /// Real candle SCAIL-2 character animation (sc-6837 + sc-6838): build the `VideoGenInput` and run the
@@ -4232,10 +4291,7 @@ async fn generate_candle_scail2(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, &'static str, Value)> {
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     let conditioning =
         resolve_candle_scail2_conditioning(api, settings, job, request, project_path).await?;
     // Inference adapters (DPO / lightning / user LoRA) + the lightning step-distill recipe.
@@ -4346,18 +4402,15 @@ async fn resolve_candle_scail2_replace_conditioning(
                 WorkerError::InvalidPayload("scail2 reference image is malformed".into())
             })?;
     // Heartbeat keepalive + user cancel across the cold SAM3 parse + single-frame propagate
-    // (sc-8390 / sc-8807); the engine's per-frame propagate contract (sc-8972) observes the
-    // tripped flag between frames, beyond the coarse seams (cold parse / model build).
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
-    let ref_mask = run_blocking_with_heartbeat(
+    // (sc-8390 / sc-8807), via the shared blocking-segment helper (sc-8830); the engine's per-frame
+    // propagate contract (sc-8972) observes the tripped flag between frames, beyond the coarse seams
+    // (cold parse / model build).
+    let ref_mask = scail2_segment_blocking(
         api,
         settings,
         &job.id,
-        Some(cancel),
-        "SCAIL-2 canceled during person segmentation.",
         "scail2 reference segment task",
-        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+        move |flag| {
             let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
                 &sam_model,
                 &sam_tokenizer,
@@ -4366,7 +4419,7 @@ async fn resolve_candle_scail2_replace_conditioning(
                 None,
             )?;
             crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_BLACK)
-        }),
+        },
     )
     .await?;
 
@@ -4410,10 +4463,7 @@ async fn generate_candle_scail2_replace(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, Value)> {
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     let (conditioning, status) =
         resolve_candle_scail2_replace_conditioning(api, settings, job, request, project_path)
             .await?;
@@ -4500,10 +4550,7 @@ async fn generate_candle_wan_vace(
         masking_strength,
         replacement_mode_from(&request.replacement_mode),
     )?;
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -4606,10 +4653,7 @@ async fn generate_candle_wan_vace_extend_bridge(
         left_anchor,
         right_anchor,
     )?;
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -4644,10 +4688,7 @@ async fn generate_wan(
     backend: &str,
 ) -> WorkerResult<DecodedVideo> {
     let (steps, guidance) = wan_sampling(engine_id, request);
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     // extend_clip / video_bridge build single-frame boundary `Keyframe` conditioning from the
     // source clip(s) (async ffmpeg frame extraction, sc-3357); every other mode resolves
     // keyframe/reference conditioning synchronously from images.
@@ -4733,19 +4774,11 @@ pub(crate) fn resolve_bernini_model_dir(settings: &Settings) -> WorkerResult<Pat
 
 /// MLX quantization for a Bernini load: Q4 default (the validated 128 GB-fitting tier, sc-4709 ~44 GB
 /// peak), Q8 opt-in via the advanced `mlxQuantize: 8` control, explicit `<= 0` ⇒ bf16 (power users
-/// with ample RAM). Never defaults to bf16 — the snapshot is ~93 GB at bf16.
+/// with ample RAM). Never defaults to bf16 — the snapshot is ~93 GB at bf16. Delegates to the shared
+/// [`resolve_mlx_dense_quant`] (sc-8830) — the byte-identical Bernini/SCAIL-2 twin.
 #[cfg(target_os = "macos")]
 fn resolve_bernini_quant(request: &VideoRequest) -> Option<Quant> {
-    match request.advanced.get("mlxQuantize").and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    }) {
-        Some(bits) if bits <= 0 => None,
-        Some(bits) if bits <= 4 => Some(Quant::Q4),
-        Some(_) => Some(Quant::Q8),
-        None => Some(Quant::Q4),
-    }
+    resolve_mlx_dense_quant(request)
 }
 
 /// Raw-settings recorded on a real MLX Bernini asset (mirrors `wan_raw_settings`).
@@ -4902,10 +4935,7 @@ async fn generate_bernini(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<DecodedVideo> {
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     let conditioning =
         resolve_bernini_conditioning(api, settings, job, request, project_path).await?;
     let input = VideoGenInput {
@@ -4980,19 +5010,11 @@ fn resolve_scail2_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
 }
 
 /// MLX quantization for a SCAIL-2 load: Q4 default, Q8 opt-in via the advanced `mlxQuantize: 8`
-/// control, explicit `<= 0` ⇒ bf16 (power users with ample RAM). Mirrors `resolve_bernini_quant`.
+/// control, explicit `<= 0` ⇒ bf16 (power users with ample RAM). Delegates to the shared
+/// [`resolve_mlx_dense_quant`] (sc-8830) — the byte-identical `resolve_bernini_quant` twin.
 #[cfg(target_os = "macos")]
 fn resolve_scail2_quant(request: &VideoRequest) -> Option<Quant> {
-    match request.advanced.get("mlxQuantize").and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    }) {
-        Some(bits) if bits <= 0 => None,
-        Some(bits) if bits <= 4 => Some(Quant::Q4),
-        Some(_) => Some(Quant::Q8),
-        None => Some(Quant::Q4),
-    }
+    resolve_mlx_dense_quant(request)
 }
 
 /// Raw-settings recorded on a real MLX SCAIL-2 asset (mirrors `bernini_raw_settings`). When the
@@ -5115,23 +5137,17 @@ async fn resolve_scail2_conditioning(
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| WorkerError::InvalidPayload("scail2 driving frame is malformed".into()))?;
 
-    // Segment + paint the reference mask (animation keeps the reference's world → white background).
-    // Both SAM3 passes run under `run_blocking_with_heartbeat` (sc-8390 / sc-8807): the cold
-    // multi-GB checkpoint parse + per-frame 1008² propagation over a driving clip can exceed the
-    // API's 90s stale-sweep, and the keepalive's cancel poll trips `cancel`, which the engine's
-    // per-frame propagate contract (gen-core d8038beb) observes between frames.
-    let scail2_cancel_message = "SCAIL-2 canceled during person segmentation.";
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
+    // Segment + paint via the shared orchestrator (sc-8830). Animation keeps the reference's world
+    // (ref bg white) and drops the driving world (driving bg black); the native SAM3 module is the
+    // per-frame 1008² MLX twin.
     let (rm, rt) = (sam_model.clone(), sam_tokenizer.clone());
-    let ref_mask = run_blocking_with_heartbeat(
+    assemble_scail2_animate_conditioning(
         api,
         settings,
         &job.id,
-        Some(cancel),
-        scail2_cancel_message,
-        "scail2 reference segment task",
-        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+        reference,
+        driving,
+        move |flag| {
             let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
                 &rm,
                 &rt,
@@ -5140,21 +5156,8 @@ async fn resolve_scail2_conditioning(
                 None,
             )?;
             crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
-        }),
-    )
-    .await?;
-
-    // Segment + paint the per-frame driving masks (animation → black background).
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
-    let driving_mask = run_blocking_with_heartbeat(
-        api,
-        settings,
-        &job.id,
-        Some(cancel),
-        scail2_cancel_message,
-        "scail2 driving segment task",
-        tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+        },
+        move |flag| {
             let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
                 &sam_model,
                 &sam_tokenizer,
@@ -5168,24 +5171,9 @@ async fn resolve_scail2_conditioning(
                 &masks,
                 crate::scail2_masks::BG_BLACK,
             ))
-        }),
+        },
     )
-    .await?;
-
-    Ok(vec![
-        Conditioning::Reference {
-            image: reference,
-            strength: None,
-        },
-        Conditioning::Mask { image: ref_mask },
-        Conditioning::ControlClip {
-            frames: driving,
-            mask: driving_mask,
-            masking_strength: 1.0,
-            start_frame: 0,
-            mode: ReplacementMode::default(),
-        },
-    ])
+    .await
 }
 
 /// Real MLX SCAIL-2 generation (epic 5439 / sc-5448): build the `VideoGenInput` and run the shared
@@ -5206,10 +5194,7 @@ async fn generate_scail2(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<DecodedVideo> {
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     let conditioning =
         resolve_scail2_conditioning(api, settings, job, request, project_path).await?;
     // Selecting a lightx2v diff-patch "lightning" LoRA flips the worker to the step-distill recipe
@@ -5321,17 +5306,13 @@ async fn resolve_scail2_replace_conditioning(
                 WorkerError::InvalidPayload("scail2 reference image is malformed".into())
             })?;
     // Heartbeat keepalive + user cancel across the cold SAM3 parse + single-frame propagate
-    // (sc-8390 / sc-8807).
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
-    let ref_mask = run_blocking_with_heartbeat(
+    // (sc-8390 / sc-8807), via the shared blocking-segment helper (sc-8830).
+    let ref_mask = scail2_segment_blocking(
         api,
         settings,
         &job.id,
-        Some(cancel),
-        "SCAIL-2 canceled during person segmentation.",
         "scail2 reference segment task",
-        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+        move |flag| {
             let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
                 &sam_model,
                 &sam_tokenizer,
@@ -5340,7 +5321,7 @@ async fn resolve_scail2_replace_conditioning(
                 None,
             )?;
             crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_BLACK)
-        }),
+        },
     )
     .await?;
 
@@ -5390,10 +5371,7 @@ async fn generate_scail2_replace(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, Value)> {
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     let (conditioning, status) =
         resolve_scail2_replace_conditioning(api, settings, job, request, project_path).await?;
     let input = VideoGenInput {
@@ -7035,10 +7013,7 @@ async fn generate_wan_vace_engine(
         replacement_mode_from(&request.replacement_mode),
     )?;
 
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     let steps = request.advanced.get("steps").and_then(|value| {
         value
             .as_u64()
@@ -7432,10 +7407,7 @@ async fn generate_wan_vace_extend_bridge(
         left_anchor,
         right_anchor,
     )?;
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     let steps = request.advanced.get("steps").and_then(|value| {
         value
             .as_u64()
@@ -9112,6 +9084,94 @@ mod tests {
             Err(WorkerError::InvalidPayload(_))
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// sc-8830 drift-fix regression: the shared [`resolve_lora_file`] resolves a `.safetensors`
+    /// nested in a **subdirectory** of the LoRA dir (via core's recursive `first_safetensors_path`).
+    /// The old candle twin `candle_resolve_lora_file` used a shallow non-recursive `read_dir`, so it
+    /// returned "LoRA has no .safetensors" for exactly this shape — a latent candle-lane bug that
+    /// converging on the core helper fixes. Both backends now resolve it identically.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolve_lora_file_finds_nested_safetensors() {
+        let dir = std::env::temp_dir().join(format!("sw_lora_nested_{}", Uuid::new_v4().simple()));
+        let nested = dir.join("adapter");
+        std::fs::create_dir_all(&nested).unwrap();
+        let weight = nested.join("model.safetensors");
+        write_lora_fixture(&weight, None);
+
+        let settings = Settings {
+            data_dir: dir.clone(),
+            ..Settings::from_env()
+        };
+        // Point the resolver at the LoRA dir (not the file); it must recurse into `adapter/`.
+        let resolved =
+            resolve_lora_file(&settings, dir.clone()).expect("nested .safetensors must resolve");
+        assert_eq!(resolved, weight.canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// sc-8830: the shared [`resolve_dense_adapters`] enforces exactly the `max_loras` cap it is
+    /// handed — one shared count guard for every dense family (Wan-VACE / SCAIL-2, both backends).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolve_dense_adapters_honors_the_max_lora_cap() {
+        let dir = std::env::temp_dir().join(format!("sw_dense_cap_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("style.safetensors");
+        write_lora_fixture(&plain, None);
+        let settings = Settings {
+            data_dir: dir.clone(),
+            ..Settings::from_env()
+        };
+
+        // Two LoRAs under a cap of 1 → rejected; the same two under a cap of 2 → accepted.
+        let two: Vec<Value> = (0..2)
+            .map(|_| json!({ "path": plain.to_string_lossy(), "weight": 0.5 }))
+            .collect();
+        let req = request(json!({ "projectId": "p", "loras": two }));
+        assert!(matches!(
+            resolve_dense_adapters(&settings, &req, 1),
+            Err(WorkerError::InvalidPayload(_))
+        ));
+        let specs = resolve_dense_adapters(&settings, &req, 2).expect("under cap resolves");
+        assert_eq!(specs.len(), 2);
+        assert!(specs.iter().all(|s| s.moe_expert.is_none()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// sc-8830: [`non_empty_negative_prompt`] trims and maps empty/whitespace to `None` (so engines
+    /// see "no negative", not the empty string) and passes a real negative through trimmed.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn non_empty_negative_prompt_trims_and_drops_empty() {
+        let empty = request(json!({ "projectId": "p", "negativePrompt": "   " }));
+        assert_eq!(non_empty_negative_prompt(&empty), None);
+        let missing = request(json!({ "projectId": "p" }));
+        assert_eq!(non_empty_negative_prompt(&missing), None);
+        let real = request(json!({ "projectId": "p", "negativePrompt": "  blurry  " }));
+        assert_eq!(non_empty_negative_prompt(&real), Some("blurry".to_owned()));
+    }
+
+    /// sc-8830: the shared [`resolve_mlx_dense_quant`] (Bernini / SCAIL-2) defaults to Q4, honors
+    /// `mlxQuantize: 8` → Q8, and treats `<= 0` as bf16 (`None`) — never defaulting to bf16.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolve_mlx_dense_quant_defaults_q4_and_honors_override() {
+        let default = request(json!({ "projectId": "p" }));
+        assert_eq!(resolve_mlx_dense_quant(&default), Some(Quant::Q4));
+        let q8 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
+        assert_eq!(resolve_mlx_dense_quant(&q8), Some(Quant::Q8));
+        let q4 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
+        assert_eq!(resolve_mlx_dense_quant(&q4), Some(Quant::Q4));
+        let bf16 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 0 } }));
+        assert_eq!(resolve_mlx_dense_quant(&bf16), None);
+        // String forms parse the same way (the payload knob can arrive as a JSON string).
+        let q8_str = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": "8" } }));
+        assert_eq!(resolve_mlx_dense_quant(&q8_str), Some(Quant::Q8));
     }
 
     /// A locally-converted Wan2.2 TI2V-5B dir if one is present (env override or the
