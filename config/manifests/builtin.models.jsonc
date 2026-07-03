@@ -112,6 +112,15 @@
           "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
         }
       },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120)
+      // at 1024² via the candle-gen VramProbe harness. q4 packed tier overall-peak 18.4 GB, bf16 dense
+      // 32.0 GB; minMemoryGb 40 covers the heaviest (bf16) tier with headroom. candle loads lazily, so
+      // load-peak is negligible — the denoise peak dominates.
+      "candle": {
+        "minMemoryGb": 40,
+        "vramGbByTier": { "q4": 18.4, "bf16": 32.0 },
+        "measured": true
+      },
       "ui": {
         "label": "Z-Image-Turbo",
         "description": "Fast first image target for local text-to-image generation.",
@@ -424,6 +433,15 @@
           "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
           "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
         }
+      },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
+      // 1024²/10-step via the candle-gen nvidia-smi peak monitor: q4 packed overall-peak 56.3 GB (the
+      // 20B DiT + Qwen2.5-VL TE + Qwen-Image VAE; the heaviest measured image tier). minMemoryGb 64
+      // covers it with headroom; q8/bf16 ESTIMATED (~66 / ~80 GB) pending measurement.
+      "candle": {
+        "minMemoryGb": 64,
+        "vramGbByTier": { "q4": 56.3, "q8": 66.0, "bf16": 80.0 },
+        "measured": false
       },
       "ui": {
         "label": "Qwen Image",
@@ -920,6 +938,15 @@
         // directly from the turnkey snapshot.
         "quantize": 4,
         "standardTierLayout": true
+      },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
+      // 1024²/8-step via the candle-gen nvidia-smi peak monitor: q4 packed overall-peak 37.3 GB (the
+      // gpt-oss MXFP4 encoder + Flux.2 VAE dominate). minMemoryGb 44 covers it with headroom; q8/bf16
+      // ESTIMATED (~42 / ~52 GB) pending measurement.
+      "candle": {
+        "minMemoryGb": 44,
+        "vramGbByTier": { "q4": 37.3, "q8": 42.0, "bf16": 52.0 },
+        "measured": false
       },
       "ui": {
         "label": "Lens-Turbo",
@@ -1495,6 +1522,15 @@
         "quantize": 4,
         "repo": "SceneWorks/ideogram-4-mlx"
       },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
+      // 1024²/10-step via the candle-gen nvidia-smi peak monitor: q4 packed overall-peak 38.5 GB (the
+      // two-DiT Ideogram path). minMemoryGb 46 covers it with headroom; q8 ESTIMATED (~44 GB) pending
+      // measurement (bf16 not hosted for this id).
+      "candle": {
+        "minMemoryGb": 46,
+        "vramGbByTier": { "q4": 38.5, "q8": 44.0 },
+        "measured": false
+      },
       // Ideogram Non-Commercial Model Agreement (gated): accept the license at the source repo and
       // add a Hugging Face token under Settings → Service credentials before downloading. NOTE: the
       // SceneWorks turnkey repo is currently PRIVATE; the end-user credential/access path for a
@@ -1711,6 +1747,15 @@
         "quantize": 8,
         "repo": "SceneWorks/boogu-image-mlx"
       },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — ESTIMATED (measured:false): the Boogu Turbo q4
+      // sibling MEASURED 32.7 GB @1024² on candle/CUDA; Base runs the same DiT with more steps + a
+      // heavier schedule, so q4 is scaled to ~38 GB (mlx Base Q8 ~35.5 vs Turbo close-in-size). Tracked
+      // for a Base measurement. minMemoryGb 44 with headroom.
+      "candle": {
+        "minMemoryGb": 44,
+        "vramGbByTier": { "q4": 38.0, "bf16": 52.0 },
+        "measured": false
+      },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Base",
       "ui": {
         "label": "Boogu Image",
@@ -1797,6 +1842,15 @@
         "minMemoryGb": 64,
         "quantize": 8,
         "repo": "SceneWorks/boogu-image-mlx"
+      },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
+      // 1024²/8-step via the candle-gen nvidia-smi peak monitor: q4 packed (group-32, sc-9410) overall
+      // peak 32.7 GB. minMemoryGb 40 covers it with headroom; bf16 ESTIMATED (~48 GB) pending
+      // measurement.
+      "candle": {
+        "minMemoryGb": 40,
+        "vramGbByTier": { "q4": 32.7, "bf16": 48.0 },
+        "measured": false
       },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Turbo",
       "ui": {
@@ -2007,6 +2061,16 @@
         "minMemoryGb": 48,
         "quantize": 8,
         "repo": "SceneWorks/krea-2-turbo-mlx"
+      },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
+      // 1024²/8-step via the candle-gen nvidia-smi peak monitor: q4 packed overall-peak 26.4 GB (the
+      // single-stream DiT + Qwen3-VL-4B TE + Qwen-Image VAE). minMemoryGb 32 covers it with headroom;
+      // q8/bf16 ESTIMATED (~31 / ~44 GB, consistent with the mlx Q8 ~27 GB / bf16 ~43 GB above) pending
+      // measurement.
+      "candle": {
+        "minMemoryGb": 32,
+        "vramGbByTier": { "q4": 26.4, "q8": 31.0, "bf16": 44.0 },
+        "measured": false
       },
       "licenseUrl": "https://www.krea.ai/krea-2-licensing",
       "ui": {
@@ -2542,6 +2606,17 @@
         "minMemoryGb": 96,
         "quantize": 4
       },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — the epic HEADLINE, MEASURED on an RTX PRO 6000
+      // (Blackwell sm_120) at 1024²/8-step via the candle-gen VramProbe. The packed Q4 tier loads its
+      // quantized footprint on-device directly (no dense CPU-staging), so the old ~105 GB dense-staging
+      // load peak is GONE — measured q4 overall-peak 47.2 GB with a negligible load-peak. minMemoryGb 56
+      // covers the measured q4 tier with headroom; q8/bf16 are ESTIMATED (~58 / ~72 GB, scaled from the
+      // 32B DiT weight sizes) pending a q8/bf16 measurement (their TE dirs are not yet cached locally).
+      "candle": {
+        "minMemoryGb": 56,
+        "vramGbByTier": { "q4": 47.2, "q8": 58.0, "bf16": 72.0 },
+        "measured": false
+      },
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/flux2-dev-mlx/blob/main/LICENSE.md",
       "ui": {
@@ -3044,6 +3119,17 @@
         "minMemoryGb": 64,
         "quantize": 4
       },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
+      // 1024²/20-step via the candle-gen VramProbe harness. q4 overall-peak 33.9 GB, bf16 dense 41.3 GB.
+      // Retires the epic 7982 standing "SD3.5 minMemoryGb under measured peak" follow-up: on discrete
+      // VRAM the real overall-peak is ~41 GB (bf16), NOT the unified-memory mlx 64 — minMemoryGb 48
+      // covers the heaviest hosted tier with headroom (the mlx 64 above is the Mac unified-memory OS
+      // peak and is left unchanged; it does not describe a discrete-GPU VRAM ceiling).
+      "candle": {
+        "minMemoryGb": 48,
+        "vramGbByTier": { "q4": 33.9, "bf16": 41.3 },
+        "measured": true
+      },
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/sd3.5-large-mlx/blob/main/LICENSE.md",
       "ui": {
@@ -3146,6 +3232,15 @@
         // quantized; the dense T5-XXL TE + VAE dominate every tier, so minMemoryGb stays 64.
         "minMemoryGb": 64,
         "quantize": 4
+      },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — same 8B MMDiT + triple TE + VAE backbone as SD3.5
+      // Large (few-step schedule only differs), so the candle VRAM is that of Large: measured q4 33.9 GB
+      // / bf16 41.3 GB there. vramGbByTier carried over from the Large measurement; minMemoryGb 48 with
+      // headroom. measured:false — Large-Turbo itself was not separately profiled (identical footprint).
+      "candle": {
+        "minMemoryGb": 48,
+        "vramGbByTier": { "q4": 33.9, "bf16": 41.3 },
+        "measured": false
       },
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/sd3.5-large-turbo-mlx/blob/main/LICENSE.md",
@@ -3251,6 +3346,15 @@
         // SD3.5 tier, below Large/Turbo's 64).
         "minMemoryGb": 56,
         "quantize": 4
+      },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
+      // 1024²/28-step via the candle-gen VramProbe harness: q4 packed overall-peak 28.5 GB. The dense
+      // T5-XXL TE + VAE dominate the 2.5B MMDiT-X (as on mlx), so bf16 is only modestly heavier —
+      // minMemoryGb 36 covers the measured q4 with headroom (bf16 estimated ~33 GB, still < 36).
+      "candle": {
+        "minMemoryGb": 36,
+        "vramGbByTier": { "q4": 28.5, "bf16": 33.0 },
+        "measured": false
       },
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/sd3.5-medium-mlx/blob/main/LICENSE.md",
