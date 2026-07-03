@@ -170,6 +170,14 @@ const MAX_MODEL_MULTIPART_BODY_BYTES: usize = MAX_MODEL_UPLOAD_BYTES + 16 * 1024
 // lora, model, pose, keypoint) before the startup sweep reclaims it. Named for uploads
 // in general — the old `STALE_LORA_UPLOAD_SECONDS` misleadingly implied LoRA-only.
 const STALE_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
+// sc-8884 (F-082): the char cap applied to every free-text prompt field (`prompt` and
+// `negativePrompt`). Both are persisted into jobs.db and re-broadcast over SSE on every
+// `job.updated`, so an uncapped field bloats the row and every subscriber's payload.
+const MAX_PROMPT_CHARS: usize = 4000;
+// sc-8884 (F-082): serialized-size ceiling for the free-form `advanced` object. It is a
+// pass-through bag threaded to the worker, so it has no per-key schema — bound its total
+// serialized size instead. 64 KiB is generous for legitimate advanced settings.
+const MAX_ADVANCED_JSON_BYTES: usize = 64 * 1024;
 // Thread-local (not a process-global atomic) so a test overriding the cap to
 // exercise the size limit can't leak that value into other LoRA-upload tests
 // running concurrently on sibling threads. `#[tokio::test]` uses a current-thread
@@ -2344,15 +2352,39 @@ fn validate_person_track_job(payload: &PersonTrackJobRequest) -> Result<(), ApiE
     Ok(())
 }
 
+/// sc-8884 (F-082): `negativePrompt` and the free-form `advanced` bag previously escaped
+/// all length validation (only `prompt` was capped), so an oversized field was persisted
+/// to jobs.db and re-serialized to every SSE subscriber on each status change. Cap the
+/// negative prompt at the same char limit as `prompt` and bound `advanced`'s serialized
+/// size. Shared by `validate_image_job` / `validate_video_job`.
+fn validate_prompt_extras(negative_prompt: &str, advanced: &JsonObject) -> Result<(), ApiError> {
+    if negative_prompt.chars().count() > MAX_PROMPT_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "negativePrompt must be at most {MAX_PROMPT_CHARS} characters"
+        )));
+    }
+    // Serialize once to measure the on-the-wire size of the pass-through bag.
+    let advanced_bytes = serde_json::to_vec(advanced)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    if advanced_bytes > MAX_ADVANCED_JSON_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "advanced settings must serialize to at most {MAX_ADVANCED_JSON_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
     }
-    if payload.prompt.is_empty() || payload.prompt.chars().count() > 4000 {
+    if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
         return Err(ApiError::bad_request(
             "prompt must be between 1 and 4000 characters",
         ));
     }
+    validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
     if ![
         "text_to_image",
         "edit_image",
@@ -2397,11 +2429,12 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
     }
-    if payload.prompt.is_empty() || payload.prompt.chars().count() > 4000 {
+    if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
         return Err(ApiError::bad_request(
             "prompt must be between 1 and 4000 characters",
         ));
     }
+    validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
     if ![
         "image_to_video",
         "text_to_video",
