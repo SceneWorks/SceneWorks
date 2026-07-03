@@ -8624,6 +8624,14 @@ async fn project_file_route_serves_files_and_rejects_traversal() {
             .and_then(|value| value.to_str().ok()),
         Some("image/png")
     );
+    // sc-9674 (sc-8872 follow-up): the serve response forbids MIME sniffing so a
+    // user-controlled project file can't be reinterpreted as active content.
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
 
     let (status, _, bytes) = request_raw(
         app.clone(),
@@ -8694,6 +8702,13 @@ async fn project_file_route_serves_byte_ranges() {
     assert_eq!(
         headers.get("accept-ranges").and_then(|v| v.to_str().ok()),
         Some("bytes")
+    );
+    // sc-9674: the 206 partial-content branch also carries nosniff.
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff")
     );
 
     // An open-ended range serves to EOF (this is how WebKit fetches the
@@ -9770,6 +9785,45 @@ async fn media_tickets_authenticate_project_file_urls() {
     )
     .await;
     assert_ne!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn pose_preview_route_sets_nosniff() {
+    // sc-9674 (sc-8872 follow-up): the pose-preview serve endpoint is a sibling
+    // media route on the API origin, so it must also forbid MIME sniffing. Served
+    // inline for <img> preview, so no attachment disposition.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    let app = create_app(settings).expect("app creates");
+
+    // The handler reads the rendered skeleton from the pose-detect cache; write one.
+    let preview_dir = data_dir.join("cache").join("pose_detect").join("job_ok");
+    std::fs::create_dir_all(&preview_dir).expect("preview dir creates");
+    std::fs::write(preview_dir.join("preview.png"), PNG_32X32).expect("preview writes");
+
+    let (status, headers, bytes) = request_raw(
+        app,
+        "GET",
+        "/api/v1/poses/preview/job_ok/preview.png",
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, PNG_32X32);
+    assert_eq!(
+        headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("image/png")
+    );
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
 }
 
 #[test]

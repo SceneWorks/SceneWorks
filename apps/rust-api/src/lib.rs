@@ -1229,6 +1229,14 @@ async fn get_project_file(
                             format!("bytes {start}-{end}/{total}"),
                         ),
                         (header::CONTENT_LENGTH, len.to_string()),
+                        // sc-9674 (sc-8872 follow-up): forbid MIME sniffing so a
+                        // user-controlled project file can't be reinterpreted by the
+                        // browser as a different (e.g. active) content type than the
+                        // Content-Type we derived. Kept inline (no attachment
+                        // disposition) so <img>/<video> preview and byte-range
+                        // playback still work — the assets are served for inline
+                        // display, not forced download.
+                        (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
                     ],
                     Body::from_stream(stream),
                 )
@@ -1250,6 +1258,9 @@ async fn get_project_file(
             (header::CONTENT_TYPE, content_type),
             (header::ACCEPT_RANGES, "bytes".to_string()),
             (header::CONTENT_LENGTH, total.to_string()),
+            // sc-9674: forbid MIME sniffing (see the range branch above). Inline
+            // disposition is kept intentionally so image/video preview still works.
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
         ],
         Body::from_stream(stream),
     )
