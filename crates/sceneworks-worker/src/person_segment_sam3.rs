@@ -23,6 +23,7 @@
 //! affine-quantized after load (`Sam3VideoModel::quantize`, sc-4925) — **Q8 by default**
 //! (~0.9 GB, near-lossless), tunable via `SCENEWORKS_SAM3_QUANT` (`q8`/`q4`/`off`).
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -84,6 +85,84 @@ fn parse_quant_bits(value: &str) -> Option<i32> {
 /// clips would leak identities. Building from cached weights is cheap (layer assembly over
 /// already-resident arrays). Mirrors the SAM2 predictor cache + poison-recovery idiom.
 static WEIGHTS: OnceLock<Mutex<Option<Weights>>> = OnceLock::new();
+
+/// Cache key for the smart-select single-image models: the resolved weight path + the quant tier in
+/// effect. A change in either (different model snapshot, `SCENEWORKS_SAM3_QUANT` flip) rebuilds, so a
+/// re-pinned/re-configured worker never serves a stale quantized instance.
+type Sam3CacheKey = (PathBuf, Option<i32>);
+
+thread_local! {
+    /// Smart-select **box** path (sc-8846 / F-044): the quantized [`Sam3ImageSegmenter`] is cached
+    /// per blocking thread, keyed by `(model_path, quant_bits)`, so repeated interactive clicks skip
+    /// the per-call model build + `quantize(8)` (seconds of latency + a transient dense/quantized
+    /// memory spike each click). Unlike the video paths this is **safe to reuse**: the image
+    /// segmenter is logically stateless — `segment_with_boxes(&self, …)` runs a pure forward + mask
+    /// post-process and retains no per-call image embedding / prompt / mask memory (the only interior
+    /// mutability is a byte-identical position-embedding memo, not segmentation state). Thread-local
+    /// (not a process-wide `Mutex`) because the model embeds an `Rc<Backbone>` → `!Send`/`!Sync`, so
+    /// it cannot cross the `spawn_blocking` thread boundary in a shared `static`; this mirrors
+    /// mlx-gen-sam3's own thread-local resize-matrix cache. One slot per key → interactive (serial)
+    /// smart-select keeps a single quantized model (~0.9 GB Q8) resident, not a per-click copy.
+    static BOX_SEGMENTER: RefCell<Option<(Sam3CacheKey, Sam3ImageSegmenter)>> =
+        const { RefCell::new(None) };
+
+    /// Smart-select **point** path (sc-8846 / F-044): the quantized [`Sam3Tracker`] cached per
+    /// blocking thread, keyed by `(model_path, quant_bits)`. Same rationale as [`BOX_SEGMENTER`]:
+    /// `segment_points(&self, …)` is a pure single-frame forward (encode frame → decode points) with
+    /// no retained memory bank — the video memory bank is assembled in the propagate loop, never
+    /// stored on the tracker — so reusing the instance across clicks is byte-identical.
+    static POINT_TRACKER: RefCell<Option<(Sam3CacheKey, Sam3Tracker)>> = const { RefCell::new(None) };
+}
+
+/// Load the shared dense checkpoint into the process-wide [`WEIGHTS`] cache (poison-recovery) and run
+/// `build` against it — the common cache-miss body for the smart-select single-image builders.
+fn with_cached_weights<T>(
+    model_path: &Path,
+    build: impl FnOnce(&Weights) -> WorkerResult<T>,
+) -> WorkerResult<T> {
+    let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        *guard = None;
+        guard
+    });
+    if guard.is_none() {
+        let weights = Weights::from_file(model_path)
+            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
+        *guard = Some(weights);
+    }
+    build(guard.as_ref().expect("weights loaded"))
+}
+
+/// Build a quantized `Sam3ImageSegmenter` from the shared (cached) dense checkpoint — the box
+/// smart-select cache-miss body (sc-8846). Split out so the build + `quantize` cost is in one place.
+fn build_box_segmenter(model_path: &Path, quant: Option<i32>) -> WorkerResult<Sam3ImageSegmenter> {
+    with_cached_weights(model_path, |weights| {
+        let mut model = Sam3ImageSegmenter::from_weights(weights)
+            .map_err(|e| WorkerError::Engine(format!("sam3 image model build: {e}")))?;
+        if let Some(bits) = quant {
+            model
+                .quantize(bits)
+                .map_err(|e| WorkerError::Engine(format!("sam3 quantize q{bits}: {e}")))?;
+        }
+        Ok(model)
+    })
+}
+
+/// Build a quantized `Sam3Tracker` from the shared (cached) dense checkpoint — the point
+/// smart-select cache-miss body (sc-8846), sibling of [`build_box_segmenter`].
+fn build_point_tracker(model_path: &Path, quant: Option<i32>) -> WorkerResult<Sam3Tracker> {
+    with_cached_weights(model_path, |weights| {
+        let mut tracker = Sam3Tracker::from_weights(weights)
+            .map_err(|e| WorkerError::Engine(format!("sam3 tracker build: {e}")))?;
+        if let Some(bits) = quant {
+            tracker
+                .quantize(bits)
+                .map_err(|e| WorkerError::Engine(format!("sam3 tracker quantize q{bits}: {e}")))?;
+        }
+        Ok(tracker)
+    })
+}
 
 /// Resolve already-present SAM3 weights: an explicit env pin (`SCENEWORKS_SAM3_WEIGHTS`, a dir or
 /// the `model.safetensors` inside it), then the app cache `<data_dir>/cache/person-segment-sam3/`,
@@ -421,50 +500,46 @@ pub(crate) fn segment_box_blocking(
     }
     let pixels = input_tensor(&image);
 
-    // Cached checkpoint (poison-recovery), shared with the video path — both consume the same
-    // facebook/sam3 weight map (mirrors person_segment / sc-4277 F-MLXW-13).
-    let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    if guard.is_none() {
-        let weights = Weights::from_file(&model_path)
-            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
-        *guard = Some(weights);
-    }
-    let weights = guard.as_ref().expect("weights loaded");
-
-    let mut model = Sam3ImageSegmenter::from_weights(weights)
-        .map_err(|e| WorkerError::Engine(format!("sam3 image model build: {e}")))?;
-    if let Some(bits) = quant_bits() {
-        model
-            .quantize(bits)
-            .map_err(|e| WorkerError::Engine(format!("sam3 quantize q{bits}: {e}")))?;
-    }
-    let tokenizer = Sam3Tokenizer::from_file(&tokenizer_path, &Sam3TextConfig::sam3())
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
-    let (input_ids, text_mask) = tokenizer
-        .encode(concept)
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
-
     let cxcywh = normalize_box_cxcywh(box_xyxy, width, height);
     let boxes = Array::from_slice(&cxcywh, &[1, 1, 4]);
     let box_labels = [1i32]; // a single positive box prompt
 
-    let instances = model
-        .segment_with_boxes(
-            &pixels,
-            &input_ids,
-            &text_mask,
-            &boxes,
-            &box_labels,
-            (width as f32, height as f32),
-            threshold,
-            mask_threshold,
-        )
-        .map_err(|e| WorkerError::Engine(format!("sam3 segment_with_boxes: {e}")))?;
+    // Cache the quantized segmenter per blocking thread, keyed by (weights, quant), so repeated
+    // interactive clicks skip the per-call `from_weights` + `quantize` (sc-8846 / F-044). The
+    // segmenter is stateless (`segment_with_boxes(&self, …)` is a pure forward + post-process), so
+    // reuse is byte-identical; the dense checkpoint is still parsed once into the shared `WEIGHTS`.
+    // The tokenizer is a cheap host-side parse — kept per-call (no GPU tensors, negligible cost).
+    let quant = quant_bits();
+    let key: Sam3CacheKey = (model_path.clone(), quant);
+    let instances = BOX_SEGMENTER.with(|cell| -> WorkerResult<_> {
+        {
+            let cached = cell.borrow();
+            if cached.as_ref().map(|(k, _)| k) != Some(&key) {
+                drop(cached);
+                let model = build_box_segmenter(&model_path, quant)?;
+                *cell.borrow_mut() = Some((key.clone(), model));
+            }
+        }
+        let cached = cell.borrow();
+        let (_, model) = cached.as_ref().expect("segmenter cached");
+        let tokenizer = Sam3Tokenizer::from_file(&tokenizer_path, &Sam3TextConfig::sam3())
+            .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
+        let (input_ids, text_mask) = tokenizer
+            .encode(concept)
+            .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
+        model
+            .segment_with_boxes(
+                &pixels,
+                &input_ids,
+                &text_mask,
+                &boxes,
+                &box_labels,
+                (width as f32, height as f32),
+                threshold,
+                mask_threshold,
+            )
+            .map_err(|e| WorkerError::Engine(format!("sam3 segment_with_boxes: {e}")))
+    })?;
 
     // Pick the instance whose MASK has the most foreground inside the prompt box. SAM3 PVS returns
     // the box-echo query (its box ≈ the prompt, but the mask can be degenerate) alongside the
@@ -550,32 +625,28 @@ pub(crate) fn segment_points_blocking(
     let coords: Vec<(f32, f32)> = points.iter().map(|&(x, y, _)| (x * sx, y * sy)).collect();
     let labels: Vec<i32> = points.iter().map(|&(_, _, l)| l).collect();
 
-    // Cached checkpoint (poison-recovery), shared with the box/video paths — all consume the same
-    // facebook/sam3 weight map (mirrors segment_box_blocking).
-    let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    if guard.is_none() {
-        let weights = Weights::from_file(&model_path)
-            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
-        *guard = Some(weights);
-    }
-    let weights = guard.as_ref().expect("weights loaded");
-
-    let mut tracker = Sam3Tracker::from_weights(weights)
-        .map_err(|e| WorkerError::Engine(format!("sam3 tracker build: {e}")))?;
-    if let Some(bits) = quant_bits() {
+    // Cache the quantized tracker per blocking thread, keyed by (weights, quant), so repeated
+    // interactive clicks skip the per-call `from_weights` + `quantize` (sc-8846 / F-044). The tracker
+    // is stateless on this single-frame path (`segment_points(&self, …)` encodes the frame + decodes
+    // the points, retaining no memory bank), so reuse is byte-identical; the dense checkpoint is
+    // still parsed once into the shared `WEIGHTS`.
+    let quant = quant_bits();
+    let key: Sam3CacheKey = (model_path.clone(), quant);
+    let mask = POINT_TRACKER.with(|cell| -> WorkerResult<_> {
+        {
+            let cached = cell.borrow();
+            if cached.as_ref().map(|(k, _)| k) != Some(&key) {
+                drop(cached);
+                let tracker = build_point_tracker(&model_path, quant)?;
+                *cell.borrow_mut() = Some((key.clone(), tracker));
+            }
+        }
+        let cached = cell.borrow();
+        let (_, tracker) = cached.as_ref().expect("tracker cached");
         tracker
-            .quantize(bits)
-            .map_err(|e| WorkerError::Engine(format!("sam3 tracker quantize q{bits}: {e}")))?;
-    }
-
-    let mask = tracker
-        .segment_points(&pixels, &coords, &labels)
-        .map_err(|e| WorkerError::Engine(format!("sam3 tracker segment_points: {e}")))?;
+            .segment_points(&pixels, &coords, &labels)
+            .map_err(|e| WorkerError::Engine(format!("sam3 tracker segment_points: {e}")))
+    })?;
 
     // Low-res mask logits `[mg, mg]` → binarize `> 0` + resize to source dims (inverts the squash).
     let grid = mask.low_res.shape()[0] as usize;
@@ -748,6 +819,29 @@ pub(crate) fn segment_all_persons_in_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// sc-8846 / F-044: the smart-select model cache is keyed by `(model_path, quant_bits)`, so a
+    /// re-pinned weight snapshot **or** a `SCENEWORKS_SAM3_QUANT` flip is a cache miss (rebuild),
+    /// never a stale quantized instance served under a new configuration. Pins that discriminator
+    /// without needing the 3.2 GB weights.
+    #[test]
+    fn cache_key_distinguishes_weights_and_quant_tier() {
+        let a: Sam3CacheKey = (PathBuf::from("/models/sam3/model.safetensors"), Some(8));
+        // Same key → cache hit.
+        assert_eq!(
+            a.clone(),
+            (PathBuf::from("/models/sam3/model.safetensors"), Some(8))
+        );
+        // Different quant tier (Q8 → Q4) → miss.
+        assert_ne!(
+            a,
+            (PathBuf::from("/models/sam3/model.safetensors"), Some(4))
+        );
+        // Quant off vs on → miss.
+        assert_ne!(a, (PathBuf::from("/models/sam3/model.safetensors"), None));
+        // Different weight snapshot → miss.
+        assert_ne!(a, (PathBuf::from("/other/model.safetensors"), Some(8)));
+    }
 
     /// sc-8807: a pre-tripped cancel flag short-circuits BEFORE frame decode / the cold 3.2 GB
     /// checkpoint parse — the paths point at nothing, so reaching either would error with
@@ -1043,8 +1137,28 @@ mod tests {
                 w as f32 * 0.894,
                 h as f32 * 0.989,
             ]);
-        let mask = segment_box_blocking(model, tokenizer, image, box_xyxy, &concept, 0.5, 0.5)
-            .expect("segment_box_blocking");
+        let mask = segment_box_blocking(
+            model.clone(),
+            tokenizer.clone(),
+            image.clone(),
+            box_xyxy,
+            &concept,
+            0.5,
+            0.5,
+        )
+        .expect("segment_box_blocking");
+
+        // sc-8846 / F-044: a SECOND identical call must return the byte-identical mask. The first
+        // call populated the thread-local quantized-segmenter cache; this run hits the cache. A drift
+        // here would mean the cached instance carried per-call state across clicks (state bleed) —
+        // the exact hazard the statelessness analysis ruled out. Same-thread (test runs inline), so
+        // it exercises the warm-cache path directly.
+        let mask2 = segment_box_blocking(model, tokenizer, image, box_xyxy, &concept, 0.5, 0.5)
+            .expect("segment_box_blocking (cached)");
+        assert_eq!(
+            mask, mask2,
+            "cached segmenter must reproduce the mask byte-for-byte (no state bleed)"
+        );
 
         assert_eq!(mask.len(), (w * h) as usize, "mask size = source dims");
         assert!(mask.iter().all(|&v| v == 0 || v == 255), "mask is binary");
@@ -1113,8 +1227,17 @@ mod tests {
                 (v.len() == 2).then(|| (v[0], v[1]))
             })
             .unwrap_or((w as f32 * 0.5, h as f32 * 0.5));
-        let mask = segment_points_blocking(model, image, vec![(px, py, 1)])
+        let mask = segment_points_blocking(model.clone(), image.clone(), vec![(px, py, 1)])
             .expect("segment_points_blocking");
+
+        // sc-8846 / F-044: a SECOND identical call must reproduce the mask byte-for-byte — the warm
+        // thread-local tracker cache carries no per-click state (statelessness verified).
+        let mask2 = segment_points_blocking(model, image, vec![(px, py, 1)])
+            .expect("segment_points_blocking (cached)");
+        assert_eq!(
+            mask, mask2,
+            "cached tracker must reproduce the mask byte-for-byte (no state bleed)"
+        );
 
         assert_eq!(mask.len(), (w * h) as usize, "mask size = source dims");
         assert!(mask.iter().all(|&v| v == 0 || v == 255), "mask is binary");
