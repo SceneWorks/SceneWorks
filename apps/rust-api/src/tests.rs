@@ -7063,6 +7063,212 @@ async fn model_download_job_forwards_catalog_family_for_worker_reconciliation() 
     assert_eq!(job["payload"]["family"], "z-image");
 }
 
+/// Write the empty sibling manifests a `model_catalog` build requires, so a co-requisite test
+/// (sc-9696) only has to author its own `builtin.models.jsonc`.
+fn write_empty_sibling_manifests(config_dir: &std::path::Path) {
+    for (name, key) in [
+        ("user.models.jsonc", "models"),
+        ("builtin.loras.jsonc", "loras"),
+        ("user.loras.jsonc", "loras"),
+        ("builtin.recipe-presets.jsonc", "presets"),
+        ("user.recipe-presets.jsonc", "presets"),
+    ] {
+        std::fs::write(
+            config_dir.join(name),
+            format!("{{ \"schemaVersion\": 1, \"{key}\": [] }}"),
+        )
+        .expect("sibling manifest writes");
+    }
+}
+
+#[test]
+fn model_download_and_co_requisite_helpers_partition_downloads() {
+    // sc-9696: a co-requisite (fetch-all dependency) must never be chosen as the primary/tier
+    // download, and must be enumerable separately for the download job + install-state gating.
+    let model = json!({
+        "id": "pid_qwenimage",
+        "downloads": [
+            { "provider": "huggingface", "repo": "SceneWorks/pid-qwenimage" },
+            { "provider": "huggingface", "repo": "SceneWorks/gemma-2-2b-it", "coRequisite": true }
+        ]
+    });
+    assert_eq!(
+        super::model_download(&model).expect("primary resolves")["repo"],
+        "SceneWorks/pid-qwenimage"
+    );
+    let co_requisites = super::model_co_requisite_downloads(&model);
+    assert_eq!(co_requisites.len(), 1);
+    assert_eq!(co_requisites[0]["repo"], "SceneWorks/gemma-2-2b-it");
+
+    // Ordering-independent: a co-requisite listed FIRST still never wins the primary slot.
+    let reordered = json!({
+        "id": "pid_qwenimage",
+        "downloads": [
+            { "provider": "huggingface", "repo": "SceneWorks/gemma-2-2b-it", "coRequisite": true },
+            { "provider": "huggingface", "repo": "SceneWorks/pid-qwenimage" }
+        ]
+    });
+    assert_eq!(
+        super::model_download(&reordered).expect("primary resolves")["repo"],
+        "SceneWorks/pid-qwenimage"
+    );
+}
+
+#[tokio::test]
+async fn model_download_job_enqueues_co_requisite_dependencies() {
+    // sc-9696: installing a model with a co-requisite download (e.g. the PiD decoder's shared
+    // gemma-2-2b-it caption encoder) must queue a SECOND download job for the dependency — else it
+    // is never fetched and the feature silently no-ops (PiD → native VAE). The co-requisite job
+    // must NOT carry the model's family (it is a different artifact than the primary checkpoint).
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+            {
+              "schemaVersion": 1,
+              "models": [{
+                "id": "pid_qwenimage",
+                "name": "PiD Decoder",
+                "type": "utility",
+                "family": "pid",
+                "downloads": [
+                  { "provider": "huggingface", "repo": "SceneWorks/pid-qwenimage" },
+                  { "provider": "huggingface", "repo": "SceneWorks/gemma-2-2b-it", "coRequisite": true }
+                ]
+              }]
+            }
+            "#,
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, primary) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/pid_qwenimage/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // The returned job is the primary (its id is what the download UI tracks).
+    assert_eq!(primary["payload"]["repo"], "SceneWorks/pid-qwenimage");
+    assert_eq!(primary["payload"]["family"], "pid");
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    let download_jobs = jobs
+        .as_array()
+        .expect("jobs is an array")
+        .iter()
+        .filter(|job| job["type"] == "model_download")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        download_jobs.len(),
+        2,
+        "the primary and its one co-requisite must each get a download job"
+    );
+    let co_requisite = download_jobs
+        .iter()
+        .find(|job| job["payload"]["repo"] == "SceneWorks/gemma-2-2b-it")
+        .expect("a co-requisite download job is enqueued");
+    assert!(
+        co_requisite["payload"].get("family").map_or(true, Value::is_null),
+        "a co-requisite job must not carry the model family (different artifact than the checkpoint)"
+    );
+}
+
+#[tokio::test]
+async fn model_catalog_gates_install_state_on_co_requisite() {
+    // sc-9696: the entry is "installed" only when the primary AND every co-requisite are cached.
+    // Primary present but the gemma-2-2b-it caption encoder missing → not-installed + repairable, so
+    // the web PiD toggle stays hidden and the user still has a path to fetch the missing dependency.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+            {
+              "schemaVersion": 1,
+              "models": [{
+                "id": "pid_qwenimage",
+                "name": "PiD Decoder",
+                "type": "utility",
+                "family": "pid",
+                "downloads": [
+                  { "provider": "huggingface", "repo": "SceneWorks/pid-qwenimage" },
+                  { "provider": "huggingface", "repo": "SceneWorks/gemma-2-2b-it", "coRequisite": true }
+                ]
+              }]
+            }
+            "#,
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let hub = temp_dir.path().join("data/cache/huggingface/hub");
+    // Primary present: a payload file makes a non-diffusers snapshot resolve as installed.
+    let primary_snapshot = hub.join("models--SceneWorks--pid-qwenimage/snapshots/rev1");
+    std::fs::create_dir_all(&primary_snapshot).expect("primary snapshot dir creates");
+    std::fs::write(
+        primary_snapshot.join("pid_qwenimage_2kto4k.safetensors"),
+        "weights",
+    )
+    .expect("primary weights write");
+
+    // Case A: gemma co-requisite absent → not installed, repairable, and surfaced as missing.
+    let (status, models) = request(
+        create_app(test_settings(&temp_dir)).expect("app creates"),
+        "GET",
+        "/api/v1/models",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["id"], "pid_qwenimage");
+    assert_eq!(
+        models[0]["installState"], "missing",
+        "primary present but co-requisite gemma missing → not installed"
+    );
+    assert_eq!(models[0]["cacheState"], "incomplete");
+    assert_eq!(models[0]["repairAvailable"], true);
+    assert!(
+        models[0]["missingRequiredFiles"]
+            .as_array()
+            .expect("missingRequiredFiles is an array")
+            .iter()
+            .any(|entry| entry
+                .as_str()
+                .is_some_and(|value| value.contains("gemma-2-2b-it"))),
+        "the missing co-requisite must be surfaced in missingRequiredFiles"
+    );
+
+    // Case B: install the gemma co-requisite too → the entry now reports installed.
+    let gemma_snapshot = hub.join("models--SceneWorks--gemma-2-2b-it/snapshots/rev1");
+    std::fs::create_dir_all(&gemma_snapshot).expect("gemma snapshot dir creates");
+    std::fs::write(gemma_snapshot.join("config.json"), "{}").expect("gemma config write");
+    std::fs::write(gemma_snapshot.join("model.safetensors"), "weights")
+        .expect("gemma weights write");
+
+    let (status, models) = request(
+        create_app(test_settings(&temp_dir)).expect("app creates"),
+        "GET",
+        "/api/v1/models",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        models[0]["installState"], "installed",
+        "primary + co-requisite both cached → installed"
+    );
+    assert_eq!(models[0]["cacheState"], "complete");
+}
+
 #[tokio::test]
 async fn lora_catalog_uses_huggingface_cache_install_state() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");

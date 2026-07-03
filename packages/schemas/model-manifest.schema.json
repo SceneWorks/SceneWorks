@@ -237,7 +237,7 @@
           },
           "downloads": {
             "type": "array",
-            "description": "Download entries list alternate sources for the same model; at most one may be marked default: true. If none is marked, the first supported entry is used. When a model ships a quant matrix (epic 8506, sc-8508), each tier (bf16 / Q8 / Q4) is a SEPARATE download entry — same repo, distinct `files` filter and `variant` — so each tier is an independently installable artifact whose presence the catalog tracks per-variant.",
+            "description": "Download entries are usually PICK-ONE alternates for the same model: at most one may be marked default: true (else the first supported entry is used); a quant matrix (epic 8506, sc-8508) lists each tier (bf16 / Q8 / Q4) as a separate same-repo entry distinguished by `files`/`variant`; OS alternates are distinguished by `platforms`. Entries flagged `coRequisite: true` are the exception — FETCH-ALL dependencies (e.g. a decoder checkpoint plus its shared caption encoder) that install alongside the primary and gate its install state (sc-9696).",
             "contains": {
               "type": "object",
               "properties": {
@@ -265,7 +265,11 @@
                 },
                 "variant": {
                   "$ref": "#/$defs/quantVariantKey",
-                  "description": "The quantization tier this entry provisions (bf16 / q8 / q4). Present only on quant-matrix entries (sc-8508); a single-variant model omits it. The web/download-job selects a tier by this key, and per-variant install tracking reports which tiers are on disk."
+                  "description": "The quantization tier this entry provisions (bf16 / q8 / q4). Present only on quant-matrix entries (sc-8508); a single-variant model omits it. The web/download-job selects a tier by this key, and per-variant install tracking reports which tiers are on disk. Never combined with coRequisite (a co-requisite is not a selectable tier)."
+                },
+                "coRequisite": {
+                  "type": "boolean",
+                  "description": "Marks this entry as a FETCH-ALL dependency installed IN ADDITION TO the primary download, not a pick-one alternate (contrast `variant` tiers and `platforms` OS alternates). Installing the model queues the primary plus every co-requisite for the current OS, and the catalog reports the entry installed only once the primary AND all co-requisites are cached. Co-requisite entries are never chosen as the primary/default and are excluded from quant-tier enumeration. A co-requisite may be shared by several models (e.g. the PiD gemma-2-2b-it caption encoder), so deleting one model does NOT remove it. Example: a PiD decoder checkpoint (primary) + gemma-2-2b-it (co-requisite). See sc-9696, epic 7840."
                 },
                 "estimatedSizeBytes": {
                   "type": ["integer", "string"],

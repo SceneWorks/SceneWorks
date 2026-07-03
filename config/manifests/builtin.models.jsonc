@@ -4338,6 +4338,10 @@
           // produces usable text-to-video. Only the cond_safe variant is fetched.
           "provider": "huggingface",
           "repo": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
+          // Co-requisite (sc-9696): the cond_safe distill LoRA is a required runtime component
+          // (auto-injected per-pass; see mlx.autoDistillLora), so it must download alongside the
+          // 10Eros checkpoint rather than being a pick-one alternate.
+          "coRequisite": true,
           "files": ["ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"],
           "estimatedSizeBytes": 662072824
         }
@@ -5573,6 +5577,11 @@
           // mirror's LICENSE (Gemma Terms) + Prohibited Use Policy + NOTICE alongside the weights.
           "provider": "huggingface",
           "repo": "SceneWorks/gemma-2-2b-it",
+          // Co-requisite (sc-9696): fetched ALONGSIDE the PiD checkpoint, not an alternate to it.
+          // Model Manager downloads both, and the entry only reports installed once both are cached
+          // (else `resolve_pid_weights` silently no-ops to the native VAE). Shared across all four PiD
+          // decoders + SANA, so deleting one PiD decoder must NOT remove it.
+          "coRequisite": true,
           "files": [],
           "estimatedSizeBytes": 5228717488
         }
@@ -5643,6 +5652,11 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/gemma-2-2b-it",
+          // Co-requisite (sc-9696): fetched ALONGSIDE the PiD checkpoint, not an alternate to it.
+          // Model Manager downloads both, and the entry only reports installed once both are cached
+          // (else `resolve_pid_weights` silently no-ops to the native VAE). Shared across all four PiD
+          // decoders + SANA, so deleting one PiD decoder must NOT remove it.
+          "coRequisite": true,
           "files": [],
           "estimatedSizeBytes": 5228717488
         }
@@ -5712,6 +5726,11 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/gemma-2-2b-it",
+          // Co-requisite (sc-9696): fetched ALONGSIDE the PiD checkpoint, not an alternate to it.
+          // Model Manager downloads both, and the entry only reports installed once both are cached
+          // (else `resolve_pid_weights` silently no-ops to the native VAE). Shared across all four PiD
+          // decoders + SANA, so deleting one PiD decoder must NOT remove it.
+          "coRequisite": true,
           "files": [],
           "estimatedSizeBytes": 5228717488
         }
@@ -5781,6 +5800,11 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/gemma-2-2b-it",
+          // Co-requisite (sc-9696): fetched ALONGSIDE the PiD checkpoint, not an alternate to it.
+          // Model Manager downloads both, and the entry only reports installed once both are cached
+          // (else `resolve_pid_weights` silently no-ops to the native VAE). Shared across all four PiD
+          // decoders + SANA, so deleting one PiD decoder must NOT remove it.
+          "coRequisite": true,
           "files": [],
           "estimatedSizeBytes": 5228717488
         }
