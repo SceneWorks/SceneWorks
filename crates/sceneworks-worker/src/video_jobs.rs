@@ -1999,8 +1999,11 @@ pub(crate) async fn run_video_upscale_job(
     // Decode the whole source to a numbered PNG sequence ON DISK (disk-bounded, no RAM), then load each
     // temporal window on demand (sc-9595). `-fps_mode passthrough` preserves the exact source frame
     // count / order; the output frame count/order/fps therefore stay identical to the whole-clip path.
-    let src_frames_dir = std::env::temp_dir().join(format!("sceneworks_seedvr2_src_{}", job.id));
-    let out_frames_dir = std::env::temp_dir().join(format!("sceneworks_seedvr2_out_{}", job.id));
+    // Sanitize the job id before it becomes a temp-dir path component (F-111): a hostile id would
+    // otherwise escape `temp_dir()`. Mirrors the person-track work dir sanitization.
+    let safe_job = safe_download_dir(&job.id);
+    let src_frames_dir = std::env::temp_dir().join(format!("sceneworks_seedvr2_src_{safe_job}"));
+    let out_frames_dir = std::env::temp_dir().join(format!("sceneworks_seedvr2_out_{safe_job}"));
     let _ = tokio::fs::remove_dir_all(&out_frames_dir).await;
     // RAII-guard the output PNG scratch so it is removed on EVERY exit after the stream: not just the
     // stream error arm, but the create_dir_all / update_job progress POST / encode span below, any of
@@ -6671,7 +6674,10 @@ async fn load_source_video_frames(
         )));
     }
 
-    let work_dir = std::env::temp_dir().join(format!("sw-replace-frames-{}", job.id));
+    // Sanitize the job id before it becomes a temp-dir path component (F-111): a hostile id would
+    // otherwise escape `temp_dir()`. Mirrors `sw-person-track-{safe_download_dir(job.id)}` in media_jobs.
+    let work_dir =
+        std::env::temp_dir().join(format!("sw-replace-frames-{}", safe_download_dir(&job.id)));
     tokio::fs::create_dir_all(&work_dir).await?;
     let pattern = work_dir.join("src_%05d.png");
     let filters = format!(
@@ -7146,9 +7152,11 @@ async fn load_clip_anchor_frames(
     take: ClipFramePosition,
 ) -> WorkerResult<Vec<Image>> {
     let media_path = resolve_clip_media_path(settings, project_id, asset_id, project_path)?;
+    // Sanitize the job id before it becomes a temp-dir path component (F-111): a hostile id would
+    // otherwise escape `temp_dir()` even with the uuid suffix. Mirrors the person-track work dir.
     let work_dir = std::env::temp_dir().join(format!(
         "sw-anchor-frames-{}-{}",
-        job.id,
+        safe_download_dir(&job.id),
         Uuid::new_v4().simple()
     ));
     tokio::fs::create_dir_all(&work_dir).await?;
