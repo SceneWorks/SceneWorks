@@ -67,7 +67,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
 mod auth;
-use auth::{access_control, cors_layer, is_authorized};
+use auth::{access_control, cors_layer, is_authorized, AuthThrottle};
 mod characters;
 use characters::*;
 mod timelines;
@@ -337,6 +337,8 @@ pub struct AppState {
     events: Arc<EventHub>,
     event_tickets: Arc<TicketStore>,
     media_tickets: Arc<TicketStore>,
+    // sc-8870 (F-068): per-peer-IP failed-token throttle for the auth oracle.
+    auth_throttle: Arc<AuthThrottle>,
     manifest_cache: Arc<Mutex<ManifestCache>>,
     manifest_write_locks: Arc<Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>>,
     model_size_cache: Arc<Mutex<ModelSizeCache>>,
@@ -780,6 +782,7 @@ pub(crate) fn create_app_with_state(
         events: Arc::new(EventHub::default()),
         event_tickets: Arc::new(TicketStore::new(EVENT_TICKET_TTL_SECONDS)),
         media_tickets: Arc::new(TicketStore::new(MEDIA_TICKET_TTL_SECONDS)),
+        auth_throttle: Arc::new(AuthThrottle::default()),
         manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
         manifest_write_locks: Arc::new(Mutex::new(HashMap::new())),
         model_size_cache: Arc::new(Mutex::new(ModelSizeCache::default())),
@@ -1151,10 +1154,38 @@ async fn access(State(state): State<AppState>) -> Json<AccessResponse> {
     })
 }
 
-async fn verify_access(State(state): State<AppState>, headers: HeaderMap) -> Json<VerifyResponse> {
-    Json(VerifyResponse {
-        ok: is_authorized(&headers, &state.settings),
-    })
+async fn verify_access(
+    State(state): State<AppState>,
+    // `Option<…>` mirrors the auth middleware: unit-test oneshot requests have no
+    // connect info, so the peer is absent and the throttle is a no-op for them.
+    connect_info: Option<axum::extract::ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+) -> Json<VerifyResponse> {
+    // sc-8870 (F-068): this endpoint is public and answers `{ok}` for any candidate
+    // token, so it is the cheapest brute-force oracle. The access-control middleware
+    // already refuses a peer that is over its failure budget (its entry check runs on
+    // every request, public ones included), so a throttled caller never reaches here;
+    // this handler only has to feed the counter — a wrong token is a failed attempt,
+    // a valid one clears the peer's record. Loopback-trusted peers still get counted
+    // here on a bad guess, but the desktop UI only ever sends the real token (or none,
+    // when auth is off), so in practice only a remote guesser accrues failures.
+    let peer_ip = connect_info.map(|axum::extract::ConnectInfo(addr)| addr.ip());
+    let ok = is_authorized(&headers, &state.settings);
+    // Only meter when a token is actually configured; with auth off every check is
+    // trivially `ok` and there is nothing to brute-force.
+    if !state.settings.access_token.is_empty() {
+        if ok {
+            state.auth_throttle.record_success(peer_ip);
+        } else {
+            let failures = state.auth_throttle.record_failure(peer_ip);
+            tracing::warn!(
+                event = "auth_verify_failed",
+                failures,
+                "rejected token via /auth/verify oracle"
+            );
+        }
+    }
+    Json(VerifyResponse { ok })
 }
 
 async fn get_project_file(

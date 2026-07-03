@@ -1,6 +1,96 @@
 use super::*;
 use axum::extract::ConnectInfo;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+
+// sc-8870 (F-068): failed-attempt throttle for the token oracle. `POST
+// /api/v1/auth/verify` is public and returns `{ok}` for any candidate token, and
+// every other gated route reveals validity via 401-vs-200; in LAN mode the token IS
+// the user's password, so with no lockout an attacker on the LAN can brute-force it
+// at wire speed. This is a small, self-contained per-peer-IP rolling-window counter:
+// once an IP exceeds `AUTH_THROTTLE_MAX_FAILURES` failures inside
+// `AUTH_THROTTLE_WINDOW`, further token attempts from that IP are refused with 429
+// until the window rolls off (each new failure re-arms the window, so sustained
+// guessing stays locked out). It is advisory/anti-automation, not a crypto control:
+// a success clears the peer's record immediately, and loopback-trusted peers never
+// reach it (the bypass returns first), so legitimate desktop/worker traffic is
+// untouched.
+const AUTH_THROTTLE_MAX_FAILURES: u32 = 10;
+const AUTH_THROTTLE_WINDOW: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Default)]
+pub(crate) struct AuthThrottle {
+    state: Mutex<HashMap<IpAddr, AttemptRecord>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AttemptRecord {
+    failures: u32,
+    // Start of the current rolling window; failures older than the window are reset.
+    window_start: Instant,
+}
+
+impl AuthThrottle {
+    /// Whether this peer is currently locked out (over the failure cap inside the
+    /// live window). Non-mutating: pure read of the current record. An unknown peer
+    /// (`None`) or a peer with a stale window is never blocked.
+    pub(crate) fn is_blocked(&self, peer: Option<IpAddr>) -> bool {
+        let Some(ip) = peer else {
+            return false;
+        };
+        let now = Instant::now();
+        let mut state = self.state.lock();
+        prune_attempts(&mut state, now);
+        state
+            .get(&ip)
+            .is_some_and(|record| record.failures >= AUTH_THROTTLE_MAX_FAILURES)
+    }
+
+    /// Record one failed token attempt for this peer, re-arming its window, and
+    /// return the running failure count so the caller can `warn!` on repeats. A
+    /// missing peer IP (unit-test oneshot path) is a no-op.
+    pub(crate) fn record_failure(&self, peer: Option<IpAddr>) -> u32 {
+        let Some(ip) = peer else {
+            return 0;
+        };
+        let now = Instant::now();
+        let mut state = self.state.lock();
+        prune_attempts(&mut state, now);
+        let record = state.entry(ip).or_insert(AttemptRecord {
+            failures: 0,
+            window_start: now,
+        });
+        record.failures = record.failures.saturating_add(1);
+        record.window_start = now;
+        record.failures
+    }
+
+    /// Clear a peer's failure record after a valid token, so a legitimate user who
+    /// mistyped a few times is not punished once they authenticate.
+    pub(crate) fn record_success(&self, peer: Option<IpAddr>) {
+        let Some(ip) = peer else {
+            return;
+        };
+        self.state.lock().remove(&ip);
+    }
+}
+
+/// Drop records whose window has fully rolled off so the map can't grow unbounded
+/// from one-off probes across many source IPs.
+fn prune_attempts(state: &mut HashMap<IpAddr, AttemptRecord>, now: Instant) {
+    state.retain(|_, record| now.duration_since(record.window_start) < AUTH_THROTTLE_WINDOW);
+}
+
+/// 429 response returned when a peer IP has exceeded the failed-token budget.
+fn throttled_response() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({
+            "detail": "Too many authentication attempts; try again later",
+            "authRequired": true
+        })),
+    )
+        .into_response()
+}
 
 pub(crate) async fn access_control(
     State(state): State<AppState>,
@@ -12,6 +102,26 @@ pub(crate) async fn access_control(
     next: Next,
 ) -> Response {
     let peer = connect_info.map(|ConnectInfo(addr)| addr);
+    let peer_ip = peer.map(|addr| addr.ip());
+
+    // sc-8870: a peer that already blew its token-guess budget is refused before any
+    // token comparison — this covers both the gated routes below and the public
+    // `/api/v1/auth/verify` oracle (the throttle check runs on every request, even the
+    // public ones, but only bites once an IP has racked up failures). Loopback-trusted
+    // peers can never accrue failures (the bypass returns first), so this only ever
+    // fires on a remote/LAN brute-forcer.
+    if !loopback_trusted(state.settings.trust_loopback, peer)
+        && state.auth_throttle.is_blocked(peer_ip)
+    {
+        tracing::warn!(
+            event = "auth_throttled",
+            path = %request.uri().path(),
+            status = StatusCode::TOO_MANY_REQUESTS.as_u16(),
+            "refused token attempt from throttled peer"
+        );
+        return throttled_response();
+    }
+
     if request.method() == Method::OPTIONS
         || !requires_token(request.method(), request.uri().path())
         || loopback_trusted(state.settings.trust_loopback, peer)
@@ -21,14 +131,21 @@ pub(crate) async fn access_control(
         return next.run(request).await;
     }
 
+    // A gated route hit with a missing/invalid token is a failed attempt — count it
+    // toward the per-IP throttle so an attacker probing e.g. `GET /api/v1/jobs` for a
+    // valid token is locked out just like one hammering `/auth/verify`.
+    let failures = state.auth_throttle.record_failure(peer_ip);
+
     // Make auth rejections visible to operators (they previously returned 401 with no
     // server-side trace). Log the path + reason + status only — never the token/secret
-    // (and `uri().path()` excludes any query string).
+    // (and `uri().path()` excludes any query string). Repeated failures escalate to a
+    // dedicated warn so a brute-force attempt stands out in the log.
     tracing::warn!(
         event = "auth_rejected",
         path = %request.uri().path(),
         reason = "missing_or_invalid_token",
         status = StatusCode::UNAUTHORIZED.as_u16(),
+        failures,
         "rejected unauthenticated API request"
     );
 
