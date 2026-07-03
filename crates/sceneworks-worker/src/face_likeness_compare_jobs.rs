@@ -204,12 +204,16 @@ pub(crate) async fn run_face_likeness_compare_job(
     )
     .await?;
 
-    let (source, candidate) = load_compare_images(settings, job)?;
     let source_ref = required_asset_id(&job.payload, "sourceAssetId")?.to_owned();
 
     // Stage the SCRFD + ArcFace bundle (download-on-first-use; a prior InstantID / kps / dataset-face
     // run leaves it cached). The same dir the candle stack loads and the MLX path joins file names in.
     let weights_dir = crate::image_jobs::ensure_face_stack_dir(api, settings, job).await?;
+
+    // The two source reads + full image decodes are folded into the blocking compare task below
+    // (sc-8909 / F-107) so they never stall the async runtime thread (protecting the heartbeat).
+    let settings_for_task = settings.clone();
+    let job_for_task = job.clone();
 
     update_job(
         api,
@@ -240,6 +244,7 @@ pub(crate) async fn run_face_likeness_compare_job(
         "",
         "face likeness compare task",
         tokio::task::spawn_blocking(move || {
+            let (source, candidate) = load_compare_images(&settings_for_task, &job_for_task)?;
             compare(&weights_dir, &source, &candidate, &source_ref)
         }),
     )

@@ -30,7 +30,7 @@ use crate::person_segment_sam3::{
 };
 use crate::{
     fresh_asset_id, heartbeat, now_rfc3339, progress_payload, run_blocking_with_heartbeat,
-    update_job, ApiClient, Settings, WorkerError, WorkerResult,
+    task_join_error, update_job, ApiClient, Settings, WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
@@ -235,11 +235,6 @@ pub(crate) async fn run_image_segment_job(
             ))
         })?;
 
-    let source_image = crate::image_decode::decode_image_any(&source_path)
-        .map_err(|e| WorkerError::InvalidPayload(format!("Source image could not be loaded: {e}")))?
-        .to_rgb8();
-    let (src_w, src_h) = (source_image.width(), source_image.height());
-
     update_job(
         api,
         &job.id,
@@ -280,8 +275,11 @@ pub(crate) async fn run_image_segment_job(
     )
     .await?;
     let cancel = CancelFlag::new();
+    // The source read + full image decode is folded into each blocking task below (sc-8909 / F-107)
+    // so it never stalls the async runtime thread; the task returns the decoded dimensions alongside
+    // the mask so the `src_w*src_h` GrayImage can be built after.
     // Points → SAM3 tracker single-frame PVS (interactive clicks); box → SAM3 concept detector.
-    let mask = if let Some(points) = points {
+    let (mask, src_w, src_h) = if let Some(points) = points {
         run_blocking_with_heartbeat(
             api,
             settings,
@@ -290,7 +288,16 @@ pub(crate) async fn run_image_segment_job(
             CANCEL_MESSAGE,
             "smart-select task",
             tokio::task::spawn_blocking(move || {
-                segment_points_blocking(model_path, source_image, points)
+                let source_image = crate::image_decode::decode_image_any(&source_path)
+                    .map_err(|e| {
+                        WorkerError::InvalidPayload(format!(
+                            "Source image could not be loaded: {e}"
+                        ))
+                    })?
+                    .to_rgb8();
+                let (src_w, src_h) = (source_image.width(), source_image.height());
+                let mask = segment_points_blocking(model_path, source_image, points)?;
+                Ok::<_, WorkerError>((mask, src_w, src_h))
             }),
         )
         .await?
@@ -304,7 +311,15 @@ pub(crate) async fn run_image_segment_job(
             CANCEL_MESSAGE,
             "smart-select task",
             tokio::task::spawn_blocking(move || {
-                segment_box_blocking(
+                let source_image = crate::image_decode::decode_image_any(&source_path)
+                    .map_err(|e| {
+                        WorkerError::InvalidPayload(format!(
+                            "Source image could not be loaded: {e}"
+                        ))
+                    })?
+                    .to_rgb8();
+                let (src_w, src_h) = (source_image.width(), source_image.height());
+                let mask = segment_box_blocking(
                     model_path,
                     tokenizer_path,
                     source_image,
@@ -312,7 +327,8 @@ pub(crate) async fn run_image_segment_job(
                     &concept,
                     threshold,
                     mask_threshold,
-                )
+                )?;
+                Ok::<_, WorkerError>((mask, src_w, src_h))
             }),
         )
         .await?
@@ -336,9 +352,16 @@ pub(crate) async fn run_image_segment_job(
         tokio::fs::create_dir_all(parent).await?;
     }
     let tmp_path = media_path.with_extension("tmp.png");
-    mask_image
-        .save_with_format(&tmp_path, image::ImageFormat::Png)
-        .map_err(|e| WorkerError::Io(std::io::Error::other(e)))?;
+    // Encode the mask PNG off the async runtime thread (sc-8909 / F-107) so the blocking encode never
+    // stalls the heartbeat.
+    let encode_tmp = tmp_path.clone();
+    tokio::task::spawn_blocking(move || {
+        mask_image
+            .save_with_format(&encode_tmp, image::ImageFormat::Png)
+            .map_err(|e| WorkerError::Io(std::io::Error::other(e)))
+    })
+    .await
+    .map_err(|e| task_join_error("smart-select mask encode task", e))??;
     tokio::fs::rename(&tmp_path, &media_path)
         .await
         .inspect_err(|_| {

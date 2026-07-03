@@ -313,7 +313,6 @@ pub(crate) async fn run_kps_extract_job(
     )
     .await?;
 
-    let image = load_source_image(settings, job)?;
     // `weights` is a single SCRFD weight file on Mac and the SCRFD+ArcFace bundle DIR off-Mac (candle
     // `load` resolves both files from one dir by name); both are `PathBuf`, both flow into the matching
     // detector below.
@@ -321,6 +320,11 @@ pub(crate) async fn run_kps_extract_job(
     let weights = ensure_scrfd_weights(api, settings, job).await?;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let weights = ensure_face_stack_dir(api, settings, job).await?;
+
+    // The source read + full image decode is folded into the blocking task below (sc-8909 / F-107)
+    // so it never stalls the async runtime thread (protecting the heartbeat).
+    let settings_for_task = settings.clone();
+    let job_for_task = job.clone();
 
     update_job(
         api,
@@ -350,6 +354,7 @@ pub(crate) async fn run_kps_extract_job(
         "",
         "kps extraction task",
         tokio::task::spawn_blocking(move || {
+            let image = load_source_image(&settings_for_task, &job_for_task)?;
             #[cfg(target_os = "macos")]
             {
                 detect_largest_kps(&weights, &image)
