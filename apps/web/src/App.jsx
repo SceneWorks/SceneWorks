@@ -1316,6 +1316,13 @@ export function App() {
       if (job.status === "failed" && !hasVisibleLocalFailure(job)) {
         pushNotice(noticeKindForJob(job), failedJobNotice(job));
       }
+      // Evict the per-job refresh bookkeeping once the job is terminal (sc-8944): the
+      // dedupe counters are only consulted while a job is still emitting incremental
+      // asset updates. Without this the Map grows one entry per asset-producing job for
+      // the session's lifetime (unbounded, slow leak in multi-day sessions).
+      if (terminalStatuses.has(job.status)) {
+        generatedAssetRefreshesRef.current.delete(refreshKey);
+      }
     }
 
     function handleWorkerUpdated(event) {
