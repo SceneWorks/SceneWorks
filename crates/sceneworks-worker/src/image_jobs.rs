@@ -314,8 +314,10 @@ const STUB_ADAPTER: &str = "procedural_preview";
 /// so the sidecar + result agree on which backend produced the image.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_ADAPTER: &str = "candle_sdxl";
-// Shared by the MLX path and the candle Lens lane (sc-5126) — both cap a job's user LoRAs at 3
-// (`resolve_adapters`), so the const is available on the Windows candle build too.
+// Shared by the MLX path and the candle Lens lane (sc-5126) — both cap a job's total LoRAs at
+// MAX_JOB_LORAS (`resolve_adapters`), so the const is available on the Windows candle build too.
+// The web pickers enforce a lower user-selectable cap (presetUtils.MAX_USER_JOB_LORAS) that leaves
+// headroom for an auto-applied builtin within this total (sc-8936).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")

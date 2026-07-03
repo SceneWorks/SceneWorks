@@ -1,9 +1,8 @@
 import React from "react";
-import { loraMatchesModel, loraWeight, serializeLora } from "../presetUtils.js";
+import { MAX_JOB_LORAS_TOTAL, loraMatchesModel, loraWeight, serializeLora } from "../presetUtils.js";
 
-// Keep in sync with the worker guard (lora_adapters.MAX_JOB_LORAS) and the Rust
-// recipe-preset normalizer — generation rejects more than this many LoRAs per job.
-const MAX_JOB_LORAS = 5;
+// The per-job total cap (sc-8936): this Character Studio picker doesn't distinguish
+// builtin vs user LoRAs, so it gates on the hard total the worker enforces.
 
 // Family-filtered LoRA selection shared by the Character Studio Angle Set + Pose
 // Library panels (sc-2223). Mirrors the Image/Video Studio behaviour without
@@ -40,8 +39,8 @@ export function useLoraSelection(loras, model) {
       if (ids.includes(lora.id)) {
         return ids.filter((id) => id !== lora.id);
       }
-      if (ids.length >= MAX_JOB_LORAS) {
-        return ids; // the worker rejects more than MAX_JOB_LORAS per job
+      if (ids.length >= MAX_JOB_LORAS_TOTAL) {
+        return ids; // the worker rejects more than MAX_JOB_LORAS_TOTAL per job
       }
       return [...ids, lora.id];
     });

@@ -34,8 +34,10 @@ const FLUX2_EDIT_CANDLE_DEFAULT_REPO: &str = "black-forest-labs/FLUX.2-klein-9B"
 /// diffusers snapshot and Q4-quantizes it at load (no install-time packed convert off-Mac).
 const FLUX2_EDIT_CANDLE_DEV_REPO: &str = "black-forest-labs/FLUX.2-dev";
 /// Cap on references fed to a single FLUX.2 edit (the multi-image picker, sc-6211): the dev edit is
-/// activation-bound, so cap at the engine's validated native fan-out (parity with the MLX
-/// `MAX_EDIT_REFERENCES`).
+/// activation-bound, so cap at the engine's validated native fan-out. This deliberately differs from
+/// the MLX `MAX_EDIT_REFERENCES` (4): that bound is set by the 96 GB Apple-Silicon unified-memory
+/// floor (5 refs at 1024² exceed it), which does not apply to this off-Mac CUDA lane — so it admits
+/// the engine's full 5-reference fan-out (sc-8936: was mislabeled "parity with the MLX const").
 const FLUX2_EDIT_CANDLE_MAX_REFERENCES: usize = 5;
 
 /// True when this is the FLUX.2 **dev** edit variant (`flux2_dev`): the 32B flagship that loads via the
