@@ -96,14 +96,21 @@ pub(crate) async fn run_frame_extract_job(
     Ok(())
 }
 
-pub(crate) async fn run_frame_extract(
-    api: &ApiClient,
-    settings: &Settings,
-    job: &JobSnapshot,
-) -> WorkerResult<JsonObject> {
+/// The resolved source of a frame-extract / person-detect job: the project store + path, the source
+/// asset JSON, and the on-disk media path (existence-checked). Shared prologue of both frame handlers
+/// (sc-8914 / F-112) — they resolve the same `projectId` + `sourceAssetId` identically.
+struct FrameSource {
+    store: ProjectStore,
+    project_path: PathBuf,
+    source_asset: Value,
+    source_media_path: PathBuf,
+}
+
+/// Resolve the `projectId` + `sourceAssetId` a frame job carries into a [`FrameSource`], confining the
+/// source media path with `safe_project_path` and erroring if it is missing.
+fn resolve_frame_source(settings: &Settings, job: &JobSnapshot) -> WorkerResult<FrameSource> {
     let project_id = required_payload_string(&job.payload, "projectId")?;
     let source_asset_id = required_payload_string(&job.payload, "sourceAssetId")?;
-    let timestamp = payload_f64(&job.payload, "sourceTimestamp", 0.0).clamp(0.0, 3600.0);
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
     let project = store.get_project(project_id)?;
     let project_path = PathBuf::from(project.path);
@@ -121,14 +128,59 @@ pub(crate) async fn run_frame_extract(
             source_media_path.display()
         )));
     }
+    Ok(FrameSource {
+        store,
+        project_path,
+        source_asset,
+        source_media_path,
+    })
+}
 
-    let frames_dir = project_path.join("assets").join("frames");
-    tokio::fs::create_dir_all(&frames_dir).await?;
+/// The per-frame identity handed to the asset-builder closure of [`render_frame_asset`]: the freshly
+/// rendered frame's on-disk media path, its ids, and the source path relative to the project — enough
+/// for the closure to build the `"type":"frame"` asset JSON (its recipe/lineage/detection payload).
+struct RenderedFrame {
+    asset_id: String,
+    created_at: String,
+    media_rel: String,
+    media_path: PathBuf,
+    source_rel: String,
+}
+
+/// The single resolve→render→tmp-rename→asset-JSON→sidecar+recipe→index flow shared by both frame
+/// handlers (sc-8914 / F-112). Renders one frame at `timestamp` (dims `width×height`) into
+/// `assets/frames/{date}_{filename_kind}_{suffix}.png`, promotes it out of its `.tmp.png`, posts the
+/// `Saving` progress update, guards the promotion with a cancel check that cleans up the frame on
+/// cancel, then lets `build_asset` produce the full asset JSON (it runs *after* the frame exists, so
+/// person-detect can run its detector on the rendered PNG). Writes the sidecar + recipe and indexes
+/// the asset. Returns the built asset JSON and its id for the caller's result payload.
+#[allow(clippy::too_many_arguments)]
+async fn render_frame_asset<F, Fut>(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    source: &FrameSource,
+    timestamp: f64,
+    width: u32,
+    height: u32,
+    filename_kind: &str,
+    ffmpeg_cancel_message: &str,
+    saving_progress: f64,
+    saving_message: &str,
+    promotion_cancel_message: &str,
+    build_asset: F,
+) -> WorkerResult<(String, Value)>
+where
+    F: FnOnce(RenderedFrame) -> Fut,
+    Fut: std::future::Future<Output = WorkerResult<Value>>,
+{
+    let project_path = &source.project_path;
+    tokio::fs::create_dir_all(project_path.join("assets").join("frames")).await?;
     tokio::fs::create_dir_all(project_path.join("recipes")).await?;
     let asset_id = fresh_asset_id();
     let created_at = now_rfc3339();
     let filename = format!(
-        "{}_frame_{}.png",
+        "{}_{filename_kind}_{}.png",
         &created_at[..10],
         asset_suffix(&asset_id)
     );
@@ -140,115 +192,50 @@ pub(crate) async fn run_frame_extract(
         api,
         settings,
         job_id: &job.id,
-        cancel_message: "Frame extraction canceled by user.",
+        cancel_message: ffmpeg_cancel_message,
     };
     render_frame_png(
         "ffmpeg",
-        &source_media_path,
+        &source.source_media_path,
         &temp_path,
         timestamp,
-        1920,
-        1080,
+        width,
+        height,
         Some(ffmpeg_context),
     )
     .await?;
     tokio::fs::rename(&temp_path, &media_path).await?;
+
+    let source_rel = relative_path(project_path, &source.source_media_path)?;
+    // Build the asset JSON now that the frame exists on disk (person-detect runs its detector here).
+    let asset = build_asset(RenderedFrame {
+        asset_id: asset_id.clone(),
+        created_at,
+        media_rel,
+        media_path: media_path.clone(),
+        source_rel,
+    })
+    .await?;
+
     update_job(
         api,
         &job.id,
         progress_payload(
             JobStatus::Saving,
             ProgressStage::Saving,
-            0.85,
-            "Saving extracted frame asset.",
+            saving_progress,
+            saving_message,
             None,
             None,
             None,
         ),
     )
     .await?;
-    if let Err(error) = check_cancel(
-        api,
-        &job.id,
-        "Frame extraction canceled before asset promotion.",
-    )
-    .await
-    {
+    if let Err(error) = check_cancel(api, &job.id, promotion_cancel_message).await {
         let _ = tokio::fs::remove_file(&media_path).await;
         return Err(error);
     }
 
-    let timeline_id = job
-        .payload
-        .get("timelineId")
-        .cloned()
-        .unwrap_or(Value::Null);
-    let timeline_item_id = job
-        .payload
-        .get("timelineItemId")
-        .cloned()
-        .unwrap_or(Value::Null);
-    let playhead_seconds = job
-        .payload
-        .get("playheadSeconds")
-        .cloned()
-        .unwrap_or(Value::Null);
-    let intended_use = optional_payload_string(&job.payload, "intendedUse").unwrap_or("reuse");
-    let source_display_name = source_asset
-        .get("displayName")
-        .and_then(Value::as_str)
-        .unwrap_or("clip");
-    let source_rel = relative_path(&project_path, &source_media_path)?;
-    let asset = json!({
-        "schemaVersion": 1,
-        "id": asset_id.clone(),
-        "projectId": project_id,
-        "generationSetId": Value::Null,
-        "type": "frame",
-        "displayName": format!("Frame {timestamp:.2}s from {source_display_name}"),
-        "createdAt": created_at,
-        "file": {
-            "path": media_rel,
-            "mimeType": "image/png",
-            "width": 1920,
-            "height": 1080,
-            "duration": Value::Null,
-            "fps": Value::Null
-        },
-        "status": {
-            "favorite": false,
-            "rating": 0,
-            "rejected": false,
-            "trashed": false
-        },
-        "recipe": {
-            "mode": "frame_extract",
-            "model": "timeline-frame-extract",
-            "adapter": "ffmpeg-frame-extract",
-            "prompt": format!("Extract frame at {timestamp:.2}s"),
-            "negativePrompt": "",
-            "seed": 0,
-            "loras": [],
-            "stylePreset": "none",
-            "normalizedSettings": {
-                "timelineId": timeline_id,
-                "timelineItemId": timeline_item_id,
-                "playheadSeconds": playhead_seconds,
-                "sourceTimestamp": timestamp,
-                "intendedUse": intended_use
-            },
-            "rawAdapterSettings": { "sourcePath": source_rel }
-        },
-        "lineage": {
-            "parents": [source_asset_id],
-            "sourceAssetId": source_asset_id,
-            "sourceTimestamp": timestamp,
-            "timelineId": job.payload.get("timelineId").cloned().unwrap_or(Value::Null),
-            "timelineItemId": job.payload.get("timelineItemId").cloned().unwrap_or(Value::Null),
-            "intendedUse": intended_use,
-            "jobId": job.id
-        }
-    });
     let sidecar_path = media_path.with_extension("sceneworks.json");
     write_json_value(&sidecar_path, &asset).await?;
     write_json_value(
@@ -258,7 +245,111 @@ pub(crate) async fn run_frame_extract(
         &asset["recipe"],
     )
     .await?;
-    store.index_asset_sidecar(project_id, &sidecar_path)?;
+    let project_id = required_payload_string(&job.payload, "projectId")?;
+    source.store.index_asset_sidecar(project_id, &sidecar_path)?;
+
+    Ok((asset_id, asset))
+}
+
+pub(crate) async fn run_frame_extract(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<JsonObject> {
+    let project_id = required_payload_string(&job.payload, "projectId")?;
+    let source_asset_id = required_payload_string(&job.payload, "sourceAssetId")?;
+    let timestamp = payload_f64(&job.payload, "sourceTimestamp", 0.0).clamp(0.0, 3600.0);
+    let source = resolve_frame_source(settings, job)?;
+
+    let intended_use = optional_payload_string(&job.payload, "intendedUse").unwrap_or("reuse");
+    let source_display_name = source
+        .source_asset
+        .get("displayName")
+        .and_then(Value::as_str)
+        .unwrap_or("clip")
+        .to_owned();
+    let (asset_id, asset) = render_frame_asset(
+        api,
+        settings,
+        job,
+        &source,
+        timestamp,
+        1920,
+        1080,
+        "frame",
+        "Frame extraction canceled by user.",
+        0.85,
+        "Saving extracted frame asset.",
+        "Frame extraction canceled before asset promotion.",
+        |frame| async move {
+            let timeline_id = job
+                .payload
+                .get("timelineId")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let timeline_item_id = job
+                .payload
+                .get("timelineItemId")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let playhead_seconds = job
+                .payload
+                .get("playheadSeconds")
+                .cloned()
+                .unwrap_or(Value::Null);
+            Ok(json!({
+                "schemaVersion": 1,
+                "id": frame.asset_id,
+                "projectId": project_id,
+                "generationSetId": Value::Null,
+                "type": "frame",
+                "displayName": format!("Frame {timestamp:.2}s from {source_display_name}"),
+                "createdAt": frame.created_at,
+                "file": {
+                    "path": frame.media_rel,
+                    "mimeType": "image/png",
+                    "width": 1920,
+                    "height": 1080,
+                    "duration": Value::Null,
+                    "fps": Value::Null
+                },
+                "status": {
+                    "favorite": false,
+                    "rating": 0,
+                    "rejected": false,
+                    "trashed": false
+                },
+                "recipe": {
+                    "mode": "frame_extract",
+                    "model": "timeline-frame-extract",
+                    "adapter": "ffmpeg-frame-extract",
+                    "prompt": format!("Extract frame at {timestamp:.2}s"),
+                    "negativePrompt": "",
+                    "seed": 0,
+                    "loras": [],
+                    "stylePreset": "none",
+                    "normalizedSettings": {
+                        "timelineId": timeline_id,
+                        "timelineItemId": timeline_item_id,
+                        "playheadSeconds": playhead_seconds,
+                        "sourceTimestamp": timestamp,
+                        "intendedUse": intended_use
+                    },
+                    "rawAdapterSettings": { "sourcePath": frame.source_rel }
+                },
+                "lineage": {
+                    "parents": [source_asset_id],
+                    "sourceAssetId": source_asset_id,
+                    "sourceTimestamp": timestamp,
+                    "timelineId": job.payload.get("timelineId").cloned().unwrap_or(Value::Null),
+                    "timelineItemId": job.payload.get("timelineItemId").cloned().unwrap_or(Value::Null),
+                    "intendedUse": intended_use,
+                    "jobId": job.id
+                }
+            }))
+        },
+    )
+    .await?;
 
     let mut result = JsonObject::new();
     result.insert("assetIds".to_owned(), json!([asset_id]));
@@ -366,24 +457,12 @@ pub(crate) async fn run_person_detect(
 ) -> WorkerResult<JsonObject> {
     let project_id = required_payload_string(&job.payload, "projectId")?;
     let source_asset_id = required_payload_string(&job.payload, "sourceAssetId")?;
-    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
-    let project = store.get_project(project_id)?;
-    let project_path = PathBuf::from(project.path);
-    let source_asset = store.get_asset(project_id, source_asset_id)?;
-    let source_file = source_asset
-        .get("file")
-        .ok_or_else(|| WorkerError::InvalidPayload("Source asset file is missing.".to_owned()))?;
-    let source_media_rel = required_value_str(source_file, "path")?;
-    let source_media_path = safe_project_path(&project_path, source_media_rel)?;
-    if !source_media_path.exists() {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Source media not found: {}",
-            source_media_path.display()
-        )));
-    }
+    let source = resolve_frame_source(settings, job)?;
 
-    let duration = source_file
-        .get("duration")
+    let duration = source
+        .source_asset
+        .get("file")
+        .and_then(|file| file.get("duration"))
         .map_or(6.0, |value| value_f64(value, 6.0))
         .clamp(0.0, 3600.0);
     let timestamp = person_detect_source_timestamp(
@@ -394,38 +473,6 @@ pub(crate) async fn run_person_detect(
         ),
         duration,
     );
-
-    let frames_dir = project_path.join("assets").join("frames");
-    tokio::fs::create_dir_all(&frames_dir).await?;
-    tokio::fs::create_dir_all(project_path.join("recipes")).await?;
-    let asset_id = fresh_asset_id();
-    let created_at = now_rfc3339();
-    let filename = format!(
-        "{}_person-frame_{}.png",
-        &created_at[..10],
-        asset_suffix(&asset_id)
-    );
-    let media_rel = format!("assets/frames/{filename}");
-    let media_path = project_path.join(&media_rel);
-    let temp_path = media_path.with_extension("tmp.png");
-
-    let ffmpeg_context = FfmpegContext {
-        api,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Person detection canceled by user.",
-    };
-    render_frame_png(
-        "ffmpeg",
-        &source_media_path,
-        &temp_path,
-        timestamp,
-        1280,
-        720,
-        Some(ffmpeg_context),
-    )
-    .await?;
-    tokio::fs::rename(&temp_path, &media_path).await?;
 
     // Preview jobs (`preview: true`, claimed via the CPU worker's
     // person_detect_preview capability) keep the procedural placeholder. Real
@@ -444,120 +491,118 @@ pub(crate) async fn run_person_detect(
         .or_else(|| job.payload.get("confidence"))
         .map_or(0.25, |value| value_f64(value, 0.25))
         .clamp(0.01, 1.0);
-    let (detections, detector_model, detector_adapter, detection_active, detector_meta) =
-        if is_preview {
-            (
-                candidate_people(1280, 720, source_asset_id, timestamp),
-                "procedural-person-detector".to_owned(),
-                "procedural_person_tracking",
-                false,
-                Value::Null,
-            )
-        } else {
-            let (boxes, device) = run_yolo11_person_detect(
-                api,
-                settings,
-                http_client,
-                job,
-                media_path.clone(),
-                confidence,
-            )
-            .await?;
-            (
-                boxes,
-                "yolo11m".to_owned(),
-                "yolo11_mlx",
-                true,
-                json!({ "backend": "mlx", "device": device, "model": "yolo11m" }),
-            )
-        };
-    let source_display_name = source_asset
+    let source_display_name = source
+        .source_asset
         .get("displayName")
         .and_then(Value::as_str)
-        .unwrap_or("clip");
-    let source_rel = relative_path(&project_path, &source_media_path)?;
-    let asset = json!({
-        "schemaVersion": 1,
-        "id": asset_id.clone(),
-        "projectId": project_id,
-        "generationSetId": Value::Null,
-        "type": "frame",
-        "displayName": format!("Person selection frame from {source_display_name}"),
-        "createdAt": created_at,
-        "file": {
-            "path": media_rel,
-            "mimeType": "image/png",
-            "width": 1280,
-            "height": 720,
-            "duration": Value::Null,
-            "fps": Value::Null
-        },
-        "status": {
-            "favorite": false,
-            "rating": 0,
-            "rejected": false,
-            "trashed": false
-        },
-        "recipe": {
-            "mode": "person_detect",
-            "model": detector_model,
-            "adapter": detector_adapter,
-            "prompt": "Detect selectable people in representative frame",
-            "negativePrompt": "",
-            "seed": 0,
-            "loras": [],
-            "stylePreset": "none",
-            "normalizedSettings": {
-                "sourceTimestamp": timestamp,
-                "detectionCount": detections.len(),
-                "confidence": confidence,
-                "personDetectionActive": detection_active,
-                "detector": detector_meta
-            },
-            "rawAdapterSettings": { "sourcePath": source_rel }
-        },
-        "lineage": {
-            "parents": [source_asset_id],
-            "sourceAssetId": source_asset_id,
-            "sourceTimestamp": timestamp,
-            "jobId": job.id
-        }
-    });
+        .unwrap_or("clip")
+        .to_owned();
 
-    update_job(
+    // The detector runs inside the asset-builder (it needs the rendered frame on disk), but its
+    // outputs also feed the outer result payload — stash them through a `RefCell` (the builder future
+    // is awaited inline on this task, never spawned, so no `Send`/thread-safety is needed).
+    let detections_out: std::cell::RefCell<Vec<Value>> = std::cell::RefCell::new(Vec::new());
+    let detection_active_out = std::cell::Cell::new(false);
+    // Capture the stash cells by reference so the `async move` builder body can `move` the owned
+    // `frame` fields in without also consuming the cells (read back after the builder returns).
+    let detections_out_ref = &detections_out;
+    let detection_active_out_ref = &detection_active_out;
+    let (asset_id, asset) = render_frame_asset(
         api,
-        &job.id,
-        progress_payload(
-            JobStatus::Saving,
-            ProgressStage::Saving,
-            0.78,
-            "Saving representative frame and candidate boxes.",
-            None,
-            None,
-            None,
-        ),
-    )
-    .await?;
-    if let Err(error) = check_cancel(
-        api,
-        &job.id,
+        settings,
+        job,
+        &source,
+        timestamp,
+        1280,
+        720,
+        "person-frame",
+        "Person detection canceled by user.",
+        0.78,
+        "Saving representative frame and candidate boxes.",
         "Person detection canceled before asset promotion.",
-    )
-    .await
-    {
-        let _ = tokio::fs::remove_file(&media_path).await;
-        return Err(error);
-    }
-    let sidecar_path = media_path.with_extension("sceneworks.json");
-    write_json_value(&sidecar_path, &asset).await?;
-    write_json_value(
-        &project_path
-            .join("recipes")
-            .join(format!("{asset_id}.recipe.json")),
-        &asset["recipe"],
+        |frame| async move {
+            let (detections, detector_model, detector_adapter, detection_active, detector_meta) =
+                if is_preview {
+                    (
+                        candidate_people(1280, 720, source_asset_id, timestamp),
+                        "procedural-person-detector".to_owned(),
+                        "procedural_person_tracking",
+                        false,
+                        Value::Null,
+                    )
+                } else {
+                    let (boxes, device) = run_yolo11_person_detect(
+                        api,
+                        settings,
+                        http_client,
+                        job,
+                        frame.media_path.clone(),
+                        confidence,
+                    )
+                    .await?;
+                    (
+                        boxes,
+                        "yolo11m".to_owned(),
+                        "yolo11_mlx",
+                        true,
+                        json!({ "backend": "mlx", "device": device, "model": "yolo11m" }),
+                    )
+                };
+            let asset = json!({
+                "schemaVersion": 1,
+                "id": frame.asset_id,
+                "projectId": project_id,
+                "generationSetId": Value::Null,
+                "type": "frame",
+                "displayName": format!("Person selection frame from {source_display_name}"),
+                "createdAt": frame.created_at,
+                "file": {
+                    "path": frame.media_rel,
+                    "mimeType": "image/png",
+                    "width": 1280,
+                    "height": 720,
+                    "duration": Value::Null,
+                    "fps": Value::Null
+                },
+                "status": {
+                    "favorite": false,
+                    "rating": 0,
+                    "rejected": false,
+                    "trashed": false
+                },
+                "recipe": {
+                    "mode": "person_detect",
+                    "model": detector_model,
+                    "adapter": detector_adapter,
+                    "prompt": "Detect selectable people in representative frame",
+                    "negativePrompt": "",
+                    "seed": 0,
+                    "loras": [],
+                    "stylePreset": "none",
+                    "normalizedSettings": {
+                        "sourceTimestamp": timestamp,
+                        "detectionCount": detections.len(),
+                        "confidence": confidence,
+                        "personDetectionActive": detection_active,
+                        "detector": detector_meta
+                    },
+                    "rawAdapterSettings": { "sourcePath": frame.source_rel }
+                },
+                "lineage": {
+                    "parents": [source_asset_id],
+                    "sourceAssetId": source_asset_id,
+                    "sourceTimestamp": timestamp,
+                    "jobId": job.id
+                }
+            });
+            *detections_out_ref.borrow_mut() = detections;
+            detection_active_out_ref.set(detection_active);
+            Ok(asset)
+        },
     )
     .await?;
-    store.index_asset_sidecar(project_id, &sidecar_path)?;
+    let detections = detections_out.into_inner();
+    let detection_active = detection_active_out.get();
 
     let mut result = JsonObject::new();
     result.insert("frameAssetId".to_owned(), Value::String(asset_id));
@@ -2208,6 +2253,7 @@ fn frame_scale_pad_filter(width: u32, height: u32) -> String {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
+#[allow(clippy::too_many_arguments)]
 async fn render_track_frames(
     ffmpeg: &str,
     source_path: &Path,
@@ -2894,6 +2940,23 @@ mod frame_seek_tests {
         // A clip shorter than the guard clamps to 0 rather than a negative seek.
         assert_eq!(frame_seek_timestamp(0.1, 0.1), 0.0);
         assert_eq!(frame_seek_timestamp(0.0, 0.0), 0.0);
+    }
+
+    /// F-112 (sc-8914): the sidecar sample-rate the media handlers record and the cadence the
+    /// `person_track` sampler uses are ONE value. The `PERSON_TRACK_*` crate constants must stay
+    /// aliases of the `person_track` module constants so the two can never drift out of sync.
+    #[test]
+    fn person_track_sample_constants_are_a_single_source_of_truth() {
+        assert_eq!(
+            PERSON_TRACK_SAMPLE_RATE_FPS,
+            crate::person_track::SAMPLE_RATE_FPS,
+            "sidecar sampleRateFps must equal the sampler cadence"
+        );
+        assert_eq!(
+            PERSON_TRACK_MAX_SAMPLES,
+            crate::person_track::MAX_SAMPLES,
+            "the placeholder-track sample cap must equal the sampler cap"
+        );
     }
 }
 
