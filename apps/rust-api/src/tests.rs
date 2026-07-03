@@ -9055,6 +9055,109 @@ async fn stale_sweep_broadcasts_job_updated_for_interrupted_jobs() {
 }
 
 #[tokio::test]
+async fn claim_sweeps_stale_jobs_once_and_still_refreshes_the_queue() {
+    // sc-8889 / F-087: claim_job runs mark_stale_workers_interrupted in its own
+    // transaction, then refreshes the queue via publish_queue_skip_sweep — which
+    // no longer sweeps a SECOND time. This pins that dropping the duplicate sweep
+    // did not regress the claim path: a claim still reaps a stale worker's job to
+    // `interrupted` and still emits queue.updated.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.worker_timeout_seconds = 1;
+    let (app, state) = create_app_with_state(settings).expect("app creates");
+
+    // worker-1 claims a job, then goes stale.
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-1",
+            "gpuId": "gpu-0",
+            "gpuName": null,
+            "capabilities": ["image_generate"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({ "type": "image_generate", "payload": {}, "requestedGpu": "auto" }),
+    )
+    .await;
+    let stale_job_id = created["id"].as_str().expect("job id is string").to_owned();
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+
+    // A fresh worker registers plus a second queued job so worker-2's claim
+    // actually returns work (response.is_some -> the queue refresh fires). Age
+    // worker-1 past the 1s timeout so the next claim's sweep reaps its job.
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-2",
+            "gpuId": "gpu-1",
+            "gpuName": null,
+            "capabilities": ["image_generate"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({ "type": "image_generate", "payload": {}, "requestedGpu": "auto" }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
+    let mut events = state.events.subscribe();
+
+    // worker-2 claims the second job. claim_job runs its own stale sweep
+    // (interrupting worker-1's job) and refreshes the queue via the skip-sweep
+    // path — without sweeping a second time.
+    let (status, claim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-2" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        claim["job"].is_object(),
+        "worker-2 claims the second queued job: {claim}"
+    );
+
+    let claim_events = drain_event_names(&mut events).await;
+    assert!(
+        claim_events.iter().any(|name| name == "queue.updated"),
+        "a claim that returns work still refreshes the queue: {claim_events:?}"
+    );
+
+    // The stale job was reaped exactly by the claim's own single sweep.
+    let (status, job) = request(
+        app,
+        "GET",
+        &format!("/api/v1/jobs/{stale_job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(job["status"], "interrupted");
+    assert_eq!(job["workerId"], Value::Null);
+}
+
+#[tokio::test]
 async fn access_token_is_enforced_on_protected_routes() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let mut settings = test_settings(&temp_dir);

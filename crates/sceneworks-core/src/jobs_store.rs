@@ -15,7 +15,7 @@ use crate::contracts::{
     WorkerSnapshot, WorkerStatus, WorkerUtilizationSnapshot,
 };
 use crate::store_util::{ensure_column, parse_string_enum};
-use crate::time::{format_unix_seconds, now_unix_seconds, utc_now};
+use crate::time::{format_unix_seconds, now_unix_seconds, parse_utc_seconds, utc_now};
 
 mod routing;
 
@@ -287,7 +287,7 @@ pub struct ProgressUpdate {
     pub worker_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct StaleSweep {
     pub workers: Vec<WorkerSnapshot>,
     pub jobs: Vec<JobSnapshot>,
@@ -444,7 +444,14 @@ impl JobsStore {
         status: Option<&str>,
         limit: u32,
     ) -> JobsStoreResult<Vec<JobSnapshot>> {
-        let _guard = self.lock.lock();
+        // Read-only, single-SELECT method: it deliberately does NOT take the
+        // process-wide write mutex (sc-8950 / F-148). connect() runs in WAL mode
+        // (see `connect`), where a reader takes a consistent snapshot and runs
+        // concurrently with an in-flight writer instead of blocking on it. The
+        // mutex exists only to serialize WRITES across our own connections; a
+        // pure read never mutates and never needs it, so keeping it here would
+        // pointlessly stall list/get/summary traffic behind every claim or
+        // progress update. All mutating methods still hold the mutex.
         let connection = self.connect()?;
         let limit = limit.clamp(1, 500);
         let mut conditions: Vec<&str> = Vec::new();
@@ -471,7 +478,8 @@ impl JobsStore {
     }
 
     pub fn get_job(&self, job_id: &str) -> JobsStoreResult<JobSnapshot> {
-        let _guard = self.lock.lock();
+        // Read-only single-SELECT: no write mutex, relies on WAL reader isolation
+        // (sc-8950 / F-148 — see list_jobs for the full rationale).
         let connection = self.connect()?;
         self.get_job_on_connection(&connection, job_id)
     }
@@ -668,9 +676,19 @@ impl JobsStore {
             ],
         )?;
         if let Some(job_id) = request.current_job_id {
+            // Verify ownership before letting a heartbeat refresh the job's
+            // liveness timestamps (sc-8873 / F-071). The progress path was
+            // hardened this way in sc-4172, but the heartbeat wasn't: a stale
+            // worker still heartbeating an old `current_job_id` it no longer
+            // owns (the job was swept to `interrupted` — worker_id cleared — or
+            // reclaimed by another worker) would keep bumping last_heartbeat_at,
+            // masking the job as alive and blocking the time-based stale sweep
+            // from ever reclaiming it. Scoping the UPDATE to the reporting
+            // worker's own rows means a non-owning heartbeat is a silent no-op.
             transaction.execute(
-                "update jobs set last_heartbeat_at = ?1, updated_at = ?1 where id = ?2",
-                params![now, job_id],
+                "update jobs set last_heartbeat_at = ?1, updated_at = ?1 \
+                 where id = ?2 and worker_id = ?3",
+                params![now, job_id, request.worker_id],
             )?;
         }
         let worker = self.get_worker_on_connection(&transaction, &request.worker_id)?;
@@ -1378,7 +1396,8 @@ impl JobsStore {
     }
 
     pub fn list_workers(&self) -> JobsStoreResult<Vec<WorkerSnapshot>> {
-        let _guard = self.lock.lock();
+        // Read-only single-SELECT: no write mutex, relies on WAL reader isolation
+        // (sc-8950 / F-148 — see list_jobs for the full rationale).
         let connection = self.connect()?;
         let mut statement = connection.prepare("select * from workers order by gpu_id, id")?;
         let workers = collect_workers(statement.query_map([], row_to_worker)?)?;
@@ -1386,16 +1405,23 @@ impl JobsStore {
     }
 
     pub fn get_worker(&self, worker_id: &str) -> JobsStoreResult<WorkerSnapshot> {
-        let _guard = self.lock.lock();
+        // Read-only single-SELECT: no write mutex, relies on WAL reader isolation
+        // (sc-8950 / F-148 — see list_jobs for the full rationale).
         let connection = self.connect()?;
         self.get_worker_on_connection(&connection, worker_id)
     }
 
     pub fn queue_summary(&self) -> JobsStoreResult<QueueSummary> {
-        // list_workers takes the store lock itself, so resolve it before we take
-        // the lock below to avoid a nested (potential self-deadlock) acquisition.
+        // Read-only aggregate: several SELECTs (per-status counts + active jobs +
+        // workers), no writes, so it takes NO write mutex and relies on WAL
+        // reader isolation like the other reads (sc-8950 / F-148). The counts and
+        // active-jobs queries run on one connection and list_workers opens its
+        // own; a writer committing between them can only make the snapshot a hair
+        // fresher, never inconsistent for the operator's queue view. (Before
+        // sc-8950 this method took the mutex and had to hoist list_workers out
+        // first to dodge a self-deadlock on the non-reentrant mutex; dropping the
+        // mutex removes that hazard entirely.)
         let workers = self.list_workers()?;
-        let _guard = self.lock.lock();
         let connection = self.connect()?;
 
         // Per-status counts over the WHOLE table — never a capped/newest-N sample.
@@ -1529,13 +1555,29 @@ impl JobsStore {
         connection: &Connection,
         statuses: &[&str],
     ) -> JobsStoreResult<Vec<JobSnapshot>> {
-        let mut jobs = Vec::new();
-        for status in statuses {
-            let mut statement = connection.prepare("select * from jobs where status = ?1")?;
-            jobs.extend(collect_jobs(
-                statement.query_map(params![status], row_to_job)?,
-            )?);
+        // One prepared statement + one table scan instead of preparing and
+        // executing `where status = ?` once per status (sc-8896 / F-094). The
+        // status list is quoted from the caller-provided `&[&str]` — always
+        // crate constants (e.g. ACTIVE_STATUSES), never user input — so direct
+        // interpolation is safe, matching active_statuses_sql()'s rationale.
+        // The old per-status loop returned rows grouped by status in the input
+        // order with no intra-group ordering; the single caller
+        // (mark_interrupted_on_startup) uses only the ids, so ordering is not
+        // load-bearing. We add an explicit `order by created_at desc` anyway to
+        // make the result deterministic and consistent with list_jobs/queue
+        // reads rather than leaving it to SQLite's unspecified row order.
+        if statuses.is_empty() {
+            return Ok(Vec::new());
         }
+        let status_list = statuses
+            .iter()
+            .map(|status| format!("'{status}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement = connection.prepare(&format!(
+            "select * from jobs where status in ({status_list}) order by created_at desc"
+        ))?;
+        let jobs = collect_jobs(statement.query_map([], row_to_job)?)?;
         Ok(jobs)
     }
 
@@ -1949,58 +1991,6 @@ fn elapsed_seconds(started_at: &str, completed_at: Option<&str>) -> Option<Contr
     let ended = completed_at.map_or_else(|| Some(now_unix_seconds()), parse_utc_seconds)?;
     let seconds = ended.saturating_sub(started).max(0);
     Some(Number::from(seconds))
-}
-
-fn parse_utc_seconds(value: &str) -> Option<i64> {
-    if value.len() < 20 {
-        return None;
-    }
-    let year = value.get(0..4)?.parse::<i32>().ok()?;
-    let month = value.get(5..7)?.parse::<u32>().ok()?;
-    let day = value.get(8..10)?.parse::<u32>().ok()?;
-    let hour = value.get(11..13)?.parse::<i64>().ok()?;
-    let minute = value.get(14..16)?.parse::<i64>().ok()?;
-    let second = value.get(17..19)?.parse::<i64>().ok()?;
-    let suffix = value.get(19..)?;
-    if value.get(4..5)? != "-"
-        || value.get(7..8)? != "-"
-        || value.get(10..11)? != "T"
-        || value.get(13..14)? != ":"
-        || value.get(16..17)? != ":"
-        || month == 0
-        || month > 12
-        || day == 0
-        || day > 31
-        || hour > 23
-        || minute > 59
-        || second > 59
-    {
-        return None;
-    }
-    if suffix != "Z" {
-        if !suffix.starts_with('.') || !suffix.ends_with('Z') {
-            return None;
-        }
-        if !suffix[1..suffix.len() - 1]
-            .chars()
-            .all(|character| character.is_ascii_digit())
-        {
-            return None;
-        }
-    }
-    Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
-}
-
-fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let adjusted_year = i64::from(year) - i64::from(month <= 2);
-    let era = adjusted_year.div_euclid(400);
-    let year_of_era = adjusted_year - era * 400;
-    let month = i64::from(month);
-    let day = i64::from(day);
-    let month_prime = month + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
 }
 
 fn is_active_status(status: &str) -> bool {

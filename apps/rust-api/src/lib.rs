@@ -1438,9 +1438,33 @@ where
 }
 
 async fn queue_summary_snapshot(state: AppState) -> Result<QueueSummary, ApiError> {
+    queue_summary_snapshot_inner(state, false).await
+}
+
+/// Build the queue summary, optionally SKIPPING the stale-worker sweep.
+///
+/// The sweep is a second blocking round-trip that mutates jobs to `interrupted`.
+/// Callers that already ran `mark_stale_workers_interrupted` in their own
+/// transaction this request (currently `claim_job`) pass `skip_sweep = true` so
+/// the queue refresh doesn't sweep a SECOND time on the same request (sc-8889 /
+/// F-087). Every other caller passes `skip_sweep = false` and gets the sweep, so
+/// a plain queue read (GET /queue) or a mutation that didn't sweep still reaps
+/// stale workers.
+async fn queue_summary_snapshot_inner(
+    state: AppState,
+    skip_sweep: bool,
+) -> Result<QueueSummary, ApiError> {
     let (sweep, summary): (StaleSweep, QueueSummary) =
-        store_call(state.clone(), |store, timeout| {
-            let sweep = store.mark_stale_workers_interrupted(timeout)?;
+        store_call(state.clone(), move |store, timeout| {
+            // When the caller already swept this request, don't pay for a second
+            // sweep — just read the summary. The empty StaleSweep means the
+            // job.updated fan-out below is a no-op (the caller emitted those
+            // events off its own sweep result).
+            let sweep = if skip_sweep {
+                StaleSweep::default()
+            } else {
+                store.mark_stale_workers_interrupted(timeout)?
+            };
             let summary = store.queue_summary()?;
             Ok((sweep, summary))
         })
@@ -1451,7 +1475,8 @@ async fn queue_summary_snapshot(state: AppState) -> Result<QueueSummary, ApiErro
     // flips to "Interrupted" instead of showing its last running state forever: the frontend's job
     // list is driven by `job.updated`, while `queue.updated` only refreshes the summary/workers
     // (sc-8186). The sweep returns each job exactly once (it also flips the owning worker offline, so
-    // a later sweep can't re-select it), so this neither spams nor double-fires.
+    // a later sweep can't re-select it), so this neither spams nor double-fires. When skip_sweep is
+    // set the sweep is empty, so nothing is broadcast here.
     for job in &sweep.jobs {
         publish(&state, "job.updated", job);
     }
@@ -1486,6 +1511,16 @@ async fn create_generation_job(
 
 async fn publish_queue(state: &AppState) -> Result<(), ApiError> {
     let queue = queue_summary_snapshot(state.clone()).await?;
+    publish(state, "queue.updated", &queue);
+    Ok(())
+}
+
+/// Like [`publish_queue`], but skips the stale-worker sweep because the caller
+/// already ran one in its own transaction this request (sc-8889 / F-087). Use
+/// only right after a `mark_stale_workers_interrupted` call — otherwise stale
+/// workers won't be reaped on this refresh.
+async fn publish_queue_skip_sweep(state: &AppState) -> Result<(), ApiError> {
+    let queue = queue_summary_snapshot_inner(state.clone(), true).await?;
     publish(state, "queue.updated", &queue);
     Ok(())
 }

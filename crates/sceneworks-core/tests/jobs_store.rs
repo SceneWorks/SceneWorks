@@ -1059,6 +1059,102 @@ fn startup_interrupt_returns_post_update_job_snapshots() {
 }
 
 #[test]
+fn startup_interrupt_collects_every_active_status() {
+    // sc-8896 / F-094: mark_interrupted_on_startup selects the in-flight jobs via
+    // list_jobs_by_status_on_connection(ACTIVE_STATUSES), now a single
+    // `status in (...)` scan instead of a per-status loop. This pins that the fold
+    // still gathers jobs sitting in DIFFERENT active statuses (running vs saving),
+    // not just one, and leaves a queued (non-active) job alone.
+    let store = store("startup-interrupt-all-statuses");
+    register_image_worker(&store);
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-2".to_owned(),
+            gpu_id: "gpu-1".to_owned(),
+            gpu_name: Some("GPU 1".to_owned()),
+            capabilities: vec![WorkerCapability::ImageGenerate],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("second worker registers");
+
+    // Job A -> running (worker-1); Job B -> saving (worker-2). Both are active but
+    // in distinct statuses, so a per-status miss would drop one.
+    let running = store
+        .create_job(image_job(Map::new()))
+        .expect("job A creates");
+    store.claim_next_job("worker-1").expect("worker-1 claims A");
+    store
+        .update_job_progress(
+            &running.id,
+            ProgressUpdate {
+                status: JobStatus::Running,
+                stage: ProgressStage::Running,
+                progress: 0.4,
+                message: "running".to_owned(),
+                error: None,
+                result: None,
+                eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
+                backend: None,
+                worker_id: Some("worker-1".to_owned()),
+            },
+        )
+        .expect("A -> running");
+
+    let saving = store
+        .create_job(image_job(Map::new()))
+        .expect("job B creates");
+    store.claim_next_job("worker-2").expect("worker-2 claims B");
+    store
+        .update_job_progress(
+            &saving.id,
+            ProgressUpdate {
+                status: JobStatus::Saving,
+                stage: ProgressStage::Saving,
+                progress: 0.9,
+                message: "saving".to_owned(),
+                error: None,
+                result: None,
+                eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
+                backend: None,
+                worker_id: Some("worker-2".to_owned()),
+            },
+        )
+        .expect("B -> saving");
+
+    // A third job stays queued (not an active status) and must be left untouched.
+    let queued = store
+        .create_job(image_job(Map::new()))
+        .expect("job C creates");
+
+    let interrupted = store
+        .mark_interrupted_on_startup()
+        .expect("startup interrupt succeeds");
+    let interrupted_ids = interrupted
+        .iter()
+        .map(|job| job.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        interrupted.len(),
+        2,
+        "both active jobs across running+saving are collected, got {interrupted_ids:?}"
+    );
+    assert!(interrupted_ids.contains(&running.id.as_str()));
+    assert!(interrupted_ids.contains(&saving.id.as_str()));
+    for job in &interrupted {
+        assert_eq!(job.status, JobStatus::Interrupted);
+    }
+    // The queued job is untouched — not active, so not swept.
+    let queued = store.get_job(&queued.id).expect("queued job loads");
+    assert_eq!(queued.status, JobStatus::Queued);
+}
+
+#[test]
 fn signal_death_fails_active_job_with_attributed_error() {
     // sc-4881: a worker hard-killed by SIGKILL/OOM can't report its own death, so
     // the supervisor attributes it. The worker's active job must become a real
@@ -1197,6 +1293,119 @@ fn idle_heartbeat_does_not_interrupt_just_claimed_job() {
         job.status
     );
     assert_eq!(job.worker_id.as_deref(), Some("worker-1"));
+}
+
+#[test]
+fn heartbeat_only_refreshes_a_job_the_reporting_worker_owns() {
+    // sc-8873 / F-071: a heartbeat may only refresh the liveness timestamps of a
+    // job the reporting worker actually owns. A stale/second worker that reports
+    // someone else's `current_job_id` must NOT bump last_heartbeat_at — otherwise
+    // it keeps the job looking alive and the time-based stale sweep can never
+    // reclaim it. The owning worker's heartbeat still refreshes the job.
+    let store = store("heartbeat-ownership");
+    register_image_worker(&store);
+    // A second, distinct worker that does not own the claimed job.
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-2".to_owned(),
+            gpu_id: "gpu-1".to_owned(),
+            gpu_name: Some("GPU 1".to_owned()),
+            capabilities: vec![WorkerCapability::ImageGenerate],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("second worker registers");
+
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    assert_eq!(claimed.id, created.id);
+    assert_eq!(claimed.worker_id.as_deref(), Some("worker-1"));
+
+    // The owning worker records a first heartbeat, establishing a baseline
+    // last_heartbeat_at we can watch for (non-)refresh.
+    store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-1".to_owned(),
+            status: WorkerStatus::Busy,
+            current_job_id: Some(created.id.clone()),
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("owner heartbeat succeeds");
+    let baseline = store.get_job(&created.id).expect("job loads");
+    let baseline_heartbeat = baseline
+        .last_heartbeat_at
+        .clone()
+        .expect("owner heartbeat recorded last_heartbeat_at");
+
+    // A NON-owning worker heartbeats the same job id. It must be a no-op on the
+    // job's liveness — the timestamps stay exactly where the owner left them, and
+    // the job keeps its owner. (Timestamps are second-granular, so equality is a
+    // faithful "did not touch" assertion regardless of wall-clock drift.)
+    store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-2".to_owned(),
+            status: WorkerStatus::Busy,
+            current_job_id: Some(created.id.clone()),
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("non-owner heartbeat still returns the worker snapshot");
+    let after_intruder = store.get_job(&created.id).expect("job loads");
+    assert_eq!(
+        after_intruder.last_heartbeat_at.as_deref(),
+        Some(baseline_heartbeat.as_str()),
+        "a non-owning worker must not refresh the job's last_heartbeat_at"
+    );
+    assert_eq!(
+        after_intruder.worker_id.as_deref(),
+        Some("worker-1"),
+        "a non-owning heartbeat must not steal or clear ownership"
+    );
+
+    // The owner can still refresh the job it owns — and the refresh must actually
+    // ADVANCE last_heartbeat_at, not just leave a non-null value (a no-op owner
+    // heartbeat would still read as `is_some()`). Timestamps are second-granular
+    // and the store stamps `utc_now()` with no injectable clock, so a real sleep
+    // would need to cross a whole-second boundary to be observable — flaky and
+    // slow. Instead, deterministically age the stored last_heartbeat_at back to a
+    // known OLD baseline via a test-only UPDATE, then require the owner heartbeat
+    // to stamp a strictly greater (current-wall-clock) value.
+    let old_baseline = "2000-01-01T00:00:00Z";
+    {
+        let connection = Connection::open(store.db_path()).expect("db opens");
+        let updated = connection
+            .execute(
+                "update jobs set last_heartbeat_at = ?1 where id = ?2",
+                params![old_baseline, created.id],
+            )
+            .expect("ages the stored heartbeat to a known baseline");
+        assert_eq!(updated, 1, "exactly the target job's heartbeat is aged");
+    }
+    store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-1".to_owned(),
+            status: WorkerStatus::Busy,
+            current_job_id: Some(created.id.clone()),
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("owner heartbeat succeeds");
+    let owner_refreshed = store.get_job(&created.id).expect("job loads");
+    let refreshed_heartbeat = owner_refreshed
+        .last_heartbeat_at
+        .as_deref()
+        .expect("the owning worker's heartbeat keeps refreshing the job it owns");
+    assert!(
+        refreshed_heartbeat > old_baseline,
+        "the owning worker's heartbeat must ADVANCE last_heartbeat_at past the \
+         aged baseline, not leave it unchanged: got {refreshed_heartbeat:?}"
+    );
 }
 
 #[test]
@@ -4975,6 +5184,101 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
     let unique: HashSet<&String> = claimed.iter().collect();
     assert_eq!(claimed.len(), JOBS, "every job claimed (count)");
     assert_eq!(unique.len(), JOBS, "no job claimed twice");
+}
+
+/// sc-8950 / F-148 — read-only methods (list_jobs/get_job/list_workers/
+/// get_worker/queue_summary) no longer take the process-wide write mutex; they
+/// rely on WAL reader isolation instead. This pins the property the change
+/// depends on: a reader returns correct, committed data promptly even while a
+/// writer is mid-transaction holding the SQLite write lock — it takes the WAL
+/// snapshot rather than blocking until the writer commits.
+#[test]
+fn reads_proceed_while_a_writer_holds_the_write_lock() {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let path = temp_db("read-during-write");
+    let store = JobsStore::new(path.clone());
+    store.initialize().expect("store initializes");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(object(json!({ "prompt": "committed" }))))
+        .expect("job creates");
+    // The committed message right after create — the reader must observe this,
+    // never the writer's uncommitted overwrite below.
+    let committed_message = created.message.clone();
+
+    // A separate connection opens a BEGIN IMMEDIATE transaction (acquiring the
+    // SQLite write lock) and holds it open for a beat WITHOUT committing, so its
+    // pending mutation is invisible to snapshots. This models a real in-flight
+    // writer; crucially it does NOT touch our JobsStore mutex, so a mutex-taking
+    // reader could only stall on the SQLite lock — which WAL lets a reader skip.
+    let (holding_tx, holding_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let writer_path = path.clone();
+    let writer_job_id = created.id.clone();
+    let writer = thread::spawn(move || {
+        let connection = Connection::open(&writer_path).expect("writer db opens");
+        connection
+            .busy_timeout(Duration::from_millis(5000))
+            .expect("busy timeout set");
+        connection
+            .execute_batch("begin immediate")
+            .expect("write lock acquired");
+        connection
+            .execute(
+                "update jobs set message = 'uncommitted' where id = ?1",
+                params![writer_job_id],
+            )
+            .expect("uncommitted write applied");
+        holding_tx.send(()).expect("signal holding");
+        // Hold the write lock until the reader has finished.
+        release_rx.recv().expect("await release");
+        connection.execute_batch("rollback").expect("rollback");
+    });
+
+    holding_rx.recv().expect("writer holds the lock");
+
+    // The read must return the COMMITTED snapshot (original message), quickly,
+    // without waiting on the writer to release. A generous bound catches a
+    // regression where a reader serializes behind the writer.
+    let started = Instant::now();
+    let loaded = store
+        .get_job(&created.id)
+        .expect("read while write in flight");
+    let jobs = store
+        .list_jobs(None, None, 100)
+        .expect("list while write in flight");
+    let summary = store
+        .queue_summary()
+        .expect("summary while write in flight");
+    let elapsed = started.elapsed();
+
+    release_tx.send(()).expect("release writer");
+    writer.join().expect("writer thread joins");
+
+    assert_eq!(
+        loaded.message, committed_message,
+        "reader must see the committed snapshot, not the writer's uncommitted change"
+    );
+    assert_ne!(
+        loaded.message, "uncommitted",
+        "reader must never observe the writer's uncommitted overwrite"
+    );
+    assert_eq!(
+        jobs.len(),
+        1,
+        "the one committed job is visible to the reader"
+    );
+    assert!(
+        summary.active_jobs.iter().any(|job| job.id == created.id),
+        "queue summary reflects the committed job"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "reads must not block for the writer's full hold; took {elapsed:?}"
+    );
 }
 
 /// sc-4172 — a zombie worker's late progress report must not resurrect a job
