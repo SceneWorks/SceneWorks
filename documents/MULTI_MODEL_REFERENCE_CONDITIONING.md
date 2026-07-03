@@ -153,7 +153,7 @@ Every reference-capable model declares `character_image` in **both** `capabiliti
 }
 ```
 
-The audit in `tests/test_worker_runtime.py::test_character_image_capability_implies_engine_or_tuning_declaration` enforces that any model claiming this capability has the engine wiring or tuning declaration to back it up (sc-2018).
+The audit `character_image_capability_implies_engine_or_tuning_declaration` (in `crates/sceneworks-worker/src/engines.rs`, reimplemented against the Rust engine wiring by sc-9513) enforces that any model claiming this capability has the engine wiring or tuning declaration to back it up (sc-2018).
 
 ### 3.2 Declarative tuning hints (`ui.*`)
 
@@ -204,7 +204,7 @@ State is persisted per-workspace via `useStudioSettingsWriter` ([useStudioSettin
 
 The Rust API is the queue and manifest server; it doesn't run inference. Two surfaces matter for the contract:
 
-- **`lora_family.rs::model_capabilities_for_type_and_family(type, family)`** — fallback capability list when a custom model omits `capabilities`. Updated by sc-2005 to drop the dishonest `character_image` claim from z-image's default. The audit `test_models_with_engine_block_advertise_character_image` (sc-2018) guards against the reverse drift.
+- **`lora_family.rs::model_capabilities_for_type_and_family(type, family)`** — fallback capability list when a custom model omits `capabilities`. Updated by sc-2005 to drop the dishonest `character_image` claim from z-image's default. The audit `models_with_engine_block_advertise_character_image` (`crates/sceneworks-worker/src/engines.rs`, sc-2018 / reimplemented in Rust by sc-9513) guards against the reverse drift.
 - **`ui.*` freeform passthrough** — Rust deserializes `ui` as `serde_json::Value` and ships it to the web client untouched. Adding a new `ui.someNewSlider` field requires no Rust changes; the picker reads it directly from the model entry.
 
 The `referenceAssetId` field on the job DTO is the only non-freeform reference-conditioning hook: it's surfaced as a typed field on `CreateImageJobRequest` so the picker can pass it through (with permission validation) without packing it into `advanced`.
@@ -213,11 +213,11 @@ The `referenceAssetId` field on the job DTO is the only non-freeform reference-c
 
 ## 6. CI enforcement (sc-2018)
 
-Three audits ride in `tests/test_worker_runtime.py`:
+Three audits enforce the contract. The two ENGINE-WIRING guards were originally Python (sc-2018), moved to `tests/test_builtin_manifest_audit.py` by sc-8861, then reimplemented in Rust against the worker's own engine wiring by sc-9513 (F-059 / epic 8283 Python eradication) — they now live in `crates/sceneworks-worker/src/engines.rs` and read the embedded manifest, so they run Python-free after `apps/worker` is deleted. The third is a pure-manifest guard that stays in Python:
 
-1. **`test_character_image_capability_implies_engine_or_tuning_declaration`** — for every builtin model declaring `character_image`, assert the worker has an engine block (`ipAdapter` / `instantId` in `MODEL_TARGETS`) or the manifest declares `ui.variationStrength`. Catches the "advertised but unwired" bug shape from sc-2005.
-2. **`test_models_with_engine_block_advertise_character_image`** — for every `MODEL_TARGETS` entry with an engine block, assert the builtin manifest advertises `character_image`. Catches the "wired but hidden" bug shape.
-3. **`test_hide_reference_strength_models_declare_a_variation_knob`** — `hideReferenceStrength: true` must be accompanied by `variationStrength`.
+1. **`character_image_capability_implies_engine_or_tuning_declaration`** (Rust, `engines.rs`) — for every builtin model declaring `character_image`, assert the worker has an identity engine (IP-Adapter / InstantID / PuLID-FLUX in the `CHARACTER_IMAGE_ENGINE_WIRING` table) or the manifest declares `ui.variationStrength`. Catches the "advertised but unwired" bug shape from sc-2005.
+2. **`models_with_engine_block_advertise_character_image`** (Rust, `engines.rs`) — for every identity engine in `CHARACTER_IMAGE_ENGINE_WIRING`, assert the builtin manifest advertises `character_image`. Catches the "wired but hidden" bug shape.
+3. **`test_hide_reference_strength_models_declare_a_variation_knob`** (`tests/test_builtin_manifest_audit.py`) — `hideReferenceStrength: true` must be accompanied by `variationStrength`.
 
 Plus `scripts/check-scaffold.mjs::assertCharacterImageTuningSurface()` runs audit #3 at build time so it fails before pytest does.
 
