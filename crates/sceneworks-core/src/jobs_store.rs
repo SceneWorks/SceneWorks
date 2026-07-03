@@ -15,7 +15,7 @@ use crate::contracts::{
     WorkerSnapshot, WorkerStatus, WorkerUtilizationSnapshot,
 };
 use crate::store_util::{ensure_column, parse_string_enum};
-use crate::time::{format_unix_seconds, now_unix_seconds, utc_now};
+use crate::time::{format_unix_seconds, now_unix_seconds, parse_utc_seconds, utc_now};
 
 mod routing;
 
@@ -1975,58 +1975,6 @@ fn elapsed_seconds(started_at: &str, completed_at: Option<&str>) -> Option<Contr
     let ended = completed_at.map_or_else(|| Some(now_unix_seconds()), parse_utc_seconds)?;
     let seconds = ended.saturating_sub(started).max(0);
     Some(Number::from(seconds))
-}
-
-fn parse_utc_seconds(value: &str) -> Option<i64> {
-    if value.len() < 20 {
-        return None;
-    }
-    let year = value.get(0..4)?.parse::<i32>().ok()?;
-    let month = value.get(5..7)?.parse::<u32>().ok()?;
-    let day = value.get(8..10)?.parse::<u32>().ok()?;
-    let hour = value.get(11..13)?.parse::<i64>().ok()?;
-    let minute = value.get(14..16)?.parse::<i64>().ok()?;
-    let second = value.get(17..19)?.parse::<i64>().ok()?;
-    let suffix = value.get(19..)?;
-    if value.get(4..5)? != "-"
-        || value.get(7..8)? != "-"
-        || value.get(10..11)? != "T"
-        || value.get(13..14)? != ":"
-        || value.get(16..17)? != ":"
-        || month == 0
-        || month > 12
-        || day == 0
-        || day > 31
-        || hour > 23
-        || minute > 59
-        || second > 59
-    {
-        return None;
-    }
-    if suffix != "Z" {
-        if !suffix.starts_with('.') || !suffix.ends_with('Z') {
-            return None;
-        }
-        if !suffix[1..suffix.len() - 1]
-            .chars()
-            .all(|character| character.is_ascii_digit())
-        {
-            return None;
-        }
-    }
-    Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
-}
-
-fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let adjusted_year = i64::from(year) - i64::from(month <= 2);
-    let era = adjusted_year.div_euclid(400);
-    let year_of_era = adjusted_year - era * 400;
-    let month = i64::from(month);
-    let day = i64::from(day);
-    let month_prime = month + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
 }
 
 fn is_active_status(status: &str) -> bool {
