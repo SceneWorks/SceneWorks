@@ -214,6 +214,40 @@ fn pose_detect_candle_real_weights_finds_person() {
     }
 }
 
+/// sc-8875: a project-relative source path is confined to the project tree — any `..`
+/// (or absolute/prefix) component must reject the join so a crafted `../../secret.png`
+/// can't escape `project_path`. Plain `Normal` segments still resolve under the project.
+#[test]
+fn join_project_relative_rejects_parent_escape() {
+    let proj = Path::new("/data/projects/p1");
+
+    // A benign relative path resolves under the project root.
+    assert_eq!(
+        join_project_relative(proj, "assets/img.png"),
+        Some(PathBuf::from("/data/projects/p1/assets/img.png")),
+        "a plain relative path must resolve under the project"
+    );
+
+    // `..` traversal is rejected outright (no escape, no lexical resolution).
+    assert_eq!(
+        join_project_relative(proj, "../../../../etc/passwd"),
+        None,
+        "a `..` escape must be rejected"
+    );
+    assert_eq!(
+        join_project_relative(proj, "assets/../../secret.png"),
+        None,
+        "an interior `..` must be rejected"
+    );
+
+    // An absolute path (RootDir component) is rejected — it must not override the base.
+    assert_eq!(
+        join_project_relative(proj, "/etc/passwd"),
+        None,
+        "an absolute path must be rejected"
+    );
+}
+
 /// sc-9123: the between-iteration cancel check used by both worker-side pose loops (batch detect +
 /// skeleton render) must surface the TYPED `Canceled` carrying the shared terminal message — that
 /// is what `run_blocking_with_heartbeat` maps to the terminal `Canceled` post instead of a failure

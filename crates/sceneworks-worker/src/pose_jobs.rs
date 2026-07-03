@@ -777,24 +777,43 @@ fn resolve_source(
             });
         }
     }
-    // project-relative path
+    // project-relative path, confined to the project tree: reject any `..`/root/prefix
+    // component so a crafted `../../<anything>` can't escape `proj` (sc-8875). The raw
+    // cwd-relative fallback is dropped for the same reason — an unresolved relative path
+    // would otherwise reach `decode_image_any` resolved against the worker's cwd.
     if let (Some(raw), Some(proj)) = (raw, project_path) {
-        let candidate = proj.join(raw);
-        if candidate.exists() {
-            return Ok(PoseSource {
-                asset_id,
-                display_name,
-                temp,
-                path: Some(candidate),
-            });
+        if let Some(candidate) = join_project_relative(proj, raw) {
+            if candidate.exists() {
+                return Ok(PoseSource {
+                    asset_id,
+                    display_name,
+                    temp,
+                    path: Some(candidate),
+                });
+            }
         }
     }
     Ok(PoseSource {
         asset_id,
         display_name,
         temp,
-        path: raw.map(PathBuf::from),
+        path: None,
     })
+}
+
+/// Join a project-relative source path under `project_path`, accepting only
+/// `Component::Normal` segments so a payload can never traverse out of the project
+/// tree with `..`, an absolute root, or a drive/UNC prefix (sc-8875). Returns `None`
+/// if any component is non-`Normal` (the caller then treats the source as unresolved).
+fn join_project_relative(project_path: &Path, raw: &str) -> Option<PathBuf> {
+    let mut path = project_path.to_path_buf();
+    for component in Path::new(raw).components() {
+        match component {
+            std::path::Component::Normal(value) => path.push(value),
+            _ => return None,
+        }
+    }
+    Some(path)
 }
 
 fn resolve_asset_path(
