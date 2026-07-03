@@ -897,6 +897,77 @@ fn shared_sweep_removes_stale_files_and_dirs_leaves_fresh_and_unrelated() {
 }
 
 #[tokio::test]
+async fn create_image_job_rejects_over_length_negative_prompt() {
+    // sc-8884 (F-082): negativePrompt now shares the prompt char cap.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, error) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+            "negativePrompt": "n".repeat(4001),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(error["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("negativePrompt")));
+}
+
+#[tokio::test]
+async fn create_image_job_rejects_oversized_advanced_object() {
+    // sc-8884 (F-082): the free-form `advanced` bag is bounded by serialized size.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, error) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+            "advanced": { "blob": "a".repeat(64 * 1024 + 1) },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(error["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("advanced")));
+}
+
+#[tokio::test]
+async fn create_video_job_rejects_over_length_negative_prompt() {
+    // sc-8884 (F-082): the negative-prompt cap is shared by the video validator too.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, error) = request(
+        app,
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_video",
+            "prompt": "a drone shot",
+            "negativePrompt": "n".repeat(4001),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(error["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("negativePrompt")));
+}
+
+#[tokio::test]
 async fn worker_can_register_claim_and_complete_job_through_http() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
