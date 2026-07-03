@@ -444,7 +444,14 @@ impl JobsStore {
         status: Option<&str>,
         limit: u32,
     ) -> JobsStoreResult<Vec<JobSnapshot>> {
-        let _guard = self.lock.lock();
+        // Read-only, single-SELECT method: it deliberately does NOT take the
+        // process-wide write mutex (sc-8950 / F-148). connect() runs in WAL mode
+        // (see `connect`), where a reader takes a consistent snapshot and runs
+        // concurrently with an in-flight writer instead of blocking on it. The
+        // mutex exists only to serialize WRITES across our own connections; a
+        // pure read never mutates and never needs it, so keeping it here would
+        // pointlessly stall list/get/summary traffic behind every claim or
+        // progress update. All mutating methods still hold the mutex.
         let connection = self.connect()?;
         let limit = limit.clamp(1, 500);
         let mut conditions: Vec<&str> = Vec::new();
@@ -471,7 +478,8 @@ impl JobsStore {
     }
 
     pub fn get_job(&self, job_id: &str) -> JobsStoreResult<JobSnapshot> {
-        let _guard = self.lock.lock();
+        // Read-only single-SELECT: no write mutex, relies on WAL reader isolation
+        // (sc-8950 / F-148 — see list_jobs for the full rationale).
         let connection = self.connect()?;
         self.get_job_on_connection(&connection, job_id)
     }
@@ -1388,7 +1396,8 @@ impl JobsStore {
     }
 
     pub fn list_workers(&self) -> JobsStoreResult<Vec<WorkerSnapshot>> {
-        let _guard = self.lock.lock();
+        // Read-only single-SELECT: no write mutex, relies on WAL reader isolation
+        // (sc-8950 / F-148 — see list_jobs for the full rationale).
         let connection = self.connect()?;
         let mut statement = connection.prepare("select * from workers order by gpu_id, id")?;
         let workers = collect_workers(statement.query_map([], row_to_worker)?)?;
@@ -1396,16 +1405,23 @@ impl JobsStore {
     }
 
     pub fn get_worker(&self, worker_id: &str) -> JobsStoreResult<WorkerSnapshot> {
-        let _guard = self.lock.lock();
+        // Read-only single-SELECT: no write mutex, relies on WAL reader isolation
+        // (sc-8950 / F-148 — see list_jobs for the full rationale).
         let connection = self.connect()?;
         self.get_worker_on_connection(&connection, worker_id)
     }
 
     pub fn queue_summary(&self) -> JobsStoreResult<QueueSummary> {
-        // list_workers takes the store lock itself, so resolve it before we take
-        // the lock below to avoid a nested (potential self-deadlock) acquisition.
+        // Read-only aggregate: several SELECTs (per-status counts + active jobs +
+        // workers), no writes, so it takes NO write mutex and relies on WAL
+        // reader isolation like the other reads (sc-8950 / F-148). The counts and
+        // active-jobs queries run on one connection and list_workers opens its
+        // own; a writer committing between them can only make the snapshot a hair
+        // fresher, never inconsistent for the operator's queue view. (Before
+        // sc-8950 this method took the mutex and had to hoist list_workers out
+        // first to dodge a self-deadlock on the non-reentrant mutex; dropping the
+        // mutex removes that hazard entirely.)
         let workers = self.list_workers()?;
-        let _guard = self.lock.lock();
         let connection = self.connect()?;
 
         // Per-status counts over the WHOLE table — never a capped/newest-N sample.
