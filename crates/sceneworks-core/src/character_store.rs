@@ -9,6 +9,7 @@ use serde_json::{json, Map, Value};
 use crate::asset_index::{
     find_asset_sidecar_path_on_connection, index_asset_on_connection, normalize_asset,
 };
+use crate::contracts;
 use crate::project_store::{apply_project_migrations, ProjectStoreError, ProjectStoreResult};
 use crate::store_util::{
     atomic_write, is_safe_id, optional_bool, optional_f64, optional_str, random_hex, read_json,
@@ -1336,177 +1337,28 @@ fn prepend_array_field(payload: &mut Value, field: &str, item: Value) -> Project
     Ok(())
 }
 
+/// Serialize a character sidecar deterministically.
+///
+/// The `payload` is the untyped `serde_json::Value` the store mutates in place.
+/// We round-trip it through the typed [`contracts::Character`] before writing so
+/// the on-disk key order comes from the struct's field-declaration order rather
+/// than a heuristic that guessed an object's "type" from which keys it contained
+/// (sc-8893 / F-091). Field-declaration order is deterministic: the same
+/// `Character` serializes to byte-identical output on every write, which is the
+/// diff-stability guarantee this function exists to provide.
+///
+/// The character enums (`CharacterType`, `CharacterReferenceRole`, ...) are
+/// forward-compatible `string_enum!`s that deserialize unknown strings into an
+/// `Unknown(String)` variant and serialize them back verbatim, so an unrecognized
+/// value never fails the round-trip. Unknown top-level/nested keys are captured by
+/// the structs' `#[serde(flatten)] extra: ExtraFields` and re-emitted after the
+/// declared fields, matching the previous writer (which appended unrecognized keys
+/// after the preferred ones).
 fn write_character_json(path: &Path, payload: &Value) -> ProjectStoreResult<()> {
-    let mut output = String::new();
-    write_character_value(payload, 0, None, &mut output)?;
+    let character: contracts::Character = serde_json::from_value(payload.clone())?;
+    let mut output = serde_json::to_string_pretty(&character)?;
     output.push('\n');
     atomic_write(path, output.as_bytes())
-}
-
-fn write_character_value(
-    value: &Value,
-    indent: usize,
-    key_hint: Option<&str>,
-    output: &mut String,
-) -> ProjectStoreResult<()> {
-    match value {
-        Value::Object(object) if should_inline_object(key_hint) => {
-            write_inline_value(&Value::Object(object.clone()), output)?;
-        }
-        Value::Object(object) => {
-            if object.is_empty() {
-                output.push_str("{}");
-                return Ok(());
-            }
-            output.push_str("{\n");
-            let keys = ordered_character_keys(object);
-            for (index, key) in keys.iter().enumerate() {
-                output.push_str(&" ".repeat(indent + 2));
-                output.push_str(&serde_json::to_string(key)?);
-                output.push_str(": ");
-                write_character_value(&object[*key], indent + 2, Some(key), output)?;
-                if index + 1 != keys.len() {
-                    output.push(',');
-                }
-                output.push('\n');
-            }
-            output.push_str(&" ".repeat(indent));
-            output.push('}');
-        }
-        Value::Array(items) if items.is_empty() || items.iter().all(is_inline_json_value) => {
-            write_inline_value(value, output)?;
-        }
-        Value::Array(items) => {
-            output.push_str("[\n");
-            for (index, item) in items.iter().enumerate() {
-                output.push_str(&" ".repeat(indent + 2));
-                write_character_value(item, indent + 2, key_hint, output)?;
-                if index + 1 != items.len() {
-                    output.push(',');
-                }
-                output.push('\n');
-            }
-            output.push_str(&" ".repeat(indent));
-            output.push(']');
-        }
-        _ => write_inline_value(value, output)?,
-    }
-    Ok(())
-}
-
-fn should_inline_object(key_hint: Option<&str>) -> bool {
-    matches!(key_hint, Some("recipeSettings" | "compatibility"))
-}
-
-fn is_inline_json_value(value: &Value) -> bool {
-    matches!(
-        value,
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
-    )
-}
-
-fn write_inline_value(value: &Value, output: &mut String) -> ProjectStoreResult<()> {
-    match value {
-        Value::Object(object) => {
-            output.push_str("{ ");
-            let keys = ordered_character_keys(object);
-            for (index, key) in keys.iter().enumerate() {
-                output.push_str(&serde_json::to_string(key)?);
-                output.push_str(": ");
-                write_inline_value(&object[*key], output)?;
-                if index + 1 != keys.len() {
-                    output.push_str(", ");
-                }
-            }
-            output.push_str(" }");
-        }
-        Value::Array(items) => {
-            output.push('[');
-            for (index, item) in items.iter().enumerate() {
-                write_inline_value(item, output)?;
-                if index + 1 != items.len() {
-                    output.push_str(", ");
-                }
-            }
-            output.push(']');
-        }
-        _ => output.push_str(&serde_json::to_string(value)?),
-    }
-    Ok(())
-}
-
-fn ordered_character_keys(object: &Map<String, Value>) -> Vec<&str> {
-    let preferred: &[&str] =
-        if object.contains_key("schemaVersion") && object.contains_key("trainedLoras") {
-            &[
-                "schemaVersion",
-                "id",
-                "projectId",
-                "name",
-                "type",
-                "description",
-                "createdAt",
-                "updatedAt",
-                "status",
-                "references",
-                "looks",
-                "loras",
-                "trainedLoras",
-            ]
-        } else if object.contains_key("assetId") && object.contains_key("addedAt") {
-            &[
-                "assetId",
-                "approved",
-                "role",
-                "notes",
-                "addedAt",
-                "approvedAt",
-                "asset",
-            ]
-        } else if object.contains_key("approvedReferenceIds") {
-            &[
-                "id",
-                "name",
-                "description",
-                "approvedReferenceIds",
-                "recipeSettings",
-                "createdAt",
-                "updatedAt",
-            ]
-        } else if object.contains_key("loraId") || object.contains_key("copiedIntoProject") {
-            &[
-                "id",
-                "loraId",
-                "name",
-                "sourcePath",
-                "projectPath",
-                "copiedIntoProject",
-                "category",
-                "scope",
-                "triggerWords",
-                "defaultWeight",
-                "compatibility",
-                "createdAt",
-                "updatedAt",
-            ]
-        } else if object.contains_key("archived") {
-            &["archived"]
-        } else {
-            &[]
-        };
-
-    let mut keys = Vec::new();
-    for key in preferred {
-        if object.contains_key(*key) {
-            keys.push(*key);
-        }
-    }
-    for key in object.keys() {
-        if !keys.iter().any(|existing| existing == key) {
-            keys.push(key.as_str());
-        }
-    }
-    keys
 }
 
 fn to_json_string(value: &Value) -> ProjectStoreResult<String> {
@@ -1605,4 +1457,148 @@ fn camel_to_title(value: &str) -> Option<String> {
     let mut characters = output.chars();
     let first = characters.next()?.to_uppercase().collect::<String>();
     Some(format!("{first}{}", characters.as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A representative, fully populated character sidecar: nested `status`,
+    /// populated `references` / `looks` / `loras` (including optional fields such
+    /// as `approvedAt`, `loraId`, `sourcePath`, `projectPath`), the nested
+    /// `recipeSettings` / `compatibility` objects, plus an unknown top-level key
+    /// (`legacyFlag`) and an unknown enum value (`role: "villain"`) to exercise the
+    /// `#[serde(flatten)] extra` capture and the `string_enum!` `Unknown` fallback.
+    fn sample_character() -> Value {
+        json!({
+            "schemaVersion": 1,
+            "id": "character_abc123",
+            "projectId": "project_xyz",
+            "name": "Ada",
+            "type": "person",
+            "description": "A protagonist.",
+            "createdAt": "2026-07-03T00:00:00Z",
+            "updatedAt": "2026-07-03T00:00:01Z",
+            "status": { "archived": false },
+            "references": [
+                {
+                    "assetId": "asset_1",
+                    "approved": true,
+                    "role": "hero",
+                    "notes": "front",
+                    "addedAt": "2026-07-03T00:00:02Z",
+                    "approvedAt": "2026-07-03T00:00:03Z"
+                },
+                {
+                    "assetId": "asset_2",
+                    "approved": false,
+                    "role": "villain",
+                    "notes": "",
+                    "addedAt": "2026-07-03T00:00:04Z",
+                    "approvedAt": null
+                }
+            ],
+            "looks": [
+                {
+                    "id": "look_1",
+                    "name": "Default",
+                    "description": "",
+                    "approvedReferenceIds": ["asset_1"],
+                    "recipeSettings": { "steps": 30, "cfg": 4.5 },
+                    "createdAt": "2026-07-03T00:00:05Z",
+                    "updatedAt": "2026-07-03T00:00:06Z"
+                }
+            ],
+            "loras": [
+                {
+                    "id": "clora_1",
+                    "loraId": "lora_9",
+                    "name": "Ada LoRA",
+                    "sourcePath": "/data/loras/ada.safetensors",
+                    "projectPath": "loras/ada.safetensors",
+                    "copiedIntoProject": true,
+                    "category": "character",
+                    "scope": "project",
+                    "triggerWords": ["ada"],
+                    "defaultWeight": 1.0,
+                    "compatibility": { "base": "flux" },
+                    "createdAt": "2026-07-03T00:00:07Z",
+                    "updatedAt": "2026-07-03T00:00:08Z"
+                }
+            ],
+            "trainedLoras": [],
+            "legacyFlag": "keep-me"
+        })
+    }
+
+    fn serialize(payload: &Value) -> String {
+        let character: contracts::Character = serde_json::from_value(payload.clone()).unwrap();
+        let mut output = serde_json::to_string_pretty(&character).unwrap();
+        output.push('\n');
+        output
+    }
+
+    #[test]
+    fn character_serialization_round_trips() {
+        let payload = sample_character();
+        let character: contracts::Character = serde_json::from_value(payload.clone()).unwrap();
+        let text = serialize(&payload);
+        // serialize -> deserialize -> equal (typed equality, incl. extras/enums).
+        let reparsed: contracts::Character = serde_json::from_str(&text).unwrap();
+        assert_eq!(character, reparsed);
+        // The unknown top-level key survives via `#[serde(flatten)] extra`.
+        assert_eq!(
+            character.extra.get("legacyFlag"),
+            Some(&Value::String("keep-me".to_owned()))
+        );
+        // The unknown enum value survives via the `string_enum!` `Unknown` fallback.
+        assert_eq!(
+            character.references[1].role,
+            contracts::CharacterReferenceRole::Unknown("villain".to_owned())
+        );
+    }
+
+    #[test]
+    fn character_serialization_is_deterministic() {
+        let payload = sample_character();
+        // Same character -> byte-identical output on every write (diff-stability).
+        assert_eq!(serialize(&payload), serialize(&payload));
+    }
+
+    #[test]
+    fn character_serialization_uses_field_declaration_key_order() {
+        let text = serialize(&sample_character());
+        // Valid pretty JSON with 2-space indentation and a trailing newline.
+        assert!(text.ends_with("}\n"), "must end with a trailing newline");
+        assert!(text.contains("\n  \"id\": "), "must be pretty-printed");
+        serde_json::from_str::<Value>(&text).expect("output must be valid JSON");
+
+        // Top-level keys appear in `contracts::Character` field-declaration order,
+        // then the flattened `extra` key, deterministically -- not alphabetically
+        // (which is what a raw `Value` pretty-print would produce) and not via the
+        // old key-guessing heuristic.
+        let expected_order = [
+            "\"schemaVersion\"",
+            "\"id\"",
+            "\"projectId\"",
+            "\"name\"",
+            "\"type\"",
+            "\"description\"",
+            "\"createdAt\"",
+            "\"updatedAt\"",
+            "\"status\"",
+            "\"references\"",
+            "\"looks\"",
+            "\"loras\"",
+            "\"trainedLoras\"",
+            "\"legacyFlag\"",
+        ];
+        let mut cursor = 0usize;
+        for key in expected_order {
+            let found = text[cursor..]
+                .find(key)
+                .unwrap_or_else(|| panic!("missing top-level key {key} after position {cursor}"));
+            cursor += found + key.len();
+        }
+    }
 }
