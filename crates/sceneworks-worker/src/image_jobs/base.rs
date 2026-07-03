@@ -3822,6 +3822,67 @@ mod standard_tier_tests {
             root.join("bf16")
         );
     }
+
+    /// sc-9092 (epic 9083 gap #3, review fix): Ideogram + Boogu were left `macOnly:true` with only
+    /// off-Mac diffusers download entries, which the PR deleted — so off-Mac they resolved to the MLX
+    /// turnkey (`SceneWorks/{ideogram-4,boogu-image}-mlx`) whose download entries were macOS-only and
+    /// thus never fetched (a "candle weights snapshot not found" load error). The fix flips them
+    /// `macOnly:false` and extends the turnkey download `platforms` to windows/linux, so both lanes
+    /// packed-load the SAME turnkey the macOS path uses (candle-gen sc-9412 / sc-9410). This asserts the
+    /// per-family subdir resolvers pick the shipped tier of a turnkey snapshot regardless of platform —
+    /// the ideogram/boogu sibling of `candle_lens_resolves_packed_turnkey_tier_subdir` above.
+    #[test]
+    fn candle_ideogram_boogu_resolve_packed_turnkey_tier_subdir() {
+        let model_request = |model: &str, bits: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": model, "advanced": { "mlxQuantize": bits } })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+
+        // Ideogram turnkey (`SceneWorks/ideogram-4-mlx`): q4 default (candle off-Mac tier) + on-demand
+        // q8. `ideogram_model_subdir` probes `<tier>/transformer/model.safetensors`.
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            seed_tier(root, "q4", "model.safetensors");
+            seed_tier(root, "q8", "model.safetensors");
+            for model in ["ideogram_4", "ideogram_4_turbo"] {
+                // Default → q4 (the shipped off-Mac tier).
+                assert_eq!(
+                    ideogram_model_subdir(root, &model_request(model, json!(null))),
+                    root.join("q4")
+                );
+                // mlxQuantize:8 → q8 when present.
+                assert_eq!(
+                    ideogram_model_subdir(root, &model_request(model, json!(8))),
+                    root.join("q8")
+                );
+            }
+        }
+
+        // Boogu turnkey (`SceneWorks/boogu-image-mlx`): Q8 `base/`/`turbo/`/`edit/` is the shipped
+        // (off-Mac) default. `boogu_model_subdir` probes `<variant>/transformer/diffusion_pytorch_model.safetensors`.
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            for variant in ["base", "turbo", "edit"] {
+                seed_tier(root, variant, "diffusion_pytorch_model.safetensors");
+            }
+            for (model, variant) in [
+                ("boogu_image", "base"),
+                ("boogu_image_turbo", "turbo"),
+                ("boogu_image_edit", "edit"),
+            ] {
+                // Default (no mlxQuantize) → the shipped Q8 `<variant>/` subfolder.
+                assert_eq!(
+                    boogu_model_subdir(root, &model_request(model, json!(null))),
+                    root.join(variant)
+                );
+            }
+        }
+    }
 }
 
 /// sc-8820: the recorded quant must reflect the tier subdir ACTUALLY resolved, not the one requested,
