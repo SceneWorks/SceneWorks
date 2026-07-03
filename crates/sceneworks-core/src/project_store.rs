@@ -3866,18 +3866,68 @@ fn guess_mime_from_filename(filename: &str) -> Option<String> {
         })
 }
 
+/// Extensions we allow a stored upload to carry, keyed by the media type they belong to. A stored
+/// filename's extension re-derives the serve mime in [`ProjectStore::project_file`] via
+/// [`guess_mime_from_filename`], and that mime is echoed verbatim into the file-serving endpoint's
+/// `Content-Type` header, so an attacker who controls the stored extension controls the served
+/// content type on the API origin. This allow-list is the gate: only extensions that map to an
+/// inert media type (image/video) are ever stored, so a `video/mp4` upload named `evil.html` can
+/// never be stored `.html` and served `text/html` → no content-type confusion / stored XSS
+/// (sc-8872). Notably it excludes `.svg` (→ `image/svg+xml`, script-capable) and every
+/// document/script extension.
+///
+/// Every extension here re-derives, through `guess_mime_from_filename`, to a mime that starts with
+/// `image/` or `video/` and is NOT `image/svg+xml` — the property the tests pin.
+const SAFE_UPLOAD_EXTENSIONS: &[&str] = &[
+    // Raster images (SVG deliberately omitted — it is script-capable).
+    "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "heic",
+    "heif", // Video.
+    "mp4", "m4v", "mov", "webm", "mkv", "avi", "ogv", "mpeg", "mpg", "wmv", "flv", "3gp", "3g2",
+];
+
+/// True when `extension` (no leading dot, already lowercased) is an allow-listed media extension
+/// whose serve mime is an inert `image/`/`video/` type (never `text/html`, `image/svg+xml`, etc.).
+fn is_safe_upload_extension(extension: &str) -> bool {
+    SAFE_UPLOAD_EXTENSIONS.contains(&extension)
+}
+
+/// Pick the stored extension for an upload **without trusting the client filename** (sc-8872).
+///
+/// The stored extension is what re-derives the serve mime later, so it must reflect the actual
+/// media type, not whatever the client named the file. Precedence:
+/// 1. The declared/sniffed `mime_type`'s canonical safe extension, when we recognize the mime.
+/// 2. Otherwise the client filename's extension, but only if it is on the media allow-list.
+/// 3. Otherwise `.bin` (serves `application/octet-stream` — inert), never an attacker-chosen
+///    `.html`/`.svg`/`.js`.
+///
+/// A `video/mp4` upload named `evil.html` therefore stores `.mp4` (rule 1); a genuinely unknown
+/// mime with a dangerous extension neutralizes to `.bin` (rule 3).
 fn upload_extension(filename: &str, mime_type: &str) -> String {
+    // 1. Prefer the extension the declared/sniffed mime canonically maps to, so the stored file's
+    //    serve mime round-trips back to the type we actually accepted. mime_guess lists candidates;
+    //    take the first one that is on our media allow-list.
+    if let Some(extension) = mime_guess::get_mime_extensions_str(mime_type)
+        .into_iter()
+        .flatten()
+        .map(|value| value.to_ascii_lowercase())
+        .find(|value| is_safe_upload_extension(value))
+    {
+        return format!(".{extension}");
+    }
+
+    // 2. Fall back to the client extension only when it is itself an allow-listed media extension —
+    //    never a document/script extension the client renamed the file to.
     if let Some(extension) = Path::new(filename)
         .extension()
         .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .filter(|value| is_safe_upload_extension(value))
     {
-        return format!(".{}", extension.to_ascii_lowercase());
+        return format!(".{extension}");
     }
-    match mime_guess::get_mime_extensions_str(mime_type).and_then(|extensions| extensions.first()) {
-        Some(extension) => format!(".{extension}"),
-        None => ".bin".to_owned(),
-    }
+
+    // 3. Anything else neutralizes to an inert, non-renderable extension.
+    ".bin".to_owned()
 }
 
 fn move_or_copy_file(source: &Path, destination: &Path) -> ProjectStoreResult<()> {
@@ -3896,10 +3946,10 @@ mod tests {
     use super::{
         apply_project_migrations, build_generated_asset_sidecar, connect_project_db,
         find_timeline_file, guess_mime_from_filename, index_timeline, is_safe_relative_path,
-        normalize_asset_tags, sniff_image_format, AssetScope, CharacterCreateInput,
-        CharacterLookInput, ProjectStore, ProjectStoreError, UploadAsset,
-        GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS,
-        PROJECT_SCHEMA_VERSION,
+        is_safe_upload_extension, normalize_asset_tags, sniff_image_format, upload_extension,
+        AssetScope, CharacterCreateInput, CharacterLookInput, ProjectStore, ProjectStoreError,
+        UploadAsset, GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS,
+        PROJECT_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
     };
     use rusqlite::Connection;
     use serde_json::{json, Value};
@@ -4995,6 +5045,109 @@ mod tests {
         let project_path = store.find_project_path(&project.id).expect("project path");
         let stored = project_path.join(asset["file"]["path"].as_str().expect("path"));
         assert_eq!(std::fs::read(&stored).expect("read stored"), bytes);
+    }
+
+    /// sc-8872 (F-070): the stored extension is derived from the declared/sniffed mime, never
+    /// trusted from the client filename. A `video/mp4` upload named `evil.html` must NOT be stored
+    /// `.html` (which `project_file` would then serve as `text/html`, enabling stored XSS on the
+    /// API origin). `.svg`/`.js`/`.html` neutralize; a genuine mime always wins.
+    #[test]
+    fn upload_extension_derives_from_mime_not_client_filename() {
+        // Declared video mime wins over a dangerous client extension.
+        assert_eq!(upload_extension("evil.html", "video/mp4"), ".mp4");
+        assert_eq!(upload_extension("evil.svg", "video/mp4"), ".mp4");
+        assert_eq!(upload_extension("evil.js", "video/webm"), ".webm");
+        // A legit media extension on a matching mime is preserved.
+        assert_eq!(upload_extension("clip.mp4", "video/mp4"), ".mp4");
+        assert_eq!(upload_extension("clip.webm", "video/webm"), ".webm");
+        // Unknown mime: a safe client media extension is honored, a dangerous one neutralizes.
+        assert_eq!(
+            upload_extension("clip.mp4", "application/octet-stream"),
+            ".mp4"
+        );
+        assert_eq!(
+            upload_extension("evil.html", "application/octet-stream"),
+            ".bin"
+        );
+        // SVG is script-capable and deliberately excluded, so it never survives as `.svg`.
+        assert_eq!(upload_extension("logo.svg", "image/svg+xml"), ".bin");
+        // Every allow-listed extension re-derives to an inert image/video serve mime — never
+        // `text/html` or `image/svg+xml` — which is the property `project_file` relies on.
+        for extension in SAFE_UPLOAD_EXTENSIONS {
+            let mime = guess_mime_from_filename(&format!("stored.{extension}"))
+                .unwrap_or_else(|| format!("no mime for .{extension}"));
+            assert!(
+                mime.starts_with("image/") || mime.starts_with("video/"),
+                ".{extension} serves inert media mime, got {mime}"
+            );
+            assert_ne!(mime, "image/svg+xml", ".{extension} must not serve svg");
+        }
+        assert!(is_safe_upload_extension("mp4"));
+        assert!(!is_safe_upload_extension("svg"));
+        assert!(!is_safe_upload_extension("html"));
+    }
+
+    /// sc-8872 (F-070): end-to-end — a `video/mp4` upload named `evil.html` is stored with a `.mp4`
+    /// extension and `project_file` serves it as `video/mp4`, never `text/html`. A legitimate
+    /// `.webm` upload still round-trips. This pins the content-type-confusion fix through the exact
+    /// serve path the file endpoint uses.
+    #[test]
+    fn import_asset_video_stores_and_serves_safe_mime_regardless_of_client_filename() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Serve").expect("project creates");
+
+        // A `video/mp4` upload whose client filename lies about its type.
+        let evil_src = temp_dir.path().join("upload-evil");
+        std::fs::write(&evil_src, b"<script>alert(1)</script> not really html")
+            .expect("source writes");
+        let evil = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "evil.html".to_owned(),
+                    content_type: Some("video/mp4".to_owned()),
+                    source_path: evil_src,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("imports");
+
+        let evil_rel = evil["file"]["path"].as_str().expect("path");
+        assert!(
+            evil_rel.ends_with(".mp4"),
+            "video stored as .mp4, not the client .html, got {evil_rel}"
+        );
+        assert_eq!(evil["type"], json!("video"));
+        // The user's original filename is still shown, only the stored name is neutralized.
+        assert_eq!(evil["displayName"], json!("evil.html"));
+
+        // The file-serving endpoint derives its Content-Type from the stored name — it must now be
+        // an inert video type, never `text/html`.
+        let served = store.project_file(&project.id, evil_rel).expect("serves");
+        assert_eq!(served.content_type, "video/mp4");
+        assert_ne!(served.content_type, "text/html");
+
+        // A legitimate webm upload still stores and serves correctly.
+        let webm_src = temp_dir.path().join("upload-webm");
+        std::fs::write(&webm_src, b"fake but non-empty webm bytes").expect("source writes");
+        let webm = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "clip.webm".to_owned(),
+                    content_type: Some("video/webm".to_owned()),
+                    source_path: webm_src,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("imports");
+        let webm_rel = webm["file"]["path"].as_str().expect("path");
+        assert!(webm_rel.ends_with(".webm"), "webm kept, got {webm_rel}");
+        let webm_served = store.project_file(&project.id, webm_rel).expect("serves");
+        assert_eq!(webm_served.content_type, "video/webm");
     }
 
     /// sc-6143: a valid-but-unsupported image (BMP here) is transcoded to lossless PNG at import,
