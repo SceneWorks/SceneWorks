@@ -15,6 +15,7 @@ import { apiFetch } from "../api.js";
 import { isDesktop, tauriInvoke } from "../runtime.js";
 import { tierLabel } from "../quantTier.js";
 import { suggestTier } from "../tierSuggestion.js";
+import { safeExternalUrl } from "../urls.js";
 
 // Wan A14B is a two-expert mixture; its LoRAs come as a high/low-noise pair. These
 // base models accept the optional low-noise expert upload (sc-1991). The 5B model
@@ -233,7 +234,9 @@ function GatedModelNotice({
   onOpenSettings,
 }) {
   const hostLabel = host || "the required service";
-  const showSeparateLicense = licenseUrl && licenseUrl !== repoUrl;
+  const safeRepoUrl = safeExternalUrl(repoUrl);
+  const safeLicenseUrl = safeExternalUrl(licenseUrl);
+  const showSeparateLicense = safeLicenseUrl && safeLicenseUrl !== safeRepoUrl;
   return (
     <div className={present ? "model-gated-notice ready" : "model-gated-notice"}>
       <p className={present ? "inline-success" : "inline-warning"}>
@@ -247,13 +250,13 @@ function GatedModelNotice({
             Add token in Settings
           </button>
         )}
-        {repoUrl ? (
-          <a href={repoUrl} target="_blank" rel="noreferrer noopener">
+        {safeRepoUrl ? (
+          <a href={safeRepoUrl} target="_blank" rel="noreferrer noopener">
             Request access on Hugging Face
           </a>
         ) : null}
         {showSeparateLicense ? (
-          <a href={licenseUrl} target="_blank" rel="noreferrer noopener">
+          <a href={safeLicenseUrl} target="_blank" rel="noreferrer noopener">
             Review license
           </a>
         ) : null}

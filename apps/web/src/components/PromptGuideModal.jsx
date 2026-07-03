@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Modal } from "./Modal.jsx";
 import { Markdown } from "./Markdown.jsx";
+import { safeExternalUrl } from "../urls.js";
 
 // Fetches a model's static Markdown prompt guide (served from /public/prompt-guides)
 // and renders it inside the shared Modal. `guide` is the resolved metadata
@@ -28,6 +29,13 @@ export function PromptGuideModal({ guide, modelName, onClose }) {
     };
   }, [guide.path]);
 
+  // `sources` come from the model manifest (`ui.promptGuide.sources`), so gate
+  // every URL through the shared scheme check (sc-8881) and drop any source
+  // whose link is not a safe http(s) external before rendering it as a link.
+  const safeSources = (guide.sources ?? [])
+    .map((source) => ({ label: source.label, href: safeExternalUrl(source.url) }))
+    .filter((source) => source.href);
+
   return (
     <Modal className="prompt-guide-modal" labelledBy="prompt-guide-title" onClose={onClose}>
       <header className="prompt-guide-head">
@@ -48,11 +56,11 @@ export function PromptGuideModal({ guide, modelName, onClose }) {
         {state.status === "ready" ? <Markdown content={state.content} /> : null}
       </div>
 
-      {guide.sources?.length ? (
+      {safeSources.length ? (
         <footer className="prompt-guide-sources">
           <span>Sources:</span>
-          {guide.sources.map((source) => (
-            <a key={source.url} href={source.url} target="_blank" rel="noopener noreferrer">
+          {safeSources.map((source) => (
+            <a key={source.href} href={source.href} target="_blank" rel="noopener noreferrer">
               {source.label}
             </a>
           ))}
