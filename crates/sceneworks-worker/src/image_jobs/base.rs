@@ -3400,17 +3400,25 @@ async fn consume_gen_events(
                         Value::Object(block),
                     );
                 }
-                let fact = write_image_asset(
-                    plan,
-                    index,
-                    seed,
-                    width,
-                    height,
-                    pixels,
-                    adapter_label,
-                    image_raw_settings,
-                    project_path,
-                )?;
+                // Encode + write the asset PNG off the async runtime thread (sc-8909 / F-107).
+                let plan_for_task = plan.clone();
+                let adapter_for_task = adapter_label.to_owned();
+                let project_path_for_task = project_path.to_owned();
+                let fact = tokio::task::spawn_blocking(move || {
+                    write_image_asset(
+                        &plan_for_task,
+                        index,
+                        seed,
+                        width,
+                        height,
+                        pixels,
+                        &adapter_for_task,
+                        image_raw_settings,
+                        &project_path_for_task,
+                    )
+                })
+                .await
+                .map_err(|error| crate::task_join_error("image asset write task", error))??;
                 asset_writes.push(Value::Object(fact));
                 emit_event(
                     "image_inference_complete",

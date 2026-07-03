@@ -929,9 +929,20 @@ pub(crate) async fn run_image_upscale_job(
             ))
         })?;
 
-    let source_image = crate::image_decode::decode_image_any(&source_path)
-        .map_err(|e| WorkerError::InvalidPayload(format!("Source image could not be loaded: {e}")))?
-        .to_rgb8();
+    // Decode the source off the async runtime thread (sc-8909 / F-107): the full read + decode is
+    // blocking and would otherwise stall the heartbeat before the upscale even starts.
+    let source_image = {
+        let source_path = source_path.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::image_decode::decode_image_any(&source_path)
+                .map_err(|e| {
+                    WorkerError::InvalidPayload(format!("Source image could not be loaded: {e}"))
+                })
+                .map(|decoded| decoded.to_rgb8())
+        })
+        .await
+        .map_err(|e| task_join_error("upscale source decode task", e))??
+    };
     let (src_w, src_h) = (source_image.width(), source_image.height());
 
     let upscaled = if engine_id == "seedvr2" {
@@ -1045,9 +1056,15 @@ pub(crate) async fn run_image_upscale_job(
         tokio::fs::create_dir_all(parent).await?;
     }
     let tmp_path = media_path.with_extension("tmp.png");
-    upscaled
-        .save_with_format(&tmp_path, image::ImageFormat::Png)
-        .map_err(|e| WorkerError::Io(std::io::Error::other(e)))?;
+    // Encode the upscaled PNG off the async runtime thread (sc-8909 / F-107).
+    let encode_tmp = tmp_path.clone();
+    tokio::task::spawn_blocking(move || {
+        upscaled
+            .save_with_format(&encode_tmp, image::ImageFormat::Png)
+            .map_err(|e| WorkerError::Io(std::io::Error::other(e)))
+    })
+    .await
+    .map_err(|e| task_join_error("upscale encode task", e))??;
     tokio::fs::rename(&tmp_path, &media_path)
         .await
         .inspect_err(|_| {
@@ -1291,18 +1308,23 @@ pub(crate) async fn run_dataset_upscale_job(
         )
         .await?;
 
-        let source_image = crate::image_decode::decode_image_any(&item.image_path)
-            .map_err(|e| WorkerError::InvalidPayload(format!("Image could not be loaded: {e}")))?
-            .to_rgb8();
         let onnx = onnx_path.clone();
         let cancel = CancelFlag::new();
         let cancel_run = cancel.clone();
+        // Decode the source inside the blocking task (sc-8909 / F-107) so the per-item read + decode
+        // never stalls the async runtime thread across the dataset loop.
+        let item_image_path = item.image_path.clone();
         let upscaled = run_upscale_with_heartbeat(
             api,
             settings,
             &job.id,
             cancel,
             tokio::task::spawn_blocking(move || {
+                let source_image = crate::image_decode::decode_image_any(&item_image_path)
+                    .map_err(|e| {
+                        WorkerError::InvalidPayload(format!("Image could not be loaded: {e}"))
+                    })?
+                    .to_rgb8();
                 upscale_blocking(onnx, factor, source_image, cancel_run)
             }),
         )
@@ -1317,9 +1339,14 @@ pub(crate) async fn run_dataset_upscale_job(
         if let Some(parent) = abs.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        upscaled
-            .save_with_format(&abs, image::ImageFormat::Png)
-            .map_err(|e| WorkerError::Io(std::io::Error::other(e)))?;
+        // Encode off the async runtime thread (sc-8909 / F-107).
+        tokio::task::spawn_blocking(move || {
+            upscaled
+                .save_with_format(&abs, image::ImageFormat::Png)
+                .map_err(|e| WorkerError::Io(std::io::Error::other(e)))
+        })
+        .await
+        .map_err(|e| task_join_error("dataset upscale encode task", e))??;
         records.push((item.item_id.clone(), rel));
     }
 

@@ -246,7 +246,9 @@ where
     )
     .await?;
     let project_id = required_payload_string(&job.payload, "projectId")?;
-    source.store.index_asset_sidecar(project_id, &sidecar_path)?;
+    source
+        .store
+        .index_asset_sidecar(project_id, &sidecar_path)?;
 
     Ok((asset_id, asset))
 }
@@ -3074,10 +3076,7 @@ mod person_track_e2e_tests {
         let mut per_frame: Vec<(f64, Vec<(crate::person_track::NormalizedBox, f64)>)> =
             Vec::with_capacity(timestamps.len());
         let mut frame_paths: Vec<PathBuf> = Vec::with_capacity(timestamps.len());
-        let frames_dir = download_context
-            .settings
-            .data_dir
-            .join("person-e2e-frames");
+        let frames_dir = download_context.settings.data_dir.join("person-e2e-frames");
         std::fs::create_dir_all(&frames_dir).expect("frames dir");
         for (index, &timestamp) in timestamps.iter().enumerate() {
             let frame_path = frames_dir.join(format!("frame_{index:04}.png"));

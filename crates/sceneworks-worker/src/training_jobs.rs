@@ -904,17 +904,30 @@ async fn consume_training_events(
                     image,
                 } = progress
                 {
-                    match write_training_sample(
-                        sample_output_dir.as_deref(),
-                        sample_project_root.as_deref(),
-                        &sample_stem,
-                        step,
-                        index,
-                        &prompt,
-                        &image,
-                        sample_cfg.sample_steps,
-                        sample_cfg.sample_guidance_scale,
-                    ) {
+                    // Persist the preview off the async runtime thread (sc-8909 / F-107): the PNG
+                    // encode + atomic rename are blocking, so move the owned `image` (no buffer clone)
+                    // and owned copies of the path/stem/prompt into a `spawn_blocking`.
+                    let sample_output_dir = sample_output_dir.clone();
+                    let sample_project_root = sample_project_root.clone();
+                    let sample_stem = sample_stem.clone();
+                    let sample_steps = sample_cfg.sample_steps;
+                    let sample_guidance_scale = sample_cfg.sample_guidance_scale;
+                    let persisted = tokio::task::spawn_blocking(move || {
+                        write_training_sample(
+                            sample_output_dir.as_deref(),
+                            sample_project_root.as_deref(),
+                            &sample_stem,
+                            step,
+                            index,
+                            &prompt,
+                            image,
+                            sample_steps,
+                            sample_guidance_scale,
+                        )
+                    })
+                    .await
+                    .map_err(|error| task_join_error("training preview persist task", error))?;
+                    match persisted {
                         Ok(record) => {
                             let record = Value::Object(record);
                             if step != latest_step {
@@ -1159,7 +1172,7 @@ fn write_training_sample(
     step: u32,
     index: u32,
     prompt: &str,
-    image: &gen_core::Image,
+    image: gen_core::Image,
     sample_steps: u32,
     sample_guidance_scale: f32,
 ) -> WorkerResult<JsonObject> {
@@ -1170,8 +1183,10 @@ fn write_training_sample(
     std::fs::create_dir_all(&dir)?;
     let filename = format!("{stem}-step{step:06}-{index}.png");
     let path = dir.join(&filename);
-    let rgb = image::RgbImage::from_raw(image.width, image.height, image.pixels.clone())
-        .ok_or_else(|| {
+    // Take `image` by value (sc-8909 / F-107) — the caller no longer needs the buffer, so the full
+    // RGB `pixels.clone()` is dropped and the raw buffer is moved straight into the encoder.
+    let rgb =
+        image::RgbImage::from_raw(image.width, image.height, image.pixels).ok_or_else(|| {
             WorkerError::Engine("training preview: image buffer size mismatch".into())
         })?;
     let temp_path = path.with_extension("tmp.png");
@@ -2006,7 +2021,7 @@ mod tests {
             250,
             2,
             "mychar, studio portrait",
-            &image,
+            image,
             8,
             1.5,
         )
@@ -2642,7 +2657,7 @@ mod tests {
                         step,
                         index,
                         &prompt,
-                        &image,
+                        image,
                         preview_steps,
                         preview_guidance,
                     )

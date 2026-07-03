@@ -977,17 +977,26 @@ async fn generate_stub_stream(
         check_cancel(api, &job.id, "Image generation canceled by user.").await?;
         let seed = resolve_seed(request, index);
         let pixels = stub_rgb8(request.width, request.height, seed);
-        let fact = write_image_asset(
-            plan,
-            index,
-            seed,
-            request.width,
-            request.height,
-            pixels,
-            STUB_ADAPTER,
-            stub_raw_settings(request),
-            project_path,
-        )?;
+        // Encode + write the asset PNG off the async runtime thread (sc-8909 / F-107).
+        let plan_for_task = plan.clone();
+        let raw_settings = stub_raw_settings(request);
+        let (width, height) = (request.width, request.height);
+        let project_path_for_task = project_path.to_owned();
+        let fact = tokio::task::spawn_blocking(move || {
+            write_image_asset(
+                &plan_for_task,
+                index,
+                seed,
+                width,
+                height,
+                pixels,
+                STUB_ADAPTER,
+                raw_settings,
+                &project_path_for_task,
+            )
+        })
+        .await
+        .map_err(|error| crate::task_join_error("stub image asset write task", error))??;
         asset_writes.push(Value::Object(fact));
         let progress = 0.1 + 0.85 * ((index + 1) as f64 / request.count as f64);
         update_job(
@@ -1009,6 +1018,11 @@ async fn generate_stub_stream(
 }
 
 /// Per-job invariants shared across every image in the generation set.
+///
+/// `Clone` so the per-image asset writers can move an owned copy into a `spawn_blocking` PNG-encode
+/// task (sc-8909 / F-107) — the plan is a few strings + one small generation-set `Value`, negligible
+/// next to the encode it hands off the async runtime thread.
+#[derive(Clone)]
 pub(crate) struct ImagePlan {
     pub(crate) request: ImageRequest,
     pub(crate) genset_id: String,
@@ -1201,11 +1215,19 @@ async fn apply_inline_upscale(
             .ok_or_else(|| {
                 WorkerError::InvalidPayload("upscale source asset missing mediaPath".to_owned())
             })?;
-        let source = crate::image_decode::decode_image_any(project_path.join(media_rel))
-            .map_err(|error| {
-                WorkerError::InvalidPayload(format!("Upscale source could not be loaded: {error}"))
-            })?
-            .to_rgb8();
+        // Decode the base image off the async runtime thread (sc-8909 / F-107).
+        let source_path = project_path.join(media_rel);
+        let source = tokio::task::spawn_blocking(move || {
+            crate::image_decode::decode_image_any(source_path)
+                .map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "Upscale source could not be loaded: {error}"
+                    ))
+                })
+                .map(|decoded| decoded.to_rgb8())
+        })
+        .await
+        .map_err(|error| crate::task_join_error("upscale source decode task", error))??;
         let seed = base_fact.get("seed").and_then(Value::as_i64).unwrap_or(0);
 
         update_job(
@@ -1240,15 +1262,25 @@ async fn apply_inline_upscale(
         )
         .await?;
 
-        let fact = write_upscaled_asset(
-            plan,
-            base_fact,
-            &upscaled,
-            engine_id,
-            factor,
-            softness,
-            project_path,
-        )?;
+        // Build the upscaled asset (including the blocking PNG encode) off the async runtime thread
+        // (sc-8909 / F-107).
+        let plan_for_task = plan.clone();
+        let base_fact_for_task = base_fact.clone();
+        let engine_for_task = engine_id.to_owned();
+        let project_path_for_task = project_path.to_owned();
+        let fact = tokio::task::spawn_blocking(move || {
+            write_upscaled_asset(
+                &plan_for_task,
+                &base_fact_for_task,
+                &upscaled,
+                &engine_for_task,
+                factor,
+                softness,
+                &project_path_for_task,
+            )
+        })
+        .await
+        .map_err(|error| crate::task_join_error("upscaled asset write task", error))??;
         asset_writes.push(Value::Object(fact));
         heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     }
