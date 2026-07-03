@@ -223,6 +223,7 @@ pub(crate) async fn run_dataset_analysis_job(
         space: EMBEDDING_SPACE,
         cancel_message: CANCEL_MESSAGE,
         saving_message: "Saving embeddings.",
+        join_error_label: "dataset analysis task join",
         item_message: &|index, total| format!("Analyzed image {} of {}.", index + 1, total),
     };
     run_batched_analysis_job(

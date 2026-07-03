@@ -17,18 +17,21 @@
 //! lives here so a future analysis job re-stamps a config, not ~400 lines of scaffold, and the cancel
 //! handling can only ever be fixed in one place.
 
-#![cfg(any(
+use super::*;
+
+#[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-
-use super::*;
-
 use gen_core::CancelFlag;
 
 /// Per-item progress scaling shared by every batched analysis job: item `index` (0-based) of `total`
 /// maps to `0.12 + 0.78 * ((index + 1) / total)`, leaving `0.04/0.08` for prepare/load and `0.94/1.0`
 /// for save/complete. Extracted so the one magic ramp is defined (and unit-tested) once (sc-8836).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) fn item_progress(index: usize, total: usize) -> f64 {
     0.12 + 0.78 * ((index + 1) as f64 / total.max(1) as f64)
 }
@@ -36,6 +39,10 @@ pub(crate) fn item_progress(index: usize, total: usize) -> f64 {
 /// Build a batched-analysis-job [`ProgressRequest`] with the shared field defaults. Every stage of both
 /// analysis jobs stamped these identical constructors (`analysis_progress` / `face_progress`); this is
 /// the one copy (sc-8836).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) fn analysis_progress(
     status: JobStatus,
     stage: ProgressStage,
@@ -64,6 +71,10 @@ pub(crate) fn analysis_progress(
 /// embedding space, the cancel message, the saving-stage message, and the per-item progress-message
 /// builder. Everything that differs between the CLIP and face analysis jobs (beyond the item shape,
 /// the model loading, and the record fold) is expressed here.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) struct AnalysisJobConfig<'a> {
     /// The `.../training/datasets/{dataset_id}/<endpoint_suffix>` sidecar path segment
     /// (`analysis-embeddings` for CLIP, `face-embeddings` for the face stack).
@@ -74,6 +85,10 @@ pub(crate) struct AnalysisJobConfig<'a> {
     pub cancel_message: &'a str,
     /// Saving-stage status message (e.g. "Saving embeddings.").
     pub saving_message: &'a str,
+    /// The `task_join_error` label if the blocking analysis task panics — kept per-run so each job
+    /// preserves its original distinct diagnostic string (`"dataset analysis task join"` for CLIP,
+    /// `"dataset face analysis task join"` for the face stack).
+    pub join_error_label: &'a str,
     /// Progress-line message for item `index` (0-based) of `total` (e.g. "Analyzed image 3 of 10.").
     /// `Send + Sync` so the enclosing job future stays `Send` (rust-api `tokio::spawn`s the loop).
     pub item_message: &'a (dyn Fn(usize, usize) -> String + Send + Sync),
@@ -89,6 +104,10 @@ pub(crate) struct AnalysisJobConfig<'a> {
 ///
 /// The per-item `index` a producer sends (0-based) is reported through [`item_progress`]. Returns the
 /// joined records so the caller can derive its completed-result fields (e.g. a with-face count).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_batched_analysis_job<R, P, C>(
     api: &ApiClient,
@@ -162,7 +181,7 @@ where
     let records = guard
         .into_handle()
         .await
-        .map_err(|error| task_join_error("dataset analysis task join", error))??;
+        .map_err(|error| task_join_error(cfg.join_error_label, error))??;
 
     update_job(
         api,

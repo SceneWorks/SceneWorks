@@ -295,6 +295,7 @@ pub(crate) async fn run_dataset_face_analysis_job(
         space: FACE_EMBEDDING_SPACE,
         cancel_message: CANCEL_MESSAGE,
         saving_message: "Saving face records.",
+        join_error_label: "dataset face analysis task join",
         item_message: &|index, total| format!("Analyzed face {} of {}.", index + 1, total),
     };
     run_batched_analysis_job(
