@@ -1200,6 +1200,96 @@ fn idle_heartbeat_does_not_interrupt_just_claimed_job() {
 }
 
 #[test]
+fn heartbeat_only_refreshes_a_job_the_reporting_worker_owns() {
+    // sc-8873 / F-071: a heartbeat may only refresh the liveness timestamps of a
+    // job the reporting worker actually owns. A stale/second worker that reports
+    // someone else's `current_job_id` must NOT bump last_heartbeat_at — otherwise
+    // it keeps the job looking alive and the time-based stale sweep can never
+    // reclaim it. The owning worker's heartbeat still refreshes the job.
+    let store = store("heartbeat-ownership");
+    register_image_worker(&store);
+    // A second, distinct worker that does not own the claimed job.
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-2".to_owned(),
+            gpu_id: "gpu-1".to_owned(),
+            gpu_name: Some("GPU 1".to_owned()),
+            capabilities: vec![WorkerCapability::ImageGenerate],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("second worker registers");
+
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    assert_eq!(claimed.id, created.id);
+    assert_eq!(claimed.worker_id.as_deref(), Some("worker-1"));
+
+    // The owning worker records a first heartbeat, establishing a baseline
+    // last_heartbeat_at we can watch for (non-)refresh.
+    store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-1".to_owned(),
+            status: WorkerStatus::Busy,
+            current_job_id: Some(created.id.clone()),
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("owner heartbeat succeeds");
+    let baseline = store.get_job(&created.id).expect("job loads");
+    let baseline_heartbeat = baseline
+        .last_heartbeat_at
+        .clone()
+        .expect("owner heartbeat recorded last_heartbeat_at");
+
+    // A NON-owning worker heartbeats the same job id. It must be a no-op on the
+    // job's liveness — the timestamps stay exactly where the owner left them, and
+    // the job keeps its owner. (Timestamps are second-granular, so equality is a
+    // faithful "did not touch" assertion regardless of wall-clock drift.)
+    store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-2".to_owned(),
+            status: WorkerStatus::Busy,
+            current_job_id: Some(created.id.clone()),
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("non-owner heartbeat still returns the worker snapshot");
+    let after_intruder = store.get_job(&created.id).expect("job loads");
+    assert_eq!(
+        after_intruder.last_heartbeat_at.as_deref(),
+        Some(baseline_heartbeat.as_str()),
+        "a non-owning worker must not refresh the job's last_heartbeat_at"
+    );
+    assert_eq!(
+        after_intruder.worker_id.as_deref(),
+        Some("worker-1"),
+        "a non-owning heartbeat must not steal or clear ownership"
+    );
+
+    // The owner can still refresh the job it owns.
+    store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-1".to_owned(),
+            status: WorkerStatus::Busy,
+            current_job_id: Some(created.id.clone()),
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("owner heartbeat succeeds");
+    let owner_refreshed = store.get_job(&created.id).expect("job loads");
+    assert!(
+        owner_refreshed.last_heartbeat_at.is_some(),
+        "the owning worker's heartbeat keeps refreshing the job it owns"
+    );
+}
+
+#[test]
 fn retry_job_is_capped() {
     let store = store("retry-cap");
     let job = store
