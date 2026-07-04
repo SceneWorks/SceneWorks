@@ -1,8 +1,8 @@
 //! DWPose whole-body pose detection on the Rust worker (epic 3482, sc-3487).
 //!
-//! Ports the Python `scene_worker/pose_adapters.py` `pose_detect` job to Rust so the
-//! Pose Library "create from photo" flow + InstantID pose conditioning keep working
-//! on a Python-free Mac. The detector is rtmlib's performance preset — `yolox_m`
+//! Runs the `pose_detect` job natively in Rust (ported from the retired Python worker's
+//! `pose_adapters.py`) so the Pose Library "create from photo" flow + InstantID pose
+//! conditioning keep working on a Python-free Mac. The detector is rtmlib's performance preset — `yolox_m`
 //! (person boxes) + `rtmw-dw-x-l` (COCO-WholeBody-133 SimCC) — run via `ort`
 //! (onnxruntime) with the CoreML execution provider. The path-selection spike
 //! (`docs/sc-3487/spike-findings.md`) validated sub-pixel keypoint parity + matched

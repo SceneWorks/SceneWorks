@@ -5,9 +5,9 @@
 //! (Anubis-Mini-8B, sc-6550), so the dispatch body is one backend-agnostic path: macOS (sc-7158) picks
 //! mlx-llm's `mlx-llama`, the Windows/CUDA candle build (sc-7404) picks candle-llm's `candle-llama`.
 //! Both retired their bespoke hand-rolled Llama decoders (`mlx-gen-prompt-refine` /
-//! `candle-gen-prompt-refine`). The Python torch `PromptRefiner`
-//! (`apps/worker/scene_worker/prompt_refine.py`) stays the fallback only on platforms with neither
-//! native provider (e.g. the candle-less Desktop installer).
+//! `candle-gen-prompt-refine`). Every shipping platform now has a native provider; a build with
+//! neither (e.g. a candle-less Linux worker) simply never advertises the `prompt_refine`
+//! capability, so the job is never dispatched to it.
 //!
 //! The `TextLlm` contract is generic (`system` + `prompt` + sampling → text), so the
 //! prompt-refinement PRODUCT logic that lived in `prompt_refine.py` moves here caller-side: the
@@ -607,7 +607,7 @@ pub(crate) fn clean_json_output(text: &str) -> String {
 // Job handler — native MLX on macOS (sc-5552 / sc-7158) and candle on the Windows candle build
 // (sc-5525 / sc-7404). The body is backend-agnostic: `core_llm::load_for_model` resolves whichever
 // provider is force-linked above (mlx-llama on macOS, candle-llama on the candle build) model-first.
-// The Python torch `PromptRefiner` remains the fallback on other platforms.
+// A build with neither native provider never advertises the capability, so the job never arrives.
 // ----------------------------------------------------------------------------------------------
 
 #[cfg(any(
@@ -1035,9 +1035,9 @@ pub(crate) async fn run_prompt_refine_job(
 }
 
 /// On platforms with no native prompt-refine provider (neither the macOS MLX twin nor the Windows
-/// candle build — e.g. Linux, or the candle-less Desktop installer), the capability is never
-/// advertised and this arm is unreachable in practice — the Python torch `PromptRefiner` serves
-/// `prompt_refine`. Kept so the `run_utility_job` dispatch compiles on all targets.
+/// candle build — e.g. a candle-less Linux worker), the `prompt_refine` capability is never
+/// advertised, so this arm is unreachable in practice. Kept so the `run_utility_job` dispatch
+/// compiles on all targets.
 #[cfg(not(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1048,8 +1048,8 @@ pub(crate) async fn run_prompt_refine_job(
     _job: &JobSnapshot,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
-        "Native prompt refinement needs the macOS MLX worker or the Windows candle backend; use the \
-         Python torch prompt refiner on this platform."
+        "Native prompt refinement needs the macOS MLX worker or the Windows candle backend; it is \
+         not supported on this platform."
             .to_owned(),
     ))
 }

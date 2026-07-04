@@ -10,9 +10,9 @@ use crate::jobs_store::routing::catalog::{
 };
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
-/// worker (vs the Python torch worker)? This lifts the per-family Python
-/// `_should_route_*_to_mlx` decision (apps/worker/scene_worker/image_adapters.py)
-/// up to the API claim layer, minus the worker-local gates (platform / disable
+/// worker? This lifts the per-family `_should_route_*_to_mlx` decision (ported
+/// from the retired Python worker) up to the API claim layer, minus the
+/// worker-local gates (platform / disable
 /// env / sidecar presence) — those are now expressed by whether an `mlx` worker
 /// is registered and idle (see `should_defer_image_to_mlx_worker`).
 ///
