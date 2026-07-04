@@ -137,11 +137,17 @@ pub(crate) fn segment_track_blocking(
     cancel: Option<CancelFlag>,
     mut progress: Option<SegmentProgress>,
 ) -> WorkerResult<Vec<Vec<u8>>> {
-    assert_eq!(
-        clip_frame_paths.len(),
-        anchors.len(),
-        "frames/anchors mismatch"
-    );
+    // A frames/anchors length mismatch is a caller contract violation. The old `assert_eq!`
+    // panicked inside `spawn_blocking`, which `media_jobs` absorbed as a silent "degraded"
+    // (box-fallback) result rather than a surfaced error — return `InvalidPayload` so the
+    // mismatch fails the job loudly (sc-8903, F-101). Kept in sync with the MLX twin.
+    if clip_frame_paths.len() != anchors.len() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "segment clip frames ({}) and anchors ({}) length mismatch",
+            clip_frame_paths.len(),
+            anchors.len()
+        )));
+    }
     check_segment_canceled(cancel.as_ref())?;
     if !anchors.iter().any(Option::is_some) {
         return Err(WorkerError::InvalidPayload(
@@ -431,6 +437,29 @@ mod tests {
         assert!(
             matches!(all, Err(WorkerError::Canceled(_))),
             "segment_all_persons_in_memory: expected Canceled"
+        );
+    }
+
+    /// sc-8903 / F-101: a frames/anchors length mismatch returns `InvalidPayload` (a surfaced
+    /// error) instead of the old `assert_eq!` panic that `media_jobs` absorbed as a silent
+    /// "degraded" box-fallback. Kept in sync with the MLX twin's test. The length check runs
+    /// before any frame decode / weight load, so the nonexistent paths are never touched.
+    #[test]
+    fn frames_anchors_length_mismatch_returns_invalid_payload() {
+        let result = segment_track_blocking(
+            PathBuf::from("/nonexistent/model.safetensors"),
+            PathBuf::from("/nonexistent/tokenizer.json"),
+            vec![
+                PathBuf::from("/nonexistent/a.png"),
+                PathBuf::from("/nonexistent/b.png"),
+            ],
+            vec![Some((0.1, 0.1, 0.5, 0.5))], // one anchor for two frames
+            None,
+            None,
+        );
+        assert!(
+            matches!(result, Err(WorkerError::InvalidPayload(ref m)) if m.contains("length mismatch")),
+            "expected InvalidPayload length mismatch, got {result:?}"
         );
     }
 
