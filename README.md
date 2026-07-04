@@ -321,6 +321,3 @@ some non-commercial (e.g. FLUX.1 [dev], FLUX.2 [klein] 9B), some permissive
 (Apache-2.0 / OpenRAIL). You are responsible for complying with each model's
 license when you download and use it; the SceneWorks license here applies only
 to SceneWorks' own code, not to the weights it runs.
-
-Bundled third-party source under `apps/*/scene_worker/_vendor/` is covered by
-its own `LICENSE` files (Apache-2.0 / MIT), retained alongside that code.
