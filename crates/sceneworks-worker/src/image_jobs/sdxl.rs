@@ -72,23 +72,6 @@ fn resolve_ip_adapter_dir(request: &ImageRequest, settings: &Settings) -> Option
     huggingface_snapshot_dir(&settings.data_dir, repo)
 }
 
-/// Composite `source` contained (long edge fits) + centered on a black `width`×`height`
-/// canvas, using the **engine's** `contain_box` so the padded source lines up pixel-for-pixel
-/// with [`gen_core::imageops::outpaint_border_mask`] (both derive the same kept rect).
-fn sdxl_outpaint_canvas(source: &image::RgbImage, width: u32, height: u32) -> Image {
-    use image::imageops::FilterType::Lanczos3;
-    let (new_w, new_h, left, top) =
-        gen_core::imageops::contain_box(source.width(), source.height(), width, height);
-    let resized = image::imageops::resize(source, new_w.max(1), new_h.max(1), Lanczos3);
-    let mut canvas = image::RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
-    image::imageops::overlay(&mut canvas, &resized, left as i64, top as i64);
-    Image {
-        width,
-        height,
-        pixels: canvas.into_raw(),
-    }
-}
-
 /// An [`Image`] (RGB8) as an `image::RgbImage` for host-side compositing.
 fn engine_image_to_rgb(image: Image) -> WorkerResult<image::RgbImage> {
     image::RgbImage::from_raw(image.width, image.height, image.pixels)
@@ -329,14 +312,18 @@ async fn generate_sdxl_advanced_stream(
                 .ok_or_else(|| {
                     WorkerError::InvalidPayload("outpaint requires a source image".to_owned())
                 })?;
-            let source = engine_image_to_rgb(load_reference_image(
+            let source = load_reference_image(
                 &settings.data_dir,
                 &request.project_id,
                 source_id,
                 project_path,
-            )?)?;
-            let (src_w, src_h) = (source.width(), source.height());
-            let canvas = sdxl_outpaint_canvas(&source, width, height);
+            )?;
+            let (src_w, src_h) = (source.width, source.height);
+            // Letterbox composite is the SHARED `fit_engine_image(.., "outpaint")` (base.rs) — the
+            // same `gen_core::imageops::contain_box` + Lanczos3 + black-canvas overlay the outpaint
+            // border mask keys off, so fit + mask stay pixel-identical (sc-9420 dedupe of the old
+            // per-lane `sdxl_outpaint_canvas` twin).
+            let canvas = fit_engine_image(source, width, height, "outpaint")?;
             // White = generate (the padded border), black = keep (the centered source).
             let mut mask = gen_core::imageops::outpaint_border_mask(src_w, src_h, width, height);
             if non_empty(&request.mask_asset_id) {

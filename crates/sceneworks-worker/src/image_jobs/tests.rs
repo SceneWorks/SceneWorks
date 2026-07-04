@@ -4550,7 +4550,9 @@ fn character_image_likeness_source_gates_to_plain_with_character() {
     );
 }
 
-#[cfg(target_os = "macos")]
+// Asserts against `gen_core::imageops::contain_box` directly (not a macOS-only symbol), so it runs
+// on the candle lane too where the same letterbox geometry is shared (sc-9420).
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 #[test]
 fn contain_box_centers_the_contained_rect() {
     // `fit_rgb`'s pad arm now rides the engine's `contain_box` (sc-8824), the same geometry the
