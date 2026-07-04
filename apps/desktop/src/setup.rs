@@ -283,17 +283,22 @@ fn parse_listening_port(line: &str) -> Option<u16> {
     if !line.contains("api_listening") {
         return None;
     }
-    // Read the port from the `address=` field specifically (not any bare host:port
-    // elsewhere on the line), for either the loopback or the LAN bind host.
-    let rest = line.split("address=").nth(1)?;
+    // Read the port from the `address` field specifically (not any bare host:port
+    // elsewhere on the line — a peer addr, a health probe). The packaged sidecar logs
+    // JSON to its piped stdout (`"address":"127.0.0.1:PORT"`), while a TTY/dev stdout
+    // logs the pretty/logfmt form (`address=127.0.0.1:PORT`). Anchor on the field name
+    // and read the first bind marker that follows, so BOTH formats resolve the port —
+    // keying only on `address=` (F-127, sc-8929) silently broke the JSON path, which is
+    // the default packaged loopback launch, stranding window-gating until the 30 s
+    // timeout ("The local API did not start in time.").
+    let rest = line.split("address").nth(1)?;
     for marker in ["127.0.0.1:", "0.0.0.0:"] {
-        if let Some(addr) = rest.strip_prefix(marker) {
-            if let Ok(port) = addr
+        if let Some(index) = rest.find(marker) {
+            let digits: String = rest[index + marker.len()..]
                 .chars()
                 .take_while(char::is_ascii_digit)
-                .collect::<String>()
-                .parse()
-            {
+                .collect();
+            if let Ok(port) = digits.parse() {
                 return Some(port);
             }
         }
@@ -1790,6 +1795,36 @@ mod bind_tests {
                 "2026-07-04 event=api_listening address=127.0.0.1:41234 msg=\"listening\""
             ),
             Some(41234)
+        );
+    }
+
+    /// The packaged sidecar's stdout is a pipe, so the API logs JSON
+    /// (`"address":"HOST:PORT"`), not the logfmt `address=HOST:PORT` a TTY/dev run
+    /// emits. Keying only on `address=` (the sc-8929 regression) failed to discover
+    /// the port on a default loopback launch, so window-gating dead-polled until the
+    /// 30 s timeout. Parse the real JSON envelope the desktop reader actually sees.
+    #[test]
+    fn parse_listening_port_handles_json_stdout() {
+        // Loopback (OS-assigned) — the default packaged first-run path.
+        assert_eq!(
+            parse_listening_port(
+                r#"{"message":"SceneWorks Rust API listening","event":"api_listening","address":"127.0.0.1:60294","level":"info","reportedAt":"2026-07-04T15:20:19Z"}"#
+            ),
+            Some(60294)
+        );
+        // LAN (0.0.0.0/fixed) JSON envelope parses too.
+        assert_eq!(
+            parse_listening_port(
+                r#"{"event":"api_listening","address":"0.0.0.0:8787","level":"info"}"#
+            ),
+            Some(8787)
+        );
+        // A JSON line that is NOT the listening event contributes no port.
+        assert_eq!(
+            parse_listening_port(
+                r#"{"event":"utility_worker_inprocess","apiUrl":"http://127.0.0.1:60294"}"#
+            ),
+            None
         );
     }
 }
