@@ -154,7 +154,8 @@ fn scail2_candle_gpu_smoke() {
     } else {
         crate::scail2_masks::BG_BLACK
     };
-    let driving_masks = crate::scail2_masks::paint_driving_masks(&drive_masks, drive_bg);
+    let driving_masks = crate::scail2_masks::paint_driving_masks(&drive_masks, drive_bg)
+        .expect("scail2 driving mask paint");
     assert_eq!(
         driving_masks.len(),
         driving.len(),
