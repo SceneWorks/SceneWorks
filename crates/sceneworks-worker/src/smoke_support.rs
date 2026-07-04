@@ -23,19 +23,21 @@ use gen_core::Image;
 ///
 /// This is the model-agnostic "is the decode alive?" guard: a NaN / all-black / flat collapse pulls
 /// `image_std` toward 0, so any coherent render for the common t2i/edit/control lanes clears this by a
-/// wide margin. Used by every smoke EXCEPT the Lens pair, which needs the tighter [`DEGENERATE_STD_FLOOR_LENS`]
-/// floor below. It is deliberately generous — it exists to catch a broken decode, not to grade quality
-/// (the real quality call is the saved-PNG eyeball).
+/// wide margin. Used by the lanes whose coherent output sits at a normal per-pixel std-dev; the lanes
+/// whose coherent baseline runs materially hotter hold to the tighter [`DEGENERATE_STD_FLOOR_TIGHT`]
+/// floor below instead. It is deliberately generous — it exists to catch a broken decode, not to grade
+/// quality (the real quality call is the saved-PNG eyeball).
 pub(crate) const DEGENERATE_STD_FLOOR_DEFAULT: f64 = 5.0;
 
-/// Tighter degenerate-decode floor for the Lens smokes (sc-9838, F-122).
+/// Tighter degenerate-decode floor for the lanes whose coherent output runs hotter (sc-9838, F-122).
 ///
-/// Lens (turbo + base) packs the transformer DiT alongside the heavier gpt-oss-20b MoE text encoder, and
-/// its coherent output sits at a materially higher per-pixel std-dev than the other lanes. A render that
-/// clears the general [`DEGENERATE_STD_FLOOR_DEFAULT`] but stalls below this floor is a Lens-specific
-/// half-collapsed decode, so the Lens smokes intentionally hold to this stricter bar rather than the
-/// shared default. This is a per-model floor by design — do NOT collapse it back to the default.
-pub(crate) const DEGENERATE_STD_FLOOR_LENS: f64 = 20.0;
+/// Some lanes render at a materially higher per-pixel std-dev than the common case, so a half-collapsed
+/// decode can still clear the general [`DEGENERATE_STD_FLOOR_DEFAULT`] while stalling below the level a
+/// live render on that lane actually reaches. Those lanes hold to this stricter per-model bar instead:
+/// the Lens pair (transformer DiT alongside the heavy gpt-oss-20b MoE text encoder), chroma1_base, and
+/// sdxl_base all sit here. This is a per-model tighter floor by design — it is NOT Lens-specific, and it
+/// should NOT be collapsed back into the default.
+pub(crate) const DEGENERATE_STD_FLOOR_TIGHT: f64 = 20.0;
 
 /// Read `key` from the environment, falling back to `default` when it is unset, empty, or
 /// whitespace-only. Trims the value. Filtering set-but-empty values keeps a bare `FOO_STEPS=` (or a

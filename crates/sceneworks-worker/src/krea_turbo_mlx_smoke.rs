@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use gen_core::{GenerationOutput, GenerationRequest, LoadSpec, Quant, WeightsSource};
 
-use super::smoke_support::{env_or, image_std, save_png};
+use super::smoke_support::{env_or, image_std, save_png, DEGENERATE_STD_FLOOR_DEFAULT};
 
 /// The engine-complete packed subdir to load: mirror `image_jobs::base::krea_model_subdir`'s default —
 /// prefer `<root>/q8` (the shipped default; carries `transformer/diffusion_pytorch_model.safetensors`),
@@ -146,7 +146,7 @@ fn krea_turbo_mlx_gpu_smoke() {
         "engine returned the wrong dimensions"
     );
     assert!(
-        std > 5.0,
+        std > DEGENERATE_STD_FLOOR_DEFAULT,
         "krea_2_turbo render looks degenerate (std {std:.2}) — possible NaN / all-black / flat decode"
     );
     println!(

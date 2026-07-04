@@ -27,7 +27,9 @@ use std::path::{Path, PathBuf};
 
 use gen_core::{GenerationOutput, GenerationRequest, LoadSpec, Quant, WeightsSource};
 
-use super::smoke_support::{env_or, image_mean, image_std, is_all_zero, save_png};
+use super::smoke_support::{
+    env_or, image_mean, image_std, is_all_zero, save_png, DEGENERATE_STD_FLOOR_TIGHT,
+};
 
 /// The engine-complete packed subdir to load: mirror `image_jobs::base::standard_tier_subdir`'s q8
 /// selection — prefer `<root>/q8` (SDXL-family turnkeys pack the backbone under `unet/`), else `root`
@@ -156,7 +158,7 @@ fn sdxl_base_q8_mlx_gpu_smoke() {
          mlx-gen Q8 path (sc-2641) must not reproduce it"
     );
     assert!(
-        std > 20.0,
+        std > DEGENERATE_STD_FLOOR_TIGHT,
         "sdxl base Q8 render looks degenerate (std {std:.2}) — possible NaN / all-black / flat decode"
     );
     println!(
