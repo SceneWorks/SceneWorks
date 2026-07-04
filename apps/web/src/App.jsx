@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { apiFetch, eventUrl, isAbortError, setMediaTicket } from "./api.js";
+import { apiFetch, isAbortError } from "./api.js";
 import { pollJobToCompletion } from "./pollJob.js";
 import { Icon } from "./components/Icons.jsx";
 import { Logo } from "./components/Logo.jsx";
@@ -30,6 +30,8 @@ import { useTraining } from "./hooks/useTraining.js";
 import { useModelsAndLoras } from "./hooks/useModelsAndLoras.js";
 import { usePersonTracks } from "./hooks/usePersonTracks.js";
 import { useTimelines } from "./hooks/useTimelines.js";
+import { useAccessGate } from "./hooks/useAccessGate.js";
+import { useJobEvents } from "./hooks/useJobEvents.js";
 import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import { ACCENTS, isAccentId } from "./accents.js";
@@ -42,11 +44,8 @@ import {
 import { buildWorkersById } from "./workers.js";
 import { createEditorScratchRegistry } from "./editorScratch.js";
 import { isDesktop as isDesktopShell, tauriInvoke } from "./runtime.js";
-import { readAccessToken, storeAccessToken, clearAccessToken } from "./accessToken.js";
 import {
   buildLocalJobStack,
-  failedJobNotice,
-  generatedResultAssetCount,
   isActiveWorker,
   isImageGenerationJob,
   isInterleaveJob,
@@ -55,8 +54,6 @@ import {
   isVideoGenerationJob,
   localJobStackLimit,
   mergeFreshJobs,
-  noticeKindForJob,
-  parseSseJson,
   readStoredAccent,
   readStoredTheme,
 } from "./appHelpers.js";
@@ -327,22 +324,6 @@ function FirstRunProjectGate({ onCreate, disabled }) {
 
 export function App() {
   const [health, setHealth] = useState(null);
-  const [access, setAccess] = useState({ authRequired: false });
-  // Whether GET /api/v1/access has answered yet. Until it does we don't know if a
-  // password is required, so a remote browser must hold its protected data loads —
-  // otherwise they fire optimistically, 401, and bury the password prompt under a band
-  // of "access token required" errors (epic 4484).
-  const [accessResolved, setAccessResolved] = useState(false);
-  // The remote-access token (= host password). Storage key + threat-model note live in
-  // accessToken.js (sc-8880); it is persisted verbatim in localStorage so it survives
-  // reloads (a LAN remote-access requirement — see that module for the accepted XSS tradeoff).
-  const [token, setToken] = useState(() => readAccessToken());
-  // What the user is typing into the login gate (sc-8808). Kept separate from the
-  // live `token` so keystrokes never flip `authenticated` or churn the data/SSE
-  // effects; `token` only changes once /api/v1/auth/verify accepts the draft.
-  const [passwordDraft, setPasswordDraft] = useState("");
-  // Wrong-password feedback for the remote-browser login gate (epic 4484 story 7).
-  const [authError, setAuthError] = useState("");
   const [projects, setProjects] = useState([]);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   // Desktop first-run wizard gate: null = unknown (still reading on desktop),
@@ -429,6 +410,21 @@ export function App() {
   // Back-compat: the existing setError(msg)/setError("") call sites map onto the
   // "general" notice kind — a truthy message replaces it, "" dismisses only it.
   const setError = useCallback((message) => pushNotice("general", message), [pushNotice]);
+  // Remote-access gate (epic 4484), extracted to a hook (sc-9750): owns access probe,
+  // host password/token, login-gate draft + error, and the media-ticket mint that must
+  // settle before protected data loads. `authenticated`/`ready` gate the data + SSE
+  // effects below; `token` threads through the data hooks and every apiFetch call site.
+  const {
+    access,
+    token,
+    passwordDraft,
+    setPasswordDraft,
+    authError,
+    authenticated,
+    ready,
+    saveToken,
+    lockRemote,
+  } = useAccessGate({ setError, pushNotice, dismissNoticeKind });
   const [theme, setTheme] = useState(readStoredTheme);
   // Apply a theme and persist it through the API. localStorage gives an instant
   // initial paint, but on the desktop shell the UI runs at the API's per-launch
@@ -676,89 +672,6 @@ export function App() {
     createVideoJob,
   });
 
-  // The desktop shell reaches its own API over loopback, which the API trusts
-  // (SCENEWORKS_TRUST_LOOPBACK), so it's authenticated without a password — never prompt
-  // for one locally (epic 4484). A remote browser must wait for GET /api/v1/access before
-  // it knows whether a password is needed; until then it holds its protected loads rather
-  // than firing them unauthenticated.
-  const authenticated = useMemo(
-    () =>
-      isDesktopShell ||
-      (accessResolved && (!access.authRequired || token.length > 0)),
-    [accessResolved, access, token],
-  );
-  // sc-8810: whether media URLs are renderable yet. When auth is on, element-driven
-  // requests (<img>/<video>) can't send the token header, so every media URL needs
-  // the query-param ticket minted below. Data loads hold until the first ticket is
-  // stored (mediaReady), otherwise thumbnails rendered in the gap would 401 and
-  // stick as "deleted" placeholders. When auth is off this resolves immediately.
-  const [mediaReady, setMediaReady] = useState(false);
-  // sc-9063 (F-008 follow-up): a persistently failing mint must not blank the whole
-  // app. `ready` waits for the first mint attempt to SETTLE (success or failure),
-  // not for a success: once a mint fails, lists/metadata load anyway — media
-  // degrades to placeholders and recovers when a retry lands — and a "media-ticket"
-  // notice tells the user why media is broken while the backoff keeps retrying.
-  const [mediaTicketFailed, setMediaTicketFailed] = useState(false);
-  const ready = authenticated && (mediaReady || mediaTicketFailed);
-
-  useEffect(() => {
-    if (!authenticated || !accessResolved) {
-      // Lock/logout stops the mint loop (cleanup above cleared the backoff timer),
-      // so drop the settled gate: the next unlock must re-run sc-8810's
-      // mint-before-data ordering rather than ride a stale mediaReady/
-      // mediaTicketFailed, and the "Retrying in the background" notice must not
-      // linger on the lock screen while no retry is actually running.
-      setMediaReady(false);
-      setMediaTicketFailed(false);
-      dismissNoticeKind("media-ticket");
-      return undefined;
-    }
-    if (!access.authRequired) {
-      setMediaTicket("");
-      setMediaReady(true);
-      return undefined;
-    }
-    let closed = false;
-    let timer = null;
-    let attempt = 0;
-    async function acquire() {
-      try {
-        // Header-authenticated mint (loopback-trusted desktop sends no token and
-        // still passes). The server keeps re-arming the same sliding ticket, so
-        // already-rendered media URLs stay valid across refreshes.
-        const response = await apiFetch("/api/v1/files/ticket", token, { method: "POST" });
-        if (closed) {
-          return;
-        }
-        setMediaTicket(response.ticket);
-        setMediaReady(true);
-        setMediaTicketFailed(false);
-        dismissNoticeKind("media-ticket");
-        attempt = 0;
-        const ttlMs = Math.max(15, Number(response.expiresInSeconds) || 0) * 1000;
-        timer = window.setTimeout(acquire, Math.max(5000, Math.floor(ttlMs / 3)));
-      } catch {
-        if (closed) {
-          return;
-        }
-        setMediaTicketFailed(true);
-        pushNotice(
-          "media-ticket",
-          "media authorization: couldn't obtain a media ticket, so thumbnails, previews, and downloads may fail to load. Retrying in the background.",
-        );
-        const delay = Math.min(30000, 1000 * 2 ** attempt);
-        attempt += 1;
-        timer = window.setTimeout(acquire, delay);
-      }
-    }
-    acquire();
-    return () => {
-      closed = true;
-      if (timer) {
-        window.clearTimeout(timer);
-      }
-    };
-  }, [access.authRequired, accessResolved, authenticated, token, pushNotice, dismissNoticeKind]);
   const imageModels = useMemo(() => {
     const items = models.filter((model) => model.type === "image" && model.installState !== "missing");
     return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "image");
@@ -960,13 +873,7 @@ export function App() {
     apiFetch("/api/v1/health", "")
       .then(setHealth)
       .catch((err) => setError(err.message));
-
-    apiFetch("/api/v1/access", "")
-      .then(setAccess)
-      .catch((err) => setError(err.message))
-      // Either way the auth state is now as resolved as it'll get; release the gate so
-      // an authenticated client (or one not requiring auth) can load its data.
-      .finally(() => setAccessResolved(true));
+    // The /api/v1/access probe (+ accessResolved release) lives in useAccessGate now (sc-9750).
   }, []);
 
   useEffect(() => {
@@ -1122,157 +1029,29 @@ export function App() {
     return () => controller.abort();
   }, [activeProject?.id, ready, token]);
 
-  useEffect(() => {
-    // Gated on `ready` (not just `authenticated`): SSE job updates carry assets whose
-    // thumbnails render immediately, so the media-ticket mint must have settled first
-    // (sc-8810; sc-9063 lets a failed mint through — media degrades, data flows).
-    if (!ready) {
-      return undefined;
-    }
-
-    let events = null;
-    let reconnectTimer = null;
-    let reconnectAttempt = 0;
-    let closed = false;
-
-    function handleJobUpdated(event) {
-      const job = parseSseJson(event, "job");
-      if (!job) {
-        return;
-      }
-      const hasGeneratedAssets = Boolean(job.result?.generationSetId || job.result?.assetIds?.length || job.result?.assets?.length);
-      const resultAssetCount = generatedResultAssetCount(job);
-      const generationSetId = job.result?.generationSetId ?? "";
-      const refreshKey = job.id ?? generationSetId;
-      const previousRefresh = generatedAssetRefreshesRef.current.get(refreshKey) ?? { assetCount: 0, generationSetId: "" };
-      const shouldRefreshGeneratedAssets =
-        Boolean(job.projectId) &&
-        hasGeneratedAssets &&
-        (resultAssetCount > previousRefresh.assetCount ||
-          (resultAssetCount === 0 && generationSetId && generationSetId !== previousRefresh.generationSetId));
-      setJobs((items) => upsertJobNewest(items, job));
-      if (hasGeneratedAssets) {
-        if (job.result?.generationSetId) {
-          setLatestGenerationSetId(job.result.generationSetId);
-        }
-        generatedAssetRefreshesRef.current.set(refreshKey, {
-          assetCount: Math.max(resultAssetCount, previousRefresh.assetCount),
-          generationSetId: generationSetId || previousRefresh.generationSetId,
-        });
-        if (shouldRefreshGeneratedAssets) {
-          refreshAssetsRef.current?.(job.projectId);
-        }
-      }
-      if (job.status === "completed" && hasGeneratedAssets) {
-        enqueueTimelineGenerationApply(job);
-      }
-      if (job.status === "completed" && job.projectId && job.type === "person_track") {
-        refreshPersonTracksRef.current?.(job.projectId);
-      }
-      if (job.status === "completed" && job.projectId && job.type === "person_detect") {
-        refreshAssetsRef.current?.(job.projectId);
-      }
-      if (job.status === "completed" && job.type === "model_download") {
-        refreshDataRef.current?.();
-      }
-      // A completed built-in LoRA download (sc-5944) flips the catalog entry to
-      // installed; refresh models+loras so the Models row and any Studio gate update.
-      if (job.status === "completed" && job.type === "lora_download") {
-        refreshDataWithLoraOverlayRef.current?.(job.projectId ?? activeProjectRef.current?.id);
-      }
-      if (job.status === "completed" && job.type === "lora_import") {
-        dismissNoticeKind("lora-import");
-        refreshDataWithLoraOverlayRef.current?.(job.projectId ?? activeProjectRef.current?.id);
-      }
-      if (job.status === "completed" && job.type === "lora_train" && job.payload?.dryRun === false) {
-        if (job.result?.loraRegistered === false) {
-          pushNotice("lora-train", `lora training: ${job.result?.loraRegistrationError ?? "Completed training but could not register the LoRA."}`);
-        } else {
-          dismissNoticeKind("lora-train");
-          refreshDataWithLoraOverlayRef.current?.(job.projectId ?? activeProjectRef.current?.id);
-        }
-      }
-      if (job.status === "failed" && !hasVisibleLocalFailure(job)) {
-        pushNotice(noticeKindForJob(job), failedJobNotice(job));
-      }
-      // Evict the per-job refresh bookkeeping once the job is terminal (sc-8944): the
-      // dedupe counters are only consulted while a job is still emitting incremental
-      // asset updates. Without this the Map grows one entry per asset-producing job for
-      // the session's lifetime (unbounded, slow leak in multi-day sessions).
-      if (terminalStatuses.has(job.status)) {
-        generatedAssetRefreshesRef.current.delete(refreshKey);
-      }
-    }
-
-    function handleWorkerUpdated(event) {
-      const worker = parseSseJson(event, "worker");
-      if (!worker) {
-        return;
-      }
-      setWorkers((items) => [worker, ...items.filter((item) => item.id !== worker.id)].sort(sortWorkers));
-    }
-
-    function handleQueueUpdated(event) {
-      const summary = parseSseJson(event, "queue");
-      if (!summary) {
-        return;
-      }
-      setQueueSummary(summary);
-      if (Array.isArray(summary.workers)) {
-        setWorkers(summary.workers.sort(sortWorkers));
-      }
-    }
-
-    async function connect() {
-      let ticket = "";
-      try {
-        if (access.authRequired) {
-          const response = await apiFetch("/api/v1/jobs/events/ticket", token, { method: "POST" });
-          ticket = response.ticket;
-        }
-      } catch (err) {
-        setError(err.message);
-        if (!closed) {
-          const delay = Math.min(30000, 1000 * 2 ** reconnectAttempt);
-          reconnectAttempt += 1;
-          reconnectTimer = window.setTimeout(connect, delay);
-        }
-        return;
-      }
-
-      if (closed) {
-        return;
-      }
-
-      const source = new EventSource(eventUrl("/api/v1/jobs/events", ticket));
-      events = source;
-      source.addEventListener("job.updated", handleJobUpdated);
-      source.addEventListener("worker.updated", handleWorkerUpdated);
-      source.addEventListener("queue.updated", handleQueueUpdated);
-      source.onopen = () => {
-        reconnectAttempt = 0;
-      };
-      source.onerror = () => {
-        source.close();
-        if (closed) {
-          return;
-        }
-        const delay = Math.min(30000, 1000 * 2 ** reconnectAttempt);
-        reconnectAttempt += 1;
-        reconnectTimer = window.setTimeout(connect, delay);
-      };
-    }
-
-    connect();
-
-    return () => {
-      closed = true;
-      if (reconnectTimer) {
-        window.clearTimeout(reconnectTimer);
-      }
-      events?.close();
-    };
-  }, [access.authRequired, ready, token]);
+  // Live job/worker/queue SSE stream, extracted to a hook (sc-9750). The handlers reach
+  // back into App state through the identity-stable setters/refs/callbacks passed here;
+  // the hook re-subscribes only on [access.authRequired, ready, token] (see useJobEvents).
+  useJobEvents({
+    access,
+    ready,
+    token,
+    setJobs,
+    setWorkers,
+    setQueueSummary,
+    setLatestGenerationSetId,
+    setError,
+    pushNotice,
+    dismissNoticeKind,
+    generatedAssetRefreshesRef,
+    refreshAssetsRef,
+    refreshDataRef,
+    refreshDataWithLoraOverlayRef,
+    refreshPersonTracksRef,
+    activeProjectRef,
+    enqueueTimelineGenerationApply,
+    hasVisibleLocalFailure,
+  });
 
   // Survivor sweep for orphaned Image-Editor scratch ops (sc-8850). Runs on every `jobs`
   // change (SSE ticks, initial load, etc.): purges the scratch + result assets of any
@@ -1402,48 +1181,8 @@ export function App() {
     refreshDataWithLoraOverlayRef.current = refreshDataWithLoraOverlay;
   });
 
-
-  // Remote-browser login (epic 4484 story 7): the password IS the API access token.
-  // Verify the typed draft against the public /api/v1/auth/verify endpoint BEFORE
-  // promoting it to the live `token`, so a wrong password keeps the gate up with an
-  // inline error (instead of saving a bad token and silently failing every subsequent
-  // request). A correct password is stored to localStorage and unlocks the app; it
-  // persists across reloads. Promoting the token here flips `authenticated`, and the
-  // [authenticated, token] effects perform the initial data load and SSE connect
-  // exactly once — no explicit refreshData() call, or it would double-fetch (sc-8808).
-  async function saveToken(event) {
-    event.preventDefault();
-    const candidate = passwordDraft.trim();
-    if (!candidate) {
-      setAuthError("Enter the password.");
-      return;
-    }
-    try {
-      const result = await apiFetch("/api/v1/auth/verify", candidate, { method: "POST" });
-      if (!result?.ok) {
-        setAuthError("Incorrect password. Try again.");
-        return;
-      }
-    } catch {
-      setAuthError("Couldn't reach the host to verify the password.");
-      return;
-    }
-    storeAccessToken(candidate);
-    setToken(candidate);
-    setPasswordDraft("");
-    setAuthError("");
-    setError("");
-  }
-
-  // Clear the stored password and re-show the login gate ("lock"/forget affordance,
-  // epic 4484 story 7). Setting the token state to "" re-renders the gate, which
-  // keys off the token state (sc-8808).
-  function lockRemote() {
-    clearAccessToken();
-    setToken("");
-    setPasswordDraft("");
-    setAuthError("");
-  }
+  // saveToken / lockRemote (the remote-browser login + lock affordances, epic 4484
+  // story 7) live in useAccessGate now (sc-9750) and are destructured above.
 
   async function completeSetupWizard() {
     try {
