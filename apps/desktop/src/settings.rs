@@ -200,13 +200,29 @@ pub fn load_settings() -> AppSettings {
         .unwrap_or_default()
 }
 
-fn save_settings(settings: &AppSettings) -> Result<(), String> {
-    let path = settings_path();
+/// Write `body` to `path` atomically via temp-file + rename, so a crash / full disk
+/// mid-write can't leave a truncated file (F-127, sc-8929). The temp file sits next to
+/// the target so the rename stays on the same filesystem (a cross-device rename is not
+/// atomic). Mirrors the sidecar pidfile writer's temp+rename. Extracted from
+/// [`save_settings`] so the atomicity contract is unit-testable against a scratch path.
+fn atomic_write(path: &std::path::Path, body: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body).map_err(|error| error.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|error| {
+        // Leave no stray temp file behind if the rename fails.
+        let _ = std::fs::remove_file(&tmp);
+        error.to_string()
+    })
+}
+
+fn save_settings(settings: &AppSettings) -> Result<(), String> {
     let body = serde_json::to_string_pretty(settings).map_err(|error| error.to_string())?;
-    std::fs::write(&path, body).map_err(|error| error.to_string())
+    // Atomic (temp+rename) so a torn write never wipes the data-dir/HF-home overrides
+    // + credential metadata (F-127, sc-8929).
+    atomic_write(&settings_path(), body.as_bytes())
 }
 
 /// Hugging Face token for injecting `HF_TOKEN` into the worker, from the host-keyed
@@ -479,7 +495,17 @@ pub struct GpuInfo {
 }
 
 fn run_capture(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program).args(args).output().ok()?;
+    let mut command = Command::new(program);
+    command.args(args);
+    // Don't flash a console window when probing a CLI (e.g. nvidia-smi) from the GUI
+    // app on Windows (F-127, sc-8929). CREATE_NO_WINDOW; mirrors `cuda_preflight` in
+    // setup.rs. No-op / not applicable off Windows.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1145,6 +1171,40 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create dir");
         let padded = format!("  {}  ", dir.to_string_lossy());
         assert_eq!(sanitized_start_dir(Some(&padded)), Some(dir.clone()));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// sc-8929 (F-127): the settings writer is atomic — the final file holds exactly
+    /// the new bytes, an existing file is replaced rather than truncated-then-written,
+    /// and no `.json.tmp` scratch file is left behind on success.
+    #[test]
+    fn atomic_write_replaces_file_and_leaves_no_temp() {
+        let root = scratch_dir("atomic");
+        let path = root.join("settings.json");
+
+        // Seed an existing file so we prove replace-in-place (not append/truncate).
+        std::fs::write(&path, b"{\"old\":true}").expect("seed old");
+        atomic_write(&path, b"{\"new\":1}").expect("atomic write");
+        assert_eq!(std::fs::read(&path).expect("read back"), b"{\"new\":1}");
+
+        // The temp file used for the rename must not survive a successful write.
+        let tmp = path.with_extension("json.tmp");
+        assert!(
+            !tmp.exists(),
+            "temp file must be renamed away, not left behind"
+        );
+
+        // A round-trip of real settings through save-shaped bytes stays valid JSON.
+        let settings = AppSettings {
+            data_dir: Some("/tmp/data".to_owned()),
+            ..AppSettings::default()
+        };
+        let body = serde_json::to_string_pretty(&settings).unwrap();
+        atomic_write(&path, body.as_bytes()).expect("atomic write settings");
+        let back: AppSettings =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).expect("parse back");
+        assert_eq!(back.data_dir.as_deref(), Some("/tmp/data"));
 
         std::fs::remove_dir_all(&root).ok();
     }

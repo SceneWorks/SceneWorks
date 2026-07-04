@@ -269,14 +269,26 @@ fn append_log(path: &Path, line: &str) {
 }
 
 /// Extract the port from the API's bound-address startup line. In loopback mode the
-/// API logs `…address=127.0.0.1:PORT`; in LAN mode (epic 4484) it binds 0.0.0.0 and
-/// logs `…address=0.0.0.0:PORT`, so both markers are tried. (LAN mode also pre-sets
-/// the known fixed port, so this is the fallback for the dynamic loopback case.)
+/// API logs `event="api_listening" … address=127.0.0.1:PORT`; in LAN mode (epic 4484)
+/// it binds 0.0.0.0 and logs `address=0.0.0.0:PORT`. (LAN mode also pre-sets the known
+/// fixed port, so this is the fallback for the dynamic loopback case.)
+///
+/// Anchored to the API's own startup marker (F-127, sc-8929): the port is read from the
+/// `address=` field of the `api_listening` event ONLY. An earlier diagnostic line that
+/// merely mentions a loopback `host:port` (e.g. a credential-socket or health-probe log)
+/// no longer seeds the wrong port, which previously left window-gating polling a dead
+/// port until the 30 s timeout fired.
 fn parse_listening_port(line: &str) -> Option<u16> {
+    // Only the API's bound-address startup line carries a port we should trust.
+    if !line.contains("api_listening") {
+        return None;
+    }
+    // Read the port from the `address=` field specifically (not any bare host:port
+    // elsewhere on the line), for either the loopback or the LAN bind host.
+    let rest = line.split("address=").nth(1)?;
     for marker in ["127.0.0.1:", "0.0.0.0:"] {
-        if let Some(index) = line.find(marker) {
-            let start = index + marker.len();
-            if let Ok(port) = line[start..]
+        if let Some(addr) = rest.strip_prefix(marker) {
+            if let Ok(port) = addr
                 .chars()
                 .take_while(char::is_ascii_digit)
                 .collect::<String>()
@@ -1691,5 +1703,31 @@ mod bind_tests {
             Some(8787)
         );
         assert_eq!(parse_listening_port("nothing to see here"), None);
+    }
+
+    /// F-127 (sc-8929): the port is read ONLY from the `api_listening` event's
+    /// `address=` field. An earlier diagnostic line that merely mentions a loopback
+    /// `host:port` (a health probe, the credential socket, etc.) must NOT seed a port —
+    /// doing so previously pointed window-gating at a dead port for the full 30 s.
+    #[test]
+    fn parse_listening_port_ignores_unrelated_lines_with_a_host_port() {
+        // A diagnostic line with a loopback host:port but no api_listening marker.
+        assert_eq!(
+            parse_listening_port("probing health at 127.0.0.1:9999 before start"),
+            None
+        );
+        // A line that mentions the event but whose host:port isn't in the address field
+        // (e.g. an incidental reference) doesn't get mis-parsed from the wrong token.
+        assert_eq!(
+            parse_listening_port("api_listening address=127.0.0.1:54321 (peer 127.0.0.1:1)"),
+            Some(54321)
+        );
+        // Real logfmt-style line with fields before/after address= still parses.
+        assert_eq!(
+            parse_listening_port(
+                "2026-07-04 event=api_listening address=127.0.0.1:41234 msg=\"listening\""
+            ),
+            Some(41234)
+        );
     }
 }
