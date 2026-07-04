@@ -2112,7 +2112,12 @@ fn combined_trigger_words(item_words: &[String], output_words: &[String]) -> Vec
     words
 }
 
-fn caption_with_trigger_words(caption: &str, trigger_words: &[String]) -> String {
+/// Compose a caption with its trigger words prepended (deduped case-insensitively
+/// against words already present in the caption, order-preserving). Shared by the
+/// training plan (this module) and the on-disk `.txt` caption sidecars
+/// (`training_store::write_dataset_caption_sidecars`) so the captions the trainer
+/// consumes and the sidecars a user inspects can never drift apart (sc-8892 / F-090).
+pub(crate) fn caption_with_trigger_words(caption: &str, trigger_words: &[String]) -> String {
     let cleaned = caption.split_whitespace().collect::<Vec<_>>().join(" ");
     let lower = cleaned.to_lowercase();
     let mut parts = trigger_words
@@ -2241,5 +2246,30 @@ mod tests {
             resolve_item_path(root, "images/photo.png").expect("safe path"),
             expected.display().to_string()
         );
+    }
+
+    /// sc-8892 / F-090: the single shared composer prepends trigger words that are
+    /// not already present (case-insensitive), preserves order, collapses whitespace,
+    /// and drops empties. This is the one function feeding both the training plan and
+    /// the `.txt` caption sidecars, so this contract is what keeps them in lockstep.
+    #[test]
+    fn caption_with_trigger_words_dedups_and_prepends() {
+        // Trigger words prepend, order preserved, caption appended.
+        assert_eq!(
+            caption_with_trigger_words("a photo", &["tok1".to_owned(), "tok2".to_owned()]),
+            "tok1, tok2, a photo"
+        );
+        // A trigger already present in the caption (case-insensitive) is not repeated.
+        assert_eq!(
+            caption_with_trigger_words("A TOK1 pose", &["tok1".to_owned()]),
+            "A TOK1 pose"
+        );
+        // Whitespace collapses and empty/blank trigger words are dropped.
+        assert_eq!(
+            caption_with_trigger_words("  a   photo ", &["".to_owned(), "  ".to_owned()]),
+            "a photo"
+        );
+        // Empty caption yields just the (unique) trigger words.
+        assert_eq!(caption_with_trigger_words("", &["tok1".to_owned()]), "tok1");
     }
 }
