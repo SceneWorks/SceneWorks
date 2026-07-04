@@ -523,26 +523,22 @@ pub(crate) async fn run_video_generate_job(
                 // segments the reference image + driving frames with native SAM3, paints the color-coded
                 // masks, and maps the SceneWorks mode to the engine task (animate_character → animation;
                 // replace_person → replacement is wired in sc-5452). No torch path (mac-only engine).
+                // It returns the resolved `lightning` bool so the effective-recipe record uses the
+                // same resolution instead of a second `unwrap_or_default` pass (F-118).
+                let (decoded, lightning) = generate_scail2(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
+                )
+                .await?;
                 (
-                    generate_scail2(
-                        api,
-                        settings,
-                        job,
-                        &request,
-                        &project_path,
-                        engine_id,
-                        backend,
-                    )
-                    .await?,
+                    decoded,
                     SCAIL2_ADAPTER,
-                    // Best-effort lightning detection for the asset's effective-recipe record (the adapter
-                    // file is already resolved by generate_scail2 above; re-reading its header is cheap).
-                    scail2_raw_settings(
-                        &request,
-                        scail2_adapters_have_lightning(
-                            &resolve_scail2_adapters(settings, &request).unwrap_or_default(),
-                        ),
-                    ),
+                    scail2_raw_settings(&request, lightning),
                     None,
                 )
             }
@@ -1841,7 +1837,9 @@ async fn run_seedvr2_stream(
             softness: Some(req.softness),
             ..Default::default()
         };
-        let decoded = generate_video(api, settings, job, backend, input).await?;
+        // SeedVR2 upscale is one-step with no per-generation sampler/scheduler knobs, so the
+        // advanced block generate_video reads for those is empty here (F-118).
+        let decoded = generate_video(api, settings, job, backend, &JsonObject::new(), input).await?;
         if let Some(frame) = decoded.frames.first() {
             out_w = frame.width;
             out_h = frame.height;
@@ -1883,6 +1881,22 @@ async fn run_seedvr2_stream(
     })
 }
 
+/// Validate a requested video-upscale factor. SeedVR2 supports only 2x and 4x, so any other value
+/// (3x, 8x, 1x, 0) is rejected with a clear error rather than silently coerced (F-118). Returns the
+/// factor widened to `u32` for the downstream dimension math.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_video_upscale_factor(factor: u8) -> WorkerResult<u32> {
+    match factor {
+        2 | 4 => Ok(u32::from(factor)),
+        other => Err(WorkerError::InvalidPayload(format!(
+            "Video upscale supports only factor 2 or 4 (got {other})."
+        ))),
+    }
+}
+
 /// Dispatch handler for `JobType::VideoUpscale`: decode the source clip, run the SeedVR2 upscaler
 /// (native MLX on Mac / candle CUDA on Windows, sc-5928), re-encode, pass the source audio through,
 /// and stream a single upscaled video asset.
@@ -1916,7 +1930,8 @@ pub(crate) async fn run_video_upscale_job(
         .or_else(|| job.project_id.clone())
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| WorkerError::InvalidPayload("Missing payload.projectId".to_owned()))?;
-    let factor: u32 = if req.factor == 4 { 4 } else { 2 };
+    // Reject an unsupported factor early rather than silently coercing it to 2 (F-118).
+    let factor = resolve_video_upscale_factor(req.factor)?;
     let backend = backend_label(&settings.gpu_id);
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -3453,18 +3468,20 @@ async fn generate_video(
     settings: &Settings,
     job: &JobSnapshot,
     backend: &str,
+    advanced: &JsonObject,
     mut input: VideoGenInput,
 ) -> WorkerResult<DecodedVideo> {
     // Per-generation sampler / scheduler axis for video (epic 7114 P5, sc-7127). The handlers leave
-    // `input.sampler`/`scheduler` `None`; read them from the job's `advanced` block here — the single
-    // funnel every Wan / LTX / SVD path passes through — and N3-guard each against the resolved engine
-    // descriptor's advertised surface. A name the engine does not advertise (every video engine but the
-    // Wan fold-in + the SVD/LTX sampler-only outliers, until candle adoption) is dropped to the engine
-    // default + a `sampling_knob_unsupported` event, never a `validate_request` hard-fail.
+    // `input.sampler`/`scheduler` `None`; read them from the caller's already-parsed `advanced` block
+    // here — the single funnel every Wan / LTX / SVD path passes through — and N3-guard each against
+    // the resolved engine descriptor's advertised surface. A name the engine does not advertise (every
+    // video engine but the Wan fold-in + the SVD/LTX sampler-only outliers, until candle adoption) is
+    // dropped to the engine default + a `sampling_knob_unsupported` event, never a hard-fail. Taking
+    // `advanced` by reference avoids re-parsing the whole payload into a throwaway VideoRequest per
+    // generation (F-118).
     {
-        let advanced = VideoRequest::from_payload(&job.payload).advanced;
         let (raw_sampler, raw_scheduler, raw_shift) =
-            crate::image_jobs::read_advanced_sampling_knobs(&advanced);
+            crate::image_jobs::read_advanced_sampling_knobs(advanced);
         let (samplers, schedulers) = video_engine_sampling_surface(input.engine_id);
         input.sampler = crate::image_jobs::normalize_sampling_knob(
             raw_sampler,
@@ -3961,7 +3978,7 @@ async fn generate_candle_video(
         if let Value::Object(map) = &mut raw_settings {
             map.insert("repo".to_owned(), Value::String(repo.clone()));
         }
-        let decoded = generate_video(api, settings, job, backend, input).await?;
+        let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
         return Ok((decoded, adapter, raw_settings));
     }
 
@@ -4001,7 +4018,7 @@ async fn generate_candle_video(
         ..VideoGenInput::default()
     };
     let raw_settings = candle_video_raw_settings(request, &repo);
-    let decoded = generate_video(api, settings, job, backend, input).await?;
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
     Ok((decoded, adapter, raw_settings))
 }
 
@@ -4318,7 +4335,7 @@ async fn generate_candle_scail2(
         video_mode: Some(candle_scail2_engine_video_mode(&request.mode).to_owned()),
         ..VideoGenInput::default()
     };
-    let decoded = generate_video(api, settings, job, backend, input).await?;
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
     Ok((
         decoded,
         CANDLE_SCAIL2_ADAPTER,
@@ -4483,7 +4500,7 @@ async fn generate_candle_scail2_replace(
         video_mode: Some("replacement".to_owned()),
         ..VideoGenInput::default()
     };
-    let decoded = generate_video(api, settings, job, backend, input).await?;
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
     Ok((decoded, status))
 }
 
@@ -4569,7 +4586,7 @@ async fn generate_candle_wan_vace(
         control_scale: Some(advanced::f32(&request.advanced, "conditioningScale", 1.0)),
         ..VideoGenInput::default()
     };
-    let decoded = generate_video(api, settings, job, backend, input).await?;
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
     let status = replacement_status_value(
         &track,
         track_id,
@@ -4672,7 +4689,7 @@ async fn generate_candle_wan_vace_extend_bridge(
         control_scale: Some(advanced::f32(&request.advanced, "conditioningScale", 1.0)),
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, input).await
+    generate_video(api, settings, job, backend, &request.advanced, input).await
 }
 
 /// Resolve a Wan request into a [`VideoGenInput`] and run it (sc-3034).
@@ -4718,7 +4735,7 @@ async fn generate_wan(
         seed: resolve_video_seed(request) as u64,
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, input).await
+    generate_video(api, settings, job, backend, &request.advanced, input).await
 }
 
 // ---------------------------------------------------------------------------
@@ -4955,7 +4972,7 @@ async fn generate_bernini(
         video_mode: Some(bernini_engine_video_mode(&request.mode).to_owned()),
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, input).await
+    generate_video(api, settings, job, backend, &request.advanced, input).await
 }
 
 // ---------------------------------------------------------------------------
@@ -5181,6 +5198,10 @@ async fn resolve_scail2_conditioning(
 /// sc-5451 / mlx-gen #462); steps/guidance stay at the engine defaults. Frame count uses the Wan
 /// 1-mod-4 stride coercion (the
 /// renderer is Wan2.1); the engine stitches > 81-frame clips into overlapping segments internally.
+///
+/// Returns the decoded clip plus the resolved `lightning` bool so the caller records the effective
+/// recipe on the asset without re-resolving the adapters (which discarded errors via
+/// `unwrap_or_default`, risking a lightning-flag inconsistency — F-118).
 #[cfg(target_os = "macos")]
 async fn generate_scail2(
     api: &ApiClient,
@@ -5190,7 +5211,7 @@ async fn generate_scail2(
     project_path: &Path,
     engine_id: &'static str,
     backend: &str,
-) -> WorkerResult<DecodedVideo> {
+) -> WorkerResult<(DecodedVideo, bool)> {
     let negative_prompt = non_empty_negative_prompt(request);
     let conditioning =
         resolve_scail2_conditioning(api, settings, job, request, project_path).await?;
@@ -5198,8 +5219,8 @@ async fn generate_scail2(
     // (8 steps, CFG off, shift 1.0) so the toggle yields the speedup; otherwise steps/guidance/shift
     // stay `None` and the engine's quality defaults stand (sc-5700).
     let adapters = resolve_scail2_adapters(settings, request)?;
-    let (steps, guidance, scheduler_shift) =
-        scail2_sampling(request, scail2_adapters_have_lightning(&adapters));
+    let lightning = scail2_adapters_have_lightning(&adapters);
+    let (steps, guidance, scheduler_shift) = scail2_sampling(request, lightning);
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -5221,7 +5242,8 @@ async fn generate_scail2(
         adapters,
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, input).await
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
+    Ok((decoded, lightning))
 }
 
 /// Resolve a `replace_person` request into SCAIL-2 cross-identity replacement conditioning (sc-5452,
@@ -5388,7 +5410,7 @@ async fn generate_scail2_replace(
         video_mode: Some(scail2_engine_video_mode(&request.mode).to_owned()),
         ..VideoGenInput::default()
     };
-    let decoded = generate_video(api, settings, job, backend, input).await?;
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
     Ok((decoded, status))
 }
 
@@ -6131,7 +6153,7 @@ async fn generate_ltx(
         text_encoder_dir,
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, input).await
+    generate_video(api, settings, job, backend, &request.advanced, input).await
 }
 
 // ---------------------------------------------------------------------------
@@ -6420,7 +6442,7 @@ async fn generate_svd(
         conditioning_fps: Some(svd_i32(request, "conditioningFps", "condFps", 7, 1, 30) as u32),
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, input).await
+    generate_video(api, settings, job, backend, &request.advanced, input).await
 }
 
 // ---------------------------------------------------------------------------
@@ -7046,7 +7068,7 @@ async fn generate_wan_vace_engine(
         control_scale: Some(advanced::f32(&request.advanced, "conditioningScale", 1.0)),
         ..VideoGenInput::default()
     };
-    let decoded = generate_video(api, settings, job, backend, input).await?;
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
     let status = replacement_status_value(
         &track,
         track_id,
@@ -7442,7 +7464,7 @@ async fn generate_wan_vace_extend_bridge(
         control_scale: Some(advanced::f32(&request.advanced, "conditioningScale", 1.0)),
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, input).await
+    generate_video(api, settings, job, backend, &request.advanced, input).await
 }
 
 #[cfg(test)]
@@ -10522,6 +10544,27 @@ mod tests {
             .map(|status| status.success())
             .unwrap_or(false)
     }
+
+    /// F-118: video upscale accepts only 2x and 4x. Any other factor is rejected with a clear error
+    /// rather than silently coerced to 2x (which produced a quietly-different output). Compiled on
+    /// both the macOS and candle lanes, matching the gate on [`resolve_video_upscale_factor`].
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn video_upscale_factor_accepts_2_and_4_rejects_others() {
+        assert_eq!(resolve_video_upscale_factor(2).expect("2x"), 2);
+        assert_eq!(resolve_video_upscale_factor(4).expect("4x"), 4);
+        for bad in [0u8, 1, 3, 5, 8] {
+            let err = resolve_video_upscale_factor(bad)
+                .expect_err("unsupported factor must be rejected, not coerced");
+            assert!(
+                matches!(err, WorkerError::InvalidPayload(ref m) if m.contains("factor 2 or 4")),
+                "factor {bad} should yield a clear InvalidPayload error, got {err:?}"
+            );
+        }
+    }
 }
 
 // Candle video lane labeling + engine-mapping unit tests (sc-5099). Windows/candle-gated; pure maps.
@@ -10640,4 +10683,5 @@ mod candle_video_label_tests {
             );
         }
     }
+
 }
