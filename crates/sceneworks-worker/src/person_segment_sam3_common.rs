@@ -187,21 +187,43 @@ pub(crate) fn select_object<F: Sam3FrameOutput>(
 /// Binarize a `grid×grid` SAM3 mask (logit `> 0`) to a 0/255 buffer, then resize it to
 /// `width×height` (bilinear) and re-threshold to a clean binary `L` mask — the per-clip-frame
 /// output the orchestrator writes. Inverts SAM3's uniform 1008² squash back to the frame aspect.
-pub(crate) fn mask_to_frame(mask_logits: &[f32], grid: usize, width: u32, height: u32) -> Vec<u8> {
+///
+/// Returns an `Engine` error when the logit buffer's length doesn't match `grid×grid` (so
+/// `GrayImage::from_raw` would fail): the old code returned an empty vec there, which is the
+/// exact sentinel the orchestrator reads as "object absent → box fallback" — so a malformed
+/// mask silently degraded to no-mask instead of surfacing (sc-8905, F-103). Legitimate
+/// per-frame absence is signalled by the *caller* (no matching object id), never by this
+/// helper swallowing a shape error.
+pub(crate) fn mask_to_frame(
+    mask_logits: &[f32],
+    grid: usize,
+    width: u32,
+    height: u32,
+) -> WorkerResult<Vec<u8>> {
+    if mask_logits.len() != grid * grid {
+        return Err(crate::WorkerError::Engine(format!(
+            "sam3 mask has {} logits, expected grid×grid = {}",
+            mask_logits.len(),
+            grid * grid
+        )));
+    }
     let bin: Vec<u8> = mask_logits
         .iter()
         .map(|&v| if v > 0.0 { 255 } else { 0 })
         .collect();
-    let Some(small) = image::GrayImage::from_raw(grid as u32, grid as u32, bin) else {
-        return Vec::new();
-    };
+    let small = image::GrayImage::from_raw(grid as u32, grid as u32, bin).ok_or_else(|| {
+        crate::WorkerError::Engine(format!(
+            "sam3 mask buffer ({}) does not fit a {grid}×{grid} GrayImage",
+            grid * grid
+        ))
+    })?;
     let resized =
         image::imageops::resize(&small, width, height, image::imageops::FilterType::Triangle);
-    resized
+    Ok(resized
         .into_raw()
         .into_iter()
         .map(|v| if v > 127 { 255 } else { 0 })
-        .collect()
+        .collect())
 }
 
 /// Normalized centroid-x (0..1) of a SAM3 low-res mask's foreground (logit `> 0`); `None` if the
@@ -344,10 +366,23 @@ mod tests {
                 logits[y * grid + x] = 1.0;
             }
         }
-        let out = mask_to_frame(&logits, grid, 8, 8);
+        let out = mask_to_frame(&logits, grid, 8, 8).expect("well-formed grid resizes");
         assert_eq!(out.len(), 64);
         assert!(out.iter().all(|&v| v == 0 || v == 255), "output is binary");
         assert_eq!(out[0], 255, "top-left corner is foreground");
         assert_eq!(out[63], 0, "bottom-right corner is background");
+    }
+
+    /// sc-8905 / F-103: a logit buffer whose length doesn't match grid×grid returns an `Engine`
+    /// error, not the empty-vec sentinel the orchestrator reads as "object absent → box
+    /// fallback". Previously a malformed mask silently degraded to no-mask.
+    #[test]
+    fn mask_to_frame_rejects_mismatched_grid_length() {
+        // grid says 4×4 (16 logits) but only 10 are supplied.
+        let result = mask_to_frame(&[1.0f32; 10], 4, 8, 8);
+        assert!(
+            matches!(result, Err(crate::WorkerError::Engine(ref m)) if m.contains("logits")),
+            "mismatched grid length must be rejected, got {result:?}"
+        );
     }
 }

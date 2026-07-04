@@ -269,7 +269,18 @@ pub(crate) fn propagate_track_blocking(
             let mask = predictor
                 .mask_to_video_res(&state, low)
                 .map_err(|e| WorkerError::Engine(format!("sam2 mask resize: {e}")))?;
-            out[*frame_idx as usize] = mask.as_slice::<u8>().to_vec();
+            // Bounds-check the predictor's returned frame index rather than trusting it:
+            // a negative i32 would wrap via `as usize` and an out-of-range index would
+            // panic on `out[..]`, unwinding the blocking task (media_jobs would absorb it
+            // as a silent "degraded"). Surface an `Engine` error instead (sc-8905, F-103).
+            let idx = usize::try_from(*frame_idx).ok().filter(|&i| i < out.len());
+            let Some(idx) = idx else {
+                return Err(WorkerError::Engine(format!(
+                    "sam2 propagate returned frame index {frame_idx} out of range 0..{}",
+                    out.len()
+                )));
+            };
+            out[idx] = mask.as_slice::<u8>().to_vec();
         }
         Ok(out)
     };
