@@ -40,6 +40,7 @@ fn image_job(payload: Map<String, Value>) -> CreateJob {
         source_job_id: None,
         duplicate_of_job_id: None,
         attempts: 1,
+        initial_status: None,
     }
 }
 
@@ -97,6 +98,245 @@ fn job_lifecycle_create_claim_complete() {
     assert_eq!(completed.result, object(json!({ "assetIds": ["asset-1"] })));
     assert_eq!(worker.status, WorkerStatus::Idle);
     assert_eq!(worker.current_job_id, None);
+}
+
+/// An Ideogram auto-caption image job (sc-9120). Created NON-claimable in `pending_caption`.
+fn pending_caption_job(payload: Value) -> CreateJob {
+    CreateJob {
+        initial_status: Some(JobStatus::PendingCaption),
+        ..image_job(object(payload))
+    }
+}
+
+/// A `prompt_refine` magic-prompt job, mirroring what the API's caption watcher enqueues.
+fn magic_prompt_job(prompt: &str, aspect_ratio: &str) -> CreateJob {
+    CreateJob {
+        job_type: JobType::PromptRefine,
+        project_id: None,
+        project_name: None,
+        payload: object(json!({
+            "task": "magic_prompt",
+            "prompt": prompt,
+            "aspectRatio": aspect_ratio,
+        })),
+        requested_gpu: "auto".to_owned(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+        initial_status: None,
+    }
+}
+
+/// sc-9120: a job created in `pending_caption` is persisted with that status/stage and is NOT
+/// claimable by a worker (the claim SELECT is hard `where status='queued'`), so the caption can be
+/// produced async without a worker ever seeing the un-rewritten prompt.
+#[test]
+fn pending_caption_job_is_not_claimable() {
+    let store = store("pending-caption-not-claimable");
+    register_image_worker(&store);
+    let created = store
+        .create_job(pending_caption_job(
+            json!({ "prompt": "a fox", "model": "ideogram_4" }),
+        ))
+        .expect("job creates");
+    assert_eq!(created.status, JobStatus::PendingCaption);
+    assert_eq!(created.stage, ProgressStage::PendingCaption);
+
+    // A worker must not be able to claim it while it is pending.
+    assert!(
+        store
+            .claim_next_job("worker-1")
+            .expect("claim runs")
+            .is_none(),
+        "a pending_caption job must never be claimed"
+    );
+
+    // It still counts as an in-flight (non-terminal) job in the queue summary.
+    let summary = store.queue_summary().expect("summary");
+    assert_eq!(
+        summary.counts.get(&JobStatus::PendingCaption).copied(),
+        Some(1)
+    );
+    assert!(summary.active_jobs.iter().any(|job| job.id == created.id));
+}
+
+/// sc-9120: promoting with a rewritten payload flips the job to `queued` (claimable) and replaces the
+/// stored prompt with the rich caption; the worker then claims it normally.
+#[test]
+fn promote_pending_caption_rewrites_prompt_and_queues() {
+    let store = store("promote-caption-rewrite");
+    register_image_worker(&store);
+    let created = store
+        .create_job(pending_caption_job(
+            json!({ "prompt": "a fox", "model": "ideogram_4" }),
+        ))
+        .expect("job creates");
+
+    let mut new_payload = created.payload.clone();
+    new_payload.insert(
+        "prompt".to_owned(),
+        Value::String(r#"{"compositional_deconstruction": {}}"#.to_owned()),
+    );
+    let promotion = store
+        .promote_pending_caption_job(&created.id, Some(new_payload))
+        .expect("promotes");
+    assert!(promotion.promoted, "the pending job should be promoted");
+    assert_eq!(promotion.job.status, JobStatus::Queued);
+    assert_eq!(
+        promotion.job.payload.get("prompt").and_then(Value::as_str),
+        Some(r#"{"compositional_deconstruction": {}}"#)
+    );
+
+    // Now claimable.
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim runs")
+        .expect("promoted job is claimable");
+    assert_eq!(claimed.id, created.id);
+}
+
+/// sc-9120: promoting with `None` (expansion unavailable/timeout) degrades to `queued` with the
+/// ORIGINAL prompt untouched — never leaving a stranded pending_caption row.
+#[test]
+fn promote_pending_caption_degrades_to_original_prompt() {
+    let store = store("promote-caption-degrade");
+    let created = store
+        .create_job(pending_caption_job(
+            json!({ "prompt": "a fox", "model": "ideogram_4" }),
+        ))
+        .expect("job creates");
+    let promotion = store
+        .promote_pending_caption_job(&created.id, None)
+        .expect("promotes");
+    assert!(promotion.promoted);
+    assert_eq!(promotion.job.status, JobStatus::Queued);
+    assert_eq!(
+        promotion.job.payload.get("prompt").and_then(Value::as_str),
+        Some("a fox"),
+        "the original prompt must be preserved on degrade"
+    );
+}
+
+/// sc-9120: the promotion is race-free — a job that was canceled while its caption was expanding is
+/// NOT resurrected. The guarded UPDATE (`where status='pending_caption'`) matches nothing, so the
+/// promotion reports `promoted = false` and the job stays canceled.
+#[test]
+fn promote_pending_caption_does_not_resurrect_a_canceled_job() {
+    let store = store("promote-caption-canceled");
+    let created = store
+        .create_job(pending_caption_job(
+            json!({ "prompt": "a fox", "model": "ideogram_4" }),
+        ))
+        .expect("job creates");
+    // A pending_caption job cancels immediately (no worker to acknowledge), like `queued`.
+    let canceled = store.cancel_job(&created.id).expect("cancels");
+    assert_eq!(canceled.status, JobStatus::Canceled);
+
+    let promotion = store
+        .promote_pending_caption_job(&created.id, None)
+        .expect("promotion runs");
+    assert!(
+        !promotion.promoted,
+        "a canceled job must not be promoted back to queued"
+    );
+    assert_eq!(
+        promotion.job.status,
+        JobStatus::Canceled,
+        "the job must stay canceled"
+    );
+}
+
+/// sc-9120: a mid-flight API restart loses the caption watcher, so the startup recovery must flip any
+/// stranded `pending_caption` row to `queued` (degraded to the original prompt) rather than stranding
+/// it un-claimable. Active jobs still go to `interrupted`; a `queued` job is left alone.
+#[test]
+fn startup_recovers_stranded_pending_caption_to_queued() {
+    let store = store("startup-recover-pending");
+    register_image_worker(&store);
+    let pending = store
+        .create_job(pending_caption_job(
+            json!({ "prompt": "a fox", "model": "ideogram_4" }),
+        ))
+        .expect("pending job creates");
+    // A separate job taken into an ACTIVE status: it must be INTERRUPTED, not degraded — proving the
+    // pending_caption recovery is distinct from (and runs alongside) the active-job interrupt sweep.
+    let active = store
+        .create_job(image_job(object(json!({ "prompt": "active" }))))
+        .expect("active job creates");
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim runs")
+        .expect("the queued job is claimed");
+    assert_eq!(claimed.id, active.id);
+
+    store
+        .mark_interrupted_on_startup()
+        .expect("startup recovery runs");
+
+    let recovered = store.get_job(&pending.id).expect("pending job loads");
+    assert_eq!(
+        recovered.status,
+        JobStatus::Queued,
+        "a stranded pending_caption job must be recovered to queued"
+    );
+    assert_eq!(
+        recovered.payload.get("prompt").and_then(Value::as_str),
+        Some("a fox"),
+        "recovery keeps the original prompt"
+    );
+    // The active job is interrupted by the same sweep.
+    assert_eq!(
+        store.get_job(&active.id).expect("active loads").status,
+        JobStatus::Interrupted
+    );
+}
+
+/// sc-9120: a repeated auto-caption (an impatient client re-POSTing the same image job) reuses an
+/// in-flight refine job instead of stacking a fresh one; a terminal refine job is never reused.
+#[test]
+fn find_reusable_prompt_refine_matches_in_flight_only() {
+    let store = store("reuse-refine-job");
+    let created = store
+        .create_job(magic_prompt_job("a fox on a beach", "16:9"))
+        .expect("refine job creates");
+
+    // An in-flight refine job with the same prompt+aspect is reused.
+    let found = store
+        .find_reusable_prompt_refine_job("a fox on a beach", "16:9")
+        .expect("query runs")
+        .expect("an in-flight refine job matches");
+    assert_eq!(found.id, created.id);
+
+    // A different prompt or aspect does not match.
+    assert!(store
+        .find_reusable_prompt_refine_job("a different scene", "16:9")
+        .expect("query runs")
+        .is_none());
+    assert!(store
+        .find_reusable_prompt_refine_job("a fox on a beach", "1:1")
+        .expect("query runs")
+        .is_none());
+
+    // Once the refine job reaches a terminal state it is no longer reusable.
+    store.cancel_job(&created.id).expect("cancels");
+    assert!(store
+        .find_reusable_prompt_refine_job("a fox on a beach", "16:9")
+        .expect("query runs")
+        .is_none());
+}
+
+/// sc-9120: a job can only be born `queued` or `pending_caption`; any other initial status is a
+/// programmer error and is rejected rather than creating a job mid-lifecycle.
+#[test]
+fn create_job_rejects_illegal_initial_status() {
+    let store = store("illegal-initial-status");
+    let error = store
+        .create_job(CreateJob {
+            initial_status: Some(JobStatus::Running),
+            ..image_job(object(json!({ "prompt": "a fox" })))
+        })
+        .expect_err("running is not a legal initial status");
+    assert!(matches!(error, JobsStoreError::InvalidInitialStatus(_)));
 }
 
 /// sc-2086 — successive progress reports must ratchet the per-job peak GPU
@@ -249,6 +489,7 @@ fn job_snapshot_title_is_derived_from_payload() {
                 source_job_id: None,
                 duplicate_of_job_id: None,
                 attempts: 1,
+                initial_status: None,
             })
             .expect("job creates")
             .id
@@ -357,6 +598,7 @@ fn job_snapshot_title_truncates_long_prompts() {
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
         .expect("job creates")
         .id;
@@ -399,6 +641,7 @@ fn non_gpu_jobs_can_claim_while_gpu_is_busy() {
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
         .expect("download job creates");
 
@@ -452,6 +695,7 @@ fn model_convert_can_claim_while_gpu_is_busy() {
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
         .expect("convert job creates");
 
@@ -500,6 +744,7 @@ fn claim_skips_jobs_not_supported_by_worker_capabilities() {
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
         .expect("download job creates");
 
@@ -548,6 +793,7 @@ fn claim_finds_compatible_job_behind_large_incompatible_prefix() {
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
         .expect("download job creates");
 
@@ -1624,6 +1870,7 @@ fn lora_train_job(requested_gpu: &str, dry_run: bool) -> CreateJob {
         source_job_id: None,
         duplicate_of_job_id: None,
         attempts: 1,
+        initial_status: None,
     }
 }
 
@@ -1768,6 +2015,7 @@ fn image_job_with(payload: Value, requested_gpu: &str) -> CreateJob {
         source_job_id: None,
         duplicate_of_job_id: None,
         attempts: 1,
+        initial_status: None,
     }
 }
 
@@ -1794,6 +2042,7 @@ fn image_edit_job_with(payload: Value, requested_gpu: &str) -> CreateJob {
         source_job_id: None,
         duplicate_of_job_id: None,
         attempts: 1,
+        initial_status: None,
     }
 }
 
@@ -1915,6 +2164,7 @@ fn sensenova_understanding_jobs_defer_to_mlx_worker() {
                 source_job_id: None,
                 duplicate_of_job_id: None,
                 attempts: 1,
+                initial_status: None,
             })
             .expect("job creates");
 
@@ -2448,6 +2698,7 @@ fn job_of(store: &JobsStore, job_type: JobType, payload: Value) -> JobSnapshot {
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
         .expect("job creates")
 }
@@ -3627,6 +3878,7 @@ fn mlx_training_job(
         source_job_id: None,
         duplicate_of_job_id: None,
         attempts: 1,
+        initial_status: None,
     }
 }
 
@@ -3656,6 +3908,7 @@ fn joy_caption_job(requested_gpu: &str) -> CreateJob {
         source_job_id: None,
         duplicate_of_job_id: None,
         attempts: 1,
+        initial_status: None,
     }
 }
 
@@ -4144,6 +4397,7 @@ fn video_job_typed(job_type: JobType, payload: Value, requested_gpu: &str) -> Cr
         source_job_id: None,
         duplicate_of_job_id: None,
         attempts: 1,
+        initial_status: None,
     }
 }
 
@@ -4925,6 +5179,7 @@ fn image_detail_routes_to_mlx_worker() {
         source_job_id: None,
         duplicate_of_job_id: None,
         attempts: 1,
+        initial_status: None,
     };
 
     for model in ["sdxl", "realvisxl"] {

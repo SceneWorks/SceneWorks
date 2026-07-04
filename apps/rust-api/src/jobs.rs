@@ -36,6 +36,7 @@ pub(crate) async fn create_job(
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
     })
     .await?;

@@ -4061,9 +4061,9 @@ async fn image_job_route_threads_reference_asset_ids() {
 }
 
 /// Poll the job list until an Ideogram magic-prompt expansion (`prompt_refine`) job other than
-/// `exclude` appears, and return its id. The image-job handler is blocked awaiting this job, so it
-/// materializes promptly. `exclude` lets a test wait for a *re-sampled* second job after completing
-/// the first.
+/// `exclude` appears, and return its id. The image-job POST returns immediately (fully async,
+/// sc-9120) and a background watcher enqueues this job, so it materializes promptly. `exclude` lets a
+/// test wait for a *re-sampled* second job after completing the first.
 async fn wait_for_prompt_refine_job_excluding(app: &axum::Router, exclude: Option<&str>) -> String {
     for _ in 0..250 {
         let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
@@ -4104,37 +4104,104 @@ async fn complete_prompt_refine_job(app: &axum::Router, job_id: &str, result: Va
     assert_eq!(status, StatusCode::OK);
 }
 
+/// Either the image job left `pending_caption` (the watcher promoted it) or a new `prompt_refine`
+/// re-sample appeared first. Lets a test drive the bounded re-sample loop without racing the two
+/// async events (sc-9120).
+enum PendingOrRefine {
+    Promoted(Value),
+    Refine(String),
+}
+
+/// Poll until EITHER the image job leaves `pending_caption` OR a `prompt_refine` job other than
+/// `exclude_refine` appears — whichever happens first. Used by the bounded-resample degrade test to
+/// feed each attempt a prose reply and then observe the eventual degrade to `queued` (sc-9120).
+async fn wait_for_job_out_of_pending_caption_or_refine(
+    app: &axum::Router,
+    job_id: &str,
+    exclude_refine: Option<&str>,
+) -> PendingOrRefine {
+    for _ in 0..250 {
+        let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+        let items = jobs.as_array().expect("jobs is an array");
+        // Prefer promotion when the image job has already left pending_caption.
+        if let Some(job) = items.iter().find(|job| job["id"] == job_id) {
+            if job["status"] != "pending_caption" {
+                return PendingOrRefine::Promoted(job.clone());
+            }
+        }
+        if let Some(id) = items
+            .iter()
+            .filter(|job| job["type"] == "prompt_refine")
+            .find_map(|job| job["id"].as_str().filter(|id| Some(*id) != exclude_refine))
+        {
+            return PendingOrRefine::Refine(id.to_owned());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("neither a promotion nor a new refine job appeared for {job_id}");
+}
+
+/// Poll a job by id until it leaves `pending_caption` (the background caption watcher promoted it),
+/// and return its final snapshot. Used by the fully-async Ideogram tests (sc-9120): the POST returns
+/// immediately in `pending_caption`, and the prompt rewrite lands on a later async promotion.
+async fn wait_for_job_out_of_pending_caption(app: &axum::Router, job_id: &str) -> Value {
+    for _ in 0..250 {
+        let (status, job) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/jobs/{job_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        if job["status"] != "pending_caption" {
+            return job;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the pending_caption job {job_id} was never promoted out of pending_caption");
+}
+
 #[tokio::test]
-async fn ideogram_plain_text_job_is_rich_auto_captioned_before_dispatch() {
-    // sc-6519: a direct/headless plain-text Ideogram 4 job (no UI auto-expand) is rich-auto-captioned
-    // BEFORE it dispatches — the API runs the same separate magic_prompt expansion the web runs and
-    // rewrites the job's prompt to the rich JSON caption, matching the UI path. The image job is held
-    // (not yet created) while the expansion runs, so there is no 3B/Ideogram co-residency.
+async fn ideogram_plain_text_job_returns_immediately_in_pending_caption() {
+    // sc-9120: a direct/headless plain-text Ideogram 4 job returns 201 IMMEDIATELY in the non-claimable
+    // `pending_caption` status — the POST no longer waits on the magic-prompt expansion at all. A
+    // background watcher then runs the same separate expansion the web runs, rewrites the prompt to the
+    // rich JSON caption, and promotes the job to `queued`, so the worker only ever sees it once queued.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let submit = {
-        let app = app.clone();
-        tokio::spawn(async move {
-            request(
-                app,
-                "POST",
-                "/api/v1/image/jobs",
-                json!({
-                    "projectId": "project-1",
-                    "mode": "text_to_image",
-                    "prompt": "a red fox in a snowy forest",
-                    "model": "ideogram_4",
-                    "count": 1,
-                    "seed": 7
-                }),
-            )
-            .await
-        })
-    };
+    // The POST is NOT spawned/awaited concurrently — it must return on its own, promptly.
+    let (status, image_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "a red fox in a snowy forest",
+            "model": "ideogram_4",
+            "count": 1,
+            "seed": 7
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(image_job["type"], "image_generate");
+    assert_eq!(
+        image_job["status"], "pending_caption",
+        "the POST must return immediately in pending_caption, not wait on the caption"
+    );
+    // Still the ORIGINAL prompt at this point — the rewrite happens on the async promotion.
+    assert_eq!(
+        image_job["payload"]["prompt"],
+        "a red fox in a snowy forest"
+    );
+    let image_job_id = image_job["id"].as_str().expect("job id").to_owned();
 
+    // The background watcher enqueues the magic-prompt expansion carrying the plain prompt, the
+    // magic_prompt task, and the derived aspect ratio.
     let refine_id = wait_for_prompt_refine_job(&app).await;
-    // The expansion job carries the plain prompt, the magic_prompt task, and the derived aspect ratio.
     let (status, refine_job) = request(
         app.clone(),
         "GET",
@@ -4154,55 +4221,40 @@ async fn ideogram_plain_text_job_is_rich_auto_captioned_before_dispatch() {
     // Complete the expansion with a rich caption. The unclaimed job has no owner, so the progress
     // report omits a workerId (matching the store's `(None, None)` ownership rule).
     let caption = r#"{"high_level_description": "a red fox", "compositional_deconstruction": {"background": "a snowy forest at golden hour", "elements": []}}"#;
-    let (status, _) = request(
-        app.clone(),
-        "POST",
-        &format!("/api/v1/jobs/{refine_id}/progress"),
-        json!({
-            "status": "completed",
-            "stage": "completed",
-            "progress": 1,
-            "message": "Caption ready.",
-            "result": { "refinedPrompt": caption }
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
+    complete_prompt_refine_job(&app, &refine_id, json!({ "refinedPrompt": caption })).await;
 
-    // The image job now dispatches with the rich caption as its prompt.
-    let (status, image_job) = submit.await.expect("submit task joins");
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(image_job["type"], "image_generate");
-    assert_eq!(image_job["payload"]["model"], "ideogram_4");
-    assert_eq!(image_job["payload"]["prompt"], caption);
+    // The watcher now promotes the image job to `queued` with the rich caption as its prompt.
+    let promoted = wait_for_job_out_of_pending_caption(&app, &image_job_id).await;
+    assert_eq!(promoted["status"], "queued");
+    assert_eq!(promoted["payload"]["model"], "ideogram_4");
+    assert_eq!(promoted["payload"]["prompt"], caption);
 }
 
 #[tokio::test]
 async fn ideogram_plain_text_job_degrades_to_original_prompt_when_expansion_fails() {
-    // sc-6519 graceful degradation: if the magic_prompt expansion fails (e.g. the refiner is not
-    // staged), the image job still dispatches with the ORIGINAL prompt — the worker's format-guard +
-    // placeholder reseed net (sc-6501) remains the fallback, so a render is always produced.
+    // sc-9120 graceful degradation: if the magic_prompt expansion fails (e.g. the refiner is not
+    // staged), the background watcher still promotes the image job to `queued` with the ORIGINAL prompt
+    // — the worker's format-guard + placeholder reseed net (sc-6501) remains the fallback, so the job
+    // is never stranded in pending_caption and a render is always produced.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let submit = {
-        let app = app.clone();
-        tokio::spawn(async move {
-            request(
-                app,
-                "POST",
-                "/api/v1/image/jobs",
-                json!({
-                    "projectId": "project-1",
-                    "mode": "text_to_image",
-                    "prompt": "a red fox in a snowy forest",
-                    "model": "ideogram_4",
-                    "seed": 7
-                }),
-            )
-            .await
-        })
-    };
+    let (status, image_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "a red fox in a snowy forest",
+            "model": "ideogram_4",
+            "seed": 7
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(image_job["status"], "pending_caption");
+    let image_job_id = image_job["id"].as_str().expect("job id").to_owned();
 
     let refine_id = wait_for_prompt_refine_job(&app).await;
     let (status, _) = request(
@@ -4220,73 +4272,188 @@ async fn ideogram_plain_text_job_degrades_to_original_prompt_when_expansion_fail
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let (status, image_job) = submit.await.expect("submit task joins");
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(image_job["type"], "image_generate");
-    assert_eq!(
-        image_job["payload"]["prompt"],
-        "a red fox in a snowy forest"
-    );
+    let promoted = wait_for_job_out_of_pending_caption(&app, &image_job_id).await;
+    assert_eq!(promoted["status"], "queued");
+    assert_eq!(promoted["type"], "image_generate");
+    assert_eq!(promoted["payload"]["prompt"], "a red fox in a snowy forest");
 }
 
 #[tokio::test]
-async fn ideogram_plain_text_job_degrades_on_invalid_caption_without_resampling() {
-    // sc-8818: the auto-caption runs INLINE in the image-job POST, so it is capped to a SINGLE bounded
-    // attempt (MAX_CAPTION_ATTEMPTS = 1) to keep the request from hanging on repeated re-samples of a
-    // stochastic 3B model. A completed-but-invalid expansion therefore degrades straight to the ORIGINAL
-    // prompt (the worker's format-guard + reseed net recovers it) and does NOT enqueue a second refine
-    // job — so an impatient client's retries can't stack unbounded magic-prompt jobs. (This tightens the
-    // prior sc-6519 behavior, which re-sampled up to 3× and could hold the POST for minutes.)
+async fn ideogram_plain_text_job_degrades_on_invalid_caption_after_bounded_resamples() {
+    // sc-9120: the expansion runs in a BACKGROUND task (no HTTP connection held), so a completed-but-
+    // invalid caption may be re-sampled a small, bounded number of times (MAX_CAPTION_ATTEMPTS). When
+    // every attempt returns prose (not a caption), the watcher degrades the image job to `queued` with
+    // the ORIGINAL prompt (the worker's reseed net recovers it). The re-sample budget is small and
+    // bounded, so an impatient client's retries can't stack unbounded magic-prompt jobs.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let submit = {
-        let app = app.clone();
-        tokio::spawn(async move {
-            request(
-                app,
-                "POST",
-                "/api/v1/image/jobs",
-                json!({
-                    "projectId": "project-1",
-                    "mode": "text_to_image",
-                    "prompt": "a red fox in a snowy forest",
-                    "model": "ideogram_4",
-                    "seed": 7
-                }),
-            )
-            .await
-        })
-    };
-
-    // The single expansion attempt returns prose, not a caption.
-    let first = wait_for_prompt_refine_job(&app).await;
-    complete_prompt_refine_job(
-        &app,
-        &first,
-        json!({ "refinedPrompt": "just a fox, nothing structured" }),
+    let (status, image_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "a red fox in a snowy forest",
+            "model": "ideogram_4",
+            "seed": 7
+        }),
     )
     .await;
-
-    // The image job dispatches PROMPTLY with the original prompt — no second refine job is enqueued.
-    let (status, image_job) = submit.await.expect("submit task joins");
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(
-        image_job["payload"]["prompt"],
-        "a red fox in a snowy forest"
-    );
+    assert_eq!(image_job["status"], "pending_caption");
+    let image_job_id = image_job["id"].as_str().expect("job id").to_owned();
 
-    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
-    let refine_jobs = jobs
+    // Feed every re-sample a prose (non-caption) reply until the watcher exhausts its budget and
+    // degrades. Completing each refine job unblocks the next attempt (a fresh refine job).
+    let mut previous: Option<String> = None;
+    loop {
+        let job =
+            wait_for_job_out_of_pending_caption_or_refine(&app, &image_job_id, previous.as_deref())
+                .await;
+        match job {
+            PendingOrRefine::Promoted(promoted) => {
+                // Degraded to the original prompt once the budget was exhausted.
+                assert_eq!(promoted["status"], "queued");
+                assert_eq!(promoted["payload"]["prompt"], "a red fox in a snowy forest");
+                break;
+            }
+            PendingOrRefine::Refine(refine_id) => {
+                complete_prompt_refine_job(
+                    &app,
+                    &refine_id,
+                    json!({ "refinedPrompt": "just a fox, nothing structured" }),
+                )
+                .await;
+                previous = Some(refine_id);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn pending_caption_ideogram_job_is_cancelable() {
+    // sc-9120: a pending_caption job must be cancelable — it goes straight to `canceled` (no worker to
+    // acknowledge), and a subsequent caption promotion does NOT resurrect it (the guarded UPDATE only
+    // matches a still-pending row).
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, image_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "a red fox in a snowy forest",
+            "model": "ideogram_4",
+            "seed": 7
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(image_job["status"], "pending_caption");
+    let image_job_id = image_job["id"].as_str().expect("job id").to_owned();
+
+    // Cancel while still pending — it terminates immediately.
+    let (status, canceled) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{image_job_id}/cancel"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(canceled["status"], "canceled");
+
+    // Even if the background watcher's expansion later completes and it tries to promote, the canceled
+    // job must NOT flip back to queued. Complete the refine job it enqueued and confirm the image job
+    // stays canceled.
+    let refine_id = wait_for_prompt_refine_job(&app).await;
+    let caption =
+        r#"{"compositional_deconstruction": {"background": "a snowy forest", "elements": []}}"#;
+    complete_prompt_refine_job(&app, &refine_id, json!({ "refinedPrompt": caption })).await;
+    // Give the watcher a moment to attempt (and no-op) the promotion.
+    for _ in 0..25 {
+        let (_, job) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/jobs/{image_job_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(
+            job["status"], "canceled",
+            "a canceled pending_caption job must never be resurrected by a late promotion"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn concurrent_ideogram_captions_share_one_refine_job() {
+    // sc-9120: two identical plain-text Ideogram jobs (an impatient client re-POSTing) must reuse ONE
+    // in-flight magic-prompt refine job rather than stacking a fresh one each time. Both image jobs land
+    // in pending_caption; the second caption watcher reuses the first's refine job.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let post = |app: axum::Router| async move {
+        request(
+            app,
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": "project-1",
+                "mode": "text_to_image",
+                "prompt": "a red fox in a snowy forest",
+                "model": "ideogram_4",
+                "seed": 7
+            }),
+        )
+        .await
+    };
+
+    let (status_a, job_a) = post(app.clone()).await;
+    assert_eq!(status_a, StatusCode::CREATED);
+    assert_eq!(job_a["status"], "pending_caption");
+    // Wait for the first refine job to be in flight before the second POST, so the reuse path is hit
+    // deterministically.
+    let refine_id = wait_for_prompt_refine_job(&app).await;
+
+    let (status_b, job_b) = post(app.clone()).await;
+    assert_eq!(status_b, StatusCode::CREATED);
+    assert_eq!(job_b["status"], "pending_caption");
+    assert_ne!(job_a["id"], job_b["id"], "two distinct image jobs");
+
+    // Let the second watcher run its reuse lookup, then assert exactly one refine job exists.
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let refine_ids: Vec<String> = jobs
         .as_array()
         .expect("jobs is an array")
         .iter()
         .filter(|job| job["type"] == "prompt_refine")
-        .count();
+        .filter_map(|job| job["id"].as_str().map(str::to_owned))
+        .collect();
     assert_eq!(
-        refine_jobs, 1,
-        "a completed-but-invalid caption must NOT be re-sampled into a second refine job (sc-8818)"
+        refine_ids,
+        vec![refine_id.clone()],
+        "the second identical caption must reuse the in-flight refine job, not stack a new one"
     );
+
+    // Completing the shared refine job promotes BOTH image jobs to queued with the rich caption.
+    let caption =
+        r#"{"compositional_deconstruction": {"background": "a snowy forest", "elements": []}}"#;
+    complete_prompt_refine_job(&app, &refine_id, json!({ "refinedPrompt": caption })).await;
+    let a = wait_for_job_out_of_pending_caption(&app, job_a["id"].as_str().unwrap()).await;
+    let b = wait_for_job_out_of_pending_caption(&app, job_b["id"].as_str().unwrap()).await;
+    assert_eq!(a["status"], "queued");
+    assert_eq!(a["payload"]["prompt"], caption);
+    assert_eq!(b["status"], "queued");
+    assert_eq!(b["payload"]["prompt"], caption);
 }
 
 #[tokio::test]

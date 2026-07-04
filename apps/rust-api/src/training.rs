@@ -478,6 +478,7 @@ pub(crate) async fn create_training_dataset_caption_job(
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
     })
     .await?;
@@ -568,6 +569,7 @@ pub(crate) async fn create_training_dataset_analysis_job(
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
     })
     .await?;
@@ -661,6 +663,7 @@ pub(crate) async fn create_training_dataset_face_analysis_job(
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
     })
     .await?;
@@ -839,6 +842,7 @@ pub(crate) async fn create_training_dataset_upscale_job(
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
     })
     .await?;
@@ -1346,6 +1350,7 @@ pub(crate) async fn create_training_job(
                 source_job_id: None,
                 duplicate_of_job_id: None,
                 attempts: 1,
+                initial_status: None,
             },
         )
     })
