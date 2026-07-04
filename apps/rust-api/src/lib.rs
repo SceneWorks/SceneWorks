@@ -1702,6 +1702,33 @@ async fn create_generation_job(
     payload: JsonObject,
     requested_gpu: String,
 ) -> Result<JobSnapshot, ApiError> {
+    create_generation_job_with_status(
+        state,
+        job_type,
+        project_id,
+        project_name,
+        payload,
+        requested_gpu,
+        None,
+    )
+    .await
+}
+
+/// Like [`create_generation_job`], but creates the job in an explicit initial status.
+/// `None` is the default `queued` (immediately claimable); `Some(JobStatus::PendingCaption)`
+/// creates the job NON-claimable so an API-side async pre-step can rewrite its payload and
+/// promote it to `queued` before any worker sees it (sc-9120, Ideogram 4 auto-caption). The
+/// job.updated/queue.updated events fire either way, so a `pending_caption` job appears in the
+/// queue view immediately.
+async fn create_generation_job_with_status(
+    state: AppState,
+    job_type: JobType,
+    project_id: Option<String>,
+    project_name: Option<String>,
+    payload: JsonObject,
+    requested_gpu: String,
+    initial_status: Option<JobStatus>,
+) -> Result<JobSnapshot, ApiError> {
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type,
@@ -1712,6 +1739,7 @@ async fn create_generation_job(
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status,
         })
     })
     .await?;

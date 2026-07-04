@@ -47,6 +47,11 @@ pub const ACTIVE_STATUSES: &[&str] = &[
 pub const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "canceled", "interrupted"];
 pub const JOB_STATUSES: &[&str] = &[
     "queued",
+    // Accepted-but-not-yet-claimable: awaiting the API-side async payload rewrite (Ideogram 4
+    // auto-caption, sc-9120) before it becomes `queued`. Deliberately absent from both
+    // ACTIVE_STATUSES and TERMINAL_STATUSES (like `queued`) so the claim SELECT ignores it and
+    // the queue summary counts it as an in-flight, non-terminal job. See JobStatus::PendingCaption.
+    "pending_caption",
     "preparing",
     "downloading",
     "loading_model",
@@ -155,6 +160,10 @@ pub enum JobsStoreError {
     NotJobOwner {
         job_id: String,
     },
+    /// `create_job` was asked to create a job in a status other than the two
+    /// legal pre-worker statuses (`queued` / `pending_caption`), e.g. a
+    /// mid-lifecycle or terminal status. A programmer error, not user input.
+    InvalidInitialStatus(String),
 }
 
 impl std::fmt::Display for JobsStoreError {
@@ -185,6 +194,10 @@ impl std::fmt::Display for JobsStoreError {
                     "Progress rejected: the reporting worker no longer owns job {job_id}."
                 )
             }
+            Self::InvalidInitialStatus(status) => write!(
+                formatter,
+                "A job can only be created in 'queued' or 'pending_caption' status, not '{status}'."
+            ),
         }
     }
 }
@@ -225,12 +238,45 @@ pub struct CreateJob {
     pub source_job_id: Option<String>,
     pub duplicate_of_job_id: Option<String>,
     pub attempts: u32,
+    /// Status the job is created in. `None` means the default `queued` (immediately
+    /// claimable). `Some(JobStatus::PendingCaption)` creates the job NON-claimable so an
+    /// API-side async pre-step (the Ideogram 4 auto-caption, sc-9120) can rewrite its
+    /// payload and promote it to `queued` before any worker sees it. Only `queued` and
+    /// `pending_caption` are valid initial statuses; any other value is rejected so a job
+    /// can't be born mid-lifecycle (e.g. `running`) or terminal.
+    pub initial_status: Option<JobStatus>,
+}
+
+impl CreateJob {
+    /// The initial status string for the insert, defaulting to `queued`. Enforces the
+    /// invariant that a job is only ever born `queued` or `pending_caption` — the two
+    /// pre-worker statuses — so a caller can't inject a mid-lifecycle or terminal status.
+    fn initial_status_str(&self) -> JobsStoreResult<&'static str> {
+        match &self.initial_status {
+            None | Some(JobStatus::Queued) => Ok("queued"),
+            Some(JobStatus::PendingCaption) => Ok("pending_caption"),
+            Some(other) => Err(JobsStoreError::InvalidInitialStatus(
+                other.as_str().to_owned(),
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct DuplicateJob {
     pub payload_changes: Map<String, Value>,
     pub requested_gpu: Option<String>,
+}
+
+/// Outcome of [`JobsStore::promote_pending_caption_job`] (sc-9120). `promoted` is `true` when the
+/// job was still `pending_caption` and this call transitioned it to `queued`; `false` when the
+/// guarded UPDATE matched nothing because the job had already left `pending_caption` (canceled by
+/// the user, or recovered to `queued` on an API restart) — in which case the caller must NOT treat
+/// the caption as having been applied. `job` is the row's current snapshot either way.
+#[derive(Debug, Clone)]
+pub struct PendingCaptionPromotion {
+    pub promoted: bool,
+    pub job: JobSnapshot,
 }
 
 #[derive(Debug, Clone)]
@@ -378,6 +424,19 @@ impl JobsStore {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let interrupted = self.list_jobs_by_status_on_connection(&transaction, ACTIVE_STATUSES)?;
+        // A `pending_caption` job (sc-9120) is owned by an API-side background task, not a worker,
+        // so an API restart LOSES its caption watcher — the row would otherwise sit un-claimable
+        // forever (it is not `queued`, so no worker claims it, and it is not an ACTIVE status, so
+        // the interrupt sweep above skips it). RECOVER it instead of failing it: promote it to
+        // `queued` with its ORIGINAL prompt (the payload was never rewritten), so the job still
+        // dispatches and the worker's format-guard + reseed net produces a render. Degrading is
+        // strictly better than interrupting: the user's job survives the restart.
+        let stranded_pending: Vec<JobSnapshot> =
+            self.list_jobs_by_status_on_connection(&transaction, &["pending_caption"])?;
+        let stranded_pending_ids = stranded_pending
+            .iter()
+            .map(|job| job.id.clone())
+            .collect::<Vec<_>>();
         let interrupted_ids = interrupted
             .iter()
             .map(|job| job.id.clone())
@@ -401,11 +460,23 @@ impl JobsStore {
             params![now],
         )?;
         transaction.execute(
+            "
+            update jobs
+               set status = 'queued',
+                   stage = 'queued',
+                   message = 'Waiting for an available worker.',
+                   updated_at = ?1
+             where status = 'pending_caption'
+            ",
+            params![now],
+        )?;
+        transaction.execute(
             "update workers set status = 'offline', current_job_id = null where status != 'offline'",
             [],
         )?;
         let updated_jobs = interrupted_ids
             .iter()
+            .chain(stranded_pending_ids.iter())
             .map(|job_id| self.get_job_on_connection(&transaction, job_id))
             .collect::<JobsStoreResult<Vec<_>>>()?;
         transaction.commit()?;
@@ -436,6 +507,99 @@ impl JobsStore {
         let job = self.create_job_on_connection(&transaction, request, Some(id))?;
         transaction.commit()?;
         Ok(job)
+    }
+
+    /// Promote a `pending_caption` job to `queued`, optionally rewriting its payload first
+    /// (sc-9120). This is the ONE method that patches a created job's payload: the Ideogram 4
+    /// auto-caption background task calls it with `Some(new_payload)` once the magic-prompt
+    /// expansion lands (rewriting `payload.prompt` to the rich caption), or with `None` to
+    /// degrade the job to `queued` with its original prompt when the expansion is
+    /// unavailable/times out — either way the job becomes claimable and the worker's
+    /// format-guard + reseed net remains the fallback.
+    ///
+    /// Race-free by construction: it runs under `BEGIN IMMEDIATE` and the UPDATE is guarded by
+    /// `status = 'pending_caption'`, so if the job was canceled (→ `canceled`) or already
+    /// recovered on a restart (→ `queued`) in the meantime, the UPDATE matches zero rows and the
+    /// method reports `promoted = false` WITHOUT clobbering the newer status. The returned
+    /// snapshot always reflects the row's current state.
+    ///
+    /// `new_payload` fully REPLACES the stored payload (the caller reads the current payload,
+    /// rewrites `prompt`, and passes the whole object back), matching how `retry`/`duplicate`
+    /// carry a full payload — there is no partial-merge ambiguity.
+    pub fn promote_pending_caption_job(
+        &self,
+        job_id: &str,
+        new_payload: Option<Map<String, Value>>,
+    ) -> JobsStoreResult<PendingCaptionPromotion> {
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = utc_now();
+        let affected = match new_payload {
+            Some(payload) => transaction.execute(
+                "
+                update jobs
+                   set payload_json = ?1,
+                       status = 'queued',
+                       stage = 'queued',
+                       message = 'Waiting for an available worker.',
+                       updated_at = ?2
+                 where id = ?3 and status = 'pending_caption'
+                ",
+                params![dumps(&payload)?, now, job_id],
+            )?,
+            None => transaction.execute(
+                "
+                update jobs
+                   set status = 'queued',
+                       stage = 'queued',
+                       message = 'Waiting for an available worker.',
+                       updated_at = ?1
+                 where id = ?2 and status = 'pending_caption'
+                ",
+                params![now, job_id],
+            )?,
+        };
+        let job = self.get_job_on_connection(&transaction, job_id)?;
+        transaction.commit()?;
+        Ok(PendingCaptionPromotion {
+            promoted: affected > 0,
+            job,
+        })
+    }
+
+    /// Find an in-flight (non-terminal) `prompt_refine` job whose payload matches the given
+    /// `prompt` + `aspect_ratio`, so a repeated Ideogram auto-caption (an impatient client
+    /// re-POSTing the same image job) can REUSE an already-running magic-prompt expansion instead
+    /// of stacking a fresh refine job every time (sc-9120 acceptance: retries can't pile up
+    /// unbounded refine jobs). Returns the newest such job, or `None` when none is in flight.
+    ///
+    /// Read-only single-SELECT: no write mutex, relies on WAL reader isolation like `list_jobs`
+    /// (sc-8950 / F-148). Matching is by the expander's two inputs — the raw `prompt` and the
+    /// reduced `aspectRatio` label — which are exactly what `enqueue_magic_prompt_job` writes, so
+    /// two requests that would produce the same expansion collapse onto one refine job.
+    pub fn find_reusable_prompt_refine_job(
+        &self,
+        prompt: &str,
+        aspect_ratio: &str,
+    ) -> JobsStoreResult<Option<JobSnapshot>> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(&format!(
+            "
+            select * from jobs
+             where type = 'prompt_refine'
+               and status not in ({terminal})
+             order by created_at desc
+            ",
+            terminal = terminal_statuses_sql()
+        ))?;
+        let candidates = collect_jobs(statement.query_map([], row_to_job)?)?;
+        Ok(candidates.into_iter().find(|job| {
+            let payload = &job.payload;
+            payload.get("task").and_then(Value::as_str) == Some("magic_prompt")
+                && payload.get("prompt").and_then(Value::as_str) == Some(prompt)
+                && payload.get("aspectRatio").and_then(Value::as_str) == Some(aspect_ratio)
+        }))
     }
 
     pub fn list_jobs(
@@ -494,7 +658,13 @@ impl JobsStore {
         }
 
         let now = utc_now();
-        if job.status == JobStatus::Queued {
+        // A `queued` OR `pending_caption` job has no worker to acknowledge the cancel, so it
+        // goes straight to terminal `canceled` here. `pending_caption` (sc-9120) shares this
+        // fast path: no worker owns it, and its background caption watcher promotes only a row
+        // that is STILL `pending_caption` (a race-free guarded UPDATE), so it can't resurrect a
+        // just-canceled job. Any active (worker-owned) status falls to the cooperative branch
+        // below that requests acknowledgement.
+        if job.status == JobStatus::Queued || job.status == JobStatus::PendingCaption {
             transaction.execute(
                 "
                 update jobs
@@ -550,6 +720,10 @@ impl JobsStore {
                 source_job_id: Some(job.id),
                 duplicate_of_job_id: None,
                 attempts: job.attempts + 1,
+                // A retry re-enters the queue claimable: its payload is whatever the original
+                // ran with (already caption-rewritten if it was an Ideogram auto-caption job),
+                // so it never re-enters `pending_caption` (sc-9120).
+                initial_status: None,
             },
             None,
         )?;
@@ -579,6 +753,9 @@ impl JobsStore {
                 source_job_id: None,
                 duplicate_of_job_id: Some(job.id),
                 attempts: 1,
+                // A duplicate copies the (already-rewritten) payload and re-enters the queue
+                // claimable — never `pending_caption` (sc-9120).
+                initial_status: None,
             },
             None,
         )?;
@@ -1530,13 +1707,22 @@ impl JobsStore {
                 format!("job_{job_hex}")
             }
         };
+        // A job is born either `queued` (immediately claimable) or, for an API-side async
+        // pre-step, `pending_caption` (sc-9120) — status and stage move in lockstep, and the
+        // waiting message reflects which gate the job is behind so the queue view reads
+        // correctly before a worker (or the background rewrite) ever touches it.
+        let initial_status = request.initial_status_str()?;
+        let initial_message = match initial_status {
+            "pending_caption" => "Preparing the prompt before dispatch.",
+            _ => "Waiting for an available worker.",
+        };
         connection.execute(
             "
             insert into jobs (
               id, type, status, project_id, project_name, payload_json, result_json,
               requested_gpu, progress, stage, message, attempts, source_job_id,
               duplicate_of_job_id, created_at, updated_at
-            ) values (?1, ?2, 'queued', ?3, ?4, ?5, '{}', ?6, 0, 'queued', ?7, ?8, ?9, ?10, ?11, ?11)
+            ) values (?1, ?2, ?12, ?3, ?4, ?5, '{}', ?6, 0, ?12, ?7, ?8, ?9, ?10, ?11, ?11)
             ",
             params![
                 job_id,
@@ -1545,11 +1731,12 @@ impl JobsStore {
                 request.project_name,
                 dumps(&request.payload)?,
                 requested_gpu,
-                "Waiting for an available worker.",
+                initial_message,
                 request.attempts,
                 request.source_job_id,
                 request.duplicate_of_job_id,
                 now,
+                initial_status,
             ],
         )?;
         self.get_job_on_connection(connection, &job_id)

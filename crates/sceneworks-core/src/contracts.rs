@@ -292,6 +292,19 @@ string_enum! {
 string_enum! {
     pub enum JobStatus {
         Queued => "queued",
+        // A job that has been accepted and persisted but is NOT yet claimable: it is
+        // waiting on an API-side async pre-step to finish rewriting its payload before it
+        // becomes `queued` for the worker (sc-9120). Currently used only by the Ideogram 4
+        // headless auto-caption, which expands a plain prompt into a rich JSON caption in a
+        // background task so the image-job POST returns immediately instead of blocking on
+        // the magic-prompt expansion. Like `queued`, it is deliberately OUT of both
+        // ACTIVE_STATUSES and TERMINAL_STATUSES: the claim SELECT (`where status='queued'`)
+        // never picks it up, and the queue summary counts it as an in-flight (non-terminal)
+        // job. A background watcher always transitions it to `queued` (rewritten or degraded
+        // to the original prompt) or `failed`, and a mid-flight API restart recovers a
+        // stranded row to `queued` (see jobs_store::mark_interrupted_on_startup), so it can
+        // never sit un-claimable forever.
+        PendingCaption => "pending_caption",
         Preparing => "preparing",
         Downloading => "downloading",
         LoadingModel => "loading_model",
@@ -307,6 +320,9 @@ string_enum! {
 string_enum! {
     pub enum ProgressStage {
         Queued => "queued",
+        // Stage twin of JobStatus::PendingCaption (sc-9120): the job is awaiting the
+        // API-side async payload rewrite (Ideogram 4 auto-caption) before it becomes queued.
+        PendingCaption => "pending_caption",
         Preparing => "preparing",
         Downloading => "downloading",
         Importing => "importing",

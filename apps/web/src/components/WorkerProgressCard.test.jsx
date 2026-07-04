@@ -229,6 +229,26 @@ describe("WorkerProgressCard layout", () => {
     expect(labels).toEqual(["Cancel"]);
   });
 
+  it("renders a pending_caption job as an in-flight, cancelable job (sc-9120)", () => {
+    // A pending_caption Ideogram job (awaiting the async prompt rewrite) is non-terminal: it gets a
+    // readable badge and can be canceled before a worker starts, like a queued job.
+    const job = {
+      id: "j",
+      type: "image_generate",
+      status: "pending_caption",
+      progress: 0,
+      attempts: 1,
+      payload: { prompt: "a red fox" },
+    };
+    const handlers = { onCancel: vi.fn(), onRetry: vi.fn(), onDuplicate: vi.fn() };
+    api = render(<WorkerProgressCard job={job} {...handlers} />, makeContext([]));
+    expect(api.container.querySelector(".status-badge").textContent).toBe("Preparing prompt");
+    const labels = Array.from(
+      api.container.querySelectorAll(".worker-progress-card__actions button"),
+    ).map((b) => b.textContent);
+    expect(labels).toEqual(["Cancel"]);
+  });
+
   it("uses resume-first actions for failed model downloads", () => {
     const job = {
       id: "j",
