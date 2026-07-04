@@ -22,8 +22,6 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use gen_core::CancelFlag;
-
 use crate::downloads::DownloadContext;
 use crate::person_segment_sam3::{
     ensure_segmenter_weights, segment_box_blocking, segment_points_blocking,
@@ -39,7 +37,6 @@ use sceneworks_core::project_store::ProjectStore;
 /// test): keep an instance when `σ(logit)·σ(presence) > THRESHOLD`, binarize its mask at `σ > MASK`.
 const SEGMENT_THRESHOLD: f32 = 0.5;
 const SEGMENT_MASK_THRESHOLD: f32 = 0.5;
-const CANCEL_MESSAGE: &str = "Smart-select canceled by user.";
 
 /// Resolve a `sourceAssetId` to its on-disk media path + the asset's `displayName` via the project
 /// sidecar (mirrors `upscale_jobs::resolve_source` / `image_adapters.find_asset_media_path`).
@@ -274,18 +271,27 @@ pub(crate) async fn run_image_segment_job(
         ),
     )
     .await?;
-    let cancel = CancelFlag::new();
     // The source read + full image decode is folded into each blocking task below (sc-8909 / F-107)
     // so it never stalls the async runtime thread; the task returns the decoded dimensions alongside
     // the mask so the `src_w*src_h` GrayImage can be built after.
     // Points → SAM3 tracker single-frame PVS (interactive clicks); box → SAM3 concept detector.
+    //
+    // Cancel is `None` by explicit per-engine decision (sc-8908 / F-106, mirroring the kps/SCRFD note
+    // at `run_blocking_with_heartbeat`): both `segment_points_blocking` and `segment_box_blocking` run
+    // ONE bounded SAM3 forward pass on ONE image (`Sam3Tracker::segment_points` /
+    // `Sam3ImageSegmenter::segment_with_boxes` at the pinned mlx-gen rev take no cancel flag and have
+    // no per-step/per-frame loop for a flag to poll — unlike the video `propagate` path, which does
+    // thread one). A flag here could only be tripped BEFORE the compute starts, which the bounded join
+    // already covers, so passing a `Some(flag)` that the engine never reads was a no-op that merely
+    // read as if the compute were cancelable. Threading a real flag would require a new engine seam for
+    // zero cancellation benefit, so we drop the un-trippable flag instead.
     let (mask, src_w, src_h) = if let Some(points) = points {
         run_blocking_with_heartbeat(
             api,
             settings,
             &job.id,
-            Some(cancel.clone()),
-            CANCEL_MESSAGE,
+            None,
+            "",
             "smart-select task",
             tokio::task::spawn_blocking(move || {
                 let source_image = crate::image_decode::decode_image_any(&source_path)
@@ -307,8 +313,8 @@ pub(crate) async fn run_image_segment_job(
             api,
             settings,
             &job.id,
-            Some(cancel.clone()),
-            CANCEL_MESSAGE,
+            None,
+            "",
             "smart-select task",
             tokio::task::spawn_blocking(move || {
                 let source_image = crate::image_decode::decode_image_any(&source_path)
