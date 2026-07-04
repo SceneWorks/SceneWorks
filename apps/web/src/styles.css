@@ -907,12 +907,28 @@ button:focus-visible {
   color: var(--accent);
 }
 
-/* Accent picker — topbar swatch row */
+/* Accent picker — topbar trigger swatch + dropdown */
 .accent-picker {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
   padding: 0 4px;
+}
+
+/* 2x3 grid of the remaining accents, anchored under the trigger swatch. */
+.accent-picker-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 40;
+  display: grid;
+  grid-template-columns: repeat(3, auto);
+  gap: 8px;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg, 0 8px 24px rgba(0, 0, 0, 0.18));
 }
 
 .accent-swatch {

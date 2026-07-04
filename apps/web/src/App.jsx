@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, isAbortError } from "./api.js";
 import { pollJobToCompletion } from "./pollJob.js";
+import { AccentPicker } from "./components/AccentPicker.jsx";
 import { Icon } from "./components/Icons.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
@@ -34,7 +35,7 @@ import { useAccessGate } from "./hooks/useAccessGate.js";
 import { useJobEvents } from "./hooks/useJobEvents.js";
 import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
-import { ACCENTS, isAccentId } from "./accents.js";
+import { isAccentId } from "./accents.js";
 import {
   dropUpscaledVariants,
   findFoldedAssetById,
@@ -2100,20 +2101,7 @@ export function App() {
           <button className="icon-btn" title="Notifications" type="button">
             <Icon.Bell />
           </button>
-          <div className="accent-picker" role="group" aria-label="Accent color">
-            {ACCENTS.map((option) => (
-              <button
-                aria-label={option.name}
-                aria-pressed={accent === option.id}
-                className={accent === option.id ? "accent-swatch active" : "accent-swatch"}
-                key={option.id}
-                onClick={() => changeAccent(option.id)}
-                style={{ "--sw": option.swatch }}
-                title={option.name}
-                type="button"
-              />
-            ))}
-          </div>
+          <AccentPicker accent={accent} onChange={changeAccent} />
           <button
             className="icon-btn"
             onClick={() => changeTheme(theme === "light" ? "dark" : "light")}
