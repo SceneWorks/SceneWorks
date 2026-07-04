@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
@@ -7,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::asset_index::{
-    find_asset_sidecar_path_on_connection, index_asset_on_connection, normalize_asset,
+    find_asset_sidecar_path_on_connection, index_asset_on_connection, normalize_asset_cached,
+    GenerationSetCache,
 };
 use crate::contracts;
 use crate::project_store::{apply_project_migrations, ProjectStoreError, ProjectStoreResult};
@@ -119,6 +121,10 @@ impl<'a> CharacterStore<'a> {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
 
+        // One connection + asset-summary memo shared across the whole listing, so
+        // an asset referenced by several characters is resolved once rather than
+        // once per (character, reference) pair (sc-8894 / F-092).
+        let mut cache = CharacterHydrationCache::new(&self.project_path)?;
         let mut characters = Vec::new();
         for sidecar_rel in rows {
             let sidecar_path = self.project_path.join(sidecar_rel);
@@ -136,10 +142,11 @@ impl<'a> CharacterStore<'a> {
             {
                 continue;
             }
-            characters.push(hydrate_character(
+            characters.push(hydrate_character_cached(
                 project_id,
                 &self.project_path,
                 character,
+                &mut cache,
             )?);
         }
         characters.sort_by(|left, right| {
@@ -1089,7 +1096,67 @@ fn write_character(
 fn hydrate_character(
     project_id: &str,
     project_path: &Path,
+    character: Value,
+) -> ProjectStoreResult<Value> {
+    // A single connection + caches shared across every reference of this
+    // character, and (via `list_characters`, which threads the same maps)
+    // across every character in a listing. `character_asset_summary`
+    // previously opened a fresh SQLite connection (+ ran migrations) and
+    // re-read the sidecar per reference, so a Character Studio listing was
+    // O(characters x references) connections and sidecar reads (sc-8894 /
+    // F-092).
+    let mut cache = CharacterHydrationCache::new(project_path)?;
+    hydrate_character_cached(project_id, project_path, character, &mut cache)
+}
+
+/// Per-listing caches shared by every `hydrate_character` call so a batch
+/// listing opens the project DB once, applies migrations once, and reads each
+/// referenced asset's sidecar at most once regardless of how many characters or
+/// references point at it (sc-8894 / F-092).
+struct CharacterHydrationCache {
+    connection: Connection,
+    generation_sets: GenerationSetCache,
+    /// asset id -> resolved summary (`None` when the asset has no sidecar), so a
+    /// repeated asset id across references/characters is resolved once.
+    asset_summaries: HashMap<String, Option<Value>>,
+}
+
+impl CharacterHydrationCache {
+    fn new(project_path: &Path) -> ProjectStoreResult<Self> {
+        Ok(Self {
+            connection: connect_project_db(project_path)?,
+            generation_sets: GenerationSetCache::default(),
+            asset_summaries: HashMap::new(),
+        })
+    }
+
+    fn asset_summary(
+        &mut self,
+        project_id: &str,
+        project_path: &Path,
+        asset_id: &str,
+    ) -> ProjectStoreResult<Option<Value>> {
+        if let Some(summary) = self.asset_summaries.get(asset_id) {
+            return Ok(summary.clone());
+        }
+        let summary = character_asset_summary(
+            &self.connection,
+            &mut self.generation_sets,
+            project_id,
+            project_path,
+            asset_id,
+        )?;
+        self.asset_summaries
+            .insert(asset_id.to_owned(), summary.clone());
+        Ok(summary)
+    }
+}
+
+fn hydrate_character_cached(
+    project_id: &str,
+    project_path: &Path,
     mut character: Value,
+    cache: &mut CharacterHydrationCache,
 ) -> ProjectStoreResult<Value> {
     let references = character
         .get("references")
@@ -1102,7 +1169,8 @@ fn hydrate_character(
                 .get("assetId")
                 .and_then(Value::as_str)
                 .and_then(|asset_id| {
-                    character_asset_summary(project_id, project_path, asset_id)
+                    cache
+                        .asset_summary(project_id, project_path, asset_id)
                         .ok()
                         .flatten()
                 })
@@ -1133,14 +1201,18 @@ fn hydrate_character(
 }
 
 fn character_asset_summary(
+    connection: &Connection,
+    generation_sets: &mut GenerationSetCache,
     project_id: &str,
     project_path: &Path,
     asset_id: &str,
 ) -> ProjectStoreResult<Option<Value>> {
-    let Some(sidecar_path) = find_asset_sidecar_path(project_path, asset_id)? else {
+    let Some(sidecar_path) =
+        find_asset_sidecar_path_on_connection(connection, project_path, asset_id)?
+    else {
         return Ok(None);
     };
-    let asset = normalize_asset(project_id, project_path, &sidecar_path)?;
+    let asset = normalize_asset_cached(project_id, project_path, &sidecar_path, generation_sets)?;
     Ok(Some(json!({
         "id": asset.get("id").cloned().unwrap_or(Value::Null),
         "type": asset.get("type").cloned().unwrap_or(Value::Null),
@@ -1237,16 +1309,6 @@ fn remove_asset_references_from_character(
     }
 
     Ok(changed)
-}
-
-/// Thin DB-prep wrapper over the shared resolver in `asset_index` (sc-4272).
-fn find_asset_sidecar_path(
-    project_path: &Path,
-    asset_id: &str,
-) -> ProjectStoreResult<Option<PathBuf>> {
-    let connection = connect_project_db(project_path)?;
-    apply_project_migrations(&connection)?;
-    find_asset_sidecar_path_on_connection(&connection, project_path, asset_id)
 }
 
 fn copy_lora_into_project(
@@ -1600,5 +1662,190 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing top-level key {key} after position {cursor}"));
             cursor += found + key.len();
         }
+    }
+
+    /// sc-8894 (F-092): the per-listing cache resolves an asset summary once and
+    /// serves every later lookup of the same id (across references and
+    /// characters) from memory instead of re-opening the DB + re-reading the
+    /// sidecar. Both a present asset and a missing one (cached as `None`) hit the
+    /// memo on the second lookup.
+    #[test]
+    fn hydration_cache_memoizes_repeated_asset_summaries() {
+        use crate::project_store::ProjectStore;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let store = ProjectStore::new(&data_dir, "test-version");
+        let project = store.create_project("Cache").expect("project creates");
+        let project_path = PathBuf::from(&project.path);
+
+        let asset = store
+            .persist_generated_asset(
+                &project.id,
+                "job-1",
+                "genset_x",
+                &json!({
+                    "assetId": "asset_shared1",
+                    "mediaPath": "assets/images/genset_x/asset_shared1.png",
+                    "mimeType": "image/png",
+                    "width": 64,
+                    "height": 64,
+                    "normalizedWidth": 64,
+                    "normalizedHeight": 64,
+                    "count": 1,
+                    "family": "z-image",
+                    "seed": 1,
+                    "index": 0,
+                    "displayName": "shared #1",
+                    "createdAt": "2026-07-03T00:00:00Z",
+                    "mode": "text_to_image",
+                    "model": "z_image_turbo",
+                    "adapter": "z_image_diffusers",
+                    "prompt": "x",
+                    "loras": [],
+                }),
+            )
+            .expect("asset persists");
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+
+        let mut cache = CharacterHydrationCache::new(&project_path).expect("cache opens");
+
+        // First lookup resolves + memoizes; the summary carries the sidecar facts.
+        let first = cache
+            .asset_summary(&project.id, &project_path, &asset_id)
+            .expect("first lookup")
+            .expect("asset resolves to a summary");
+        assert_eq!(first["id"], json!(asset_id));
+        assert_eq!(first["type"], json!("image"));
+        assert_eq!(first["displayName"], json!("shared #1"));
+        assert_eq!(cache.asset_summaries.len(), 1);
+
+        // Second lookup of the same id is served from the memo, byte-identical.
+        let second = cache
+            .asset_summary(&project.id, &project_path, &asset_id)
+            .expect("second lookup")
+            .expect("asset still resolves");
+        assert_eq!(first, second);
+        assert_eq!(
+            cache.asset_summaries.len(),
+            1,
+            "no new memo entry on a repeat"
+        );
+
+        // A missing asset caches its `None` so a repeated miss is also memoized.
+        assert!(cache
+            .asset_summary(&project.id, &project_path, "asset_absent")
+            .expect("miss lookup")
+            .is_none());
+        assert_eq!(cache.asset_summaries.len(), 2);
+        assert!(cache
+            .asset_summary(&project.id, &project_path, "asset_absent")
+            .expect("repeat miss lookup")
+            .is_none());
+        assert_eq!(
+            cache.asset_summaries.len(),
+            2,
+            "no new memo entry on a repeat miss"
+        );
+    }
+
+    /// sc-8894 (F-092): the caching refactor is behavior-preserving — two
+    /// characters referencing the SAME asset each get the identical hydrated
+    /// `asset` summary through the public `list_characters` (which now shares one
+    /// cache), and `get_character` produces the same summary.
+    #[test]
+    fn list_characters_hydrates_shared_asset_reference_consistently() {
+        use crate::project_store::ProjectStore;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let store = ProjectStore::new(&data_dir, "test-version");
+        let project = store.create_project("Shared Ref").expect("project creates");
+        let project_path = PathBuf::from(&project.path);
+
+        let asset = store
+            .persist_generated_asset(
+                &project.id,
+                "job-1",
+                "genset_x",
+                &json!({
+                    "assetId": "asset_shared2",
+                    "mediaPath": "assets/images/genset_x/asset_shared2.png",
+                    "mimeType": "image/png",
+                    "width": 64,
+                    "height": 64,
+                    "normalizedWidth": 64,
+                    "normalizedHeight": 64,
+                    "count": 1,
+                    "family": "z-image",
+                    "seed": 1,
+                    "index": 0,
+                    "displayName": "shared #2",
+                    "createdAt": "2026-07-03T00:00:00Z",
+                    "mode": "text_to_image",
+                    "model": "z_image_turbo",
+                    "adapter": "z_image_diffusers",
+                    "prompt": "x",
+                    "loras": [],
+                }),
+            )
+            .expect("asset persists");
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+
+        let characters = CharacterStore::new(&data_dir, &project_path);
+        let mut ids = Vec::new();
+        for name in ["Ada", "Bea"] {
+            let created = characters
+                .create_character(
+                    &project.id,
+                    CharacterCreateInput {
+                        name: name.to_owned(),
+                        character_type: "person".to_owned(),
+                        description: String::new(),
+                    },
+                )
+                .expect("character creates");
+            let character_id = created["id"].as_str().expect("character id").to_owned();
+            characters
+                .add_reference(
+                    &project.id,
+                    &character_id,
+                    CharacterReferenceInput {
+                        asset_id: asset_id.clone(),
+                        approved: true,
+                        role: "hero".to_owned(),
+                        notes: String::new(),
+                    },
+                )
+                .expect("reference attaches");
+            ids.push(character_id);
+        }
+
+        let listed = characters
+            .list_characters(&project.id, false)
+            .expect("list hydrates");
+        assert_eq!(listed.len(), 2);
+        for character in &listed {
+            let reference = &character["references"][0];
+            assert_eq!(reference["assetId"], json!(asset_id));
+            let summary = &reference["asset"];
+            assert_eq!(summary["id"], json!(asset_id));
+            assert_eq!(summary["type"], json!("image"));
+            assert_eq!(summary["displayName"], json!("shared #2"));
+        }
+        // Both characters resolved the SAME shared asset to an identical summary.
+        assert_eq!(
+            listed[0]["references"][0]["asset"],
+            listed[1]["references"][0]["asset"]
+        );
+
+        // `get_character` (single-character path) yields the same summary.
+        let single = characters
+            .get_character(&project.id, &ids[0])
+            .expect("get hydrates");
+        assert_eq!(
+            single["references"][0]["asset"],
+            listed[0]["references"][0]["asset"]
+        );
     }
 }
