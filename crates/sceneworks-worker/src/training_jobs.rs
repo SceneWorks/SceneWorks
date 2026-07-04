@@ -135,6 +135,14 @@ fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -> WorkerRes
         "Training baseModelPath",
     )?;
     resolve_training_output_dir(settings, &plan.output.output_dir, "Training outputDir")?;
+    // sc-8878 (F-076): the client-supplied `output.file_name` is joined under the confined
+    // `output_dir` by the engine trainer (`TrainingRequest.file_name`), but only the preview-sample
+    // stem was ever sanitized — a `../…`/absolute `file_name` would escape the confined output dir
+    // and write the adapter anywhere the worker can. Confine it to a single plain path component
+    // (no separators, no `..`, not absolute) with the same primitive the strict-control lanes use
+    // for payload-supplied weight filenames (`safe_weight_filename`). Shared by the dry run and the
+    // real run (both call this), so both reject the same forged filename before any join.
+    safe_weight_filename(&plan.output.file_name, "Training fileName")?;
     let mut missing = Vec::new();
     for item in &plan.dataset.items {
         let image_path = resolve_dataset_item_path(
@@ -1793,6 +1801,55 @@ mod tests {
         assert!(
             resolved.is_ok(),
             "HF-cache model dir should resolve for the real run: {resolved:?}"
+        );
+    }
+
+    /// sc-8878 (F-076): a forged `output.file_name` carrying a path separator / `..` / an absolute
+    /// path must be rejected before the engine joins it under the confined output dir — otherwise the
+    /// adapter write escapes the app-managed output root. The plan is otherwise valid (present dataset
+    /// image, in-root output dir), so only the malicious file name trips the guard.
+    #[test]
+    fn validate_rejects_traversal_file_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        std::fs::create_dir_all(&dataset_root).expect("dataset root");
+        let image = dataset_root.join("image.png");
+        std::fs::write(&image, b"png").expect("image");
+        for bad in [
+            "../evil.safetensors",
+            "../../etc/passwd",
+            "sub/evil.safetensors",
+            "/tmp/evil.safetensors",
+            "..",
+        ] {
+            let mut value = plan_json(
+                dir.path(),
+                "z_image_lora",
+                "z_image_turbo",
+                "lora",
+                &[&image.display().to_string()],
+            );
+            value["output"]["fileName"] = json!(bad);
+            let error = validate_training_plan(&settings, &parse(value))
+                .expect_err(&format!("traversal file name '{bad}' must be rejected"));
+            assert!(
+                error.to_string().contains("Training fileName"),
+                "rejection for '{bad}' should name the field: {error}"
+            );
+        }
+        // A plain single-component file name still validates.
+        let mut ok = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image.display().to_string()],
+        );
+        ok["output"]["fileName"] = json!("my_style.safetensors");
+        assert!(
+            validate_training_plan(&settings, &parse(ok)).is_ok(),
+            "a plain file name should validate"
         );
     }
 
