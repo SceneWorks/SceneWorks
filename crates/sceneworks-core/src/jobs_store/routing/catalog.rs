@@ -590,8 +590,8 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // Microsoft Lens / Lens-Turbo (epic 3164 / sc-5105 MLX; sc-5126 candle): pure T2I family. UNLIKE the
     // other candle families it DOES advertise on-the-fly quant AND LoRA/LoKr, so `candle_quant_lora` is
     // set — the first (and, with SD3.5/Krea, one of the) candle families exempt from the quant/LoRA → torch
-    // fallbacks. Lens was the LAST whole-model torch-only image family (`torch_only_image_model_epic` now
-    // matches nothing).
+    // fallbacks. Lens was the LAST whole-model torch-only image family — once it routed, the per-model
+    // torch-only image epic seam matched nothing and was retired (sc-8951).
     ModelCaps::new("lens", true, true, false, false, true),
     ModelCaps::new("lens_turbo", true, true, false, false, true),
     // Bernini still-image companion (epic 4699 / sc-5424): MLX-only id — `engine_id:"bernini"`
