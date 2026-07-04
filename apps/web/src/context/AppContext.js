@@ -64,6 +64,26 @@ export function useAppLive() {
   return value;
 }
 
+// Non-throwing merge of the three contexts into the flat combined shape. Returns null
+// when NONE of the providers is present (rather than throwing), so a consumer that must
+// degrade gracefully when rendered in isolation (e.g. useAssetBatch's toolbar, which
+// falls back to inert defaults in unit tests) can share the exact merge logic the
+// throwing useAppContext() facade uses. Subscribes to both split contexts, so a caller
+// that reads live fields still re-renders on job/worker ticks — behavior-preserving.
+export function useAppContextOptional() {
+  const staticValue = useContext(AppStaticContext);
+  const liveValue = useContext(AppLiveContext);
+  const combined = useContext(AppContext);
+  return useMemo(() => {
+    // Only the legacy single <AppContext.Provider> present (tests): return it directly so
+    // its identity is preserved and no field is dropped.
+    if (staticValue === null && liveValue === null) {
+      return combined;
+    }
+    return { ...(combined ?? {}), ...(staticValue ?? {}), ...(liveValue ?? {}) };
+  }, [staticValue, liveValue, combined]);
+}
+
 // Backward-compatible combined hook: merges the two split contexts into the flat shape
 // the monolithic context used to expose. Consumers that read live fields (or a mix of
 // live + static) keep using this and lose no field. Consumers that read only static
@@ -76,15 +96,7 @@ export function useAppLive() {
 // When only the legacy combined <AppContext.Provider> is present (tests), both split
 // contexts are null and we return the combined value directly.
 export function useAppContext() {
-  const staticValue = useContext(AppStaticContext);
-  const liveValue = useContext(AppLiveContext);
-  const combined = useContext(AppContext);
-  const merged = useMemo(() => {
-    if (staticValue === null && liveValue === null) {
-      return combined;
-    }
-    return { ...(combined ?? {}), ...(staticValue ?? {}), ...(liveValue ?? {}) };
-  }, [staticValue, liveValue, combined]);
+  const merged = useAppContextOptional();
   if (merged === null || merged === undefined) {
     throw new Error("useAppContext must be used within the App context providers");
   }
