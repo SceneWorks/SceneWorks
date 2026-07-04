@@ -94,6 +94,13 @@ const CANCEL_MESSAGE: &str = "Image upscale canceled by user.";
 /// (sc-5499). Overridable via the manifest `onnx` resource or the env pin
 /// `SCENEWORKS_REALESRGAN_X{2,4}_ONNX`.
 const ONNX_REPO: &str = "SceneWorks/real-esrgan-onnx";
+/// Pinned Real-ESRGAN ONNX revision (sc-9682, F-077 follow-up). Even though
+/// `SceneWorks/real-esrgan-onnx` is a first-party repo, fetching the mutable `main`
+/// branch means a re-push (or a compromised token) could silently swap the ONNX graph
+/// we load. Pin the exact commit for defense-in-depth, mirroring the SeedVR2 pin
+/// (sc-8879). HF's tree API still reports each file's `lfs.oid`, which
+/// `ensure_hf_cached_file` verifies the downloaded content against.
+const ONNX_REVISION: &str = "09f741bac80a246b407da3ee902bf5f3291b602f";
 
 fn onnx_file(factor: u8) -> String {
     format!("real_esrgan_x{factor}.onnx")
@@ -464,7 +471,15 @@ async fn ensure_onnx(
         cancel_message: "Image upscale canceled while fetching Real-ESRGAN weights.",
         fresh_download: false,
     };
-    ensure_hf_cached_file(&context, &repo, "main", &file, &target)
+    // Pin the exact commit for the default first-party repo so `main` moving under us
+    // can't swap the ONNX graph (sc-9682). A manifest-supplied override repo may carry
+    // its own revision layout, so only pin when we're using the default repo.
+    let revision = if repo == ONNX_REPO {
+        ONNX_REVISION
+    } else {
+        "main"
+    };
+    ensure_hf_cached_file(&context, &repo, revision, &file, &target)
         .await
         .map_err(|error| match error {
             WorkerError::InvalidPayload(detail) => WorkerError::InvalidPayload(format!(

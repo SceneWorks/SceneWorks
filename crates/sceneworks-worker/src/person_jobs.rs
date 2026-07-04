@@ -104,6 +104,15 @@ const DET_REPO: &str = "SceneWorks/yolo11m-person-detect-mlx";
 const DET_FILE: &str = "yolo11m.onnx";
 #[cfg(not(target_os = "macos"))]
 const DET_REPO: &str = "SceneWorks/yolo11m-person-detect-onnx";
+/// Pinned detector-weights revision (sc-9682, F-077 follow-up). Even though `DET_REPO` is
+/// a first-party repo, fetching the mutable `main` branch means a re-push (or a compromised
+/// token) could silently swap the detector weights we load. Pin the exact commit per repo
+/// for defense-in-depth, mirroring the SeedVR2 pin (sc-8879). HF's tree API still reports
+/// each file's `lfs.oid`, which `ensure_hf_cached_file` verifies the content against.
+#[cfg(target_os = "macos")]
+const DET_REVISION: &str = "d7027d3a8812bdebbf7862fc1c7dcfdeebb0f777";
+#[cfg(not(target_os = "macos"))]
+const DET_REVISION: &str = "3cffbaccca4f239ae6301d8b66ba721401ecfa8d";
 // ---------------------------------------------------------------------------
 // pure detector math (unit-tested without weights)
 // ---------------------------------------------------------------------------
@@ -989,7 +998,7 @@ pub(crate) async fn ensure_detector_weights(
         .join("cache")
         .join("person-detect")
         .join(DET_FILE);
-    ensure_hf_cached_file(context, DET_REPO, "main", DET_FILE, &target).await
+    ensure_hf_cached_file(context, DET_REPO, DET_REVISION, DET_FILE, &target).await
 }
 
 #[cfg(test)]
