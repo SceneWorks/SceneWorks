@@ -2,7 +2,7 @@
 // Builds the sceneworks-rust-api binary (with the embedded web UI) and stages it
 // as a Tauri sidecar named for the host target triple. Wired as the
 // tauri.conf.json `beforeBuildCommand` so `tauri build` is self-contained.
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import {
   copyFileSync,
   mkdirSync,
@@ -21,13 +21,28 @@ const repoRoot = resolve(desktopDir, "..", ".."); // repository root
 const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
 
 function run(cmd, args, extraEnv = {}) {
-  const cmdStr = `${cmd} ${args.join(" ")}`;
-  console.log(`> ${cmdStr}`);
-  execSync(cmdStr, {
+  console.log(`> ${cmd} ${args.join(" ")}`);
+  // execFileSync (argv), NOT a joined execSync shell string (F-127, sc-8929): a
+  // `PYTHON` path containing spaces (e.g. "C:\\Program Files\\Python\\python.exe")
+  // would break when re-split by the shell. Each arg is passed as a discrete argv
+  // entry, so no quoting is needed and spaces are safe. (`shell:true` is deliberately
+  // NOT used — under it Node concatenates args WITHOUT escaping (DEP0190), which would
+  // reintroduce the very space-splitting this fixes.)
+  const opts = {
     stdio: "inherit",
     cwd: repoRoot,
     env: { ...process.env, ...extraEnv },
-  });
+  };
+  // Windows can't exec a batch shim (npm.cmd) directly post-CVE-2024-27980; route it
+  // through cmd.exe with each token discretely quoted so spaces stay intact. Real
+  // executables (python.exe, rustc.exe) spawn directly via argv on every platform.
+  if (process.platform === "win32" && /\.(cmd|bat)$/i.test(cmd)) {
+    const quote = (s) => (/[\s"]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
+    const line = [cmd, ...args].map(quote).join(" ");
+    execFileSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", line], opts);
+    return;
+  }
+  execFileSync(cmd, args, opts);
 }
 
 // Host target triple, e.g. aarch64-apple-darwin or x86_64-pc-windows-msvc.
