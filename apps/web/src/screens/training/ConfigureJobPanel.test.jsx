@@ -73,8 +73,9 @@ function baseProps(overrides = {}) {
     resetConfigDefaults: noop,
     submitTrainingJob: noop,
     configSnapshot: null,
-    readiness: null,
-    readinessLoading: false,
+    // sc-8942 (F-140): the Dataset Doctor readout props are now one grouped `datasetDoctor`
+    // bundle (report/loading + the six fix-action handlers) shared with DatasetEditorPanel.
+    datasetDoctor: { report: null, loading: false },
     readinessBlocksTraining: false,
     ...overrides,
   };
@@ -96,7 +97,10 @@ describe("ConfigureJobPanel readiness gate", () => {
     mount(
       <ConfigureJobPanel
         {...baseProps({
-          readiness: { gate: "blocked", subScores: { technical: 0 }, counts: { fatal: 1 }, itemCount: 2, items: [], datasetFlags: [] },
+          datasetDoctor: {
+            report: { gate: "blocked", subScores: { technical: 0 }, counts: { fatal: 1 }, itemCount: 2, items: [], datasetFlags: [] },
+            loading: false,
+          },
           readinessBlocksTraining: true,
         })}
       />,

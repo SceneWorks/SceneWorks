@@ -82,16 +82,20 @@ export function useTraining({ token, activeProject, setError, setJobs }) {
   // metadata write — it does not bump the dataset version — so callers refetch readiness, not the
   // dataset, afterward.
   const setTrainingDatasetItemQualityAck = useCallback(
-    async (datasetId, itemId, checks, optionsOrProjectId = {}, explicitProjectId = activeProject?.id) => {
-      const options = typeof optionsOrProjectId === "string" ? {} : (optionsOrProjectId ?? {});
-      const projectId = typeof optionsOrProjectId === "string" ? optionsOrProjectId : explicitProjectId;
+    async (datasetId, itemId, checks, options = {}) => {
+      // sc-8942 (F-140): single options object. The optional target project is a named
+      // `projectId` field (defaulting to the active project) rather than the old
+      // type-switching 4th param (string=projectId | object=options), which was unique in
+      // the codebase and easy to call wrong — a mistyped arg silently fell through to the
+      // active project. No caller ever used the string form, so this is behavior-preserving.
+      const { projectId = activeProject?.id, expectedContentHash, expectedCaptionHash } = options ?? {};
       if (!projectId || !datasetId || !itemId) {
         throw new Error("Select a training dataset item first.");
       }
       const body = {
         checks,
-        ...(options.expectedContentHash ? { expectedContentHash: options.expectedContentHash } : {}),
-        ...(options.expectedCaptionHash ? { expectedCaptionHash: options.expectedCaptionHash } : {}),
+        ...(expectedContentHash ? { expectedContentHash } : {}),
+        ...(expectedCaptionHash ? { expectedCaptionHash } : {}),
       };
       return apiFetch(
         `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/items/${encodeURIComponent(itemId)}/quality-ack`,
