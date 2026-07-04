@@ -6784,21 +6784,54 @@ fn resolve_character_references(
             }
         }
     }
+    // The approved references we will attempt (capped at the engine's 4-reference contract). A
+    // reference that fails to load must NOT be dropped silently: a corrupted approved reference
+    // otherwise quietly weakens identity conditioning with zero signal (sc-8922, F-120). Warn per
+    // skipped reference (asset id + error) and, when some — but not all — loaded, emit a summary the
+    // operator can compare against the approved count.
+    let attempted: Vec<String> = ids
+        .into_iter()
+        .filter(|id| !id.is_empty())
+        .take(4)
+        .collect();
+    let approved_count = attempted.len();
     let mut images = Vec::new();
-    for asset_id in ids.into_iter().filter(|id| !id.is_empty()).take(4) {
-        if let Ok(image) = load_reference_image(
+    for asset_id in attempted {
+        match load_reference_image(
             &settings.data_dir,
             &request.project_id,
             &asset_id,
             project_path,
         ) {
-            images.push(image);
+            Ok(image) => images.push(image),
+            Err(error) => {
+                tracing::warn!(
+                    event = "character_reference_load_failed",
+                    characterId = %character_id,
+                    assetId = %asset_id,
+                    error = %error,
+                    "skipping an unreadable approved character reference — identity conditioning \
+                     will use fewer references than approved"
+                );
+            }
         }
     }
     if images.is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Replace Person requires at least one approved character reference image.".to_owned(),
         ));
+    }
+    if images.len() < approved_count {
+        tracing::warn!(
+            event = "character_references_partially_loaded",
+            characterId = %character_id,
+            loaded = images.len(),
+            approved = approved_count,
+            "loaded fewer character references than were approved — {} of {} approved references \
+             could not be read; identity conditioning is reduced",
+            images.len(),
+            approved_count
+        );
     }
     Ok(images)
 }
