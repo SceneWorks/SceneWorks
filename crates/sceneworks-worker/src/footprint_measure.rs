@@ -50,8 +50,16 @@
 //! panics with a download hint and is simply not part of the run.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gen_core::{GenerationOutput, GenerationRequest, Image, LoadSpec, Quant, WeightsSource};
+
+/// One-tier-per-process guard (sc-8925). The MLX memory counters + allocator peak high-water mark are
+/// PROCESS-GLOBAL and persist across tests in the same binary, so measuring a second tier in the same
+/// process folds the first tier's residue into its numbers. `measure_footprint` flips this once and
+/// asserts it was previously false — an unfiltered `cargo test … footprint -- --ignored` run (more than
+/// one tier in one process) now fails loudly instead of silently emitting corrupt `[[FOOTPRINT]]` lines.
+static FOOTPRINT_RAN: AtomicBool = AtomicBool::new(false);
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key)
@@ -163,6 +171,16 @@ fn image_std(img: &Image) -> f64 {
 // `[[FOOTPRINT]]` scrape line, not the return value — so this reports through stdout and returns
 // nothing (sc-8952).
 fn measure_footprint(model: &str, tier: &str, engine_id: &str, dir: &Path, req: GenerationRequest) {
+    // Enforce the "RUN ONE TIER PER PROCESS" invariant (sc-8925): the MLX counters are process-global,
+    // so a second measurement in the same binary invocation would report numbers contaminated by the
+    // first tier's allocator residue + peak high-water mark. Fail loudly instead of scraping garbage.
+    assert!(
+        !FOOTPRINT_RAN.swap(true, Ordering::SeqCst),
+        "footprint harness measured a second tier in one process — the MLX peak/active counters are \
+         process-global, so run exactly one `footprint_<x>` per `cargo test … -- --ignored` invocation \
+         (see the module doc). The just-attempted {model} {tier} measurement would be corrupt."
+    );
+
     println!(
         "[footprint] loading {model} ({tier}) from {} ...",
         dir.display()
