@@ -4,7 +4,7 @@ import { pollJobToCompletion } from "./pollJob.js";
 import { Icon } from "./components/Icons.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
-import { FullscreenPreview } from "./components/assetPanels.jsx";
+import { FullscreenPreview, assetSeed } from "./components/assetPanels.jsx";
 import { fallbackModels, terminalStatuses } from "./constants.js";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { PoseLibraryScreen } from "./screens/PoseLibraryScreen.jsx";
@@ -1838,6 +1838,12 @@ export function App() {
     if (!asset || !recipe) {
       return;
     }
+    // Keep-seed replays THIS image's own seed for a byte-for-byte rerun (e.g. to
+    // reproduce and upscale with PiD). assetSeed prefers the per-asset recipe over the
+    // set's shared base seed, so reuse honors the exact image the user is viewing.
+    // Null → Image Studio leaves the seed random (a close variation), the default.
+    const seed = assetSeed(asset);
+    const replaySeed = options.keepSeed && seed != null && seed !== "" ? seed : null;
     setSelectedAssetId(asset.id);
     closePreview();
     setStudioLaunch({
@@ -1846,9 +1852,7 @@ export function App() {
       assetId: asset.id,
       sourceAssetId: asset.lineage?.sourceAssetId ?? null,
       recipe,
-      // When set, Image Studio replays the saved seed for a byte-for-byte rerun
-      // (e.g. reproduce the image to upscale with PiD) instead of a random variation.
-      keepSeed: Boolean(options.keepSeed),
+      replaySeed,
     });
     setActiveView("Image");
   }

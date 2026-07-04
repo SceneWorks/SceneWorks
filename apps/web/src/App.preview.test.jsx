@@ -2,7 +2,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AssetPickerField } from "./components/AssetPicker.jsx";
-import { FullscreenPreview, PREVIEW_FIT_VIEW, PREVIEW_MAX_SCALE, PREVIEW_MIN_SCALE, clampPan, zoomView } from "./components/assetPanels.jsx";
+import { FullscreenPreview, PREVIEW_FIT_VIEW, PREVIEW_MAX_SCALE, PREVIEW_MIN_SCALE, assetSeed, clampPan, zoomView } from "./components/assetPanels.jsx";
 import { FakeEventSource, response, changeField } from "./main.testSupport.jsx";
 
 describe("SceneWorks app shell", () => {
@@ -428,7 +428,23 @@ describe("SceneWorks app shell", () => {
     expect(onUseRecipe).toHaveBeenCalledWith(asset, { keepSeed: false });
   });
 
-  it("surfaces a copyable seed and a keep-seed toggle for recipe reuse", async () => {
+  it("resolves each image's own seed, preferring the per-asset recipe over the shared set seed", () => {
+    // Two siblings of one generation set: the set recipe carries the batch's base seed
+    // (7), while each image records its own seed. assetSeed must return the per-image
+    // value so navigating between siblings updates the seed (and reuse reproduces the
+    // exact image), not the constant set seed.
+    const setRecipe = { model: "z_image_turbo", seed: 7 };
+    const first = { id: "a", recipe: { model: "z_image_turbo", seed: 7 }, generationSet: { recipe: setRecipe } };
+    const second = { id: "b", recipe: { model: "z_image_turbo", seed: 42 }, generationSet: { recipe: setRecipe } };
+    expect(assetSeed(first)).toBe(7);
+    expect(assetSeed(second)).toBe(42);
+    // Falls back to the set seed when the asset has no per-asset recipe, and honors seed 0.
+    expect(assetSeed({ id: "c", generationSet: { recipe: setRecipe } })).toBe(7);
+    expect(assetSeed({ id: "d", recipe: { seed: 0 } })).toBe(0);
+    expect(assetSeed({ id: "e" })).toBeNull();
+  });
+
+  it("offers a keep-seed toggle only when the asset carries a seed", async () => {
     const noop = () => {};
     const onUseRecipe = vi.fn();
     const asset = {
@@ -457,10 +473,10 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    // Seed is shown in the meta panel.
-    expect(document.body.querySelector(".preview-seed-value").textContent).toBe("1234");
+    // The toggle appears because the recipe carries a seed.
+    expect(document.body.querySelector(".preview-keep-seed")).not.toBeNull();
 
-    // Toggle keep-seed on, then reuse the recipe.
+    // Toggle keep-seed on, then reuse the recipe — the choice rides on onUseRecipe.
     await act(async () => {
       document.body.querySelector(".preview-keep-seed input[type=\"checkbox\"]").click();
     });
