@@ -261,10 +261,20 @@ impl Upscaler {
                 session,
                 device: ACCEL_DEVICE,
             }),
-            Err(_) => Ok(Self {
-                session: build_session(path, false)?,
-                device: "cpu",
-            }),
+            // Log WHY the hardware-EP session build failed before silently rebuilding on
+            // CPU (F-099) — otherwise a CoreML/CUDA init failure just presents as an
+            // unexplained "device = cpu" with no breadcrumb (sc-8901).
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    provider = ACCEL_DEVICE,
+                    "Real-ESRGAN {ACCEL_DEVICE} session build failed; falling back to CPU"
+                );
+                Ok(Self {
+                    session: build_session(path, false)?,
+                    device: "cpu",
+                })
+            }
         }
     }
 

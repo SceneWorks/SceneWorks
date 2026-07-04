@@ -864,10 +864,19 @@ impl OrtYolo {
                 session,
                 device: "cuda",
             }),
-            Err(_) => Ok(Self {
-                session: build_session(path, false)?,
-                device: "cpu",
-            }),
+            // Log WHY the CUDA session build failed before silently rebuilding on CPU
+            // (F-099): otherwise a cuDNN/CUDA mismatch or a genuinely GPU-less box both
+            // present as an unexplained "device = cpu" with no breadcrumb (sc-8901).
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "yolo11m CUDA session build failed; falling back to CPU"
+                );
+                Ok(Self {
+                    session: build_session(path, false)?,
+                    device: "cpu",
+                })
+            }
         }
     }
 
