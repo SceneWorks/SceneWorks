@@ -4269,10 +4269,7 @@ async fn resolve_candle_scail2_conditioning(
                     tracing::debug!(event = "scail2_sam3_propagate_progress", frame, total);
                 })),
             )?;
-            Ok(crate::scail2_masks::paint_driving_masks(
-                &masks,
-                crate::scail2_masks::BG_BLACK,
-            ))
+            crate::scail2_masks::paint_driving_masks(&masks, crate::scail2_masks::BG_BLACK)
         },
     )
     .await
@@ -5170,10 +5167,7 @@ async fn resolve_scail2_conditioning(
                     tracing::debug!(event = "scail2_sam3_propagate_progress", frame, total);
                 })),
             )?;
-            Ok(crate::scail2_masks::paint_driving_masks(
-                &masks,
-                crate::scail2_masks::BG_BLACK,
-            ))
+            crate::scail2_masks::paint_driving_masks(&masks, crate::scail2_masks::BG_BLACK)
         },
     )
     .await
