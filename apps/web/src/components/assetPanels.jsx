@@ -717,6 +717,38 @@ export function FullscreenPreview({
   }, [asset.id, asset.variants?.upscaled?.id]);
   const displayedAsset = hasUpscaleVariants ? asset.variants[variantMode] : asset;
 
+  // Seed lives on the generation recipe. Surface it so users can copy it and pair
+  // it with "Use this recipe" to reproduce the exact image (e.g. for PiD upscaling).
+  // Resolve the same way "Use this recipe" does. Guard with `!= null` — seed 0 is valid.
+  const recipe = asset.generationSet?.recipe ?? asset.recipe ?? null;
+  const seed = recipe?.seed;
+  const hasSeed = seed != null && seed !== "";
+  const [seedCopied, setSeedCopied] = React.useState(false);
+  // "Use this recipe" defaults to a random seed (a close variation). Toggle this on
+  // to replay the exact seed for a byte-for-byte reproduction (e.g. PiD upscaling).
+  const [keepSeed, setKeepSeed] = React.useState(false);
+  React.useEffect(() => {
+    setKeepSeed(false);
+  }, [asset.id]);
+  const copySeed = React.useCallback(async () => {
+    if (!hasSeed) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(String(seed));
+      setSeedCopied(true);
+    } catch {
+      // Clipboard unavailable (e.g. insecure context) — leave the label unchanged.
+    }
+  }, [hasSeed, seed]);
+  React.useEffect(() => {
+    if (!seedCopied) {
+      return undefined;
+    }
+    const timer = setTimeout(() => setSeedCopied(false), 1500);
+    return () => clearTimeout(timer);
+  }, [seedCopied]);
+
   // Zoom/pan is IMAGES ONLY — video keeps its native <video> controls and gets no
   // zoom overlay/UI (sc-8728). `isVideo` gates the whole zoom surface.
   const isVideo = assetCanRenderAsVideo(displayedAsset);
@@ -1029,6 +1061,18 @@ export function FullscreenPreview({
           <div className="preview-modal-meta">
             <strong>{asset.displayName}</strong>
             <span>{asset.recipe?.model}</span>
+            {hasSeed ? (
+              <button
+                className="preview-seed"
+                onClick={copySeed}
+                title="Copy seed to clipboard"
+                type="button"
+              >
+                <span className="preview-seed-label">Seed</span>
+                <span className="preview-seed-value">{seed}</span>
+                <span className="preview-seed-hint">{seedCopied ? "Copied" : "Copy"}</span>
+              </button>
+            ) : null}
           </div>
           {hasUpscaleVariants ? (
             <div className="segmented-control compact-segment preview-variant-toggle" aria-label="Image variant">
@@ -1055,9 +1099,17 @@ export function FullscreenPreview({
               Save As…
             </button>
             {onUseRecipe && asset.type === "image" && (asset.generationSet?.recipe || asset.recipe) ? (
-              <button onClick={() => onUseRecipe(asset)} type="button">
-                Use this recipe
-              </button>
+              <>
+                {hasSeed ? (
+                  <label className="checkline preview-keep-seed" title="Reuse the exact seed for a byte-for-byte rerun">
+                    <input checked={keepSeed} onChange={(event) => setKeepSeed(event.target.checked)} type="checkbox" />
+                    Keep seed
+                  </label>
+                ) : null}
+                <button onClick={() => onUseRecipe(asset, { keepSeed })} type="button">
+                  Use this recipe
+                </button>
+              </>
             ) : null}
             {onEditImage && asset.type === "image" ? (
               <button onClick={() => onEditImage(asset)} type="button">
