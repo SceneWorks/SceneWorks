@@ -3333,7 +3333,9 @@ fn zimage_base_control_real_weights_generates_per_mode() {
 #[ignore = "needs real Qwen-Image + 2512-Fun-Controlnet-Union weights + Metal device"]
 fn qwen_control_real_weights_generates_one_pose() {
     let base = hf_snapshot("models--Qwen--Qwen-Image");
-    let control = hf_snapshot("models--alibaba-pai--Qwen-Image-2512-Fun-Controlnet-Union")
+    // sc-9870: packed control tier — the Q8 base pairs with the q8/ overlay subdir.
+    let control = hf_snapshot("models--SceneWorks--qwen-image-2512-fun-controlnet-union")
+        .join("q8")
         .join(super::QWEN_CONTROL_FILE);
     assert!(
         control.exists(),
@@ -6453,10 +6455,9 @@ fn strict_control_table_is_the_authority() {
 
     let qwen = strict_control_engine("qwen_image_control").expect("qwen row");
     // sc-8267 source swap: InstantX → alibaba-pai 2512-Fun-Controlnet-Union (input-agnostic VACE branch).
-    assert_eq!(
-        qwen.repo,
-        "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union"
-    );
+    // sc-9870: repointed to the SceneWorks PACKED tier (per-quant q4/q8/bf16 subdirs) — the row stays
+    // consistent across the MLX (`qwen.rs`) and candle (`qwen_control.rs`) drivers.
+    assert_eq!(qwen.repo, "SceneWorks/qwen-image-2512-fun-controlnet-union");
     // sc-8250 exposure: the 2512-Fun Union admits pose + canny + depth.
     assert_eq!(
         qwen.supported_kinds,
@@ -7633,7 +7634,11 @@ fn real_weight_matrix_zimage_base_depth() {
 #[cfg(target_os = "macos")]
 fn matrix_qwen_paths() -> (std::path::PathBuf, std::path::PathBuf) {
     let base = hf_snapshot("models--Qwen--Qwen-Image");
-    let control = hf_snapshot("models--alibaba-pai--Qwen-Image-2512-Fun-Controlnet-Union")
+    // sc-9870: the packed control tier (`SceneWorks/qwen-image-2512-fun-controlnet-union`) ships one
+    // `model.safetensors` per q4/q8/bf16 subdir. This smoke loads the Q8 base, so pair it with the q8/
+    // control overlay subdir.
+    let control = hf_snapshot("models--SceneWorks--qwen-image-2512-fun-controlnet-union")
+        .join("q8")
         .join(super::QWEN_CONTROL_FILE);
     assert!(
         control.exists(),
@@ -7912,13 +7917,32 @@ fn candle_control_providers_resolve_models_and_repos() {
         "black-forest-labs/FLUX.1-dev"
     );
 
-    // sc-8350 — qwen InstantX → 2512-Fun: the default control repo + base repo are the 2512-Fun row, NOT
-    // the retired InstantX `Qwen-Image-ControlNet-Union`.
+    // sc-8350 — qwen InstantX → 2512-Fun. sc-9870 — repointed to the SceneWorks PACKED tier: the default
+    // control repo is the per-quant `SceneWorks/qwen-image-2512-fun-controlnet-union` matrix (NOT the dense
+    // alibaba-pai overlay, and NOT the retired InstantX repo), and the default file is the q4 tier subdir's
+    // single `model.safetensors` when no `mlxQuantize` is requested. The base repo is unchanged (2512 base).
     let qwen = request(json!({ "projectId": "p", "model": "qwen_image" }));
-    let (q_repo, _q_file) = qwen_control_repo_file(&qwen).expect("defaults resolve");
-    assert_eq!(q_repo, "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union");
+    let (q_repo, q_file) = qwen_control_repo_file(&qwen).expect("defaults resolve");
+    assert_eq!(q_repo, "SceneWorks/qwen-image-2512-fun-controlnet-union");
+    assert_eq!(q_file, "q4/model.safetensors");
     assert_eq!(QWEN_CONTROL_DEFAULT_REPO, "Qwen/Qwen-Image-2512");
+    assert_ne!(q_repo, "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union");
     assert_ne!(q_repo, "InstantX/Qwen-Image-ControlNet-Union");
+    // Tier tracks `advanced.mlxQuantize`: q8 selects the q8 subdir, bf16 opt-out selects the bf16 subdir.
+    let qwen_q8 = request(
+        json!({ "projectId": "p", "model": "qwen_image", "advanced": { "mlxQuantize": 8 } }),
+    );
+    assert_eq!(
+        qwen_control_repo_file(&qwen_q8).unwrap().1,
+        "q8/model.safetensors"
+    );
+    let qwen_bf16 = request(
+        json!({ "projectId": "p", "model": "qwen_image", "advanced": { "mlxQuantize": 0 } }),
+    );
+    assert_eq!(
+        qwen_control_repo_file(&qwen_bf16).unwrap().1,
+        "bf16/model.safetensors"
+    );
 
     // sc-8379 — z-image base: both Turbo and base are recognized; the base selects the base repos + the
     // ~50-step default + the `z_image_control` engine-id row.

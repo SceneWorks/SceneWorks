@@ -3,7 +3,9 @@
 // `candle_gen_qwen_image::QwenFunControl`. The candle sibling of the MLX Qwen 2512-Fun strict-control path
 // (qwen.rs `generate_qwen_control_stream`): one image per pose (or, with `advanced.controlMode =
 // canny|depth` + a source, an auto-derived canny / Depth-Anything-V2 map), each fed to the VACE-style
-// `alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union` branch overlaid on the Qwen-Image-2512 base.
+// 2512-Fun-Controlnet-Union branch overlaid on the Qwen-Image-2512 base. sc-9870: the control overlay is
+// now the SceneWorks PACKED tier (`SceneWorks/qwen-image-2512-fun-controlnet-union`, per-quant q4/q8/bf16
+// subdirs), resolved per `advanced.mlxQuantize`, replacing the dense alibaba-pai overlay staging.
 //
 // **sc-8350 source swap.** This lane previously loaded the InstantX `Qwen-Image-ControlNet-Union`
 // checkpoint (`QwenControl`, a residual-ControlNet on the `Qwen/Qwen-Image` base). It now rides the
@@ -18,10 +20,18 @@
 // module's imports (`parse_poses`/`Settings`/`WorkerResult`/`huggingface_snapshot_dir`/
 // `ensure_hf_cached_file`/`start_gen_stream`/… all in scope unqualified).
 
-/// Default 2512-Fun-Controlnet-Union weights (Apache-2.0, input-agnostic VACE control) — same repo/file
-/// the MLX path uses (`qwen.rs` 2512-Fun constants); the candle lane keeps its own constant (sc-8350).
-const QWEN_CONTROL_REPO: &str = "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union";
-const QWEN_CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
+/// Default 2512-Fun-Controlnet-Union weights (Apache-2.0, input-agnostic VACE control). As of sc-9870
+/// (epic 8236) this points at the SceneWorks PACKED control tier — a per-quant matrix whose q4/ q8/ bf16/
+/// subdirs each ship a single `model.safetensors` overlay — NOT the old dense alibaba-pai overlay
+/// (sc-8350). The exact subdir is selected per `advanced.mlxQuantize` by [`qwen_control_tier_subdir`] so
+/// the control overlay tier tracks the base transformer tier for a coherent A/B. The candle
+/// `QwenFunControl` engine already packed-detects the overlay (sc-9869), so nothing downstream changes.
+/// Same repo the MLX path uses (`qwen.rs` — the shared `STRICT_CONTROL_ENGINES` `qwen_image_control` row).
+const QWEN_CONTROL_REPO: &str = "SceneWorks/qwen-image-2512-fun-controlnet-union";
+/// The single packed control file inside each tier subdir (`q4/`, `q8/`, `bf16/`). Deterministic —
+/// the packed tier ships exactly one `model.safetensors` per subdir, so the sc-8350 two-overlay
+/// ambiguity is naturally resolved.
+const QWEN_CONTROL_FILE: &str = "model.safetensors";
 /// The Qwen-Image-2512 base diffusers repo when the manifest omits `repo` (the 2512-Fun base, sc-8350).
 const QWEN_CONTROL_DEFAULT_REPO: &str = "Qwen/Qwen-Image-2512";
 /// ControlNet conditioning-scale default (the strict-pose tier).
@@ -35,8 +45,9 @@ const QWEN_CONTROL_DEFAULT_GUIDANCE: f32 = 4.0;
 const QWEN_CONTROL_ENGINE: &str = "candle_qwen_control";
 /// The [`STRICT_CONTROL_ENGINES`] catalog id this candle lane validates `advanced.controlMode` against
 /// (the `qwen_image_control` row — `{Pose, Canny, Depth}`). As of sc-8350 the candle lane loads the
-/// 2512-Fun-Controlnet-Union checkpoint on the Qwen-Image-2512 base (`QwenFunControl`), matching the
-/// table's `qwen_image_control` repo (`alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union`) exactly.
+/// 2512-Fun-Controlnet-Union checkpoint on the Qwen-Image-2512 base (`QwenFunControl`); sc-9870 repoints
+/// the control overlay at the packed tier, matching the table's `qwen_image_control` repo
+/// (`SceneWorks/qwen-image-2512-fun-controlnet-union`) exactly — consistent with the MLX `qwen.rs` lane.
 const QWEN_CONTROL_ENGINE_ID: &str = "qwen_image_control";
 
 /// Model ids the candle Qwen ControlNet route accepts.
@@ -98,26 +109,48 @@ fn qwen_control_guidance(request: &ImageRequest) -> f32 {
     )
 }
 
-/// The (repo, filename) of the ControlNet weights — `advanced.controlWeights.{repo,filename}` overrides,
-/// else the 2512-Fun-Controlnet-Union default (parity with the MLX `resolve_control_weights_for`).
-/// The payload filename must be a plain component (sc-8821 / F-019).
+/// The packed control tier subdir the request's `advanced.mlxQuantize` selects (sc-9870): `bf16` (opt
+/// out of quantization, `<= 0` / "none"), `q8` (`> 4`), else the `q4` default — the SAME mapping
+/// [`standard_tier_subdir`] uses for the base transformer tier, so the control overlay tier tracks the
+/// base tier for a coherent A/B. Mirrors the MLX `qwen_control_tier_subdir`.
+fn qwen_control_tier_subdir(request: &ImageRequest) -> &'static str {
+    let bits = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    match bits {
+        Some(b) if b <= 0 => "bf16",
+        Some(b) if b > 4 => "q8",
+        _ => "q4",
+    }
+}
+
+/// The (repo, repo-relative file path) of the ControlNet weights.
+///
+/// Default (sc-9870): the SceneWorks packed control tier — repo [`QWEN_CONTROL_REPO`], file
+/// `<tier>/model.safetensors` where `<tier>` is [`qwen_control_tier_subdir`] (per `advanced.mlxQuantize`).
+/// Deterministic single-file resolution — each tier subdir ships exactly one `model.safetensors`.
+///
+/// Override: `advanced.controlWeights.{repo,filename}` still points at a flat repo with a plain-component
+/// weight file (sc-8821 / F-019 — the filename must have no path separators). When a `filename` override
+/// is present the tier subdir is NOT applied (the override addresses a specific file directly).
 fn qwen_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
     let cw = request.advanced.get("controlWeights").and_then(Value::as_object);
-    let pick = |key: &str, default: &str| {
+    let pick = |key: &str| {
         cw.and_then(|m| m.get(key))
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|v| !v.is_empty())
-            .unwrap_or(default)
-            .to_owned()
+            .map(str::to_owned)
     };
-    Ok((
-        pick("repo", QWEN_CONTROL_REPO),
-        safe_weight_filename(
-            &pick("filename", QWEN_CONTROL_FILE),
-            "advanced.controlWeights.filename",
-        )?,
-    ))
+    let repo = pick("repo").unwrap_or_else(|| QWEN_CONTROL_REPO.to_owned());
+    let file = match pick("filename") {
+        // Explicit override — a plain-component file in the override repo (no tier subdir).
+        Some(name) => safe_weight_filename(&name, "advanced.controlWeights.filename")?,
+        // Default packed tier — `<tier>/model.safetensors` selected by `advanced.mlxQuantize`.
+        None => format!("{}/{QWEN_CONTROL_FILE}", qwen_control_tier_subdir(request)),
+    };
+    Ok((repo, file))
 }
 
 /// Resolve the 2512-Fun-Controlnet-Union weight **file** the `QwenFunControl` provider loads (sc-8350),
