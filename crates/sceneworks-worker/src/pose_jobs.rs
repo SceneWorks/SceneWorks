@@ -1085,6 +1085,7 @@ async fn run_pose_detect_inner(
         Some(cancel.clone()),
         POSE_CANCEL_MESSAGE,
         "pose detection task",
+        crate::no_cancel_ack(),
         tokio::task::spawn_blocking(move || {
             detect_batch(det_path, pose_path, image_paths, &detect_cancel)
         }),
@@ -1118,6 +1119,7 @@ async fn run_pose_detect_inner(
         Some(cancel),
         POSE_CANCEL_MESSAGE,
         "pose skeleton render task",
+        crate::no_cancel_ack(),
         tokio::task::spawn_blocking(move || {
             let mut out_sources: Vec<Value> = Vec::new();
             for (src, raw_src) in resolved.iter().zip(raw) {

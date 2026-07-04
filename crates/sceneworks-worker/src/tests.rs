@@ -4167,6 +4167,7 @@ async fn run_blocking_with_heartbeat_aborts_task_when_heartbeat_post_fails() {
         Some(cancel.clone()),
         "canceled",
         "f003 test task",
+        crate::no_cancel_ack(),
         task,
     )
     .await;
@@ -4232,6 +4233,7 @@ async fn run_blocking_with_heartbeat_waits_for_blocking_task_winddown_on_post_fa
         Some(cancel.clone()),
         "canceled",
         "f003 blocking winddown task",
+        crate::no_cancel_ack(),
         task,
     )
     .await;
@@ -4280,6 +4282,7 @@ async fn run_blocking_with_heartbeat_none_cancel_returns_single_shot_value() {
         None,
         "",
         "smart-select none-cancel test task",
+        crate::no_cancel_ack(),
         task,
     )
     .await;
@@ -4558,6 +4561,7 @@ async fn keepalive_posts_terminal_canceled_when_the_task_honors_the_flag() {
         Some(flag),
         "Person tracking canceled during segmentation.",
         "sam propagate stand-in",
+        crate::no_cancel_ack(),
         task,
     )
     .await;
@@ -4606,6 +4610,7 @@ async fn keepalive_cancels_the_job_even_when_the_task_cannot_observe_the_flag() 
         Some(flag),
         "Person tracking canceled during segmentation.",
         "candle propagate stand-in",
+        crate::no_cancel_ack(),
         task,
     )
     .await;

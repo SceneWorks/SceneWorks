@@ -243,6 +243,7 @@ pub(crate) async fn run_face_likeness_compare_job(
         None,
         "",
         "face likeness compare task",
+        crate::no_cancel_ack(),
         tokio::task::spawn_blocking(move || {
             let (source, candidate) = load_compare_images(&settings_for_task, &job_for_task)?;
             compare(&weights_dir, &source, &candidate, &source_ref)

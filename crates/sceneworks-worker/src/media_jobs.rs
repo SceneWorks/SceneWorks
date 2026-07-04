@@ -664,6 +664,7 @@ async fn run_yolo11_person_detect(
         None,
         "",
         "person detect task",
+        crate::no_cancel_ack(),
         tokio::task::spawn_blocking(move || {
             crate::person_jobs::detect_people_blocking(weights, frame_path, conf)
         }),
@@ -1249,6 +1250,7 @@ async fn run_macos_segmenter(
                 Some(cancel),
                 cancel_message,
                 "person segment task",
+                crate::no_cancel_ack(),
                 tokio::task::spawn_blocking(move || {
                     crate::person_segment_sam3::segment_track_blocking(
                         model,
@@ -1283,6 +1285,7 @@ async fn run_macos_segmenter(
                 Some(cancel),
                 cancel_message,
                 "person segment task",
+                crate::no_cancel_ack(),
                 tokio::task::spawn_blocking(move || {
                     crate::person_segment::propagate_track_blocking(
                         weights,
@@ -1350,6 +1353,7 @@ async fn run_candle_segmenter(
         Some(cancel),
         "Person tracking canceled during segmentation.",
         "person segment task",
+        crate::no_cancel_ack(),
         tokio::task::spawn_blocking(move || {
             crate::person_segment_sam3_candle::segment_track_blocking(
                 model,

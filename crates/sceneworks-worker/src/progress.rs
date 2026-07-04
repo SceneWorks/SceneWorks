@@ -283,22 +283,33 @@ pub(crate) async fn mark_job_canceled(
 /// Every consumer is a job handler gated behind `any(target_os = "macos", feature =
 /// "backend-candle")`, so on the plain-Linux parity build (neither) this is unused — allow
 /// dead_code there only, keeping real dead-code detection on the configs that do call it.
+/// The instant a user cancel is first observed (the flag has just been tripped), the optional
+/// `on_cancel_acknowledged` closure runs once — before the terminal `Canceled` is posted. Callers
+/// use it to post an intermediate "Canceling…" job update so the UI acknowledges the cancel while an
+/// un-interruptible op finishes, instead of appearing frozen until it flips terminal (the image
+/// upscale path, sc-8928). Its error is treated exactly like a heartbeat POST failure: bounded-join
+/// teardown, then propagate. Pass [`no_cancel_ack`] when there's nothing extra to post.
 #[cfg_attr(
     all(not(target_os = "macos"), not(feature = "backend-candle")),
     allow(dead_code)
 )]
-pub(crate) async fn run_blocking_with_heartbeat<R>(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_blocking_with_heartbeat<R, F, Fut>(
     api: &ApiClient,
     settings: &Settings,
     job_id: &str,
     cancel: Option<gen_core::CancelFlag>,
     cancel_message: &str,
     task_label: &'static str,
+    on_cancel_acknowledged: Option<F>,
     task: tokio::task::JoinHandle<WorkerResult<R>>,
 ) -> WorkerResult<R>
 where
     R: Send + 'static,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = WorkerResult<()>>,
 {
+    let mut on_cancel_acknowledged = on_cancel_acknowledged;
     // Bind the blocking task to its cancel flag. On any heartbeat/`?` early return below we perform
     // the explicit awaited bounded-join teardown (`guard.cancel_and_join()`) BEFORE the error
     // propagates, so the still-running GPU task is actually wound down (or hard-abandoned) before
@@ -347,11 +358,31 @@ where
                     if !canceled && cancel_requested_peek(api, job_id).await {
                         flag.cancel();
                         canceled = true;
+                        // Fire the one-shot cancel-acknowledged hook (e.g. post an intermediate
+                        // "Canceling…" update). Its failure is teardown-then-propagate like a
+                        // heartbeat POST failure (sc-8928).
+                        if let Some(hook) = on_cancel_acknowledged.take() {
+                            if let Err(error) = hook().await {
+                                guard.cancel_and_join().await;
+                                return Err(error);
+                            }
+                        }
                     }
                 }
             }
         }
     }
+}
+
+/// A well-typed `None` for [`run_blocking_with_heartbeat`]'s `on_cancel_acknowledged` param, for the
+/// callers with no intermediate "Canceling…" update to post. Naming a concrete future type lets the
+/// compiler infer `F`/`Fut` at the `None` call sites without a turbofish (sc-8928).
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn no_cancel_ack() -> Option<fn() -> std::future::Ready<WorkerResult<()>>> {
+    None
 }
 
 /// Check-only cancel poll (sc-5515): returns `true` when the user requested

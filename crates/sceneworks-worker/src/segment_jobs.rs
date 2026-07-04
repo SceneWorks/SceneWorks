@@ -293,6 +293,7 @@ pub(crate) async fn run_image_segment_job(
             None,
             "",
             "smart-select task",
+            crate::no_cancel_ack(),
             tokio::task::spawn_blocking(move || {
                 let source_image = crate::image_decode::decode_image_any(&source_path)
                     .map_err(|e| {
@@ -316,6 +317,7 @@ pub(crate) async fn run_image_segment_job(
             None,
             "",
             "smart-select task",
+            crate::no_cancel_ack(),
             tokio::task::spawn_blocking(move || {
                 let source_image = crate::image_decode::decode_image_any(&source_path)
                     .map_err(|e| {
