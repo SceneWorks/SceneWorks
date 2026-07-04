@@ -15,9 +15,11 @@
 //! cargo test -p sceneworks-worker --features backend-candle --release realvisxl_lightning_candle_gpu_smoke -- --ignored --nocapture
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use gen_core::{GenerationOutput, GenerationRequest, Image, LoadSpec, WeightsSource};
+
+use super::smoke_support::{env_or, image_std, save_png};
 
 fn env_path(key: &str) -> PathBuf {
     // Trim: a cmd `set VAR=value && ...` keeps the trailing space before `&&`.
@@ -26,42 +28,6 @@ fn env_path(key: &str) -> PathBuf {
             .unwrap_or_else(|_| panic!("set ${key}"))
             .trim(),
     )
-}
-
-fn env_or(key: &str, default: &str) -> String {
-    // Filter set-but-empty values so `RVXL_STEPS=` (or a whitespace-only value) falls back to the
-    // default instead of feeding "" into a downstream `.parse()` and panicking (sc-8924: unify on the
-    // empty-filtering env_or the MLX-side smokes already use).
-    std::env::var(key)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_string())
-}
-
-/// Mean per-pixel std-dev across the RGB channels — a cheap "is the image non-degenerate" check (an
-/// all-black / NaN-clamped decode collapses toward 0; a noisy wrong-schedule render is HIGH, so this
-/// only guards the degenerate floor — the real lightning-vs-ddim quality call is the saved-PNG eyeball).
-fn image_std(img: &Image) -> f64 {
-    let n = img.pixels.len() as f64;
-    if n == 0.0 {
-        return 0.0;
-    }
-    let mean = img.pixels.iter().map(|&p| p as f64).sum::<f64>() / n;
-    let var = img
-        .pixels
-        .iter()
-        .map(|&p| (p as f64 - mean).powi(2))
-        .sum::<f64>()
-        / n;
-    var.sqrt()
-}
-
-fn save_png(img: &Image, path: &Path) {
-    image::RgbImage::from_raw(img.width, img.height, img.pixels.clone())
-        .expect("rgb buffer")
-        .save(path)
-        .unwrap_or_else(|e| panic!("save {}: {e}", path.display()));
 }
 
 fn render(

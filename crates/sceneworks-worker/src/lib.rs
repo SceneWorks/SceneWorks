@@ -163,6 +163,19 @@ mod lora_eval_harness;
 // see the module doc + docs/sc-6541/closed-loop-protocol.md.
 #[cfg(all(test, target_os = "macos"))]
 mod lora_train_driver;
+// Shared test-support helpers for the real-weight smoke harnesses (sc-8866, epic 8800): the
+// byte-identical `env_or` + RGB8 degenerate-decode floor checks (`image_mean`/`image_std`/
+// `is_all_zero`/`save_png`) that were copy-pasted across every `*_mlx_smoke.rs` (macOS) and
+// `*_gpu_smoke.rs` (off-Mac candle) file + `footprint_measure.rs`. Gated on the SUPERSET of both
+// smoke lanes so it compiles exactly where a smoke that imports it does.
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
+mod smoke_support;
 // Real-weight GPU smoke for the candle SCAIL-2 lane (sc-7078). Test-only + candle-only; never built
 // in normal compiles. Drives the shipped worker conditioning + `gen_core::load("scail2_14b")`.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
