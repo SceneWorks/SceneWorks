@@ -54,7 +54,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use gen_core::{GenerationOutput, GenerationRequest, LoadSpec, Quant, WeightsSource};
 
-use super::smoke_support::{env_or, image_std};
+use super::smoke_support::{env_or, image_std, DEGENERATE_STD_FLOOR_DEFAULT};
 
 /// One-tier-per-process guard (sc-8925). The MLX memory counters + allocator peak high-water mark are
 /// PROCESS-GLOBAL and persist across tests in the same binary, so measuring a second tier in the same
@@ -193,7 +193,7 @@ fn measure_footprint(model: &str, tier: &str, engine_id: &str, dir: &Path, req: 
     };
     let std = image_std(&image);
     assert!(
-        std > 5.0,
+        std > DEGENERATE_STD_FLOOR_DEFAULT,
         "{model} {tier} render looks degenerate (std {std:.2}) — measured footprint would be bogus"
     );
     let peak = mlx_rs::memory::get_peak_memory() as u64;

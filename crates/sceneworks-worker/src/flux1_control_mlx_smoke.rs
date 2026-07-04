@@ -29,7 +29,7 @@ use gen_core::{
     Conditioning, ControlKind, GenerationOutput, GenerationRequest, Image, LoadSpec, WeightsSource,
 };
 
-use super::smoke_support::{env_or, image_std};
+use super::smoke_support::{env_or, image_std, DEGENERATE_STD_FLOOR_DEFAULT};
 
 fn env_path(key: &str) -> PathBuf {
     PathBuf::from(
@@ -158,7 +158,7 @@ fn flux1_dev_control_mlx_smoke() {
         .save(out_dir.join("flux1_control_baseline.png"))
         .expect("save baseline");
     assert!(
-        base_std > 5.0,
+        base_std > DEGENERATE_STD_FLOOR_DEFAULT,
         "control-free baseline looks degenerate (std {base_std:.2})"
     );
 
@@ -192,7 +192,7 @@ fn flux1_dev_control_mlx_smoke() {
         println!("[smoke] flux1 {label}: std {std:.2}, steer(meanAbsΔ vs control-free) {steer:.2}");
         assert_eq!((image.width, image.height), (w, h));
         assert!(
-            std > 5.0,
+            std > DEGENERATE_STD_FLOOR_DEFAULT,
             "flux1 {label} control render looks degenerate (std {std:.2})"
         );
         assert!(

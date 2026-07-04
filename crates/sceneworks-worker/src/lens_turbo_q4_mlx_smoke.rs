@@ -27,7 +27,9 @@ use std::path::{Path, PathBuf};
 
 use gen_core::{GenerationOutput, GenerationRequest, LoadSpec, Quant, WeightsSource};
 
-use super::smoke_support::{env_or, image_mean, image_std, is_all_zero, save_png};
+use super::smoke_support::{
+    env_or, image_mean, image_std, is_all_zero, save_png, DEGENERATE_STD_FLOOR_TIGHT,
+};
 
 /// The engine-complete packed subdir to load: mirror `image_jobs::base::standard_tier_subdir`'s q4
 /// selection — prefer `<root>/q4` (lens turnkeys pack the backbone under `transformer/`), else `root`
@@ -168,7 +170,7 @@ fn lens_turbo_q4_mlx_gpu_smoke() {
         "lens_turbo Q4 decode is ALL-ZERO — a broken packed load/decode"
     );
     assert!(
-        std > 20.0,
+        std > DEGENERATE_STD_FLOOR_TIGHT,
         "lens_turbo Q4 render looks degenerate (std {std:.2}) — possible NaN / all-black / flat decode"
     );
     println!(
