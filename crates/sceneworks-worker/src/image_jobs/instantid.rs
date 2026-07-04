@@ -4,11 +4,20 @@ const INSTANTID_MODEL: &str = "instantid_realvisxl";
 const INSTANTID_SDXL_REPO: &str = "SG161222/RealVisXL_V5.0";
 /// Stock InstantID checkpoint repo — the IdentityNet `ControlNetModel/` lives here.
 const INSTANTID_CONTROLNET_REPO: &str = "InstantX/InstantID";
+/// Pinned revision for the stock InstantX IdentityNet repo (sc-9879, F-077 follow-up).
+const INSTANTID_CONTROLNET_REVISION: &str = "57b32dfee076092ad2930c71fd6d439c2c3b1820";
 /// Converted-weights bundle (download-on-first-use): the MLX `ip-adapter.safetensors`
 /// (`tools/convert_instantid.py`) + the native face stack `scrfd_10g.safetensors`
 /// (`convert_scrfd.py`) + `arcface_iresnet100.safetensors` (`convert_glintr100.py`). Public
 /// repo, mirroring the YOLO11 / SAM2 `SceneWorks/*-mlx` uploads (sc-3633 / sc-3707).
 const INSTANTID_MLX_REPO: &str = "SceneWorks/instantid-mlx";
+/// Pinned revision for the first-party converted InstantID bundle (sc-9879, F-077 follow-up). Even
+/// though `SceneWorks/instantid-mlx` is a first-party repo, fetching the mutable `main` branch means a
+/// re-push (or a compromised token) could silently swap the ip-adapter / SCRFD / ArcFace weights we
+/// load. Pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). HF's tree API still reports
+/// each file's `lfs.oid`, which `ensure_hf_cached_file` verifies against. NOTE: the candle PuLID lane
+/// reuses this SAME repo (`pulid_candle.rs` `PULID_CANDLE_FACE_REPO`); its pin must match this sha.
+const INSTANTID_MLX_REVISION: &str = "bca0cacf8e5e04529bb2b326a521361b02be84fd";
 const INSTANTID_IP_ADAPTER_FILE: &str = "ip-adapter.safetensors";
 // `pub(crate)` so the Dataset Doctor face pass (sc-6538) can join them under the bundle dir that
 // `ensure_face_stack_dir` stages, to load the MLX `FaceAnalysis` (SCRFD + ArcFace) directly.
@@ -33,6 +42,8 @@ const INSTANTID_ANGLE_CONTROLNET_SCALE: f32 = 0.65;
 /// xinsir OpenPose-SDXL ControlNet (the pose-mode second branch, sc-3117). Loads via the stock
 /// `load_controlnet` (no conversion) — `image_adapters.py:615-617` parity.
 const INSTANTID_OPENPOSE_REPO: &str = "xinsir/controlnet-openpose-sdxl-1.0";
+/// Pinned revision for the xinsir OpenPose-SDXL ControlNet (sc-9879, F-077 follow-up).
+const INSTANTID_OPENPOSE_REVISION: &str = "23f966cd5cfdd3f7729c903e243d87152162d2b7";
 /// Torch-parity default OpenPose lock (`instantid_adapter.py::_openpose_scale`, default 0.7).
 const INSTANTID_OPENPOSE_SCALE: f32 = 0.7;
 /// The face-restore re-render side (the engine's production crop size, sc-3380).
@@ -273,6 +284,21 @@ fn instantid_raw_settings(
     raw
 }
 
+/// The pinned commit revision for each InstantID download repo (sc-9879, F-077 follow-up). Every
+/// InstantID weight repo is a fixed, non-overridable const (the env pins point at local snapshot dirs,
+/// never another HF repo), so fetching the mutable `main` branch means a re-push (or a compromised token)
+/// could silently swap the weights we load. Pin each to its exact commit for defense-in-depth (mirrors
+/// sc-8879/sc-9682); the `lfs.oid` sha256 verify in `ensure_hf_cached_file` is retained. Any repo not in
+/// this table (a caller passing something unexpected) falls back to `main` rather than a wrong sha.
+fn instantid_revision(repo: &str) -> &'static str {
+    match repo {
+        INSTANTID_MLX_REPO => INSTANTID_MLX_REVISION,
+        INSTANTID_CONTROLNET_REPO => INSTANTID_CONTROLNET_REVISION,
+        INSTANTID_OPENPOSE_REPO => INSTANTID_OPENPOSE_REVISION,
+        _ => "main",
+    }
+}
+
 /// Resolve a single InstantID weight file: return it if already present in `dir`, else
 /// download `url` into `dir` (atomic `.tmp` + rename, so a partial download is never mistaken
 /// for a complete one — same shape as `person_segment::ensure_segmenter_weights`).
@@ -282,7 +308,7 @@ async fn ensure_instantid_file(
     dir: &Path,
     name: &str,
 ) -> WorkerResult<PathBuf> {
-    ensure_hf_cached_file(context, repo, "main", name, &dir.join(name)).await
+    ensure_hf_cached_file(context, repo, instantid_revision(repo), name, &dir.join(name)).await
 }
 
 /// Resolve only the SCRFD detector weights (`scrfd_10g.safetensors`) from the same converted
@@ -430,7 +456,7 @@ async fn ensure_instantid_weights(
         ensure_hf_cached_file(
             &context,
             INSTANTID_CONTROLNET_REPO,
-            "main",
+            INSTANTID_CONTROLNET_REVISION,
             &source,
             &controlnet_dir.join(file),
         )

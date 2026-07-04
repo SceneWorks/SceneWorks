@@ -12,6 +12,12 @@
 /// h94 IP-Adapter repo (the ViT-H encoder + the plus/plus-face SDXL weights), matching the MLX SDXL IP
 /// path's `SDXL_IP_ADAPTER_REPO`.
 const SDXL_IPADAPTER_REPO: &str = "h94/IP-Adapter";
+/// Pinned revision for the `h94/IP-Adapter` repo (sc-9879, F-077 follow-up). A fixed, non-overridable
+/// repo (the env pin points at a local dir, not another HF repo), so fetching the mutable `main` branch
+/// means an upstream re-push could silently swap the adapter / CLIP-encoder weights we load. Pin the
+/// exact commit for defense-in-depth (mirrors sc-8879/sc-9682). HF's tree API still reports each file's
+/// `lfs.oid`, which `ensure_hf_cached_file` verifies the downloaded content against.
+const SDXL_IPADAPTER_REVISION: &str = "018e402774aeeddd60609b4ecdb7e298259dc729";
 /// The IP-Adapter-Plus (ViT-H) bundle inside the repo (`image_proj` Resampler + `ip_adapter.*` K/V).
 const SDXL_IPADAPTER_BUNDLE_SRC: &str = "sdxl_models/ip-adapter-plus_sdxl_vit-h.safetensors";
 /// The CLIP ViT-H image-encoder files inside the repo (config + weights).
@@ -141,7 +147,7 @@ async fn ensure_sdxl_ipadapter_weights(
     let bundle = ensure_hf_cached_file(
         &context,
         SDXL_IPADAPTER_REPO,
-        "main",
+        SDXL_IPADAPTER_REVISION,
         SDXL_IPADAPTER_BUNDLE_SRC,
         &cache.join("ip-adapter-plus_sdxl_vit-h.safetensors"),
     )
@@ -152,7 +158,7 @@ async fn ensure_sdxl_ipadapter_weights(
         ensure_hf_cached_file(
             &context,
             SDXL_IPADAPTER_REPO,
-            "main",
+            SDXL_IPADAPTER_REVISION,
             source,
             &encoder.join(name),
         )

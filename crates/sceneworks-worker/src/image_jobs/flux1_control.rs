@@ -15,6 +15,13 @@ const FLUX1_DEV_CONTROL_ENGINE_ID: &str = "flux1_dev_control";
 /// (the diffusers checkpoint). The default *repo* is the shared strict-control table (single source of
 /// truth — `STRICT_CONTROL_ENGINES`).
 const FLUX1_CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
+/// Pinned revision for the default `Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro-2.0` control-weights
+/// repo (sc-9879, F-077 follow-up). Fetching the mutable `main` branch means a re-push (or a compromised
+/// token) could silently swap the ControlNet checkpoint we load; pin the exact commit for defense-in-depth
+/// (mirrors the SeedVR2/Real-ESRGAN pins, sc-8879/sc-9682). Applied ONLY to the default table repo — a
+/// manifest `controlWeights.repo` override carries its own revision layout, so it keeps `main`. HF's tree
+/// API still reports the file's `lfs.oid`, which `ensure_hf_cached_file` verifies against.
+const FLUX1_CONTROL_REVISION: &str = "5d700aaad96c5ddcdf8a38ef9b22a82aac2c38e5";
 /// The asset `adapter` id recorded on FLUX.1-dev strict-control assets (the dev base MLX label —
 /// shared with the plain FLUX.1 path).
 const FLUX1_CONTROL_ADAPTER_LABEL: &str = "mlx_flux";
@@ -100,7 +107,15 @@ async fn ensure_flux1_control_weights(
         .join("cache")
         .join("controlnet-flux1")
         .join(&file);
-    crate::downloads::ensure_hf_cached_file(&context, &repo, "main", &file, &dst).await
+    // Pin the exact commit for the default table control repo so `main` moving under us can't swap the
+    // ControlNet checkpoint (sc-9879). A manifest `controlWeights.repo` override may carry its own
+    // revision layout, so only pin when we're on the default repo.
+    let revision = if repo == strict_control_default_repo(FLUX1_DEV_CONTROL_ENGINE_ID) {
+        FLUX1_CONTROL_REVISION
+    } else {
+        "main"
+    };
+    crate::downloads::ensure_hf_cached_file(&context, &repo, revision, &file, &dst).await
 }
 
 /// Control lock strength for FLUX.1-dev: `advanced.controlScale` (default 0.7, clamp [0,2]). The Shakker

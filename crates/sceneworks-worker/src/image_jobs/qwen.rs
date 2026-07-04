@@ -397,13 +397,23 @@ struct LightningDistill {
     file: &'static str,
 }
 
+/// The default Lightning distill-LoRA repo (`qwen_image_edit_2511_lightning`). A fixed default; a
+/// manifest-supplied `LightningDistill.repo` (should one ever appear) is honored but not pinned.
+const QWEN_LIGHTNING_LORA_REPO: &str = "lightx2v/Qwen-Image-Edit-2511-Lightning";
+/// Pinned revision for the default Lightning distill-LoRA repo (sc-9879, F-077 follow-up). Fetching the
+/// mutable `main` branch means an upstream re-push could silently swap the distill LoRA we stack at load.
+/// Pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). `HuggingFaceSnapshot::resolve`
+/// still verifies each file's `lfs.oid` sha256 against the downloaded content. Applied ONLY to the default
+/// repo — a non-default repo keeps `main`.
+const QWEN_LIGHTNING_LORA_REVISION: &str = "d74eba145674fd7e31b949324e148e21e7118abd";
+
 /// The Lightning distill config for a SceneWorks model id, or `None` for every
 /// production variant. Only `qwen_image_edit_2511_lightning` is a distilled variant today.
 fn qwen_edit_lightning(model: &str) -> Option<LightningDistill> {
     match model {
         "qwen_image_edit_2511_lightning" => Some(LightningDistill {
             sampler: "lightning",
-            repo: "lightx2v/Qwen-Image-Edit-2511-Lightning",
+            repo: QWEN_LIGHTNING_LORA_REPO,
             file: "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
         }),
         _ => None,
@@ -438,7 +448,13 @@ async fn ensure_distill_lora_cached(
             "Unable to resolve Hugging Face cache path for {repo}."
         ))
     })?;
-    let revision = "main";
+    // Pin the exact commit for the default distill-LoRA repo so `main` moving under us can't swap the
+    // LoRA (sc-9879). A non-default repo (none exists today, but the param is repo-agnostic) keeps `main`.
+    let revision = if repo == QWEN_LIGHTNING_LORA_REPO {
+        QWEN_LIGHTNING_LORA_REVISION
+    } else {
+        "main"
+    };
     let client = reqwest::Client::new();
     let snapshot =
         HuggingFaceSnapshot::resolve(&client, settings, repo, revision, &[file.to_owned()]).await?;

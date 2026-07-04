@@ -504,20 +504,41 @@ async fn download_snapshot_fresh_retry_discards_partial_blob() {
 fn derived_tokenizer_overlay_targets_only_known_base_repos() {
     let snap = std::path::Path::new("/snap");
     let want = PathBuf::from("/snap/tokenizer/tokenizer.json");
-    // Kolors → its SceneWorks tokenizer repo + the snapshot's tokenizer/tokenizer.json.
+    // Kolors → its SceneWorks tokenizer repo + pinned revision + the snapshot's tokenizer/tokenizer.json.
     assert_eq!(
         derived_tokenizer_overlay("Kwai-Kolors/Kolors-diffusers", snap),
-        Some(("SceneWorks/kolors-chatglm3-tokenizer", want.clone()))
+        Some((
+            "SceneWorks/kolors-chatglm3-tokenizer",
+            "4001e09f10ef05845457b976bbf1d28d54319886",
+            want.clone()
+        ))
     );
-    // Qwen-Image (sc-6570) → its SceneWorks tokenizer repo, same dest.
+    // Qwen-Image (sc-6570) → its SceneWorks tokenizer repo + pinned revision, same dest.
     assert_eq!(
         derived_tokenizer_overlay("Qwen/Qwen-Image", snap),
-        Some(("SceneWorks/qwen-image-tokenizer", want.clone()))
+        Some((
+            "SceneWorks/qwen-image-tokenizer",
+            "b0178292f0f4b1be9b5bfdda2b6e97fda0e195c3",
+            want.clone()
+        ))
+    );
+    // Qwen-Image-2512 (sc-8271) reuses the same hosted overlay repo → the SAME pinned revision.
+    assert_eq!(
+        derived_tokenizer_overlay("Qwen/Qwen-Image-2512", snap),
+        Some((
+            "SceneWorks/qwen-image-tokenizer",
+            "b0178292f0f4b1be9b5bfdda2b6e97fda0e195c3",
+            want.clone()
+        ))
     );
     // Whitespace from a manifest field is tolerated.
     assert_eq!(
         derived_tokenizer_overlay("  Qwen/Qwen-Image  ", snap),
-        Some(("SceneWorks/qwen-image-tokenizer", want))
+        Some((
+            "SceneWorks/qwen-image-tokenizer",
+            "b0178292f0f4b1be9b5bfdda2b6e97fda0e195c3",
+            want
+        ))
     );
     // Every other model is a no-op — including sibling repos that must NOT match.
     assert_eq!(derived_tokenizer_overlay("owner/model", snap), None);
@@ -530,6 +551,34 @@ fn derived_tokenizer_overlay_targets_only_known_base_repos() {
         derived_tokenizer_overlay("Qwen/Qwen-Image-Edit-2511", snap),
         None
     );
+}
+
+/// sc-9879 (F-077 follow-up): every derived-tokenizer overlay must pin an exact 40-hex lowercase commit
+/// (not the mutable `main` branch) so an upstream re-push can't silently swap the derived `tokenizer.json`
+/// the in-process generator/trainer constructs from. Mirrors the `_REVISION` format tests in this PR.
+#[test]
+fn derived_tokenizer_overlay_revisions_are_pinned_commits_not_main() {
+    let snap = std::path::Path::new("/snap");
+    for base in [
+        "Kwai-Kolors/Kolors-diffusers",
+        "Qwen/Qwen-Image",
+        "Qwen/Qwen-Image-2512",
+    ] {
+        let (_, revision, _) =
+            derived_tokenizer_overlay(base, snap).expect("known base has an overlay");
+        assert_ne!(revision, "main", "{base} tokenizer must pin a fixed revision");
+        assert_eq!(
+            revision.len(),
+            40,
+            "a pinned HF revision is a 40-char commit sha ({base})"
+        );
+        assert!(
+            revision
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "the pinned revision must be lowercase hex ({base})"
+        );
+    }
 }
 
 /// A single stub that serves both the HF tree resolve (for the SceneWorks tokenizer repo) and the

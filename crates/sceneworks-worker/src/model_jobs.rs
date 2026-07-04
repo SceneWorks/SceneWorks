@@ -311,6 +311,14 @@ struct DerivedTokenizerOverlay {
     base_repo: &'static str,
     /// SceneWorks-hosted repo holding the materialized fast `tokenizer.json`.
     tokenizer_repo: &'static str,
+    /// Pinned commit of [`tokenizer_repo`] to fetch (sc-9879, F-077 follow-up). The tokenizer repo is a
+    /// fixed SceneWorks-hosted const here (no manifest/payload override reaches this overlay), so pulling
+    /// the mutable `main` branch would let an upstream re-push silently swap the derived `tokenizer.json`
+    /// the in-process generator/trainer constructs from. Pin the exact commit for defense-in-depth
+    /// (mirrors sc-8879/sc-9682). Per-entry because entries may share a repo (Qwen-Image / -2512) but the
+    /// pin must be resolved per distinct repo. The standard resolve+download path still verifies each
+    /// file's reported `lfs.oid`.
+    tokenizer_revision: &'static str,
 }
 
 /// The single overlaid file (in every case the HF fast serialization) and its in-snapshot subdir.
@@ -327,6 +335,7 @@ const DERIVED_TOKENIZER_OVERLAYS: &[DerivedTokenizerOverlay] = &[
     DerivedTokenizerOverlay {
         base_repo: "Kwai-Kolors/Kolors-diffusers",
         tokenizer_repo: "SceneWorks/kolors-chatglm3-tokenizer",
+        tokenizer_revision: "4001e09f10ef05845457b976bbf1d28d54319886",
     },
     // Qwen-Image (sc-6570): ships the Qwen2 BPE tokenizer as `vocab.json` + `merges.txt` only. The MLX
     // `qwen-image` provider's `load_tokenizer` reads `tokenizer/tokenizer.json`. Derived via mlx-gen
@@ -335,6 +344,7 @@ const DERIVED_TOKENIZER_OVERLAYS: &[DerivedTokenizerOverlay] = &[
     DerivedTokenizerOverlay {
         base_repo: "Qwen/Qwen-Image",
         tokenizer_repo: "SceneWorks/qwen-image-tokenizer",
+        tokenizer_revision: "b0178292f0f4b1be9b5bfdda2b6e97fda0e195c3",
     },
     // Qwen-Image-2512 (sc-8271): the Dec-2025 base refresh is architecturally identical to
     // `Qwen/Qwen-Image` and reuses the same Qwen2 BPE tokenizer (unchanged across the line),
@@ -342,16 +352,17 @@ const DERIVED_TOKENIZER_OVERLAYS: &[DerivedTokenizerOverlay] = &[
     DerivedTokenizerOverlay {
         base_repo: "Qwen/Qwen-Image-2512",
         tokenizer_repo: "SceneWorks/qwen-image-tokenizer",
+        tokenizer_revision: "b0178292f0f4b1be9b5bfdda2b6e97fda0e195c3",
     },
 ];
 
-/// The hosted tokenizer repo + overlay dest for a just-downloaded `repo`, or `None` when `repo` is not
-/// a base model that needs the overlay (a no-op for every other model). Pure so the repo guard +
-/// target path are unit-testable without a download.
+/// The hosted tokenizer repo + its pinned revision + overlay dest for a just-downloaded `repo`, or
+/// `None` when `repo` is not a base model that needs the overlay (a no-op for every other model). Pure so
+/// the repo guard + pinned revision + target path are unit-testable without a download.
 pub(crate) fn derived_tokenizer_overlay(
     repo: &str,
     snapshot_dir: &Path,
-) -> Option<(&'static str, PathBuf)> {
+) -> Option<(&'static str, &'static str, PathBuf)> {
     let trimmed = repo.trim();
     DERIVED_TOKENIZER_OVERLAYS
         .iter()
@@ -359,6 +370,7 @@ pub(crate) fn derived_tokenizer_overlay(
         .map(|overlay| {
             (
                 overlay.tokenizer_repo,
+                overlay.tokenizer_revision,
                 snapshot_dir.join("tokenizer").join(DERIVED_TOKENIZER_FILE),
             )
         })
@@ -378,7 +390,9 @@ pub(crate) async fn overlay_derived_tokenizer(
     repo: &str,
     snapshot_dir: &Path,
 ) -> WorkerResult<()> {
-    let Some((tokenizer_repo, dest)) = derived_tokenizer_overlay(repo, snapshot_dir) else {
+    let Some((tokenizer_repo, tokenizer_revision, dest)) =
+        derived_tokenizer_overlay(repo, snapshot_dir)
+    else {
         return Ok(());
     };
     if dest.exists() {
@@ -391,7 +405,7 @@ pub(crate) async fn overlay_derived_tokenizer(
         http_client,
         settings,
         tokenizer_repo,
-        "main",
+        tokenizer_revision,
         &[DERIVED_TOKENIZER_FILE.to_owned()],
     )
     .await?;

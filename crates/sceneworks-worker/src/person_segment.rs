@@ -57,6 +57,12 @@ const SEG_FILE: &str = "sam2.1_hiera_large.safetensors";
 /// (sc-3707, uploaded from the official Meta `.pt` via `tools/convert_sam2_to_mlx.py`;
 /// bit-identical to the avbiswas reference).
 const SEG_REPO: &str = "SceneWorks/sam2-mlx";
+/// Pinned SAM2 weights revision (sc-9879, F-077 follow-up). Even though `SEG_REPO` is a
+/// first-party repo, fetching the mutable `main` branch means a re-push (or a compromised
+/// token) could silently swap the segmenter weights we load. Pin the exact commit for
+/// defense-in-depth, mirroring the person-detector pin (sc-9682). HF's tree API still reports
+/// the file's `lfs.oid`, which `ensure_hf_cached_file` verifies the downloaded content against.
+const SEG_REVISION: &str = "fbc86db0dceb8c744e5fc95feadc37572107be69";
 
 /// The SAM2 video predictor is loaded once and cached process-wide (weights load is the
 /// expensive part; the per-clip tracking state is built fresh each call). Holds `None` until
@@ -105,7 +111,7 @@ pub(crate) async fn ensure_segmenter_weights(
         .join("cache")
         .join("person-segment")
         .join(SEG_FILE);
-    ensure_hf_cached_file(context, SEG_REPO, "main", SEG_FILE, &target).await
+    ensure_hf_cached_file(context, SEG_REPO, SEG_REVISION, SEG_FILE, &target).await
 }
 
 /// Scale a normalized `(x, y, width, height)` box to a pixel-space `[x1, y1, x2, y2]`
@@ -321,6 +327,25 @@ pub(crate) fn propagate_track_blocking(
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// sc-9879 (F-077 follow-up): the first-party SAM2 weights repo is fetched at a pinned commit,
+    /// never the mutable `main` branch, so a re-push (or a compromised token) can't silently swap the
+    /// segmenter weights we load. Lock the constant to a real 40-hex lowercase commit id.
+    #[test]
+    fn seg_revision_is_pinned_commit_not_main() {
+        assert_ne!(SEG_REVISION, "main", "SAM2 must pin a fixed revision");
+        assert_eq!(
+            SEG_REVISION.len(),
+            40,
+            "a pinned HF revision is a 40-char commit sha"
+        );
+        assert!(
+            SEG_REVISION
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "the pinned revision must be lowercase hex"
+        );
+    }
 
     /// sc-4277 / F-MLXW-13: the model-cache locks recover from poison instead of
     /// `.expect()`-panicking. A prior job panicking while holding the lock must

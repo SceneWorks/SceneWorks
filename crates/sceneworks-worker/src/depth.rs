@@ -33,6 +33,13 @@
 /// platform); only the estimation function is backend-gated.
 pub const DEPTH_ANYTHING_V2_SMALL_REPO: &str = "depth-anything/Depth-Anything-V2-Small-hf";
 
+/// Pinned Depth-Anything-V2 revision (sc-9879, F-077 follow-up). The depth estimator is a fixed,
+/// non-overridable repo (the env pin points at a local snapshot dir, not another HF repo), so fetching
+/// the mutable `main` branch means an upstream re-push could silently swap the weights we load. Pin the
+/// exact commit for defense-in-depth (mirrors sc-8879/sc-9682). HF's tree API still reports the file's
+/// `lfs.oid`, which `ensure_hf_cached_file` verifies the downloaded content against.
+pub const DEPTH_ANYTHING_V2_REVISION: &str = "5426e4f0f36572d16453bbda7a8389317b1bef99";
+
 /// The single weight file the estimator loads from its snapshot dir. (Both the MLX and candle
 /// loaders read every `*.safetensors` in the dir; the published Small checkpoint ships exactly
 /// this one file.)

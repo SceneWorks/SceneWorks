@@ -23,6 +23,12 @@
 /// `.safetensors` on `main` (no `refs/pr` dance, unlike the Kolors IP-Adapter).
 const KOLORS_CONTROL_REPO: &str = "Kwai-Kolors/Kolors-ControlNet-Pose";
 const KOLORS_CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
+/// Pinned revision for the default `KOLORS_CONTROL_REPO` (sc-9879, F-077 follow-up). Fetching the
+/// mutable `main` branch means a re-push (or a compromised token) could silently swap the ControlNet
+/// checkpoint we load; pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). Applied ONLY
+/// to the default repo — a manifest `controlWeights.repo` override carries its own revision layout, so it
+/// keeps `main`. HF's tree API still reports the file's `lfs.oid`, which `ensure_hf_cached_file` verifies.
+const KOLORS_CONTROL_REVISION: &str = "83e35a8033a89d2e75044b412d0e2474111578f7";
 /// The Kolors base diffusers repo when the manifest omits `repo`.
 const KOLORS_CONTROL_DEFAULT_REPO: &str = "Kwai-Kolors/Kolors-diffusers";
 /// ControlNet conditioning-scale default (the strict-pose tier).
@@ -151,7 +157,15 @@ async fn ensure_kolors_control_weights(
         .join("cache")
         .join("controlnet-kolors")
         .join(&file);
-    ensure_hf_cached_file(&context, &repo, "main", &file, &dst).await?;
+    // Pin the exact commit for the default control repo so `main` moving under us can't swap the
+    // ControlNet checkpoint (sc-9879). A manifest `controlWeights.repo` override may carry its own
+    // revision layout, so only pin when we're on the default repo.
+    let revision = if repo == KOLORS_CONTROL_REPO {
+        KOLORS_CONTROL_REVISION
+    } else {
+        "main"
+    };
+    ensure_hf_cached_file(&context, &repo, revision, &file, &dst).await?;
     Ok(dst)
 }
 
