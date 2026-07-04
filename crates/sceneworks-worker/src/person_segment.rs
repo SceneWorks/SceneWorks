@@ -305,6 +305,13 @@ pub(crate) fn propagate_track_blocking(
     }
 
     // Pass 2: re-seed the prompt + every weak frame as box anchors and re-propagate.
+    //
+    // ACCEPTED TRADEOFF (sc-8953 / F-151): `run` rebuilds the tracking state via
+    // `init_state_from_frames` (re-encoding all frames) and re-propagates from scratch. That
+    // repeats pass 1's per-frame encode, but `Sam2VideoPredictor` exposes no way to reset the
+    // prompts on an existing state, so a fresh state is the only correct way to re-seed. It is
+    // bounded (the clip is capped at ≤24 frames) and only runs when pass 1 actually drifted, so
+    // the extra encode is left as-is; revisit only if the engine later exposes state reuse.
     let mut seeds = vec![(0usize, prompt)];
     seeds.extend(weak);
     run(&seeds)
