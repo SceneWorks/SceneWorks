@@ -124,9 +124,14 @@ pub(crate) fn normalize_app_managed_path(
     if raw_path.is_empty() {
         return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
     }
+    // Canonicalize before the confinement check so a symlink (or `..`) under the
+    // data dir can't satisfy a purely-lexical `starts_with` and land the write
+    // outside; allow either the lexical or the canonical root so a not-yet-created
+    // target still matches (sc-8877 / F-075), mirroring `normalize_app_managed_lora_path`.
     let data_dir = normalized_data_dir(settings)?;
-    let path = normalize_absolute_path(Path::new(raw_path))?;
-    ensure_path_under(path, &[data_dir], label)
+    let canonical_data_dir = normalize_existing_or_absolute(&settings.data_dir)?;
+    let path = normalize_existing_or_absolute(Path::new(raw_path))?;
+    ensure_path_under(path, &[data_dir, canonical_data_dir], label)
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -166,10 +171,20 @@ pub(crate) fn normalize_app_managed_model_path(
     if raw_path.is_empty() {
         return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
     }
+    // Canonicalize the input and allow either the lexical or canonical form of each
+    // root, so a symlink/`..` can't slip past the confinement check (sc-8877 / F-075),
+    // matching `normalize_app_managed_lora_path` (same roots).
     let data_dir = normalized_data_dir(settings)?;
+    let canonical_data_dir = normalize_existing_or_absolute(&settings.data_dir)?;
     let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
-    let path = normalize_absolute_path(Path::new(raw_path))?;
-    ensure_path_under(path, &[data_dir, hf_cache], label)
+    let canonical_hf_cache =
+        normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let path = normalize_existing_or_absolute(Path::new(raw_path))?;
+    ensure_path_under(
+        path,
+        &[data_dir, canonical_data_dir, hf_cache, canonical_hf_cache],
+        label,
+    )
 }
 
 /// Confine a LoRA adapter path taken from a job payload to an app-managed root
@@ -268,6 +283,10 @@ pub(crate) fn resolve_training_output_dir(
     output_dir: &str,
     label: &str,
 ) -> WorkerResult<PathBuf> {
+    // `normalize_app_managed_path` now returns the canonicalized path (sc-8877), so
+    // build each sub-root in both its lexical and canonical form to keep this second
+    // `starts_with` consistent (a canonical path never starts_with a lexical root
+    // when the two differ, e.g. macOS `/var` -> `/private/var`).
     let path = normalize_app_managed_path(settings, output_dir, label)?;
     let data_dir = normalized_data_dir(settings)?;
     // Global-scope outputs land in `<data>/loras` (or `<data>/models` for full
@@ -276,11 +295,13 @@ pub(crate) fn resolve_training_output_dir(
     // `resolve_training_output_location` computes API-side from trusted inputs.
     // All three stay inside the app data dir, so allow the projects tree too
     // rather than rejecting every project-scoped run.
-    let allowed_roots = [
-        data_dir.join("loras"),
-        data_dir.join("models"),
-        data_dir.join("projects"),
-    ];
+    let mut allowed_roots = Vec::with_capacity(6);
+    for sub in ["loras", "models", "projects"] {
+        allowed_roots.push(data_dir.join(sub));
+        allowed_roots.push(normalize_existing_or_absolute(
+            &settings.data_dir.join(sub),
+        )?);
+    }
     ensure_path_under(path, &allowed_roots, label)
 }
 
@@ -290,15 +311,19 @@ pub(crate) fn resolve_dataset_item_path(
     image_path: &str,
     label: &str,
 ) -> WorkerResult<PathBuf> {
+    // `root` is now canonicalized (sc-8877), so canonicalize the resolved image path
+    // too — otherwise an absolute image path stays lexical (e.g. macOS `/var/...`)
+    // and never starts_with a canonical root (`/private/var/...`). Canonicalizing the
+    // image also closes the symlink-escape the lexical check missed.
     let root = normalize_app_managed_path(settings, dataset_root, "Dataset root")?;
     let raw_image = Path::new(image_path.trim());
     if image_path.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
     }
     let path = if raw_image.is_absolute() {
-        normalize_absolute_path(raw_image)?
+        normalize_existing_or_absolute(raw_image)?
     } else {
-        normalize_absolute_path(&root.join(raw_image))?
+        normalize_existing_or_absolute(&root.join(raw_image))?
     };
     ensure_path_under(path, &[root], label)
 }
@@ -365,16 +390,23 @@ pub(crate) fn resolve_lora_import_target(
     payload: &JsonObject,
     fallback_target: PathBuf,
 ) -> WorkerResult<PathBuf> {
-    let target = normalize_absolute_path(
-        &optional_payload_string(payload, "targetDir")
-            .map(PathBuf::from)
-            .unwrap_or(fallback_target),
-    )?;
-    let mut allowed_roots = vec![normalize_absolute_path(&settings.data_dir.join("loras"))?];
+    let requested = optional_payload_string(payload, "targetDir")
+        .map(PathBuf::from)
+        .unwrap_or(fallback_target);
+    // Canonicalize the target before the confinement check so a symlink/`..` under
+    // the managed root can't pass a purely-lexical `starts_with` and redirect the
+    // write outside; allow each root's lexical or canonical form so a not-yet-created
+    // target dir still matches (sc-8877 / F-075).
+    let target = normalize_existing_or_absolute(&requested)?;
+    let loras_root = settings.data_dir.join("loras");
+    let mut allowed_roots = vec![
+        normalize_absolute_path(&loras_root)?,
+        normalize_existing_or_absolute(&loras_root)?,
+    ];
     if let Some(project_path) = project_path_for_payload(settings, payload)? {
-        allowed_roots.push(normalize_absolute_path(
-            &project_path.join("loras").join("imports"),
-        )?);
+        let project_imports = project_path.join("loras").join("imports");
+        allowed_roots.push(normalize_absolute_path(&project_imports)?);
+        allowed_roots.push(normalize_existing_or_absolute(&project_imports)?);
     }
     if allowed_roots.iter().any(|root| target.starts_with(root)) {
         return Ok(target);
@@ -390,12 +422,18 @@ pub(crate) fn resolve_model_import_target(
     payload: &JsonObject,
     fallback_target: PathBuf,
 ) -> WorkerResult<PathBuf> {
-    let target = normalize_absolute_path(
-        &optional_payload_string(payload, "targetDir")
-            .map(PathBuf::from)
-            .unwrap_or(fallback_target),
-    )?;
-    let allowed_roots = [normalize_absolute_path(&settings.data_dir.join("models"))?];
+    let requested = optional_payload_string(payload, "targetDir")
+        .map(PathBuf::from)
+        .unwrap_or(fallback_target);
+    // Canonicalize before the confinement check so a symlink/`..` can't escape the
+    // lexical `starts_with`; allow the managed root's lexical or canonical form so a
+    // not-yet-created target still matches (sc-8877 / F-075).
+    let target = normalize_existing_or_absolute(&requested)?;
+    let models_root = settings.data_dir.join("models");
+    let allowed_roots = [
+        normalize_absolute_path(&models_root)?,
+        normalize_existing_or_absolute(&models_root)?,
+    ];
     if allowed_roots.iter().any(|root| target.starts_with(root)) {
         return Ok(target);
     }
@@ -408,9 +446,16 @@ pub(crate) fn resolve_model_convert_output(
     settings: &Settings,
     output_dir: &str,
 ) -> WorkerResult<PathBuf> {
-    let target = normalize_absolute_path(&PathBuf::from(output_dir))?;
-    let allowed_root = normalize_absolute_path(&settings.data_dir.join("models"))?;
-    if target.starts_with(&allowed_root) {
+    // Canonicalize before the confinement check so a symlink/`..` can't escape the
+    // lexical `starts_with`; allow the managed root's lexical or canonical form so a
+    // not-yet-created output dir still matches (sc-8877 / F-075).
+    let target = normalize_existing_or_absolute(Path::new(output_dir))?;
+    let models_root = settings.data_dir.join("models");
+    let allowed_roots = [
+        normalize_absolute_path(&models_root)?,
+        normalize_existing_or_absolute(&models_root)?,
+    ];
+    if allowed_roots.iter().any(|root| target.starts_with(root)) {
         return Ok(target);
     }
     Err(WorkerError::InvalidPayload(
