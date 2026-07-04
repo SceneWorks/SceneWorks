@@ -889,6 +889,36 @@ fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
     }
 }
 
+/// The transformer-tier bit count a dense-TE turnkey (FLUX.2-klein, the [`DENSE_TE_TIER_MODELS`]
+/// class) actually asked for, derived from `advanced.mlxQuantize` the SAME way [`standard_tier_subdir`]
+/// picks its `bf16`/`q8`/`q4` tier (`<=0 → bf16`, `>4 → q8`, else the q4 default). Returns the recipe
+/// bit count of the REQUESTED tier: `None` (bf16) / `Some(8)` / `Some(4)`.
+///
+/// sc-9362 (F-018 follow-up): [`resolve_quant`] returns `(None, None)` for every dense-TE job (the
+/// load quant must stay `None` so the deliberately-dense bf16 text encoder is never re-quantized), so
+/// the request-derived recipe bits are ALWAYS bf16 even though the transformer is packed at q4/q8. If
+/// [`reconcile_resolved_tier_quant`] compared the resolved transformer tier against that always-`None`
+/// value, every straight (non-fallback) dense-TE job would look like a bf16→qN "downgrade" — firing a
+/// spurious `quant_tier_downgraded` event while the asset telemetry still hid the true transformer
+/// precision. Comparing the resolved tier against THIS requested-tier value instead lets the reconcile
+/// record the actual transformer precision on every job and warn/emit ONLY on a genuine fallback
+/// (requested tier absent → resolver fell through to an adjacent tier).
+///
+/// macOS-only: consumed on the MLX `generate_stream` reconcile path (the candle lane has no tier
+/// layout), alongside [`tier_quant_from_resolved_dir`].
+#[cfg(target_os = "macos")]
+fn dense_te_requested_tier_bits(request: &ImageRequest) -> Option<i64> {
+    let bits = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    match bits {
+        Some(b) if b <= 0 => None,
+        Some(b) if b > 4 => Some(8),
+        _ => Some(4),
+    }
+}
+
 /// The `(engine Quant, recipe bit count)` a resolved turnkey tier subdir ACTUALLY loads at, parsed
 /// from the tier dir's basename (sc-8820). The tier resolvers ([`standard_tier_subdir`],
 /// [`ideogram_model_subdir`], [`boogu_model_subdir`], [`krea_model_subdir`]) fall through q4→q8→bf16
@@ -2572,13 +2602,26 @@ async fn generate_stream(
     // q4→q8→bf16 when the preferred tier isn't downloaded, but the quant above is derived from the
     // REQUEST — so a bf16 pick with only `q4/` present would render Q4 while the recipe records dense,
     // lying to the epic 8506 quant A/B workflow. Reconcile against the tier subdir actually resolved:
-    // record the precision that ran + `warn!`/emit `quant_tier_downgraded` on a real fallback. The
-    // dense-TE turnkeys (FLUX.2-klein) keep their `None` load quant (never re-quantize the dense bf16
-    // TE) while still correcting the recorded bits. SANA (no quant support) has no tier subdir, so
-    // `tier_quant_from_resolved_dir` returns `None` and this is a no-op for it.
+    // record the precision that ran + `warn!`/emit `quant_tier_downgraded` on a real fallback. SANA
+    // (no quant support) has no tier subdir, so `tier_quant_from_resolved_dir` returns `None` and this
+    // is a no-op for it.
+    //
+    // sc-9362 (F-018 follow-up): dense-TE turnkeys (FLUX.2-klein) always derive `(None, None)` from
+    // `resolve_quant` (the load quant must stay `None` so the dense bf16 TE is never re-quantized),
+    // but their transformer is packed at q4/q8. Reconciling against that always-bf16 value made every
+    // straight dense-TE job read as a bf16→qN "downgrade" — a spurious event, and pre-8820 the recipe
+    // recorded bf16 for a q4/q8 transformer. Feed reconcile the transformer tier the request ACTUALLY
+    // asked for ([`dense_te_requested_tier_bits`], mirroring the `standard_tier_subdir` mapping) so it
+    // records the resolved transformer precision on EVERY job and only warns/emits on a genuine
+    // fallback. `allow_quant_change=false` keeps the load quant `None` (TE stays dense bf16).
     let (quant, quant_bits) = if model.supports_quant() {
+        let requested_for_reconcile = if is_dense_te_tier(request) {
+            (None, dense_te_requested_tier_bits(request))
+        } else {
+            (quant, quant_bits)
+        };
         reconcile_resolved_tier_quant(
-            (quant, quant_bits),
+            requested_for_reconcile,
             &weights_dir,
             !is_dense_te_tier(request),
             &request.model,
@@ -4153,5 +4196,103 @@ mod quant_tier_reconcile_tests {
         let (quant, bits) =
             reconcile_resolved_tier_quant(requested, &resolved, true, "sd3_5_large", "job1", "mlx");
         assert_eq!((quant, bits), (Some(Quant::Q4), Some(4)));
+    }
+
+    /// sc-9362 (F-018 follow-up): the dense-TE transformer tier the request asks for is derived from
+    /// `advanced.mlxQuantize` exactly like [`standard_tier_subdir`] — `<=0 → bf16 (None)`, `>4 → q8`,
+    /// else the q4 default — regardless of the always-`None` load quant `resolve_quant` returns for
+    /// dense-TE. This is what reconcile compares the resolved tier against so a straight job isn't a
+    /// spurious downgrade.
+    #[test]
+    fn dense_te_requested_tier_bits_mirrors_standard_tier_mapping() {
+        let req = |mlx_quantize: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": "flux2_klein_9b", "advanced": { "mlxQuantize": mlx_quantize } })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        let default = ImageRequest::from_payload(
+            json!({ "model": "flux2_klein_9b" }).as_object().unwrap(),
+        );
+        // No selection → the q4 default (matches standard_tier_subdir's preferred).
+        assert_eq!(dense_te_requested_tier_bits(&default), Some(4));
+        assert_eq!(dense_te_requested_tier_bits(&req(json!(0))), None); // bf16 opt-out
+        assert_eq!(dense_te_requested_tier_bits(&req(json!(4))), Some(4));
+        assert_eq!(dense_te_requested_tier_bits(&req(json!(8))), Some(8));
+        assert_eq!(dense_te_requested_tier_bits(&req(json!("8"))), Some(8)); // numeric-string
+        assert_eq!(dense_te_requested_tier_bits(&req(json!(-1))), None);
+    }
+
+    /// sc-9362 (F-018 follow-up): a straight (no-fallback) dense-TE job — its q4 transformer tier is
+    /// downloaded and resolves as requested — records the ACTUAL transformer tier (Q4) while keeping
+    /// the load quant `None` (the dense bf16 TE is never re-quantized). Before the fix the request
+    /// derived `(None, None)` and — since dense-TE always requests bf16 in `resolve_quant` — the
+    /// resolved q4 tier read as a bf16→q4 downgrade; now the requested tier is the q4 the request
+    /// actually asked for, so the resolved tier MATCHES and reconcile pass-throughs it with no event.
+    #[test]
+    fn dense_te_no_fallback_records_transformer_tier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // The klein q4 transformer tier is present (dense bf16 TE lives alongside in the same tier).
+        let dir = root.join("q4").join("transformer");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("diffusion_pytorch_model.safetensors"), b"x").unwrap();
+
+        let req = ImageRequest::from_payload(
+            json!({ "model": "flux2_klein_9b", "advanced": {} })
+                .as_object()
+                .unwrap(),
+        );
+        // The tier resolver lands on the requested q4 tier (no fallback).
+        let resolved = standard_tier_subdir(root, &req);
+        assert_eq!(resolved, root.join("q4"));
+        // resolve_quant keeps dense-TE at `(None, None)` (never re-quantize the dense bf16 TE)…
+        assert_eq!(resolve_quant(&req), (None, None));
+        // …but reconcile against the REQUESTED transformer tier (q4) records the real transformer
+        // precision (Q4) with the load quant still `None`, and — since resolved == requested — with no
+        // downgrade (the requested/resolved tiers match, so it's a clean pass-through).
+        let requested_for_reconcile = (None, dense_te_requested_tier_bits(&req));
+        assert_eq!(requested_for_reconcile, (None, Some(4)));
+        let (quant, bits) = reconcile_resolved_tier_quant(
+            requested_for_reconcile,
+            &resolved,
+            false, // dense-TE: keep the load quant None
+            "flux2_klein_9b",
+            "job1",
+            "mlx",
+        );
+        assert_eq!(
+            (quant, bits),
+            (None, Some(4)),
+            "records the actual q4 transformer tier, load quant stays None"
+        );
+    }
+
+    /// sc-9362: a GENUINE dense-TE fallback still surfaces — the request asks for q8 but only q4 is
+    /// downloaded, so the resolver falls through to q4; reconcile records q4 (the tier that ran) while
+    /// the load quant stays `None`. This is the case that legitimately warns/emits.
+    #[test]
+    fn dense_te_genuine_fallback_records_resolved_tier() {
+        let req = ImageRequest::from_payload(
+            json!({ "model": "flux2_klein_9b", "advanced": { "mlxQuantize": 8 } })
+                .as_object()
+                .unwrap(),
+        );
+        // Requested q8 tier bits, but only the q4 tier exists on disk (resolver fell through).
+        assert_eq!(dense_te_requested_tier_bits(&req), Some(8));
+        let (quant, bits) = reconcile_resolved_tier_quant(
+            (None, dense_te_requested_tier_bits(&req)),
+            std::path::Path::new("/m/q4"),
+            false,
+            "flux2_klein_9b",
+            "job1",
+            "mlx",
+        );
+        assert_eq!(
+            (quant, bits),
+            (None, Some(4)),
+            "genuine q8→q4 fallback records the resolved q4 tier, load quant stays None"
+        );
     }
 }
