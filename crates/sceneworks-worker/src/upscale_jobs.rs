@@ -835,6 +835,20 @@ fn resolve_source(
 // job handler
 // ---------------------------------------------------------------------------
 
+/// Resolve the requested image-upscale factor, rejecting anything other than the two supported
+/// scales (2x/4x — the only `real_esrgan_x{factor}.onnx` exports and SeedVR2 targets). Mirrors the
+/// video path's [`resolve_video_upscale_factor`](crate::video_jobs) (F-118 / sc-8920): an
+/// unsupported factor now fails loudly instead of being silently coerced to 2x, which produced a
+/// quietly-different output at a different resolution.
+fn resolve_image_upscale_factor(factor: u64) -> WorkerResult<u8> {
+    match factor {
+        2 | 4 => Ok(factor as u8),
+        other => Err(WorkerError::InvalidPayload(format!(
+            "Image upscale supports only factor 2 or 4 (got {other})."
+        ))),
+    }
+}
+
 pub(crate) async fn run_image_upscale_job(
     api: &ApiClient,
     settings: &Settings,
@@ -866,10 +880,10 @@ pub(crate) async fn run_image_upscale_job(
             WorkerError::InvalidPayload("Upscale jobs require a source image asset.".to_owned())
         })?
         .to_owned();
-    let factor: u8 = match payload.get("factor").and_then(Value::as_u64).unwrap_or(2) {
-        4 => 4,
-        _ => 2,
-    };
+    // Reject an unsupported factor early rather than silently coercing it to 2x (F-118 / sc-8920,
+    // mirroring the video path). A missing factor still defaults to 2x.
+    let factor: u8 =
+        resolve_image_upscale_factor(payload.get("factor").and_then(Value::as_u64).unwrap_or(2))?;
     let engine = payload
         .get("engine")
         .and_then(Value::as_str)
@@ -1242,10 +1256,10 @@ pub(crate) async fn run_dataset_upscale_job(
 ) -> WorkerResult<()> {
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     let payload = &job.payload;
-    let factor: u8 = match payload.get("factor").and_then(Value::as_u64).unwrap_or(2) {
-        4 => 4,
-        _ => 2,
-    };
+    // Reject an unsupported factor early rather than silently coercing it to 2x (F-118 / sc-8920,
+    // mirroring the video path). A missing factor still defaults to 2x.
+    let factor: u8 =
+        resolve_image_upscale_factor(payload.get("factor").and_then(Value::as_u64).unwrap_or(2))?;
     let project_id = payload
         .get("projectId")
         .and_then(Value::as_str)
