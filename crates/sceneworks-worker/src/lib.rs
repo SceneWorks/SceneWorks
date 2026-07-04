@@ -869,15 +869,16 @@ async fn heartbeat(
 /// Dispatch one claimed job to its handler and reconcile the terminal state.
 ///
 /// `shutdown` (sc-8845, F-043) is the process-shutdown [`CancelFlag`] tripped by
-/// `run_job_with_shutdown` when SIGTERM/Ctrl-C arrives mid-job. Handlers that thread a real cancel
-/// checkpoint honor it to stop promptly; the caller's bounded-wait-then-terminal-`Canceled` write
-/// is what GUARANTEES no job dangles `running` even for a handler that cannot observe the flag. The
-/// always-compiled placeholder path threads it directly so the shutdown-during-job behavior is
-/// exercised on every target (the GPU handlers are macOS/candle-gated). HONEST RESIDUAL: the
-/// per-engine GPU handlers still poll the API `cancel_requested` for a *user* cancel and do not yet
-/// consult this process flag; on shutdown they wind down at the loop's grace window rather than
-/// their next step, and the loop still writes the terminal `Canceled`. A follow-up can thread the
-/// flag through those handler signatures for a prompter mid-step stop (sc-8845 note).
+/// `run_job_with_shutdown` when SIGTERM/Ctrl-C arrives mid-job. The caller's
+/// bounded-wait-then-terminal-`Canceled` write is what GUARANTEES no job dangles `running` even for a
+/// handler that cannot observe the flag. The always-compiled placeholder path threads it directly so
+/// the shutdown-during-job behavior is exercised on every target (the GPU handlers are macOS/candle-
+/// gated). sc-9618 (F-043 follow-up): the dispatch below is scoped in [`with_shutdown_flag`], binding
+/// the flag as a task-local so the per-engine GPU consumer loops (image `consume_gen_events`, video
+/// `generate_video`, training `consume_training_events`, the shared `run_batched_analysis_job`, and the
+/// image-detail loop) consult it via `shutdown_requested()` at their existing per-step cancel
+/// checkpoints — tripping the engine cancel mid-step on quit instead of winding down at the grace
+/// window. MLX and candle twins stay in sync because both funnel through those SAME shared consumers.
 async fn run_utility_job(
     api: &ApiClient,
     settings: &Settings,
@@ -885,222 +886,230 @@ async fn run_utility_job(
     job: JobSnapshot,
     shutdown: gen_core::CancelFlag,
 ) {
-    let result = match job.job_type {
-        JobType::Placeholder => run_placeholder_job(api, settings, &job, &shutdown)
-            .await
-            .map_err(|error| ("Placeholder job failed.", error)),
-        // Native MLX image generation, served in-process by the linked mlx-gen
-        // engine on the macOS Apple-Silicon GPU worker (epic 3018). Off macOS the
-        // capability is never advertised, so this arm is unreachable there.
-        JobType::ImageGenerate => run_image_generate_job(api, settings, http_client, &job)
-            .await
-            .map_err(|error| ("Image generation failed.", error)),
-        // Plain Image Edit (sc-3513): the distinct `image_edit` job type (`mode=edit_image`
-        // + `sourceAssetId`, epic 2427) shares the generate handler — it dispatches on
-        // payload model+mode (qwen/flux2/sdxl edit streams), not job type. The API only
-        // routes MLX-eligible edit models here (jobs_store::image_job_is_mlx_eligible); off
-        // macOS the `image_edit` capability is never advertised, so this arm is unreachable.
-        JobType::ImageEdit => run_image_generate_job(api, settings, http_client, &job)
-            .await
-            .map_err(|error| ("Image edit failed.", error)),
-        // Native MLX tile-ControlNet detail refine (epic 3041, sc-3060), served in-process
-        // by the engine on the macOS Apple-Silicon GPU worker. Off macOS the capability is
-        // never advertised, so this arm is unreachable there (image_detail runs on torch).
-        JobType::ImageDetail => run_image_detail_job(api, settings, &job)
-            .await
-            .map_err(|error| ("Image detail enhancement failed.", error)),
-        // SenseNova-U1 visual question answering + Document Studio interleave (epic 3180,
-        // sc-3905). These bypass the `Generator` registry and call the concrete `T2iModel`
-        // directly (text / text+images output the `GenerationOutput` contract can't express).
-        // The API routes them here only on Mac (`understanding_job_is_mlx_eligible`); off macOS
-        // the `image_vqa`/`image_interleave` capabilities are never advertised, so these arms
-        // are unreachable there (the Python torch worker serves them on Windows/Linux).
-        JobType::ImageVqa => run_vqa_job(api, settings, &job)
-            .await
-            .map_err(|error| ("Visual question answering failed.", error)),
-        JobType::ImageInterleave => run_interleave_job(api, settings, &job)
-            .await
-            .map_err(|error| ("Interleaved generation failed.", error)),
-        // Native MLX video generation, served in-process by the linked mlx-gen engine
-        // on the macOS Apple-Silicon GPU worker (epic 3018). sc-3033 ships the runtime
-        // + procedural stub; the real Wan (sc-3034) / LTX+audio (sc-3035) models link
-        // their provider crates. Off macOS the capability is never advertised, so this
-        // arm is unreachable there.
-        // The clip-conditioning advanced video modes (epic 3040, sc-3522) share the video
-        // generation handler — `run_video_generate_job` dispatches `extend_clip` /
-        // `video_bridge` by the request `mode` into the LTX IC-LoRA `VideoClip` path. The API
-        // only routes the LTX-eligible jobs here (`video_job_is_mlx_eligible`); off macOS the
-        // VideoExtend/VideoBridge capabilities are never advertised, so these arms are
-        // unreachable there (the procedural stub would otherwise ignore the conditioning).
-        JobType::VideoGenerate | JobType::VideoExtend | JobType::VideoBridge => {
-            run_video_generate_job(api, settings, &job)
+    // Bind the process-shutdown flag as a task-local for the whole dispatch (sc-9618, F-043 follow-up)
+    // so the per-engine GPU consumer loops awaited below honor it at their per-step cancel checkpoints
+    // (via `shutdown_requested()`), stopping a gen/prompt mid-step on quit instead of waiting out the
+    // grace window — without threading the flag through every stream-handler signature. The placeholder
+    // path keeps its explicit `&shutdown` (it's the always-compiled reference implementation).
+    let result = with_shutdown_flag(shutdown.clone(), async {
+        match job.job_type {
+            JobType::Placeholder => run_placeholder_job(api, settings, &job, &shutdown)
                 .await
-                .map_err(|error| ("Video generation failed.", error))
-        }
-        // replace_person → native Wan-VACE (epic 3040, sc-3521): the `PersonReplace` job
-        // type (and `video_generate` mode=`replace_person`) shares the video handler, which
-        // dispatches on `mode == "replace_person"` to the engine `wan_vace` provider — the
-        // native equivalent of the torch `WanVACEPipeline` path. The API routes only
-        // MLX-eligible replace_person jobs here (`jobs_store::video_job_is_mlx_eligible`);
-        // off macOS the `person_replace` capability is never advertised, so this arm only
-        // produces a real video on the macOS MLX worker (and the Python torch path serves
-        // Windows/Linux + non-VACE replacement).
-        JobType::PersonReplace => run_video_generate_job(api, settings, &job)
-            .await
-            .map_err(|error| ("Person replacement failed.", error)),
-        // Native MLX LoRA/LoKr training (epic 3039, sc-3043/3049), served in-process
-        // by the linked mlx-gen engine on the macOS Apple-Silicon GPU worker. The API
-        // routes only MLX-native families here (jobs_store::training_job_is_mlx_eligible);
-        // kolors/lens + LoKr-on-Wan stay on the Python torch worker, which is also the
-        // Windows/Linux path. Off macOS the execute capability is never advertised.
-        JobType::LoraTrain => run_lora_train_job(api, settings, &job)
-            .await
-            .map_err(|error| ("LoRA training failed.", error)),
-        // Native MLX JoyCaption dataset captioning (epic 3550, sc-3556). The API
-        // routes only `captioner=joy_caption` jobs here; Windows/Linux and
-        // explicit non-MLX GPU choices keep the Python torch captioner fallback.
-        JobType::TrainingCaption => run_training_caption_job(api, settings, &job)
-            .await
-            .map_err(|error| ("Training captioning failed.", error)),
-        // Dataset Doctor CLIP-embedding analysis (sc-6535): the macOS MLX worker embeds every dataset
-        // image (clip_vit_l14) and POSTs the content-hash sidecar; off-Mac the handler returns a
-        // precise unsupported error (no candle CLIP embedder yet).
-        JobType::DatasetAnalysis => run_dataset_analysis_job(api, settings, &job)
-            .await
-            .map_err(|error| ("Dataset analysis failed.", error)),
-        // Dataset Doctor face pass (sc-6538): the native SCRFD+ArcFace stack embeds the largest face of
-        // each Person-dataset image and POSTs the face sidecar. MLX on Mac (`mlx-gen-face`), candle on
-        // the candle lane; off both the handler returns a precise unsupported error.
-        JobType::DatasetFaceAnalysis => run_dataset_face_analysis_job(api, settings, &job)
-            .await
-            .map_err(|error| ("Dataset face analysis failed.", error)),
-        // On-demand "compare image to another" likeness tool (sc-4415): scores a CANDIDATE asset
-        // against a SOURCE identity reference asset through the shared SCRFD+ArcFace scorer. MLX on Mac,
-        // candle off-Mac; off both the handler returns a precise unsupported error. Like the
-        // dataset-face pass, the job-type capability is gpu.rs-hardcoded (the face stack has no gen-core
-        // registry), so a job stays queued rather than mis-claimed where the stack isn't linked.
-        JobType::FaceLikenessCompare => run_face_likeness_compare_job(api, settings, &job)
-            .await
-            .map_err(|error| ("Face likeness compare failed.", error)),
-        // Native candle prompt refinement (epic 5095, sc-5525; consolidated onto candle-llm in sc-7404):
-        // routes `prompt_refine` to the candle `core_llm::TextLlm` provider (candle-llama, resolved
-        // model-first). The candle worker advertises `prompt_refine` only when `backend_candle_enabled`
-        // (engines::registry_capabilities from the registered core_llm provider); off the Windows candle
-        // build the capability is never advertised, so this arm is unreachable there and the Python torch
-        // refiner serves the job (sc-5525 keeps it as the Mac + default-installer fallback).
-        JobType::PromptRefine => run_prompt_refine_job(api, settings, &job)
-            .await
-            .map_err(|error| ("Prompt refinement failed.", error)),
-        JobType::ModelDownload => run_model_download_job(api, settings, http_client, &job)
-            .await
-            .map_err(|error| ("Model download failed.", error)),
-        JobType::LoraImport => run_lora_import_job(api, settings, http_client, &job)
-            .await
-            .map_err(|error| ("LoRA import failed.", error)),
-        JobType::LoraDownload => run_lora_download_job(api, settings, http_client, &job)
-            .await
-            .map_err(|error| ("LoRA download failed.", error)),
-        JobType::ModelImport => run_model_import_job(api, settings, http_client, &job)
-            .await
-            .map_err(|error| ("Model import failed.", error)),
-        JobType::ModelConvert => run_model_convert_job(api, settings, &job)
-            .await
-            .map_err(|error| ("Model conversion failed.", error)),
-        JobType::FrameExtract => run_frame_extract_job(api, settings, &job)
-            .await
-            .map_err(|error| ("Frame extraction failed.", error)),
-        JobType::TimelineExport => run_timeline_export_job(api, settings, &job)
-            .await
-            .map_err(|error| ("Timeline export failed.", error)),
-        JobType::PersonDetect => run_person_detect_job(api, settings, http_client, &job)
-            .await
-            .map_err(|error| ("Person detection failed.", error)),
-        // DWPose whole-body pose detection (epic 3482, sc-3487 Mac / sc-5496 off-Mac):
-        // RTMW via onnxruntime, replacing the Python rtmlib path — CoreML EP on the
-        // macOS MLX worker, CUDA EP on the off-Mac candle GPU worker. Available on Mac
-        // AND the candle lane; on a candle-disabled box `PoseDetect` is never advertised
-        // by the Rust worker (the Python worker handles it), so this falls to the `_`
-        // arm there.
-        #[cfg(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        ))]
-        JobType::PoseDetect => run_pose_detect_job(api, settings, http_client, &job)
-            .await
-            .map_err(|error| ("Pose detection failed.", error)),
-        // SCRFD 5-point landmark extraction (epic 4422, sc-4433): native-MLX SCRFD on Mac + the candle
-        // SCRFD/ArcFace stack on the Windows/Linux candle lane (sc-5497, epic 5482), served in-process
-        // for the Key Point Library. Available on Mac AND the candle lane; on a candle-disabled box
-        // `KpsExtract` is never advertised by the Rust worker (the Python InsightFace path handles it),
-        // so this falls to the `_` arm there.
-        #[cfg(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        ))]
-        JobType::KpsExtract => run_kps_extract_job(api, settings, &job)
-            .await
-            .map_err(|error| ("Keypoint extraction failed.", error)),
-        // Image upscaling, served in-process by `upscale_jobs::run_image_upscale_job`: Real-ESRGAN
-        // RRDBNet x2/x4 via onnxruntime/CoreML (epic 3482, sc-3489, Mac) + SeedVR2 one-step diffusion
-        // (native MLX on Mac sc-4815 / candle CUDA on Windows sc-5928). Available on Mac AND the
-        // Windows/CUDA candle lane; on a plain Windows/Linux box `ImageUpscale` is never advertised by
-        // the Rust worker, so it falls to the `_` arm (Python Real-ESRGAN/AuraSR). The routing oracle
-        // refuses `engine=seedvr2` on torch and `engine=real-esrgan`/`aura-sr` on the candle worker.
-        #[cfg(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        ))]
-        JobType::ImageUpscale => run_image_upscale_job(api, settings, http_client, &job)
-            .await
-            .map_err(|error| ("Image upscale failed.", error)),
-        // Dataset Doctor one-tap upscale (sc-6539): Real-ESRGAN over flagged low-res items, then
-        // re-point each via the API. Same engine + worker lanes as image_upscale.
-        #[cfg(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        ))]
-        JobType::DatasetUpscale => run_dataset_upscale_job(api, settings, http_client, &job)
-            .await
-            .map_err(|error| ("Dataset upscale failed.", error)),
-        // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt segmentation,
-        // served in-process by `segment_jobs::run_image_segment_job` — a box prompt → a binary
-        // inpaint mask asset for the Image Editor. macOS-only (the capability is advertised only by
-        // `mlx_gpu`), so off-Mac this arm is absent and a segment job is never claimed there.
-        #[cfg(target_os = "macos")]
-        JobType::ImageSegment => {
-            segment_jobs::run_image_segment_job(api, settings, http_client, &job)
+                .map_err(|error| ("Placeholder job failed.", error)),
+            // Native MLX image generation, served in-process by the linked mlx-gen
+            // engine on the macOS Apple-Silicon GPU worker (epic 3018). Off macOS the
+            // capability is never advertised, so this arm is unreachable there.
+            JobType::ImageGenerate => run_image_generate_job(api, settings, http_client, &job)
                 .await
-                .map_err(|error| ("Smart-select segmentation failed.", error))
+                .map_err(|error| ("Image generation failed.", error)),
+            // Plain Image Edit (sc-3513): the distinct `image_edit` job type (`mode=edit_image`
+            // + `sourceAssetId`, epic 2427) shares the generate handler — it dispatches on
+            // payload model+mode (qwen/flux2/sdxl edit streams), not job type. The API only
+            // routes MLX-eligible edit models here (jobs_store::image_job_is_mlx_eligible); off
+            // macOS the `image_edit` capability is never advertised, so this arm is unreachable.
+            JobType::ImageEdit => run_image_generate_job(api, settings, http_client, &job)
+                .await
+                .map_err(|error| ("Image edit failed.", error)),
+            // Native MLX tile-ControlNet detail refine (epic 3041, sc-3060), served in-process
+            // by the engine on the macOS Apple-Silicon GPU worker. Off macOS the capability is
+            // never advertised, so this arm is unreachable there (image_detail runs on torch).
+            JobType::ImageDetail => run_image_detail_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Image detail enhancement failed.", error)),
+            // SenseNova-U1 visual question answering + Document Studio interleave (epic 3180,
+            // sc-3905). These bypass the `Generator` registry and call the concrete `T2iModel`
+            // directly (text / text+images output the `GenerationOutput` contract can't express).
+            // The API routes them here only on Mac (`understanding_job_is_mlx_eligible`); off macOS
+            // the `image_vqa`/`image_interleave` capabilities are never advertised, so these arms
+            // are unreachable there (the Python torch worker serves them on Windows/Linux).
+            JobType::ImageVqa => run_vqa_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Visual question answering failed.", error)),
+            JobType::ImageInterleave => run_interleave_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Interleaved generation failed.", error)),
+            // Native MLX video generation, served in-process by the linked mlx-gen engine
+            // on the macOS Apple-Silicon GPU worker (epic 3018). sc-3033 ships the runtime
+            // + procedural stub; the real Wan (sc-3034) / LTX+audio (sc-3035) models link
+            // their provider crates. Off macOS the capability is never advertised, so this
+            // arm is unreachable there.
+            // The clip-conditioning advanced video modes (epic 3040, sc-3522) share the video
+            // generation handler — `run_video_generate_job` dispatches `extend_clip` /
+            // `video_bridge` by the request `mode` into the LTX IC-LoRA `VideoClip` path. The API
+            // only routes the LTX-eligible jobs here (`video_job_is_mlx_eligible`); off macOS the
+            // VideoExtend/VideoBridge capabilities are never advertised, so these arms are
+            // unreachable there (the procedural stub would otherwise ignore the conditioning).
+            JobType::VideoGenerate | JobType::VideoExtend | JobType::VideoBridge => {
+                run_video_generate_job(api, settings, &job)
+                    .await
+                    .map_err(|error| ("Video generation failed.", error))
+            }
+            // replace_person → native Wan-VACE (epic 3040, sc-3521): the `PersonReplace` job
+            // type (and `video_generate` mode=`replace_person`) shares the video handler, which
+            // dispatches on `mode == "replace_person"` to the engine `wan_vace` provider — the
+            // native equivalent of the torch `WanVACEPipeline` path. The API routes only
+            // MLX-eligible replace_person jobs here (`jobs_store::video_job_is_mlx_eligible`);
+            // off macOS the `person_replace` capability is never advertised, so this arm only
+            // produces a real video on the macOS MLX worker (and the Python torch path serves
+            // Windows/Linux + non-VACE replacement).
+            JobType::PersonReplace => run_video_generate_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Person replacement failed.", error)),
+            // Native MLX LoRA/LoKr training (epic 3039, sc-3043/3049), served in-process
+            // by the linked mlx-gen engine on the macOS Apple-Silicon GPU worker. The API
+            // routes only MLX-native families here (jobs_store::training_job_is_mlx_eligible);
+            // kolors/lens + LoKr-on-Wan stay on the Python torch worker, which is also the
+            // Windows/Linux path. Off macOS the execute capability is never advertised.
+            JobType::LoraTrain => run_lora_train_job(api, settings, &job)
+                .await
+                .map_err(|error| ("LoRA training failed.", error)),
+            // Native MLX JoyCaption dataset captioning (epic 3550, sc-3556). The API
+            // routes only `captioner=joy_caption` jobs here; Windows/Linux and
+            // explicit non-MLX GPU choices keep the Python torch captioner fallback.
+            JobType::TrainingCaption => run_training_caption_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Training captioning failed.", error)),
+            // Dataset Doctor CLIP-embedding analysis (sc-6535): the macOS MLX worker embeds every dataset
+            // image (clip_vit_l14) and POSTs the content-hash sidecar; off-Mac the handler returns a
+            // precise unsupported error (no candle CLIP embedder yet).
+            JobType::DatasetAnalysis => run_dataset_analysis_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Dataset analysis failed.", error)),
+            // Dataset Doctor face pass (sc-6538): the native SCRFD+ArcFace stack embeds the largest face of
+            // each Person-dataset image and POSTs the face sidecar. MLX on Mac (`mlx-gen-face`), candle on
+            // the candle lane; off both the handler returns a precise unsupported error.
+            JobType::DatasetFaceAnalysis => run_dataset_face_analysis_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Dataset face analysis failed.", error)),
+            // On-demand "compare image to another" likeness tool (sc-4415): scores a CANDIDATE asset
+            // against a SOURCE identity reference asset through the shared SCRFD+ArcFace scorer. MLX on Mac,
+            // candle off-Mac; off both the handler returns a precise unsupported error. Like the
+            // dataset-face pass, the job-type capability is gpu.rs-hardcoded (the face stack has no gen-core
+            // registry), so a job stays queued rather than mis-claimed where the stack isn't linked.
+            JobType::FaceLikenessCompare => run_face_likeness_compare_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Face likeness compare failed.", error)),
+            // Native candle prompt refinement (epic 5095, sc-5525; consolidated onto candle-llm in sc-7404):
+            // routes `prompt_refine` to the candle `core_llm::TextLlm` provider (candle-llama, resolved
+            // model-first). The candle worker advertises `prompt_refine` only when `backend_candle_enabled`
+            // (engines::registry_capabilities from the registered core_llm provider); off the Windows candle
+            // build the capability is never advertised, so this arm is unreachable there and the Python torch
+            // refiner serves the job (sc-5525 keeps it as the Mac + default-installer fallback).
+            JobType::PromptRefine => run_prompt_refine_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Prompt refinement failed.", error)),
+            JobType::ModelDownload => run_model_download_job(api, settings, http_client, &job)
+                .await
+                .map_err(|error| ("Model download failed.", error)),
+            JobType::LoraImport => run_lora_import_job(api, settings, http_client, &job)
+                .await
+                .map_err(|error| ("LoRA import failed.", error)),
+            JobType::LoraDownload => run_lora_download_job(api, settings, http_client, &job)
+                .await
+                .map_err(|error| ("LoRA download failed.", error)),
+            JobType::ModelImport => run_model_import_job(api, settings, http_client, &job)
+                .await
+                .map_err(|error| ("Model import failed.", error)),
+            JobType::ModelConvert => run_model_convert_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Model conversion failed.", error)),
+            JobType::FrameExtract => run_frame_extract_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Frame extraction failed.", error)),
+            JobType::TimelineExport => run_timeline_export_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Timeline export failed.", error)),
+            JobType::PersonDetect => run_person_detect_job(api, settings, http_client, &job)
+                .await
+                .map_err(|error| ("Person detection failed.", error)),
+            // DWPose whole-body pose detection (epic 3482, sc-3487 Mac / sc-5496 off-Mac):
+            // RTMW via onnxruntime, replacing the Python rtmlib path — CoreML EP on the
+            // macOS MLX worker, CUDA EP on the off-Mac candle GPU worker. Available on Mac
+            // AND the candle lane; on a candle-disabled box `PoseDetect` is never advertised
+            // by the Rust worker (the Python worker handles it), so this falls to the `_`
+            // arm there.
+            #[cfg(any(
+                target_os = "macos",
+                all(not(target_os = "macos"), feature = "backend-candle")
+            ))]
+            JobType::PoseDetect => run_pose_detect_job(api, settings, http_client, &job)
+                .await
+                .map_err(|error| ("Pose detection failed.", error)),
+            // SCRFD 5-point landmark extraction (epic 4422, sc-4433): native-MLX SCRFD on Mac + the candle
+            // SCRFD/ArcFace stack on the Windows/Linux candle lane (sc-5497, epic 5482), served in-process
+            // for the Key Point Library. Available on Mac AND the candle lane; on a candle-disabled box
+            // `KpsExtract` is never advertised by the Rust worker (the Python InsightFace path handles it),
+            // so this falls to the `_` arm there.
+            #[cfg(any(
+                target_os = "macos",
+                all(not(target_os = "macos"), feature = "backend-candle")
+            ))]
+            JobType::KpsExtract => run_kps_extract_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Keypoint extraction failed.", error)),
+            // Image upscaling, served in-process by `upscale_jobs::run_image_upscale_job`: Real-ESRGAN
+            // RRDBNet x2/x4 via onnxruntime/CoreML (epic 3482, sc-3489, Mac) + SeedVR2 one-step diffusion
+            // (native MLX on Mac sc-4815 / candle CUDA on Windows sc-5928). Available on Mac AND the
+            // Windows/CUDA candle lane; on a plain Windows/Linux box `ImageUpscale` is never advertised by
+            // the Rust worker, so it falls to the `_` arm (Python Real-ESRGAN/AuraSR). The routing oracle
+            // refuses `engine=seedvr2` on torch and `engine=real-esrgan`/`aura-sr` on the candle worker.
+            #[cfg(any(
+                target_os = "macos",
+                all(not(target_os = "macos"), feature = "backend-candle")
+            ))]
+            JobType::ImageUpscale => run_image_upscale_job(api, settings, http_client, &job)
+                .await
+                .map_err(|error| ("Image upscale failed.", error)),
+            // Dataset Doctor one-tap upscale (sc-6539): Real-ESRGAN over flagged low-res items, then
+            // re-point each via the API. Same engine + worker lanes as image_upscale.
+            #[cfg(any(
+                target_os = "macos",
+                all(not(target_os = "macos"), feature = "backend-candle")
+            ))]
+            JobType::DatasetUpscale => run_dataset_upscale_job(api, settings, http_client, &job)
+                .await
+                .map_err(|error| ("Dataset upscale failed.", error)),
+            // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt segmentation,
+            // served in-process by `segment_jobs::run_image_segment_job` — a box prompt → a binary
+            // inpaint mask asset for the Image Editor. macOS-only (the capability is advertised only by
+            // `mlx_gpu`), so off-Mac this arm is absent and a segment job is never claimed there.
+            #[cfg(target_os = "macos")]
+            JobType::ImageSegment => {
+                segment_jobs::run_image_segment_job(api, settings, http_client, &job)
+                    .await
+                    .map_err(|error| ("Smart-select segmentation failed.", error))
+            }
+            // SeedVR2 video upscaling (epic 4811): one-step super-resolution — native MLX on Mac (sc-4816)
+            // / candle CUDA on Windows (sc-5928). SceneWorks' first video upscaler: decodes the source
+            // clip, runs the temporal-chunked 5D upscale, re-encodes, and passes the source audio through.
+            // Available on Mac + the Windows/CUDA candle lane; elsewhere `VideoUpscale` is never advertised
+            // (no torch path), so it falls to the `_` arm and the routing oracle reports it unsupported.
+            #[cfg(any(
+                target_os = "macos",
+                all(not(target_os = "macos"), feature = "backend-candle")
+            ))]
+            JobType::VideoUpscale => run_video_upscale_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Video upscale failed.", error)),
+            JobType::PersonTrack => run_person_track_job(api, settings, http_client, &job)
+                .await
+                .map_err(|error| ("Person tracking failed.", error)),
+            _ => {
+                let result = fail_job(
+                    api,
+                    &job.id,
+                    "No Rust utility exists for this job type.",
+                    Some(format!(
+                        "Unsupported utility job type: {}",
+                        job.job_type.as_str()
+                    )),
+                )
+                .await;
+                result.map_err(|error| ("Utility job failed.", error))
+            }
         }
-        // SeedVR2 video upscaling (epic 4811): one-step super-resolution — native MLX on Mac (sc-4816)
-        // / candle CUDA on Windows (sc-5928). SceneWorks' first video upscaler: decodes the source
-        // clip, runs the temporal-chunked 5D upscale, re-encodes, and passes the source audio through.
-        // Available on Mac + the Windows/CUDA candle lane; elsewhere `VideoUpscale` is never advertised
-        // (no torch path), so it falls to the `_` arm and the routing oracle reports it unsupported.
-        #[cfg(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        ))]
-        JobType::VideoUpscale => run_video_upscale_job(api, settings, &job)
-            .await
-            .map_err(|error| ("Video upscale failed.", error)),
-        JobType::PersonTrack => run_person_track_job(api, settings, http_client, &job)
-            .await
-            .map_err(|error| ("Person tracking failed.", error)),
-        _ => {
-            let result = fail_job(
-                api,
-                &job.id,
-                "No Rust utility exists for this job type.",
-                Some(format!(
-                    "Unsupported utility job type: {}",
-                    job.job_type.as_str()
-                )),
-            )
-            .await;
-            result.map_err(|error| ("Utility job failed.", error))
-        }
-    };
+    })
+    .await;
     if matches!(job.job_type, JobType::LoraImport | JobType::ModelImport) {
         let _ = cleanup_uploaded_import_source(settings, &job.payload).await;
     }

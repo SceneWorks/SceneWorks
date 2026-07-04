@@ -177,7 +177,9 @@ where
                 }
                 _ = interval.tick() => {
                     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                    if !canceled && cancel_requested_peek(api, &job.id).await {
+                    // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
+                    // poll (a local flag read) so a quit stops the embed loop at its next per-item check.
+                    if !canceled && (shutdown_requested() || cancel_requested_peek(api, &job.id).await) {
                         // Trip the flag so the blocking loop bails at its next per-item check; the
                         // terminal `Canceled` is posted below once the task has actually stopped.
                         cancel.cancel();

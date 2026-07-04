@@ -1005,7 +1005,10 @@ async fn consume_training_events(
                     // (sc-8390; same class as the inline-upscale sc-8200). Also poll cancel here so a
                     // cancel requested during such a gap is honored without awaiting the next event.
                     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                    if !canceled && cancel_requested_peek(api, &job.id).await {
+                    // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
+                    // poll (a local flag read) so a quit stops training at the next step / event gap.
+                    if !canceled && (shutdown_requested() || cancel_requested_peek(api, &job.id).await)
+                    {
                         begin_training_cancel(api, &job.id, &cancel, backend).await;
                         canceled = true;
                     }
@@ -1017,16 +1020,19 @@ async fn consume_training_events(
             }
             match event {
                 TrainEvent::Progress(progress) => {
-                    // Poll cancel on the long training band only (cheap stages fly by).
+                    // Poll cancel on the long training band only (cheap stages fly by). A process
+                    // shutdown (sc-9618) short-circuits the throttle + API poll so a quit stops on the
+                    // very next training step, not just at the heartbeat-tick gap above.
                     if matches!(progress, TrainingProgress::Training { .. })
-                        && last_cancel_check.elapsed() >= Duration::from_secs(2)
+                        && (shutdown_requested()
+                            || (last_cancel_check.elapsed() >= Duration::from_secs(2) && {
+                                last_cancel_check = Instant::now();
+                                cancel_requested_peek(api, &job.id).await
+                            }))
                     {
-                        last_cancel_check = Instant::now();
-                        if cancel_requested_peek(api, &job.id).await {
-                            begin_training_cancel(api, &job.id, &cancel, backend).await;
-                            canceled = true;
-                            continue;
-                        }
+                        begin_training_cancel(api, &job.id, &cancel, backend).await;
+                        canceled = true;
+                        continue;
                     }
                     if let TrainingProgress::Checkpoint { step } = progress {
                         checkpoints.push(json!({ "step": step }));
