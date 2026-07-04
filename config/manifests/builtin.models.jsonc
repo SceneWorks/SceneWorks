@@ -390,6 +390,41 @@
           "files": ["bf16/*"],
           "estimatedSizeBytes": 57731960832,
           "footprint": { "diskSizeBytes": 57731960832, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // Packed 2512-Fun-Controlnet-Union strict-control tier (sc-9870, epic 8236). SceneWorks re-host
+        // of alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union as a per-tier packed matrix — each subdir
+        // is a SINGLE `model.safetensors` control overlay: q4/ q8/ bf16/. This replaces the old dense
+        // alibaba-pai overlay staging (sc-8350): the base-Qwen strict-pose lane (candle `qwen_control.rs`
+        // + MLX `qwen.rs`, engine id `qwen_image_control`) now resolves the control subdir that MATCHES
+        // the selected transformer tier (advanced.mlxQuantize → q4/q8/bf16, via `qwen_control_tier_subdir`)
+        // for a coherent A/B — a q4 base pairs with the q4 control overlay, etc. Listed as co-requisites
+        // (FETCH-ALL) so the whole control matrix installs alongside the base and A/B tier-toggling never
+        // needs a gen-time fetch; the drivers still on-demand-fetch a missing tier as a safety net. The
+        // packed overlays are small (q4 ~0.99 GB / q8 ~1.87 GB / bf16 ~3.51 GB) relative to the 20B base.
+        // The sc-8350 two-overlay ambiguity is gone: each tier subdir ships exactly one control file.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-2512-fun-controlnet-union",
+          "coRequisite": true,
+          "files": ["q4/model.safetensors"],
+          "estimatedSizeBytes": 989855744,
+          "footprint": { "diskSizeBytes": 989855744, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-2512-fun-controlnet-union",
+          "coRequisite": true,
+          "files": ["q8/model.safetensors"],
+          "estimatedSizeBytes": 1873805312,
+          "footprint": { "diskSizeBytes": 1873805312, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-2512-fun-controlnet-union",
+          "coRequisite": true,
+          "files": ["bf16/model.safetensors"],
+          "estimatedSizeBytes": 3506438144,
+          "footprint": { "diskSizeBytes": 3506438144, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
