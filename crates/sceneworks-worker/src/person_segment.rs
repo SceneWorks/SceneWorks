@@ -1,8 +1,9 @@
 //! Native-MLX SAM2 person segmentation on the Rust worker (epic 3704, sc-3709 → sc-3715;
 //! Slice 3 of sc-3488 / epic 3482).
 //!
-//! Ports the Python `scene_worker/person_adapters.py` `segment_track` to Rust so the
-//! Replace-Person mask-generation step runs on a Python-free Mac. **sc-3715** upgrades the
+//! Runs the `segment_track` step natively in Rust (ported from the retired Python
+//! worker's `person_adapters.py`) so the Replace-Person mask-generation step runs on
+//! a Python-free Mac. **sc-3715** upgrades the
 //! per-frame box-prompt segmenter (sc-3709) to the native-MLX SAM2 **video predictor**
 //! (`mlx-gen-sam2` `Sam2VideoPredictor`, sc-3714): prompt SAM2 once on the selected track's
 //! first detected frame, then propagate temporally-consistent masks across the clip via the

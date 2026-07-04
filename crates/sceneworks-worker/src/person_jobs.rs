@@ -1,8 +1,9 @@
 //! YOLO11 person detection on the Rust worker (epic 3482, sc-3488 slice 1 / sc-3633;
 //! off-Mac candle lane sc-5498, epic 5482).
 //!
-//! Ports the Python `scene_worker/person_adapters.py` `_UltralyticsDetector`
-//! (Ultralytics `yolo11m.pt`, COCO class 0) to Rust so the Replace-Person detection +
+//! Runs YOLO11 person detection natively in Rust — the Ultralytics `yolo11m.pt`
+//! (COCO class 0) detector, ported from the retired Python worker's
+//! `person_adapters.py` `_UltralyticsDetector` — so the Replace-Person detection +
 //! selected-person tracking steps run Python-free. The pure detector math (letterbox /
 //! decode / NMS / box normalization) is backend-neutral and unit-tested without weights;
 //! only the forward pass differs by platform:

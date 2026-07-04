@@ -413,7 +413,7 @@ pub(crate) fn progress_payload(
         result,
         eta_seconds,
         // The Rust utility worker doesn't run GPU work, so it never reports
-        // per-job peak GPU stats. The Python GPU worker (scene_worker) sets
+        // per-job peak GPU stats. The native GPU worker (MLX/candle) sets
         // these (sc-2086). Same for `backend` — utility jobs run on the CPU
         // worker which never advertises a GPU runtime.
         peak_gpu_memory_pct: None,

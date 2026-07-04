@@ -1,8 +1,8 @@
 //! Real-ESRGAN image upscaling on the Rust worker (epic 3482, sc-3489; off-Mac sc-5499).
 //!
-//! Ports the Python `scene_worker/upscalers.py` + `image_adapters.run_image_upscale`
-//! `image_upscale` job to Rust so the Image Editor upscale tool (epic 2427) keeps
-//! working Python-free. The upscaler is Real-ESRGAN (RRDBNet x2/x4) run via `ort`
+//! Runs the `image_upscale` job natively in Rust (ported from the retired Python
+//! worker's `upscalers.py` + `image_adapters.run_image_upscale`) so the Image Editor
+//! upscale tool (epic 2427) keeps working Python-free. The upscaler is Real-ESRGAN (RRDBNet x2/x4) run via `ort`
 //! (onnxruntime): the **CoreML** execution provider on macOS (sc-3489, the same `ort`
 //! stack + bundled `libonnxruntime.dylib` sc-3487 ships for DWPose) and the **CUDA**
 //! execution provider off-Mac on the candle GPU-worker lane (sc-5499, the Windows/Linux
