@@ -334,7 +334,12 @@ fn instantid_pid_gpu_smoke() {
     let angle = env_or("INSTANTID_PID_ANGLE", "front");
     println!("[smoke] Angle {angle:?} PiD side {size} -> expect 4x ...");
     let angle_pid = model
-        .generate_angle(&base_request(size, size, true), &reference, &angle, &mut |_| {})
+        .generate_angle(
+            &base_request(size, size, true),
+            &reference,
+            &angle,
+            &mut |_| {},
+        )
         .unwrap_or_else(|e| panic!("instantid angle {angle:?} PiD generate: {e}"));
     assert_pid_output(&angle_pid, &ref_embedding, &model, size, "angle", &out_dir);
 

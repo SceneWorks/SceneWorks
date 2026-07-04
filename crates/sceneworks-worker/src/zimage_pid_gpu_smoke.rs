@@ -66,7 +66,8 @@ fn save_png(img: &Image, path: &Path) {
 }
 
 fn render(spec: &LoadSpec, w: u32, h: u32, steps: u32, use_pid: bool) -> Image {
-    let generator = gen_core::load("z_image_turbo", spec).expect("load candle z_image_turbo provider");
+    let generator =
+        gen_core::load("z_image_turbo", spec).expect("load candle z_image_turbo provider");
     let req = GenerationRequest {
         prompt: env_or(
             "ZIMAGE_PID_PROMPT",
@@ -107,7 +108,9 @@ fn zimage_pid_gpu_smoke() {
         .parse()
         .expect("ZIMAGE_PID_SIZE");
     let (w, h) = (size, size);
-    let steps: u32 = env_or("ZIMAGE_PID_STEPS", "8").parse().expect("ZIMAGE_PID_STEPS");
+    let steps: u32 = env_or("ZIMAGE_PID_STEPS", "8")
+        .parse()
+        .expect("ZIMAGE_PID_STEPS");
 
     // Native VAE decode (render-sized) — the byte-exact default path, spec WITHOUT pid.
     println!("[smoke] Z-Image native-VAE {w}x{h} @ {steps} steps ...");
