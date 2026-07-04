@@ -264,6 +264,10 @@ struct ZImageStrictControl {
     /// The [`STRICT_CONTROL_ENGINES`] catalog id for this job's model — `z_image_turbo_control` (Turbo) or
     /// `z_image_control` (base, sc-8379) — the `advanced.controlMode` validation key.
     engine_id: &'static str,
+    /// Per-generation PiD decoder weights (epic 7840, sc-8044): `Some` only when opted in (`advanced.usePid`)
+    /// AND the PiD + Gemma snapshots are cached (Z-Image is the FLUX.1 latent space → `zimage-turbo` alias).
+    /// Threaded into `with_pid` at load; `use_pid` on the request is `is_some()`. `None` ⇒ native VAE decode.
+    pid: Option<gen_core::PidWeights>,
 }
 
 impl CandleStrictControl for ZImageStrictControl {
@@ -289,9 +293,16 @@ impl CandleStrictControl for ZImageStrictControl {
             // real CFG); `z_image_turbo` → the distilled Turbo path (byte-unchanged).
             base: self.is_base,
         };
-        ZImageControl::load(&paths).map_err(|error| {
+        let model = ZImageControl::load(&paths).map_err(|error| {
             WorkerError::Engine(format!("Z-Image strict-pose control load failed: {error}"))
-        })
+        })?;
+        // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND the snapshots are cached.
+        match &self.pid {
+            Some(pid) => model.with_pid(pid).map_err(|error| {
+                WorkerError::Engine(format!("Z-Image control PiD decoder load failed: {error}"))
+            }),
+            None => Ok(model),
+        }
     }
 
     fn generate_one(
@@ -317,9 +328,8 @@ impl CandleStrictControl for ZImageStrictControl {
                 .then(|| self.negative_prompt.clone())
                 .filter(|value| !value.trim().is_empty()),
             seed,
-            // No PiD backbone on this lane (native VAE decode) — behavior-preserving across the
-            // candle-gen PiD seam bump (sc-8373 / sc-9300); matches candle-gen Default.
-            use_pid: false,
+            // PiD opt-in (sc-8044): in lockstep with the `with_pid` load — `is_some()` ⇒ decoder loaded.
+            use_pid: self.pid.is_some(),
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {
@@ -380,7 +390,10 @@ async fn generate_candle_zimage_control_stream(
     let negative_prompt = request.negative_prompt.clone();
 
     let pose_count = pose_entries(request).len();
-    let raw_settings = zimage_control_raw_settings(
+    // Per-generation PiD decode (epic 7840, sc-8044): resolve the `zimage-turbo`/`flux` PiD student + Gemma
+    // when `advanced.usePid` is set and the snapshots are cached; else `None` → native Z-Image VAE.
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let mut raw_settings = zimage_control_raw_settings(
         request,
         &repo,
         steps,
@@ -389,6 +402,8 @@ async fn generate_candle_zimage_control_stream(
         is_base,
         guidance,
     );
+    // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
+    raw_settings.insert("usePid".to_owned(), Value::Bool(pid_weights.is_some()));
 
     let provider = ZImageStrictControl {
         snapshot: base,
@@ -402,6 +417,7 @@ async fn generate_candle_zimage_control_stream(
         guidance,
         negative_prompt,
         engine_id,
+        pid: pid_weights,
     };
 
     run_candle_strict_control(

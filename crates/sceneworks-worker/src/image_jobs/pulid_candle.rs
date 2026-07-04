@@ -309,7 +309,15 @@ async fn generate_candle_pulid_stream(
         .filter(|value| !value.is_empty())
         .unwrap_or(PULID_CANDLE_FLUX_REPO)
         .to_owned();
-    let raw_settings = pulid_candle_raw_settings(request, &repo, steps, guidance, id_weight);
+    // Per-generation PiD decode (epic 7840, sc-8044): resolve the `flux` PiD student + Gemma when
+    // `advanced.usePid` is set and the snapshots are cached; else `None` → native FLUX.1 VAE. PiD is a
+    // generative decoder, so face likeness may shift — the user's per-gen call. `use_pid` and the engine's
+    // `with_pid` load stay in lockstep (the engine rejects a mismatch).
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+    let mut raw_settings = pulid_candle_raw_settings(request, &repo, steps, guidance, id_weight);
+    // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
+    raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
     // Per-image work items: (seed, prompt) — `request.count` images at the reference identity.
     let (width, height) = (request.width, request.height);
@@ -332,6 +340,13 @@ async fn generate_candle_pulid_stream(
             let model = PulidFlux::load(&paths).map_err(|error| {
                 WorkerError::Engine(format!("PuLID-FLUX load failed: {error}"))
             })?;
+            // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND snapshots cached.
+            let model = match &pid_weights {
+                Some(pid) => model.with_pid(pid).map_err(|error| {
+                    WorkerError::Engine(format!("PuLID-FLUX PiD decoder load failed: {error}"))
+                })?,
+                None => model,
+            };
             // Build the per-job identity-likeness scorer ONCE here (on the blocking thread where the
             // `!Send` face stack is allowed), embedding the source identity face a single time and
             // reusing it across every output (sc-4411 caching AC). `None` ⇒ non-fatal staging /
@@ -359,9 +374,8 @@ async fn generate_candle_pulid_stream(
                     seed: seed as u64,
                     sampler: sampler.clone(),
                     scheduler: scheduler.clone(),
-                    // No PiD backbone on this lane (native VAE decode) — behavior-preserving across the
-                    // candle-gen PiD seam bump (sc-8373 / sc-9300); matches candle-gen Default.
-                    use_pid: false,
+                    // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
+                    use_pid,
                     cancel: cancel.clone(),
                 };
                 let out = match model.generate(&req, &reference, &mut *on_progress) {

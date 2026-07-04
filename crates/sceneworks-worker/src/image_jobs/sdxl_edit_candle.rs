@@ -278,8 +278,21 @@ async fn generate_candle_sdxl_edit_stream(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| sdxl_edit_candle_default_repo(&request.model))
         .to_owned();
-    let raw_settings =
+    // Per-generation PiD decode (epic 7840, sc-8044): resolve the `sdxl` PiD student + Gemma when
+    // `advanced.usePid` is set and the snapshots are cached; else `None` → native VAE. SDXL edit composes
+    // the SDXL VAE, so it shares the one `sdxl` student. The inpaint/outpaint mask blend runs in latent
+    // space and ends in a single decode, so PiD sees the same final latent as the VAE path — the output
+    // is just 2K/4K. `use_pid` and the engine's `with_pid` load stay in lockstep (the engine rejects a
+    // mismatch).
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+
+    let mut raw_settings =
         sdxl_edit_candle_raw_settings(request, &repo, steps, guidance, strength, mode_tag);
+    // Mark PiD output on the sidecar (epic 7840): the NSCLv1 non-commercial restriction flows to PiD-
+    // decoded output. Record whether PiD ACTUALLY ran (not merely whether it was requested) — a request
+    // that opted in but has no cached snapshots decodes on the native VAE.
+    raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
     // Per-image work items: (seed, prompt) — `request.count` edits of the same source.
     let work: Vec<(i64, String)> = (0..request.count as usize)
@@ -295,6 +308,14 @@ async fn generate_candle_sdxl_edit_stream(
         move || {
             let model = SdxlEdit::load(&SdxlEditPaths { sdxl_base })
                 .map_err(|error| WorkerError::Engine(format!("SDXL edit load failed: {error}")))?;
+            // Attach the optional PiD decoder (sc-8044): `Some` only when this generation opted in AND the
+            // snapshots are cached, so a native-VAE edit is a no-op here.
+            let model = match &pid_weights {
+                Some(pid) => model.with_pid(pid).map_err(|error| {
+                    WorkerError::Engine(format!("SDXL edit PiD decoder load failed: {error}"))
+                })?,
+                None => model,
+            };
             Ok((model, gen_source, gen_mask))
         },
         move |(model, source, mask), tx, cancel| {
@@ -311,9 +332,9 @@ async fn generate_candle_sdxl_edit_stream(
                     guidance,
                     strength,
                     seed: seed as u64,
-                    // No PiD backbone on this lane (native VAE decode) — behavior-preserving across the
-                    // candle-gen PiD seam bump (sc-8373 / sc-9300); matches candle-gen Default.
-                    use_pid: false,
+                    // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above — the engine errors
+                    // if set without a loaded student, so `use_pid` is `pid_weights.is_some()`.
+                    use_pid,
                     cancel: cancel.clone(),
                 };
                 let result = match &mask {
