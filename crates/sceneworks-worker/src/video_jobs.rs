@@ -1300,6 +1300,142 @@ fn snap_seedvr2_dim(value: u32) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
+// Disk-space guard for the streaming SeedVR2 output (sc-9646, sc-9595 follow-up)
+// ---------------------------------------------------------------------------
+// sc-9595 removed the sc-8829 host-RAM cap by streaming the upscale in temporal windows, so peak host
+// RAM is now bounded to ~one window regardless of clip length. But the constraint MOVED from RAM to
+// DISK: the full upscaled PNG sequence is written to a worker scratch dir before the final encode, so
+// a multi-minute / 4K clip can now write many GB with NO guard (the RAM cap previously bounded the
+// whole operation). This mirrors the removed `check_seedvr2_host_ram`: a generous, machine-derived,
+// fail-loud-before-the-window-loop preflight that estimates the output PNG footprint and rejects a
+// clip that would fill the scratch volume, so the disk is not silently exhausted mid-run.
+
+/// Fraction of the scratch volume's CURRENTLY-AVAILABLE space the streamed output PNG sequence is
+/// allowed to occupy. Deliberately generous — the estimate itself uses raw RGB8 per frame (a real
+/// upper bound on PNG-compressed output), and we still leave headroom for the source frames already on
+/// disk, the eventual encoded MP4, and everything else sharing the volume.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const SEEDVR2_DISK_OUTPUT_FRACTION: f64 = 0.8;
+
+/// Estimated peak on-disk bytes for the streamed output: `frame_count` PNG frames at
+/// `out_w × out_h`, sized as raw RGB8 (`w·h·3`) per frame. PNG compression only ever makes the real
+/// footprint SMALLER, so this is a safe upper bound (matching the generous shape of the removed
+/// `seedvr2_estimated_host_bytes`). Pure so the estimate is unit-testable without a filesystem.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn seedvr2_estimated_output_bytes(frame_count: u64, out_w: u64, out_h: u64) -> u64 {
+    let per_frame = out_w.saturating_mul(out_h).saturating_mul(3);
+    frame_count.saturating_mul(per_frame)
+}
+
+/// Bytes currently AVAILABLE on the volume backing `path`, best-effort and portable with NO new crate
+/// dependency (mirrors the removed `total_physical_ram_bytes`, which likewise shelled out): macOS +
+/// Linux run POSIX `df -k -P <path>` and read the 4th column (available 1K blocks); Windows (candle
+/// lane) runs `fsutil volume diskfree <path>`. Returns `None` if the probe fails; the caller then
+/// skips the guard rather than falsely rejecting a job.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn available_disk_bytes(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        // `df -k -P` forces POSIX one-line-per-filesystem output in 1024-byte blocks, so the columns
+        // are stable regardless of locale/long device names:
+        //   Filesystem 1024-blocks Used Available Capacity Mounted on
+        let out = std::process::Command::new("df")
+            .args(["-k", "-P"])
+            .arg(path)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        // The data row is the 2nd line (after the header); `-P` guarantees it is a single line.
+        let row = text.lines().nth(1)?;
+        let available_kib = row.split_whitespace().nth(3)?.parse::<u64>().ok()?;
+        Some(available_kib.saturating_mul(1024))
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows (candle lane): `fsutil volume diskfree <path>` prints the free bytes; the
+        // "Total # of avail free bytes" line is the per-user available figure. Dependency-free.
+        let out = std::process::Command::new("fsutil")
+            .args(["volume", "diskfree"])
+            .arg(path)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("avail") && lower.contains("free bytes") {
+                // Grab the last whitespace-separated token, stripping thousands separators.
+                if let Some(token) = line.split_whitespace().next_back() {
+                    let digits: String = token.chars().filter(|c| c.is_ascii_digit()).collect();
+                    if let Ok(bytes) = digits.parse::<u64>() {
+                        return Some(bytes);
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Fail loud (before the window loop / before any GPU work) when the estimated streamed-output PNG
+/// footprint would exceed the generous fraction of the scratch volume's currently-available space.
+/// `Ok(())` when it fits, when the frame count / dimensions are unknown (0), or when the free-space
+/// probe is unavailable (we do not falsely reject a job on a probe failure). The error names the
+/// estimate AND the available space so the user knows exactly what to trim. Mirrors the shape of the
+/// removed `check_seedvr2_host_ram` (sc-9646).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn check_seedvr2_output_disk(
+    scratch_dir: &Path,
+    frame_count: u64,
+    out_w: u64,
+    out_h: u64,
+) -> WorkerResult<()> {
+    if frame_count == 0 || out_w == 0 || out_h == 0 {
+        return Ok(());
+    }
+    let Some(available) = available_disk_bytes(scratch_dir) else {
+        // Probe failed (unknown platform / error): skip the guard rather than block a valid job.
+        return Ok(());
+    };
+    let needed = seedvr2_estimated_output_bytes(frame_count, out_w, out_h);
+    let budget = ((available as f64) * SEEDVR2_DISK_OUTPUT_FRACTION) as u64;
+    if needed > budget {
+        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+        // Largest frame count that fits the budget, so the message is actionable.
+        let per_frame = seedvr2_estimated_output_bytes(1, out_w, out_h).max(1);
+        let max_frames = budget / per_frame;
+        return Err(WorkerError::InvalidPayload(format!(
+            "Not enough disk space to upscale this clip: {frame_count} output frames at \
+             {out_w}×{out_h} would write ~{needed:.1} GB of PNG frames to the scratch volume, over \
+             the ~{budget:.1} GB usable of ~{available:.1} GB free. Trim the clip to about \
+             {max_frames} frames (or fewer), lower the target resolution, or free up disk space.",
+            needed = needed as f64 / GIB,
+            budget = budget as f64 / GIB,
+            available = available as f64 / GIB,
+        )));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Streaming worker-window chunking for the SeedVR2 upscale (sc-9595, removes the sc-8829 host-RAM cap)
 // ---------------------------------------------------------------------------
 // sc-8829 (F-027) bounded host RGB8 RAM with a machine-derived frame cap that FAILED LOUD before decode:
@@ -1776,6 +1912,20 @@ async fn run_seedvr2_stream(
     let target_h = snap_seedvr2_dim(target_h);
 
     tokio::fs::create_dir_all(out_frames_dir).await?;
+
+    // Disk-space preflight (sc-9646): sc-9595 streams the whole upscaled PNG sequence to this scratch
+    // dir before the final encode, so a long / high-res clip can write many GB with no bound (the
+    // removed sc-8829 host-RAM cap previously bounded the whole operation). Fail loud HERE — before the
+    // first window's decode + GPU work — when the estimated output footprint would exceed a generous
+    // fraction of the scratch volume's free space, so we don't fill the disk mid-run. Probed on a
+    // blocking thread (it shells out) but cheap and one-shot.
+    {
+        let guard_dir = out_frames_dir.to_path_buf();
+        let (frames, gw, gh) = (n as u64, u64::from(target_w), u64::from(target_h));
+        tokio::task::spawn_blocking(move || check_seedvr2_output_disk(&guard_dir, frames, gw, gh))
+            .await
+            .map_err(|error| task_join_error("seedvr2 disk preflight", error))??;
+    }
 
     // Plan the worker windows over the REAL frame count with the engine's own planner: a valid chunk
     // length + `DEFAULT_OVERLAP` cross-fade, so the worker-window seam handling matches the engine's
@@ -6808,21 +6958,54 @@ fn resolve_character_references(
             }
         }
     }
+    // The approved references we will attempt (capped at the engine's 4-reference contract). A
+    // reference that fails to load must NOT be dropped silently: a corrupted approved reference
+    // otherwise quietly weakens identity conditioning with zero signal (sc-8922, F-120). Warn per
+    // skipped reference (asset id + error) and, when some — but not all — loaded, emit a summary the
+    // operator can compare against the approved count.
+    let attempted: Vec<String> = ids
+        .into_iter()
+        .filter(|id| !id.is_empty())
+        .take(4)
+        .collect();
+    let approved_count = attempted.len();
     let mut images = Vec::new();
-    for asset_id in ids.into_iter().filter(|id| !id.is_empty()).take(4) {
-        if let Ok(image) = load_reference_image(
+    for asset_id in attempted {
+        match load_reference_image(
             &settings.data_dir,
             &request.project_id,
             &asset_id,
             project_path,
         ) {
-            images.push(image);
+            Ok(image) => images.push(image),
+            Err(error) => {
+                tracing::warn!(
+                    event = "character_reference_load_failed",
+                    characterId = %character_id,
+                    assetId = %asset_id,
+                    error = %error,
+                    "skipping an unreadable approved character reference — identity conditioning \
+                     will use fewer references than approved"
+                );
+            }
         }
     }
     if images.is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Replace Person requires at least one approved character reference image.".to_owned(),
         ));
+    }
+    if images.len() < approved_count {
+        tracing::warn!(
+            event = "character_references_partially_loaded",
+            characterId = %character_id,
+            loaded = images.len(),
+            approved = approved_count,
+            "loaded fewer character references than were approved — {} of {} approved references \
+             could not be read; identity conditioning is reduced",
+            approved_count - images.len(),
+            approved_count
+        );
     }
     Ok(images)
 }

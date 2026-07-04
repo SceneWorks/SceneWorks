@@ -97,6 +97,88 @@ fn resolve_max_new_tokens(
             DEFAULT_REFINE_MAX_NEW_TOKENS
         })
 }
+
+/// The `prompt_refine` job multiplexed FOUR tasks through five scattered booleans
+/// (`is_magic`/`is_image_caption`/`is_image_describe`/`is_vision_task`/`is_caption_task`) re-derived in
+/// six ladders — a shape where incoherent combinations were representable and which hid the F-003
+/// cancel bug (sc-8921, F-119). This enum makes the task ONE value classified once from the payload's
+/// `task` discriminator; every per-task property below is a method on it, so the dispatch body reads a
+/// single `match` instead of re-testing booleans. The four variants are exactly the four real tasks:
+/// - [`Rewrite`](RefineTask::Rewrite): the default free-text "refine my prompt" rewrite (warmer sampling).
+/// - [`MagicPrompt`](RefineTask::MagicPrompt): a text idea → JSON Ideogram caption (sc-5997).
+/// - [`ImageCaption`](RefineTask::ImageCaption): a reference image → JSON Ideogram caption (sc-8105).
+/// - [`ImageDescribe`](RefineTask::ImageDescribe): a reference image → NL prose/tags description (sc-8204).
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RefineTask {
+    Rewrite,
+    MagicPrompt,
+    ImageCaption,
+    ImageDescribe,
+}
+
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl RefineTask {
+    /// Classify the payload's `task` discriminator (case-insensitive). Any unknown/absent value is the
+    /// default free-text [`Rewrite`](RefineTask::Rewrite) — the pre-refactor behavior.
+    pub(crate) fn from_payload(task: Option<&str>) -> Self {
+        match task.map(str::trim).unwrap_or_default() {
+            t if t.eq_ignore_ascii_case("magic_prompt") => RefineTask::MagicPrompt,
+            t if t.eq_ignore_ascii_case("image_caption") => RefineTask::ImageCaption,
+            t if t.eq_ignore_ascii_case("image_describe") => RefineTask::ImageDescribe,
+            _ => RefineTask::Rewrite,
+        }
+    }
+
+    /// A vision task is driven by a reference image (`Content::Image` user block), not a text prompt —
+    /// so it requires an `imagePath`/`referencePath` and no `prompt`.
+    pub(crate) fn is_vision(self) -> bool {
+        matches!(self, RefineTask::ImageCaption | RefineTask::ImageDescribe)
+    }
+
+    /// A caption task emits a JSON-constrained Ideogram caption (the decode is grammar-masked) and is
+    /// validated as a schema-valid caption. `image_describe` is a vision task but NOT a caption task
+    /// (it emits unconstrained prose/tags).
+    pub(crate) fn is_caption(self) -> bool {
+        matches!(self, RefineTask::MagicPrompt | RefineTask::ImageCaption)
+    }
+
+    /// Sampling temperature: the caption tasks and the prose describe sample cool for a faithful,
+    /// steady description; the free-text rewrite stays warmer for creative variation.
+    pub(crate) fn temperature(self) -> f32 {
+        match self {
+            RefineTask::Rewrite => 0.7,
+            RefineTask::MagicPrompt | RefineTask::ImageCaption | RefineTask::ImageDescribe => 0.4,
+        }
+    }
+
+    /// The running-progress message shown while the model decodes.
+    pub(crate) fn work_message(self) -> &'static str {
+        match self {
+            RefineTask::ImageCaption => "Captioning image…",
+            RefineTask::ImageDescribe => "Describing image…",
+            RefineTask::MagicPrompt => "Expanding to a caption…",
+            RefineTask::Rewrite => "Refining prompt…",
+        }
+    }
+
+    /// The terminal completion message.
+    pub(crate) fn done_message(self) -> &'static str {
+        match self {
+            RefineTask::MagicPrompt | RefineTask::ImageCaption => "Caption ready.",
+            RefineTask::ImageDescribe => "Description ready.",
+            RefineTask::Rewrite => "Prompt refined.",
+        }
+    }
+}
 // Architecture-pill label for the streamed progress (mirrors the candle image/video paths): the MLX
 // twin on macOS, candle on the Windows candle build.
 #[cfg(target_os = "macos")]
@@ -630,19 +712,11 @@ pub(crate) async fn run_prompt_refine_job(
     // sc-5997), `image_caption` (reference image → JSON caption, sc-8105 — the `core_llm` VISION path),
     // or the default free-text rewrite. The two caption tasks both emit a JSON-constrained Ideogram
     // caption; `image_caption` additionally carries an image and needs no text prompt.
-    let task = payload
-        .get("task")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    let is_magic = task.eq_ignore_ascii_case("magic_prompt");
-    let is_image_caption = task.eq_ignore_ascii_case("image_caption");
-    // sc-8204 (epic 8203): `image_describe` is the plain-text sibling of `image_caption` — the SAME
-    // `core_llm` vision path, but for NON-structured t2i models it emits a natural-language PROSE
-    // description (no JSON constraint, no `is_caption` validation). Both vision tasks carry a reference
-    // image and need no text prompt.
-    let is_image_describe = task.eq_ignore_ascii_case("image_describe");
-    let is_vision_task = is_image_caption || is_image_describe;
+    // Classify the job into ONE `RefineTask` value from the `task` discriminator, instead of the five
+    // scattered booleans re-derived per ladder that this refactor replaced (sc-8921, F-119). Every
+    // per-task property (vision? caption? temperature, messages) is now a method on the enum or a single
+    // `match` below, so no incoherent boolean combination is representable.
+    let task = RefineTask::from_payload(payload.get("task").and_then(Value::as_str));
     let original_prompt = payload
         .get("prompt")
         .and_then(Value::as_str)
@@ -651,19 +725,19 @@ pub(crate) async fn run_prompt_refine_job(
         .to_owned();
     // The vision tasks (image_caption / image_describe) are driven by the reference image, not a text
     // prompt, so they do not require a `prompt`; every other task does.
-    if original_prompt.is_empty() && !is_vision_task {
+    if original_prompt.is_empty() && !task.is_vision() {
         return Err(WorkerError::InvalidPayload(
             "Prompt refinement requires a non-empty prompt.".to_owned(),
         ));
     }
-    // The image-caption task resolves + decodes a reference image (the JoyCaption `load_caption_image`
-    // pattern → RGB8) into the vision contract's `ImageRef`. Accept either `imagePath` or `referencePath`.
-    // The path is UNTRUSTED (it arrives on the job payload over the LAN-remote API boundary, epic 4484),
-    // so — like every other on-disk image/model input (JoyCaption via `resolve_dataset_item_path`, the
+    // The vision tasks resolve + decode a reference image (the JoyCaption `load_caption_image` pattern →
+    // RGB8) into the vision contract's `ImageRef`. Accept either `imagePath` or `referencePath`. The path
+    // is UNTRUSTED (it arrives on the job payload over the LAN-remote API boundary, epic 4484), so — like
+    // every other on-disk image/model input (JoyCaption via `resolve_dataset_item_path`, the
     // InstantID/captioner reference reads, the LoRA load path) — confine it to an app-managed root via
     // `normalize_app_managed_model_path` BEFORE opening it. That rejects `..` traversal and any absolute
     // path outside the app data dir / HF hub cache, closing the arbitrary-file-read gap.
-    let image_ref = if is_vision_task {
+    let image_ref = if task.is_vision() {
         let image_path = payload
             .get("imagePath")
             .or_else(|| payload.get("referencePath"))
@@ -681,18 +755,6 @@ pub(crate) async fn run_prompt_refine_job(
     } else {
         None
     };
-    let guide = payload
-        .get("guide")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let workflow = payload
-        .get("workflow")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    // A caption task (magic-prompt OR image-caption) drives the same TextLlm seam with Ideogram's
-    // caption system prompt instead of the rewrite rules; captions run longer than a one-line prompt,
-    // so allow more tokens and sample cooler for steadier JSON.
-    let is_caption_task = is_magic || is_image_caption;
     let model = payload
         .get("model")
         .and_then(Value::as_str)
@@ -700,52 +762,50 @@ pub(crate) async fn run_prompt_refine_job(
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_REFINE_MODEL)
         .to_owned();
-    let max_new_tokens = resolve_max_new_tokens(payload, is_caption_task, is_image_describe);
-    // Both the JSON caption tasks and the prose-describe task sample cool for a faithful, steady
-    // description; the free-text rewrite stays warmer for creative variation.
-    let temperature = if is_caption_task || is_image_describe {
-        0.4
-    } else {
-        0.7
-    };
-    let work_message = if is_image_caption {
-        "Captioning image…"
-    } else if is_image_describe {
-        "Describing image…"
-    } else if is_magic {
-        "Expanding to a caption…"
-    } else {
-        "Refining prompt…"
-    };
-    let done_message = if is_caption_task {
-        "Caption ready."
-    } else if is_image_describe {
-        "Description ready."
-    } else {
-        "Prompt refined."
-    };
+    let max_new_tokens = resolve_max_new_tokens(
+        payload,
+        task.is_caption(),
+        task == RefineTask::ImageDescribe,
+    );
+    let temperature = task.temperature();
+    let work_message = task.work_message();
+    let done_message = task.done_message();
 
-    let (system, user_message) = if is_image_caption {
-        build_image_caption_messages()
-    } else if is_image_describe {
-        // sc-8205: the describe style (prose vs booru tags) is selected per-model by the `captionStyle`
-        // payload field the web forwards from the catalog; absent/unknown → prose.
-        let style =
-            DescribeStyle::from_payload(payload.get("captionStyle").and_then(Value::as_str));
-        build_image_describe_messages(style)
-    } else if is_magic {
-        let aspect_ratio = payload
-            .get("aspectRatio")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("1:1");
-        build_magic_prompt_messages(&original_prompt, aspect_ratio)
-    } else {
-        (
-            build_refine_system_prompt(guide.as_deref(), workflow.as_deref()),
-            original_prompt.clone(),
-        )
+    // Build the `(system, user)` chat text per task: the caption tasks swap Ideogram's caption system
+    // prompt in for the rewrite rules, describe supplies the prose/tags describe asset, and the default
+    // rewrite assembles its guide/workflow system prompt with the user's prompt as the turn.
+    let (system, user_message) = match task {
+        RefineTask::ImageCaption => build_image_caption_messages(),
+        RefineTask::ImageDescribe => {
+            // sc-8205: the describe style (prose vs booru tags) is selected per-model by the
+            // `captionStyle` payload field the web forwards from the catalog; absent/unknown → prose.
+            let style =
+                DescribeStyle::from_payload(payload.get("captionStyle").and_then(Value::as_str));
+            build_image_describe_messages(style)
+        }
+        RefineTask::MagicPrompt => {
+            let aspect_ratio = payload
+                .get("aspectRatio")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("1:1");
+            build_magic_prompt_messages(&original_prompt, aspect_ratio)
+        }
+        RefineTask::Rewrite => {
+            let guide = payload
+                .get("guide")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let workflow = payload
+                .get("workflow")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            (
+                build_refine_system_prompt(guide.as_deref(), workflow.as_deref()),
+                original_prompt.clone(),
+            )
+        }
     };
     let weights_dir = resolve_app_managed_model_dir(settings, &model, "prompt-refine model path")?;
     // Attribute the run to the active backend (MLX on macOS, candle off-Mac) on the streamed progress
@@ -792,6 +852,11 @@ pub(crate) async fn run_prompt_refine_job(
         source: weights_dir.to_string_lossy().into_owned(),
         quantize: None,
     };
+    // Whether the decode is JSON-grammar-constrained (the caption tasks) and whether a reference image
+    // rides the user turn (the vision tasks) — copied out of the `Copy` `RefineTask` into plain bools so
+    // the blocking closure below names no enum, keeping its capture set minimal.
+    let is_caption_task = task.is_caption();
+    let is_vision_task = task.is_vision();
     // Resolution requirements (see the sc-8105 note below): only the request's output constraint —
     // the JSON grammar for a caption task, NONE for the prose `image_describe`/rewrite tasks. Built
     // out here so it doubles as the cache key alongside the weights dir.
@@ -1004,7 +1069,7 @@ pub(crate) async fn run_prompt_refine_job(
     // (carries `compositional_deconstruction`) and KEEPS the element bboxes (no stripping). A malformed
     // reply is handled like an empty one — a clear engine error the caller surfaces (mirroring the
     // magic-prompt malformed-output handling, where a non-caption reply also fails downstream).
-    if is_image_caption {
+    if task == RefineTask::ImageCaption {
         let parsed = serde_json::from_str::<Value>(&refined).map_err(|error| {
             WorkerError::Engine(format!(
                 "The image-caption model returned output that is not valid JSON: {error}"
@@ -1171,6 +1236,67 @@ mod tests {
         let small = image::DynamicImage::new_rgb8(640, 480);
         let kept = downscale_to_pixel_budget(small, VISION_REFERENCE_MAX_PIXELS);
         assert_eq!((kept.width(), kept.height()), (640, 480));
+    }
+
+    #[test]
+    fn refine_task_classifies_the_discriminator_and_derives_properties() {
+        // Classification is case-insensitive and trims; anything unknown/absent is the default rewrite.
+        assert_eq!(RefineTask::from_payload(None), RefineTask::Rewrite);
+        assert_eq!(RefineTask::from_payload(Some("")), RefineTask::Rewrite);
+        assert_eq!(RefineTask::from_payload(Some("bogus")), RefineTask::Rewrite);
+        assert_eq!(
+            RefineTask::from_payload(Some("  Magic_Prompt ")),
+            RefineTask::MagicPrompt
+        );
+        assert_eq!(
+            RefineTask::from_payload(Some("IMAGE_CAPTION")),
+            RefineTask::ImageCaption
+        );
+        assert_eq!(
+            RefineTask::from_payload(Some("image_describe")),
+            RefineTask::ImageDescribe
+        );
+
+        // is_vision: the two image tasks are reference-image driven; the text tasks are not.
+        assert!(!RefineTask::Rewrite.is_vision());
+        assert!(!RefineTask::MagicPrompt.is_vision());
+        assert!(RefineTask::ImageCaption.is_vision());
+        assert!(RefineTask::ImageDescribe.is_vision());
+
+        // is_caption: magic-prompt AND image_caption emit JSON captions; describe (vision, prose) does not.
+        assert!(RefineTask::MagicPrompt.is_caption());
+        assert!(RefineTask::ImageCaption.is_caption());
+        assert!(!RefineTask::ImageDescribe.is_caption());
+        assert!(!RefineTask::Rewrite.is_caption());
+
+        // Temperature: only the free-text rewrite samples warm (0.7); everything else is cool (0.4).
+        assert_eq!(RefineTask::Rewrite.temperature(), 0.7);
+        for task in [
+            RefineTask::MagicPrompt,
+            RefineTask::ImageCaption,
+            RefineTask::ImageDescribe,
+        ] {
+            assert_eq!(task.temperature(), 0.4, "{task:?} should sample cool");
+        }
+
+        // Messages match the pre-refactor ladder exactly.
+        assert_eq!(RefineTask::ImageCaption.work_message(), "Captioning image…");
+        assert_eq!(
+            RefineTask::ImageDescribe.work_message(),
+            "Describing image…"
+        );
+        assert_eq!(
+            RefineTask::MagicPrompt.work_message(),
+            "Expanding to a caption…"
+        );
+        assert_eq!(RefineTask::Rewrite.work_message(), "Refining prompt…");
+        assert_eq!(RefineTask::MagicPrompt.done_message(), "Caption ready.");
+        assert_eq!(RefineTask::ImageCaption.done_message(), "Caption ready.");
+        assert_eq!(
+            RefineTask::ImageDescribe.done_message(),
+            "Description ready."
+        );
+        assert_eq!(RefineTask::Rewrite.done_message(), "Prompt refined.");
     }
 
     #[test]

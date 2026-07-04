@@ -97,7 +97,7 @@ pub(crate) async fn run_training_caption_job(
         != "joy_caption"
     {
         return Err(WorkerError::InvalidPayload(
-            "Unsupported training captioner for the MLX worker; use joy_caption.".to_owned(),
+            "Unsupported training captioner for the native worker; use joy_caption.".to_owned(),
         ));
     }
 
@@ -142,7 +142,7 @@ pub(crate) async fn run_training_caption_job(
             JobStatus::LoadingModel,
             ProgressStage::LoadingModel,
             0.08,
-            "Loading JoyCaption MLX model.",
+            &format!("Loading JoyCaption model ({}).", backend.to_uppercase()),
             None,
             backend,
         ),
@@ -154,6 +154,9 @@ pub(crate) async fn run_training_caption_job(
     let blocking_cancel = cancel.clone();
     let blocking_items = items.clone();
     let blocking_options = options.clone();
+    // The active backend label (mlx / candle / cpu), owned into the blocking task so its engine-error
+    // strings name the REAL backend instead of a hardcoded "MLX" (sc-8916, F-114).
+    let blocking_backend = backend.to_owned();
     let job_id = job.id.clone();
     let blocking = tokio::task::spawn_blocking(move || -> WorkerResult<()> {
         emit_event(
@@ -167,7 +170,12 @@ pub(crate) async fn run_training_caption_job(
             JOY_CAPTION_MODEL,
             &LoadSpec::new(WeightsSource::Dir(weights_dir)),
         )
-        .map_err(|error| WorkerError::Engine(format!("JoyCaption MLX load failed: {error}")))?;
+        .map_err(|error| {
+            WorkerError::Engine(format!(
+                "JoyCaption {} load failed: {error}",
+                blocking_backend.to_uppercase()
+            ))
+        })?;
         emit_event(
             "caption_pipeline_load_complete",
             json!({
@@ -210,7 +218,10 @@ pub(crate) async fn run_training_caption_job(
             let output = captioner
                 .caption(&request, &mut on_progress)
                 .map_err(|error| {
-                    WorkerError::Engine(format!("JoyCaption MLX generation failed: {error}"))
+                    WorkerError::Engine(format!(
+                        "JoyCaption {} generation failed: {error}",
+                        blocking_backend.to_uppercase()
+                    ))
                 })?;
             // Prepend any missing trigger words to the caption. Backend-neutral worker-local helper
             // (sc-5098) — the same logic mlx-gen + candle-gen each ship locally — so the shared path
@@ -366,8 +377,8 @@ pub(crate) async fn run_training_caption_job(
     _job: &JobSnapshot,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
-        "The in-process JoyCaption worker needs the macOS MLX backend or the Windows candle backend; \
-         use the Python torch captioner on this platform."
+        "The in-process JoyCaption worker needs the macOS MLX backend or the candle backend \
+         (build with --features backend-candle); use the Python torch captioner on this platform."
             .to_owned(),
     ))
 }
