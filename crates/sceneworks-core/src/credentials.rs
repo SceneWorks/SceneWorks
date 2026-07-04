@@ -182,6 +182,9 @@ impl CredentialFileStore {
         let tmp_path = self.path.with_extension(format!("{extension}.{token}.tmp"));
         write_secret_file(&tmp_path, body.as_bytes())?;
         std::fs::rename(&tmp_path, &self.path)?;
+        // Persist the rename itself so the new name survives a crash too (the temp
+        // fsync in `write_secret_file` only covered the bytes) (sc-8949 / F-147).
+        sync_parent_dir(&self.path);
         // Backstop: re-assert 0600 on the final path in case it already existed
         // with looser permissions on a platform without atomic-mode creation.
         restrict_permissions(&self.path)?;
@@ -193,6 +196,10 @@ impl CredentialFileStore {
 /// Unix so a secret is never momentarily readable by other local users. On other
 /// platforms this is a plain write (the desktop build keeps secrets in the OS
 /// keychain, not this file).
+///
+/// The `sync_all` flushes the bytes to disk before the caller renames the temp
+/// into place, so a crash can't leave a zero-length or partial credentials file
+/// where the atomic rename promised all-or-nothing (sc-8949 / F-147).
 #[cfg(unix)]
 fn write_secret_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     use std::io::Write;
@@ -203,12 +210,27 @@ fn write_secret_file(path: &Path, contents: &[u8]) -> io::Result<()> {
         .truncate(true)
         .mode(0o600)
         .open(path)?;
-    file.write_all(contents)
+    file.write_all(contents)?;
+    file.sync_all()
 }
 
 #[cfg(not(unix))]
 fn write_secret_file(path: &Path, contents: &[u8]) -> io::Result<()> {
-    std::fs::write(path, contents)
+    use std::io::Write;
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(contents)?;
+    file.sync_all()
+}
+
+/// fsync the directory holding `path` so a just-completed rename is durable. Best
+/// effort: the temp fsync already makes the credential bytes durable, so a platform
+/// that refuses to fsync a directory handle doesn't fail the write (sc-8949).
+fn sync_parent_dir(path: &Path) {
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
 }
 
 /// Normalize a user-entered host or URL to a bare lower-cased host (strip scheme
