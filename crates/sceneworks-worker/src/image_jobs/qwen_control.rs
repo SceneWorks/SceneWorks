@@ -189,6 +189,11 @@ async fn ensure_qwen_control_weights(
         .join("cache")
         .join("controlnet-qwen")
         .join(&file);
+    // sc-9879 pinned this fetch to a fixed commit, but sc-9870 (merged concurrently) repointed
+    // `QWEN_CONTROL_REPO` from `alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union` to the first-party
+    // SceneWorks PACKED tier (`SceneWorks/qwen-image-2512-fun-controlnet-union`) with a per-quant
+    // `<tier>/model.safetensors` layout. The old alibaba-pai SHA is invalid for the new repo, so this
+    // fetch is left on `main` here pending a re-pin to a verified SceneWorks packed-tier commit.
     ensure_hf_cached_file(&context, &repo, "main", &file, &dst).await?;
     Ok(dst)
 }

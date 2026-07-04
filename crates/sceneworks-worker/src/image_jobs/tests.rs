@@ -8358,3 +8358,125 @@ fn candle_preprocess_depth_requires_source_and_weights() {
     )
     .is_err());
 }
+
+// ---------------------------------------------------------------------------
+// sc-9879 (F-077 follow-up): every worker HF runtime-weight fetch pins a fixed commit revision, never
+// the mutable `main` branch, so a re-push (or a compromised token) can't silently swap the weights we
+// load. Each `_REVISION` const below is locked to a real 40-hex lowercase commit sha (mirrors the
+// sc-9682 `onnx_revision_is_pinned_commit_not_main` format tests). Grouped per lane so each assertion
+// only compiles where its const does (MLX-only files vs candle-only include!s vs both-lane).
+// ---------------------------------------------------------------------------
+
+/// Assert a pinned HF revision is a real 40-hex lowercase commit sha (never `main`). Referenced on
+/// BOTH lanes (the depth + InstantID pins compile everywhere), so no cfg gating on the helper itself.
+fn assert_pinned_revision(name: &str, revision: &str) {
+    assert_ne!(revision, "main", "{name} must pin a fixed revision");
+    assert_eq!(
+        revision.len(),
+        40,
+        "{name}: a pinned HF revision is a 40-char commit sha"
+    );
+    assert!(
+        revision
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "{name}: the pinned revision must be lowercase hex"
+    );
+}
+
+/// The Depth-Anything-V2 estimator pin (`strict_control.rs`) — resolved on both lanes.
+#[test]
+fn depth_anything_revision_is_pinned_commit_not_main() {
+    assert_pinned_revision(
+        "DEPTH_ANYTHING_V2_REVISION",
+        crate::depth::DEPTH_ANYTHING_V2_REVISION,
+    );
+}
+
+/// The InstantID download pins (`instantid.rs`) — compiled on macOS AND the candle lane.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn instantid_revisions_are_pinned_commits_not_main() {
+    assert_pinned_revision("INSTANTID_MLX_REVISION", INSTANTID_MLX_REVISION);
+    assert_pinned_revision(
+        "INSTANTID_CONTROLNET_REVISION",
+        INSTANTID_CONTROLNET_REVISION,
+    );
+    assert_pinned_revision("INSTANTID_OPENPOSE_REVISION", INSTANTID_OPENPOSE_REVISION);
+    // `instantid_revision` returns the pin for a known repo and falls back to `main` otherwise.
+    assert_eq!(
+        instantid_revision(INSTANTID_MLX_REPO),
+        INSTANTID_MLX_REVISION
+    );
+    assert_eq!(instantid_revision("some/override-repo"), "main");
+}
+
+/// The MLX-only strict-control pins (`flux1_control.rs` / `flux2.rs`) + the MLX Qwen distill-LoRA pin
+/// (`qwen.rs`). These files are `#[cfg(target_os = "macos")]`-gated `include!`s.
+#[cfg(target_os = "macos")]
+#[test]
+fn mlx_control_and_distill_revisions_are_pinned_commits_not_main() {
+    assert_pinned_revision("FLUX1_CONTROL_REVISION", FLUX1_CONTROL_REVISION);
+    assert_pinned_revision("FLUX2_CONTROL_REVISION", FLUX2_CONTROL_REVISION);
+    assert_pinned_revision("QWEN_LIGHTNING_LORA_REVISION", QWEN_LIGHTNING_LORA_REVISION);
+}
+
+/// The candle-only strict-control pins (qwen / kolors / zimage / flux1 / flux2 control branches). These
+/// files are `#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]`-gated `include!`s.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_control_revisions_are_pinned_commits_not_main() {
+    // NOTE: QWEN_CONTROL_REVISION was dropped during the sc-9879 rebase — sc-9870 repointed
+    // QWEN_CONTROL_REPO to the SceneWorks packed tier, invalidating the old alibaba-pai SHA. The
+    // qwen_control fetch is temporarily back on `main` pending a re-pin to a verified SceneWorks commit.
+    assert_pinned_revision("KOLORS_CONTROL_REVISION", KOLORS_CONTROL_REVISION);
+    assert_pinned_revision("ZIMAGE_CTRL_REVISION", ZIMAGE_CTRL_REVISION);
+    assert_pinned_revision("ZIMAGE_CTRL_BASE_REVISION", ZIMAGE_CTRL_BASE_REVISION);
+    assert_pinned_revision(
+        "FLUX1_CONTROL_CANDLE_REVISION",
+        FLUX1_CONTROL_CANDLE_REVISION,
+    );
+    assert_pinned_revision(
+        "FLUX2_CONTROL_CANDLE_REVISION",
+        FLUX2_CONTROL_CANDLE_REVISION,
+    );
+}
+
+/// The candle-only IP-Adapter / PuLID / Qwen-edit distill pins. Candle-lane `include!`s.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_ipadapter_and_pulid_revisions_are_pinned_commits_not_main() {
+    assert_pinned_revision(
+        "FLUX_IPADAPTER_ADAPTER_REVISION",
+        FLUX_IPADAPTER_ADAPTER_REVISION,
+    );
+    assert_pinned_revision(
+        "FLUX_IPADAPTER_ENCODER_REVISION",
+        FLUX_IPADAPTER_ENCODER_REVISION,
+    );
+    assert_pinned_revision("SDXL_IPADAPTER_REVISION", SDXL_IPADAPTER_REVISION);
+    assert_pinned_revision(
+        "PULID_CANDLE_ADAPTER_REVISION",
+        PULID_CANDLE_ADAPTER_REVISION,
+    );
+    assert_pinned_revision("PULID_CANDLE_MLX_REVISION", PULID_CANDLE_MLX_REVISION);
+    assert_pinned_revision("PULID_CANDLE_FACE_REVISION", PULID_CANDLE_FACE_REVISION);
+    assert_pinned_revision(
+        "QWEN_EDIT_CANDLE_LIGHTNING_LORA_REVISION",
+        QWEN_EDIT_CANDLE_LIGHTNING_LORA_REVISION,
+    );
+    // The PuLID face-stack repo IS `SceneWorks/instantid-mlx`, so its pin must match the InstantID pin.
+    assert_eq!(
+        PULID_CANDLE_FACE_REVISION, INSTANTID_MLX_REVISION,
+        "PuLID + InstantID fetch the same SceneWorks/instantid-mlx repo; pins must agree"
+    );
+    // `pulid_candle_revision` returns the pin for a known repo and falls back to `main` otherwise.
+    assert_eq!(
+        pulid_candle_revision(PULID_CANDLE_FACE_REPO),
+        PULID_CANDLE_FACE_REVISION
+    );
+    assert_eq!(pulid_candle_revision("some/override-repo"), "main");
+}

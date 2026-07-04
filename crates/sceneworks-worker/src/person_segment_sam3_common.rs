@@ -27,6 +27,13 @@ pub(crate) const TOKENIZER_FILE: &str = "tokenizer.json";
 /// LICENSE copy); until then point `SCENEWORKS_SAM3_WEIGHTS` at a local `facebook/sam3` snapshot dir.
 pub(crate) const SEG_REPO: &str = "SceneWorks/sam3-mlx";
 
+/// Pinned SAM3 weights revision (sc-9879, F-077 follow-up). Even though `SEG_REPO` is a
+/// first-party repo, fetching the mutable `main` branch means a re-push (or a compromised
+/// token) could silently swap the `model.safetensors` / `tokenizer.json` we load. Pin the
+/// exact commit for defense-in-depth, mirroring the person-detector pin (sc-9682). HF's tree
+/// API still reports each file's `lfs.oid`, which `ensure_hf_cached_file` verifies against.
+pub(crate) const SEG_REVISION: &str = "3ed10b164a755c00b1a4d671dde95719c127e1a7";
+
 /// SAM3 model input is a square 1008×1008 (the processor resizes to a fixed square, not
 /// aspect-preserving — `Sam3VideoProcessor` `size={1008,1008}`, `default_to_square`).
 pub(crate) const INPUT_SIZE: u32 = 1008;
@@ -93,12 +100,18 @@ pub(crate) async fn ensure_segmenter_weights(
         return Ok(pair);
     }
     let dir = settings.data_dir.join("cache").join("person-segment-sam3");
-    let model =
-        ensure_hf_cached_file(context, SEG_REPO, "main", MODEL_FILE, &dir.join(MODEL_FILE)).await?;
+    let model = ensure_hf_cached_file(
+        context,
+        SEG_REPO,
+        SEG_REVISION,
+        MODEL_FILE,
+        &dir.join(MODEL_FILE),
+    )
+    .await?;
     let tokenizer = ensure_hf_cached_file(
         context,
         SEG_REPO,
-        "main",
+        SEG_REVISION,
         TOKENIZER_FILE,
         &dir.join(TOKENIZER_FILE),
     )
@@ -260,6 +273,25 @@ pub(crate) struct AllPersonMasks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// sc-9879 (F-077 follow-up): the first-party SAM3 weights repo is fetched at a pinned commit,
+    /// never the mutable `main` branch, so a re-push (or a compromised token) can't silently swap the
+    /// SAM3 checkpoint we load. Lock the constant to a real 40-hex lowercase commit id.
+    #[test]
+    fn seg_revision_is_pinned_commit_not_main() {
+        assert_ne!(SEG_REVISION, "main", "SAM3 must pin a fixed revision");
+        assert_eq!(
+            SEG_REVISION.len(),
+            40,
+            "a pinned HF revision is a 40-char commit sha"
+        );
+        assert!(
+            SEG_REVISION
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "the pinned revision must be lowercase hex"
+        );
+    }
 
     /// A tiny backend-neutral stand-in for either sam3 crate's `VideoFrameOutput`, so the shared
     /// [`select_object`] math is tested here (compiled on both lanes) without depending on

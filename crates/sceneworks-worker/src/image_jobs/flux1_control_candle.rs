@@ -24,6 +24,12 @@
 /// like the other candle control lanes).
 const FLUX1_CONTROL_CANDLE_REPO: &str = "Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro-2.0";
 const FLUX1_CONTROL_CANDLE_FILE: &str = "diffusion_pytorch_model.safetensors";
+/// Pinned revision for the default `FLUX1_CONTROL_CANDLE_REPO` (sc-9879, F-077 follow-up). Fetching the
+/// mutable `main` branch means a re-push (or a compromised token) could silently swap the ControlNet
+/// checkpoint we load; pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). Applied ONLY
+/// to the default repo — a manifest `controlWeights.repo` override keeps `main`. HF's tree API still
+/// reports the file's `lfs.oid`, which `ensure_hf_cached_file` verifies against.
+const FLUX1_CONTROL_CANDLE_REVISION: &str = "5d700aaad96c5ddcdf8a38ef9b22a82aac2c38e5";
 /// The FLUX.1-dev base diffusers repo when the manifest omits `repo` (HF-gated). The candle lane loads
 /// the dense bf16 snapshot.
 const FLUX1_CONTROL_CANDLE_BASE_REPO: &str = "black-forest-labs/FLUX.1-dev";
@@ -165,7 +171,15 @@ async fn ensure_flux1_control_candle_weights(
         .join("cache")
         .join("controlnet-flux1-candle")
         .join(&file);
-    ensure_hf_cached_file(&context, &repo, "main", &file, &dst).await?;
+    // Pin the exact commit for the default control repo so `main` moving under us can't swap the
+    // ControlNet checkpoint (sc-9879). A manifest `controlWeights.repo` override may carry its own
+    // revision layout, so only pin when we're on the default repo.
+    let revision = if repo == FLUX1_CONTROL_CANDLE_REPO {
+        FLUX1_CONTROL_CANDLE_REVISION
+    } else {
+        "main"
+    };
+    ensure_hf_cached_file(&context, &repo, revision, &file, &dst).await?;
     Ok(dst)
 }
 

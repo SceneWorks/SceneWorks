@@ -20,8 +20,14 @@ const FLUX_IPADAPTER_ADAPTER_FILE: &str = "ip_adapter.safetensors";
 /// pooled image embeds) + the weight file the provider's `resolve_image_encoder` looks for in the dir.
 const FLUX_IPADAPTER_ENCODER_REPO: &str = "openai/clip-vit-large-patch14";
 const FLUX_IPADAPTER_ENCODER_FILE: &str = "model.safetensors";
-/// Both repos ship the safetensors on `main` (unlike the Kolors `refs/pr/4`).
-const FLUX_IPADAPTER_REVISION: &str = "main";
+/// Pinned revisions for the two IP-Adapter repos (sc-9879, F-077 follow-up). Both are fixed,
+/// non-overridable consts, so fetching the mutable `main` branch means an upstream re-push could silently
+/// swap the adapter / CLIP-image-encoder weights we load. Pin each to its exact commit for
+/// defense-in-depth (mirrors sc-8879/sc-9682). HF's tree API still reports each file's `lfs.oid`, which
+/// `ensure_hf_cached_file` verifies the downloaded content against. (Split per repo because a single sha
+/// cannot address two different repos.)
+const FLUX_IPADAPTER_ADAPTER_REVISION: &str = "18f6940238ab5dc3744df7a8e30315892279d5f9";
+const FLUX_IPADAPTER_ENCODER_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
 /// IP-Adapter scale default — the XLabs resemblance tier 0.7 (matches `base.rs` `FLUX_IP_SCALE`, the MLX
 /// path, and the candle `IpAdapterFlux::DEFAULT_IP_SCALE`).
 const FLUX_IPADAPTER_IP_SCALE: f32 = 0.7;
@@ -163,7 +169,7 @@ async fn ensure_flux_ipadapter_weights(
             ensure_hf_cached_file(
                 &context,
                 FLUX_IPADAPTER_ADAPTER_REPO,
-                FLUX_IPADAPTER_REVISION,
+                FLUX_IPADAPTER_ADAPTER_REVISION,
                 FLUX_IPADAPTER_ADAPTER_FILE,
                 &dst,
             )
@@ -182,7 +188,7 @@ async fn ensure_flux_ipadapter_weights(
             ensure_hf_cached_file(
                 &context,
                 FLUX_IPADAPTER_ENCODER_REPO,
-                FLUX_IPADAPTER_REVISION,
+                FLUX_IPADAPTER_ENCODER_REVISION,
                 FLUX_IPADAPTER_ENCODER_FILE,
                 &dir.join(FLUX_IPADAPTER_ENCODER_FILE),
             )

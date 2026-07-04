@@ -297,7 +297,9 @@ async fn ensure_depth_estimator_dir(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<PathBuf> {
-    use crate::depth::{DEPTH_ANYTHING_V2_FILE, DEPTH_ANYTHING_V2_SMALL_REPO};
+    use crate::depth::{
+        DEPTH_ANYTHING_V2_FILE, DEPTH_ANYTHING_V2_REVISION, DEPTH_ANYTHING_V2_SMALL_REPO,
+    };
 
     if let Ok(p) = std::env::var("SCENEWORKS_DEPTH_ANYTHING_V2") {
         let p = PathBuf::from(p);
@@ -324,7 +326,7 @@ async fn ensure_depth_estimator_dir(
     crate::downloads::ensure_hf_cached_file(
         &context,
         DEPTH_ANYTHING_V2_SMALL_REPO,
-        "main",
+        DEPTH_ANYTHING_V2_REVISION,
         DEPTH_ANYTHING_V2_FILE,
         &dir.join(DEPTH_ANYTHING_V2_FILE),
     )

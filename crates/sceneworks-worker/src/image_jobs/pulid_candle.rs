@@ -32,8 +32,26 @@ const PULID_CANDLE_BISENET_FILE: &str = "bisenet_parsing.safetensors";
 const PULID_CANDLE_FACE_REPO: &str = "SceneWorks/instantid-mlx";
 const PULID_CANDLE_SCRFD_FILE: &str = "scrfd_10g.safetensors";
 const PULID_CANDLE_ARCFACE_FILE: &str = "arcface_iresnet100.safetensors";
-/// Both bundle repos ship the safetensors on `main`.
-const PULID_CANDLE_REVISION: &str = "main";
+/// Pinned commit revisions for the three PuLID download repos (sc-9879, F-077 follow-up). Every repo is
+/// a fixed, non-overridable const, so fetching the mutable `main` branch means a re-push (or a compromised
+/// token) could silently swap the adapter / EVA-BiSeNet / face-stack weights we load. Pin each to its
+/// exact commit for defense-in-depth (mirrors sc-8879/sc-9682); the `lfs.oid` sha256 verify in
+/// `ensure_hf_cached_file` is retained. `PULID_CANDLE_FACE_REPO` == `SceneWorks/instantid-mlx`, so its
+/// sha MUST equal `instantid.rs` `INSTANTID_MLX_REVISION` (they fetch the same repo).
+const PULID_CANDLE_ADAPTER_REVISION: &str = "492b1451255dc9d9bc3c857259690b5f8b998d4a";
+const PULID_CANDLE_MLX_REVISION: &str = "78ef91f977eae16d66fb191caf003154b7a0a0b8";
+const PULID_CANDLE_FACE_REVISION: &str = "bca0cacf8e5e04529bb2b326a521361b02be84fd";
+
+/// The pinned revision for one PuLID download repo (sc-9879). Any repo not in this table falls back to
+/// `main` rather than a wrong sha.
+fn pulid_candle_revision(repo: &str) -> &'static str {
+    match repo {
+        PULID_CANDLE_ADAPTER_REPO => PULID_CANDLE_ADAPTER_REVISION,
+        PULID_CANDLE_MLX_REPO => PULID_CANDLE_MLX_REVISION,
+        PULID_CANDLE_FACE_REPO => PULID_CANDLE_FACE_REVISION,
+        _ => "main",
+    }
+}
 
 /// Torch/MLX-parity defaults (the `pulid_flux_dev` "photoreal" preset): 30 steps at guidance 4.0,
 /// id_weight 1.0.
@@ -160,7 +178,7 @@ async fn ensure_pulid_candle_weights(
             return Ok(snapshot);
         }
         let dst = bundle.join(file);
-        ensure_hf_cached_file(context, repo, PULID_CANDLE_REVISION, file, &dst).await?;
+        ensure_hf_cached_file(context, repo, pulid_candle_revision(repo), file, &dst).await?;
         Ok(dst)
     }
 
@@ -189,7 +207,8 @@ async fn ensure_pulid_candle_weights(
         (PULID_CANDLE_FACE_REPO, PULID_CANDLE_ARCFACE_FILE),
         (PULID_CANDLE_MLX_REPO, PULID_CANDLE_BISENET_FILE),
     ] {
-        ensure_hf_cached_file(&context, repo, PULID_CANDLE_REVISION, file, &bundle.join(file)).await?;
+        ensure_hf_cached_file(&context, repo, pulid_candle_revision(repo), file, &bundle.join(file))
+            .await?;
     }
 
     Ok((adapter, eva, bundle))
