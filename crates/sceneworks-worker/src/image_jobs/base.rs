@@ -154,11 +154,11 @@ impl ImageRoute {
             | ImageRoute::Flux2DevControl => pose_entries(request).len() as u32,
             ImageRoute::Flux2Edit | ImageRoute::QwenEdit => grouped_edit_image_count(request),
             ImageRoute::InstantId => instantid_image_count(request, settings),
-            ImageRoute::SensenovaEdit => match flux2_grouping(request) {
-                Flux2Grouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
+            ImageRoute::SensenovaEdit => match edit_grouping(request) {
+                EditGrouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
                 // SenseNova has no strict-pose (ControlNet) path; pose jobs are excluded
                 // upstream, so any residual grouping preserves the requested image count.
-                Flux2Grouping::Poses(_) | Flux2Grouping::Plain => request.count,
+                EditGrouping::Poses(_) | EditGrouping::Plain => request.count,
             },
             // PuLID-FLUX is one identity image per seed (no angle/pose grouping) — like the base
             // MLX + SDXL-advanced + Bernini paths, the effective count is the requested count.
@@ -280,12 +280,90 @@ fn resolve_candle_image_route(
     }
 }
 
+/// How a native edit job batches its iterations (sc-8946 (F-144): renamed from `Flux2Grouping` and
+/// moved here from flux2.rs — it is the SHARED grouping for the FLUX.2 / Qwen-Edit / SenseNova-U1 edit
+/// lanes, not FLUX.2-specific, so a reader auditing Qwen/SenseNova grouping finds it in base.rs).
+#[cfg(target_os = "macos")]
+enum EditGrouping {
+    /// `count` independent images (per-image seeds), the plain reference/edit path.
+    Plain,
+    /// The 11-angle Character-Studio set: shared seed, per-angle prompt augment.
+    Angles,
+    /// The best-effort pose tier: `n` poses, shared seed, `[skeleton, reference]` sets.
+    Poses(usize),
+}
+
+/// Decide the grouping for a native edit job (parity with the `Mlx*Adapter` decision: pose set >
+/// angle set > plain, all gated to `character_image` mode — an `edit_image` job is never grouped).
+/// The caller only reaches this with a reference present, so `is_character_image` reduces to the mode
+/// check. Shared by the FLUX.2 / Qwen-Edit / SenseNova-U1 edit lanes (sc-8946 moved it from flux2.rs).
+#[cfg(target_os = "macos")]
+fn edit_grouping(request: &ImageRequest) -> EditGrouping {
+    if request.mode != "character_image" {
+        return EditGrouping::Plain;
+    }
+    let poses = pose_entries(request).len();
+    if poses > 0 {
+        return EditGrouping::Poses(poses);
+    }
+    if advanced::flag(&request.advanced, "angleSet") {
+        return EditGrouping::Angles;
+    }
+    EditGrouping::Plain
+}
+
+/// Upper bound on reference images for a multi-reference edit (sc-6211). Even with the engine's
+/// sequence-gated activation chunking (sc-6266), the FLUX.2-dev edit stays activation-bound: 4
+/// references at 1024² peak ~93 GB and 5 would exceed the 96 GB floor (measured). The per-machine
+/// `flux2_dev_edit_memory_guard` rejects over-budget combinations with an actionable message; this
+/// caps absurd inputs (and bounds the DiT sequence) before that.
+#[cfg(target_os = "macos")]
+const MAX_EDIT_REFERENCES: usize = 4;
+
+/// Reference asset ids for a native edit (sc-8946 moved it from flux2.rs — shared by the FLUX.2 /
+/// SenseNova-via-grouping lanes, not FLUX.2-specific). The FLUX.2-dev multi-image picker (sc-6211)
+/// sends the plural `referenceAssetIds` — take all of them in order, capped at [`MAX_EDIT_REFERENCES`].
+/// With no plural list it falls back to the single-reference flows: the character `referenceAssetId`,
+/// else the Image-Edit `sourceAssetId` (edit_image mode). Mirrors the Python
+/// `ref_id = referenceAssetId or (sourceAssetId if edit_image)`, plus the new multi-reference set.
+#[cfg(target_os = "macos")]
+fn edit_reference_ids(request: &ImageRequest) -> Vec<String> {
+    if !request.reference_asset_ids.is_empty() {
+        // Parsed list is already trimmed + non-empty (sceneworks-core `string_list`).
+        return request
+            .reference_asset_ids
+            .iter()
+            .take(MAX_EDIT_REFERENCES)
+            .cloned()
+            .collect();
+    }
+    if let Some(id) = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return vec![id.to_owned()];
+    }
+    if request.mode == "edit_image" {
+        if let Some(id) = request
+            .source_asset_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            return vec![id.to_owned()];
+        }
+    }
+    Vec::new()
+}
+
 #[cfg(target_os = "macos")]
 fn grouped_edit_image_count(request: &ImageRequest) -> u32 {
-    match flux2_grouping(request) {
-        Flux2Grouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
-        Flux2Grouping::Poses(count) => count as u32,
-        Flux2Grouping::Plain => request.count,
+    match edit_grouping(request) {
+        EditGrouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
+        EditGrouping::Poses(count) => count as u32,
+        EditGrouping::Plain => request.count,
     }
 }
 
@@ -1955,6 +2033,66 @@ pub(crate) fn load_reference_image(
     })
 }
 
+/// The clamped identity img2img-init strength for a strict-pose set, or `None` for the pose-only tier.
+/// `Some(strength)` iff `advanced.referenceStrength > 0` AND a non-empty `referenceAssetId` is present;
+/// `strength` is the user value clamped to `[0.05, 1.0]`, carrying the mflux `image_strength`
+/// convention **verbatim** (higher strength → later denoise start → output stays closer to the init).
+///
+/// sc-8946 (F-144): this was duplicated line-for-line as `zimage_identity_strength` (Z-Image, sc-3146)
+/// and `flux2_identity_strength` (FLUX.2-dev control) — an identity-gate change had to be made twice.
+/// The gate + clamp are IDENTICAL across the two lanes (both mirror `MlxZImageAdapter`), so it lives
+/// here once. Pure (request only), so the parity-sensitive gate + clamp stay unit-testable without I/O.
+#[cfg(target_os = "macos")]
+fn identity_strength(request: &ImageRequest) -> Option<f32> {
+    let strength = request
+        .advanced
+        .get("referenceStrength")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .filter(|strength| *strength > 0.0)?;
+    let has_asset = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|id| !id.is_empty());
+    has_asset.then(|| (strength as f32).clamp(0.05, 1.0))
+}
+
+/// Resolve the optional identity img2img-init for a strict-pose set: `Some((image, strength))` when
+/// [`identity_strength`] engages (decoding `referenceAssetId` via [`load_reference_image`]), else
+/// `None` (the default pose-only tier). The reference is shared across the whole pose set — identity is
+/// constant; only the per-pose skeleton changes.
+///
+/// sc-8946 (F-144): the shared body of the former `resolve_identity_init` /
+/// `resolve_flux2_identity_init` (both line-for-line copies). The Z-Image strict-pose stream and the
+/// FLUX.2-dev control stream both call this.
+#[cfg(target_os = "macos")]
+fn resolve_identity_init(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Option<(Image, f32)>> {
+    let Some(strength) = identity_strength(request) else {
+        return Ok(None);
+    };
+    let asset_id = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .expect("identity_strength guarantees a non-empty referenceAssetId");
+    let image = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        asset_id,
+        project_path,
+    )?;
+    Ok(Some((image, strength)))
+}
+
 /// The source identity reference (decoded image + its asset id) a strict-control pose set scores its
 /// finished poses against (epic 4406, sc-4410), or `None` when the job carries no identity reference.
 ///
@@ -2090,7 +2228,7 @@ fn build_reference_conditioning(references: &[Image]) -> Vec<Conditioning> {
 /// Reference asset ids for a Boogu instruction edit, in order. The multi-image picker sends the plural
 /// `referenceAssetIds` — take all of them, capped at [`BOOGU_MAX_EDIT_REFERENCES`]; with no plural list
 /// it falls back to the single Image-Edit `sourceAssetId` (`edit_image` mode). Mirrors
-/// `flux2_edit_reference_ids`.
+/// `edit_reference_ids`.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -2468,7 +2606,7 @@ fn resolve_generic_lane_conditioning(
         let init = if request.mode == "edit_image" {
             resolve_zimage_edit_init(request, settings, project_path)?
         } else {
-            resolve_zimage_identity_init(request, settings, project_path)?
+            resolve_identity_init(request, settings, project_path)?
         };
         Ok(LaneConditioning {
             identity_init: init,

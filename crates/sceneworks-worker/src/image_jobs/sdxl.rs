@@ -72,16 +72,6 @@ fn resolve_ip_adapter_dir(request: &ImageRequest, settings: &Settings) -> Option
     huggingface_snapshot_dir(&settings.data_dir, repo)
 }
 
-/// Resolve a mask asset id to an RGB8 [`Image`] (the engine luma-converts + binarizes it).
-fn load_mask_asset_image(
-    settings: &Settings,
-    project_id: &str,
-    mask_asset_id: &str,
-    project_path: &Path,
-) -> WorkerResult<Image> {
-    load_reference_image(&settings.data_dir, project_id, mask_asset_id, project_path)
-}
-
 /// Composite `source` contained (long edge fits) + centered on a black `width`×`height`
 /// canvas, using the **engine's** `contain_box` so the padded source lines up pixel-for-pixel
 /// with [`gen_core::imageops::outpaint_border_mask`] (both derive the same kept rect).
@@ -310,8 +300,14 @@ async fn generate_sdxl_advanced_stream(
                     .ok_or_else(|| {
                         WorkerError::InvalidPayload("inpaint requires a mask image".to_owned())
                     })?;
-                let mask =
-                    load_mask_asset_image(settings, &request.project_id, mask_id, project_path)?;
+                // The engine luma-converts + binarizes the mask asset, so it loads through the shared
+                // reference-image loader (sc-8946 inlined the one-line `load_mask_asset_image` alias).
+                let mask = load_reference_image(
+                    &settings.data_dir,
+                    &request.project_id,
+                    mask_id,
+                    project_path,
+                )?;
                 // Align the mask to the source with the SAME fit geometry.
                 let mask = fit_engine_image(mask, width, height, &request.fit_mode)?;
                 conditioning.push(Conditioning::Mask { image: mask });
@@ -347,8 +343,12 @@ async fn generate_sdxl_advanced_stream(
                 // Union the user edit region with the border (white wins) — pad-fit the user
                 // mask onto the same contained geometry first.
                 let mask_id = request.mask_asset_id.as_deref().unwrap().trim();
-                let user_mask =
-                    load_mask_asset_image(settings, &request.project_id, mask_id, project_path)?;
+                let user_mask = load_reference_image(
+                    &settings.data_dir,
+                    &request.project_id,
+                    mask_id,
+                    project_path,
+                )?;
                 let user_mask = fit_engine_image(user_mask, width, height, "pad")?;
                 mask = gen_core::imageops::union_masks(&mask, &user_mask).map_err(|error| {
                     WorkerError::Engine(format!("outpaint mask union failed: {error}"))

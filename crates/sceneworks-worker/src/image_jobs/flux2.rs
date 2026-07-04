@@ -1,30 +1,5 @@
-/// How a FLUX.2 edit job batches its iterations.
-enum Flux2Grouping {
-    /// `count` independent images (per-image seeds), the plain reference/edit path.
-    Plain,
-    /// The 11-angle Character-Studio set: shared seed, per-angle prompt augment.
-    Angles,
-    /// The best-effort pose tier: `n` poses, shared seed, `[skeleton, reference]` sets.
-    Poses(usize),
-}
-
-/// Decide the grouping for a FLUX.2 edit job (parity with the `MlxFlux2Adapter`
-/// decision: pose set > angle set > plain, all gated to `character_image` mode — an
-/// `edit_image` job is never grouped). The caller only reaches this with a reference
-/// present, so `is_character_image` reduces to the mode check.
-fn flux2_grouping(request: &ImageRequest) -> Flux2Grouping {
-    if request.mode != "character_image" {
-        return Flux2Grouping::Plain;
-    }
-    let poses = pose_entries(request).len();
-    if poses > 0 {
-        return Flux2Grouping::Poses(poses);
-    }
-    if advanced::flag(&request.advanced, "angleSet") {
-        return Flux2Grouping::Angles;
-    }
-    Flux2Grouping::Plain
-}
+// `EditGrouping` / `edit_grouping` moved to base.rs (sc-8946, F-144): they are the SHARED grouping for
+// the FLUX.2 / Qwen-Edit / SenseNova-U1 edit lanes, not FLUX.2-specific, so navigation lands in base.rs.
 
 /// The per-iteration plan shared by every native edit stream (FLUX.2 / Qwen-Edit / SenseNova-U1,
 /// F-024 sc-8826): the `(seeds, prompts, pose_inputs)` grouping expansion, the
@@ -68,18 +43,18 @@ struct EditBatch {
 #[cfg(target_os = "macos")]
 fn plan_edit_batch(
     request: &ImageRequest,
-    grouping: &Flux2Grouping,
+    grouping: &EditGrouping,
     mut raw_settings: JsonObject,
 ) -> EditBatch {
     let set_seed = resolve_seed(request, 0);
     let (seeds, prompts, pose_inputs): (Vec<i64>, Vec<String>, Option<Vec<PoseInput>>) =
         match grouping {
-            Flux2Grouping::Poses(count) => {
+            EditGrouping::Poses(count) => {
                 let poses = parse_poses(request);
                 let prompts = vec![augment_prompt_for_pose(&request.prompt); *count];
                 (vec![set_seed; *count], prompts, Some(poses))
             }
-            Flux2Grouping::Angles => {
+            EditGrouping::Angles => {
                 let prompts = CHARACTER_ANGLE_SET_ORDER
                     .iter()
                     .map(|angle| augment_prompt_for_angle(&request.prompt, angle))
@@ -90,7 +65,7 @@ fn plan_edit_batch(
                     None,
                 )
             }
-            Flux2Grouping::Plain => {
+            EditGrouping::Plain => {
                 let count = request.count as usize;
                 let seeds = (0..count).map(|index| resolve_seed(request, index)).collect();
                 (seeds, vec![request.prompt.clone(); count], None)
@@ -98,18 +73,18 @@ fn plan_edit_batch(
         };
 
     match grouping {
-        Flux2Grouping::Angles => {
+        EditGrouping::Angles => {
             raw_settings.insert("angleSet".to_owned(), Value::Bool(true));
         }
-        Flux2Grouping::Poses(_) => {
+        EditGrouping::Poses(_) => {
             raw_settings.insert("poseLibrary".to_owned(), Value::Bool(true));
         }
-        Flux2Grouping::Plain => {}
+        EditGrouping::Plain => {}
     }
 
-    let character_set = matches!(grouping, Flux2Grouping::Angles | Flux2Grouping::Poses(_));
+    let character_set = matches!(grouping, EditGrouping::Angles | EditGrouping::Poses(_));
     let plain_with_character =
-        matches!(grouping, Flux2Grouping::Plain) && request.mode == "character_image";
+        matches!(grouping, EditGrouping::Plain) && request.mode == "character_image";
     let score_likeness = character_set || plain_with_character;
 
     EditBatch {
@@ -163,54 +138,14 @@ fn flux2_edit_engine_id(model: &str) -> Option<&'static str> {
     }
 }
 
-/// Upper bound on reference images for a multi-reference edit (sc-6211). Even with the engine's
-/// sequence-gated activation chunking (sc-6266), the FLUX.2-dev edit stays activation-bound: 4
-/// references at 1024² peak ~93 GB and 5 would exceed the 96 GB floor (measured). The per-machine
-/// `flux2_dev_edit_memory_guard` rejects over-budget combinations with an actionable message; this
-/// caps absurd inputs (and bounds the DiT sequence) before that.
-const MAX_EDIT_REFERENCES: usize = 4;
-
-/// Reference asset ids for a FLUX.2 edit. The FLUX.2-dev multi-image picker (sc-6211) sends the
-/// plural `referenceAssetIds` — take all of them in order, capped at [`MAX_EDIT_REFERENCES`]. With no
-/// plural list it falls back to the single-reference flows: the character `referenceAssetId`, else the
-/// Image-Edit `sourceAssetId` (edit_image mode). Mirrors the Python
-/// `ref_id = referenceAssetId or (sourceAssetId if edit_image)`, plus the new multi-reference set.
-fn flux2_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
-    if !request.reference_asset_ids.is_empty() {
-        // Parsed list is already trimmed + non-empty (sceneworks-core `string_list`).
-        return request
-            .reference_asset_ids
-            .iter()
-            .take(MAX_EDIT_REFERENCES)
-            .cloned()
-            .collect();
-    }
-    if let Some(id) = request
-        .reference_asset_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    {
-        return vec![id.to_owned()];
-    }
-    if request.mode == "edit_image" {
-        if let Some(id) = request
-            .source_asset_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        {
-            return vec![id.to_owned()];
-        }
-    }
-    Vec::new()
-}
+// `MAX_EDIT_REFERENCES` / `edit_reference_ids` moved to base.rs (sc-8946, F-144): shared by the
+// FLUX.2 / SenseNova-via-grouping edit lanes, so they live with the other shared edit helpers.
 
 /// True when this is a FLUX.2 edit job (a flux2 edit-capable model + ≥1 reference)
 /// whose base weights resolve — routed to the edit variant rather than txt2img.
 fn flux2_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
     flux2_edit_engine_id(&request.model).is_some()
-        && !flux2_edit_reference_ids(request).is_empty()
+        && !edit_reference_ids(request).is_empty()
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
@@ -430,7 +365,7 @@ async fn generate_flux2_edit_stream(
     let adapter_label = model.adapter_label();
 
     // Resolve the reference image(s) on the async side (decode → Send Image moved in).
-    let reference_ids = flux2_edit_reference_ids(request);
+    let reference_ids = edit_reference_ids(request);
     let mut references = Vec::with_capacity(reference_ids.len());
     for id in &reference_ids {
         references.push(load_reference_image(
@@ -481,7 +416,7 @@ async fn generate_flux2_edit_stream(
     // plain With-Character) applies to EVERY character_image generation on this FLUX.2 edit lane,
     // which produces the FINAL image directly (no face-restore pass), so scoring the generated
     // image scores what the user sees.
-    let grouping = flux2_grouping(request);
+    let grouping = edit_grouping(request);
     let EditBatch {
         seeds,
         prompts,
@@ -508,7 +443,7 @@ async fn generate_flux2_edit_stream(
     // the generator-worker closure below and reused across all outputs. Staging is non-fatal (a
     // failure → no scorer → scores omitted, the generation still renders). The scored reference is
     // `references[0]` — for a character_image job that IS the `referenceAssetId` (first in
-    // `flux2_edit_reference_ids`).
+    // `edit_reference_ids`).
     let face_stack_dir = stage_likeness(
         api,
         settings,
@@ -817,53 +752,10 @@ fn flux2_control_raw_settings(
     raw
 }
 
-/// The clamped identity img2img-init strength for the FLUX.2-dev strict-pose set, or `None` for the
-/// pose-only tier (mirrors `zimage_identity_strength`). `Some` iff `advanced.referenceStrength > 0`
-/// AND a non-empty `referenceAssetId` — the dev control engine accepts an optional `Reference` init
-/// next to the required `Control`. Off by default (pose-only is the validated path).
-fn flux2_identity_strength(request: &ImageRequest) -> Option<f32> {
-    let strength = request
-        .advanced
-        .get("referenceStrength")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .filter(|strength| *strength > 0.0)?;
-    let has_asset = request
-        .reference_asset_id
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|id| !id.is_empty());
-    has_asset.then(|| (strength as f32).clamp(0.05, 1.0))
-}
-
-/// Resolve the optional identity img2img-init for the FLUX.2-dev strict-pose set: `Some((image,
-/// strength))` when [`flux2_identity_strength`] engages (decoding `referenceAssetId`), else `None`
-/// (the default pose-only tier). The reference is shared across the whole pose set.
-fn resolve_flux2_identity_init(
-    request: &ImageRequest,
-    settings: &Settings,
-    project_path: &Path,
-) -> WorkerResult<Option<(Image, f32)>> {
-    let Some(strength) = flux2_identity_strength(request) else {
-        return Ok(None);
-    };
-    let asset_id = request
-        .reference_asset_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .expect("flux2_identity_strength guarantees a non-empty referenceAssetId");
-    let image = load_reference_image(
-        &settings.data_dir,
-        &request.project_id,
-        asset_id,
-        project_path,
-    )?;
-    Ok(Some((image, strength)))
-}
+// sc-8946 (F-144): the FLUX.2-dev identity gate (`flux2_identity_strength`) and its init resolver
+// (`resolve_identity_init`) were line-for-line copies of the Z-Image pair. Both now share the
+// single [`identity_strength`] / [`resolve_identity_init`] in base.rs — the FLUX.2-dev control stream
+// calls those directly.
 
 /// Build the FLUX.2-dev control LoadSpec: the base dev snapshot + the Fun-Controlnet-Union overlay
 /// (+ quant + adapters). The dev base loads manifest-aware (a pre-quantized Q4 snapshot loads packed);
@@ -913,7 +805,7 @@ async fn generate_flux2_dev_control_stream(
     let request = &plan.request;
     // Optional identity img2img-init (opt-in, off by default — `referenceStrength`-gated), shared
     // across the pose set. `None` → the pose-only tier (the validated sc-2292 default).
-    let identity_init = resolve_flux2_identity_init(request, settings, project_path)?;
+    let identity_init = resolve_identity_init(request, settings, project_path)?;
 
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("FLUX.2-dev weights not found".to_owned()))?;

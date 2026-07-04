@@ -3081,7 +3081,7 @@ fn zimage_identity_strength_gate_and_clamp() {
         if !asset.is_null() {
             obj.insert("referenceAssetId".to_owned(), asset);
         }
-        zimage_identity_strength(&request(payload))
+        identity_strength(&request(payload))
     };
     let approx = |got: Option<f32>, want: f32| match got {
         Some(value) => assert!((value - want).abs() < 1e-6, "got {value}, want {want}"),
@@ -3639,31 +3639,31 @@ fn flux2_control_raw_settings_records_control_recipe() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn flux2_identity_strength_gates_on_strength_and_asset() {
+fn identity_strength_gates_on_strength_and_asset() {
     // Off by default (no referenceStrength) — the pose-only tier.
     assert_eq!(
-        flux2_identity_strength(&request(
+        identity_strength(&request(
             json!({ "projectId": "p", "referenceAssetId": "r" })
         )),
         None
     );
     // referenceStrength set but no asset → None.
     assert_eq!(
-        flux2_identity_strength(&request(
+        identity_strength(&request(
             json!({ "projectId": "p", "advanced": { "referenceStrength": 0.5 } })
         )),
         None
     );
     // Both present → clamped strength (the opt-in img2img-init).
     assert_eq!(
-        flux2_identity_strength(&request(json!({
+        identity_strength(&request(json!({
             "projectId": "p", "referenceAssetId": "r", "advanced": { "referenceStrength": 0.5 }
         }))),
         Some(0.5)
     );
     // Clamp to [0.05, 1.0].
     assert_eq!(
-        flux2_identity_strength(&request(json!({
+        identity_strength(&request(json!({
             "projectId": "p", "referenceAssetId": "r", "advanced": { "referenceStrength": 2.0 }
         }))),
         Some(1.0)
@@ -3837,36 +3837,36 @@ fn flux1_dev_control_real_weights_generates_each_mode() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn flux2_edit_reference_ids_prefers_reference_then_source() {
+fn edit_reference_ids_prefers_reference_then_source() {
     // referenceAssetId (character flow) wins.
     assert_eq!(
-        flux2_edit_reference_ids(&request(json!({
+        edit_reference_ids(&request(json!({
             "projectId": "p", "referenceAssetId": "ref_1", "sourceAssetId": "src_1"
         }))),
         vec!["ref_1".to_owned()]
     );
     // sourceAssetId only in edit_image mode.
     assert_eq!(
-        flux2_edit_reference_ids(&request(json!({
+        edit_reference_ids(&request(json!({
             "projectId": "p", "mode": "edit_image", "sourceAssetId": "src_1"
         }))),
         vec!["src_1".to_owned()]
     );
     // sourceAssetId without edit_image mode is ignored (it's the txt2img path).
-    assert!(flux2_edit_reference_ids(&request(json!({
+    assert!(edit_reference_ids(&request(json!({
         "projectId": "p", "sourceAssetId": "src_1"
     })))
     .is_empty());
-    assert!(flux2_edit_reference_ids(&request(json!({ "projectId": "p" }))).is_empty());
+    assert!(edit_reference_ids(&request(json!({ "projectId": "p" }))).is_empty());
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn flux2_edit_reference_ids_takes_plural_multi_reference_set() {
+fn edit_reference_ids_takes_plural_multi_reference_set() {
     // sc-6211: the multi-image picker sends `referenceAssetIds` — all of them, in order, win over the
     // singular fields.
     assert_eq!(
-        flux2_edit_reference_ids(&request(json!({
+        edit_reference_ids(&request(json!({
             "projectId": "p",
             "referenceAssetIds": ["a", "b", "c"],
             "referenceAssetId": "singular_ignored"
@@ -3875,7 +3875,7 @@ fn flux2_edit_reference_ids_takes_plural_multi_reference_set() {
     );
     // Capped at MAX_EDIT_REFERENCES (4) — a 6-image pick keeps the first four.
     assert_eq!(
-        flux2_edit_reference_ids(&request(json!({
+        edit_reference_ids(&request(json!({
             "projectId": "p",
             "referenceAssetIds": ["a", "b", "c", "d", "e", "f"]
         })))
@@ -3884,14 +3884,14 @@ fn flux2_edit_reference_ids_takes_plural_multi_reference_set() {
     );
     // A single pick in the plural picker reduces to the single-reference path.
     assert_eq!(
-        flux2_edit_reference_ids(&request(json!({
+        edit_reference_ids(&request(json!({
             "projectId": "p", "referenceAssetIds": ["only"]
         }))),
         vec!["only".to_owned()]
     );
     // Empty plural list falls back to the singular reference flow.
     assert_eq!(
-        flux2_edit_reference_ids(&request(json!({
+        edit_reference_ids(&request(json!({
             "projectId": "p", "referenceAssetIds": [], "referenceAssetId": "ref_1"
         }))),
         vec!["ref_1".to_owned()]
@@ -4108,30 +4108,30 @@ fn augment_prompt_for_pose_appends_cue() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn flux2_grouping_poses_over_angles_over_plain() {
+fn edit_grouping_poses_over_angles_over_plain() {
     // Pose set wins even when angleSet is also set.
     let poses = request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
         "advanced": { "angleSet": true, "poses": [{ "id": "a" }, { "id": "b" }] }
     }));
-    assert!(matches!(flux2_grouping(&poses), Flux2Grouping::Poses(2)));
+    assert!(matches!(edit_grouping(&poses), EditGrouping::Poses(2)));
     // angleSet without poses → the 11-angle set.
     let angles = request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
         "advanced": { "angleSet": true }
     }));
-    assert!(matches!(flux2_grouping(&angles), Flux2Grouping::Angles));
+    assert!(matches!(edit_grouping(&angles), EditGrouping::Angles));
     // character_image with neither → plain.
     let plain = request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref"
     }));
-    assert!(matches!(flux2_grouping(&plain), Flux2Grouping::Plain));
+    assert!(matches!(edit_grouping(&plain), EditGrouping::Plain));
     // edit_image never groups, even with angleSet (mode gate).
     let edit = request(json!({
         "projectId": "p", "mode": "edit_image", "sourceAssetId": "src",
         "advanced": { "angleSet": true }
     }));
-    assert!(matches!(flux2_grouping(&edit), Flux2Grouping::Plain));
+    assert!(matches!(edit_grouping(&edit), EditGrouping::Plain));
 }
 
 /// `plan_edit_batch` (F-024 sc-8826) is the shared grouping/stamping/gating builder for the FLUX.2 /
@@ -4154,7 +4154,7 @@ fn plan_edit_batch_expands_and_gates_per_grouping() {
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
         "advanced": { "angleSet": true, "seed": 7 }
     }));
-    let batch = plan_edit_batch(&angles, &flux2_grouping(&angles), base_settings());
+    let batch = plan_edit_batch(&angles, &edit_grouping(&angles), base_settings());
     assert_eq!(batch.seeds.len(), CHARACTER_ANGLE_SET_ORDER.len());
     assert_eq!(batch.prompts.len(), CHARACTER_ANGLE_SET_ORDER.len());
     assert!(batch.seeds.iter().all(|&s| s == batch.seeds[0]));
@@ -4169,7 +4169,7 @@ fn plan_edit_batch_expands_and_gates_per_grouping() {
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
         "advanced": { "seed": 7, "poses": [{ "id": "a" }, { "id": "b" }] }
     }));
-    let batch = plan_edit_batch(&poses, &flux2_grouping(&poses), base_settings());
+    let batch = plan_edit_batch(&poses, &edit_grouping(&poses), base_settings());
     assert_eq!(batch.seeds.len(), 2);
     assert!(batch.seeds.iter().all(|&s| s == batch.seeds[0]));
     assert_eq!(batch.pose_inputs.as_ref().map(Vec::len), Some(2));
@@ -4184,7 +4184,7 @@ fn plan_edit_batch_expands_and_gates_per_grouping() {
     let plain_char = request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref", "count": 3
     }));
-    let batch = plan_edit_batch(&plain_char, &flux2_grouping(&plain_char), base_settings());
+    let batch = plan_edit_batch(&plain_char, &edit_grouping(&plain_char), base_settings());
     assert_eq!(batch.seeds.len(), 3);
     assert!(batch.pose_inputs.is_none());
     assert!(batch.raw_settings.get("angleSet").is_none());
@@ -4195,7 +4195,7 @@ fn plan_edit_batch_expands_and_gates_per_grouping() {
     let plain_edit = request(json!({
         "projectId": "p", "mode": "edit_image", "sourceAssetId": "src", "count": 2
     }));
-    let batch = plan_edit_batch(&plain_edit, &flux2_grouping(&plain_edit), base_settings());
+    let batch = plan_edit_batch(&plain_edit, &edit_grouping(&plain_edit), base_settings());
     assert_eq!(batch.seeds.len(), 2);
     assert!(!batch.score_likeness);
 }

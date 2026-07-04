@@ -245,7 +245,7 @@ async fn generate_zimage_control_stream(
     // AND a referenceAssetId is present — parity with `MlxZImageAdapter._identity_init_requested`.
     // The reference is shared across the whole pose set (identity is constant; only the per-pose
     // skeleton changes). None → the pose-only tier (the validated sc-2257 default).
-    let identity_init = resolve_zimage_identity_init(request, settings, project_path)?;
+    let identity_init = resolve_identity_init(request, settings, project_path)?;
 
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("Z-Image weights not found".to_owned()))?;
@@ -492,7 +492,7 @@ async fn generate_zimage_base_control_stream(
     let request = &plan.request;
     // Identity img2img-init (opt-in escape hatch, off by default) — same gate as the Turbo path
     // (`advanced.referenceStrength > 0` AND a `referenceAssetId`). Shared across the whole pose set.
-    let identity_init = resolve_zimage_identity_init(request, settings, project_path)?;
+    let identity_init = resolve_identity_init(request, settings, project_path)?;
 
     let zimage = mlx_model("z_image")
         .ok_or_else(|| WorkerError::InvalidPayload("z-image base model row missing".to_owned()))?;
@@ -653,62 +653,10 @@ async fn generate_zimage_base_control_stream(
     .await
 }
 
-/// The clamped identity img2img-init strength for the Z-Image strict-pose set, or `None` for the
-/// pose-only tier (sc-3146). `Some(strength)` iff `advanced.referenceStrength > 0` AND a non-empty
-/// `referenceAssetId` is present — parity with `MlxZImageAdapter._identity_init_requested`. The
-/// strict-pose stream always carries poses (`zimage_control_available`), so the
-/// bare-reference-without-poses rejection is handled upstream; here a `referenceStrength` set
-/// without an asset simply falls back to pose-only, matching the Python gate rather than erroring.
-///
-/// `strength` is the user value clamped to `[0.05, 1.0]` and carries the mflux `image_strength`
-/// convention **verbatim** (no numeric inversion): the mlx-gen Z-Image control engine and mflux
-/// agree — higher strength → later denoise start (`init_time_step`) → output stays closer to the
-/// init. Mirrors `MlxZImageAdapter._reference_strength` + the sidecar's verbatim forward. Pure
-/// (request only) so the parity-sensitive gate + clamp are unit-testable without asset I/O.
-fn zimage_identity_strength(request: &ImageRequest) -> Option<f32> {
-    let strength = request
-        .advanced
-        .get("referenceStrength")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .filter(|strength| *strength > 0.0)?;
-    let has_asset = request
-        .reference_asset_id
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|id| !id.is_empty());
-    has_asset.then(|| (strength as f32).clamp(0.05, 1.0))
-}
-
-/// Resolve the optional identity img2img-init for the Z-Image strict-pose set (sc-3146):
-/// `Some((image, strength))` when [`zimage_identity_strength`] engages, decoding `referenceAssetId`
-/// via [`load_reference_image`]; `None` for the default pose-only tier. The reference is shared
-/// across the whole pose set (identity is constant; only the per-pose skeleton changes).
-fn resolve_zimage_identity_init(
-    request: &ImageRequest,
-    settings: &Settings,
-    project_path: &Path,
-) -> WorkerResult<Option<(Image, f32)>> {
-    let Some(strength) = zimage_identity_strength(request) else {
-        return Ok(None);
-    };
-    let asset_id = request
-        .reference_asset_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .expect("zimage_identity_strength guarantees a non-empty referenceAssetId");
-    let image = load_reference_image(
-        &settings.data_dir,
-        &request.project_id,
-        asset_id,
-        project_path,
-    )?;
-    Ok(Some((image, strength)))
-}
+// sc-8946 (F-144): the Z-Image identity gate (`zimage_identity_strength`) and its init resolver
+// (`resolve_identity_init`) were line-for-line copies of the FLUX.2-dev pair. Both now share
+// the single [`identity_strength`] / [`resolve_identity_init`] in base.rs — this lane calls those
+// directly (see `resolve_identity_init(request, settings, project_path)` at the strict-pose streams).
 
 /// Resolve the Z-Image Image-Edit img2img init for `mode == "edit_image"` (epic 3529):
 /// `Some((source, strength))` decoding `sourceAssetId` and pre-fitting it to the output W×H
