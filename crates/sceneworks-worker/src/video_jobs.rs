@@ -6979,7 +6979,7 @@ fn resolve_character_references(
             approved = approved_count,
             "loaded fewer character references than were approved — {} of {} approved references \
              could not be read; identity conditioning is reduced",
-            images.len(),
+            approved_count - images.len(),
             approved_count
         );
     }
