@@ -81,7 +81,7 @@ pub struct Managed {
     pub shutting_down: AtomicBool,
 }
 
-/// PIDs of the API + Python worker + MLX worker sidecars owned by this launch.
+/// PIDs of the API + GPU worker (MLX on macOS, candle on Windows) sidecars owned by this launch.
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct SidecarPids {
     api: Option<u32>,
@@ -197,10 +197,10 @@ pub fn shared_huggingface_home() -> PathBuf {
 }
 
 /// Hugging Face cache home injected into both sidecars so the rust-api model
-/// catalog and the Python inference worker resolve weights from the same root.
+/// catalog and the native inference worker resolve weights from the same root.
 /// Without this the API falls back to `<data_dir>/cache/huggingface` while the
-/// worker uses huggingface_hub's default `~/.cache/huggingface`, so they
-/// disagree and every catalog entry shows "missing" (sc-1473 Step 1 gap).
+/// worker uses the HF hub default `~/.cache/huggingface`, so they disagree and
+/// every catalog entry shows "missing" (sc-1473 Step 1 gap).
 /// Resolution order: an explicit `HF_HOME` in the environment (useful under
 /// `tauri dev`), then the user's persisted choice from the first-run splash, then
 /// the shared per-user cache. Because the splash persists this *before* the
@@ -510,7 +510,7 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
             "SCENEWORKS_DATA_DIR",
             resolved_data_dir().to_string_lossy().to_string(),
         )
-        // Pin the config dir so the API and Python worker share one root on all
+        // Pin the config dir so the API and worker share one root on all
         // platforms (Linux otherwise splits XDG data vs config).
         .env(
             "SCENEWORKS_CONFIG_DIR",
@@ -1210,7 +1210,9 @@ fn record_candle_worker_pid(app: &AppHandle, pid: Option<u32>) {
 }
 
 /// True when `pid` is one of our sidecars (not a recycled, unrelated PID). The
-/// command line must reference the API binary or the Python worker module.
+/// command line must reference the API binary. The native GPU worker
+/// (`sceneworks-rust-worker`) exits on its own when its parent/API is gone, so
+/// only the API sidecar needs identity-checked reaping.
 #[cfg(unix)]
 fn is_our_sidecar(pid: u32) -> bool {
     let Ok(output) = std::process::Command::new("ps")
@@ -1223,15 +1225,14 @@ fn is_our_sidecar(pid: u32) -> bool {
         return false;
     }
     let command = String::from_utf8_lossy(&output.stdout);
-    command.contains("sceneworks-api") || command.contains("scene_worker")
+    command.contains("sceneworks-api")
 }
 
 #[cfg(windows)]
 fn is_our_sidecar(pid: u32) -> bool {
-    // tasklist exposes the image name (sceneworks-api.exe) but not arguments, so
-    // the Python worker (python.exe -m scene_worker) can't be matched here; the
-    // worker exits on its own when its parent/API is gone, so only the API needs
-    // reaping on Windows.
+    // tasklist exposes the image name (sceneworks-api.exe) but not arguments; the
+    // native GPU worker exits on its own when its parent/API is gone, so only the
+    // API needs reaping on Windows.
     let Ok(output) = std::process::Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .output()

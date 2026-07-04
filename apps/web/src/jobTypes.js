@@ -5,7 +5,6 @@
 
 // Job types that require a GPU worker. Keep in sync with the backend:
 //   crates/sceneworks-core/src/jobs_store.rs::job_requires_gpu
-//   apps/worker/scene_worker/runtime.py (SUPPORTED_JOB_TYPES + TRAINING_JOB_TYPES + CAPTION_JOB_TYPES)
 export const GPU_REQUIRED_JOB_TYPES = new Set([
   "image_generate",
   "image_edit",
@@ -41,9 +40,9 @@ export const actionStatuses = new Set(["failed", "canceled", "interrupted", "com
 // Terminal statuses that represent an error/abnormal end (terminal minus completed).
 export const errorStatuses = new Set(["failed", "canceled", "interrupted"]);
 
-// Generation quality enum. The VALUES are what the worker honors
-// (apps/worker/scene_worker/video_adapters.py step maps: fast | balanced | best;
-// unknown values fall through to balanced). Labels are the user-facing names.
+// Generation quality enum. The VALUES are what the worker honors (the native
+// worker maps them to step counts: fast | balanced | best; unknown values fall
+// through to balanced). Labels are the user-facing names.
 // Shared by Video Studio and the Preset Manager so a saved preset's quality
 // always matches the studio control.
 export const qualityChoices = [

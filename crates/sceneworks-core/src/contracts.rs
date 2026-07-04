@@ -314,8 +314,8 @@ string_enum! {
         Estimating => "estimating",
         Generating => "generating",
         Running => "running",
-        // LoRA training stages (status stays `running`); see
-        // apps/worker/scene_worker/training_adapters.py.
+        // LoRA training stages (status stays `running`); see the native trainer
+        // in crates/sceneworks-worker/src/training_jobs.rs.
         CachingLatents => "caching_latents",
         Training => "training",
         Checkpointing => "checkpointing",
@@ -355,37 +355,35 @@ string_enum! {
         PersonTrack => "person_track",
         PersonReplace => "person_replace",
         // Whole-body DWPose keypoint detection (Pose Library, epic 2282). Advertised
-        // only by the Python worker when the onnxruntime/rtmlib backend is installed
-        // (runtime.py, gated on pose_detector_backend_available); the Rust utility
-        // worker never emits it. See jobs_store::worker_supports_job.
+        // by the native GPU worker (MLX on macOS / candle off-Mac) when its pose
+        // backend is linked; the Rust CPU utility worker never emits it. See
+        // jobs_store::worker_supports_job.
         PoseDetect => "pose_detect",
         // SCRFD 5-point face-landmark extraction (Key Point Library, epic 4422 /
-        // sc-4433). Advertised by the macOS Rust/MLX worker (native SCRFD, zero-Python)
-        // and by the Python worker when the InsightFace backend is installed
-        // (runtime.py, gated on kps_extractor_backend_available). See
+        // sc-4433). Advertised by the native GPU worker (macOS MLX SCRFD, zero-Python;
+        // candle off-Mac) when its face-landmark backend is linked. See
         // jobs_store::worker_supports_job.
         KpsExtract => "kps_extract",
         // Procedural detection/tracking previews served by the Rust utility worker.
-        // Real, model-backed PersonDetect/PersonTrack jobs are served by the Python
+        // Real, model-backed PersonDetect/PersonTrack jobs are served by the native
         // GPU worker (YOLO/ByteTrack/SAM2); these preview capabilities keep the CPU
         // procedural path claimable only for explicit `preview: true` jobs, so a
         // real job never routes to the placeholder. Segment availability is its own
-        // capability for replacement readiness. See jobs_store::worker_supports_job
-        // and apps/worker/scene_worker/runtime.py.
+        // capability for replacement readiness. See jobs_store::worker_supports_job.
         PersonDetectPreview => "person_detect_preview",
         PersonTrackPreview => "person_track_preview",
-        // Real person segmentation (SAM2), advertised only by the Python GPU worker
-        // (runtime.py, gated on segmenter_backend_available) and consumed by
-        // replace-person readiness; the Rust worker never emits it. Not dead — see
+        // Real person segmentation (SAM2), advertised only by the native GPU worker
+        // when its segmenter backend is linked and consumed by replace-person
+        // readiness; the Rust CPU utility worker never emits it. Not dead — see
         // the API "segment" capability mapping.
         PersonSegment => "person_segment",
         // Standalone image upscale (Image Editor, epic 2427). Advertised by the
-        // Python worker when the torch inference backend is available (runtime.py);
-        // the Rust utility worker never emits it. See jobs_store::job_requires_gpu.
+        // native GPU worker when its upscale backend is linked; the Rust CPU utility
+        // worker never emits it. See jobs_store::job_requires_gpu.
         ImageUpscale => "image_upscale",
         // Standalone tile-ControlNet detail refine (Image Editor, epic 2427; spike
-        // sc-2437). Advertised by the Python worker only when the torch inference
-        // backend is available (runtime.py); the Rust utility worker never emits it.
+        // sc-2437). Advertised by the native GPU worker only when its inference
+        // backend is linked; the Rust CPU utility worker never emits it.
         // See jobs_store::job_requires_gpu.
         ImageDetail => "image_detail",
         // Smart-select segmentation (Image Editor, epic 6087 / sc-6105). Advertised
@@ -394,8 +392,8 @@ string_enum! {
         // construction. See jobs_store::job_requires_gpu / mac_rust_supported.
         ImageSegment => "image_segment",
         // Standalone VIDEO upscale (Video Studio, epic 4811 / sc-4816). Advertised by
-        // the macOS Rust/MLX worker (native SeedVR2, zero-Python); no Python-worker
-        // backend (mac-only). GPU-required. See jobs_store::worker_supports_job.
+        // the macOS Rust/MLX worker (native SeedVR2, zero-Python); mac-only, no other
+        // backend. GPU-required. See jobs_store::worker_supports_job.
         VideoUpscale => "video_upscale",
         FrameExtract => "frame_extract",
         TimelineExport => "timeline_export",
@@ -431,18 +429,17 @@ string_enum! {
         // Real (non-dry-run) LoRA training execution. Advertised separately from
         // `LoraTrain` (dry-run plan validation, which needs no inference backend)
         // so a real run only routes to a worker that can actually train. See
-        // jobs_store::worker_supports_job and apps/worker/scene_worker/runtime.py.
+        // jobs_store::worker_supports_job.
         LoraTrainExecute => "lora_train_execute",
         // Prompt refinement (LLM rewrite of a user prompt) by a small in-process instruction LLM.
         // Advertised via the native `core_llm::TextLlm` provider (resolved model-first, zero torch; the
         // legacy `gen_core::load_textllm` seam was retired in sc-7189), derived in
         // engines::registry_capabilities: MLX on macOS (sc-5552 / sc-7158) and candle on the
-        // Windows/CUDA build when `backend_candle_enabled` (sc-5525 / sc-7404). The torch
-        // `PromptRefiner` remains only as the fallback on platforms with neither
-        // native provider (e.g. the candle-less Desktop installer / Linux). The model is provisioned
+        // Windows/CUDA build when `backend_candle_enabled` (sc-5525 / sc-7404). A build with neither
+        // native provider never advertises the capability. The model is provisioned
         // from the catalog (`prompt_refine_anubis_8b`, sc-5605/sc-6550) into the HF cache the worker
         // resolves; the native path does not auto-download. Routed by capability match. See
-        // apps/worker/scene_worker/runtime.py and crates/sceneworks-worker/src/prompt_refine_jobs.rs.
+        // crates/sceneworks-worker/src/prompt_refine_jobs.rs.
         PromptRefine => "prompt_refine",
     }
 }
