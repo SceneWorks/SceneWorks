@@ -611,23 +611,6 @@ pub(crate) fn classify_candle_video_gap(payload: &Map<String, Value>) -> Unsuppo
     )
 }
 
-/// The dedicated MLX-porting epic for a torch-only image model (epic 3482 policy: every
-/// unported model gets its own port epic + is dropped on Mac until it lands). `None` = a
-/// model we don't have a port epic for yet, which the oracle reports as "needs an epic".
-/// Keep in sync with `docs/mac-rust-gaps.md` §1.
-///
-/// **No whole-model torch-only image families remain.** Each was ported to MLX and moved into
-/// `MLX_ROUTED_MODELS`, so it never reaches this classifier: Kolors (epic 3090 / sc-3875), InstantID
-/// (epic 3109 / sc-3345), PuLID-FLUX (epic 3069 / sc-3344), z_image_edit (epic 3529 / sc-3923),
-/// Chroma (epic 3531 / sc-3843), SenseNova-U1 (epic 3180 / sc-3900), and finally Lens / Lens-Turbo
-/// (epic 3164 / sc-5105 — the LAST one). Models with a partial surface (e.g. InstantID pose-library,
-/// PuLID reference-less) are named per-feature in `classify_image_gap`, not here. This function is
-/// retained for the generic "unported model → needs a port epic" path and as the seam for any future
-/// torch-only image model: add a `match _model { "<id>" => Some("epic NNNN"), _ => None }` arm here.
-pub(crate) fn torch_only_image_model_epic(_model: &str) -> Option<&'static str> {
-    None
-}
-
 /// Name the precise gap for an ineligible `image_generate` / `image_edit` job: a torch-only
 /// model, or a torch-only feature on an otherwise-MLX family. Mirrors the per-family
 /// `*_mlx_eligible` gates so the reason matches why routing refused it.
@@ -636,13 +619,22 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
         return UnsupportedReason::new(None, "image generation", "no model specified.", None);
     };
     if !MLX_ROUTED_MODELS.contains(&model) {
-        let epic = torch_only_image_model_epic(model);
-        let detail = if epic.is_some() {
-            "this model has no Rust/MLX engine yet; it is dropped on Mac until its port epic lands."
-        } else {
-            "this model has no Rust/MLX engine and no port epic yet — file a porting epic and drop it on Mac (epic 3482 policy)."
-        };
-        return UnsupportedReason::new(Some(model), "unsupported image model", detail, epic);
+        // No whole-model torch-only image family remains: every one was ported to MLX and moved
+        // into `MLX_ROUTED_MODELS`, so anything reaching here is an unported model with no port
+        // epic yet. Kolors (epic 3090 / sc-3875), InstantID (epic 3109 / sc-3345), PuLID-FLUX
+        // (epic 3069 / sc-3344), z_image_edit (epic 3529 / sc-3923), Chroma (epic 3531 /
+        // sc-3843), SenseNova-U1 (epic 3180 / sc-3900), and finally Lens / Lens-Turbo (epic 3164
+        // / sc-5105 — the LAST one) all routed. Models with a partial surface (e.g. InstantID
+        // pose-library, PuLID reference-less) are named per-feature below, not here. The old
+        // `torch_only_image_model_epic` seam was retired once it became permanently `None`
+        // (sc-8951); a future torch-only image model reintroduces per-model epic mapping here.
+        // Keep in sync with `docs/mac-rust-gaps.md` §1.
+        return UnsupportedReason::new(
+            Some(model),
+            "unsupported image model",
+            "this model has no Rust/MLX engine and no port epic yet — file a porting epic and drop it on Mac (epic 3482 policy).",
+            None,
+        );
     }
     // Third-party LyCORIS (LoHa / non-peft LoKr) now applies on every MLX provider (epic 3641,
     // sc-3642/3643/3671), so it is no longer an image gap.

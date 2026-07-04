@@ -48,7 +48,7 @@ Image models in `MODEL_TARGETS` that are **not** in `MLX_ROUTED_MODELS` → the 
 adapter is authoritative on Mac. **Policy (Michael, 2026-06-07): every unported model gets its
 own MLX-porting epic and is *dropped on Mac only* (UI-gated, sc-3486) until that port lands —
 Windows/Linux keep the torch path.** Nothing here is a permanent drop. `mac_rust_supported` →
-`torch_only_image_model_epic(model)` names the specific epic below.
+`classify_image_gap` names the specific epic below.
 
 | Model id | Family | Mac disposition | Porting epic |
 |---|---|---|---|
@@ -56,13 +56,14 @@ Windows/Linux keep the torch path.** Nothing here is a permanent drop. `mac_rust
 | `pulid_flux_dev` | flux (PuLID) | 🔵 Port → drop-on-Mac until then | epic 3069 (engine done; owes SceneWorks routing) |
 
 > **No whole-model torch-only image families remain.** `lens` / `lens_turbo` were the last; they
-> are MLX on Mac as of epic 3164 / sc-5105 (see §6). `torch_only_image_model_epic` now names nothing
-> — the gap path fires only for a hypothetical unported model id.
+> are MLX on Mac as of epic 3164 / sc-5105 (see §6). The per-model `torch_only_image_model_epic`
+> seam matched nothing and was retired (sc-8951); the gap path in `classify_image_gap` now fires
+> only for a hypothetical unported model id.
 
-> A torch-only image model with **no** porting epic yet → `torch_only_image_model_epic` returns
-> `None` and the oracle reports "needs a port epic (epic 3482 policy)"; file one + add it to the
-> match. FLUX.2-**dev** is not a Mac `MODEL_TARGETS` entry and is out of mlx-gen scope; third-party
-> **LyCORIS** is a feature gap, see §2.
+> A torch-only image model with **no** porting epic yet → `classify_image_gap` reports "needs a
+> port epic (epic 3482 policy)"; file one + reintroduce a per-model epic mapping in
+> `classify_image_gap`. FLUX.2-**dev** is not a Mac `MODEL_TARGETS` entry and is out of mlx-gen
+> scope; third-party **LyCORIS** is a feature gap, see §2.
 
 ## 2. Image feature gaps on MLX-routed families
 
