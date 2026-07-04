@@ -375,11 +375,17 @@ fn sd3_5_lora_apply_mlx_gpu_smoke() {
     let lora = match std::env::var("SD3_LORA") {
         Ok(p) if !p.trim().is_empty() => PathBuf::from(p.trim()),
         _ => {
-            eprintln!(
-                "[skip] SD3_LORA not set — point it at an sd3 LoRA .safetensors (a community adapter, or \
-                 the `train_sd3_lora` smoke output) to exercise the worker apply seam (with_adapters -> \
-                 apply_sd3_adapters)"
-            );
+            // Make the self-skip UNMISTAKABLE in a recorded validation run (sc-8926): libtest reports a
+            // bare `return` as `ok`, so a green line here would falsely read as "the LoRA apply path was
+            // exercised". Emit a loud, greppable `[SKIPPED]` marker naming the test + the missing lever on
+            // BOTH streams (stdout is captured and printed on the hand-run; stderr shows even without
+            // --nocapture) so a story-recorded run cannot mistake this skip for a real pass.
+            let msg = "[SKIPPED] sd3_5_lora_apply_mlx_gpu_smoke: SD3_LORA not set — the worker LoRA \
+                       apply seam (with_adapters -> apply_sd3_adapters) was NOT exercised. Point SD3_LORA \
+                       at an sd3 LoRA .safetensors (a community adapter, or the `train_sd3_lora` smoke \
+                       output) to run it.";
+            println!("{msg}");
+            eprintln!("{msg}");
             return;
         }
     };

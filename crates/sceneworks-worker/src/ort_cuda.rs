@@ -60,6 +60,12 @@ const DEFAULT_CUDA_DIR: &str = r"C:\Program Files\NVIDIA GPU Computing Toolkit\C
 const DEFAULT_CUDA_DIR: &str = "/usr/local/cuda/lib64";
 
 /// An existing directory from `env_key`, if set + non-empty + present.
+///
+/// When the override is set to a non-empty value but the directory does not exist, this `warn!`s
+/// and returns `None` rather than swallowing it: a typo'd override is otherwise indistinguishable
+/// from unset, so resolution silently falls through to `PATH` / the toolkit default and the wrong-
+/// version DLLs load, surfacing as a confusing deferred cuDNN failure mid-inference with no clue
+/// that the override was ignored.
 fn dir_from_env(env_key: &str) -> Option<PathBuf> {
     let value = std::env::var(env_key).ok()?;
     let trimmed = value.trim();
@@ -67,7 +73,17 @@ fn dir_from_env(env_key: &str) -> Option<PathBuf> {
         return None;
     }
     let path = PathBuf::from(trimmed);
-    path.is_dir().then_some(path)
+    if path.is_dir() {
+        return Some(path);
+    }
+    tracing::warn!(
+        event = "ort_cuda_dir_override_missing",
+        env = env_key,
+        path = %trimmed,
+        "the CUDA/cuDNN dir override points at a missing directory; ignoring it and falling back \
+         to PATH / the toolkit default (this can load wrong-version DLLs and fail mid-inference)"
+    );
+    None
 }
 
 /// Resolve the CUDA runtime directory: the explicit `SCENEWORKS_ORT_CUDA_DIR`, then

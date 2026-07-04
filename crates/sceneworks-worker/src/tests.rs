@@ -925,6 +925,38 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
     }
 }
 
+/// Parse the embedded `builtin.models.jsonc` manifest (the exact bytes shipped) and return its
+/// `models` array. Shared by the manifest-gating catalog-eligibility tests so the ~15-line
+/// load→strip-comments→parse→get-array boilerplate lives in ONE place (sc-8926 dedupe of the
+/// near-verbatim copies that had drifted between the SD3.5 / SANA / SANA-Sprint gate tests).
+fn builtin_models_manifest() -> Vec<Value> {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(raw)).expect("builtin models parses as JSON");
+    manifest
+        .get("models")
+        .and_then(Value::as_array)
+        .expect("models array")
+        .clone()
+}
+
+/// The builtin-manifest entry for `id`, panicking with a clear hint if the id is absent. Shared by
+/// the manifest-gating tests (sc-8926) so each gate test asserts on the entry directly instead of
+/// re-implementing the manifest lookup.
+fn builtin_model_entry(id: &str) -> Value {
+    builtin_models_manifest()
+        .into_iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
+        .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"))
+}
+
 /// sc-7875 (SD3.5 S6, MLX-path validation boundary): the three SD3.5 builtin-manifest entries gate
 /// correctly at the catalog layer — `macOnly: false` (cross-platform now that the candle off-Mac lane
 /// is wired, sc-7880/epic 7982; availability is driven by the routing tables, not this flag),
@@ -937,21 +969,6 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
 /// by the rust-api `gated_credential_tests`; this is the catalog-eligibility counterpart.)
 #[test]
 fn sd3_5_manifest_entries_gate_correctly() {
-    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
-    use sceneworks_core::jsonc::strip_jsonc_comments;
-
-    let raw = BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .map(|(_, contents)| *contents)
-        .expect("builtin.models.jsonc present");
-    let manifest: Value =
-        serde_json::from_str(&strip_jsonc_comments(raw)).expect("builtin models parses as JSON");
-    let models = manifest
-        .get("models")
-        .and_then(Value::as_array)
-        .expect("models array");
-
     // (id, expected minMemoryGb) — Large/Turbo flagship-tier 64, Medium light-tier 56
     // (S6 worker-lane footprint ~52 GB Q8 / ~48.6 GB Q4 + headroom, below the 64 flagship tier).
     let expected: &[(&str, u64)] = &[
@@ -960,10 +977,7 @@ fn sd3_5_manifest_entries_gate_correctly() {
         ("sd3_5_medium", 56),
     ];
     for (id, min_mem) in expected {
-        let entry = models
-            .iter()
-            .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
-            .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"));
+        let entry = builtin_model_entry(id);
 
         assert_eq!(
             entry.get("family").and_then(Value::as_str),
@@ -1054,24 +1068,7 @@ fn sd3_5_manifest_entries_gate_correctly() {
 /// `model_table_rows_resolve_and_flags_match_descriptor`.
 #[test]
 fn sana_manifest_entry_gates_correctly() {
-    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
-    use sceneworks_core::jsonc::strip_jsonc_comments;
-
-    let raw = BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .map(|(_, contents)| *contents)
-        .expect("builtin.models.jsonc present");
-    let manifest: Value =
-        serde_json::from_str(&strip_jsonc_comments(raw)).expect("builtin models parses as JSON");
-    let models = manifest
-        .get("models")
-        .and_then(Value::as_array)
-        .expect("models array");
-    let entry = models
-        .iter()
-        .find(|m| m.get("id").and_then(Value::as_str) == Some("sana_1600m"))
-        .expect("sana_1600m present in builtin.models.jsonc");
+    let entry = builtin_model_entry("sana_1600m");
 
     assert_eq!(
         entry.get("family").and_then(Value::as_str),
@@ -1147,24 +1144,7 @@ fn sana_manifest_entry_gates_correctly() {
 /// `model_table_rows_resolve_and_flags_match_descriptor`.
 #[test]
 fn sana_sprint_manifest_entry_gates_correctly() {
-    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
-    use sceneworks_core::jsonc::strip_jsonc_comments;
-
-    let raw = BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .map(|(_, contents)| *contents)
-        .expect("builtin.models.jsonc present");
-    let manifest: Value =
-        serde_json::from_str(&strip_jsonc_comments(raw)).expect("builtin models parses as JSON");
-    let models = manifest
-        .get("models")
-        .and_then(Value::as_array)
-        .expect("models array");
-    let entry = models
-        .iter()
-        .find(|m| m.get("id").and_then(Value::as_str) == Some("sana_sprint_1600m"))
-        .expect("sana_sprint_1600m present in builtin.models.jsonc");
+    let entry = builtin_model_entry("sana_sprint_1600m");
 
     assert_eq!(
         entry.get("family").and_then(Value::as_str),
