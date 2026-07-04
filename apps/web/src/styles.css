@@ -7783,6 +7783,11 @@ details[open] > summary.lora-scope-group-heading::before,
   letter-spacing: 0.04em;
 }
 
+/* Keep-seed toggle sits inline with the preview action buttons. */
+.preview-keep-seed {
+  white-space: nowrap;
+}
+
 .preview-variant-toggle {
   min-width: 188px;
 }

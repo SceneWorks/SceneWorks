@@ -984,10 +984,12 @@ export function ImageStudio() {
     }
     promptEdited.current = true;
     setNegativePrompt(String(recipe.negativePrompt ?? ""));
-    // Recipe replay restores the creative setup, but intentionally leaves Seed
-    // random so "Use this recipe" makes a close variation instead of a byte-for-byte
-    // rerun of the saved asset.
-    setSeed("");
+    // Recipe replay leaves Seed random by default so "Use this recipe" makes a close
+    // variation instead of a byte-for-byte rerun. When the launcher asks to keep the
+    // seed (viewer "Keep seed" toggle), replay the saved seed for an exact reproduction.
+    // Guard with `!= null` so seed 0 is honored.
+    const replaySeed = launchRequest.keepSeed && recipe.seed != null && recipe.seed !== "";
+    setSeed(replaySeed ? String(recipe.seed) : "");
     const countValue = finiteRecipeNumber(settings.count);
     if (countValue) {
       setCount(countValue);

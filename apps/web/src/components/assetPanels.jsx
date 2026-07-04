@@ -724,6 +724,12 @@ export function FullscreenPreview({
   const seed = recipe?.seed;
   const hasSeed = seed != null && seed !== "";
   const [seedCopied, setSeedCopied] = React.useState(false);
+  // "Use this recipe" defaults to a random seed (a close variation). Toggle this on
+  // to replay the exact seed for a byte-for-byte reproduction (e.g. PiD upscaling).
+  const [keepSeed, setKeepSeed] = React.useState(false);
+  React.useEffect(() => {
+    setKeepSeed(false);
+  }, [asset.id]);
   const copySeed = React.useCallback(async () => {
     if (!hasSeed) {
       return;
@@ -1093,9 +1099,17 @@ export function FullscreenPreview({
               Save As…
             </button>
             {onUseRecipe && asset.type === "image" && (asset.generationSet?.recipe || asset.recipe) ? (
-              <button onClick={() => onUseRecipe(asset)} type="button">
-                Use this recipe
-              </button>
+              <>
+                {hasSeed ? (
+                  <label className="checkline preview-keep-seed" title="Reuse the exact seed for a byte-for-byte rerun">
+                    <input checked={keepSeed} onChange={(event) => setKeepSeed(event.target.checked)} type="checkbox" />
+                    Keep seed
+                  </label>
+                ) : null}
+                <button onClick={() => onUseRecipe(asset, { keepSeed })} type="button">
+                  Use this recipe
+                </button>
+              </>
             ) : null}
             {onEditImage && asset.type === "image" ? (
               <button onClick={() => onEditImage(asset)} type="button">

@@ -1833,7 +1833,7 @@ export function App() {
     return asset?.generationSet?.recipe ?? asset?.recipe ?? null;
   }
 
-  function sendAssetRecipeToImage(asset) {
+  function sendAssetRecipeToImage(asset, options = {}) {
     const recipe = recipeForAsset(asset);
     if (!asset || !recipe) {
       return;
@@ -1846,6 +1846,9 @@ export function App() {
       assetId: asset.id,
       sourceAssetId: asset.lineage?.sourceAssetId ?? null,
       recipe,
+      // When set, Image Studio replays the saved seed for a byte-for-byte rerun
+      // (e.g. reproduce the image to upscale with PiD) instead of a random variation.
+      keepSeed: Boolean(options.keepSeed),
     });
     setActiveView("Image");
   }

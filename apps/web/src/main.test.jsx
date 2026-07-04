@@ -2733,7 +2733,52 @@ describe("SceneWorks app shell", () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Use this recipe").click();
     });
 
-    expect(onUseRecipe).toHaveBeenCalledWith(asset);
+    // Second arg carries the keep-seed choice; this asset has no seed so the toggle
+    // is hidden and defaults to false (random-seed variation).
+    expect(onUseRecipe).toHaveBeenCalledWith(asset, { keepSeed: false });
+  });
+
+  it("surfaces a copyable seed and a keep-seed toggle for recipe reuse", async () => {
+    const noop = () => {};
+    const onUseRecipe = vi.fn();
+    const asset = {
+      id: "asset-seed",
+      displayName: "Atrium",
+      type: "image",
+      status: {},
+      file: { path: "assets/images/atrium.png" },
+      recipe: { mode: "text_to_image", model: "z_image_turbo", prompt: "mist", seed: 1234 },
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <FullscreenPreview
+          asset={asset}
+          deleteAsset={noop}
+          nextAsset={null}
+          onClose={noop}
+          onPreviewAsset={noop}
+          onUseRecipe={onUseRecipe}
+          previousAsset={null}
+          purgeAsset={noop}
+          updateAssetStatus={noop}
+        />,
+      );
+    });
+
+    // Seed is shown in the meta panel.
+    expect(document.body.querySelector(".preview-seed-value").textContent).toBe("1234");
+
+    // Toggle keep-seed on, then reuse the recipe.
+    await act(async () => {
+      document.body.querySelector(".preview-keep-seed input[type=\"checkbox\"]").click();
+    });
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Use this recipe").click();
+    });
+
+    expect(onUseRecipe).toHaveBeenCalledWith(asset, { keepSeed: true });
   });
 
   // sc-8730: the FullscreenPreview "Edit" button invokes onEditImage, which App now
