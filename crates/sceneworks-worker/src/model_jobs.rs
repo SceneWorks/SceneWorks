@@ -751,10 +751,11 @@ pub(crate) async fn run_model_convert_job(
     let model_id = required_payload_string(&job.payload, "modelId")?.to_owned();
     let source_repo = required_payload_string(&job.payload, "sourceRepo")?.to_owned();
     let output_dir = required_payload_string(&job.payload, "outputDir")?.to_owned();
-    let dtype = optional_payload_string(&job.payload, "dtype")
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("bfloat16")
-        .to_owned();
+    // NOTE: there is intentionally no `dtype` knob. The native converters each produce a fixed
+    // precision (the FLUX.2-klein converter is bf16-only; LTX / FLUX.2-dev honor `quantizeBits`),
+    // so a client-supplied `dtype` had no converter to receive it and only ever appeared in the
+    // progress message — claiming e.g. a float16 conversion that never happened (F-117). Precision
+    // is controlled by `quantizeBits` below.
     // Optional MLX quantization. `quantizeOnly` quantizes an already-converted bf16
     // MLX dir (turnkey models); otherwise quantization rides on the native->MLX
     // conversion. `bits` is validated by the convert tool's choices (LTX honors it; the
@@ -996,7 +997,7 @@ pub(crate) async fn run_model_convert_job(
             JobStatus::Running,
             ProgressStage::Running,
             0.2,
-            &format!("Converting {model_id} to MLX ({dtype}). This can take several minutes."),
+            &format!("Converting {model_id} to MLX. This can take several minutes."),
             None,
             None,
             None,
