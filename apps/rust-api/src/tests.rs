@@ -7292,7 +7292,9 @@ fn filtered_cache_health_reports_absent_filter_as_missing_not_incomplete() {
     // sc-9907: a filter whose files are ENTIRELY absent is cleanly missing, not torn. Only a
     // partially-present filter (some files there, some gone) counts as incomplete/repairable.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let repo_root = temp_dir.path().join("models--SceneWorks--z-image-turbo-mlx");
+    let repo_root = temp_dir
+        .path()
+        .join("models--SceneWorks--z-image-turbo-mlx");
     let snapshot = repo_root.join("snapshots/abc123");
     std::fs::create_dir_all(snapshot.join("q8")).expect("q8 creates");
     std::fs::create_dir_all(repo_root.join("refs")).expect("refs creates");
@@ -7309,7 +7311,10 @@ fn filtered_cache_health_reports_absent_filter_as_missing_not_incomplete() {
 
     // The q8 tier is present → installed.
     let q8 = super::models::huggingface_cache_health(&repo_root, &["q8/*".to_owned()]);
-    assert!(q8.installed && !q8.incomplete, "downloaded tier is installed");
+    assert!(
+        q8.installed && !q8.incomplete,
+        "downloaded tier is installed"
+    );
 }
 
 #[tokio::test]
