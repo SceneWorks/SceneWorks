@@ -189,6 +189,18 @@ mod realvisxl_lightning_gpu_smoke;
 // dense diffusers snapshot — the worker-lane validation backing the off-Mac candle routing wire.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod flux2_dev_gpu_smoke;
+// Real-weight GPU smoke for the candle InstantID + PiD super-resolving decode (epic 7840, sc-8386).
+// Test-only + candle-only; drives the bespoke `candle_gen_instantid::InstantId` provider across
+// Identity/Angle/Pose with the `pid_sdxl` student attached, asserting the PiD decode 4×-super-resolves
+// the native decode AND the ArcFace identity likeness survives. Validates the sc-8373 InstantID lane.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod instantid_pid_gpu_smoke;
+// Real-weight GPU smoke for the candle Z-Image + PiD decode (epic 7840, sc-8033). Test-only +
+// candle-only; drives `gen_core::load("z_image_turbo", spec.with_pid(pid_flux, gemma))` — the generic
+// candle t2i lane (sc-9727) — proving Z-Image's flux-aliased latent decodes through the pid_flux
+// student at 4× (native 1024² -> 4096²). Z-Image has no dedicated pid_zimage; it reuses pid_flux.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod zimage_pid_gpu_smoke;
 // Real-weight MLX smoke for the Krea 2 Turbo worker lane (epic 7565 sc-7575). Test-only + macOS-only;
 // drives `gen_core::load("krea_2_turbo")` with a Q8 LoadSpec against the packed `q8/` turnkey subdir —
 // the worker-lane validation (the crate links + drives the engine), not just the mlx-gen-krea crate.
