@@ -218,8 +218,58 @@ pub(crate) fn normalize_app_managed_lora_path(
 pub(crate) fn normalize_existing_or_absolute(path: &Path) -> WorkerResult<PathBuf> {
     match std::fs::canonicalize(path) {
         Ok(canonical) => normalize_absolute_path(&canonical),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => normalize_absolute_path(path),
+        // `canonicalize` fails `NotFound` as soon as *any* component (leaf or an
+        // intermediate dir) is absent, so a purely-lexical fallback would leave
+        // intermediate symlinks unresolved: a planted `<data>/loras/evil -> /outside`
+        // with a not-yet-created leaf `<data>/loras/evil/newdir` would still satisfy a
+        // lexical `starts_with(<data>)` and escape the managed root (sc-9812 / F-075
+        // follow-up). Instead canonicalize the deepest *existing* ancestor — resolving
+        // every symlink in the real portion of the path — then re-append the missing
+        // tail lexically, so a legitimate not-yet-created leaf under the root still
+        // resolves while an intermediate-symlink escape is caught by the confinement
+        // check that runs on the returned path.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            normalize_nonexistent_via_ancestor(path)
+        }
         Err(error) => Err(error.into()),
+    }
+}
+
+/// Resolve a path whose leaf (and possibly deeper ancestors) does not yet exist by
+/// canonicalizing the deepest existing ancestor and re-appending the missing tail.
+/// This resolves any symlink in the *existing* portion of the path (closing the
+/// intermediate-symlink escape lexical normalization missed) while still returning a
+/// usable path for a legitimate not-yet-created target under a managed root.
+fn normalize_nonexistent_via_ancestor(path: &Path) -> WorkerResult<PathBuf> {
+    // Start from a lexically-absolute, `.`/`..`-collapsed form so the tail we peel off
+    // is composed only of `Normal` components (no `..` to re-introduce a traversal
+    // after the existing prefix is canonicalized).
+    let absolute = normalize_absolute_path(path)?;
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut ancestor = absolute.as_path();
+    loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(canonical) => {
+                let mut resolved = canonical;
+                for component in tail.iter().rev() {
+                    resolved.push(component);
+                }
+                return normalize_absolute_path(&resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match (ancestor.file_name(), ancestor.parent()) {
+                    (Some(name), Some(parent)) => {
+                        tail.push(name.to_owned());
+                        ancestor = parent;
+                    }
+                    // Reached the filesystem root without finding an existing ancestor
+                    // (e.g. a path on a non-mounted volume): fall back to the lexical
+                    // form. There is no symlink to resolve, so this cannot escape.
+                    _ => return Ok(absolute),
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
 }
 

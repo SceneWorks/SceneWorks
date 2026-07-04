@@ -476,7 +476,17 @@ fn parse_dataset_upscale_items_reads_valid_entries_and_skips_malformed() {
         parse_dataset_upscale_items(&settings, payload.as_object().unwrap()).expect("items parse");
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].item_id, "a");
-    assert_eq!(items[0].image_path, a);
+    // sc-9812: path confinement canonicalizes the deepest existing ancestor before
+    // re-appending the (not-yet-created) tail, so the resolved image path is expressed
+    // via the canonical tempdir root (on macOS `/var` -> `/private/var`).
+    let expected_a = dir
+        .path()
+        .canonicalize()
+        .expect("tempdir canonicalizes")
+        .join("datasets")
+        .join("ds-1")
+        .join("a.png");
+    assert_eq!(items[0].image_path, expected_a);
     assert_eq!(items[1].item_id, "d");
 }
 

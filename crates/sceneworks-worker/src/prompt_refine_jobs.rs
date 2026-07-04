@@ -1824,7 +1824,14 @@ mod tests {
             "Image caption reference image",
         )
         .expect("an in-root reference path is accepted");
-        assert!(resolved.starts_with(dir.path()), "stays under the data dir");
+        // sc-9812: confinement canonicalizes the deepest existing ancestor before
+        // re-appending the not-yet-created tail, so the resolved path is under the
+        // canonical data-dir root (on macOS `/var` -> `/private/var`).
+        let canonical_root = dir.path().canonicalize().expect("tempdir canonicalizes");
+        assert!(
+            resolved.starts_with(&canonical_root),
+            "stays under the data dir"
+        );
 
         // Out-of-root absolute path: rejected.
         let outside_dir = tempfile::tempdir().expect("tempdir2");
