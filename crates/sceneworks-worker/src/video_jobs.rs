@@ -3727,6 +3727,13 @@ async fn generate_video(
                     if canceled {
                         continue; // drain so the blocking sender never blocks.
                     }
+                    // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
+                    // poll so a quit stops the gen at this frame step, matching a user cancel.
+                    if shutdown_requested() {
+                        begin_video_cancel(api, &job.id, &cancel, backend).await;
+                        canceled = true;
+                        continue;
+                    }
                     if last_cancel.elapsed() >= Duration::from_secs(2) {
                         last_cancel = Instant::now();
                         if cancel_requested_peek(api, &job.id).await {
@@ -3759,12 +3766,15 @@ async fn generate_video(
                 }
                 _ = interval.tick() => {
                     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                    if !canceled && last_cancel.elapsed() >= Duration::from_secs(2) {
-                        last_cancel = Instant::now();
-                        if cancel_requested_peek(api, &job.id).await {
-                            begin_video_cancel(api, &job.id, &cancel, backend).await;
-                            canceled = true;
-                        }
+                    // sc-9618: honor a process shutdown on every tick (local flag read, unthrottled).
+                    if !canceled && (shutdown_requested()
+                        || (last_cancel.elapsed() >= Duration::from_secs(2) && {
+                            last_cancel = Instant::now();
+                            cancel_requested_peek(api, &job.id).await
+                        }))
+                    {
+                        begin_video_cancel(api, &job.id, &cancel, backend).await;
+                        canceled = true;
                     }
                     // Forward-progress watchdog: a wedged engine keeps this async loop heartbeating
                     // (the block runs on a separate thread), so the API sees a healthy job forever.

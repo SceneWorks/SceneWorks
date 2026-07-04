@@ -3546,7 +3546,9 @@ async fn consume_gen_events(
                 mark_started(index);
                 if last_cancel_check.elapsed() >= Duration::from_secs(2) {
                     last_cancel_check = Instant::now();
-                    if cancel_requested_peek(api, &job.id).await {
+                    // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
+                    // poll so a quit stops the gen at this step, matching a user cancel.
+                    if shutdown_requested() || cancel_requested_peek(api, &job.id).await {
                         // Trip the flag + show "Cancelling…", but stay non-terminal until the
                         // in-flight image actually stops (terminal Canceled posted after the
                         // blocking run returns) — sc-5515.
@@ -3653,12 +3655,16 @@ async fn consume_gen_events(
             }
             _ = interval.tick() => {
                 heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                if !canceled && last_cancel_check.elapsed() >= Duration::from_secs(2) {
-                    last_cancel_check = Instant::now();
-                    if cancel_requested_peek(api, &job.id).await {
-                        begin_image_cancel(api, &job.id, &cancel, plan, asset_writes, backend).await;
-                        canceled = true;
-                    }
+                // sc-9618: honor a process shutdown on every tick (a local flag read, no API cost, so
+                // not throttled by the 2s user-cancel poll) so a quit trips the engine cancel promptly.
+                if !canceled && (shutdown_requested()
+                    || (last_cancel_check.elapsed() >= Duration::from_secs(2) && {
+                        last_cancel_check = Instant::now();
+                        cancel_requested_peek(api, &job.id).await
+                    }))
+                {
+                    begin_image_cancel(api, &job.id, &cancel, plan, asset_writes, backend).await;
+                    canceled = true;
                 }
             }
         }

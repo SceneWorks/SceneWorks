@@ -355,7 +355,10 @@ where
                     return Err(error);
                 }
                 if let Some(flag) = &cancel {
-                    if !canceled && cancel_requested_peek(api, job_id).await {
+                    // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
+                    // poll (a local flag read) so a quit trips the blocking task's engine cancel at the
+                    // next heartbeat tick instead of winding down only at the loop grace window.
+                    if !canceled && (shutdown_requested() || cancel_requested_peek(api, job_id).await) {
                         flag.cancel();
                         canceled = true;
                         // Fire the one-shot cancel-acknowledged hook (e.g. post an intermediate
@@ -414,6 +417,49 @@ pub(crate) async fn cancel_requested_peek(api: &ApiClient, job_id: &str) -> bool
     }
 }
 
+tokio::task_local! {
+    /// The process-shutdown [`gen_core::CancelFlag`] for the in-flight job (sc-9618, F-043 follow-up).
+    /// `run_job_with_shutdown` trips a shared flag on SIGTERM/Ctrl-C and awaits the un-dropped job
+    /// future (bounded by `shutdown_timeout_seconds`) — that guarantees correctness (no dangling
+    /// `running`) for EVERY handler regardless of whether it observes the flag. This task-local lets the
+    /// per-engine GPU consumer loops ALSO honor it at their existing per-step cancel checkpoints so a
+    /// prompt/gen stops mid-step on quit instead of waiting out the grace window, WITHOUT threading the
+    /// flag through ~30 stream-handler signatures (and desyncing an MLX/candle twin in the process).
+    /// `run_utility_job` scopes it via [`with_shutdown_flag`] around its whole dispatch, and every
+    /// consumer loop (image `consume_gen_events`, video `generate_video`, training
+    /// `consume_training_events`, `run_batched_analysis_job`, image-detail) runs inside that same task
+    /// (the only `tokio::spawn`s below it are the model-producer tasks, which poll the ENGINE flag), so
+    /// the scope reaches every checkpoint. Unset outside a job (e.g. unit tests) ⇒ [`shutdown_requested`]
+    /// reads `false`.
+    pub(crate) static SHUTDOWN_FLAG: gen_core::CancelFlag;
+}
+
+/// Run `future` with the process-shutdown [`SHUTDOWN_FLAG`] task-local bound to `shutdown`, so every
+/// consumer loop awaited within it can consult [`shutdown_requested`] at its cancel checkpoints
+/// (sc-9618). Scoped once around `run_utility_job`'s dispatch.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) async fn with_shutdown_flag<F>(shutdown: gen_core::CancelFlag, future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    SHUTDOWN_FLAG.scope(shutdown, future).await
+}
+
+/// Whether a process shutdown has been requested for the in-flight job (sc-9618). Reads the
+/// [`SHUTDOWN_FLAG`] task-local scoped by [`with_shutdown_flag`]; `false` when unset (outside a job, or
+/// a unit test that calls a consumer directly). Consumer-loop cancel checkpoints OR this in alongside
+/// the API `cancel_requested_peek` user-cancel poll, so a shutdown trips the engine cancel at the next
+/// step exactly like a user cancel would.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn shutdown_requested() -> bool {
+    SHUTDOWN_FLAG
+        .try_with(|flag| flag.is_cancelled())
+        .unwrap_or(false)
+}
+
 pub(crate) async fn update_job(
     api: &ApiClient,
     job_id: &str,
@@ -460,4 +506,36 @@ pub(crate) fn progress_payload(
 
 pub(crate) fn number_from_f64(value: f64) -> ContractNumber {
     Number::from_f64(value).unwrap_or_else(|| Number::from(0))
+}
+
+#[cfg(test)]
+mod shutdown_flag_tests {
+    use super::*;
+
+    /// sc-9618: outside a scoped job the task-local is unset, so a consumer loop's checkpoint reads
+    /// "no shutdown" and keeps running (never spuriously cancels a job in a unit test).
+    #[tokio::test]
+    async fn shutdown_requested_is_false_when_unscoped() {
+        assert!(!shutdown_requested());
+    }
+
+    /// sc-9618: inside `with_shutdown_flag`, the checkpoint reads the scoped flag — `false` until it is
+    /// tripped, `true` once the process-shutdown flag is cancelled — exactly what
+    /// `run_job_with_shutdown` does on SIGTERM/Ctrl-C. This is the observable both `consume_gen_events`
+    /// and every twin consult at each per-step cancel checkpoint.
+    #[tokio::test]
+    async fn shutdown_requested_tracks_the_scoped_flag() {
+        let flag = gen_core::CancelFlag::new();
+        let flag_for_scope = flag.clone();
+        with_shutdown_flag(flag_for_scope, async {
+            // Not yet tripped inside the scope.
+            assert!(!shutdown_requested());
+            // Tripping the (shared clone of the) flag is observed at the next checkpoint read.
+            flag.cancel();
+            assert!(shutdown_requested());
+        })
+        .await;
+        // Back outside the scope, the task-local is gone again.
+        assert!(!shutdown_requested());
+    }
 }

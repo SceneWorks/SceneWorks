@@ -496,13 +496,17 @@ pub(crate) async fn run_image_detail_job(
                 if canceled {
                     continue; // drain so the blocking sender never blocks; terminal posts after stop.
                 }
-                if last_cancel_check.elapsed() >= Duration::from_secs(2) {
-                    last_cancel_check = Instant::now();
-                    if cancel_requested_peek(api, &job.id).await {
-                        begin_detail_cancel(api, &job.id, &cancel, backend).await;
-                        canceled = true;
-                        continue;
-                    }
+                // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API poll
+                // so a quit stops the tile pass at this step, matching a user cancel.
+                if shutdown_requested()
+                    || (last_cancel_check.elapsed() >= Duration::from_secs(2) && {
+                        last_cancel_check = Instant::now();
+                        cancel_requested_peek(api, &job.id).await
+                    })
+                {
+                    begin_detail_cancel(api, &job.id, &cancel, backend).await;
+                    canceled = true;
+                    continue;
                 }
                 update_job(
                     api,
@@ -521,12 +525,15 @@ pub(crate) async fn run_image_detail_job(
             }
             _ = interval.tick() => {
                 heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                if !canceled && last_cancel_check.elapsed() >= Duration::from_secs(2) {
-                    last_cancel_check = Instant::now();
-                    if cancel_requested_peek(api, &job.id).await {
-                        begin_detail_cancel(api, &job.id, &cancel, backend).await;
-                        canceled = true;
-                    }
+                // sc-9618: honor a process shutdown on every tick (local flag read, unthrottled).
+                if !canceled && (shutdown_requested()
+                    || (last_cancel_check.elapsed() >= Duration::from_secs(2) && {
+                        last_cancel_check = Instant::now();
+                        cancel_requested_peek(api, &job.id).await
+                    }))
+                {
+                    begin_detail_cancel(api, &job.id, &cancel, backend).await;
+                    canceled = true;
                 }
             }
         }
