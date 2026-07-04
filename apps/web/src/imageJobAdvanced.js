@@ -1,5 +1,5 @@
 import { buildStructuredPromptRecipe } from "./ideogramCaption.js";
-import { tierQuantize } from "./quantTier.js";
+import { tierQuantize, isConvRotTier } from "./quantTier.js";
 
 // sc-8854 (F-052): pure builder for the Image Studio job's `advanced` payload. Extracted
 // verbatim from ImageStudio.submit() — the ~110-line object literal that assembled the
@@ -133,6 +133,12 @@ export function buildImageJobAdvanced(state) {
     ...(showTierPicker && tierQuantize(quantTier) !== null
       ? { mlxQuantize: tierQuantize(quantTier) }
       : {}),
+    // Krea 2 INT8-ConvRot tier (sc-9300, epic 9083): the online-rotation int8 DiT is NOT a bits-based
+    // quant, so it can't ride `mlxQuantize` (its `tierQuantize` is null, so the spread above omits it).
+    // Instead send a distinct `convRot: true` the worker maps to the ConvRot LoadSpec construction
+    // (weights = Dir(bf16 snapshot) + text_encoder = File(convrot DiT)). Emitted only when the picker
+    // is shown AND the picked tier is int8-convrot — disjoint from the mlxQuantize spread above.
+    ...(showTierPicker && isConvRotTier(quantTier) ? { convRot: true } : {}),
     // PiD decoder (epic 7840, sc-7851): emit usePid:true only when the toggle is shown
     // (model PiD-eligible AND checkpoint installed) AND on. The worker swaps the native
     // VAE for the PiD decode + 2K/4K super-resolve pass; it rides `advanced` (opaque

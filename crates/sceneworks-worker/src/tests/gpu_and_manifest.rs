@@ -40,6 +40,24 @@ fn nvidia_smi_parsing_and_visible_device_filtering_match_python_worker() {
     );
 }
 
+// sc-9300 (epic 9083): the INT8-ConvRot sm_89 compute-cap probe parses `nvidia-smi
+// --query-gpu=compute_cap` and takes the HIGHEST cap across GPUs (a multi-GPU box may mix an Ada card
+// with an older one). Blank / unparseable rows are ignored; nothing parseable ⇒ `None` (ineligible).
+#[test]
+fn compute_cap_parse_takes_the_highest_and_tolerates_junk() {
+    // Single Ada card (RTX 4090 = 8.9) clears the floor.
+    assert_eq!(parse_max_compute_cap("8.9\n"), Some(8.9));
+    // Blackwell (12.0).
+    assert_eq!(parse_max_compute_cap("12.0\n"), Some(12.0));
+    // Multi-GPU: an A100 (8.0) + an RTX 4090 (8.9) → the max (8.9) is what the gate sees.
+    assert_eq!(parse_max_compute_cap("8.0\n8.9\n"), Some(8.9));
+    // Junk / blank rows are ignored; a trailing blank line doesn't break the max.
+    assert_eq!(parse_max_compute_cap("  \n7.5\nN/A\n"), Some(7.5));
+    // No parseable cap (nvidia-smi absent / empty) ⇒ None ⇒ ConvRot-ineligible.
+    assert_eq!(parse_max_compute_cap(""), None);
+    assert_eq!(parse_max_compute_cap("\n[N/A]\n"), None);
+}
+
 #[test]
 fn auto_worker_ids_and_child_environment_match_python_supervisor() {
     assert_eq!(gpu_worker_id("worker-gpu-auto-0", "0"), "worker-gpu-auto-0");

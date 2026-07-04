@@ -256,7 +256,23 @@ export function ImageStudio() {
     setRequestedGpu,
     updateAssetStatus,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
+    visibleWorkers = [],
   } = useAppContext();
+  // Krea 2 INT8-ConvRot eligibility (sc-9300, epic 9083): the candle-only tier is offered ONLY when a
+  // live worker advertises the `int8_convrot` capability — which the worker emits solely on the candle
+  // lane AND when its GPU clears the sm_89 compute-cap floor (gpu.rs). So macOS/MLX and pre-Ada NVIDIA
+  // hosts (where no worker advertises it) HIDE the tier gracefully rather than only failing at submit.
+  const convRotEligible = useMemo(
+    () =>
+      visibleWorkers.some(
+        (worker) =>
+          worker?.status !== "offline" &&
+          Array.isArray(worker?.capabilities) &&
+          worker.capabilities.includes("int8_convrot"),
+      ),
+    [visibleWorkers],
+  );
+  const tierOptions = useMemo(() => ({ convRotEligible }), [convRotEligible]);
   // Prompt-refinement model catalog entry (sc-5605) — drives the "download the
   // refinement model" affordance in RefinePromptControl when Refine fails because the
   // model isn't provisioned on the native worker.
@@ -625,8 +641,14 @@ export function ImageStudio() {
   // The picker renders only when MORE THAN ONE tier is installed; a single installed tier keeps
   // the studio unchanged (no toggle). Boogu's `precisionToggle` is orthogonal — those models are
   // single-download (no variant matrix), so they never hit this path.
-  const availableTiers = useMemo(() => installedTiers(selectedModel), [selectedModel]);
-  const showTierPicker = useMemo(() => shouldShowTierPicker(selectedModel), [selectedModel]);
+  const availableTiers = useMemo(
+    () => installedTiers(selectedModel, tierOptions),
+    [selectedModel, tierOptions],
+  );
+  const showTierPicker = useMemo(
+    () => shouldShowTierPicker(selectedModel, tierOptions),
+    [selectedModel, tierOptions],
+  );
   // PiD decoder toggle visibility (epic 7840, sc-7851): the model's latent space has a PiD
   // backbone (ui.pid) AND that backbone's PiD checkpoint is installed. Hidden otherwise — for
   // non-eligible models (e.g. SenseNova) and for eligible models whose checkpoint isn't
@@ -872,7 +894,7 @@ export function ImageStudio() {
     if (availableTiers.includes(quantTier)) {
       return;
     }
-    setQuantTier(defaultTierSelection(selectedModel, lastUsedTiers[model]) ?? "");
+    setQuantTier(defaultTierSelection(selectedModel, lastUsedTiers[model], tierOptions) ?? "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model, availableTiersKey]);
   // Switch the active quant tier (sc-8515): persist it as this model's last-used tier and surface
