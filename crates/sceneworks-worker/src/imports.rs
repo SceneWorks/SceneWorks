@@ -10,13 +10,20 @@ pub(crate) async fn import_lora_source_path(
     target_dir: &Path,
     prefer_move: bool,
 ) -> WorkerResult<()> {
-    let source = source.canonicalize()?;
-    if !source.exists() {
-        return Err(WorkerError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("LoRA source not found: {}", source.display()),
-        )));
-    }
+    // `canonicalize` already fails `NotFound` when the source is missing, so the
+    // old `!source.exists()` guard that followed it was dead code and its friendly
+    // message never fired for the common case. Map the `NotFound` here instead so
+    // a missing source still surfaces the actionable error (sc-8898 / F-096).
+    let source = source.canonicalize().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            WorkerError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("LoRA source not found: {}", source.display()),
+            ))
+        } else {
+            WorkerError::Io(error)
+        }
+    })?;
     tokio::fs::create_dir_all(target_dir).await?;
     if source.is_dir() {
         copy_dir_recursive(&source, target_dir).await?;
