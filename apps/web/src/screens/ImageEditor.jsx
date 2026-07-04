@@ -8,7 +8,6 @@ import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
-import { makeObjElement, makeTextElement, normalizeHexColor } from "../ideogramCaption.js";
 import {
   activeLayerOf,
   addLayer,
@@ -28,23 +27,6 @@ import {
 } from "../imageLayers.js";
 import { LayersPanel } from "../components/LayersPanel.jsx";
 import { CurveEditor } from "../components/CurveEditor.jsx";
-import {
-  IDENTITY_LEVELS,
-  IDENTITY_CURVES,
-  isIdentityLevels,
-  isIdentityCurves,
-  applyLevels,
-  applyCurves,
-  computeHistogram,
-} from "../colorGrade.js";
-import {
-  maskAlphaFromRgba,
-  writeMaskAlphaToRgba,
-  invertAlpha,
-  dilateAlpha,
-  erodeAlpha,
-  blurAlpha,
-} from "../maskRefine.js";
 // Pure job builders + model/engine helpers (sc-6112) — extracted to a konva-free module
 // so the Library batch flow can reuse them; imported for internal use and re-exported
 // below to keep this module's public surface (and its tests) unchanged.
@@ -61,6 +43,53 @@ import {
   availableUpscaleEngines as upscaleEnginesForPlatform,
   useUpscaleEngineFallback,
 } from "../upscaleEngines.js";
+// Per-tool logic extracted to dedicated hooks + pure helper modules (sc-9752, F-052
+// follow-up). Each hook owns its tool's state/refs/handlers and is wired below; the pure
+// helpers are re-exported here so this module's public surface (and ImageEditor.test.jsx's
+// imports) stay byte-for-byte unchanged.
+import { useColorGradeTool } from "./imageEditor/useColorGradeTool.js";
+import { useBoxesTool } from "./imageEditor/useBoxesTool.js";
+import { useMaskTool } from "./imageEditor/useMaskTool.js";
+import {
+  COLOR_ADJUSTMENTS,
+  IDENTITY_COLOR_ADJUST,
+  isIdentityAdjust,
+  gradePixel,
+  applyColorAdjustments,
+  konvaColorFilter,
+} from "./imageEditor/colorGradeMath.js";
+import {
+  BOX_TYPES,
+  MAX_BOX_PALETTE,
+  MAX_DOCUMENT_PALETTE,
+  isValidHexColor,
+  rectToBbox,
+  bboxToRect,
+  boxPaletteIsValid,
+  documentPalette,
+  documentPaletteIsValid,
+  boxIsValid,
+  BOX_PALETTE,
+  MIN_BOX_PX,
+  rectFromPoints,
+  clampRectToCanvas,
+  makeBox,
+  boxFillStyle,
+  addPaletteColor,
+  removePaletteColor,
+  boxMetadataGaps,
+  paintBoxesOnContext,
+  colorName,
+  composeColorPrompt,
+  boxesToIdeogramElements,
+} from "./imageEditor/boxGeometry.js";
+import {
+  buildSegmentJobBody,
+  rectToSegmentBox,
+  tintMaskRgbaInPlace,
+  MASK_PREVIEW_RGBA,
+  maskHasContent,
+} from "./imageEditor/maskShared.js";
 
 export {
   buildDetailJobBody,
@@ -70,6 +99,45 @@ export {
   editCapableModels,
   upscaleEngineHasSoftness,
   upscaleFactorsForEngine,
+};
+
+// Re-export the per-tool pure helpers (sc-9752) so the editor's public surface + its
+// test imports are unchanged after the extraction.
+export {
+  COLOR_ADJUSTMENTS,
+  IDENTITY_COLOR_ADJUST,
+  isIdentityAdjust,
+  gradePixel,
+  applyColorAdjustments,
+  konvaColorFilter,
+  BOX_TYPES,
+  MAX_BOX_PALETTE,
+  MAX_DOCUMENT_PALETTE,
+  isValidHexColor,
+  rectToBbox,
+  bboxToRect,
+  boxPaletteIsValid,
+  documentPalette,
+  documentPaletteIsValid,
+  boxIsValid,
+  BOX_PALETTE,
+  MIN_BOX_PX,
+  rectFromPoints,
+  clampRectToCanvas,
+  makeBox,
+  boxFillStyle,
+  addPaletteColor,
+  removePaletteColor,
+  boxMetadataGaps,
+  paintBoxesOnContext,
+  colorName,
+  composeColorPrompt,
+  boxesToIdeogramElements,
+  buildSegmentJobBody,
+  rectToSegmentBox,
+  tintMaskRgbaInPlace,
+  MASK_PREVIEW_RGBA,
+  maskHasContent,
 };
 
 const MIN_SCALE = 0.05;
@@ -201,127 +269,6 @@ export function modelIsInpaintCapable(model) {
   return (model?.capabilities ?? []).includes("image_inpaint");
 }
 
-// Whether the brush strokes form an actual mask region (at least one non-erase
-// stroke with a drawn segment). Erase-only strokes don't count. Pure.
-export function maskHasContent(lines) {
-  return (lines ?? []).some((line) => !line.erase && (line.points?.length ?? 0) >= 2);
-}
-
-// Color-grade controls (sc-2439). Each is a normalized −1..1 slider where 0 is the
-// identity; `gradePixel` defines the math. Pure data so the panel + reset are trivial.
-const COLOR_ADJUSTMENTS = [
-  { key: "brightness", label: "Brightness" },
-  { key: "contrast", label: "Contrast" },
-  { key: "saturation", label: "Saturation" },
-  { key: "temperature", label: "Temperature" },
-];
-
-export const IDENTITY_COLOR_ADJUST = { brightness: 0, contrast: 0, saturation: 0, temperature: 0 };
-
-const clamp8 = (value) => (value < 0 ? 0 : value > 255 ? 255 : Math.round(value));
-
-// True when no grade is applied (all sliders at 0) — lets the preview/Apply skip work.
-export function isIdentityAdjust(adjust) {
-  return COLOR_ADJUSTMENTS.every(({ key }) => !(adjust?.[key]));
-}
-
-// Grade one RGB pixel by the −1..1 adjustments, in a fixed order: temperature
-// (warm raises R / lowers B), brightness (additive), contrast (around mid-gray),
-// then saturation (blend toward/away from luma). Pure + clamped for unit testing.
-export function gradePixel([r, g, b], adjust) {
-  const { brightness = 0, contrast = 0, saturation = 0, temperature = 0 } = adjust ?? {};
-  r += temperature * 30;
-  b -= temperature * 30;
-  const add = brightness * 255;
-  r += add;
-  g += add;
-  b += add;
-  const cf = 1 + contrast;
-  r = (r - 128) * cf + 128;
-  g = (g - 128) * cf + 128;
-  b = (b - 128) * cf + 128;
-  const luma = 0.299 * r + 0.587 * g + 0.114 * b;
-  const sf = 1 + saturation;
-  r = luma + sf * (r - luma);
-  g = luma + sf * (g - luma);
-  b = luma + sf * (b - luma);
-  return [clamp8(r), clamp8(g), clamp8(b)];
-}
-
-// Apply the grade to a flat RGBA buffer in place (alpha untouched). Shared by the
-// Konva live-preview filter and the Apply bake, so preview === baked result.
-export function applyColorAdjustments(data, adjust) {
-  if (isIdentityAdjust(adjust)) return;
-  for (let i = 0; i < data.length; i += 4) {
-    const [r, g, b] = gradePixel([data[i], data[i + 1], data[i + 2]], adjust);
-    data[i] = r;
-    data[i + 1] = g;
-    data[i + 2] = b;
-  }
-}
-
-// Konva custom filter for the live preview — reads the grade from the node's attrs
-// (set declaratively by react-konva) and runs the shared math, so preview === bake.
-// `gradeMode` selects which grade is previewed (sc-6109): the brightness/contrast
-// "adjust", levels, or curves.
-function konvaColorFilter(imageData) {
-  const mode = this.getAttr("gradeMode");
-  if (mode === "levels") applyLevels(imageData.data, this.getAttr("gradeLevels"));
-  else if (mode === "curves") applyCurves(imageData.data, this.getAttr("gradeCurves"));
-  else applyColorAdjustments(imageData.data, this.getAttr("colorAdjust"));
-}
-
-// The `POST /api/v1/jobs` body for a smart-select image_segment job (sc-3751 / backend
-// sc-6105). Same generic-jobs shape as upscale/detail; the worker (native-MLX SAM3) reads
-// `sourceAssetId` + a `box` prompt `[x1,y1,x2,y2]` in source-image pixel coords and returns a
-// binary mask asset. Pure for testing.
-export function buildSegmentJobBody({ project, requestedGpu, sourceAssetId, box, displayName }) {
-  return {
-    type: "image_segment",
-    projectId: project.id,
-    projectName: project.name ?? null,
-    requestedGpu,
-    payload: {
-      projectId: project.id,
-      sourceAssetId,
-      box,
-      displayName,
-    },
-  };
-}
-
-// Convert an image-pixel rect `{x,y,width,height}` to a SAM3 box prompt `[x1,y1,x2,y2]`, ordered
-// (positive width/height) and rounded to whole pixels. Pure for testing.
-export function rectToSegmentBox(rect) {
-  const x1 = Math.round(Math.min(rect.x, rect.x + rect.width));
-  const y1 = Math.round(Math.min(rect.y, rect.y + rect.height));
-  const x2 = Math.round(Math.max(rect.x, rect.x + rect.width));
-  const y2 = Math.round(Math.max(rect.y, rect.y + rect.height));
-  return [x1, y1, x2, y2];
-}
-
-// The smart-select mask preview tint: translucent pink, matching the brush-stroke color so the
-// auto-mask and any brush refinements read as one selection.
-export const MASK_PREVIEW_RGBA = [255, 40, 120, 128];
-
-// Recolor a decoded white-on-black mask's RGBA buffer in place to pink-on-transparent for the
-// on-canvas preview: foreground (luminance > 127) → translucent pink, background → transparent.
-// Pure (operates on the pixel buffer) so it's unit-testable without a real canvas.
-export function tintMaskRgbaInPlace(data) {
-  const [r, g, b, a] = MASK_PREVIEW_RGBA;
-  for (let i = 0; i < data.length; i += 4) {
-    if (data[i] > 127) {
-      data[i] = r;
-      data[i + 1] = g;
-      data[i + 2] = b;
-      data[i + 3] = a;
-    } else {
-      data[i + 3] = 0;
-    }
-  }
-  return data;
-}
-
 // Filename for a Save / Download export (sc-2434): the source name with an
 // "-edited" suffix before the extension, always .png — the working image is
 // rasterized to PNG, so the original extension would be misleading. Pure.
@@ -409,188 +356,6 @@ function cropOverlayRects(imgW, imgH, rect) {
   ];
 }
 
-// ── Box layout (Workstream A, sc-6089) ───────────────────────────────────────
-// The colored-box layout tool lets the user draw labeled rectangles that drive
-// generation two ways: a structured `bbox` for Ideogram 4 (epic 4725) and a
-// color-keyed region prompt for any edit model. A box is a pure data record in
-// image-pixel coords:
-//   { id, rect:{x,y,width,height}, color:"#RRGGBB", type:"obj"|"text",
-//     desc, text? /* type==="text" */, colorPalette?:["#RRGGBB",…] /* ≤5 */ }
-// The conversion/validation below is pure (no React/Konva) so the box tool, the
-// Ideogram elements adapter (sc-6095), and the color-keyed path (sc-6093/6094)
-// all share one source of truth.
-export const BOX_TYPES = ["obj", "text"];
-
-// Ideogram's structured-caption palette limits (epic 4725 S3): ≤5 colors per
-// element, ≤16 across the whole document.
-export const MAX_BOX_PALETTE = 5;
-export const MAX_DOCUMENT_PALETTE = 16;
-
-// Uppercase `#RRGGBB` only — the Ideogram S3 contract is case-sensitive, so a
-// lowercase value is invalid (the per-box metadata editor, sc-6091, normalizes
-// user input to uppercase before storing). Pure.
-const HEX_COLOR_RE = /^#[0-9A-F]{6}$/;
-export function isValidHexColor(color) {
-  return typeof color === "string" && HEX_COLOR_RE.test(color);
-}
-
-// Normalize one pixel coordinate to Ideogram's 0–1000 grid (origin top-left),
-// rounded to an integer and clamped to the canvas. Guards a zero/absent dim.
-function normBboxCoord(px, dim) {
-  if (!dim) return 0;
-  return clamp(Math.round((px / dim) * 1000), 0, 1000);
-}
-
-// rect {x,y,width,height} (image-pixel coords) → `[y_min, x_min, y_max, x_max]`,
-// integers normalized 0–1000, origin top-left, clamped to the canvas. Component
-// order matches epic 4725 S3 exactly. Robust to flipped (negative-size) rects.
-export function rectToBbox(rect, imgW, imgH) {
-  const x0 = normBboxCoord(rect.x, imgW);
-  const x1 = normBboxCoord(rect.x + rect.width, imgW);
-  const y0 = normBboxCoord(rect.y, imgH);
-  const y1 = normBboxCoord(rect.y + rect.height, imgH);
-  return [Math.min(y0, y1), Math.min(x0, x1), Math.max(y0, y1), Math.max(x0, x1)];
-}
-
-// Inverse of `rectToBbox` for round-tripping a stored bbox back onto a canvas of
-// the given size. Returns image-pixel coords (unrounded, like `centeredCropRect`);
-// the 0–1000 quantization means the round-trip is exact only to grid resolution.
-export function bboxToRect([yMin, xMin, yMax, xMax], imgW, imgH) {
-  return {
-    x: (xMin / 1000) * imgW,
-    y: (yMin / 1000) * imgH,
-    width: ((xMax - xMin) / 1000) * imgW,
-    height: ((yMax - yMin) / 1000) * imgH,
-  };
-}
-
-// A per-element palette is valid when it is ≤5 uppercase `#RRGGBB` colors. An
-// absent palette is valid (it's optional). Pure.
-export function boxPaletteIsValid(palette) {
-  if (palette == null) return true;
-  if (!Array.isArray(palette)) return false;
-  return palette.length <= MAX_BOX_PALETTE && palette.every(isValidHexColor);
-}
-
-// The document-level palette: the de-duplicated union of every box's per-element
-// `colorPalette`, order-preserving (Ideogram key order is quality-relevant, S3). Pure.
-export function documentPalette(boxes) {
-  const seen = [];
-  for (const box of boxes ?? []) {
-    for (const color of box?.colorPalette ?? []) {
-      if (!seen.includes(color)) seen.push(color);
-    }
-  }
-  return seen;
-}
-
-// The document palette must stay ≤16 colors overall (epic 4725 S3). Pure.
-export function documentPaletteIsValid(boxes) {
-  return documentPalette(boxes).length <= MAX_DOCUMENT_PALETTE;
-}
-
-// A box is valid for serialization when it has positive geometry, a known type,
-// a non-empty description, and — for text elements — a non-empty literal string.
-// Color/palette validity is checked separately (`isValidHexColor`/`boxPaletteIsValid`)
-// since the color-keyed path needs only color + desc, not a full Ideogram element. Pure.
-export function boxIsValid(box) {
-  if (!box || !box.rect) return false;
-  if (!(box.rect.width > 0) || !(box.rect.height > 0)) return false;
-  if (!BOX_TYPES.includes(box.type)) return false;
-  if (typeof box.desc !== "string" || box.desc.trim() === "") return false;
-  if (box.type === "text" && (typeof box.text !== "string" || box.text.trim() === "")) return false;
-  return true;
-}
-
-// ── Box drawing tool (Workstream A, sc-6090) ─────────────────────────────────
-// A small palette of distinct, nameable colors for the box tool, plus a custom
-// `#RRGGBB`. All entries are uppercase #RRGGBB (valid per `isValidHexColor`) so a
-// drawn box is well-formed for the color-keyed path and the Ideogram adapter.
-export const BOX_PALETTE = [
-  { name: "Red", value: "#FF0000" },
-  { name: "Green", value: "#00C853" },
-  { name: "Blue", value: "#2962FF" },
-  { name: "Yellow", value: "#FFD600" },
-  { name: "Orange", value: "#FF6D00" },
-  { name: "Purple", value: "#AA00FF" },
-  { name: "Cyan", value: "#00B8D4" },
-  { name: "Pink", value: "#FF4081" },
-];
-
-// Smallest box (image pixels) a drag must cover to commit — a click or tiny
-// smudge is discarded rather than creating a degenerate box.
-export const MIN_BOX_PX = 8;
-
-// Axis-aligned rect spanning two points (image-pixel coords). Pure — the drag
-// direction (up-left vs down-right) is normalized to a positive-size rect.
-export function rectFromPoints(a, b) {
-  return {
-    x: Math.min(a.x, b.x),
-    y: Math.min(a.y, b.y),
-    width: Math.abs(a.x - b.x),
-    height: Math.abs(a.y - b.y),
-  };
-}
-
-// Clamp a rect to the canvas, keeping width/height ≥ minPx and the rect fully
-// inside [0,imgW]×[0,imgH]. Mirrors the crop tool's clamp but pure (takes dims).
-export function clampRectToCanvas(rect, imgW, imgH, minPx = MIN_BOX_PX) {
-  const width = clamp(rect.width, minPx, imgW);
-  const height = clamp(rect.height, minPx, imgH);
-  return {
-    width,
-    height,
-    x: clamp(rect.x, 0, imgW - width),
-    y: clamp(rect.y, 0, imgH - height),
-  };
-}
-
-// Build a new box record (the sc-6089 model) from a drawn rect + color. Metadata
-// (type/desc/text/colorPalette) starts at safe defaults; the per-box metadata
-// editor (sc-6091) fills it in. `id` is supplied by the caller (session-unique).
-export function makeBox(id, rect, color) {
-  return { id, rect, color, type: "obj", desc: "", text: "", colorPalette: [] };
-}
-
-// A semi-transparent CSS rgba() fill from a `#RRGGBB` color for the box overlay.
-// Pure; falls back to a neutral fill if the color isn't a valid 6-digit hex.
-export function boxFillStyle(hex, alpha) {
-  if (!isValidHexColor(hex)) return `rgba(127,127,127,${alpha})`;
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
-}
-
-// ── Per-box metadata (Workstream A, sc-6091) ─────────────────────────────────
-// Append a color to a per-element palette (uppercased), ignoring duplicates,
-// invalid hex, and anything past the ≤5 cap. Pure; returns the same array
-// reference when nothing changes so callers can no-op cheaply.
-export function addPaletteColor(palette, color, max = MAX_BOX_PALETTE) {
-  const list = palette ?? [];
-  const value = typeof color === "string" ? color.toUpperCase() : color;
-  if (!isValidHexColor(value) || list.includes(value) || list.length >= max) return list;
-  return [...list, value];
-}
-
-// Remove a color from a per-element palette. Pure; returns a new array.
-export function removePaletteColor(palette, color) {
-  return (palette ?? []).filter((entry) => entry !== color);
-}
-
-// What a box still needs to serialize as a valid Ideogram element (S3): a
-// description, the literal text for a text element, and a valid ≤5 palette.
-// Returns a human list of what's missing ("" when ready). The color-keyed edit
-// path only needs color + desc, so this does NOT gate that path. Pure.
-export function boxMetadataGaps(box) {
-  if (!box) return [];
-  const gaps = [];
-  if (typeof box.desc !== "string" || box.desc.trim() === "") gaps.push("a description");
-  if (box.type === "text" && (typeof box.text !== "string" || box.text.trim() === "")) gaps.push("the literal text");
-  if (!boxPaletteIsValid(box.colorPalette)) gaps.push("a valid color palette (≤5)");
-  return gaps;
-}
-
 // ── Blank-canvas "New layout" (Workstream A, sc-6092) ────────────────────────
 // A from-scratch substrate for layout-from-nothing (Ideogram text-to-image). The
 // dimensions obey Ideogram's constraints: multiples of 16 within [256, 2048].
@@ -617,70 +382,6 @@ export function blankCanvasDims(aspectKey, longSide) {
     width = longSide * ratio;
   }
   return { width: snapCanvasDim(width), height: snapCanvasDim(height) };
-}
-
-// ── Bake → pass-through edit (Workstream A, sc-6093) ─────────────────────────
-// Paint each box as a solid colored rectangle onto a 2D context — the color-keyed
-// region signal the edit model reads ("replace the {color} region with …"). The
-// caller draws the working image first; this overlays the boxes. Pure given the
-// context, so the paint order/coords are unit-testable without a real canvas.
-export function paintBoxesOnContext(ctx, boxes) {
-  for (const box of boxes ?? []) {
-    ctx.fillStyle = box.color;
-    ctx.fillRect(box.rect.x, box.rect.y, box.rect.width, box.rect.height);
-  }
-}
-
-// ── Auto color-prompt (Workstream A, sc-6094) ────────────────────────────────
-// Friendly color name for a palette/custom hex — palette colors get their name
-// lowercased (#FF0000 → "red"); anything else falls back to the hex itself so the
-// prompt still references a concrete color. Pure.
-export function colorName(hex) {
-  const found = BOX_PALETTE.find((entry) => entry.value === hex);
-  return found ? found.name.toLowerCase() : hex;
-}
-
-// Compose an editable color-keyed edit prompt from the boxes: one clause per
-// described box, referencing it by its visible color so the model maps region →
-// element. Boxes missing the needed text (obj → desc; text → literal) are skipped.
-// Pure; "" when nothing is describable yet. The user can edit the result freely.
-export function composeColorPrompt(boxes) {
-  const clauses = [];
-  for (const box of boxes ?? []) {
-    const name = colorName(box.color);
-    if (box.type === "text") {
-      const text = (box.text ?? "").trim();
-      if (!text) continue;
-      const desc = (box.desc ?? "").trim();
-      clauses.push(`place the text "${text}" in the ${name} region${desc ? ` (${desc})` : ""}`);
-    } else {
-      const desc = (box.desc ?? "").trim();
-      if (!desc) continue;
-      clauses.push(`replace the ${name} region with ${desc}`);
-    }
-  }
-  if (!clauses.length) return "";
-  return `${clauses.map((clause) => clause.charAt(0).toUpperCase() + clause.slice(1)).join(". ")}.`;
-}
-
-// ── Boxes → Ideogram elements[] adapter (Workstream A, sc-6095) ──────────────
-// Convert the editor's boxes into Ideogram 4 structured-caption `elements[]`
-// (epic 4725 S3 contract), one element per box, via ideogramCaption.js's factories
-// so the canonical key order is guaranteed (obj: type,bbox,desc,color_palette;
-// text: type,bbox,text,desc,color_palette). bbox is the 0–1000 grid from
-// `rectToBbox`; palette entries are normalized to uppercase #RRGGBB and dropped if
-// empty/invalid (an empty palette is omitted entirely). Pure — this supplies only
-// the spatial elements; the non-spatial caption fields are epic 4725's (S3/S4/S7).
-export function boxesToIdeogramElements(boxes, imgW, imgH) {
-  return (boxes ?? []).map((box) => {
-    const bbox = rectToBbox(box.rect, imgW, imgH);
-    const palette = (box.colorPalette ?? []).map(normalizeHexColor).filter(Boolean);
-    const color_palette = palette.length ? palette : null;
-    if (box.type === "text") {
-      return makeTextElement({ bbox, text: box.text ?? "", desc: box.desc ?? "", color_palette });
-    }
-    return makeObjElement({ bbox, desc: box.desc ?? "", color_palette });
-  });
 }
 
 // Decode a blob into an HTMLImageElement via a same-origin object: URL. Asset
@@ -856,18 +557,27 @@ export function ImageEditor() {
     setUpscaleFactor,
   });
 
-  // Color grade (sc-2439): non-destructive −1..1 adjustments previewed live via a
-  // Konva filter, baked into the working image on Apply.
-  const [colorAdjust, setColorAdjust] = useState(IDENTITY_COLOR_ADJUST);
-  // Curves + levels (sc-6109): the Color tool has three modes — the brightness/
-  // contrast "adjust" (above), per-channel levels, and an editable tone curve. Each
-  // previews via the same Konva filter and bakes via the same Canvas-2D pass. The
-  // active channel ("master" | "r" | "g" | "b") is shared by the levels + curves UI.
-  const [colorMode, setColorMode] = useState("adjust"); // "adjust" | "levels" | "curves"
-  const [levels, setLevels] = useState(IDENTITY_LEVELS);
-  const [curves, setCurves] = useState(IDENTITY_CURVES);
-  const [colorChannel, setColorChannel] = useState("master");
+  // Per-tool logic lives in dedicated hooks now (sc-9752): the color-grade, mask, and
+  // box tools each own their state/refs/handlers. They are called below (after the shared
+  // callbacks they invoke — checkpoint / stagePointToImage / replaceLayerImage / runAiOp —
+  // are defined) via stable ref bridges, so the hook call order stays fixed and each hook
+  // always invokes the LATEST callback exactly as the pre-extraction inline closures did.
+  const imageNodeRef = useRef(null); // Konva image node — cached for color-grade filtering + transform
   const histogramRef = useRef(null);
+  // Stable bridges to callbacks defined later in this component. Assigned once those
+  // callbacks exist; the tool hooks call `bridge.current(...)` so they read the latest
+  // definition (identical to reading the live closure inline).
+  const checkpointRef = useRef(() => {});
+  const stagePointToImageRef = useRef(() => null);
+  const replaceLayerImageRef = useRef(() => {});
+  const runAiOpRef = useRef(() => {});
+  const checkpointBridge = useCallback(() => checkpointRef.current(), []);
+  const stagePointToImageBridge = useCallback((event) => stagePointToImageRef.current(event), []);
+  const replaceLayerImageBridge = useCallback(
+    (id, image, objectUrl, blob) => replaceLayerImageRef.current(id, image, objectUrl, blob),
+    [],
+  );
+  const runAiOpBridge = useCallback((opts) => runAiOpRef.current(opts), []);
 
   // AI prompt edit (sc-2435): an edit-capable model + instruction + optional seed,
   // run against the working image through the existing edit_image flow.
@@ -891,48 +601,11 @@ export function ImageEditor() {
   // Keyboard-shortcut quick reference panel (sc-6111).
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
-  // Inpaint mask (sc-2436): freehand brush strokes in image-pixel coords, rasterized
-  // to a mask asset on Run for inpaint-capable models. `maskMode` is the paint sub-mode
-  // of the AI Edit tool (Stage panning is suspended while it's on).
-  const [maskLines, setMaskLines] = useState([]); // [{ points:[x,y,…], size, erase }]
-  const [maskMode, setMaskMode] = useState(false);
-  const [maskBrush, setMaskBrush] = useState(64);
-  const [maskErase, setMaskErase] = useState(false);
-  const maskPaintingRef = useRef(false);
-  // Mask refinement (sc-6110): feather / grow / shrink radius in px for the post-process ops.
-  const [maskRefineRadius, setMaskRefineRadius] = useState(6);
-
-  // Smart-select (sc-3751): a box-drag sub-mode of the mask tool that runs the SAM3 `image_segment`
-  // job (sc-6105) and loads the returned binary mask as an editable base UNDER the brush strokes.
-  // `maskBaseImage` is the white-on-black mask bitmap (rasterized into the mask PNG alongside the
-  // strokes); `maskOverlay` is its pink-on-transparent preview (rendered in the mask layer, so the
-  // eraser's destination-out clears it too). `maskSubTool` toggles brush vs. box-select.
-  const [maskBaseImage, setMaskBaseImage] = useState(null); // HTMLImageElement | null
-  const [maskOverlay, setMaskOverlay] = useState(null); // HTMLCanvasElement | null
-  const [maskSubTool, setMaskSubTool] = useState("brush"); // "brush" | "select"
-  const [selectDraft, setSelectDraft] = useState(null); // live selection rect during a drag
-  const selectDrawingRef = useRef(false);
-  const selectStartRef = useRef(null);
-
   // Reference-image conditioning (sc-6107): user-attached library images that jointly condition the
   // AI Edit alongside the working image, on a FLUX.2 `multiReference` edit model. The working image is
   // added at run time (it's staged as a scratch source), so this holds only the user's picks.
   const [refAssetIds, setRefAssetIds] = useState([]); // string[] of library asset ids
   const [refPickerOpen, setRefPickerOpen] = useState(false);
-
-  // Box layout tool (sc-6090): colored rectangles drawn over the working image in
-  // image-pixel coords. They drive the color-keyed edit path (sc-6093) and the
-  // Ideogram bbox path (sc-6095). Session-only overlay state — boxes are not baked
-  // into the working bitmap here, so they don't mark the session dirty.
-  const [boxes, setBoxes] = useState([]); // [{ id, rect, color, type, desc, text, colorPalette }]
-  const [selectedBoxId, setSelectedBoxId] = useState(null);
-  const [boxColor, setBoxColor] = useState(BOX_PALETTE[0].value);
-  const [boxDraft, setBoxDraft] = useState(null); // live rect during a drag-draw
-  const boxDrawingRef = useRef(false);
-  const boxStartRef = useRef(null);
-  const boxIdRef = useRef(0);
-  const boxNodeRefs = useRef(new Map()); // id → Konva node, for transformer binding
-  const boxTransformerRef = useRef(null);
 
   // Blank-canvas "New layout" (sc-6092): a from-scratch substrate for box layout
   // (Ideogram text-to-image). The modal picks an aspect + long-side size → W×H.
@@ -965,12 +638,6 @@ export function ImageEditor() {
     if (!multiRefCapable && refAssetIds.length) setRefAssetIds([]);
   }, [multiRefCapable, refAssetIds.length]);
 
-  // Leave paint mode (restoring Stage panning) when the edit tool is closed or the
-  // model can't inpaint — otherwise the canvas would stay in a paint state with no UI.
-  useEffect(() => {
-    if (maskMode && (tool !== "edit" || !canMask)) setMaskMode(false);
-  }, [tool, canMask, maskMode]);
-
   // Save / export (sc-2434). `dirty` tracks edits not yet persisted to the Library;
   // `edits` is the ordered provenance chain; `savedAssetId` flags a completed Save
   // for the bar's "Saved" hint. A fresh open clears all three.
@@ -992,7 +659,6 @@ export function ImageEditor() {
   const cropRectRef = useRef(null);
   const transformerRef = useRef(null);
   const layerTransformerRef = useRef(null); // Konva transformer bound to the active layer (sc-6120)
-  const imageNodeRef = useRef(null); // Konva image node — cached for color-grade filtering + transform
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
 
   // Undo/redo (sc-6106): a bounded snapshot history over the working-image session.
@@ -1015,16 +681,128 @@ export function ImageEditor() {
   const editsRef = useRef(edits);
   const dirtyRef = useRef(dirty);
   const savedAssetIdRef = useRef(savedAssetId);
-  const boxesRef = useRef(boxes);
-  const boxColorRef = useRef(boxColor);
   const aiOpRef = useRef(aiOp);
   useEffect(() => { editsRef.current = edits; }, [edits]);
   useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
   useEffect(() => { savedAssetIdRef.current = savedAssetId; }, [savedAssetId]);
-  useEffect(() => { boxesRef.current = boxes; }, [boxes]);
-  useEffect(() => { boxColorRef.current = boxColor; }, [boxColor]);
   useEffect(() => { aiOpRef.current = aiOp; }, [aiOp]);
   useEffect(() => { workingRef.current = working; }, [working]);
+
+  // ── Per-tool hooks (sc-9752, F-052 follow-up) ──────────────────────────────
+  // Each tool owns its own state, refs, and handlers. They're called here — before the
+  // snapshot/reset/pointer plumbing that reads their refs — and receive the shared,
+  // late-defined callbacks through the stable ref bridges above (checkpoint /
+  // stagePointToImage / replaceLayerImage / runAiOp), so the call order is fixed and each
+  // hook invokes the LATEST callback exactly as the inline closures did. The boxes hook's
+  // `boxesRef`/`boxColorRef`/`boxIdRef` are the SAME snapshot-mirror refs the editor reads
+  // in captureSnapshot / writes in applyHistoryAux — the ref-mirror contract is preserved.
+  const colorGradeTool = useColorGradeTool({
+    working,
+    tool,
+    imageNodeRef,
+    histogramRef,
+    checkpoint: checkpointBridge,
+    replaceLayerImage: replaceLayerImageBridge,
+    blobToImage,
+    setTool,
+    setEdits,
+    setDirty,
+  });
+  const {
+    colorAdjust,
+    colorMode,
+    levels,
+    curves,
+    colorChannel,
+    setColorMode,
+    setColorChannel,
+    setCurves,
+    channelStroke,
+    activeGradeIsIdentity,
+    startColorGrade,
+    setAdjustValue,
+    resetAdjust,
+    setLevelsValue,
+    resetActiveColorMode,
+    applyColorGrade,
+    resetColorState,
+    discardColorPreview,
+  } = colorGradeTool;
+
+  const boxesTool = useBoxesTool({
+    working,
+    tool,
+    checkpoint: checkpointBridge,
+    stagePointToImage: stagePointToImageBridge,
+    setTool,
+  });
+  const {
+    boxes,
+    selectedBoxId,
+    boxColor,
+    boxDraft,
+    setBoxes,
+    setSelectedBoxId,
+    setBoxColor,
+    setBoxDraft,
+    boxesRef,
+    boxColorRef,
+    boxIdRef,
+    boxDrawingRef,
+    boxTransformerRef,
+    selectBoxTool,
+    registerBoxNode,
+    boxPointerDown,
+    boxPointerMove,
+    boxPointerUp,
+    updateBox,
+    handleBoxDragEnd,
+    handleBoxTransformEnd,
+    chooseBoxColor,
+    deleteBox,
+    clearBoxes,
+    resetBoxState,
+  } = boxesTool;
+
+  const maskTool = useMaskTool({
+    working,
+    tool,
+    canMask,
+    aiOp,
+    activeProject,
+    requestedGpu,
+    runAiOp: runAiOpBridge,
+    stagePointToImage: stagePointToImageBridge,
+    blobToImage,
+    setTool,
+  });
+  const {
+    maskLines,
+    maskMode,
+    maskBrush,
+    maskErase,
+    maskRefineRadius,
+    maskBaseImage,
+    maskOverlay,
+    maskSubTool,
+    selectDraft,
+    setMaskMode,
+    setMaskBrush,
+    setMaskErase,
+    setMaskRefineRadius,
+    setMaskSubTool,
+    maskPointerDown,
+    maskPointerMove,
+    maskPointerUp,
+    clearMask,
+    selectPointerDown,
+    selectPointerMove,
+    selectPointerUp,
+    cancelSelectDrag,
+    rasterizeMaskToFile,
+    refineMask,
+    resetMaskState,
+  } = maskTool;
 
   // Memoize the image-renderable subset (sc-8939): the Image Editor re-renders on every
   // pointermove of a brush stroke / box drag, and re-filtering the full catalog each time
@@ -1080,28 +858,19 @@ export function ImageEditor() {
   const resetEditorOverlays = useCallback(() => {
     setTool("move");
     setCropRect(null);
-    setColorAdjust(IDENTITY_COLOR_ADJUST);
-    setColorMode("adjust");
-    setLevels(IDENTITY_LEVELS);
-    setCurves(IDENTITY_CURVES);
-    setColorChannel("master");
+    // Per-tool state resets are owned by each tool hook now (sc-9752). Each reset mirrors
+    // the exact lines it replaced: color → adjust/levels/curves/mode/channel identity;
+    // mask → strokes + smart-select base + sub-mode + select gesture latch; boxes →
+    // boxes/selection/draft + node registry + draw latch.
+    resetColorState();
     // A new working bitmap invalidates the mask (dims/content changed) — strokes + smart-select base.
-    setMaskLines([]);
-    setMaskMode(false);
-    setMaskBaseImage(null);
-    setMaskOverlay(null);
-    setMaskSubTool("brush");
-    setSelectDraft(null);
-    selectDrawingRef.current = false;
+    resetMaskState();
     // A new editing session starts with no attached reference images (sc-6107).
     setRefAssetIds([]);
     setRefPickerOpen(false);
     // Boxes are in image-pixel coords → a new bitmap (open/crop/upscale/AI op) invalidates them.
-    setBoxes([]);
-    setSelectedBoxId(null);
-    setBoxDraft(null);
-    boxNodeRefs.current.clear();
-    boxDrawingRef.current = false;
+    resetBoxState();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Replace the whole working document with a fresh single-layer stack from one
@@ -1140,6 +909,9 @@ export function ImageEditor() {
       boxColor: boxColorRef.current,
       boxIdSeq: boxIdRef.current,
     };
+    // boxesRef / boxColorRef / boxIdRef are stable refs (from useBoxesTool); empty deps
+    // preserve the pre-extraction behavior (a checkpoint reads them live, sc-9752).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const syncHistoryFlags = useCallback(() => {
@@ -1153,6 +925,8 @@ export function ImageEditor() {
     historyRef.current = historyCheckpoint(historyRef.current, captureSnapshot());
     syncHistoryFlags();
   }, [captureSnapshot, syncHistoryFlags]);
+  // Keep the tool hooks' bridge pointed at the latest checkpoint (sc-9752).
+  checkpointRef.current = checkpoint;
 
   // Start a fresh history for a newly opened session (clears both stacks).
   const resetHistory = useCallback(() => {
@@ -1178,6 +952,9 @@ export function ImageEditor() {
     // Restore the layer-id counter so a layer added after this undo can't recycle
     // an id that a redo would bring back (mirrors boxIdSeq).
     if (typeof snap.layerIdSeq === "number") layerIdRef.current = snap.layerIdSeq;
+    // The box setters + refs come from useBoxesTool but are stable (useState setters +
+    // useRefs); empty deps preserve the pre-extraction behavior (sc-9752).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const restoreSnapshot = useCallback(
@@ -1520,10 +1297,9 @@ export function ImageEditor() {
   function cancelCrop() {
     setTool("move");
     setCropRect(null);
-    // Discard any unbaked color preview (adjust / levels / curves).
-    setColorAdjust(IDENTITY_COLOR_ADJUST);
-    setLevels(IDENTITY_LEVELS);
-    setCurves(IDENTITY_CURVES);
+    // Discard any unbaked color preview (adjust / levels / curves). Owned by the color
+    // hook now (sc-9752), which resets exactly those three values and leaves mode/channel.
+    discardColorPreview();
   }
 
   // Escape (sc-6111): cancel the most specific in-progress gesture, falling back to
@@ -1534,9 +1310,8 @@ export function ImageEditor() {
       setBoxDraft(null);
       return;
     }
-    if (selectDrawingRef.current) {
-      selectDrawingRef.current = false;
-      setSelectDraft(null);
+    // Cancel an in-flight smart-select drag (mask hook owns the gesture latch, sc-9752).
+    if (cancelSelectDrag()) {
       return;
     }
     if (tool === "crop") {
@@ -1632,6 +1407,8 @@ export function ImageEditor() {
     if (prev?.objectUrl && prev.objectUrl !== objectUrl) URL.revokeObjectURL(prev.objectUrl);
     setWorking((cur) => replaceLayerBitmap(cur, id, { image, objectUrl, blob }));
   }, []);
+  // Keep the color-grade hook's bridge pointed at the latest replaceLayerImage (sc-9752).
+  replaceLayerImageRef.current = replaceLayerImage;
 
   // A document-level AI op (upscale / outpaint / box-keyed edit) flattens the stack
   // into one base layer; warn before discarding a multi-layer stack.
@@ -1714,134 +1491,6 @@ export function ImageEditor() {
     transformer.nodes(node ? [node] : []);
     transformer.getLayer()?.batchDraw();
   }, [tool, working]);
-
-  // ── Color grade (sc-2439; curves + levels sc-6109) ─────────────────────────
-  function startColorGrade() {
-    if (!working) return;
-    setTool("color");
-    setColorMode("adjust");
-    setColorChannel("master");
-    setColorAdjust(IDENTITY_COLOR_ADJUST);
-    setLevels(IDENTITY_LEVELS);
-    setCurves(IDENTITY_CURVES);
-  }
-
-  const setAdjustValue = (key, value) => setColorAdjust((prev) => ({ ...prev, [key]: value }));
-  const resetAdjust = (key) => setAdjustValue(key, 0);
-
-  // Patch the active channel's levels (sc-6109).
-  const setLevelsValue = (key, value) =>
-    setLevels((prev) => ({ ...prev, [colorChannel]: { ...prev[colorChannel], [key]: value } }));
-
-  // Reset the currently-selected color mode (all channels) to its identity.
-  function resetActiveColorMode() {
-    if (colorMode === "levels") setLevels(IDENTITY_LEVELS);
-    else if (colorMode === "curves") setCurves(IDENTITY_CURVES);
-    else setColorAdjust(IDENTITY_COLOR_ADJUST);
-  }
-
-  // Stroke for the curve editor / channel cue.
-  const channelStroke = { master: "var(--accent)", r: "#d44", g: "#4a4", b: "#46d" }[colorChannel];
-
-  // Whether the currently-selected color mode is at its identity (gates Apply + the
-  // live-preview cache).
-  function activeGradeIsIdentity() {
-    if (colorMode === "levels") return isIdentityLevels(levels);
-    if (colorMode === "curves") return isIdentityCurves(curves);
-    return isIdentityAdjust(colorAdjust);
-  }
-
-  // Live preview: Konva applies filters only on a cached node, and re-running them
-  // needs a re-cache. Cache the active layer's node (re-caching when ANY grade input
-  // changes) while the color tool is active with a non-identity grade; clear it
-  // otherwise so Move/other tools see the untouched bitmap. The filter reads the
-  // gradeMode + colorAdjust/levels/curves attrs.
-  useEffect(() => {
-    const node = imageNodeRef.current;
-    if (!node) return;
-    if (tool === "color" && !activeGradeIsIdentity()) {
-      node.cache();
-    } else {
-      node.clearCache();
-    }
-    node.getLayer()?.batchDraw();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tool, colorMode, colorAdjust, levels, curves, working]);
-
-  // Draw the active layer's histogram for the levels mode (sc-6109). Recomputed when
-  // the layer or selected channel changes; cheap (one pass over the layer bitmap).
-  useEffect(() => {
-    const canvas = histogramRef.current;
-    if (!canvas || tool !== "color" || colorMode !== "levels") return;
-    const layer = activeLayerOf(working);
-    if (!layer) return;
-    const off = document.createElement("canvas");
-    off.width = layer.image.naturalWidth;
-    off.height = layer.image.naturalHeight;
-    const octx = off.getContext("2d");
-    octx.drawImage(layer.image, 0, 0);
-    const hist = computeHistogram(octx.getImageData(0, 0, off.width, off.height).data);
-    const series = colorChannel === "master" ? hist.luma : hist[colorChannel];
-    const peak = Math.max(1, ...series);
-    const ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = colorChannel === "r" ? "#d44" : colorChannel === "g" ? "#4a4" : colorChannel === "b" ? "#46d" : "#888";
-    const bw = canvas.width / 256;
-    for (let i = 0; i < 256; i += 1) {
-      const h = (series[i] / peak) * canvas.height;
-      ctx.fillRect(i * bw, canvas.height - h, Math.max(1, bw), h);
-    }
-  }, [tool, colorMode, colorChannel, working]);
-
-  // Apply: bake the active mode's grade (adjust / levels / curves) into the ACTIVE
-  // layer using the SAME pixel math as the live preview (a 2D-canvas pass), writing
-  // it back in place — stack + dims preserved (sc-6119). Records the grade in the
-  // edit chain (sc-6109).
-  const applyColorGrade = useCallback(async () => {
-    const layer = activeLayerOf(working);
-    if (!working || !layer) return;
-    // Resolve the active mode's transform + provenance entry; bail if it's identity.
-    let transform;
-    let edit;
-    if (colorMode === "levels") {
-      if (isIdentityLevels(levels)) return;
-      const baked = levels;
-      transform = (data) => applyLevels(data, baked);
-      edit = { op: "levels", levels: baked };
-    } else if (colorMode === "curves") {
-      if (isIdentityCurves(curves)) return;
-      const baked = curves;
-      transform = (data) => applyCurves(data, baked);
-      edit = { op: "curves", curves: baked };
-    } else {
-      if (isIdentityAdjust(colorAdjust)) return;
-      const baked = { ...colorAdjust };
-      transform = (data) => applyColorAdjustments(data, baked);
-      edit = { op: "color", ...baked };
-    }
-    const w = layer.image.naturalWidth;
-    const h = layer.image.naturalHeight;
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(layer.image, 0, 0);
-    const imageData = ctx.getImageData(0, 0, w, h);
-    transform(imageData.data);
-    ctx.putImageData(imageData, 0, 0);
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
-    if (!blob) return;
-    const { image, objectUrl } = await blobToImage(blob);
-    checkpoint();
-    replaceLayerImage(layer.id, image, objectUrl, blob);
-    // The grade is baked; drop every live preview.
-    setColorAdjust(IDENTITY_COLOR_ADJUST);
-    setLevels(IDENTITY_LEVELS);
-    setCurves(IDENTITY_CURVES);
-    setTool("move");
-    setEdits((prev) => [...prev, edit]);
-    setDirty(true);
-  }, [working, colorMode, colorAdjust, levels, curves, replaceLayerImage, checkpoint]);
 
   // ── Layer stack ops (sc-6118) ─────────────────────────────────────────────
   // Wire the layers panel to the pure layer-stack ops (../imageLayers.js). Each
@@ -1975,120 +1624,6 @@ export function ImageEditor() {
     setDirty(true);
   }
 
-  // ── Box layout tool (sc-6090) ─────────────────────────────────────────────
-  function selectBoxTool() {
-    if (working) setTool("boxes");
-  }
-
-  const nextBoxId = () => `box_${(boxIdRef.current += 1)}`;
-
-  // Konva node registry so the transformer can bind to the selected box; the ref
-  // callback removes a node when its box unmounts (tool switch / delete).
-  const registerBoxNode = (id, node) => {
-    if (node) boxNodeRefs.current.set(id, node);
-    else boxNodeRefs.current.delete(id);
-  };
-
-  function boxPointerDown(event) {
-    if (tool !== "boxes" || !working) return;
-    // Only a click on the canvas background starts a new box — clicks on an
-    // existing box (select/drag) or a transformer handle (resize) are left alone.
-    const stage = event.target.getStage();
-    const name = event.target?.name?.() ?? "";
-    const onBackground = event.target === stage || name === "editor-image" || name === "editor-bg";
-    if (!onBackground) return;
-    const pt = stagePointToImage(event);
-    if (!pt) return;
-    boxDrawingRef.current = true;
-    boxStartRef.current = pt;
-    setSelectedBoxId(null);
-    setBoxDraft({ x: pt.x, y: pt.y, width: 0, height: 0 });
-  }
-
-  function boxPointerMove(event) {
-    if (!boxDrawingRef.current) return;
-    const pt = stagePointToImage(event);
-    if (!pt) return;
-    setBoxDraft(rectFromPoints(boxStartRef.current, pt));
-  }
-
-  function boxPointerUp() {
-    if (!boxDrawingRef.current) return;
-    boxDrawingRef.current = false;
-    const draft = boxDraft;
-    setBoxDraft(null);
-    // Discard a click / sub-minimum smudge; otherwise commit a new colored box.
-    if (!draft || draft.width < MIN_BOX_PX || draft.height < MIN_BOX_PX) return;
-    const rect = clampRectToCanvas(draft, working.width, working.height);
-    const id = nextBoxId();
-    checkpoint();
-    setBoxes((prev) => [...prev, makeBox(id, rect, boxColor)]);
-    setSelectedBoxId(id);
-  }
-
-  const updateBoxRect = (id, rect) =>
-    setBoxes((prev) => prev.map((box) => (box.id === id ? { ...box, rect } : box)));
-
-  // Patch a box's metadata (sc-6091): type / desc / text / colorPalette.
-  const updateBox = (id, patch) =>
-    setBoxes((prev) => prev.map((box) => (box.id === id ? { ...box, ...patch } : box)));
-
-  function handleBoxDragEnd(id, event) {
-    const node = event.target;
-    const rect = clampRectToCanvas(
-      { x: node.x(), y: node.y(), width: node.width(), height: node.height() },
-      working.width,
-      working.height,
-    );
-    node.setAttrs(rect);
-    checkpoint();
-    updateBoxRect(id, rect);
-  }
-
-  function handleBoxTransformEnd(id, event) {
-    const node = event.target;
-    const rect = clampRectToCanvas(
-      { x: node.x(), y: node.y(), width: node.width() * node.scaleX(), height: node.height() * node.scaleY() },
-      working.width,
-      working.height,
-    );
-    node.scaleX(1);
-    node.scaleY(1);
-    node.setAttrs(rect);
-    checkpoint();
-    updateBoxRect(id, rect);
-  }
-
-  // Selecting a palette color sets the color for new boxes and recolors the
-  // selected box (the palette acts on the active box). Stored uppercase so the
-  // box stays valid per `isValidHexColor` even from a lowercase <input type=color>.
-  function chooseBoxColor(color) {
-    const value = color.toUpperCase();
-    // Recoloring the active box is an undoable step; setting the color for future
-    // boxes (no selection) is not — it changes no committed state.
-    if (selectedBoxId) checkpoint();
-    setBoxColor(value);
-    if (selectedBoxId) {
-      setBoxes((prev) => prev.map((box) => (box.id === selectedBoxId ? { ...box, color: value } : box)));
-    }
-  }
-
-  function deleteBox(id) {
-    if (!id) return;
-    checkpoint();
-    setBoxes((prev) => prev.filter((box) => box.id !== id));
-    boxNodeRefs.current.delete(id);
-    setSelectedBoxId((cur) => (cur === id ? null : cur));
-  }
-
-  function clearBoxes() {
-    if (boxes.length) checkpoint();
-    setBoxes([]);
-    boxNodeRefs.current.clear();
-    setSelectedBoxId(null);
-    setBoxDraft(null);
-  }
-
   // Flatten the visible layer stack onto a fresh canvas at the document size
   // (sc-6117). The layers' images are already decoded, so this is synchronous;
   // callers toBlob it (Save / Download / AI-op source) or paint overlays on top
@@ -2172,17 +1707,10 @@ export function ImageEditor() {
     boxPointerUp(event);
   }
 
-  // Bind the transformer to the selected box whenever the box tool is active.
-  useEffect(() => {
-    const transformer = boxTransformerRef.current;
-    if (tool !== "boxes" || !transformer) return;
-    const node = selectedBoxId ? boxNodeRefs.current.get(selectedBoxId) : null;
-    transformer.nodes(node ? [node] : []);
-    transformer.getLayer()?.batchDraw();
-  }, [tool, selectedBoxId, boxes]);
-
   // ── Inpaint mask brush (sc-2436) ──────────────────────────────────────────
-  // Pointer position in image-pixel coords (undo the stage pan/zoom), clamped.
+  // Pointer position in image-pixel coords (undo the stage pan/zoom), clamped. Stays in
+  // the editor (it reads `view` + `working` + the shared `clamp`) and is bridged into the
+  // mask + boxes hooks via stagePointToImageRef so they read the latest closure (sc-9752).
   function stagePointToImage(event) {
     const stage = event.target.getStage();
     const pointer = stage?.getPointerPosition();
@@ -2192,123 +1720,7 @@ export function ImageEditor() {
       y: clamp((pointer.y - view.y) / view.scale, 0, working.height),
     };
   }
-
-  function maskPointerDown(event) {
-    if (!maskMode || maskSubTool !== "brush" || !working) return;
-    const pt = stagePointToImage(event);
-    if (!pt) return;
-    maskPaintingRef.current = true;
-    setMaskLines((prev) => [...prev, { points: [pt.x, pt.y], size: maskBrush, erase: maskErase }]);
-  }
-
-  function maskPointerMove(event) {
-    if (!maskMode || maskSubTool !== "brush" || !maskPaintingRef.current) return;
-    const pt = stagePointToImage(event);
-    if (!pt) return;
-    setMaskLines((prev) => {
-      if (!prev.length) return prev;
-      const last = prev[prev.length - 1];
-      return [...prev.slice(0, -1), { ...last, points: [...last.points, pt.x, pt.y] }];
-    });
-  }
-
-  function maskPointerUp() {
-    maskPaintingRef.current = false;
-  }
-
-  function clearMask() {
-    setMaskLines([]);
-    setMaskBaseImage(null);
-    setMaskOverlay(null);
-  }
-
-  // ── Smart-select box (sc-3751) ────────────────────────────────────────────
-  // A box-drag sub-mode of the mask tool: drag a selection rect, then on release run the SAM3
-  // `image_segment` job over it. Mirrors the sc-6090 box draw, but transient (one rect → one run).
-  function selectPointerDown(event) {
-    if (!maskMode || maskSubTool !== "select" || !working) return;
-    const pt = stagePointToImage(event);
-    if (!pt) return;
-    selectDrawingRef.current = true;
-    selectStartRef.current = pt;
-    setSelectDraft({ x: pt.x, y: pt.y, width: 0, height: 0 });
-  }
-
-  function selectPointerMove(event) {
-    if (!selectDrawingRef.current) return;
-    const pt = stagePointToImage(event);
-    if (!pt) return;
-    setSelectDraft(rectFromPoints(selectStartRef.current, pt));
-  }
-
-  function selectPointerUp() {
-    if (!selectDrawingRef.current) return;
-    selectDrawingRef.current = false;
-    const draft = selectDraft;
-    setSelectDraft(null);
-    // Discard a click / sub-minimum smudge; otherwise run segmentation over the box.
-    if (!draft || draft.width < MIN_BOX_PX || draft.height < MIN_BOX_PX) return;
-    const rect = clampRectToCanvas(draft, working.width, working.height);
-    runSmartSelect(rect);
-  }
-
-  // Rasterize the brush strokes to a mask PNG File aligned to the working bitmap:
-  // white = edit region on black. Erase strokes punch holes (destination-out on a
-  // transparent scratch), then it's flattened onto black so the worker's convert("L")
-  // reads white-on-black. Mirrors the same compositing as the on-canvas preview.
-  // Composite the current mask (smart-select base + brush strokes) onto a fresh
-  // white-on-black canvas at working dims. Shared by the inpaint upload + the mask
-  // refine ops (sc-6110). White = edit region; erased holes flatten to black (=keep).
-  function rasterizeMaskToCanvas() {
-    const scratch = document.createElement("canvas");
-    scratch.width = working.width;
-    scratch.height = working.height;
-    const sctx = scratch.getContext("2d");
-    // Smart-select base first (sc-3751): the white-on-black SAM3 mask underlays the brush strokes,
-    // so paint strokes add to it and erase strokes (destination-out) carve it back. Its opaque
-    // black areas are harmless — the final flatten is onto black anyway.
-    if (maskBaseImage) sctx.drawImage(maskBaseImage, 0, 0);
-    sctx.lineCap = "round";
-    sctx.lineJoin = "round";
-    sctx.strokeStyle = "#ffffff";
-    sctx.fillStyle = "#ffffff";
-    for (const line of maskLines) {
-      sctx.globalCompositeOperation = line.erase ? "destination-out" : "source-over";
-      sctx.lineWidth = line.size;
-      const p = line.points;
-      if (p.length === 2) {
-        sctx.beginPath();
-        sctx.arc(p[0], p[1], line.size / 2, 0, Math.PI * 2);
-        sctx.fill();
-        continue;
-      }
-      sctx.beginPath();
-      sctx.moveTo(p[0], p[1]);
-      for (let i = 2; i < p.length; i += 2) sctx.lineTo(p[i], p[i + 1]);
-      sctx.stroke();
-    }
-    // Flatten onto black so erased/holes read as black (= keep).
-    const out = document.createElement("canvas");
-    out.width = working.width;
-    out.height = working.height;
-    const octx = out.getContext("2d");
-    octx.fillStyle = "#000000";
-    octx.fillRect(0, 0, out.width, out.height);
-    octx.drawImage(scratch, 0, 0);
-    return out;
-  }
-
-  function rasterizeMaskToFile() {
-    return new Promise((resolve, reject) => {
-      rasterizeMaskToCanvas().toBlob((blob) => {
-        if (!blob) {
-          reject(new Error("Could not encode the mask."));
-          return;
-        }
-        resolve(new File([blob], "mask.png", { type: "image/png" }));
-      }, "image/png");
-    });
-  }
+  stagePointToImageRef.current = stagePointToImage;
 
   // ── AI ops on the working image (sc-2432 seam) ────────────────────────────
   // Flatten the composited document to a PNG File. `filename` overrides the name
@@ -2405,6 +1817,9 @@ export function ImageEditor() {
     },
     [working, aiOp, activeProject, workingImageToFile, activeLayerToFile, confirmFlatten, importAsset, token, purgeAsset, trackEditorScratchOp],
   );
+  // Keep the mask hook's bridge pointed at the latest runAiOp (sc-9752) — runSmartSelect
+  // stages a scratch image_segment job through this exact seam.
+  runAiOpRef.current = runAiOp;
 
   function runUpscale() {
     const valid = upscaleFactorsForEngine(upscaleEngine);
@@ -2498,97 +1913,6 @@ export function ImageEditor() {
           height: outHeight,
           fitMode,
         }),
-    });
-  }
-
-  // Decode a worker mask (white-on-black PNG at working dims) into the editable mask base: a
-  // white-on-black canvas for rasterizeMaskToFile + a pink-on-transparent overlay for the preview.
-  // Drawn scaled to the working dims defensively (the mask is produced at the working size).
-  function loadMaskBase(image) {
-    const base = document.createElement("canvas");
-    base.width = working.width;
-    base.height = working.height;
-    base.getContext("2d").drawImage(image, 0, 0, working.width, working.height);
-    const overlay = document.createElement("canvas");
-    overlay.width = working.width;
-    overlay.height = working.height;
-    const octx = overlay.getContext("2d");
-    octx.drawImage(base, 0, 0);
-    const data = octx.getImageData(0, 0, overlay.width, overlay.height);
-    tintMaskRgbaInPlace(data.data);
-    octx.putImageData(data, 0, 0);
-    setMaskBaseImage(base);
-    setMaskOverlay(overlay);
-  }
-
-  // Install a refined white-on-black mask canvas as the new mask base (sc-6110): it
-  // becomes the base + a fresh pink overlay, and the brush strokes are cleared (they
-  // are now baked into the canvas). Mirrors loadMaskBase but from a canvas.
-  function applyRefinedMask(maskCanvas) {
-    const overlay = document.createElement("canvas");
-    overlay.width = working.width;
-    overlay.height = working.height;
-    const octx = overlay.getContext("2d");
-    octx.drawImage(maskCanvas, 0, 0);
-    const data = octx.getImageData(0, 0, overlay.width, overlay.height);
-    tintMaskRgbaInPlace(data.data);
-    octx.putImageData(data, 0, 0);
-    setMaskBaseImage(maskCanvas);
-    setMaskOverlay(overlay);
-    setMaskLines([]);
-  }
-
-  // Mask refinement (sc-6110): flatten the current mask, run a pure pixel op
-  // (feather / grow / shrink / invert), and reinstall it as the base. No-op when no
-  // mask exists, except invert (empty mask → select-all).
-  function refineMask(op) {
-    if (!working) return;
-    if (op !== "invert" && !maskHasContent(maskLines) && !maskBaseImage) return;
-    const canvas = rasterizeMaskToCanvas();
-    const w = canvas.width;
-    const h = canvas.height;
-    const ctx = canvas.getContext("2d");
-    const imageData = ctx.getImageData(0, 0, w, h);
-    const alpha = maskAlphaFromRgba(imageData.data);
-    let refined;
-    if (op === "invert") refined = invertAlpha(alpha);
-    else if (op === "grow") refined = dilateAlpha(alpha, w, h, maskRefineRadius);
-    else if (op === "shrink") refined = erodeAlpha(alpha, w, h, maskRefineRadius);
-    else refined = blurAlpha(alpha, w, h, maskRefineRadius);
-    writeMaskAlphaToRgba(imageData.data, refined);
-    ctx.putImageData(imageData, 0, 0);
-    applyRefinedMask(canvas);
-  }
-
-  // Run the SAM3 image_segment job over the selection box (sc-3751): stage the working image, post
-  // the job, and on completion load the returned binary mask as an editable base under the strokes.
-  // It does NOT replace the working image (onComplete owns the result), so the session is unchanged
-  // except for the mask layer; the brush/eraser then refines it before Inpaint.
-  function runSmartSelect(rect) {
-    if (!working || aiOp || !canMask) return;
-    const box = rectToSegmentBox(rect);
-    runAiOp({
-      label: "smart select",
-      endpoint: "/api/v1/jobs",
-      buildBody: (scratch) =>
-        buildSegmentJobBody({
-          project: activeProject,
-          requestedGpu,
-          sourceAssetId: scratch.id,
-          box,
-          displayName: working?.source?.name,
-        }),
-      onComplete: async (resultAsset) => {
-        const res = await fetch(assetUrl(resultAsset));
-        if (!res.ok) throw new Error(`Failed to load mask (${res.status})`);
-        const { image, objectUrl } = await blobToImage(await res.blob());
-        loadMaskBase(image);
-        URL.revokeObjectURL(objectUrl); // the pixels are copied into the base/overlay canvases
-        // Return to the mask tool so the auto-mask can be refined with the brush/eraser.
-        setTool("edit");
-        setMaskMode(true);
-        setMaskSubTool("brush");
-      },
     });
   }
 
