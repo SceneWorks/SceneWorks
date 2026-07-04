@@ -1036,10 +1036,20 @@ pub(crate) async fn run_prompt_refine_job(
                 }
                 _ = heartbeat_interval.tick() => {
                     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                    match check_cancel(api, &job.id, CANCEL_MESSAGE).await {
-                        Ok(()) => {}
-                        Err(WorkerError::Canceled(_)) => cancel.cancel(),
-                        Err(error) => return Err(error),
+                    // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
+                    // `check_cancel` poll (a local flag read) so a quit trips the decode flag at its
+                    // next per-token check instead of waiting out the grace window, exactly like a
+                    // user cancel does. `check_cancel` posts the terminal `Canceled` itself; on
+                    // shutdown the bounded-wait teardown in `run_job_with_shutdown` owns the terminal,
+                    // so here we just trip the engine flag to stop the decode mid-generation.
+                    if shutdown_requested() {
+                        cancel.cancel();
+                    } else {
+                        match check_cancel(api, &job.id, CANCEL_MESSAGE).await {
+                            Ok(()) => {}
+                            Err(WorkerError::Canceled(_)) => cancel.cancel(),
+                            Err(error) => return Err(error),
+                        }
                     }
                 }
             }

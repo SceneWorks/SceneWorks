@@ -3637,38 +3637,10 @@ fn flux2_control_raw_settings_records_control_recipe() {
     assert_eq!(raw.get("realModelInference"), Some(&json!(true)));
 }
 
-#[cfg(target_os = "macos")]
-#[test]
-fn identity_strength_gates_on_strength_and_asset() {
-    // Off by default (no referenceStrength) — the pose-only tier.
-    assert_eq!(
-        identity_strength(&request(
-            json!({ "projectId": "p", "referenceAssetId": "r" })
-        )),
-        None
-    );
-    // referenceStrength set but no asset → None.
-    assert_eq!(
-        identity_strength(&request(
-            json!({ "projectId": "p", "advanced": { "referenceStrength": 0.5 } })
-        )),
-        None
-    );
-    // Both present → clamped strength (the opt-in img2img-init).
-    assert_eq!(
-        identity_strength(&request(json!({
-            "projectId": "p", "referenceAssetId": "r", "advanced": { "referenceStrength": 0.5 }
-        }))),
-        Some(0.5)
-    );
-    // Clamp to [0.05, 1.0].
-    assert_eq!(
-        identity_strength(&request(json!({
-            "projectId": "p", "referenceAssetId": "r", "advanced": { "referenceStrength": 2.0 }
-        }))),
-        Some(1.0)
-    );
-}
+// sc-8946: the former `identity_strength_gates_on_strength_and_asset` was folded away — after the
+// rename it near-duplicated `zimage_identity_strength_gate_and_clamp` above, which is a strict superset
+// (same off-by-default / no-asset / clamp-to-1.0 cases PLUS verbatim forwarding, string coercion, and
+// the 0.05 floor) over the same `identity_strength(&request(..))` gate.
 
 /// Real-weights smoke: FLUX.2-dev strict-pose Fun-Controlnet-Union (sc-6055; engine sc-2292). Loads
 /// the converted Q4 dev snapshot (`models/mlx/flux2_dev`, assembled by the `flux2_dev_quant` convert
