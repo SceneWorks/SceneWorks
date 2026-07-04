@@ -7742,10 +7742,45 @@ details[open] > summary.lora-scope-group-heading::before,
 }
 
 .preview-modal-meta strong,
-.preview-modal-meta span {
+.preview-modal-meta > span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Copyable seed chip — lets users grab the seed for a byte-for-byte rerun
+   (e.g. reproduce the image to upscale with PiD). */
+.preview-seed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: start;
+  margin-top: 1px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.preview-seed:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+
+.preview-seed-value {
+  font-variant-numeric: tabular-nums;
+  color: inherit;
+}
+
+.preview-seed-hint {
+  color: var(--accent);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .preview-variant-toggle {
