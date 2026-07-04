@@ -938,17 +938,44 @@ fn install_state_for(
             .join("models")
             .join(safe_download_dir(&download_context.repo));
         let cache_path = huggingface_repo_cache_path(data_dir, &download_context.repo);
-        let cache_health = cache_path
-            .as_ref()
-            .map(|path| huggingface_cache_health(path, &download_context.files));
-        let cache_installed = cache_health.as_ref().is_some_and(|health| health.installed);
-        let cache_incomplete = cache_health
-            .as_ref()
-            .is_some_and(|health| health.incomplete);
-        let mut missing_required_files = cache_health
-            .as_ref()
-            .map(|health| health.missing_files.clone())
-            .unwrap_or_default();
+        // Quant-matrix models (sc-8506/8508): the top-level install state aggregates across ALL
+        // selectable tiers, not just the default one. A model that offers bf16/q8/q4 counts as
+        // installed when ANY tier is fully present, and is only "incomplete" when a tier is genuinely
+        // torn (partially downloaded) AND no complete tier exists. Installing a single valid tier —
+        // even a non-default one — must never surface as an incomplete/repairable cache (sc-9907),
+        // because that rendered a false "Cached files are incomplete" warning + Fix button on a
+        // perfectly good install. Single-variant models keep the default-tier contract below.
+        let (cache_installed, cache_incomplete, mut missing_required_files) =
+            if model_has_variant_matrix(model) {
+                let variants = model_variant_states(model, data_dir);
+                let any_installed = variants.iter().any(|variant| variant.installed);
+                // Only a torn tier (some-but-not-all files present) with no complete sibling is a real
+                // repair candidate; a validly absent tier is "missing", not "incomplete".
+                let torn = variants
+                    .iter()
+                    .find(|variant| variant.cache_incomplete && !variant.installed);
+                let incomplete = !any_installed && torn.is_some();
+                let missing = if any_installed {
+                    Vec::new()
+                } else {
+                    torn.map(|variant| variant.missing_required_files.clone())
+                        .unwrap_or_default()
+                };
+                (any_installed, incomplete, missing)
+            } else {
+                let cache_health = cache_path
+                    .as_ref()
+                    .map(|path| huggingface_cache_health(path, &download_context.files));
+                let installed = cache_health.as_ref().is_some_and(|health| health.installed);
+                let incomplete = cache_health
+                    .as_ref()
+                    .is_some_and(|health| health.incomplete);
+                let missing = cache_health
+                    .as_ref()
+                    .map(|health| health.missing_files.clone())
+                    .unwrap_or_default();
+                (installed, incomplete, missing)
+            };
         let managed_installed = model_is_installed(&managed_path);
         let primary_installed = managed_installed || cache_installed;
         let installed_path = if cache_installed || cache_incomplete {
@@ -1720,8 +1747,24 @@ fn huggingface_filtered_cache_health(
         .cloned()
         .collect::<Vec<_>>();
     if missing.is_empty() {
+        // Every expected file/pattern is present — fully installed.
         HuggingFaceCacheHealth::installed()
+    } else if missing.len() == files.len() {
+        // NONE of this filter's expected files are present: the tier is cleanly absent, not torn.
+        // A quant-matrix model keeps every tier in ONE shared repo cache (bf16/, q8/, q4/ subdirs),
+        // so downloading one tier populates the repo snapshot the OTHER tiers' filters also probe.
+        // Reporting a not-downloaded tier as `incomplete` is what surfaced a false "Cached files are
+        // incomplete" warning + Fix button for a perfectly valid single-quant install (sc-9907).
+        // "You didn't download this tier" (missing) must stay distinct from "this tier is
+        // half-downloaded" (incomplete) so nothing upstream raises a spurious repair prompt.
+        HuggingFaceCacheHealth {
+            installed: false,
+            incomplete: false,
+            missing_files: missing,
+        }
     } else {
+        // Some — but not all — expected files are present: a genuinely torn download a re-fetch
+        // should repair.
         HuggingFaceCacheHealth::missing(missing)
     }
 }

@@ -7287,6 +7287,124 @@ fn turbo_cache_health_flags_missing_lora_only_when_listed_explicitly() {
     );
 }
 
+#[test]
+fn filtered_cache_health_reports_absent_filter_as_missing_not_incomplete() {
+    // sc-9907: a filter whose files are ENTIRELY absent is cleanly missing, not torn. Only a
+    // partially-present filter (some files there, some gone) counts as incomplete/repairable.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let repo_root = temp_dir
+        .path()
+        .join("models--SceneWorks--z-image-turbo-mlx");
+    let snapshot = repo_root.join("snapshots/abc123");
+    std::fs::create_dir_all(snapshot.join("q8")).expect("q8 creates");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("refs creates");
+    std::fs::write(repo_root.join("refs/main"), "abc123").expect("ref writes");
+    // Only the q8 tier is on disk.
+    std::fs::write(snapshot.join("q8/model_index.json"), "{}").expect("q8 file writes");
+
+    // The q4 tier is entirely absent → missing, but NOT incomplete (no false repair prompt).
+    let q4 = super::models::huggingface_cache_health(&repo_root, &["q4/*".to_owned()]);
+    assert!(
+        !q4.installed && !q4.incomplete,
+        "an entirely-absent tier is missing, not incomplete: {q4:?}"
+    );
+
+    // The q8 tier is present → installed.
+    let q8 = super::models::huggingface_cache_health(&repo_root, &["q8/*".to_owned()]);
+    assert!(
+        q8.installed && !q8.incomplete,
+        "downloaded tier is installed"
+    );
+}
+
+#[tokio::test]
+async fn quant_matrix_model_with_single_tier_reads_installed_not_incomplete() {
+    // sc-9907: a quant-matrix model keeps every tier in ONE shared repo cache. Downloading a single
+    // valid tier (here q8, NOT the default q4) previously tripped the top-level default-tier check
+    // and surfaced a false "Cached files are incomplete" + Fix button. The card must read installed,
+    // never incomplete/repairable, and the per-tier states must show q8 installed / q4+bf16 missing.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+            {
+              "schemaVersion": 1,
+              "models": [{
+                "id": "z_image_turbo",
+                "name": "Z-Image Turbo",
+                "type": "image",
+                "family": "z-image",
+                "downloads": [
+                  { "provider": "huggingface", "repo": "SceneWorks/z-image-turbo-mlx", "variant": "q4", "default": true, "files": ["q4/*"] },
+                  { "provider": "huggingface", "repo": "SceneWorks/z-image-turbo-mlx", "variant": "q8", "files": ["q8/*"] },
+                  { "provider": "huggingface", "repo": "SceneWorks/z-image-turbo-mlx", "variant": "bf16", "files": ["bf16/*"] }
+                ]
+              }]
+            }
+            "#,
+    )
+    .expect("builtin models writes");
+    for file in [
+        "user.models.jsonc",
+        "builtin.loras.jsonc",
+        "user.loras.jsonc",
+        "builtin.recipe-presets.jsonc",
+        "user.recipe-presets.jsonc",
+    ] {
+        let key = if file.contains("preset") {
+            "presets"
+        } else if file.contains("lora") {
+            "loras"
+        } else {
+            "models"
+        };
+        std::fs::write(
+            config_dir.join(file),
+            format!(r#"{{ "schemaVersion": 1, "{key}": [] }}"#),
+        )
+        .expect("empty manifest writes");
+    }
+    // Only the non-default q8 tier is on disk in the shared repo snapshot.
+    let snapshot = temp_dir
+        .path()
+        .join("data/cache/huggingface/hub/models--SceneWorks--z-image-turbo-mlx/snapshots/abc123");
+    std::fs::create_dir_all(snapshot.join("q8")).expect("q8 dir creates");
+    std::fs::write(snapshot.join("q8/model_index.json"), "{}").expect("q8 file writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["id"], "z_image_turbo");
+    assert_eq!(models[0]["hasVariantMatrix"], true);
+    // Top-level card reads installed — a single valid tier is a complete install, not a repair.
+    assert_eq!(models[0]["installState"], "installed");
+    assert_eq!(models[0]["cacheState"], "complete");
+    assert_eq!(models[0]["repairAvailable"], false);
+    assert_eq!(models[0]["missingRequiredFiles"], json!([]));
+
+    // Per-tier truth: q8 installed; q4 (default) and bf16 cleanly missing, NOT incomplete.
+    let variants = models[0]["variants"].as_array().expect("variants array");
+    let state_of = |name: &str| {
+        variants
+            .iter()
+            .find(|variant| variant["variant"] == name)
+            .unwrap_or_else(|| panic!("variant {name} present"))
+            .clone()
+    };
+    let q8 = state_of("q8");
+    assert_eq!(q8["installState"], "installed");
+    assert_eq!(q8["cacheState"], "complete");
+    for absent in ["q4", "bf16"] {
+        let tier = state_of(absent);
+        assert_eq!(tier["installState"], "missing", "{absent} installState");
+        assert_eq!(tier["cacheState"], "missing", "{absent} cacheState");
+    }
+}
+
 #[cfg(windows)]
 fn create_test_symlink_file(
     target: &std::path::Path,
