@@ -769,6 +769,140 @@ fn krea_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
         .unwrap_or_else(|| root.to_path_buf())
 }
 
+/// The private HF repo hosting the Krea 2 INT8-ConvRot DiT single-file checkpoint (sc-9300, epic
+/// 9083). Authed download with the SceneWorks HF token, like every private SceneWorks tier.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const KREA_CONVROT_REPO: &str = "SceneWorks/krea-2-turbo-int8-convrot";
+
+/// The ConvRot DiT filename inside [`KREA_CONVROT_REPO`] (mirrors the manifest download `files`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const KREA_CONVROT_DIT_FILE: &str = "krea2_turbo_int8_convrot.safetensors";
+
+/// Whether this Krea 2 request selected the candle-only INT8-ConvRot tier (sc-9300). The studio's tier
+/// picker sends `advanced.convRot: true` for the `int8-convrot` variant (it has no `mlxQuantize` — the
+/// online-rotation int8 DiT isn't a bits-based quant). Candle-lane only: the tier is `platforms`-scoped
+/// off macOS and the worker only advertises the `int8_convrot` capability on the candle lane, so this
+/// never fires on the MLX path even if a stray flag arrives. Confined to `krea_2_turbo`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn wants_krea_convrot(request: &ImageRequest) -> bool {
+    request.model == "krea_2_turbo"
+        && request
+            .advanced
+            .get("convRot")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+/// Resolve the INT8-ConvRot LoadSpec inputs for a Krea 2 request (sc-9300): the canonical bf16 Krea 2
+/// snapshot DIR (the LoadSpec `weights` root — tokenizer / Qwen3-VL TE / Qwen-Image VAE / config + the
+/// non-quantized surface) and the downloaded ConvRot DiT single-file (the LoadSpec `text_encoder`
+/// `File`, which the candle-gen krea engine's `convrot_selector` routes to `load_components_convrot`).
+///
+/// `None` when the request didn't select ConvRot, OR either artifact isn't present yet (the bf16
+/// `bf16/` subdir of the `krea-2-turbo-mlx` turnkey, or the ConvRot DiT `.safetensors`) — the caller
+/// then falls back to the normal dense/packed path rather than half-loading. The bf16 base is fetched
+/// on demand by [`ensure_krea_convrot_base_present`] before this resolves. The sm_89 compute-cap floor
+/// is enforced ENGINE-side (`ensure_int8_floor` inside `load_components_convrot`) AND surfaced as the
+/// worker's `int8_convrot` capability, so an ineligible card never reaches here (the picker hides it).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_krea_convrot(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> Option<(PathBuf, PathBuf)> {
+    if !wants_krea_convrot(request) {
+        return None;
+    }
+    // The bf16 base surface: the `bf16/` subdir of the shared `krea-2-turbo-mlx` turnkey (the SAME dir
+    // the bf16 tier ships), a candle-readable `transformer/ text_encoder/ vae/ tokenizer/` root. The
+    // ConvRot DiT replaces only the transformer at load, but the pipeline still reads the dense TE/VAE/
+    // tokenizer/config from here.
+    let base_dir = huggingface_snapshot_dir(&settings.data_dir, KREA_MLX_TURNKEY_REPO)
+        .map(|root| root.join("bf16"))
+        .filter(|dir| {
+            dir.join("model_index.json").is_file()
+                && dir.join("text_encoder").is_dir()
+                && dir.join("vae").is_dir()
+        })?;
+    // The ConvRot DiT single-file inside the private repo's snapshot.
+    let convrot_dit = huggingface_snapshot_dir(&settings.data_dir, KREA_CONVROT_REPO)
+        .map(|root| root.join(KREA_CONVROT_DIT_FILE))
+        .filter(|file| file.is_file())?;
+    Some((base_dir, convrot_dit))
+}
+
+/// The shared `krea-2-turbo-mlx` turnkey repo (its `bf16/` subdir supplies the ConvRot base surface).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const KREA_MLX_TURNKEY_REPO: &str = "SceneWorks/krea-2-turbo-mlx";
+
+/// On-demand fetch of the canonical bf16 Krea 2 base surface for the INT8-ConvRot tier (sc-9300),
+/// the sibling of [`ensure_boogu_tier_present`]. The ConvRot catalog download pulls only the DiT
+/// single-file; the bf16 `bf16/` subdir of the `krea-2-turbo-mlx` turnkey (tokenizer / Qwen3-VL TE /
+/// Qwen-Image VAE / config) is fetched here when the ConvRot tier is selected and it isn't present —
+/// so q4/q8 users are never forced to download the 35 GB bf16 base (it isn't a global co-requisite).
+/// No-op when the request isn't a ConvRot job, the bf16 base is already complete, or the `hf` CLI is
+/// absent (then `resolve_krea_convrot` returns `None` and the job falls back / surfaces a load error).
+/// Fails loud on a real download error — fast, before any compute.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn ensure_krea_convrot_base_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &ImageRequest,
+) -> WorkerResult<()> {
+    if !wants_krea_convrot(request) {
+        return Ok(());
+    }
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, KREA_MLX_TURNKEY_REPO) else {
+        // Turnkey never fetched → `hf` may still pull it below; probe the eventual bf16 subdir path.
+        // (If the repo is entirely absent, the fetch below installs the requested bf16 leaf dirs.)
+        return fetch_krea_convrot_base(api, settings, job).await;
+    };
+    let bf16 = root.join("bf16");
+    // Present already (dense sharded transformer index + the dense TE/VAE) → no fetch.
+    if bf16.join("model_index.json").is_file()
+        && bf16.join("text_encoder").is_dir()
+        && bf16.join("vae").is_dir()
+    {
+        return Ok(());
+    }
+    fetch_krea_convrot_base(api, settings, job).await
+}
+
+/// Pull the bf16 base leaf dirs of the `krea-2-turbo-mlx` turnkey into the HF cache (sc-9300). Same
+/// leaf-glob shape as the manifest bf16 tier download; scratched marker dir keyed by job id.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn fetch_krea_convrot_base(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".krea-convrot-base-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec![
+        "bf16/transformer/*".to_owned(),
+        "bf16/text_encoder/*".to_owned(),
+        "bf16/vae/*".to_owned(),
+        "bf16/tokenizer/*".to_owned(),
+        "bf16/scheduler/*".to_owned(),
+        "bf16/model_index.json".to_owned(),
+    ];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api,
+        settings,
+        job,
+        KREA_MLX_TURNKEY_REPO,
+        "main",
+        &files,
+        &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
+}
+
 /// On-demand fetch of a non-default Boogu tier subfolder (sc-6568 / sc-8513). The catalog download
 /// pulls only the packed Q8 `<variant>/` subfolder, so when a job opts into another tier
 /// ([`boogu_tier_subdir`]: `<=0` → `<variant>-bf16/` dense, `1..=4` → `<variant>-q4/` packed) and that
@@ -3211,10 +3345,21 @@ async fn generate_candle_stream(
     // default tier / every other family / an unfetched turnkey (falls through to the load error below).
     ensure_boogu_tier_present(api, settings, job, request).await?;
     ensure_ideogram_tier_present(api, settings, job, request).await?;
-    let weights_dir = resolve_weights_dir(request, settings)?.ok_or_else(|| {
-        let repo = model_repo(request, &model);
-        WorkerError::InvalidPayload(format!("candle weights snapshot not found for {repo}"))
-    })?;
+    // Krea 2 INT8-ConvRot tier (sc-9300, epic 9083): fetch the canonical bf16 base surface on demand
+    // (the ConvRot catalog download pulls only the DiT single-file), then resolve the two LoadSpec
+    // inputs. `None` = not a ConvRot job (or an artifact still absent) → the normal dense/packed path
+    // below. When it resolves, the LoadSpec `weights` becomes the bf16 base DIR and `text_encoder` the
+    // ConvRot DiT `File` — the exact shape the candle-gen krea engine's `convrot_selector` expects.
+    ensure_krea_convrot_base_present(api, settings, job, request).await?;
+    let convrot = resolve_krea_convrot(request, settings);
+    let weights_dir = if let Some((base_dir, _)) = convrot.as_ref() {
+        base_dir.clone()
+    } else {
+        resolve_weights_dir(request, settings)?.ok_or_else(|| {
+            let repo = model_repo(request, &model);
+            WorkerError::InvalidPayload(format!("candle weights snapshot not found for {repo}"))
+        })?
+    };
 
     // Descriptor-derived denoise/guidance surface (distilled families → no guidance/negative; guided
     // families → the scale + negative prompt). Identical to the MLX path; quant + LoRA are omitted.
@@ -3246,12 +3391,20 @@ async fn generate_candle_stream(
     // it resolves them like the MLX path; the sc-3675/sc-5096 families advertise neither and skip both
     // (dense bf16/fp16, no adapters) — preserving their shipped behavior. The router only lets a quant
     // request / LoRA reach this worker for a family that supports it (`image_request_candle_eligible`).
-    let (quant, quant_bits) = if model.supports_quant() {
+    let (quant, quant_bits) = if convrot.is_some() {
+        // INT8-ConvRot (sc-9300): the int8 DiT replaces the dense transformer wholesale — a bits-based
+        // load-time `Quant` is meaningless (and the candle-gen krea engine rejects a quant overlay on
+        // the ConvRot path). Force dense-None; the recipe records no `mlxQuantize` bits for this tier.
+        (None, None)
+    } else if model.supports_quant() {
         resolve_quant(request)
     } else {
         (None, None)
     };
-    let adapters = if model.supports_adapters() {
+    let adapters = if convrot.is_some() {
+        // ConvRot does not combine with LoRA/LoKr (the int8 DiT is not adapter-wired); skip adapters.
+        Vec::new()
+    } else if model.supports_adapters() {
         resolve_adapters(request, settings)?
     } else {
         Vec::new()
@@ -3358,11 +3511,26 @@ async fn generate_candle_stream(
     // ideogram/kolors/krea/lens), so this un-gates the toggle across the whole off-Mac catalog — using the
     // SAME `resolve_pid_weights` model→backbone gate as the macOS lane (a non-eligible model → `None` →
     // native VAE, so this is a no-op for anything without a PiD backbone).
-    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    // ConvRot (sc-9300) does not combine with a PiD decode overlay — the int8 DiT consume path replaces
+    // the transformer wholesale and is not PiD-wired (the candle-gen krea engine rejects the combo). So
+    // suppress PiD when ConvRot is selected; every non-ConvRot job resolves PiD exactly as before.
+    let pid_weights = if convrot.is_some() {
+        None
+    } else {
+        resolve_pid_weights(request, &settings.data_dir, &request.model)?
+    };
     let use_pid = pid_weights.is_some();
     let mut spec = load_spec(weights_dir, quant, adapters, None);
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
+    }
+    // INT8-ConvRot LoadSpec seam (sc-9300, epic 9083): ride the ConvRot DiT single-file on the shared,
+    // already-optional `LoadSpec::text_encoder` as a `WeightsSource::File` while `spec.weights` stays the
+    // canonical Krea 2 bf16 snapshot `Dir` (set as `weights_dir` above). The candle-gen krea engine's
+    // `convrot_selector` decodes a `File` here → `load_components_convrot` (which enforces the sm_89
+    // compute-cap floor); a `Dir`/`None` there is the normal dense/packed path. Other engines ignore it.
+    if let Some((_, convrot_dit)) = convrot {
+        spec.text_encoder = Some(WeightsSource::File(convrot_dit));
     }
 
     let (cancel, rx, blocking) = start_cached_gen_stream(

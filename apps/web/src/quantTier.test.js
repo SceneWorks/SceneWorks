@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   defaultTierSelection,
   installedTiers,
+  isConvRotTier,
+  isSelectableTier,
   shouldShowTierPicker,
   tierLabel,
   tierQuantize,
+  INT8_CONVROT_TIER,
 } from "./quantTier.js";
 
 // Build a /models-shaped model with a variant matrix. `installed` is the set of tier keys whose
@@ -38,7 +41,51 @@ describe("quantTier mapping", () => {
     expect(tierLabel("bf16")).toBe("Full precision (bf16)");
     expect(tierLabel("q8")).toBe("Q8 (balanced)");
     expect(tierLabel("q4")).toBe("Q4 (smallest)");
+    expect(tierLabel(INT8_CONVROT_TIER)).toBe("INT8-ConvRot (candle, sm_89+)");
     expect(tierLabel("mystery")).toBe("mystery");
+  });
+});
+
+describe("INT8-ConvRot tier (sc-9300)", () => {
+  it("is a selectable tier but has no mlxQuantize value", () => {
+    expect(isConvRotTier(INT8_CONVROT_TIER)).toBe(true);
+    expect(isConvRotTier("q4")).toBe(false);
+    expect(isSelectableTier(INT8_CONVROT_TIER)).toBe(true);
+    // It rides a distinct advanced.convRot signal, not mlxQuantize — so tierQuantize is null.
+    expect(tierQuantize(INT8_CONVROT_TIER)).toBe(null);
+  });
+
+  it("is offered only when convRotEligible (candle + sm_89 worker present)", () => {
+    const model = matrixModel({
+      tiers: ["q4", INT8_CONVROT_TIER, "bf16"],
+      installed: ["q4", INT8_CONVROT_TIER, "bf16"],
+    });
+    // Eligible host (default): the tier appears, ordered between q4 and bf16.
+    expect(installedTiers(model)).toEqual(["q4", INT8_CONVROT_TIER, "bf16"]);
+    // Ineligible host (macOS/MLX or pre-Ada NVIDIA — no int8_convrot worker): the tier is hidden.
+    expect(installedTiers(model, { convRotEligible: false })).toEqual(["q4", "bf16"]);
+  });
+
+  it("is never seeded as the default selection on an ineligible host", () => {
+    const model = matrixModel({
+      tiers: [INT8_CONVROT_TIER, "bf16"],
+      installed: [INT8_CONVROT_TIER, "bf16"],
+      defaultTier: INT8_CONVROT_TIER,
+    });
+    // Eligible: the declared default (convrot) is picked.
+    expect(defaultTierSelection(model, null)).toBe(INT8_CONVROT_TIER);
+    // Ineligible: convrot is filtered out, so the remaining installed tier (bf16) is picked.
+    expect(defaultTierSelection(model, null, { convRotEligible: false })).toBe("bf16");
+  });
+
+  it("does not count a hidden convrot tier toward the picker's >1 threshold", () => {
+    const model = matrixModel({
+      tiers: ["bf16", INT8_CONVROT_TIER],
+      installed: ["bf16", INT8_CONVROT_TIER],
+    });
+    expect(shouldShowTierPicker(model)).toBe(true);
+    // On an ineligible host only bf16 remains → single tier → no picker.
+    expect(shouldShowTierPicker(model, { convRotEligible: false })).toBe(false);
   });
 });
 

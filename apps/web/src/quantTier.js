@@ -20,6 +20,18 @@ const TIER_QUANTIZE = {
   q4: 4,
 };
 
+// The candle-only Krea 2 INT8-ConvRot tier key (sc-9300, epic 9083). NOT a bits-based quant — the
+// online-rotation int8 DiT can't be expressed as an `mlxQuantize` value — so it is DELIBERATELY absent
+// from TIER_QUANTIZE and instead sends a distinct `advanced.convRot: true` signal (see
+// imageJobAdvanced.js). It is a selectable tier (`isSelectableTier` accepts it) but `tierQuantize`
+// returns null for it, so it never leaks an `mlxQuantize` into the payload.
+export const INT8_CONVROT_TIER = "int8-convrot";
+
+// Whether a tier key names the candle INT8-ConvRot tier.
+export function isConvRotTier(tier) {
+  return tier === INT8_CONVROT_TIER;
+}
+
 // Human labels for the picker, keyed by tier. Unknown/"default" tiers fall back to the raw key.
 // "training" is NOT a quant tier: it's the flat-diffusers LoRA-training base some tiered models
 // (lens, sc-8797) additionally host on macOS. It's absent from TIER_QUANTIZE, so the generation
@@ -29,10 +41,13 @@ const TIER_LABELS = {
   q8: "Q8 (balanced)",
   q4: "Q4 (smallest)",
   training: "LoRA training base (bf16 diffusers)",
+  // Candle-only (Windows/Linux, sm_89+). Online-rotation int8 DiT — closer to bf16 than Q4 (sc-9300).
+  [INT8_CONVROT_TIER]: "INT8-ConvRot (candle, sm_89+)",
 };
 
-// Display order (smallest → largest); tiers not in this list sort after, alphabetically.
-const TIER_ORDER = ["q4", "q8", "bf16"];
+// Display order (smallest → largest); tiers not in this list sort after, alphabetically. int8-convrot
+// sits between q4 and q8 by footprint/fidelity (int8 DiT, PSNR 34.4 dB — better than Q4's 22.7 dB).
+const TIER_ORDER = ["q4", INT8_CONVROT_TIER, "q8", "bf16"];
 
 // Map a tier key to its `advanced.mlxQuantize` value, or null when the key isn't a known quant
 // tier (e.g. "default" on a single-variant model — such models never render the picker).
@@ -46,10 +61,26 @@ export function tierLabel(tier) {
   return TIER_LABELS[tier] ?? tier;
 }
 
-// The installed, selectable quant tiers of a model, in display order. A tier is selectable when
-// it is a known quant tier (bf16/q8/q4 — the "default" pseudo-variant of a single-variant model
-// is excluded) AND its files are installed. Returns [] when the model has no variant matrix.
-export function installedTiers(model) {
+// Whether a tier key is a user-selectable generation tier: a known bits-based quant (bf16/q8/q4) OR
+// the candle INT8-ConvRot tier. Excludes the "default" pseudo-variant of a single-variant model and
+// non-generation pseudo-tiers like "training". Distinct from `tierQuantize` (which returns null for
+// int8-convrot because it has no mlxQuantize value — the tier still selects, via `advanced.convRot`).
+export function isSelectableTier(tier) {
+  return tierQuantize(tier) !== null || isConvRotTier(tier);
+}
+
+// The installed, selectable quant tiers of a model, in display order. A tier is selectable when it is
+// a known quant tier (bf16/q8/q4) OR the candle INT8-ConvRot tier (`isSelectableTier` — the "default"
+// pseudo-variant of a single-variant model is excluded) AND its files are installed. Returns [] when
+// the model has no variant matrix.
+//
+// `options.convRotEligible` (sc-9300, default true) gates the candle-only INT8-ConvRot tier: the
+// caller passes `false` when NO live worker advertises the `int8_convrot` capability (macOS/MLX, or a
+// pre-Ada NVIDIA GPU that fails the sm_89 compute-cap probe), so the tier is HIDDEN on an ineligible
+// host even when its files happen to be present in the cache. Every other tier is unaffected. Default
+// true keeps existing single-lane call sites (and tests) unchanged.
+export function installedTiers(model, options = {}) {
+  const { convRotEligible = true } = options;
   if (!model?.hasVariantMatrix || !Array.isArray(model.variants)) {
     return [];
   }
@@ -57,7 +88,8 @@ export function installedTiers(model) {
     .filter(
       (variant) =>
         variant &&
-        tierQuantize(variant.variant) !== null &&
+        isSelectableTier(variant.variant) &&
+        (convRotEligible || !isConvRotTier(variant.variant)) &&
         variant.installState === "installed",
     )
     .map((variant) => variant.variant)
@@ -79,8 +111,10 @@ export function installedTiers(model) {
 
 // Whether the studio should render the tier picker: only when MORE THAN ONE quant tier is
 // installed (a single installed tier — the common case — shows no toggle, per acceptance).
-export function shouldShowTierPicker(model) {
-  return installedTiers(model).length > 1;
+// `options` (sc-9300) forwards the `convRotEligible` gate so an ineligible host doesn't count the
+// hidden INT8-ConvRot tier toward the >1 threshold.
+export function shouldShowTierPicker(model, options = {}) {
+  return installedTiers(model, options).length > 1;
 }
 
 // The tier that declares itself the default download (`variant.default === true`) IF it is
@@ -100,9 +134,10 @@ function defaultInstalledTier(model, tiers) {
 //   2. the model's declared default tier (`variant.default: true`), when installed.
 //   3. q4 if installed (the catalog's smallest/default convention).
 //   4. the first installed tier.
-// Returns null when nothing is installed (no picker will render anyway).
-export function defaultTierSelection(model, lastUsed) {
-  const tiers = installedTiers(model);
+// Returns null when nothing is installed (no picker will render anyway). `options` (sc-9300) forwards
+// the `convRotEligible` gate so a hidden INT8-ConvRot tier is never seeded as the selection.
+export function defaultTierSelection(model, lastUsed, options = {}) {
+  const tiers = installedTiers(model, options);
   if (tiers.length === 0) {
     return null;
   }

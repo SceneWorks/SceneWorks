@@ -144,6 +144,20 @@ describe("buildImageJobAdvanced", () => {
     );
   });
 
+  it("emits convRot (not mlxQuantize) for the INT8-ConvRot tier (sc-9300)", () => {
+    const advanced = buildImageJobAdvanced(
+      offState({ showTierPicker: true, quantTier: "int8-convrot" }),
+    );
+    expect(advanced.convRot).toBe(true);
+    // The online-rotation int8 DiT is not a bits-based quant, so it must NOT leak an mlxQuantize.
+    expect(advanced).not.toHaveProperty("mlxQuantize");
+    // convRot is only emitted when the tier picker is shown AND int8-convrot is picked.
+    expect(buildImageJobAdvanced(offState({ showTierPicker: false, quantTier: "int8-convrot" }))).not.toHaveProperty(
+      "convRot",
+    );
+    expect(buildImageJobAdvanced(offState({ showTierPicker: true, quantTier: "q4" }))).not.toHaveProperty("convRot");
+  });
+
   it("emits usePid only when the PiD toggle is shown and on", () => {
     expect(buildImageJobAdvanced(offState({ showPidToggle: false, usePid: true }))).not.toHaveProperty("usePid");
     expect(buildImageJobAdvanced(offState({ showPidToggle: true, usePid: true })).usePid).toBe(true);

@@ -2036,6 +2036,11 @@
           // 20,554,619,613 B = transformer 14.57 + text_encoder 5.47 + vae 0.48 GB; rounded up).
           "provider": "huggingface",
           "repo": "SceneWorks/krea-2-turbo-mlx",
+          // sc-9300: the per-tier `variant` keys make Krea 2 a proper variant matrix (like the
+          // standard-tier models) so `/models` emits a `variants[]` entry per tier and the studio tier
+          // picker (`quantTier.js`) can toggle installed tiers. q8 is the shipped default.
+          "variant": "q8",
+          "default": true,
           "files": [
             "q8/transformer/*",
             "q8/text_encoder/*",
@@ -2052,6 +2057,7 @@
           // selectable via advanced mlxQuantize<=4 (sc-8508/8509). Same complete-root shape as q8.
           "provider": "huggingface",
           "repo": "SceneWorks/krea-2-turbo-mlx",
+          "variant": "q4",
           "files": [
             "q4/transformer/*",
             "q4/text_encoder/*",
@@ -2069,6 +2075,7 @@
           // via advanced mlxQuantize<=0 (sc-8508/8509). Mirror of the dense `krea/Krea-2-Turbo` tree.
           "provider": "huggingface",
           "repo": "SceneWorks/krea-2-turbo-mlx",
+          "variant": "bf16",
           "files": [
             "bf16/transformer/*",
             "bf16/text_encoder/*",
@@ -2079,6 +2086,31 @@
           ],
           "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 35678119918
+        },
+        {
+          // INT8-ConvRot tier (sc-9300, epic 9083) — candle-ONLY (Windows/Linux; NOT macOS/mlx). The
+          // community INT8-ConvRot DiT (online-rotation IGEMM, sc-9601: PSNR 34.4 dB vs bf16, > Q4's
+          // 22.7 dB) hosted PRIVATELY at `SceneWorks/krea-2-turbo-int8-convrot` as a single 13.5 GB
+          // `krea2_turbo_int8_convrot.safetensors`. It REPLACES only the DiT — the rest of the surface
+          // (tokenizer / Qwen3-VL TE / Qwen-Image VAE / config) comes from the canonical bf16 Krea 2
+          // snapshot, which the worker fetches on-demand when this tier is selected. The LoadSpec
+          // the worker builds is `weights = Dir(<bf16 snapshot root>)` + `text_encoder =
+          // File(<convrot .safetensors>)` (see `image_jobs/base.rs resolve_krea_convrot`). Authed HF
+          // download (SceneWorks token, like every private SceneWorks repo). `platforms` OMITS macos so
+          // the Mac picker never lists it; the worker's sm_89 compute-cap capability + the candle
+          // `vramGbByTier.int8-convrot` gate hide it on ineligible cards.
+          // The ConvRot download pulls ONLY the DiT single-file. The canonical bf16 Krea 2 snapshot
+          // (`SceneWorks/krea-2-turbo-mlx` `bf16/` subdir) supplies the non-quantized surface (tokenizer
+          // / Qwen3-VL TE / Qwen-Image VAE / config) the ConvRot LoadSpec `Dir` root points at; the
+          // worker fetches it on-demand when this tier is selected (`ensure_krea_convrot_base_present`,
+          // the sibling of `ensure_boogu_tier_present`) rather than forcing it on q4/q8 users via a
+          // global co-requisite. `platforms` OMITS macos so the Mac picker never lists this tier.
+          "provider": "huggingface",
+          "repo": "SceneWorks/krea-2-turbo-int8-convrot",
+          "variant": "int8-convrot",
+          "files": ["krea2_turbo_int8_convrot.safetensors"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 13500000000
         }
       ],
       "paths": {
@@ -2125,13 +2157,19 @@
       // measurement.
       "candle": {
         "minMemoryGb": 32,
-        "vramGbByTier": { "q4": 26.4, "q8": 31.0, "bf16": 44.0 },
+        // sc-9300: the INT8-ConvRot tier's VRAM ceiling. The int8 DiT is ~half the bf16 DiT, but the
+        // rest of the resident surface (Qwen3-VL-4B TE + Qwen-Image VAE) is unchanged and the online
+        // Hadamard rotation adds transient activation, so ESTIMATE it near the q8 tier (~31 GB) pending
+        // measurement. It gates the `int8-convrot` variant through the SAME per-tier memory-eligibility
+        // path as q4/q8/bf16 (the third of the three ConvRot gates; the candle lane + sm_89 compute-cap
+        // are the worker's `int8_convrot` capability).
+        "vramGbByTier": { "q4": 26.4, "q8": 31.0, "bf16": 44.0, "int8-convrot": 31.0 },
         "measured": false
       },
       "licenseUrl": "https://www.krea.ai/krea-2-licensing",
       "ui": {
         "label": "Krea 2 Turbo",
-        "description": "Krea 2 Turbo — Krea AI's from-scratch foundation image model, distilled to a fast few-step (~8), CFG-free variant: a 28-block single-stream rectified-flow DiT with a Qwen3-VL-4B text encoder, native MLX (Apple Silicon). Strong photorealism up to 2048². Pre-quantized Q8 (~20.5 GB download, default). Krea 2 Community License (non-commercial). Needs a 48 GB-class Mac.",
+        "description": "Krea 2 Turbo — Krea AI's from-scratch foundation image model, distilled to a fast few-step (~8), CFG-free variant: a 28-block single-stream rectified-flow DiT with a Qwen3-VL-4B text encoder, native MLX (Apple Silicon). Strong photorealism up to 2048². Pre-quantized Q8 (~20.5 GB download, default). Krea 2 Community License (non-commercial). Needs a 48 GB-class Mac. Candle (Windows/Linux) adds an INT8-ConvRot tier (online-rotation int8 DiT), an sm_89-exclusive visibility feature: A/B @1024²/8-step — bf16 ~8.8 s (reference, coherent) · Q4-packed ~9.8 s (PSNR 22.7 dB vs bf16, coherent) · INT8-ConvRot (coherent, PSNR 34.4 dB vs bf16 — visibly closer to full precision than Q4). Requires an RTX 40xx / RTX PRO Blackwell (sm_89+) GPU; hidden on Mac and pre-Ada cards.",
         "recommendedFor": ["text_to_image"],
         // PiD decoder (epic 7840, qwenimage latent space — Krea 2 Turbo reuses the Qwen
         // VAE) — optional per-generation VAE replacement, decode + 2K/4K SR; NC output.
