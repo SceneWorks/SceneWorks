@@ -304,16 +304,32 @@ pub(crate) fn segment_track_blocking(
     };
     let masks = outputs
         .iter()
-        .map(|frame| {
-            frame
-                .obj_ids
-                .iter()
-                .position(|&o| o == selected)
-                .map(|i| mask_to_frame(&frame.masks[i], MASK_GRID, width, height))
-                .unwrap_or_default()
-        })
-        .collect();
+        .map(|frame| frame_mask_for_object(frame, selected, width, height))
+        .collect::<WorkerResult<Vec<_>>>()?;
     Ok(masks)
+}
+
+/// Emit the selected object's binary mask on one SAM3 frame, or an empty vec when the object
+/// isn't present (legitimate per-frame absence → orchestrator box-fallback). Guards the
+/// `obj_ids`/`masks` parallel-vec assumption: an id present in `obj_ids` but with no matching
+/// entry in `masks` is a malformed engine output, surfaced as an `Engine` error rather than
+/// indexing OOB (sc-8905, F-103).
+fn frame_mask_for_object(
+    frame: &VideoFrameOutput,
+    selected: i32,
+    width: u32,
+    height: u32,
+) -> WorkerResult<Vec<u8>> {
+    let Some(i) = frame.obj_ids.iter().position(|&o| o == selected) else {
+        return Ok(Vec::new());
+    };
+    let logits = frame.masks.get(i).ok_or_else(|| {
+        WorkerError::Engine(format!(
+            "sam3 frame has obj id {selected} at index {i} but only {} masks",
+            frame.masks.len()
+        ))
+    })?;
+    mask_to_frame(logits, MASK_GRID, width, height)
 }
 
 /// Normalize an `[x1, y1, x2, y2]` pixel box (clamped to the image) to SAM3's `[cx, cy, w, h]`
@@ -441,7 +457,7 @@ pub(crate) fn segment_box_blocking(
         )
     })?;
     // Reuse the >0 binarize + resize-to-source path (inverts the 1008² squash back to the frame).
-    Ok(mask_to_frame(&grid_mask, grid, width, height))
+    mask_to_frame(&grid_mask, grid, width, height)
 }
 
 /// Smart-select POINT path (epic 6087, sc-6346): segment whatever lies under fg/bg click points on
@@ -514,7 +530,7 @@ pub(crate) fn segment_points_blocking(
         .map_err(|e| WorkerError::Engine(format!("sam3 mask read: {e}")))?
         .as_slice::<f32>()
         .to_vec();
-    Ok(mask_to_frame(&logits, grid, width, height))
+    mask_to_frame(&logits, grid, width, height)
 }
 
 /// Segment + track every "person" across already-decoded RGB `frames` with the SAM3 text-concept
@@ -623,6 +639,10 @@ pub(crate) fn segment_all_persons_in_memory(
             .then(a.cmp(b))
     });
 
+    // `zip` already bounds to the shorter of obj_ids/masks, so the parallel-vec assumption is
+    // safe here; `mask_to_frame` now returns an `Engine` error on a malformed (grid-mismatched)
+    // mask instead of the empty-vec sentinel, so propagate rather than silently dropping it
+    // (sc-8905, F-103).
     let per_frame = outputs
         .iter()
         .map(|frame| {
@@ -630,11 +650,10 @@ pub(crate) fn segment_all_persons_in_memory(
                 .obj_ids
                 .iter()
                 .zip(&frame.masks)
-                .map(|(oid, logits)| (*oid, mask_to_frame(logits, MASK_GRID, width, height)))
-                .filter(|(_, mask)| !mask.is_empty())
-                .collect()
+                .map(|(oid, logits)| Ok((*oid, mask_to_frame(logits, MASK_GRID, width, height)?)))
+                .collect::<WorkerResult<Vec<_>>>()
         })
-        .collect();
+        .collect::<WorkerResult<Vec<_>>>()?;
 
     Ok(AllPersonMasks {
         order,
@@ -729,6 +748,44 @@ mod tests {
             matches!(result, Err(WorkerError::InvalidPayload(ref m)) if m.contains("length mismatch")),
             "expected InvalidPayload length mismatch, got {result:?}"
         );
+    }
+
+    /// sc-8905 / F-103: `frame_mask_for_object` guards the obj_ids/masks parallel-vec
+    /// assumption. An id present in `obj_ids` but with no matching `masks` entry (a malformed
+    /// engine output) surfaces an `Engine` error instead of indexing OOB; an absent id returns
+    /// an empty vec (legitimate per-frame absence); a well-formed pair produces a mask.
+    #[test]
+    fn frame_mask_for_object_guards_parallel_vecs() {
+        // obj id 5 is present but `masks` is empty → parallel-vec violation → Engine error.
+        let malformed = VideoFrameOutput {
+            obj_ids: vec![5],
+            masks: vec![],
+        };
+        let err = frame_mask_for_object(&malformed, 5, 8, 8);
+        assert!(
+            matches!(err, Err(WorkerError::Engine(ref m)) if m.contains("masks")),
+            "obj id without a mask must error, got {err:?}"
+        );
+
+        // Selected object absent from this frame → empty vec (box-fallback), not an error.
+        let absent = VideoFrameOutput {
+            obj_ids: vec![9],
+            masks: vec![vec![-1.0f32; MASK_GRID * MASK_GRID]],
+        };
+        let empty = frame_mask_for_object(&absent, 5, 8, 8).expect("absent object is not an error");
+        assert!(
+            empty.is_empty(),
+            "absent object → empty mask (box fallback)"
+        );
+
+        // Well-formed pair → a real binary mask at the requested dims.
+        let present = VideoFrameOutput {
+            obj_ids: vec![5],
+            masks: vec![vec![1.0f32; MASK_GRID * MASK_GRID]],
+        };
+        let mask = frame_mask_for_object(&present, 5, 8, 8).expect("well-formed mask");
+        assert_eq!(mask.len(), 64, "mask sized to width*height");
+        assert!(mask.iter().all(|&v| v == 0 || v == 255), "mask is binary");
     }
 
     #[test]
