@@ -16,6 +16,15 @@
 //! `records_payload`. Everything else — the cancel/heartbeat handling reconciled in sc-8835 (F-035) —
 //! lives here so a future analysis job re-stamps a config, not ~400 lines of scaffold, and the cancel
 //! handling can only ever be fixed in one place.
+//!
+//! **Training is intentionally out of scope** (sc-9541, F-034 follow-up). `training_jobs`'
+//! `consume_training_events` supervises a `spawn_blocking` producer with the same `CancelJoinGuard` +
+//! bounded-join teardown, but its channel carries a rich `TrainEvent`/`TrainingProgress` variant tree
+//! (not the bare per-item `usize` this scaffold streams), its progress spans five kernel bands (not the
+//! single `item_progress` ramp), its `Sample` events have file-persistence side effects, and it ends in
+//! an in-place `Done` result with NO sidecar POST. Folding it here would force this seam generic over an
+//! event type + an event→progress mapper + a stateful side-effect hook + a no-op sidecar branch, hurting
+//! clarity more than the duplication removed — see the no-fold rationale on `consume_training_events`.
 
 use super::*;
 
