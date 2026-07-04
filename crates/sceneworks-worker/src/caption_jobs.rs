@@ -760,7 +760,17 @@ mod tests {
         ]);
         let items = caption_items(&settings, &payload).expect("items parse");
         assert_eq!(items[0].item_id, "item_1");
-        assert_eq!(items[0].image_path, image_path);
+        // sc-9812: path confinement now canonicalizes the deepest existing ancestor
+        // before re-appending the (not-yet-created) tail, so the resolved image path
+        // is expressed via the canonical tempdir root (on macOS `/var` -> `/private/var`).
+        let expected = dir
+            .path()
+            .canonicalize()
+            .expect("tempdir canonicalizes")
+            .join("datasets")
+            .join("ds-1")
+            .join("image.png");
+        assert_eq!(items[0].image_path, expected);
         assert_eq!(items[0].trigger_words, vec!["miraStyle"]);
     }
 

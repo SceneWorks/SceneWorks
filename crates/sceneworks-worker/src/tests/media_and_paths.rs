@@ -147,7 +147,12 @@ fn model_destinations_are_constrained_to_data_models() {
     let temp = tempdir().expect("tempdir creates");
     let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
     settings.data_dir = temp.path().to_path_buf();
-    let models_root = super::normalize_absolute_path(&temp.path().join("models"))
+    // sc-9812: the confinement helpers canonicalize the deepest existing ancestor of a
+    // (possibly not-yet-created) target, so the returned path is expressed via the
+    // canonical data-dir root (on macOS `/var` -> `/private/var`). Build the expected
+    // prefix from the canonical tempdir so `starts_with` matches.
+    let canonical_root = temp.path().canonicalize().expect("tempdir canonicalizes");
+    let models_root = super::normalize_absolute_path(&canonical_root.join("models"))
         .expect("models root normalizes");
     let fallback = temp.path().join("models").join("fallback");
 
@@ -325,6 +330,69 @@ fn app_managed_helpers_resolve_symlinks_before_root_check() {
     std::fs::create_dir_all(&real).expect("real model dir creates");
     super::normalize_app_managed_model_path(&settings, &real.display().to_string(), "Model")
         .expect("a real managed dir is still accepted");
+}
+
+// sc-9812 / F-075 follow-up: the sc-8877 fix canonicalizes before the confinement
+// check, but `normalize_existing_or_absolute` fell back to purely-*lexical*
+// normalization whenever `canonicalize` returned `NotFound` — which fires as soon as
+// the *leaf* is absent, even if an *intermediate* directory is a symlink escaping the
+// root. So `<data>/loras/evil-symlink/newdir` (evil-symlink -> outside, newdir not yet
+// created) resolved lexically and still satisfied `starts_with(<data>)`. The fix
+// canonicalizes the deepest existing ancestor (resolving the intermediate symlink)
+// before re-appending the missing tail, so the confinement check now catches it.
+#[cfg(unix)]
+#[test]
+fn intermediate_dir_symlink_escape_with_nonexistent_leaf_is_rejected() {
+    let temp = tempdir().expect("tempdir creates");
+    let data_dir = temp.path().join("data");
+    let loras_dir = data_dir.join("loras");
+    let outside_dir = temp.path().join("outside");
+    std::fs::create_dir_all(&loras_dir).expect("loras dir creates");
+    std::fs::create_dir_all(&outside_dir).expect("outside dir creates");
+
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.data_dir = data_dir.clone();
+
+    // 1. A normal not-yet-existing leaf under the root still resolves and passes.
+    let fresh_leaf = loras_dir.join("brand-new-dir");
+    let normalized =
+        super::normalize_app_managed_path(&settings, &fresh_leaf.display().to_string(), "Path")
+            .expect("a not-yet-created leaf under the root is still accepted");
+    // The resolved path stays under the (canonicalized) managed root.
+    assert!(normalized.starts_with(
+        data_dir
+            .canonicalize()
+            .expect("data dir canonicalizes")
+    ));
+
+    // 2. An existing valid path under the root still passes.
+    let existing = loras_dir.join("existing-dir");
+    std::fs::create_dir_all(&existing).expect("existing dir creates");
+    super::normalize_app_managed_path(&settings, &existing.display().to_string(), "Path")
+        .expect("an existing dir under the root is still accepted");
+
+    // 3. The exploit: an *intermediate* directory symlink escaping the root, with a
+    //    nonexistent leaf beyond it. Pre-fix this passed the lexical `starts_with`.
+    let outside_target = outside_dir.join("escape");
+    std::fs::create_dir_all(&outside_target).expect("outside target creates");
+    let evil_symlink = loras_dir.join("evil-symlink");
+    std::os::unix::fs::symlink(&outside_target, &evil_symlink).expect("symlink creates");
+    let escaped = evil_symlink.join("newdir"); // newdir does not exist yet
+    let err =
+        super::normalize_app_managed_path(&settings, &escaped.display().to_string(), "Path")
+            .expect_err("intermediate-symlink escape with a nonexistent leaf rejects");
+    assert!(err.to_string().contains("app-managed directory"));
+
+    // 4. Regression guard for sc-8877: a *leaf* symlink escape is still rejected.
+    let leaf_symlink = loras_dir.join("leaf-escape");
+    std::os::unix::fs::symlink(&outside_target, &leaf_symlink).expect("symlink creates");
+    let err = super::normalize_app_managed_path(
+        &settings,
+        &leaf_symlink.display().to_string(),
+        "Path",
+    )
+    .expect_err("leaf-symlink escape still rejects");
+    assert!(err.to_string().contains("app-managed directory"));
 }
 
 // sc-8821 / F-019: payload-supplied weight filenames (`advanced.controlWeights.filename`,
