@@ -28,6 +28,14 @@
 /// `QwenFunControl` engine already packed-detects the overlay (sc-9869), so nothing downstream changes.
 /// Same repo the MLX path uses (`qwen.rs` — the shared `STRICT_CONTROL_ENGINES` `qwen_image_control` row).
 const QWEN_CONTROL_REPO: &str = "SceneWorks/qwen-image-2512-fun-controlnet-union";
+/// Pinned revision for the default `QWEN_CONTROL_REPO` (sc-9879, F-077 follow-up). Fetching the mutable
+/// `main` branch means a re-push (or a compromised token) could silently swap the ControlNet overlay we
+/// load; pin the exact commit for defense-in-depth (mirrors the other candle control lanes, e.g.
+/// `FLUX1_CONTROL_CANDLE_REVISION`). Applied ONLY to the default repo — a manifest/user
+/// `controlWeights.repo` override keeps `main`. The pin is the packed-tier repo's `main` HEAD as of the
+/// sc-9870 repoint. HF's tree API still reports each tier file's `lfs.oid`, which `ensure_hf_cached_file`
+/// verifies against.
+const QWEN_CONTROL_REVISION: &str = "a061fbc42a4744d6a7ec206370fbd3a37d4a7cca";
 /// The single packed control file inside each tier subdir (`q4/`, `q8/`, `bf16/`). Deterministic —
 /// the packed tier ships exactly one `model.safetensors` per subdir, so the sc-8350 two-overlay
 /// ambiguity is naturally resolved.
@@ -189,12 +197,18 @@ async fn ensure_qwen_control_weights(
         .join("cache")
         .join("controlnet-qwen")
         .join(&file);
-    // sc-9879 pinned this fetch to a fixed commit, but sc-9870 (merged concurrently) repointed
-    // `QWEN_CONTROL_REPO` from `alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union` to the first-party
-    // SceneWorks PACKED tier (`SceneWorks/qwen-image-2512-fun-controlnet-union`) with a per-quant
-    // `<tier>/model.safetensors` layout. The old alibaba-pai SHA is invalid for the new repo, so this
-    // fetch is left on `main` here pending a re-pin to a verified SceneWorks packed-tier commit.
-    ensure_hf_cached_file(&context, &repo, "main", &file, &dst).await?;
+    // Pin the exact commit for the default control repo so `main` moving under us can't swap the
+    // ControlNet overlay (sc-9879). sc-9870 (merged concurrently) repointed `QWEN_CONTROL_REPO` from
+    // `alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union` to the first-party SceneWorks PACKED tier
+    // (`SceneWorks/qwen-image-2512-fun-controlnet-union`, per-quant `<tier>/model.safetensors`); the pin
+    // below is that repo's verified `main` HEAD. A manifest/user `controlWeights.repo` override may carry
+    // its own revision layout, so only pin when we're on the default repo.
+    let revision = if repo == QWEN_CONTROL_REPO {
+        QWEN_CONTROL_REVISION
+    } else {
+        "main"
+    };
+    ensure_hf_cached_file(&context, &repo, revision, &file, &dst).await?;
     Ok(dst)
 }
 

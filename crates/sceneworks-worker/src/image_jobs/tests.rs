@@ -8429,9 +8429,7 @@ fn mlx_control_and_distill_revisions_are_pinned_commits_not_main() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_control_revisions_are_pinned_commits_not_main() {
-    // NOTE: QWEN_CONTROL_REVISION was dropped during the sc-9879 rebase — sc-9870 repointed
-    // QWEN_CONTROL_REPO to the SceneWorks packed tier, invalidating the old alibaba-pai SHA. The
-    // qwen_control fetch is temporarily back on `main` pending a re-pin to a verified SceneWorks commit.
+    assert_pinned_revision("QWEN_CONTROL_REVISION", QWEN_CONTROL_REVISION);
     assert_pinned_revision("KOLORS_CONTROL_REVISION", KOLORS_CONTROL_REVISION);
     assert_pinned_revision("ZIMAGE_CTRL_REVISION", ZIMAGE_CTRL_REVISION);
     assert_pinned_revision("ZIMAGE_CTRL_BASE_REVISION", ZIMAGE_CTRL_BASE_REVISION);
