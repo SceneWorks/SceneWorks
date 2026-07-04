@@ -12,7 +12,6 @@ const requiredPaths = [
   "apps/rust-api/src/main.rs",
   "apps/desktop/Cargo.toml",
   "apps/desktop/src/main.rs",
-  "apps/worker/scene_worker/runtime.py",
   "crates/sceneworks-core/Cargo.toml",
   "crates/sceneworks-core/src/lib.rs",
   "Cargo.toml",

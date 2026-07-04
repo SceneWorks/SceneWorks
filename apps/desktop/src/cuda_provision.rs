@@ -12,8 +12,7 @@
 //! fetched lazily.
 //!
 //! The source is the PyPI `nvidia-*-cu12` + `onnxruntime-gpu` wheels (each a zip):
-//! exactly what build-sidecar.mjs / stage-onnxruntime-cuda.py harvested from, so the
-//! version-matched CUDA 12.9 runtime + the cuDNN/cuFFT/nvJitLink/nvRTC set
+//! the same version-matched CUDA 12.9 runtime + the cuDNN/cuFFT/nvJitLink/nvRTC set
 //! onnxruntime-gpu 1.26.0 was validated against (cuDNN 9.23 / cuFFT 11.4, sc-5496).
 //! URLs + sha256 are pinned (mirrors the pinned-URL pattern used elsewhere for
 //! reproducible downloads): resolved once from the PyPI JSON API and baked in below.
