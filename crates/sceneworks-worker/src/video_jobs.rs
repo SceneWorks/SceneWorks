@@ -5620,6 +5620,13 @@ fn ltx_available(request: &VideoRequest, settings: &Settings) -> bool {
 /// set — plus the bundled `gemma/` text encoder the engine reads via `$LTX_GEMMA_DIR`.
 #[cfg(target_os = "macos")]
 const LTX_BUNDLE_REPO: &str = "SceneWorks/ltx-2.3-mlx";
+/// Pinned revision for the fixed [`LTX_BUNDLE_REPO`] (sc-9879, F-077 follow-up). The bundle repo is a
+/// hard-coded const (no manifest/payload override reaches this on-demand `q8/*` fetch), so pulling the
+/// mutable `main` branch would let an upstream re-push silently swap the Q8 checkpoint we load. Pin the
+/// exact commit for defense-in-depth (mirrors the SeedVR2/Real-ESRGAN pins, sc-8879/sc-9682). The `hf`
+/// CLI still verifies each file's own hash on download.
+#[cfg(target_os = "macos")]
+const LTX_BUNDLE_REVISION: &str = "254989c3ca7ee691187647f350b112c0c448789d";
 
 /// Whether `dir` is a converted LTX snapshot **complete for the current engine** — it must
 /// carry the audio `vocoder` + I2V `vae_encoder` + single `upsampler`/`vae_decoder` the
@@ -5780,7 +5787,7 @@ async fn ensure_ltx_q8_present(
         settings,
         job,
         LTX_BUNDLE_REPO,
-        "main",
+        LTX_BUNDLE_REVISION,
         &files,
         &scratch,
     )
@@ -7732,6 +7739,30 @@ mod tests {
             SEEDVR2_REPO,
             crate::upscale_jobs::SEEDVR2_REPO,
             "video and image SeedVR2 must reference the same upstream mirror repo"
+        );
+    }
+
+    /// sc-9879 (F-077 follow-up): `ensure_ltx_q8_present` pulls `q8/*` from the FIXED SceneWorks LTX-2.3
+    /// bundle const (non-overridable here), so it must pin an exact commit rather than the mutable `main`
+    /// branch — an upstream re-push would otherwise silently swap the Q8 checkpoint we load. Lock the pin
+    /// to a real 40-hex lowercase commit id (mirrors the SeedVR2 format test above).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_bundle_revision_is_pinned_commit_not_main() {
+        assert_ne!(
+            LTX_BUNDLE_REVISION, "main",
+            "LTX q8 bundle must pin a fixed revision"
+        );
+        assert_eq!(
+            LTX_BUNDLE_REVISION.len(),
+            40,
+            "a pinned HF revision is a 40-char commit sha"
+        );
+        assert!(
+            LTX_BUNDLE_REVISION
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "the pinned revision must be lowercase hex"
         );
     }
 

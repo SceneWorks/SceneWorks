@@ -8480,3 +8480,12 @@ fn candle_ipadapter_and_pulid_revisions_are_pinned_commits_not_main() {
     );
     assert_eq!(pulid_candle_revision("some/override-repo"), "main");
 }
+
+/// The candle-only Krea 2 ConvRot bf16-base pin (`base.rs`, sc-9300 tier). Fetches the fixed
+/// `SceneWorks/krea-2-turbo-mlx` turnkey const on-demand; the repo is non-overridable here, so it must
+/// pin an exact commit rather than the mutable `main` branch (sc-9879, F-077 follow-up).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn krea_convrot_base_revision_is_pinned_commit_not_main() {
+    assert_pinned_revision("KREA_MLX_TURNKEY_REVISION", KREA_MLX_TURNKEY_REVISION);
+}

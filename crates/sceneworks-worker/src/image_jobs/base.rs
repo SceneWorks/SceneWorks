@@ -833,6 +833,13 @@ fn resolve_krea_convrot(
 /// The shared `krea-2-turbo-mlx` turnkey repo (its `bf16/` subdir supplies the ConvRot base surface).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const KREA_MLX_TURNKEY_REPO: &str = "SceneWorks/krea-2-turbo-mlx";
+/// Pinned revision for the fixed [`KREA_MLX_TURNKEY_REPO`] (sc-9879, F-077 follow-up). The repo is a
+/// hard-coded const (no manifest/payload override reaches this on-demand ConvRot-base fetch), so pulling
+/// the mutable `main` branch would let an upstream re-push silently swap the bf16 DiT / Qwen3-VL TE /
+/// Qwen-Image VAE we load. Pin the exact commit for defense-in-depth (mirrors the SeedVR2/Real-ESRGAN
+/// pins, sc-8879/sc-9682). The `hf` CLI still verifies each file's own hash on download.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const KREA_MLX_TURNKEY_REVISION: &str = "d009674080cc1bccf2b629d834c34bf5eccdb723";
 
 /// On-demand fetch of the canonical bf16 Krea 2 base surface for the INT8-ConvRot tier (sc-9300),
 /// the sibling of [`ensure_boogu_tier_present`]. The ConvRot catalog download pulls only the DiT
@@ -894,7 +901,7 @@ async fn fetch_krea_convrot_base(
         settings,
         job,
         KREA_MLX_TURNKEY_REPO,
-        "main",
+        KREA_MLX_TURNKEY_REVISION,
         &files,
         &scratch,
     )
