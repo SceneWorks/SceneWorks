@@ -29,20 +29,14 @@ use gen_core::{
     Conditioning, ControlKind, GenerationOutput, GenerationRequest, Image, LoadSpec, WeightsSource,
 };
 
+use super::smoke_support::{env_or, image_std};
+
 fn env_path(key: &str) -> PathBuf {
     PathBuf::from(
         std::env::var(key)
             .unwrap_or_else(|_| panic!("set ${key}"))
             .trim(),
     )
-}
-
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_string())
 }
 
 /// A synthetic single-channel-ish control fixture (a smooth top-to-bottom luminance ramp broadcast to
@@ -85,22 +79,6 @@ fn mean_abs_delta(a: &Image, b: &Image) -> f64 {
         .map(|(&x, &y)| (x as f64 - y as f64).abs())
         .sum::<f64>()
         / a.pixels.len() as f64
-}
-
-/// Mean per-pixel std-dev — a cheap "is the decode non-degenerate (not all-black/NaN)" floor.
-fn image_std(img: &Image) -> f64 {
-    let n = img.pixels.len() as f64;
-    if n == 0.0 {
-        return 0.0;
-    }
-    let mean = img.pixels.iter().map(|&p| p as f64).sum::<f64>() / n;
-    let var = img
-        .pixels
-        .iter()
-        .map(|&p| (p as f64 - mean).powi(2))
-        .sum::<f64>()
-        / n;
-    var.sqrt()
 }
 
 /// Render one image through the loaded `flux1_dev_control` generator with the given conditioning (empty =

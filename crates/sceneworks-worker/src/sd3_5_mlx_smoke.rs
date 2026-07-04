@@ -30,20 +30,14 @@
 //! `SD3_STEPS` (default per model: Large 28, Turbo 4, Medium 40); `SD3_PROMPT`; `SD3_OUT_DIR`
 //! (default `/tmp/sd3_5_smoke`).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use gen_core::{
     AdapterKind, AdapterSpec, GenerationOutput, GenerationRequest, Image, LoadSpec, Quant,
     WeightsSource,
 };
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_string())
-}
+use super::smoke_support::{env_or, save_png};
 
 /// `q4` -> Q4, `q8` -> Q8 (the manifest default for all three SD3.5 tiers). An unrecognized value
 /// panics with a clear hint rather than silently defaulting to Q8 (sc-8924): a hand-run tier
@@ -161,13 +155,6 @@ fn mean_neighbor_gradient(img: &Image) -> f64 {
         }
     }
     sum / cnt as f64
-}
-
-fn save_png(img: &Image, path: &Path) {
-    image::RgbImage::from_raw(img.width, img.height, img.pixels.clone())
-        .expect("rgb buffer")
-        .save(path)
-        .unwrap_or_else(|e| panic!("save {}: {e}", path.display()));
 }
 
 /// Drive the worker-lane load→generate seam for one SD3.5 engine id and assert a coherent image.

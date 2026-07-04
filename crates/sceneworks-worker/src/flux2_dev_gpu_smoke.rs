@@ -19,9 +19,11 @@
 //! cargo test -p sceneworks-worker --features backend-candle --release flux2_dev_candle_gpu_smoke -- --ignored --nocapture
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use gen_core::{GenerationOutput, GenerationRequest, Image, LoadSpec, Quant, WeightsSource};
+
+use super::smoke_support::{env_or, image_std, save_png};
 
 /// A synthetic RGB test image (a smooth diagonal gradient with a centered block) — enough to exercise
 /// the VAE encode + reference/control token path on real weights without shipping a fixture. The dev
@@ -54,17 +56,6 @@ fn env_path(key: &str) -> PathBuf {
             .unwrap_or_else(|_| panic!("set ${key}"))
             .trim(),
     )
-}
-
-fn env_or(key: &str, default: &str) -> String {
-    // Filter set-but-empty values so `FLUX2_DEV_STEPS=` (or a whitespace-only value) falls back to the
-    // default instead of feeding "" into a downstream `.parse()` and panicking (sc-8924: unify on the
-    // empty-filtering env_or the MLX-side smokes already use).
-    std::env::var(key)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_string())
 }
 
 /// The requested quant tier + its lowercase label (for the output filename). `q4` -> Q4 (the shipped
@@ -101,31 +92,6 @@ mod quant_tests {
         // A typo'd tier must NOT silently default (sc-8924) — it would record a bogus tier validation.
         let _ = parse_quant("q2");
     }
-}
-
-/// Mean per-pixel std-dev across the RGB channels — a cheap "is the image non-degenerate" check. The
-/// sc-7457 dev-quant bug (CUDA-Q4 matmul no-op at cap=80) produced an all-black decode whose std
-/// collapses toward 0; this guards that degenerate floor (the real quality call is the saved-PNG eyeball).
-fn image_std(img: &Image) -> f64 {
-    let n = img.pixels.len() as f64;
-    if n == 0.0 {
-        return 0.0;
-    }
-    let mean = img.pixels.iter().map(|&p| p as f64).sum::<f64>() / n;
-    let var = img
-        .pixels
-        .iter()
-        .map(|&p| (p as f64 - mean).powi(2))
-        .sum::<f64>()
-        / n;
-    var.sqrt()
-}
-
-fn save_png(img: &Image, path: &Path) {
-    image::RgbImage::from_raw(img.width, img.height, img.pixels.clone())
-        .expect("rgb buffer")
-        .save(path)
-        .unwrap_or_else(|e| panic!("save {}: {e}", path.display()));
 }
 
 #[test]

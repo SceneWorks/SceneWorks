@@ -52,7 +52,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use gen_core::{GenerationOutput, GenerationRequest, Image, LoadSpec, Quant, WeightsSource};
+use gen_core::{GenerationOutput, GenerationRequest, LoadSpec, Quant, WeightsSource};
+
+use super::smoke_support::{env_or, image_std};
 
 /// One-tier-per-process guard (sc-8925). The MLX memory counters + allocator peak high-water mark are
 /// PROCESS-GLOBAL and persist across tests in the same binary, so measuring a second tier in the same
@@ -60,14 +62,6 @@ use gen_core::{GenerationOutput, GenerationRequest, Image, LoadSpec, Quant, Weig
 /// asserts it was previously false — an unfiltered `cargo test … footprint -- --ignored` run (more than
 /// one tier in one process) now fails loudly instead of silently emitting corrupt `[[FOOTPRINT]]` lines.
 static FOOTPRINT_RAN: AtomicBool = AtomicBool::new(false);
-
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_string())
-}
 
 /// Locate a cached `SceneWorks/<repo>` turnkey snapshot whose `<tier>/` subdir carries the packed
 /// backbone file `sentinel` (e.g. `unet/diffusion_pytorch_model.safetensors`). Returns the `<tier>/`
@@ -125,23 +119,6 @@ fn quant_for(tier: &str) -> Option<Quant> {
         "q8" => Some(Quant::Q8),
         _ => None,
     }
-}
-
-/// Mean per-pixel std across the RGB buffer — the cheap "is the render non-degenerate?" floor so a
-/// broken decode doesn't silently produce a bogus footprint number.
-fn image_std(img: &Image) -> f64 {
-    let n = img.pixels.len() as f64;
-    if n == 0.0 {
-        return 0.0;
-    }
-    let mean = img.pixels.iter().map(|&p| p as f64).sum::<f64>() / n;
-    let var = img
-        .pixels
-        .iter()
-        .map(|&p| (p as f64 - mean).powi(2))
-        .sum::<f64>()
-        / n;
-    var.sqrt()
 }
 
 /// Run one real load + generation for `(model, tier)` at `dir`, sampling the MLX memory counters

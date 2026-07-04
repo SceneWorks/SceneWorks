@@ -23,6 +23,8 @@ use gen_core::{
     ReplacementMode, WeightsSource,
 };
 
+use super::smoke_support::env_or;
+
 fn env_path(key: &str) -> PathBuf {
     // Trim: a cmd `set VAR=value && ...` keeps the trailing space before `&&`.
     PathBuf::from(
@@ -30,17 +32,6 @@ fn env_path(key: &str) -> PathBuf {
             .unwrap_or_else(|_| panic!("set ${key}"))
             .trim(),
     )
-}
-
-fn env_or(key: &str, default: &str) -> String {
-    // Filter set-but-empty values so `SCAIL2_STEPS=` (or a whitespace-only value) falls back to the
-    // default instead of feeding "" into a downstream `.parse()` and panicking (sc-8924: unify on the
-    // empty-filtering env_or the MLX-side smokes already use).
-    std::env::var(key)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_string())
 }
 
 fn load_rgb(path: &Path) -> Image {
