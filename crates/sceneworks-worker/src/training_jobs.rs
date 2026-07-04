@@ -836,7 +836,19 @@ impl SamplePersister {
             ProjectStore::new(settings.data_dir.clone(), "worker")
                 .get_project(project_id)
                 .ok()
-                .map(|project| PathBuf::from(project.path))
+                // Canonicalize the project root with the SAME normalization the output
+                // path went through (`resolve_training_output_dir` -> `normalize_app_managed_path`
+                // -> `normalize_existing_or_absolute`). The project store persists `path`
+                // lexically (`data_dir.join(...).display()`), so on macOS it stays `/var/...`
+                // while `output_dir` resolves to `/private/var/...`; without this, the
+                // `strip_prefix(project_root)` in `write_training_sample` fails and every
+                // sample record silently loses its `relativePath` (sc-9812 / F-075 follow-up).
+                // The project dir always exists here (`find_project_path` requires it), so
+                // this canonicalizes fully; fall back to the lexical path if resolution fails.
+                .map(|project| {
+                    let lexical = PathBuf::from(project.path);
+                    normalize_existing_or_absolute(&lexical).unwrap_or(lexical)
+                })
         });
         let stem = Path::new(&plan.output.file_name)
             .file_stem()
@@ -2199,6 +2211,130 @@ mod tests {
         // The PNG must decode back to the source dimensions.
         let decoded = image::open(&png).expect("re-open png").to_rgb8();
         assert_eq!((decoded.width(), decoded.height()), (4, 2));
+    }
+
+    /// sc-9812 (F-075 follow-up) — INTEGRATION-level guard for the caller-symmetry regression the
+    /// unit test above cannot catch. `SamplePersister::new` derives its two `strip_prefix` operands
+    /// from DIFFERENT provenance: `output_dir` from `resolve_training_output_dir`
+    /// (`normalize_app_managed_path` -> `normalize_existing_or_absolute`, canonicalized) and
+    /// `project_root` from the project store (`get_project(...).path`, persisted LEXICALLY as
+    /// `data_dir.join(...).display()`). On macOS the app data dir under `/var/...` canonicalizes to
+    /// `/private/var/...`, so before the fix the two forms diverged and `write_training_sample`'s
+    /// `strip_prefix` dropped `relativePath` from every project-scoped sample record. We build the
+    /// project root the way `project_store` does (a real `create_project`), NOT a hand-matched
+    /// lexical pair, and assert the record's `relativePath` is populated and correct. This FAILS
+    /// before the `SamplePersister::new` canonicalization and PASSES after.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn sample_persister_populates_relative_path_for_project_store_provisioned_root() {
+        let data_dir = tempfile::tempdir().expect("data dir tempdir");
+        let settings = test_settings(data_dir.path());
+
+        // Provision the project exactly as production does: the store persists `path`
+        // lexically (`project_path.display().to_string()`), which on macOS keeps the
+        // `/var/...` form even though the real path resolves under `/private/var/...`.
+        let store = ProjectStore::new(settings.data_dir.to_path_buf(), "test");
+        let project = store
+            .create_project("Char Studio")
+            .expect("project provisions");
+
+        // Project-scoped output lives under the owning project's tree, the default scope.
+        // `resolve_training_output_dir` (via `normalize_app_managed_path`) canonicalizes it,
+        // so this is the operand whose form diverges from the lexical `project.path`.
+        let output_dir = PathBuf::from(&project.path).join("loras").join("lora-1");
+
+        let mut plan_value = plan_json(
+            data_dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &["x.png"],
+        );
+        plan_value["output"]["outputDir"] = json!(output_dir.display().to_string());
+        plan_value["output"]["fileName"] = json!("mychar.safetensors");
+        let plan = parse(plan_value);
+
+        let job: JobSnapshot = serde_json::from_value(json!({
+            "id": "job-1",
+            "type": "train_lora",
+            "status": "running",
+            "projectId": project.id,
+            "projectName": "Char Studio",
+            "payload": {},
+            "result": {},
+            "requestedGpu": "auto",
+            "assignedGpu": null,
+            "workerId": "test-worker",
+            "progress": 0.0,
+            "stage": "queued",
+            "message": "queued",
+            "error": null,
+            "etaSeconds": null,
+            "elapsedSeconds": null,
+            "attempts": 1,
+            "sourceJobId": null,
+            "duplicateOfJobId": null,
+            "cancelRequested": false,
+            "createdAt": "2026-07-04T00:00:00Z",
+            "updatedAt": "2026-07-04T00:00:00Z",
+            "startedAt": null,
+            "completedAt": null,
+            "canceledAt": null,
+            "lastHeartbeatAt": null
+        }))
+        .expect("job snapshot deserializes");
+
+        // Drive the REAL provenance — this is where the two operands are resolved.
+        let persister = SamplePersister::new(&settings, &job, &plan);
+        let resolved_output = persister
+            .output_dir
+            .clone()
+            .expect("output dir resolves under the projects tree");
+        let resolved_project_root = persister
+            .project_root
+            .clone()
+            .expect("project root resolves from the store");
+
+        let image = gen_core::Image {
+            width: 4,
+            height: 2,
+            pixels: vec![255u8, 0, 0]
+                .into_iter()
+                .cycle()
+                .take(4 * 2 * 3)
+                .collect(),
+        };
+        let record = write_training_sample(
+            Some(resolved_output.as_path()),
+            Some(resolved_project_root.as_path()),
+            &persister.stem,
+            250,
+            2,
+            "mychar, studio portrait",
+            image,
+            8,
+            1.5,
+        )
+        .expect("sample persists");
+
+        // The regression: before the fix, `strip_prefix(project_root)` fails on macOS and this
+        // key is absent. It must be present and project-root-relative (the shape the Training
+        // Studio resolves as `/api/v1/projects/<id>/files/<relativePath>`).
+        let relative = record
+            .get("relativePath")
+            .and_then(|value| value.as_str())
+            .expect("relativePath is populated for a project-scoped sample");
+        assert!(
+            !relative.is_empty(),
+            "relativePath must be non-empty, got {relative:?}"
+        );
+        assert_eq!(
+            relative, "loras/lora-1/samples/step-000250/mychar-step000250-2.png",
+            "relativePath must be project-root-relative"
+        );
     }
 
     /// Real-weights smoke (sc-4732 + sc-4764): load the Kolors trainer from the installed
