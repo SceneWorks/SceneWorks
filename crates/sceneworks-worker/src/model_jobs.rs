@@ -918,6 +918,12 @@ pub(crate) async fn run_model_convert_job(
     let quantize_only = payload_bool(&job.payload, "quantizeOnly");
     let quantize_bits = job.payload.get("quantizeBits").and_then(Value::as_u64);
 
+    // The active backend label (mlx on macOS, candle off-Mac, cpu fallback) so the user-facing
+    // conversion-cancel strings name the REAL backend instead of a hardcoded "MLX" (sc-9801, the
+    // F-114 follow-up to sc-8916). Same `backend_label(&settings.gpu_id)` mechanism the caption /
+    // training paths use.
+    let backend = backend_label(&settings.gpu_id).to_uppercase();
+
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
         api,
@@ -933,7 +939,12 @@ pub(crate) async fn run_model_convert_job(
         ),
     )
     .await?;
-    check_cancel(api, &job.id, "MLX conversion canceled before it started.").await?;
+    check_cancel(
+        api,
+        &job.id,
+        &format!("{backend} conversion canceled before it started."),
+    )
+    .await?;
 
     let Some(checkpoint_dir) = huggingface_snapshot_dir(&settings.data_dir, &source_repo) else {
         fail_job(
@@ -1023,7 +1034,12 @@ pub(crate) async fn run_model_convert_job(
     // weights), so honor cancel up front and run on a blocking thread. On any failure the partial
     // temp dir is removed so it can never be promoted by the atomic rename below. The Flux2 path's
     // borrowed vae/text-encoder/tokenizer are absolute symlinks that survive the rename.
-    check_cancel(api, &job.id, "MLX conversion canceled by user.").await?;
+    check_cancel(
+        api,
+        &job.id,
+        &format!("{backend} conversion canceled by user."),
+    )
+    .await?;
     let temp = temp_dir.clone();
     let outcome = match plan {
         ConvertPlan::Flux2 {
