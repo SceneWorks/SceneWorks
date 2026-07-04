@@ -196,12 +196,30 @@ fn yolox_preprocess(img: &RgbImage) -> (Vec<f32>, f32) {
 
 /// This YOLOX export bakes in NMS: `dets`(1,N,5)=[xyxy,score]. rtmlib's
 /// `shape[-1]==5` branch: boxes /= ratio, keep score > 0.3.
-fn yolox_decode(dets: &[f32], shape: &[i64], ratio: f32) -> Vec<Box4> {
+///
+/// The shape/length are validated against the `(…, N, 5)` contract before indexing
+/// (F-102): a mis-pinned ONNX export with a rank < 2 shape or a `dets` buffer shorter
+/// than `N*5` would panic on `shape[1]` / `dets[base + 4]` and unwind the async task;
+/// return an `Engine` error instead (sc-8904).
+fn yolox_decode(dets: &[f32], shape: &[i64], ratio: f32) -> WorkerResult<Vec<Box4>> {
     let mut out = Vec::new();
     if shape.last().copied() != Some(5) {
-        return out;
+        return Ok(out);
     }
-    let n = shape[1] as usize;
+    if shape.len() < 2 {
+        return Err(WorkerError::Engine(format!(
+            "yolox output rank {} < 2 (expected (…, N, 5))",
+            shape.len()
+        )));
+    }
+    let n = shape[1].max(0) as usize;
+    if dets.len() < n.saturating_mul(5) {
+        return Err(WorkerError::Engine(format!(
+            "yolox output has {} values but (N={n} × 5) needs {}",
+            dets.len(),
+            n.saturating_mul(5)
+        )));
+    }
     for i in 0..n {
         let base = i * 5;
         if dets[base + 4] > 0.3 {
@@ -213,7 +231,7 @@ fn yolox_decode(dets: &[f32], shape: &[i64], ratio: f32) -> Vec<Box4> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 /// Build the (1,3,PH,PW) BGR-normalized pose input for one bbox + return the
@@ -260,6 +278,12 @@ fn argmax(slice: &[f32]) -> (usize, f32) {
 }
 
 /// Decode SimCC outputs → 133 `[x, y, score]` in original px.
+///
+/// The SimCC-x shape/length are validated against the `(1, K, Wx)` contract before
+/// indexing (F-102): a mis-pinned RTMW export with a rank < 3 shape, `K == 0`, or a
+/// `simcc_x`/`simcc_y` buffer shorter than `K*Wx` / `K*Wy` would panic on `sx_shape[2]`
+/// or the per-keypoint slices and unwind the async task; return an `Engine` error
+/// instead (sc-8904).
 fn pose_decode(
     simcc_x: &[f32],
     sx_shape: &[i64],
@@ -268,13 +292,33 @@ fn pose_decode(
     cy: f32,
     sw: f32,
     sh: f32,
-) -> Vec<[f32; 3]> {
-    let k = sx_shape[1] as usize;
-    let wx = sx_shape[2] as usize;
+) -> WorkerResult<Vec<[f32; 3]>> {
+    if sx_shape.len() < 3 {
+        return Err(WorkerError::Engine(format!(
+            "rtmw simcc_x rank {} < 3 (expected (1, K, Wx))",
+            sx_shape.len()
+        )));
+    }
+    let k = sx_shape[1].max(0) as usize;
+    let wx = sx_shape[2].max(0) as usize;
+    if k == 0 {
+        return Err(WorkerError::Engine(
+            "rtmw simcc_x has 0 keypoints".to_owned(),
+        ));
+    }
     let wy = simcc_y.len() / k;
+    if simcc_x.len() < k.saturating_mul(wx) || simcc_y.len() < k.saturating_mul(wy) {
+        return Err(WorkerError::Engine(format!(
+            "rtmw simcc buffers too short: x has {} (needs {}), y has {} (needs {})",
+            simcc_x.len(),
+            k.saturating_mul(wx),
+            simcc_y.len(),
+            k.saturating_mul(wy)
+        )));
+    }
     let x0 = cx - sw / 2.0;
     let y0 = cy - sh / 2.0;
-    (0..k)
+    Ok((0..k)
         .map(|j| {
             let (xloc, mvx) = argmax(&simcc_x[j * wx..(j + 1) * wx]);
             let (yloc, mvy) = argmax(&simcc_y[j * wy..(j + 1) * wy]);
@@ -288,7 +332,7 @@ fn pose_decode(
             let py = (ly / SPLIT) / PH as f32 * sh + y0;
             [px, py, val]
         })
-        .collect()
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -305,7 +349,18 @@ struct PoseRecord {
 
 /// Convert one person's raw 133 `[x,y,score]` (original px) into the SceneWorks
 /// OpenPose record, normalized by (w,h). Mirrors `wholebody_to_openpose`.
-fn wholebody_to_openpose(kps: &[[f32; 3]], w: f32, h: f32) -> PoseRecord {
+///
+/// Requires the full COCO-WholeBody-133 keypoint set (F-102): the body/hand/face slices
+/// index `kps` up to 132, so a shorter buffer (a mis-pinned RTMW export with a different
+/// keypoint count) would panic on `kps[i]` and unwind the async task. Return an `Engine`
+/// error instead of indexing OOB (sc-8904).
+fn wholebody_to_openpose(kps: &[[f32; 3]], w: f32, h: f32) -> WorkerResult<PoseRecord> {
+    if kps.len() < 133 {
+        return Err(WorkerError::Engine(format!(
+            "rtmw decode produced {} keypoints, expected 133 (COCO-WholeBody)",
+            kps.len()
+        )));
+    }
     let pt = |i: usize| [kps[i][0] / w, kps[i][1] / h, kps[i][2]];
     let seq = |lo: usize, hi: usize| (lo..hi).map(pt).collect::<Vec<_>>();
     let mut body = vec![[0.0f32; 3]; 18];
@@ -318,11 +373,11 @@ fn wholebody_to_openpose(kps: &[[f32; 3]], w: f32, h: f32) -> PoseRecord {
         (ls[1] + rs[1]) / 2.0 / h,
         ls[2].min(rs[2]),
     ];
-    PoseRecord {
+    Ok(PoseRecord {
         keypoints: body,
         hands: [seq(91, 112), seq(112, 133)],
         face: seq(23, 91),
-    }
+    })
 }
 
 /// Re-normalize a source-aspect pose into a centered `max(w,h)` SQUARE (pad short
@@ -534,10 +589,10 @@ impl Detector {
     fn detect(&mut self, img: &RgbImage) -> WorkerResult<Vec<Vec<[f32; 3]>>> {
         let (din, ratio) = yolox_preprocess(img);
         let dout = run(&mut self.det, [1, 3, DET as i64, DET as i64], din)?;
-        let boxes = dout
-            .first()
-            .map(|(shape, data)| yolox_decode(data, shape, ratio))
-            .unwrap_or_default();
+        let boxes = match dout.first() {
+            Some((shape, data)) => yolox_decode(data, shape, ratio)?,
+            None => Vec::new(),
+        };
         let mut people = Vec::new();
         for b in &boxes {
             let (pin, cx, cy, sw, sh) = pose_preprocess(img, b);
@@ -559,7 +614,7 @@ impl Detector {
                 cy,
                 sw,
                 sh,
-            ));
+            )?);
         }
         Ok(people)
     }
@@ -1090,15 +1145,15 @@ async fn run_pose_detect_inner(
                     .people
                     .iter()
                     .map(|kps| {
-                        let rec = squareify(&wholebody_to_openpose(kps, w, h), w, h);
+                        let rec = squareify(&wholebody_to_openpose(kps, w, h)?, w, h);
                         let bb = bbox(
                             &[&rec.keypoints, &rec.hands[0], &rec.hands[1], &rec.face],
                             min_conf,
                         );
                         let area = bb.map_or(0.0, |b| (b[2] - b[0]) * (b[3] - b[1]));
-                        (area, rec, bb)
+                        Ok((area, rec, bb))
                     })
-                    .collect();
+                    .collect::<WorkerResult<Vec<_>>>()?;
                 ordered
                     .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 

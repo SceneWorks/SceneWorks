@@ -15,7 +15,7 @@ fn wholebody_to_openpose_maps_indices_and_computes_neck() {
     kps[0] = [100.0, 10.0, 5.0]; // nose -> op 0
     kps[5] = [80.0, 40.0, 4.0]; // l_sho -> op 5
     kps[6] = [120.0, 50.0, 6.0]; // r_sho -> op 6
-    let rec = wholebody_to_openpose(&kps, 200.0, 100.0);
+    let rec = wholebody_to_openpose(&kps, 200.0, 100.0).expect("133 keypoints convert");
     // nose normalized
     assert!(approx(rec.keypoints[0][0], 0.5, 1e-6));
     assert!(approx(rec.keypoints[0][1], 0.1, 1e-6));
@@ -106,12 +106,26 @@ fn yolox_decode_embedded_nms_branch() {
         10.0, 20.0, 30.0, 40.0, 0.9, // keep
         1.0, 2.0, 3.0, 4.0, 0.1, // drop (score <= 0.3)
     ];
-    let boxes = yolox_decode(&dets, &[1, 2, 5], 0.5);
+    let boxes = yolox_decode(&dets, &[1, 2, 5], 0.5).expect("valid (N,5) decodes");
     assert_eq!(boxes.len(), 1);
     assert!(approx(boxes[0].x1, 20.0, 1e-6));
     assert!(approx(boxes[0].y2, 80.0, 1e-6));
     // non-NMS shape (last dim != 5) -> empty (we only ship the embedded-NMS export)
-    assert!(yolox_decode(&[0.0; 85], &[1, 1, 85], 1.0).is_empty());
+    assert!(yolox_decode(&[0.0; 85], &[1, 1, 85], 1.0)
+        .expect("non-5 last dim is a benign empty")
+        .is_empty());
+}
+
+#[test]
+fn yolox_decode_rejects_truncated_output() {
+    // Last dim is 5 (the embedded-NMS branch) but the data buffer is shorter than N*5:
+    // (1,2,5) needs 10 values, hand it 5 → Engine error instead of an OOB panic (F-102).
+    let short = yolox_decode(&[0.0; 5], &[1, 2, 5], 1.0);
+    // `Box4` isn't `Debug`, so match the error shape directly rather than formatting.
+    assert!(
+        matches!(short, Err(WorkerError::Engine(_))),
+        "truncated yolox buffer must be rejected"
+    );
 }
 
 #[test]
@@ -126,7 +140,8 @@ fn pose_decode_argmax_and_rescale() {
     sy[2] = 7.0;
     // crop geometry: center (50,60), scale (PW, PH) so px = (loc/2)/PW*PW + x0.
     let (cx, cy, sw, sh) = (50.0f32, 60.0f32, PW as f32, PH as f32);
-    let kp = pose_decode(&sx, &[1, k as i64, wx as i64], &sy, cx, cy, sw, sh);
+    let kp = pose_decode(&sx, &[1, k as i64, wx as i64], &sy, cx, cy, sw, sh)
+        .expect("valid simcc decodes");
     assert_eq!(kp.len(), 1);
     // x: loc 2 -> 2/2=1 ; (1)/PW*sw + (cx - sw/2) = 1 + (50 - PW/2)
     let x0 = cx - sw / 2.0;
@@ -141,9 +156,39 @@ fn pose_decode_argmax_and_rescale() {
 fn pose_decode_negative_value_marks_missing() {
     let sx = vec![-1.0f32; 4];
     let sy = vec![-1.0f32; 4];
-    let kp = pose_decode(&sx, &[1, 1, 4], &sy, 50.0, 60.0, PW as f32, PH as f32);
+    let kp = pose_decode(&sx, &[1, 1, 4], &sy, 50.0, 60.0, PW as f32, PH as f32)
+        .expect("valid simcc decodes");
     // val <= 0 -> loc (-1,-1) -> negative rescaled coords, score <= 0
     assert!(kp[0][2] <= 0.0);
+}
+
+#[test]
+fn pose_decode_rejects_malformed_simcc() {
+    // Rank < 3 simcc_x shape → Engine error, not an OOB panic on sx_shape[2] (F-102).
+    let rank2 = pose_decode(&[0.0; 4], &[1, 4], &[0.0; 4], 0.0, 0.0, 1.0, 1.0);
+    assert!(
+        matches!(rank2, Err(WorkerError::Engine(_))),
+        "rank-2 simcc_x must be rejected, got {rank2:?}"
+    );
+    // Well-formed rank but simcc_x is shorter than K*Wx → Engine error.
+    let short = pose_decode(&[0.0; 2], &[1, 2, 4], &[0.0; 8], 0.0, 0.0, 1.0, 1.0);
+    assert!(
+        matches!(short, Err(WorkerError::Engine(_))),
+        "truncated simcc_x must be rejected, got {short:?}"
+    );
+}
+
+#[test]
+fn wholebody_to_openpose_rejects_short_keypoint_set() {
+    // Fewer than 133 keypoints (a mis-pinned RTMW export) → Engine error, not an OOB panic
+    // on the body/hand/face slices (F-102).
+    let short = vec![[0.0f32; 3]; 100];
+    let result = wholebody_to_openpose(&short, 200.0, 100.0);
+    // `PoseRecord` isn't `Debug`, so match the error shape directly rather than formatting.
+    assert!(
+        matches!(result, Err(WorkerError::Engine(msg)) if msg.contains("133")),
+        "100-keypoint buffer must be rejected with a 133-keypoint Engine error"
+    );
 }
 
 /// sc-5496 off-Mac GPU smoke (ignored — needs the real RTMW onnx weights + CUDA). Validates the
@@ -184,7 +229,11 @@ fn pose_detect_candle_real_weights_finds_person() {
         "expected at least one detected person"
     );
     let (w, h) = (src.width as f32, src.height as f32);
-    let rec = squareify(&wholebody_to_openpose(&src.people[0], w, h), w, h);
+    let rec = squareify(
+        &wholebody_to_openpose(&src.people[0], w, h).expect("133 keypoints convert"),
+        w,
+        h,
+    );
     assert_eq!(rec.keypoints.len(), 18);
 
     // Confident body points are normalized (not raw pixels) and land near the [0,1]
