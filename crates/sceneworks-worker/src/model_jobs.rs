@@ -1,5 +1,49 @@
 use super::*;
 
+/// Post the terminal `Completed` update for a Hugging Face cache download, building the shared
+/// `{<id_key>, repo, path, storage:"huggingface_cache", completedAt}` result object (F-116). Both
+/// model download paths (`modelId`) and the LoRA path (`loraId`) funnel through here so the result
+/// shape and completion wording stay in one place.
+async fn complete_hf_cache_download(
+    api: &ApiClient,
+    job: &JobSnapshot,
+    id_key: &str,
+    repo: &str,
+    cache_path: &Path,
+    message: &str,
+) -> WorkerResult<()> {
+    let mut result = JsonObject::new();
+    result.insert(
+        id_key.to_owned(),
+        job.payload.get(id_key).cloned().unwrap_or(Value::Null),
+    );
+    result.insert("repo".to_owned(), Value::String(repo.to_owned()));
+    result.insert(
+        "path".to_owned(),
+        Value::String(cache_path.display().to_string()),
+    );
+    result.insert(
+        "storage".to_owned(),
+        Value::String("huggingface_cache".to_owned()),
+    );
+    result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            message,
+            None,
+            Some(result),
+            None,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn run_model_download_job(
     api: &ApiClient,
     settings: &Settings,
@@ -63,33 +107,13 @@ pub(crate) async fn run_model_download_job(
         if !reconcile_downloaded_model_family(api, job, &cache_path).await? {
             return Ok(());
         }
-        let mut result = JsonObject::new();
-        result.insert(
-            "modelId".to_owned(),
-            job.payload.get("modelId").cloned().unwrap_or(Value::Null),
-        );
-        result.insert("repo".to_owned(), Value::String(repo.to_owned()));
-        result.insert(
-            "path".to_owned(),
-            Value::String(cache_path.display().to_string()),
-        );
-        result.insert(
-            "storage".to_owned(),
-            Value::String("huggingface_cache".to_owned()),
-        );
-        result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
-        update_job(
+        complete_hf_cache_download(
             api,
-            &job.id,
-            progress_payload(
-                JobStatus::Completed,
-                ProgressStage::Completed,
-                1.0,
-                "Model download completed in the Hugging Face cache.",
-                None,
-                Some(result),
-                None,
-            ),
+            job,
+            "modelId",
+            repo,
+            &cache_path,
+            "Model download completed in the Hugging Face cache.",
         )
         .await?;
         return Ok(());
@@ -156,36 +180,15 @@ pub(crate) async fn run_model_download_job(
         return Ok(());
     }
 
-    let mut result = JsonObject::new();
-    result.insert(
-        "modelId".to_owned(),
-        job.payload.get("modelId").cloned().unwrap_or(Value::Null),
-    );
-    result.insert("repo".to_owned(), Value::String(repo.to_owned()));
-    result.insert(
-        "path".to_owned(),
-        Value::String(cache_path.display().to_string()),
-    );
-    result.insert(
-        "storage".to_owned(),
-        Value::String("huggingface_cache".to_owned()),
-    );
-    result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
-    update_job(
+    complete_hf_cache_download(
         api,
-        &job.id,
-        progress_payload(
-            JobStatus::Completed,
-            ProgressStage::Completed,
-            1.0,
-            "Model download completed in the Hugging Face cache.",
-            None,
-            Some(result),
-            None,
-        ),
+        job,
+        "modelId",
+        repo,
+        &cache_path,
+        "Model download completed in the Hugging Face cache.",
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 /// Download a built-in catalog LoRA's Hugging Face repo/file into the shared HF cache
@@ -288,36 +291,15 @@ pub(crate) async fn run_lora_download_job(
     .await?;
     let cache_path = huggingface_snapshot_dir(&settings.data_dir, repo).unwrap_or(repo_dir);
 
-    let mut result = JsonObject::new();
-    result.insert(
-        "loraId".to_owned(),
-        job.payload.get("loraId").cloned().unwrap_or(Value::Null),
-    );
-    result.insert("repo".to_owned(), Value::String(repo.to_owned()));
-    result.insert(
-        "path".to_owned(),
-        Value::String(cache_path.display().to_string()),
-    );
-    result.insert(
-        "storage".to_owned(),
-        Value::String("huggingface_cache".to_owned()),
-    );
-    result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
-    update_job(
+    complete_hf_cache_download(
         api,
-        &job.id,
-        progress_payload(
-            JobStatus::Completed,
-            ProgressStage::Completed,
-            1.0,
-            "LoRA download completed in the Hugging Face cache.",
-            None,
-            Some(result),
-            None,
-        ),
+        job,
+        "loraId",
+        repo,
+        &cache_path,
+        "LoRA download completed in the Hugging Face cache.",
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 /// A base model whose upstream snapshot omits the HF **fast** `tokenizer.json` the in-process Rust
