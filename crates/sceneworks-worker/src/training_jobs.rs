@@ -640,7 +640,7 @@ async fn run_training_execution(
 
     let engine_id = engine_trainer_id(plan).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
-            "No MLX trainer for kernel '{}' (base model '{}').",
+            "No native trainer for kernel '{}' (base model '{}').",
             plan.target.kernel, plan.target.base_model
         ))
     })?;
@@ -986,6 +986,7 @@ async fn consume_training_events(
                     &sample_cfg.sample_prompts,
                     sample_cfg.sample_steps,
                     sample_cfg.sample_guidance_scale,
+                    backend,
                 );
                 update_job(
                     api,
@@ -1226,6 +1227,7 @@ fn training_result(
     sample_prompts: &[String],
     sample_steps: u32,
     sample_guidance_scale: f32,
+    backend: &str,
 ) -> JsonObject {
     let mut result = JsonObject::new();
     result.insert("mode".to_owned(), json!("train"));
@@ -1258,7 +1260,10 @@ fn training_result(
     result.insert("resolution".to_owned(), json!(plan.config.resolution));
     result.insert("triggerWords".to_owned(), json!(plan.output.trigger_words));
     result.insert("planVersion".to_owned(), json!(plan.plan_version));
-    result.insert("backend".to_owned(), json!("mlx"));
+    // Record the REAL backend that ran the training (mlx on macOS, candle off-Mac, cpu fallback),
+    // not a hardcoded "mlx" — off-Mac candle runs otherwise stamped the wrong provenance (sc-8916,
+    // F-114).
+    result.insert("backend".to_owned(), json!(backend));
     // sc-5637 — fold the preview samples into the final result so they persist on the completed job
     // (the streamed updates are transient). `latestTrainingSamples` is left empty on completion (the
     // UI unions `trainingSamples` + `latestTrainingSamples`, so the cumulative list is sufficient).
