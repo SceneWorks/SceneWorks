@@ -2113,9 +2113,18 @@ export function App() {
     [token],
   );
   // Keep the ref current for the App-level scratch-op survivor (sc-8850), which purges
-  // from the SSE/sweep path without re-subscribing. Assigned here (after purgeAsset is
-  // defined) rather than in the hoisted ref block above, which runs before this const.
-  purgeAssetRef.current = purgeAsset;
+  // from the SSE/sweep path without re-subscribing. Published from a post-commit effect
+  // rather than the render body (sc-9641, following sc-8940): render-body ref mutation is
+  // unsafe because a discarded concurrent/StrictMode render could leave the ref pointing
+  // at an uncommitted closure. useLayoutEffect (no dep array) mirrors the sc-8940 refresh
+  // block above so the ref always holds the newest *committed* purgeAsset, and flushes
+  // before any passive effect on the same commit. `purgeAsset` is a useCallback([token]),
+  // so this only rewrites when the token changes. It lives here (not in the sc-8940 block)
+  // because purgeAsset is defined after it; the sole read site (the scratch registry's
+  // purge callback) fires from the SSE/sweep path — post-commit — never during render.
+  useLayoutEffect(() => {
+    purgeAssetRef.current = purgeAsset;
+  });
 
   const importAsset = useCallback(
     async (file, options = {}) => {
