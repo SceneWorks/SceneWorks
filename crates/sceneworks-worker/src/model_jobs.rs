@@ -919,9 +919,10 @@ pub(crate) async fn run_model_convert_job(
     let quantize_bits = job.payload.get("quantizeBits").and_then(Value::as_u64);
 
     // The active backend label (mlx on macOS, candle off-Mac, cpu fallback) so the user-facing
-    // conversion-cancel strings name the REAL backend instead of a hardcoded "MLX" (sc-9801, the
-    // F-114 follow-up to sc-8916). Same `backend_label(&settings.gpu_id)` mechanism the caption /
-    // training paths use.
+    // conversion progress / failure / completion / cancel strings name the REAL backend instead of a
+    // hardcoded "MLX" (sc-9801 fixed the cancel strings; sc-9863 extended it to the remaining
+    // progress/failure/completion strings — the F-114 follow-up to sc-8916). Same
+    // `backend_label(&settings.gpu_id)` mechanism the caption / training paths use.
     let backend = backend_label(&settings.gpu_id).to_uppercase();
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -932,7 +933,7 @@ pub(crate) async fn run_model_convert_job(
             JobStatus::Preparing,
             ProgressStage::Preparing,
             0.05,
-            &format!("Preparing MLX conversion for {model_id}."),
+            &format!("Preparing {backend} conversion for {model_id}."),
             None,
             None,
             None,
@@ -952,7 +953,7 @@ pub(crate) async fn run_model_convert_job(
             &job.id,
             "Native checkpoint is not downloaded.",
             Some(format!(
-                "Download {source_repo} before converting it to MLX."
+                "Download {source_repo} before converting it to {backend}."
             )),
         )
         .await?;
@@ -967,7 +968,7 @@ pub(crate) async fn run_model_convert_job(
         fail_job(
             api,
             &job.id,
-            "Quantize-only MLX conversion is no longer supported.",
+            &format!("Quantize-only {backend} conversion is no longer supported."),
             Some(
                 "In-place re-quantization of a pre-converted MLX model was removed with the legacy \
                  mlx-video converter (sc-3240). Convert the native checkpoint with quantization \
@@ -1022,7 +1023,7 @@ pub(crate) async fn run_model_convert_job(
             JobStatus::Running,
             ProgressStage::Running,
             0.2,
-            &format!("Converting {model_id} to MLX. This can take several minutes."),
+            &format!("Converting {model_id} to {backend}. This can take several minutes."),
             None,
             None,
             None,
@@ -1088,12 +1089,15 @@ pub(crate) async fn run_model_convert_job(
         Ok(Err(detail)) => {
             let _ = tokio::fs::remove_dir_all(&temp_dir).await;
             return Err(WorkerError::Engine(format!(
-                "MLX conversion failed. {detail}"
+                "{backend} conversion failed. {detail}"
             )));
         }
         Err(join_error) => {
             let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-            return Err(task_join_error("MLX conversion task", join_error));
+            return Err(task_join_error(
+                &format!("{backend} conversion task"),
+                join_error,
+            ));
         }
     }
 
@@ -1120,7 +1124,7 @@ pub(crate) async fn run_model_convert_job(
             JobStatus::Completed,
             ProgressStage::Completed,
             1.0,
-            "MLX conversion completed.",
+            &format!("{backend} conversion completed."),
             None,
             Some(result),
             None,
