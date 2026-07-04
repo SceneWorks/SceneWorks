@@ -54,6 +54,13 @@ describe("LogsScreen", () => {
     await act(async () => root.unmount());
     container.remove();
     vi.clearAllMocks();
+    // Belt-and-suspenders: guarantee fake-timer state can never escape this
+    // file. A fake-timer test that trips the per-test timeout skips its own
+    // `finally { vi.useRealTimers() }`, leaking mocked timers into the next
+    // test (which then throws "timers APIs are not mocked"). This unconditional
+    // restore runs even after a timed-out test, so the leak can't propagate
+    // (sc-9744).
+    vi.useRealTimers();
   });
 
   // Controlled <input>: set the value through the native setter React tracks,
@@ -182,33 +189,48 @@ describe("LogsScreen", () => {
     expect(snapshotPaths.some((path) => path.includes("limit=1000"))).toBe(false);
   });
 
-  it("finds a match beyond the first 1000 held rows (sc-8849)", async () => {
-    vi.useFakeTimers();
-    try {
-      // Simulate a full server buffer: 5000 rows, with the unique needle living
-      // deep in the tail (row 4200) — well past the old 1000-row snapshot window.
-      logRows = [];
-      for (let seq = 0; seq < 5000; seq += 1) {
-        const message = seq === 4200 ? "needle_deep_in_buffer marker" : "routine heartbeat tick";
-        logRows.push(row(seq, "api", "info", message, { event: "tick" }));
+  // A generous per-test timeout: rendering the multi-thousand-row buffer under
+  // fake timers is inherently heavy, and the default 5000ms was a razor-thin
+  // margin that tipped over on a busy machine (CI / parallel forks). A timeout
+  // here was the trigger for the whole flake — see sc-9744.
+  it(
+    "finds a match beyond the first 1000 held rows (sc-8849)",
+    async () => {
+      vi.useFakeTimers();
+      try {
+        // Simulate a server buffer larger than the old 1000-row snapshot window,
+        // with the unique needle living past that boundary (row 1200) — so a
+        // regression back to the 1000-row tail would drop it. 1500 rows keeps the
+        // "beyond 1000 held rows" invariant while rendering far less DOM than the
+        // full 5000-row capacity, which is what pushed this test over the default
+        // timeout (sc-9744).
+        const ROW_COUNT = 1500;
+        const NEEDLE_SEQ = 1200; // > 1000, so it lives beyond the old snapshot window
+        logRows = [];
+        for (let seq = 0; seq < ROW_COUNT; seq += 1) {
+          const message =
+            seq === NEEDLE_SEQ ? "needle_deep_in_buffer marker" : "routine heartbeat tick";
+          logRows.push(row(seq, "api", "info", message, { event: "tick" }));
+        }
+        await render();
+        // Snapshot fetched all rows, so the deep row is actually held in memory.
+        expect(container.querySelectorAll(".logs-row").length).toBe(ROW_COUNT);
+
+        const input = container.querySelector("input.logs-search");
+        await typeSearch(input, "needle_deep_in_buffer");
+        await act(async () => {
+          vi.advanceTimersByTime(300);
+        });
+
+        const rows = container.querySelectorAll(".logs-row");
+        expect(rows.length).toBe(1);
+        expect(rows[0].textContent).toContain("needle_deep_in_buffer");
+      } finally {
+        vi.useRealTimers();
       }
-      await render();
-      // Snapshot fetched all 5000, so the deep row is actually held in memory.
-      expect(container.querySelectorAll(".logs-row").length).toBe(5000);
-
-      const input = container.querySelector("input.logs-search");
-      await typeSearch(input, "needle_deep_in_buffer");
-      await act(async () => {
-        vi.advanceTimersByTime(300);
-      });
-
-      const rows = container.querySelectorAll(".logs-row");
-      expect(rows.length).toBe(1);
-      expect(rows[0].textContent).toContain("needle_deep_in_buffer");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+    },
+    15000,
+  );
 
   it("clears the search filter and restores all rows (sc-8849)", async () => {
     vi.useFakeTimers();
