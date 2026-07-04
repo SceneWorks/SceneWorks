@@ -735,6 +735,18 @@ enum ConvertPlan {
     },
 }
 
+/// A user-facing reason a conversion can't proceed (missing checkpoint, unknown converter, …). The
+/// plan resolver returns this instead of calling `fail_job` itself, so the resolution phase names the
+/// failure condition once and [`run_model_convert_job`] performs the single `fail_job` + early return
+/// — replacing the eight scattered `fail_job(...).await?; return Ok(())` pairs the resolver used to
+/// interleave with plan construction (sc-8921, F-119).
+struct ConvertPlanError {
+    /// The short `fail_job` message (the failure headline).
+    message: &'static str,
+    /// The `fail_job` detail (the actionable explanation), always present for these conditions.
+    detail: String,
+}
+
 /// The SD3.5 MMDiT variant a `sd3_5_*_quant` conversion targets — a target-neutral mirror of
 /// `mlx_gen_sd3::Sd3Variant` (which is macOS-only), so [`ConvertPlan`] stays buildable on every
 /// target. The macOS converter maps it back to the engine variant in [`convert_sd3_prequant`].
@@ -746,6 +758,146 @@ enum Sd3Variant {
     LargeTurbo,
     /// `sd3_5_medium_quant` — SD3.5 Medium (2.5B MMDiT-X, dual-attention first 13 blocks).
     Medium,
+}
+
+/// Resolve the native [`ConvertPlan`] for a convert job from its `converter` discriminator, or a
+/// [`ConvertPlanError`] naming why it can't proceed (missing source file, base model not installed,
+/// unknown converter, …). Split out of [`run_model_convert_job`] (sc-8921, F-119): the converter-arm
+/// match used to interleave eight `fail_job(...).await?; return Ok(())` side-effects with plan
+/// construction inside the 350-line job body; here each becomes an `Err(ConvertPlanError)` value and
+/// the caller performs the SINGLE `fail_job`. Still async because the LTX arm may fetch the upscaler
+/// (`ensure_ltx_upscaler_cached`), and real infra errors (`?`) propagate as the outer `WorkerError`.
+async fn resolve_convert_plan(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    checkpoint_dir: &Path,
+    quantize_bits: Option<u64>,
+) -> WorkerResult<Result<ConvertPlan, ConvertPlanError>> {
+    // Re-read the payload discriminators the caller already validated (cheap, and keeps this resolver's
+    // arg list small): `modelId`/`sourceRepo` are required, `converter` optional (empty = the "no
+    // converter configured" failure arm).
+    let model_id = required_payload_string(&job.payload, "modelId")?;
+    let source_repo = required_payload_string(&job.payload, "sourceRepo")?;
+    let converter = optional_payload_string(&job.payload, "converter").unwrap_or_default();
+    let plan = match converter {
+        "flux2_klein_diffusers" => {
+            let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
+            let base_repo = required_payload_string(&job.payload, "baseRepo")?.to_owned();
+            let source_file = checkpoint_dir.join(&source_file_name);
+            if !source_file.is_file() {
+                return Ok(Err(ConvertPlanError {
+                    message: "Converted-model source file is missing.",
+                    detail: format!("Expected {source_file_name} in {source_repo}."),
+                }));
+            }
+            let Some(base_dir) = huggingface_snapshot_dir(&settings.data_dir, &base_repo) else {
+                return Ok(Err(ConvertPlanError {
+                    message: "Base FLUX.2-klein model is not installed.",
+                    detail: format!(
+                        "Install {base_repo} before converting {model_id} — its VAE, text encoder, \
+                         and tokenizer are reused."
+                    ),
+                }));
+            };
+            ConvertPlan::Flux2 {
+                source_file,
+                base_dir,
+            }
+        }
+        "ltx_video" => {
+            let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
+            let source_file = checkpoint_dir.join(&source_file_name);
+            if !source_file.is_file() {
+                return Ok(Err(ConvertPlanError {
+                    message: "LTX-2.3 source checkpoint file is missing.",
+                    detail: format!("Expected {source_file_name} in {source_repo}."),
+                }));
+            }
+            let upscaler_repo = required_payload_string(&job.payload, "baseRepo")?.to_owned();
+            let upscaler_file = optional_payload_string(&job.payload, "upscalerFile")
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(LTX_SPATIAL_UPSCALER_FILE)
+                .to_owned();
+            let Some(upscaler_dir) =
+                ensure_ltx_upscaler_cached(api, settings, job, &upscaler_repo, &upscaler_file)
+                    .await?
+            else {
+                return Ok(Err(ConvertPlanError {
+                    message: "LTX-2.3 spatial upscaler is unavailable.",
+                    detail: format!(
+                        "Could not obtain {upscaler_file} from {upscaler_repo}; install the base \
+                         LTX-2.3 model or check connectivity before converting {model_id}."
+                    ),
+                }));
+            };
+            // Default to the reference Q4 recipe when the manifest/request specifies no bits.
+            let bits = quantize_bits.map_or(4, |bits| bits as i32);
+            ConvertPlan::Ltx {
+                source_file,
+                upscaler_dir,
+                bits,
+            }
+        }
+        "flux2_dev_quant" => {
+            // FLUX.2-dev is self-contained (its own VAE/tokenizer/TE in the snapshot), so the whole
+            // gated diffusers snapshot dir is the convert source — no single source file, no base
+            // repo. Q4 is mandatory (in-app Q4 load of the dense bf16 would peak ~105 GB), so default
+            // to Q4 / group-size 64 when the request omits them.
+            let bits = quantize_bits.map_or(4, |bits| bits as i32);
+            let group_size = job
+                .payload
+                .get("quantizeGroupSize")
+                .and_then(Value::as_u64)
+                .map_or(64, |group| group as i32);
+            ConvertPlan::Flux2Dev {
+                source_dir: checkpoint_dir.to_path_buf(),
+                bits,
+                group_size,
+            }
+        }
+        // SD3.5 (epic 7841 / sc-7871) — the gated diffusers snapshot is self-contained (its own
+        // transformer/ + triple text encoder + tokenizer + VAE), so the whole snapshot dir is the
+        // convert source: pre-quantize ONLY the MMDiT transformer/ on disk and symlink the dense TE /
+        // VAE / tokenizer / scheduler / model_index.json through. Default Q8 / group-size 64 (the
+        // manifest `quantize: 8`, reference group size) when the request omits them. The converter id
+        // selects the MMDiT arch variant.
+        converter @ ("sd3_5_large_quant" | "sd3_5_large_turbo_quant" | "sd3_5_medium_quant") => {
+            let bits = quantize_bits.map_or(8, |bits| bits as i32);
+            let group_size = job
+                .payload
+                .get("quantizeGroupSize")
+                .and_then(Value::as_u64)
+                .map_or(64, |group| group as i32);
+            let variant = match converter {
+                "sd3_5_large_quant" => Sd3Variant::Large,
+                "sd3_5_large_turbo_quant" => Sd3Variant::LargeTurbo,
+                _ => Sd3Variant::Medium,
+            };
+            ConvertPlan::Sd3 {
+                source_dir: checkpoint_dir.to_path_buf(),
+                variant,
+                bits,
+                group_size,
+            }
+        }
+        "" => {
+            return Ok(Err(ConvertPlanError {
+                message: "No MLX converter is configured for this model.",
+                detail: format!(
+                    "{model_id} sets mlx.requiresConversion but no mlx.converter; the legacy \
+                     converter was retired (sc-3240)."
+                ),
+            }));
+        }
+        other => {
+            return Ok(Err(ConvertPlanError {
+                message: "Unknown MLX converter.",
+                detail: format!("Unrecognized mlx.converter '{other}' for {model_id}."),
+            }));
+        }
+    };
+    Ok(Ok(plan))
 }
 
 /// Convert a model's native checkpoint into the local MLX format on macOS/Apple Silicon, fully
@@ -810,16 +962,6 @@ pub(crate) async fn run_model_convert_job(
         return Ok(());
     };
 
-    // Converter discriminator (sc-2235 / sc-3224 / sc-3240). Every convert-required model now
-    // declares one in its manifest `mlx.converter`; there is NO Python fallback — the
-    // `mlx_video.convert_wan` subprocess and its mlx-video venv were retired at this cutover.
-    //   flux2_klein_diffusers          -> FLUX.2-klein single-file → diffusers dir (sc-3136)
-    //   ltx_video                      -> single-file LTX-2.3 → split MLX dir (mlx-gen-ltx)
-    //   flux2_dev_quant                -> FLUX.2-dev diffusers snapshot → packed Q4 dir (sc-5921)
-    let converter = optional_payload_string(&job.payload, "converter")
-        .map(str::to_owned)
-        .unwrap_or_default();
-
     // Quantize-only (re-quantize a pre-converted turnkey bf16 MLX dir) was a capability of the
     // Python `convert_wan --quantize-only` with no native equivalent; it is unreachable from the UI
     // and superseded by native-conversion-with-quant. Surface it explicitly rather than silently
@@ -840,149 +982,18 @@ pub(crate) async fn run_model_convert_job(
         return Ok(());
     }
 
-    let plan = match converter.as_str() {
-        "flux2_klein_diffusers" => {
-            let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
-            let base_repo = required_payload_string(&job.payload, "baseRepo")?.to_owned();
-            let source_file = checkpoint_dir.join(&source_file_name);
-            if !source_file.is_file() {
-                fail_job(
-                    api,
-                    &job.id,
-                    "Converted-model source file is missing.",
-                    Some(format!("Expected {source_file_name} in {source_repo}.")),
-                )
-                .await?;
+    // Converter discriminator (sc-2235 / sc-3224 / sc-3240). Every convert-required model declares one
+    // in its manifest `mlx.converter` (flux2_klein_diffusers / ltx_video / flux2_dev_quant / the SD3.5
+    // quant variants); there is NO Python fallback — the `mlx_video.convert_wan` subprocess was retired
+    // at this cutover. `resolve_convert_plan` reads the discriminator + source repo from the payload.
+    let plan =
+        match resolve_convert_plan(api, settings, job, &checkpoint_dir, quantize_bits).await? {
+            Ok(plan) => plan,
+            Err(ConvertPlanError { message, detail }) => {
+                fail_job(api, &job.id, message, Some(detail)).await?;
                 return Ok(());
             }
-            let Some(base_dir) = huggingface_snapshot_dir(&settings.data_dir, &base_repo) else {
-                fail_job(
-                    api,
-                    &job.id,
-                    "Base FLUX.2-klein model is not installed.",
-                    Some(format!(
-                        "Install {base_repo} before converting {model_id} — its VAE, text encoder, \
-                         and tokenizer are reused."
-                    )),
-                )
-                .await?;
-                return Ok(());
-            };
-            ConvertPlan::Flux2 {
-                source_file,
-                base_dir,
-            }
-        }
-        "ltx_video" => {
-            let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
-            let source_file = checkpoint_dir.join(&source_file_name);
-            if !source_file.is_file() {
-                fail_job(
-                    api,
-                    &job.id,
-                    "LTX-2.3 source checkpoint file is missing.",
-                    Some(format!("Expected {source_file_name} in {source_repo}.")),
-                )
-                .await?;
-                return Ok(());
-            }
-            let upscaler_repo = required_payload_string(&job.payload, "baseRepo")?.to_owned();
-            let upscaler_file = optional_payload_string(&job.payload, "upscalerFile")
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(LTX_SPATIAL_UPSCALER_FILE)
-                .to_owned();
-            let Some(upscaler_dir) =
-                ensure_ltx_upscaler_cached(api, settings, job, &upscaler_repo, &upscaler_file)
-                    .await?
-            else {
-                fail_job(
-                    api,
-                    &job.id,
-                    "LTX-2.3 spatial upscaler is unavailable.",
-                    Some(format!(
-                        "Could not obtain {upscaler_file} from {upscaler_repo}; install the base \
-                         LTX-2.3 model or check connectivity before converting {model_id}."
-                    )),
-                )
-                .await?;
-                return Ok(());
-            };
-            // Default to the reference Q4 recipe when the manifest/request specifies no bits.
-            let bits = quantize_bits.map_or(4, |bits| bits as i32);
-            ConvertPlan::Ltx {
-                source_file,
-                upscaler_dir,
-                bits,
-            }
-        }
-        "flux2_dev_quant" => {
-            // FLUX.2-dev is self-contained (its own VAE/tokenizer/TE in the snapshot), so the whole
-            // gated diffusers snapshot dir is the convert source — no single source file, no base
-            // repo. Q4 is mandatory (in-app Q4 load of the dense bf16 would peak ~105 GB), so default
-            // to Q4 / group-size 64 when the request omits them.
-            let bits = quantize_bits.map_or(4, |bits| bits as i32);
-            let group_size = job
-                .payload
-                .get("quantizeGroupSize")
-                .and_then(Value::as_u64)
-                .map_or(64, |group| group as i32);
-            ConvertPlan::Flux2Dev {
-                source_dir: checkpoint_dir.clone(),
-                bits,
-                group_size,
-            }
-        }
-        // SD3.5 (epic 7841 / sc-7871) — the gated diffusers snapshot is self-contained (its own
-        // transformer/ + triple text encoder + tokenizer + VAE), so the whole snapshot dir is the
-        // convert source: pre-quantize ONLY the MMDiT transformer/ on disk and symlink the dense TE /
-        // VAE / tokenizer / scheduler / model_index.json through. Default Q8 / group-size 64 (the
-        // manifest `quantize: 8`, reference group size) when the request omits them. The converter id
-        // selects the MMDiT arch variant.
-        converter @ ("sd3_5_large_quant" | "sd3_5_large_turbo_quant" | "sd3_5_medium_quant") => {
-            let bits = quantize_bits.map_or(8, |bits| bits as i32);
-            let group_size = job
-                .payload
-                .get("quantizeGroupSize")
-                .and_then(Value::as_u64)
-                .map_or(64, |group| group as i32);
-            let variant = match converter {
-                "sd3_5_large_quant" => Sd3Variant::Large,
-                "sd3_5_large_turbo_quant" => Sd3Variant::LargeTurbo,
-                _ => Sd3Variant::Medium,
-            };
-            ConvertPlan::Sd3 {
-                source_dir: checkpoint_dir.clone(),
-                variant,
-                bits,
-                group_size,
-            }
-        }
-        "" => {
-            fail_job(
-                api,
-                &job.id,
-                "No MLX converter is configured for this model.",
-                Some(format!(
-                    "{model_id} sets mlx.requiresConversion but no mlx.converter; the legacy \
-                     converter was retired (sc-3240)."
-                )),
-            )
-            .await?;
-            return Ok(());
-        }
-        other => {
-            fail_job(
-                api,
-                &job.id,
-                "Unknown MLX converter.",
-                Some(format!(
-                    "Unrecognized mlx.converter '{other}' for {model_id}."
-                )),
-            )
-            .await?;
-            return Ok(());
-        }
-    };
+        };
 
     // Convert into a unique temp sibling and only promote it on success, so a
     // canceled/failed conversion never leaves a partial directory that the catalog

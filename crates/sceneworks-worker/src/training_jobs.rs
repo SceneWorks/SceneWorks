@@ -790,6 +790,141 @@ pub(crate) async fn begin_training_cancel(
     .await;
 }
 
+/// The preview-sample plumbing (sc-5637), lifted out of [`consume_training_events`] into one cohesive
+/// unit (sc-8921, F-119): the resolved sample config + output/project/stem paths, plus the accumulated
+/// cumulative (`all_samples`) and this-cadence (`latest_samples`) record lists the Training Studio
+/// renders. The engine streams `TrainingProgress::Sample` events carrying a decoded RGB bitmap; each is
+/// persisted as a PNG project asset off the async thread and the updated lists are streamed live. All
+/// best-effort — a persistence hiccup logs and is skipped, never failing the run. Owning this state
+/// here shrinks the event loop to `persister.persist(...)` and keeps the Done handler's final-result
+/// fold reading the same accumulated samples.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct SamplePersister {
+    cfg: TrainingConfig,
+    output_dir: Option<PathBuf>,
+    project_root: Option<PathBuf>,
+    stem: String,
+    all_samples: Vec<Value>,
+    latest_step: u32,
+    latest_samples: Vec<Value>,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl SamplePersister {
+    /// Resolve the sample config + destination paths for a run. `output_dir`/`project_root` are
+    /// resolved leniently (already validated upstream in `run_training_execution`); if either is
+    /// unavailable, samples simply don't render but training is unaffected.
+    fn new(settings: &Settings, job: &JobSnapshot, plan: &TrainingPlan) -> Self {
+        let output_dir =
+            resolve_training_output_dir(settings, &plan.output.output_dir, "Training outputDir")
+                .ok();
+        let project_root = job.project_id.as_ref().and_then(|project_id| {
+            ProjectStore::new(settings.data_dir.clone(), "worker")
+                .get_project(project_id)
+                .ok()
+                .map(|project| PathBuf::from(project.path))
+        });
+        let stem = Path::new(&plan.output.file_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("lora")
+            .to_owned();
+        Self {
+            cfg: map_training_config(&plan.config),
+            output_dir,
+            project_root,
+            stem,
+            all_samples: Vec::new(),
+            latest_step: 0,
+            latest_samples: Vec::new(),
+        }
+    }
+
+    /// Persist one `TrainingProgress::Sample` preview and stream the updated cumulative + this-cadence
+    /// lists. The PNG encode + atomic rename are blocking, so the owned `image` (no buffer clone) +
+    /// owned path/stem/prompt move into a `spawn_blocking` (sc-8909 / F-107). A write failure logs and
+    /// is skipped — the run continues.
+    #[allow(clippy::too_many_arguments)]
+    async fn persist(
+        &mut self,
+        api: &ApiClient,
+        job: &JobSnapshot,
+        backend: &str,
+        total_steps: u32,
+        step: u32,
+        index: u32,
+        total: u32,
+        prompt: String,
+        image: gen_core::Image,
+    ) -> WorkerResult<()> {
+        let output_dir = self.output_dir.clone();
+        let project_root = self.project_root.clone();
+        let stem = self.stem.clone();
+        let sample_steps = self.cfg.sample_steps;
+        let sample_guidance_scale = self.cfg.sample_guidance_scale;
+        let persisted = tokio::task::spawn_blocking(move || {
+            write_training_sample(
+                output_dir.as_deref(),
+                project_root.as_deref(),
+                &stem,
+                step,
+                index,
+                &prompt,
+                image,
+                sample_steps,
+                sample_guidance_scale,
+            )
+        })
+        .await
+        .map_err(|error| task_join_error("training preview persist task", error))?;
+        match persisted {
+            Ok(record) => {
+                let record = Value::Object(record);
+                if step != self.latest_step {
+                    self.latest_step = step;
+                    self.latest_samples.clear();
+                }
+                self.all_samples.push(record.clone());
+                self.latest_samples.push(record);
+                let result = training_samples_result(
+                    &self.all_samples,
+                    &self.latest_samples,
+                    &self.cfg.sample_prompts,
+                    self.cfg.sample_steps,
+                    self.cfg.sample_guidance_scale,
+                );
+                update_job(
+                    api,
+                    &job.id,
+                    training_progress(
+                        JobStatus::Running,
+                        ProgressStage::Training,
+                        train_fraction(step, total_steps.max(step)),
+                        &format!("Rendered preview {index}/{total} at step {step}."),
+                        Some(result),
+                        backend,
+                    ),
+                )
+                .await?;
+            }
+            Err(error) => tracing::warn!(
+                event = "training_preview_persist_failed",
+                step,
+                index,
+                error = %error,
+                "worker failed to persist training preview — skipping, training continues"
+            ),
+        }
+        Ok(())
+    }
+}
+
 /// Consume training events from the blocking thread: stream staged progress, poll
 /// cancel ~every 2s (draining after a cancel so the blocking sender never blocks),
 /// and on the final `Done` event report completion with the result the UI shows.
@@ -821,30 +956,11 @@ async fn consume_training_events(
     let mut last_cancel_check = Instant::now();
     let mut checkpoints: Vec<Value> = Vec::new();
 
-    // sc-5637 — preview-sample plumbing. The engine streams `TrainingProgress::Sample` events
-    // carrying a decoded RGB bitmap at the configured cadence; the worker persists each as a PNG
-    // project asset and accumulates the records the Training Studio renders (`trainingSamples` =
-    // cumulative, `latestTrainingSamples` = this cadence). All best-effort: a persistence hiccup
-    // must never fail the training run. `output_dir`/`project_root` are resolved leniently (already
-    // validated upstream in `run_training_execution`); if either is unavailable, samples simply
-    // don't render but training is unaffected.
-    let sample_cfg = map_training_config(&plan.config);
-    let sample_output_dir =
-        resolve_training_output_dir(settings, &plan.output.output_dir, "Training outputDir").ok();
-    let sample_project_root = job.project_id.as_ref().and_then(|project_id| {
-        ProjectStore::new(settings.data_dir.clone(), "worker")
-            .get_project(project_id)
-            .ok()
-            .map(|project| PathBuf::from(project.path))
-    });
-    let sample_stem = Path::new(&plan.output.file_name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("lora")
-        .to_owned();
-    let mut all_samples: Vec<Value> = Vec::new();
-    let mut latest_step: u32 = 0;
-    let mut latest_samples: Vec<Value> = Vec::new();
+    // sc-5637 — preview-sample plumbing, now owned by `SamplePersister` (sc-8921): the resolved sample
+    // config + destination paths + the accumulated cumulative/this-cadence record lists. The event
+    // loop's `Sample` arm delegates to `samples.persist(...)` and the `Done` arm reads
+    // `samples.all_samples` / `samples.cfg` for the final result fold.
+    let mut samples = SamplePersister::new(settings, job, plan);
 
     let mut heartbeat_interval = tokio::time::interval(progress_report_interval(settings));
     heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -852,161 +968,113 @@ async fn consume_training_events(
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
     let loop_result: WorkerResult<()> = async {
         loop {
-        let event = tokio::select! {
-            maybe_event = rx.recv() => match maybe_event {
-                Some(event) => event,
-                None => break,
-            },
-            _ = heartbeat_interval.tick() => {
-                // Keep the worker's heartbeat alive during long silent gaps between engine events
-                // — e.g. a slow checkpoint disk-write + preview-sampling pass for a large model
-                // (Krea2). Heartbeats otherwise ride only on incoming progress events (below), so a
-                // quiet stretch past the API's 90s worker-timeout lets the stale-sweep mark this
-                // still-running job `interrupted`, and the next progress post is then 409'd
-                // (sc-8390; same class as the inline-upscale sc-8200). Also poll cancel here so a
-                // cancel requested during such a gap is honored without awaiting the next event.
-                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                if !canceled && cancel_requested_peek(api, &job.id).await {
-                    begin_training_cancel(api, &job.id, &cancel, backend).await;
-                    canceled = true;
-                }
-                continue;
-            }
-        };
-        if canceled {
-            continue; // drain remaining events so the blocking sender never blocks.
-        }
-        match event {
-            TrainEvent::Progress(progress) => {
-                // Poll cancel on the long training band only (cheap stages fly by).
-                if matches!(progress, TrainingProgress::Training { .. })
-                    && last_cancel_check.elapsed() >= Duration::from_secs(2)
-                {
-                    last_cancel_check = Instant::now();
-                    if cancel_requested_peek(api, &job.id).await {
+            let event = tokio::select! {
+                maybe_event = rx.recv() => match maybe_event {
+                    Some(event) => event,
+                    None => break,
+                },
+                _ = heartbeat_interval.tick() => {
+                    // Keep the worker's heartbeat alive during long silent gaps between engine events
+                    // — e.g. a slow checkpoint disk-write + preview-sampling pass for a large model
+                    // (Krea2). Heartbeats otherwise ride only on incoming progress events (below), so a
+                    // quiet stretch past the API's 90s worker-timeout lets the stale-sweep mark this
+                    // still-running job `interrupted`, and the next progress post is then 409'd
+                    // (sc-8390; same class as the inline-upscale sc-8200). Also poll cancel here so a
+                    // cancel requested during such a gap is honored without awaiting the next event.
+                    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                    if !canceled && cancel_requested_peek(api, &job.id).await {
                         begin_training_cancel(api, &job.id, &cancel, backend).await;
                         canceled = true;
-                        continue;
-                    }
-                }
-                if let TrainingProgress::Checkpoint { step } = progress {
-                    checkpoints.push(json!({ "step": step }));
-                }
-                // sc-5637 — a preview sample: persist it as a project asset and stream the updated
-                // sample lists (cumulative + this-cadence) so Training Studio shows it live. Handled
-                // here (not in `map_training_progress`) because it writes a file + carries a result
-                // payload. Best-effort: a write failure logs and is skipped, never failing the run.
-                if let TrainingProgress::Sample {
-                    step,
-                    index,
-                    total,
-                    prompt,
-                    image,
-                } = progress
-                {
-                    // Persist the preview off the async runtime thread (sc-8909 / F-107): the PNG
-                    // encode + atomic rename are blocking, so move the owned `image` (no buffer clone)
-                    // and owned copies of the path/stem/prompt into a `spawn_blocking`.
-                    let sample_output_dir = sample_output_dir.clone();
-                    let sample_project_root = sample_project_root.clone();
-                    let sample_stem = sample_stem.clone();
-                    let sample_steps = sample_cfg.sample_steps;
-                    let sample_guidance_scale = sample_cfg.sample_guidance_scale;
-                    let persisted = tokio::task::spawn_blocking(move || {
-                        write_training_sample(
-                            sample_output_dir.as_deref(),
-                            sample_project_root.as_deref(),
-                            &sample_stem,
-                            step,
-                            index,
-                            &prompt,
-                            image,
-                            sample_steps,
-                            sample_guidance_scale,
-                        )
-                    })
-                    .await
-                    .map_err(|error| task_join_error("training preview persist task", error))?;
-                    match persisted {
-                        Ok(record) => {
-                            let record = Value::Object(record);
-                            if step != latest_step {
-                                latest_step = step;
-                                latest_samples.clear();
-                            }
-                            all_samples.push(record.clone());
-                            latest_samples.push(record);
-                            let result = training_samples_result(
-                                &all_samples,
-                                &latest_samples,
-                                &sample_cfg.sample_prompts,
-                                sample_cfg.sample_steps,
-                                sample_cfg.sample_guidance_scale,
-                            );
-                            update_job(
-                                api,
-                                &job.id,
-                                training_progress(
-                                    JobStatus::Running,
-                                    ProgressStage::Training,
-                                    train_fraction(step, total_steps.max(step)),
-                                    &format!("Rendered preview {index}/{total} at step {step}."),
-                                    Some(result),
-                                    backend,
-                                ),
-                            )
-                            .await?;
-                        }
-                        Err(error) => tracing::warn!(
-                            event = "training_preview_persist_failed",
-                            step,
-                            index,
-                            error = %error,
-                            "worker failed to persist training preview — skipping, training continues"
-                        ),
                     }
                     continue;
                 }
-                let (status, stage, fraction, message) =
-                    map_training_progress(progress, total_steps);
-                update_job(
-                    api,
-                    &job.id,
-                    training_progress(status, stage, fraction, &message, None, backend),
-                )
-                .await?;
-                // No per-event heartbeat here: the `heartbeat_interval.tick()` arm above already
-                // pings `Busy` on the shared 5–15 s interval, keeping `last_seen` fresh independent of
-                // event cadence (posting progress does not refresh it). A heartbeat per progress event
-                // just doubled the API round-trips, throttling GPU stepping to API latency (sc-8917,
-                // F-115) with no keepalive benefit.
+            };
+            if canceled {
+                continue; // drain remaining events so the blocking sender never blocks.
             }
-            TrainEvent::Done(output) => {
-                let result = training_result(
-                    plan,
-                    &output,
-                    &checkpoints,
-                    &all_samples,
-                    &sample_cfg.sample_prompts,
-                    sample_cfg.sample_steps,
-                    sample_cfg.sample_guidance_scale,
-                    backend,
-                );
-                update_job(
-                    api,
-                    &job.id,
-                    training_progress(
-                        JobStatus::Completed,
-                        ProgressStage::Completed,
-                        1.0,
-                        &format!("Trained LoRA saved as {}.", plan.output.file_name),
-                        Some(result),
+            match event {
+                TrainEvent::Progress(progress) => {
+                    // Poll cancel on the long training band only (cheap stages fly by).
+                    if matches!(progress, TrainingProgress::Training { .. })
+                        && last_cancel_check.elapsed() >= Duration::from_secs(2)
+                    {
+                        last_cancel_check = Instant::now();
+                        if cancel_requested_peek(api, &job.id).await {
+                            begin_training_cancel(api, &job.id, &cancel, backend).await;
+                            canceled = true;
+                            continue;
+                        }
+                    }
+                    if let TrainingProgress::Checkpoint { step } = progress {
+                        checkpoints.push(json!({ "step": step }));
+                    }
+                    // sc-5637 — a preview sample: persist it + stream the updated cumulative/this-cadence
+                    // lists so Training Studio shows it live. Handled here (not in `map_training_progress`)
+                    // because it writes a file + carries a result payload; delegated to `SamplePersister`
+                    // (sc-8921). Best-effort: a write failure logs and is skipped, never failing the run.
+                    if let TrainingProgress::Sample {
+                        step,
+                        index,
+                        total,
+                        prompt,
+                        image,
+                    } = progress
+                    {
+                        samples
+                            .persist(
+                                api,
+                                job,
+                                backend,
+                                total_steps,
+                                step,
+                                index,
+                                total,
+                                prompt,
+                                image,
+                            )
+                            .await?;
+                        continue;
+                    }
+                    let (status, stage, fraction, message) =
+                        map_training_progress(progress, total_steps);
+                    update_job(
+                        api,
+                        &job.id,
+                        training_progress(status, stage, fraction, &message, None, backend),
+                    )
+                    .await?;
+                    // No per-event heartbeat here: the `heartbeat_interval.tick()` arm above already
+                    // pings `Busy` on the shared 5–15 s interval, keeping `last_seen` fresh independent of
+                    // event cadence (posting progress does not refresh it). A heartbeat per progress event
+                    // just doubled the API round-trips, throttling GPU stepping to API latency (sc-8917,
+                    // F-115) with no keepalive benefit.
+                }
+                TrainEvent::Done(output) => {
+                    let result = training_result(
+                        plan,
+                        &output,
+                        &checkpoints,
+                        &samples.all_samples,
+                        &samples.cfg.sample_prompts,
+                        samples.cfg.sample_steps,
+                        samples.cfg.sample_guidance_scale,
                         backend,
-                    ),
-                )
-                .await?;
+                    );
+                    update_job(
+                        api,
+                        &job.id,
+                        training_progress(
+                            JobStatus::Completed,
+                            ProgressStage::Completed,
+                            1.0,
+                            &format!("Trained LoRA saved as {}.", plan.output.file_name),
+                            Some(result),
+                            backend,
+                        ),
+                    )
+                    .await?;
+                }
             }
-        }
         }
         Ok(())
     }

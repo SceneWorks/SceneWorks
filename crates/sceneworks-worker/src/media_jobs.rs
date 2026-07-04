@@ -756,6 +756,28 @@ struct RealPersonTrack {
     tracker_meta: Value,
 }
 
+/// The resolved person-track fields the sidecar assembly consumes, produced by ONE of the two tracking
+/// paths — the procedural CPU-preview placeholder or the real native detector+tracker run. Replaces the
+/// 8-tuple `run_person_track` used to bind out of its preview/real `if/else` (sc-8921, F-119): every
+/// consumer now reads a named field, and the two paths must fill the same shape rather than agreeing on
+/// positional order. `person_active` distinguishes the paths (false = preview placeholder).
+struct PersonTrackOutcome {
+    frames: Vec<Value>,
+    average_confidence: f64,
+    /// Sidecar `maskState` (`active` / `generated` / `degraded` / `missing`, or `deferred` for preview).
+    mask_state: &'static str,
+    /// Whether a real detector/tracker ran (`true`) vs the procedural preview placeholder (`false`).
+    person_active: bool,
+    /// `recipe.model` provenance label (e.g. `yolo11m` / `procedural-person-tracker`).
+    tracker_model: String,
+    /// `recipe.adapter` provenance label (e.g. `yolo11_bytetrack` / `procedural_person_tracking`).
+    tracker_adapter: &'static str,
+    /// `status.quality` payload (real run only; `Null` for preview).
+    quality: Value,
+    /// `status.tracker` / `recipe.normalizedSettings.tracker` payload (real run only; `Null` for preview).
+    tracker_meta: Value,
+}
+
 /// The per-backend seam of [`assemble_real_person_track`] (sc-8833): everything the shared
 /// orchestrator can't infer from the tracking result. `device_default` is the fallback device label
 /// used only if no frame reports one (zero-frame case); every frame's real device overrides it.
@@ -1634,16 +1656,7 @@ pub(crate) async fn run_person_track(
     // YOLO11 detector (sc-3633) per sampled frame + the SORT/ByteTrack tracker (sc-3634), then
     // segment each detected frame with the native-MLX SAM2 segmenter (sc-3709) → maskState
     // active / generated / degraded / missing.
-    let (
-        frames,
-        average_confidence,
-        mask_state,
-        person_active,
-        tracker_model,
-        tracker_adapter,
-        quality_value,
-        tracker_meta,
-    ): (Vec<Value>, f64, &str, bool, String, &str, Value, Value) = if is_preview {
+    let outcome: PersonTrackOutcome = if is_preview {
         let frames = track_frames_from_detection(&detection, duration);
         let avg = frames
             .iter()
@@ -1654,16 +1667,16 @@ pub(crate) async fn run_person_track(
             })
             .sum::<f64>()
             / (frames.len().max(1) as f64);
-        (
+        PersonTrackOutcome {
             frames,
-            avg,
-            "deferred",
-            false,
-            "procedural-person-tracker".to_owned(),
-            "procedural_person_tracking",
-            Value::Null,
-            Value::Null,
-        )
+            average_confidence: avg,
+            mask_state: "deferred",
+            person_active: false,
+            tracker_model: "procedural-person-tracker".to_owned(),
+            tracker_adapter: "procedural_person_tracking",
+            quality: Value::Null,
+            tracker_meta: Value::Null,
+        }
     } else {
         let source_media_rel = required_value_str(source_file, "path")?;
         let source_media_path = safe_project_path(&project_path, source_media_rel)?;
@@ -1688,17 +1701,27 @@ pub(crate) async fn run_person_track(
             segment_enabled,
         )
         .await?;
-        (
-            real.frames,
-            real.average_confidence,
-            real.mask_state,
-            true,
-            "yolo11m".to_owned(),
-            "yolo11_bytetrack",
-            real.quality,
-            real.tracker_meta,
-        )
+        PersonTrackOutcome {
+            frames: real.frames,
+            average_confidence: real.average_confidence,
+            mask_state: real.mask_state,
+            person_active: true,
+            tracker_model: "yolo11m".to_owned(),
+            tracker_adapter: "yolo11_bytetrack",
+            quality: real.quality,
+            tracker_meta: real.tracker_meta,
+        }
     };
+    let PersonTrackOutcome {
+        frames,
+        average_confidence,
+        mask_state,
+        person_active,
+        tracker_model,
+        tracker_adapter,
+        quality: quality_value,
+        tracker_meta,
+    } = outcome;
 
     let track_name =
         optional_payload_string(&job.payload, "trackName").unwrap_or("Selected person");
