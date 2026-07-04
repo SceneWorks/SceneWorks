@@ -153,6 +153,12 @@ fn instantid_image_count(request: &ImageRequest, settings: &Settings) -> u32 {
 /// Resolve the active angle-set collection for this job (sc-4450): the per-generation override
 /// (`advanced.keypointCollectionId`) → the user default → the built-in 11. Built-in fallback on
 /// any store error so angle generation never hard-fails on a Key Point Library hiccup.
+///
+/// ACCEPTED TRADEOFF (sc-8953 / F-151): for an angle-set job this runs its `ProjectStore` lookup
+/// twice — once via `instantid_image_count` at plan time and once here at generation time. It is a
+/// single small indexed read against the local SQLite store, negligible next to the generation, so
+/// the duplicate is left as-is; the fix (resolve once and thread the collection through the plan)
+/// is deferred until it matters.
 fn active_angle_collection(
     request: &ImageRequest,
     settings: &Settings,

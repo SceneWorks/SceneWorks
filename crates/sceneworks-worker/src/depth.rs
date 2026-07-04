@@ -68,6 +68,11 @@ pub fn depth_control_image(
 ) -> crate::WorkerResult<image::RgbImage> {
     use crate::WorkerError;
 
+    // ACCEPTED TRADEOFF (sc-8953 / F-151): this loads the ~100 MB Depth-Anything-V2-Small
+    // checkpoint from disk on every depth-controlled generation — there is no process-level cache
+    // of the estimator (unlike the generator cache). It is one load per generation of a Small
+    // model, dominated by the diffusion cost around it, so it is left uncached; add a cache here
+    // only if depth control becomes hot enough that the reload shows up in profiles.
     let model = depth_backend::DepthAnythingV2::from_dir(weights_dir)
         .map_err(|error| WorkerError::Engine(format!("depth estimator load: {error}")))?;
     let (w, h) = (img.width(), img.height());

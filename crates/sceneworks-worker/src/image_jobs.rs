@@ -1366,6 +1366,13 @@ fn write_upscaled_asset(
 
 /// The job-result shape the API streams from: `assetWrites` + the `generationSet`
 /// fact drive `persist_reported_assets` (idempotent per progress update).
+///
+/// ACCEPTED TRADEOFF (sc-8953 / F-151): this deep-clones the whole `asset_writes` vec into the
+/// result on every call, and the generation loop calls it on each `GenEvent::Step` — so the total
+/// serialization work is O(images² · steps) as `asset_writes` grows one entry per finished image.
+/// At current image counts (a handful per set) and step counts this is negligible next to the
+/// generation itself, so it is left as-is; if sets grow large, stream this only on `Image` /
+/// `Decoding` events (where the fact set actually changes) rather than on every step.
 fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
     json!({
         "generationSetId": plan.genset_id,
