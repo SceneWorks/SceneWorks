@@ -644,11 +644,19 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
                     }
                     text
                 }
-                CommandEvent::Terminated(payload) => format!(
-                    "[desktop] api sidecar terminated: code={:?} signal={:?}\n",
-                    payload.code, payload.signal
-                ),
-                CommandEvent::Error(error) => format!("[desktop] api sidecar error: {error}\n"),
+                CommandEvent::Terminated(payload) => {
+                    let line = format!(
+                        "[desktop] api sidecar terminated: code={:?} signal={:?}\n",
+                        payload.code, payload.signal
+                    );
+                    handle_api_exit(&app_handle);
+                    line
+                }
+                CommandEvent::Error(error) => {
+                    let line = format!("[desktop] api sidecar error: {error}\n");
+                    handle_api_exit(&app_handle);
+                    line
+                }
                 _ => continue,
             };
             if let Some(file) = file.as_mut() {
@@ -661,6 +669,38 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+/// Handle an unexpected exit of the API sidecar (F-128, sc-8930). The API is spawned
+/// once and `run_startup`'s `Managed.api.is_some()` guard blocks a re-spawn; the GPU
+/// workers self-supervise with backoff but the API did not, so if it crashed mid-session
+/// the webview pointed at a dead origin with the "Retry" button inert (its `start_setup`
+/// re-entry short-circuited on the still-populated `api` slot).
+///
+/// Clear the `Managed.api` slot + the recorded PID so the guard now sees `None` and a
+/// Retry re-spawns the API, and surface a setup `error` event so the UI shows the
+/// recoverable error screen instead of a silently-dead window. No-op during a graceful
+/// shutdown (the child was killed on purpose) — see `begin_shutdown`, which `take()`s the
+/// child before this reader observes the resulting `Terminated`.
+fn handle_api_exit(app: &AppHandle) {
+    if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
+        return;
+    }
+    // Drop the child handle + its recorded PID so `run_startup`'s spawn-once guard
+    // re-arms and a Retry actually re-spawns the API.
+    let _ = app.state::<Managed>().api.lock().expect("api lock").take();
+    record_api_pid_cleared(app);
+    // Forget the discovered port so window-gating re-derives it from the fresh spawn.
+    *app.state::<Managed>()
+        .api_port
+        .lock()
+        .expect("api port lock") = None;
+    emit(
+        app,
+        "error",
+        "The local API stopped unexpectedly. Click Retry to restart it.",
+        true,
+    );
 }
 
 /// Health-gate the window on a background thread: wait for the API's
@@ -1205,6 +1245,17 @@ fn record_api_pid(app: &AppHandle, pid: u32) {
     write_sidecar_pidfile(&pids);
 }
 
+/// Clear the recorded API PID after the sidecar exits unexpectedly (F-128, sc-8930), so
+/// the next launch's `reap_stale_sidecars` doesn't try to reap a PID that already died
+/// (or, worse, a recycled one). Paired with clearing the in-memory `Managed.api` slot so
+/// a Retry re-spawns the API.
+fn record_api_pid_cleared(app: &AppHandle) {
+    let state = app.state::<Managed>();
+    let mut pids = state.pids.lock().expect("pids lock");
+    pids.api = None;
+    write_sidecar_pidfile(&pids);
+}
+
 #[cfg(target_os = "macos")]
 fn record_mlx_worker_pid(app: &AppHandle, pid: Option<u32>) {
     let state = app.state::<Managed>();
@@ -1674,14 +1725,25 @@ mod bind_tests {
     /// var in prose or `backticks` are allowed and don't match.) The needle is
     /// assembled from parts so this test's own source doesn't trip the `include_str!`
     /// scan of this very file.
+    ///
+    /// F-128 (sc-8930): scans ALL of the crate's source modules, not just four — the
+    /// invariant is only enforced where it's checked, so a `.env("SCENEWORKS_ALLOW_
+    /// OPEN_BIND", …)` added to `update.rs` / `cred_ipc.rs` / `cuda_provision.rs` would
+    /// previously have slipped past. Keep this list in lockstep with `apps/desktop/src`.
     #[test]
     fn desktop_never_sets_allow_open_bind() {
         let needle = concat!("\"SCENEWORKS_", "ALLOW_OPEN_BIND\"");
+        // Every .rs module in apps/desktop/src (cuda_provision.rs is Windows-gated at
+        // compile time, but include_str! reads its source on any host, so its bind env
+        // is scanned everywhere too).
         for source in [
             include_str!("setup.rs"),
             include_str!("settings.rs"),
             include_str!("main.rs"),
             include_str!("net.rs"),
+            include_str!("update.rs"),
+            include_str!("cred_ipc.rs"),
+            include_str!("cuda_provision.rs"),
         ] {
             assert!(
                 !source.contains(needle),
