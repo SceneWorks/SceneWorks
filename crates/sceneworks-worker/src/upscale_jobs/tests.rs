@@ -681,6 +681,28 @@ fn seedvr2_revision_is_pinned_commit_not_main() {
     );
 }
 
+/// sc-9682 (F-077 follow-up): the first-party Real-ESRGAN ONNX repo is fetched at a
+/// pinned commit, never the mutable `main` branch, so a re-push (or a compromised token)
+/// can't silently swap the ONNX graph we load. Lock the constant to a real 40-hex commit id.
+#[test]
+fn onnx_revision_is_pinned_commit_not_main() {
+    assert_ne!(
+        ONNX_REVISION, "main",
+        "Real-ESRGAN ONNX must pin a fixed revision"
+    );
+    assert_eq!(
+        ONNX_REVISION.len(),
+        40,
+        "a pinned HF revision is a 40-char commit sha"
+    );
+    assert!(
+        ONNX_REVISION
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "the pinned revision must be lowercase hex"
+    );
+}
+
 #[test]
 fn dataset_repoint_body_maps_records_with_a_null_asset_id() {
     let body = dataset_repoint_body(&[

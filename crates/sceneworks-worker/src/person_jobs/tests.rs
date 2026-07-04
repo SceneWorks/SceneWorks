@@ -219,6 +219,29 @@ fn detections_to_json_normalizes_orders_and_drops_degenerate() {
     assert_eq!(json[0]["maskState"], "missing");
 }
 
+/// sc-9682 (F-077 follow-up): the first-party YOLO11 detector repo is fetched at a pinned
+/// commit, never the mutable `main` branch, so a re-push (or a compromised token) can't
+/// silently swap the detector weights we load. `DET_REVISION` is cfg-split per platform
+/// (MLX vs ONNX repo); this asserts whichever variant compiles is a real 40-hex commit id.
+#[test]
+fn det_revision_is_pinned_commit_not_main() {
+    assert_ne!(
+        DET_REVISION, "main",
+        "the detector must pin a fixed revision"
+    );
+    assert_eq!(
+        DET_REVISION.len(),
+        40,
+        "a pinned HF revision is a 40-char commit sha"
+    );
+    assert!(
+        DET_REVISION
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "the pinned revision must be lowercase hex"
+    );
+}
+
 /// Cache fixtures staged during development (sc-3633): the exported detector,
 /// the bus.jpg test image, and the `ultralytics.predict` reference detections.
 #[cfg(target_os = "macos")]
