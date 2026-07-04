@@ -14,6 +14,14 @@ pub(crate) struct SupervisedChild {
     /// for a while resets its restart backoff instead of ratcheting it up forever
     /// (sc-4282 / F-MLXW-20).
     pub(crate) spawned_at: Instant,
+    /// Set once a child has exited and been attributed, holding the `Instant` at
+    /// which its backoff elapses and it becomes eligible to respawn. While this is
+    /// `Some`, the child's dead process has already been reaped and reported, so it
+    /// is skipped by exit detection and only revisited to respawn. Tracking the
+    /// deadline per child (instead of sleeping the backoff inline) keeps one
+    /// crash-looping child's delay from stalling the restart of its healthy siblings
+    /// or the detection of further exits (sc-8899 / F-097).
+    pub(crate) next_restart_at: Option<Instant>,
 }
 
 /// A child that stayed alive at least this long before exiting is treated as
@@ -64,6 +72,7 @@ pub(crate) async fn supervise_children(
                 process,
                 restart_attempt: 0,
                 spawned_at: Instant::now(),
+                next_restart_at: None,
             },
         );
     }
@@ -98,8 +107,39 @@ pub(crate) async fn restart_exited_children_with_spawner<F>(
 where
     F: FnMut(&Settings, &WorkerSpec) -> WorkerResult<Child>,
 {
-    let mut exited = Vec::new();
+    restart_exited_children_at(settings, children, &mut spawner, Instant::now()).await
+}
+
+/// Non-blocking supervision tick. Each call does two independent passes over every
+/// child so no single child's backoff can stall the others (sc-8899 / F-097):
+///
+/// 1. **Detect** newly-exited children (those not already awaiting a restart),
+///    attribute an abnormal death, and stamp a per-child `next_restart_at` deadline
+///    from its backoff. Nothing sleeps here.
+/// 2. **Respawn** every child whose `next_restart_at` deadline has passed by `now`.
+///
+/// Because the backoff lives on each child as a deadline rather than an inline
+/// sleep, a 30 s backoff on one crash-looping child no longer delays restarting a
+/// healthy sibling or detecting a further exit — both are handled on the very next
+/// 1 s tick. Shutdown is not handled here (the tick never blocks); the supervision
+/// loop's own `shutdown_signal()` branch races each tick.
+pub(crate) async fn restart_exited_children_at<F>(
+    settings: &Settings,
+    children: &mut HashMap<String, SupervisedChild>,
+    spawner: &mut F,
+    now: Instant,
+) -> WorkerResult<()>
+where
+    F: FnMut(&Settings, &WorkerSpec) -> WorkerResult<Child>,
+{
+    // Pass 1: detect newly-exited children and stamp each with its restart deadline.
+    // Children already awaiting a restart (`next_restart_at` set) have had their dead
+    // process reaped and reported, so they are skipped here and handled in pass 2.
+    let mut newly_exited = Vec::new();
     for (worker_id, child) in children.iter_mut() {
+        if child.next_restart_at.is_some() {
+            continue;
+        }
         if let Some(status) = child.process.try_wait()? {
             // A child that ran healthily for a while before exiting starts its
             // backoff fresh, so rare widely-spaced crashes don't ratchet the delay
@@ -111,6 +151,7 @@ where
             // backoff below both read the same stored value.
             child.restart_attempt = child.restart_attempt.saturating_add(1);
             let delay = retry_delay(settings.poll_seconds, child.restart_attempt);
+            child.next_restart_at = Some(now + Duration::from_secs(delay));
             // A child that terminated abnormally never got to report it. A
             // terminating signal (SIGKILL/OOM, SIGABRT, SIGSEGV, …) is an
             // uncatchable death; a non-zero exit code is a self-terminated process
@@ -132,33 +173,34 @@ where
                     "restartInSeconds": delay,
                 }),
             );
-            exited.push((worker_id.clone(), signal, exit_code));
+            newly_exited.push((worker_id.clone(), signal, exit_code));
         }
     }
-    for (worker_id, signal, exit_code) in exited {
-        // Surface an abnormal death to the user before the backoff sleep, so a job
-        // that died fails promptly instead of hanging until restart. A clean exit-0
-        // is a graceful stop (e.g. the child caught a shutdown signal and exited
-        // itself) and is never reported (sc-6320).
+    // Surface each abnormal death to the user immediately, without waiting on the
+    // backoff, so a job that died fails promptly instead of hanging until restart. A
+    // clean exit-0 is a graceful stop (e.g. the child caught a shutdown signal and
+    // exited itself) and is never reported (sc-6320).
+    for (worker_id, signal, exit_code) in newly_exited {
         if child_died_abnormally(signal, exit_code) {
             report_worker_terminated(settings, &worker_id, signal, exit_code).await;
         }
-        let Some(mut child) = children.remove(&worker_id) else {
+    }
+
+    // Pass 2: respawn every child whose backoff deadline has elapsed. Each is
+    // independent, so several siblings can come back on the same tick and a still-
+    // backing-off child simply waits its turn without blocking anyone.
+    let ready: Vec<String> = children
+        .iter()
+        .filter(|(_, child)| child.next_restart_at.is_some_and(|at| now >= at))
+        .map(|(worker_id, _)| worker_id.clone())
+        .collect();
+    for worker_id in ready {
+        let Some(child) = children.get_mut(&worker_id) else {
             continue;
         };
-        let delay = retry_delay(settings.poll_seconds, child.restart_attempt);
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
-            _ = shutdown_signal() => {
-                children.insert(worker_id, child);
-                stop_children(settings, children).await;
-                return Ok(());
-            }
-        }
-        let process = spawner(settings, &child.spec)?;
-        child.process = process;
-        child.spawned_at = Instant::now();
-        children.insert(child.spec.worker_id.clone(), child);
+        child.process = spawner(settings, &child.spec)?;
+        child.spawned_at = now;
+        child.next_restart_at = None;
     }
     Ok(())
 }

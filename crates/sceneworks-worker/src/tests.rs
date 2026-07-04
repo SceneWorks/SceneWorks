@@ -49,7 +49,7 @@ use super::model_jobs::{
 #[cfg(unix)]
 use super::supervisor::terminating_signal;
 use super::supervisor::{
-    auto_worker_specs, child_died_abnormally, child_environment,
+    auto_worker_specs, child_died_abnormally, child_environment, restart_exited_children_at,
     restart_exited_children_with_spawner, utility_worker_specs, SupervisedChild, WorkerSpec,
 };
 use super::{
@@ -1310,22 +1310,56 @@ async fn supervisor_restarts_exited_children_with_backoff_state() {
             process: exited,
             restart_attempt: 0,
             spawned_at: std::time::Instant::now(),
+            next_restart_at: None,
         },
     )]);
-    let mut spawns = 0_u32;
-
-    restart_exited_children_with_spawner(&settings, &mut children, |_settings, _spec| {
-        spawns += 1;
+    let spawns = std::cell::Cell::new(0_u32);
+    let mut spawner = |_settings: &_, _spec: &WorkerSpec| {
+        spawns.set(spawns.get() + 1);
         Ok(spawn_sleep_child())
-    })
-    .await
-    .expect("child restarts");
+    };
 
-    assert_eq!(spawns, 1);
+    // Detection tick: the exit is reaped and a backoff deadline is stamped, but the
+    // child is not respawned yet because its backoff has not elapsed (sc-8899).
+    let t0 = std::time::Instant::now();
+    restart_exited_children_at(&settings, &mut children, &mut spawner, t0)
+        .await
+        .expect("exit is detected");
+    assert_eq!(
+        spawns.get(),
+        0,
+        "detection tick does not respawn before backoff"
+    );
+    {
+        let child = children
+            .get("worker-gpu-auto-0")
+            .expect("exited child stays tracked while backing off");
+        assert_eq!(child.restart_attempt, 1);
+        assert!(
+            child.next_restart_at.is_some(),
+            "a backoff deadline is stamped on the exited child"
+        );
+    }
+
+    // Restart tick past the backoff deadline: the child is respawned exactly once.
+    restart_exited_children_at(
+        &settings,
+        &mut children,
+        &mut spawner,
+        t0 + Duration::from_secs(30),
+    )
+    .await
+    .expect("child restarts once its backoff elapses");
+
+    assert_eq!(spawns.get(), 1);
     let child = children
         .get_mut("worker-gpu-auto-0")
         .expect("restarted child is tracked");
     assert_eq!(child.restart_attempt, 1);
+    assert!(
+        child.next_restart_at.is_none(),
+        "the backoff deadline clears once the child is respawned"
+    );
     assert!(child
         .process
         .try_wait()
@@ -1333,6 +1367,96 @@ async fn supervisor_restarts_exited_children_with_backoff_state() {
         .is_none());
     let _ = child.process.start_kill();
     let _ = child.process.wait().await;
+}
+
+/// sc-8899 / F-097: one child's restart backoff must not stall the whole
+/// supervision tick. A crash-looping child with a long backoff and a healthy
+/// sibling that just crashed are handled independently — the sibling restarts on
+/// the next eligible tick while the still-backing-off child simply waits its turn.
+#[tokio::test]
+async fn supervisor_backoff_on_one_child_does_not_stall_another() {
+    let settings = test_settings("http://127.0.0.1".to_owned(), None);
+
+    // A crash-looping child mid-backoff: already reaped, with a deadline 30 s out.
+    let mut looping = spawn_exit_child();
+    for _ in 0..20 {
+        if looping.try_wait().expect("child status checks").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let t0 = std::time::Instant::now();
+    let looping_child = SupervisedChild {
+        spec: WorkerSpec {
+            worker_id: "worker-gpu-auto-0".to_owned(),
+            gpu_id: "0".to_owned(),
+        },
+        process: looping,
+        restart_attempt: 6,
+        spawned_at: t0,
+        next_restart_at: Some(t0 + Duration::from_secs(30)),
+    };
+
+    // A healthy sibling that already crashed and whose short backoff is now due.
+    let mut sibling = spawn_exit_child();
+    for _ in 0..20 {
+        if sibling.try_wait().expect("child status checks").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let sibling_child = SupervisedChild {
+        spec: WorkerSpec {
+            worker_id: "worker-gpu-auto-1".to_owned(),
+            gpu_id: "1".to_owned(),
+        },
+        process: sibling,
+        restart_attempt: 1,
+        spawned_at: t0,
+        next_restart_at: Some(t0 + Duration::from_secs(1)),
+    };
+
+    let mut children = HashMap::from([
+        ("worker-gpu-auto-0".to_owned(), looping_child),
+        ("worker-gpu-auto-1".to_owned(), sibling_child),
+    ]);
+    let mut restarted = Vec::new();
+    let mut spawner = |_settings: &_, spec: &WorkerSpec| {
+        restarted.push(spec.worker_id.clone());
+        Ok(spawn_sleep_child())
+    };
+
+    // A single tick at t0 + 5 s: the sibling's 1 s backoff is due while the looping
+    // child's 30 s backoff is not. The old inline-sleep design would have blocked the
+    // whole tick on whichever child was handled first; the per-child deadline model
+    // restarts only the due sibling and leaves the looping child untouched (sc-8899).
+    restart_exited_children_at(
+        &settings,
+        &mut children,
+        &mut spawner,
+        t0 + Duration::from_secs(5),
+    )
+    .await
+    .expect("tick completes without stalling on the backing-off child");
+
+    assert_eq!(
+        restarted,
+        vec!["worker-gpu-auto-1".to_owned()],
+        "the due sibling restarts while the looping child is still backing off"
+    );
+    assert!(
+        children["worker-gpu-auto-0"].next_restart_at.is_some(),
+        "the looping child keeps its unexpired backoff deadline"
+    );
+    assert!(
+        children["worker-gpu-auto-1"].next_restart_at.is_none(),
+        "the restarted sibling has its deadline cleared"
+    );
+
+    for child in children.values_mut() {
+        let _ = child.process.start_kill();
+        let _ = child.process.wait().await;
+    }
 }
 
 /// sc-4282 / F-MLXW-20: a child that ran healthily past the reset threshold
@@ -1364,18 +1488,21 @@ async fn supervisor_resets_backoff_after_a_healthy_run() {
             spawned_at: std::time::Instant::now()
                 .checked_sub(Duration::from_secs(360))
                 .expect("monotonic clock backdates 6 minutes"),
+            next_restart_at: None,
         },
     )]);
 
+    // The backoff reset happens when the exit is detected, so a single detection
+    // tick is enough to observe it (the respawn itself waits for the backoff).
     restart_exited_children_with_spawner(&settings, &mut children, |_settings, _spec| {
         Ok(spawn_sleep_child())
     })
     .await
-    .expect("child restarts");
+    .expect("exit is detected");
 
     let child = children
         .get_mut("worker-gpu-auto-0")
-        .expect("restarted child is tracked");
+        .expect("exited child stays tracked while backing off");
     // Reset to 0 on the healthy run, then advanced once for this restart.
     assert_eq!(
         child.restart_attempt, 1,
