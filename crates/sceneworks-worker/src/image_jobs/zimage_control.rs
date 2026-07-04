@@ -317,6 +317,9 @@ impl CandleStrictControl for ZImageStrictControl {
                 .then(|| self.negative_prompt.clone())
                 .filter(|value| !value.trim().is_empty()),
             seed,
+            // No PiD backbone on this lane (native VAE decode) — behavior-preserving across the
+            // candle-gen PiD seam bump (sc-8373 / sc-9300); matches candle-gen Default.
+            use_pid: false,
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {

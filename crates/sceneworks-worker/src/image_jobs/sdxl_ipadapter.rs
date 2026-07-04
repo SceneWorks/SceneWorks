@@ -333,6 +333,10 @@ async fn generate_candle_sdxl_ipadapter_stream(
                     seed: seed as u64,
                     sampler: sampler.clone(),
                     scheduler: scheduler.clone(),
+                    // This lane never resolves a PiD backbone (no `resolve_pid_weights` call), so keep
+                    // the native VAE decode — behavior-preserving across the candle-gen PiD seam bump
+                    // (sc-8373 / sc-9300). Matches the candle-gen request `Default` (use_pid: false).
+                    use_pid: false,
                     cancel: cancel.clone(),
                 };
                 let out = match model.generate(&req, &reference, &mut *on_progress) {

@@ -311,6 +311,9 @@ async fn generate_candle_sdxl_edit_stream(
                     guidance,
                     strength,
                     seed: seed as u64,
+                    // No PiD backbone on this lane (native VAE decode) — behavior-preserving across the
+                    // candle-gen PiD seam bump (sc-8373 / sc-9300); matches candle-gen Default.
+                    use_pid: false,
                     cancel: cancel.clone(),
                 };
                 let result = match &mask {

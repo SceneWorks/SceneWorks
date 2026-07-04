@@ -2093,7 +2093,7 @@
           // 22.7 dB) hosted PRIVATELY at `SceneWorks/krea-2-turbo-int8-convrot` as a single 13.5 GB
           // `krea2_turbo_int8_convrot.safetensors`. It REPLACES only the DiT — the rest of the surface
           // (tokenizer / Qwen3-VL TE / Qwen-Image VAE / config) comes from the canonical bf16 Krea 2
-          // snapshot, which this tier lists as a co-requisite so the worker fetches both. The LoadSpec
+          // snapshot, which the worker fetches on-demand when this tier is selected. The LoadSpec
           // the worker builds is `weights = Dir(<bf16 snapshot root>)` + `text_encoder =
           // File(<convrot .safetensors>)` (see `image_jobs/base.rs resolve_krea_convrot`). Authed HF
           // download (SceneWorks token, like every private SceneWorks repo). `platforms` OMITS macos so
