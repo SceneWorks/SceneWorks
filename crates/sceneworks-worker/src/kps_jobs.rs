@@ -428,6 +428,7 @@ pub(crate) async fn run_kps_extract_job(
         None,
         "",
         "kps extraction task",
+        crate::no_cancel_ack(),
         tokio::task::spawn_blocking(move || {
             let image = load_source_image(&settings_for_task, &job_for_task)?;
             #[cfg(target_os = "macos")]

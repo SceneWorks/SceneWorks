@@ -61,9 +61,8 @@ use ort::value::Tensor;
 use serde_json::{json, Value};
 
 use crate::{
-    cancel_requested_peek, fresh_asset_id, heartbeat, mark_job_canceled, now_rfc3339,
-    progress_payload, progress_report_interval, resolve_dataset_item_path, safe_project_path,
-    task_join_error, update_job, ApiClient, CancelJoinGuard, Settings, WorkerError, WorkerResult,
+    fresh_asset_id, heartbeat, now_rfc3339, progress_payload, resolve_dataset_item_path,
+    safe_project_path, task_join_error, update_job, ApiClient, Settings, WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
@@ -755,11 +754,12 @@ pub(crate) async fn upscale_image_in_memory(
     }
 }
 
-/// Upscale-specific keepalive. The generic [`crate::run_blocking_with_heartbeat`] covers the same
-/// "heartbeat + cancel-poll while a blocking task runs" need for every other path (sc-8390); this
-/// one stays bespoke only because it ALSO posts an intermediate `Running`/"Canceling image upscale."
-/// update the instant a cancel is observed, so the UI acknowledges the cancel while the long
-/// diffusion finishes rather than appearing frozen until it flips terminal. Keep them in sync.
+/// Upscale keepalive: the shared [`crate::run_blocking_with_heartbeat`] (sc-8390) with the upscale's
+/// one extra behavior — the instant a cancel is observed it posts an intermediate `Running`/"Canceling
+/// image upscale." update so the UI acknowledges the cancel while the long diffusion finishes rather
+/// than appearing frozen until it flips terminal. That extra post is now the shared helper's
+/// `on_cancel_acknowledged` hook (sc-8928), so the sc-8390-critical select/heartbeat/teardown loop
+/// lives in exactly ONE place instead of a maintained-in-sync copy.
 async fn run_upscale_with_heartbeat<R>(
     api: &ApiClient,
     settings: &Settings,
@@ -770,61 +770,33 @@ async fn run_upscale_with_heartbeat<R>(
 where
     R: Send + 'static,
 {
-    // Bind the blocking upscale task to its cancel flag (sc-8804, F-003): on a `heartbeat`/
-    // `update_job` `?` early return (a transient POST failure or a 409 stale-sweep reclaim) we
-    // perform the explicit awaited bounded-join teardown (`guard.cancel_and_join()`) BEFORE the
-    // error propagates, so the still-running diffusion is wound down (or hard-abandoned) rather than
-    // leaked alongside the next claimed job. A bare `abort()` on drop is inert on a running blocking
-    // task.
-    let mut guard = CancelJoinGuard::new(cancel.clone(), task);
-    let mut canceled = false;
-    let mut interval = tokio::time::interval(progress_report_interval(settings));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            result = &mut *guard.handle_mut() => {
-                // Task RESOLVED — disarm before any `?` so a task/join error never drops an armed
-                // guard (reviewer note: `??` used to precede disarm at upscale_jobs.rs:695).
-                guard.disarm();
-                let value = result.map_err(|error| task_join_error("upscale task", error))??;
-                if canceled {
-                    mark_job_canceled(api, job_id, CANCEL_MESSAGE).await?;
-                    return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
-                }
-                return Ok(value);
-            }
-            _ = interval.tick() => {
-                if let Err(error) =
-                    heartbeat(api, settings, WorkerStatus::Busy, Some(job_id)).await
-                {
-                    guard.cancel_and_join().await;
-                    return Err(error);
-                }
-                if !canceled && cancel_requested_peek(api, job_id).await {
-                    cancel.cancel();
-                    canceled = true;
-                    if let Err(error) = update_job(
-                        api,
-                        job_id,
-                        progress_payload(
-                            JobStatus::Running,
-                            ProgressStage::Running,
-                            0.45,
-                            "Canceling image upscale.",
-                            None,
-                            None,
-                            None,
-                        ),
-                    )
-                    .await
-                    {
-                        guard.cancel_and_join().await;
-                        return Err(error);
-                    }
-                }
-            }
-        }
-    }
+    crate::run_blocking_with_heartbeat(
+        api,
+        settings,
+        job_id,
+        Some(cancel),
+        CANCEL_MESSAGE,
+        "upscale task",
+        Some(|| async move {
+            update_job(
+                api,
+                job_id,
+                progress_payload(
+                    JobStatus::Running,
+                    ProgressStage::Running,
+                    0.45,
+                    "Canceling image upscale.",
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .map(|_| ())
+        }),
+        task,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------

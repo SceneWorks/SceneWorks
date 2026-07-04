@@ -1839,7 +1839,8 @@ async fn run_seedvr2_stream(
         };
         // SeedVR2 upscale is one-step with no per-generation sampler/scheduler knobs, so the
         // advanced block generate_video reads for those is empty here (F-118).
-        let decoded = generate_video(api, settings, job, backend, &JsonObject::new(), input).await?;
+        let decoded =
+            generate_video(api, settings, job, backend, &JsonObject::new(), input).await?;
         if let Some(frame) = decoded.frames.first() {
             out_w = frame.width;
             out_h = frame.height;
@@ -2394,6 +2395,7 @@ where
         Some(cancel),
         SCAIL2_SEGMENT_CANCEL_MESSAGE,
         task_label,
+        crate::no_cancel_ack(),
         tokio::task::spawn_blocking(move || segment(flag)),
     )
     .await
@@ -10683,5 +10685,4 @@ mod candle_video_label_tests {
             );
         }
     }
-
 }

@@ -242,6 +242,7 @@ pub(crate) async fn run_vqa_job(
         Some(cancel),
         VQA_CANCEL_MESSAGE,
         "VQA task join",
+        crate::no_cancel_ack(),
         tokio::task::spawn_blocking(move || -> WorkerResult<String> {
             vqa_generate(
                 &weights_dir,
@@ -595,6 +596,7 @@ pub(crate) async fn run_interleave_job(
         Some(cancel),
         INTERLEAVE_CANCEL_MESSAGE,
         "interleave task join",
+        crate::no_cancel_ack(),
         interleave_task,
     )
     .await?;
@@ -650,6 +652,7 @@ pub(crate) async fn run_interleave_job(
         None,
         "",
         "interleave document write join",
+        crate::no_cancel_ack(),
         write_task,
     )
     .await?;

@@ -288,28 +288,42 @@ pub(crate) async fn gpu_utilization(gpu_id: &str) -> Option<WorkerUtilizationSna
 /// unprivileged). Returns `None` only when no probe yields anything.
 #[cfg(target_os = "macos")]
 pub(crate) async fn query_mlx_utilization() -> Option<WorkerUtilizationSnapshot> {
-    let total_mb = sysctl_memsize_mb().await;
-    let used_mb = vm_stat_used_mb().await;
-    let gpu_load_percent = ioreg_gpu_load().await;
+    // Run the three independent probes concurrently rather than serially: awaited back-to-back their
+    // per-probe timeouts (sysctl 2s + vm_stat 2s + ioreg 3s) could stack to ~7s of latency on a hung
+    // machine and push a heartbeat past the sweep budget; `join!` bounds the wait to the slowest
+    // single probe (~3s) instead (sc-8928).
+    let (total_mb, used_mb, gpu_load_percent) =
+        tokio::join!(sysctl_memsize_mb(), vm_stat_used_mb(), ioreg_gpu_load(),);
     mlx_utilization_from(total_mb, used_mb, gpu_load_percent)
 }
 
-/// Total unified memory (MB) via `sysctl -n hw.memsize`.
+/// Total unified memory (MB) via `sysctl -n hw.memsize`. The machine's physical RAM never changes at
+/// runtime, so the first successful read is cached process-wide and every subsequent call (each
+/// heartbeat) skips the subprocess entirely (sc-8928). A failed probe is NOT cached — it re-probes
+/// next time.
 #[cfg(target_os = "macos")]
 async fn sysctl_memsize_mb() -> Option<u64> {
+    static MEMSIZE_MB: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    if let Some(cached) = MEMSIZE_MB.get() {
+        return Some(*cached);
+    }
     let output = tokio::time::timeout(
         Duration::from_secs(2),
         Command::new("sysctl").args(["-n", "hw.memsize"]).output(),
     )
     .await;
-    match output {
+    let mb = match output {
         Ok(Ok(output)) if output.status.success() => String::from_utf8_lossy(&output.stdout)
             .trim()
             .parse::<u64>()
             .ok()
             .map(|bytes| bytes / (1024 * 1024)),
         _ => None,
+    };
+    if let Some(mb) = mb {
+        let _ = MEMSIZE_MB.set(mb);
     }
+    mb
 }
 
 /// Total unified memory in GB (`sysctl hw.memsize`), for per-job memory-budget guards such as the
