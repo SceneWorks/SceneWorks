@@ -1259,6 +1259,19 @@ use mlx_gen_seedvr2::video as seedvr2_video;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const SEEDVR2_REPO: &str = "numz/SeedVR2_comfyUI";
+/// Pinned SeedVR2 checkpoint revision (sc-8879 / sc-9879). `numz/SeedVR2_comfyUI` is a
+/// third-party mirror with a fixed (non-overridable) repo here — fetching the mutable `main`
+/// branch would let an upstream re-push silently swap the 3B fp16 DiT + VAE weights we load.
+/// Pin the exact commit so downloads are reproducible; HF's tree API still reports each file's
+/// `lfs.oid`, which `ensure_hf_cached_file` verifies the content against. MUST equal the
+/// image-upscale lane's `upscale_jobs::SEEDVR2_REVISION` (same repo + files) — the
+/// `seedvr2_video_revision_matches_image_lane` agreement test locks them together so they
+/// can't drift.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const SEEDVR2_REVISION: &str = "09ced71023636e9bc8cdf9cdecfb2625d1e691e8";
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1611,7 +1624,7 @@ async fn ensure_seedvr2_weights(
         crate::downloads::ensure_hf_cached_file(
             &context,
             SEEDVR2_REPO,
-            "main",
+            SEEDVR2_REVISION,
             file,
             &dir.join(file),
         )
@@ -7669,6 +7682,57 @@ mod tests {
 
     fn request(value: Value) -> VideoRequest {
         VideoRequest::from_payload(&value.as_object().cloned().unwrap())
+    }
+
+    /// sc-8879 / sc-9879 (F-077 follow-up): the video SeedVR2 upscale fetches the same fixed
+    /// third-party mirror as the image lane, and must pin an exact commit rather than the mutable
+    /// `main` branch so an upstream re-push can't silently swap the 3B DiT + VAE weights. Lock the
+    /// constant to a real 40-hex lowercase commit id (mirrors `seedvr2_revision_is_pinned_commit_not_main`
+    /// in the image-upscale lane).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn seedvr2_video_revision_is_pinned_commit_not_main() {
+        assert_ne!(
+            SEEDVR2_REVISION, "main",
+            "video SeedVR2 must pin a fixed revision"
+        );
+        assert_eq!(
+            SEEDVR2_REVISION.len(),
+            40,
+            "a pinned HF revision is a 40-char commit sha"
+        );
+        assert!(
+            SEEDVR2_REVISION
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "the pinned revision must be lowercase hex"
+        );
+    }
+
+    /// sc-9879 (F-077 follow-up): the image (`upscale_jobs`) and video (`video_jobs`) SeedVR2 fetches
+    /// pull the IDENTICAL files from the IDENTICAL fixed mirror, so their pinned commit must agree.
+    /// Two independent consts (a shared source of truth would need a cfg-split hoist across the two
+    /// modules) — lock them together here so a bump to one lane without the other fails loudly
+    /// (mirrors this PR's InstantID/PuLID shared-repo sha-agreement tests).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn seedvr2_video_revision_matches_image_lane() {
+        assert_eq!(
+            SEEDVR2_REVISION,
+            crate::upscale_jobs::SEEDVR2_REVISION,
+            "video and image SeedVR2 fetch the same mirror + files; their pinned commit must match"
+        );
+        assert_eq!(
+            SEEDVR2_REPO,
+            crate::upscale_jobs::SEEDVR2_REPO,
+            "video and image SeedVR2 must reference the same upstream mirror repo"
+        );
     }
 
     // sc-8828 (F-026): `resolve_video_route` is the extracted native (MLX) dispatch decision — the

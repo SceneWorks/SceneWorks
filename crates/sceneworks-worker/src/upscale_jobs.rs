@@ -517,14 +517,14 @@ fn manifest_onnx_resource(manifest_entry: &Value, factor: u8) -> Option<(String,
 /// Upstream HuggingFace repo holding the raw SeedVR2 ComfyUI checkpoint. The `mlx-gen-seedvr2`
 /// registry loads it directly (converts to MLX layout in-memory, no Python). Public; downloaded on
 /// first use. Overridable via the manifest `seedvr2` resource or `SCENEWORKS_SEEDVR2_CHECKPOINT`.
-const SEEDVR2_REPO: &str = "numz/SeedVR2_comfyUI";
+pub(crate) const SEEDVR2_REPO: &str = "numz/SeedVR2_comfyUI";
 /// Pinned SeedVR2 checkpoint revision (sc-8879). `numz/SeedVR2_comfyUI` is a third-party
 /// mirror; fetching the mutable `main` branch means an upstream re-push would silently
 /// change the weights we load. Pin the exact commit that carries the 3B fp16 DiT + VAE
 /// (`seedvr2_ema_3b_fp16.safetensors` / `ema_vae_fp16.safetensors`) so downloads are
 /// reproducible. HF's tree API still reports each file's `lfs.oid`, which
 /// `ensure_hf_cached_file` verifies the content against.
-const SEEDVR2_REVISION: &str = "09ced71023636e9bc8cdf9cdecfb2625d1e691e8";
+pub(crate) const SEEDVR2_REVISION: &str = "09ced71023636e9bc8cdf9cdecfb2625d1e691e8";
 /// The exact filenames `Seedvr2Pipeline::load` expects in the checkpoint dir (3B fp16 DiT + VAE).
 const SEEDVR2_DIT_FILE: &str = "seedvr2_ema_3b_fp16.safetensors";
 const SEEDVR2_VAE_FILE: &str = "ema_vae_fp16.safetensors";
