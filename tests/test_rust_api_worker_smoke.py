@@ -4,13 +4,22 @@ import json
 import os
 from pathlib import Path
 import shutil
-import socket
 import subprocess
 import time
 from uuid import uuid4
 
 import httpx
 import pytest
+
+# Shared, corruption-free fixtures (sc-8934 / F-132): PNG + safetensors builders
+# and the API-spawn helpers, previously copy-pasted (and drifted) between this
+# file and test_rust_api_contract_snapshots.py.
+from rust_api_harness import (
+    PNG_1X1,
+    free_port,
+    minimal_safetensors as _minimal_safetensors,
+    wait_for_health,
+)
 
 # sc-8861 (F-059): these e2e tests used to drive the live Rust API via
 # `scene_worker.runtime.ApiClient` and run the image pipeline with the in-process
@@ -178,44 +187,6 @@ def complete_image_job(
 
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def _minimal_safetensors() -> bytes:
-    # Smallest valid safetensors: 8-byte little-endian header length + JSON header.
-    # The import path inspects this header for architecture detection, so a stub
-    # like b"lora" is rejected with an invalid-header 400.
-    header = b'{"__metadata__":{"format":"pt"}}'
-    return len(header).to_bytes(8, "little") + header
-
-
-PNG_1X1 = (
-    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
-    b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00"
-    b"\x00\x00\x0cIDAT\x08\xd7c\xf8\xff\xff?\x00\x05\xfe"
-    b"\x02\xfeA\xe2&\x9b\x00\x00\x00\x00IEND\xaeB`\x82"
-)
-
-
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def wait_for_health(base_url: str, process: subprocess.Popen) -> None:
-    deadline = time.monotonic() + 30
-    last_error: Exception | None = None
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise AssertionError(f"Rust API exited early with code {process.returncode}")
-        try:
-            response = httpx.get(f"{base_url}/api/v1/health", timeout=1)
-            if response.status_code == 200:
-                return
-        except httpx.HTTPError as exc:
-            last_error = exc
-        time.sleep(0.25)
-    raise AssertionError(f"Rust API did not become healthy: {last_error}")
 
 
 def wait_for_job_status(base_url: str, job_id: str, status: str, process: subprocess.Popen) -> dict:
