@@ -65,7 +65,7 @@ fn save_png(img: &Image, path: &Path) {
 }
 
 fn render(
-    weights_dir: &Path,
+    generator: &dyn gen_core::Generator,
     prompt: &str,
     w: u32,
     h: u32,
@@ -73,10 +73,9 @@ fn render(
     guidance: f32,
     sampler: Option<&str>,
 ) -> Image {
-    // Same seam as `generate_candle_stream`: registry load of the candle `sdxl` engine + a dense
-    // (no-quant, no-adapter) LoadSpec pointed at the RealVisXL Lightning diffusers components.
-    let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.to_path_buf()));
-    let generator = gen_core::load("sdxl", &spec).expect("load candle sdxl provider");
+    // The generator is loaded ONCE by the caller and reused across the lightning + optional ddim
+    // contrast render (sc-8925): the SDXL snapshot is multi-GB, so re-loading it per render() (as the
+    // old per-call `gen_core::load` did) doubled the load wall-clock + VRAM on the RVXL_CONTRAST=1 run.
     let req = GenerationRequest {
         prompt: prompt.to_owned(),
         width: w,
@@ -124,10 +123,17 @@ fn realvisxl_lightning_candle_gpu_smoke() {
         "a photorealistic portrait of a red fox in a snowy forest, golden hour, sharp focus",
     );
 
+    // Same seam as `generate_candle_stream`: registry load of the candle `sdxl` engine + a dense
+    // (no-quant, no-adapter) LoadSpec pointed at the RealVisXL Lightning diffusers components. Loaded
+    // ONCE here and reused across both renders (sc-8925) — the multi-GB snapshot is not re-loaded for
+    // the RVXL_CONTRAST=1 ddim run.
+    let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.to_path_buf()));
+    let generator = gen_core::load("sdxl", &spec).expect("load candle sdxl provider");
+
     // The shipped behavior: realvisxl_lightning forces the few-step `lightning` sampler, CFG-off
     // (guidance 1.0 — the distilled checkpoint is trained CFG-free).
     println!("[smoke] rendering lightning @ {steps} steps ({w}x{h}) ...");
-    let lightning = render(&weights_dir, &prompt, w, h, steps, 1.0, Some("lightning"));
+    let lightning = render(&*generator, &prompt, w, h, steps, 1.0, Some("lightning"));
     let lightning_std = image_std(&lightning);
     save_png(
         &lightning,
@@ -147,7 +153,7 @@ fn realvisxl_lightning_candle_gpu_smoke() {
     // so render it at the base SDXL default 7.5. Saved for the eyeball only.
     if env_or("RVXL_CONTRAST", "0") == "1" {
         println!("[smoke] rendering ddim @ {steps} steps (contrast) ...");
-        let ddim = render(&weights_dir, &prompt, w, h, steps, 7.5, Some("ddim"));
+        let ddim = render(&*generator, &prompt, w, h, steps, 7.5, Some("ddim"));
         save_png(&ddim, &out_dir.join(format!("ddim_{steps}step.png")));
         println!(
             "[smoke] ddim contrast std {:.2} -> {}",
