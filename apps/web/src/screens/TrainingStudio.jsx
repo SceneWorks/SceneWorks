@@ -1407,6 +1407,26 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
   }
 
+  // sc-8942 (F-140): one cohesive bundle of the Dataset Doctor readout props, shaped like
+  // the DatasetDoctorReadout signature. Both the Dataset editor and Configure-job panels
+  // take this single prop instead of the eight individually-threaded props they each used
+  // to mirror. The six fix-action handlers are hoisted function declarations (stable), so
+  // this memo only re-creates when the report or its loading flag changes.
+  const datasetDoctor = useMemo(
+    () => ({
+      report: readiness,
+      loading: readinessLoading,
+      onRemoveDuplicates: removeDuplicates,
+      onUpscaleLowRes: upscaleLowRes,
+      onSmartCrop: smartCropItems,
+      onStripExif: stripExifItems,
+      onAnalyzeDataset: analyzeDataset,
+      onAnalyzeFaces: analyzeFaces,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- action handlers are stable hoisted fn decls
+    [readiness, readinessLoading],
+  );
+
   return (
     <ModelAvailabilityGate
       ready={trainingReady}
@@ -1529,16 +1549,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   applyOrderedNames={applyOrderedNames}
                   setCaptionDialog={setCaptionDialog}
                   health={health}
-                  readiness={readiness}
-                  readinessLoading={readinessLoading}
+                  datasetDoctor={datasetDoctor}
                   readinessByKey={readinessByKey}
                   onToggleItemAck={toggleItemQualityAck}
-                  onRemoveDuplicates={removeDuplicates}
-                  onUpscaleLowRes={upscaleLowRes}
-                  onSmartCrop={smartCropItems}
-                  onStripExif={stripExifItems}
-                  onAnalyzeDataset={analyzeDataset}
-                  onAnalyzeFaces={analyzeFaces}
                   canSave={canSave}
                   saveDataset={saveDataset}
                   savingDataset={savingDataset}
@@ -1612,15 +1625,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   resetConfigDefaults={resetConfigDefaults}
                   submitTrainingJob={submitTrainingJob}
                   configSnapshot={configSnapshot}
-                  readiness={readiness}
-                  readinessLoading={readinessLoading}
+                  datasetDoctor={datasetDoctor}
                   readinessBlocksTraining={readinessBlocksTraining}
-                  onRemoveDuplicates={removeDuplicates}
-                  onUpscaleLowRes={upscaleLowRes}
-                  onSmartCrop={smartCropItems}
-                  onStripExif={stripExifItems}
-                  onAnalyzeDataset={analyzeDataset}
-                  onAnalyzeFaces={analyzeFaces}
                 />
               ) : null}
             </section>

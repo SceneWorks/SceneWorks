@@ -58,15 +58,12 @@ export function ConfigureJobPanel({
   resetConfigDefaults,
   submitTrainingJob,
   configSnapshot,
-  readiness = null,
-  readinessLoading = false,
+  // sc-8942 (F-140): grouped Dataset Doctor readout props (report/loading + the six
+  // fix-action callbacks), shared verbatim with DatasetEditorPanel. Spread straight onto
+  // DatasetDoctorReadout below. `readinessBlocksTraining` stays a separate prop — it gates
+  // the Train button, not the readout.
+  datasetDoctor,
   readinessBlocksTraining = false,
-  onRemoveDuplicates,
-  onUpscaleLowRes,
-  onSmartCrop,
-  onStripExif,
-  onAnalyzeDataset,
-  onAnalyzeFaces,
 }) {
   return (
     <>
@@ -430,17 +427,7 @@ export function ConfigureJobPanel({
           {/* Dataset Doctor readout before the Train button (sc-6534). Advisory: it
               only hard-blocks training when the gate is Blocked (too few images / a
               fatal flag); warnings stay informational. */}
-          <DatasetDoctorReadout
-            report={readiness}
-            loading={readinessLoading}
-            compact
-            onRemoveDuplicates={onRemoveDuplicates}
-            onUpscaleLowRes={onUpscaleLowRes}
-            onSmartCrop={onSmartCrop}
-            onStripExif={onStripExif}
-            onAnalyzeDataset={onAnalyzeDataset}
-            onAnalyzeFaces={onAnalyzeFaces}
-          />
+          <DatasetDoctorReadout {...datasetDoctor} compact />
           {readinessBlocksTraining ? (
             <p className="inline-warning">
               This dataset isn’t ready to train yet — open Data Sets to add or fix images.
