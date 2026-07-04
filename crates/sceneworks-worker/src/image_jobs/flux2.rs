@@ -893,8 +893,7 @@ fn flux2_control_load(
     adapters: Vec<AdapterSpec>,
 ) -> WorkerResult<Box<dyn Generator>> {
     let spec = flux2_control_spec(weights_dir, control_weights, quant, adapters);
-    gen_core::load(FLUX2_DEV_CONTROL_ENGINE_ID, &spec)
-        .map_err(|error| WorkerError::Engine(format!("FLUX.2-dev control load failed: {error}")))
+    load_control_engine(FLUX2_DEV_CONTROL_ENGINE_ID, &spec)
 }
 
 /// Real FLUX.2-dev strict-pose generation: one image per pose, each conditioned on a DWPose skeleton
