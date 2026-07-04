@@ -214,7 +214,9 @@ fn validate_upscale_target_dimensions(width: u32, height: u32) -> WorkerResult<(
 
 struct Upscaler {
     session: Session,
-    #[allow(dead_code)]
+    /// The session's actual execution device — the hardware EP ([`ACCEL_DEVICE`]: CoreML on macOS,
+    /// CUDA off-Mac) when it initialised, else `"cpu"` after the fallback. Surfaced on the upscale
+    /// result's `rawAdapterSettings` for observability (sc-8923).
     device: &'static str,
 }
 
@@ -342,13 +344,16 @@ impl Upscaler {
 
 /// Blocking upscale: load+cache the factor's session (amortising the CoreML/CUDA graph
 /// compile across a batch), run it. All `ort` objects live inside this closure and
-/// never cross an await (mirrors `pose_jobs::detect_batch`).
+/// never cross an await (mirrors `pose_jobs::detect_batch`). Returns the upscaled image plus the
+/// session's actual execution device (`coreml`/`cuda`/`cpu`) so the caller can surface whether the
+/// hardware EP was used or it fell back to CPU (sc-8923, mirrors `pose_jobs` reporting
+/// `detector.device`).
 fn upscale_blocking(
     onnx_path: PathBuf,
     factor: u8,
     img: RgbImage,
     cancel: CancelFlag,
-) -> WorkerResult<RgbImage> {
+) -> WorkerResult<(RgbImage, &'static str)> {
     use std::collections::hash_map::Entry;
     let cell = UPSCALERS.get_or_init(|| Mutex::new(HashMap::new()));
     // Recover from a poisoned lock rather than panicking every subsequent job: if a
@@ -364,7 +369,9 @@ fn upscale_blocking(
         Entry::Occupied(e) => e.into_mut(),
         Entry::Vacant(e) => e.insert(Upscaler::load(&onnx_path)?),
     };
-    upscaler.upscale(&img, factor as usize, &cancel)
+    let device = upscaler.device;
+    let out = upscaler.upscale(&img, factor as usize, &cancel)?;
+    Ok((out, device))
 }
 
 // ---------------------------------------------------------------------------
@@ -730,7 +737,10 @@ pub(crate) async fn upscale_image_in_memory(
         _ => {
             let onnx = ensure_onnx(api, settings, http_client, job, factor, manifest_entry).await?;
             let task_cancel = cancel.clone();
-            run_upscale_with_heartbeat(
+            // This in-memory path feeds inline generation and does not build a device-reporting
+            // result, so the session device is discarded here (surfaced on the standalone
+            // `image_upscale` job's rawAdapterSettings instead, sc-8923).
+            let (out, _device) = run_upscale_with_heartbeat(
                 api,
                 settings,
                 &job.id,
@@ -739,7 +749,8 @@ pub(crate) async fn upscale_image_in_memory(
                     upscale_blocking(onnx, factor, source, task_cancel)
                 }),
             )
-            .await
+            .await?;
+            Ok(out)
         }
     }
 }
@@ -955,7 +966,9 @@ pub(crate) async fn run_image_upscale_job(
     };
     let (src_w, src_h) = (source_image.width(), source_image.height());
 
-    let upscaled = if engine_id == "seedvr2" {
+    // Real-ESRGAN reports its actual `ort` execution device (coreml/cuda/cpu) for observability;
+    // SeedVR2 is a generative pass with no such session, so it reports `None` (sc-8923).
+    let (upscaled, esrgan_device): (RgbImage, Option<&'static str>) = if engine_id == "seedvr2" {
         update_job(
             api,
             &job.id,
@@ -990,7 +1003,7 @@ pub(crate) async fn run_image_upscale_job(
         let cancel = CancelFlag::new();
         // Move `source_image` into the future — the `else` branch already consumes it and it's
         // unused after this `if`, so the clone (a full RGB buffer copy) was needless (sc-8927).
-        run_upscale_with_heartbeat(
+        let out = run_upscale_with_heartbeat(
             api,
             settings,
             &job.id,
@@ -999,7 +1012,8 @@ pub(crate) async fn run_image_upscale_job(
                 run_seedvr2_upscale(dir, source_image, factor, softness, seed, cancel).await
             }),
         )
-        .await?
+        .await?;
+        (out, None)
     } else {
         // Real-ESRGAN via `ort` — the CoreML EP on macOS (sc-3489), the CUDA EP off-Mac on the
         // candle GPU-worker lane (sc-5499), both with a CPU fallback. The routing oracle
@@ -1038,7 +1052,7 @@ pub(crate) async fn run_image_upscale_job(
         )
         .await?;
         let cancel = CancelFlag::new();
-        run_upscale_with_heartbeat(
+        let (out, device) = run_upscale_with_heartbeat(
             api,
             settings,
             &job.id,
@@ -1047,7 +1061,8 @@ pub(crate) async fn run_image_upscale_job(
                 upscale_blocking(onnx_path, factor, source_image, cancel)
             }),
         )
-        .await?
+        .await?;
+        (out, Some(device))
     };
     let (out_w, out_h) = (upscaled.width(), upscaled.height());
 
@@ -1101,6 +1116,11 @@ pub(crate) async fn run_image_upscale_job(
         // the result is reproducible + the UI can surface what produced it.
         upscale_settings["softness"] = json!(softness);
         upscale_settings["seed"] = json!(seed);
+    }
+    if let Some(device) = esrgan_device {
+        // Report the Real-ESRGAN `ort` session's actual execution device (coreml/cuda/cpu) so an
+        // upscale result reveals whether the hardware EP ran or it fell back to CPU (sc-8923).
+        upscale_settings["device"] = json!(device);
     }
     let fact = json!({
         "assetId": asset_id,
@@ -1324,7 +1344,9 @@ pub(crate) async fn run_dataset_upscale_job(
         // Decode the source inside the blocking task (sc-8909 / F-107) so the per-item read + decode
         // never stalls the async runtime thread across the dataset loop.
         let item_image_path = item.image_path.clone();
-        let upscaled = run_upscale_with_heartbeat(
+        // Per-item device is uniform across the batch (same cached session) and not recorded per
+        // item, so it's discarded here (sc-8923).
+        let (upscaled, _device) = run_upscale_with_heartbeat(
             api,
             settings,
             &job.id,
