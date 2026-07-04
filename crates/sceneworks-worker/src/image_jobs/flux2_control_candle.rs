@@ -212,6 +212,11 @@ struct Flux2StrictControl {
     steps: u32,
     guidance: f32,
     control_scale: f32,
+    /// Per-generation PiD decoder weights (epic 7840, sc-8044): `Some` only when this generation opted in
+    /// (`advanced.usePid`) AND the `flux2` PiD + Gemma snapshots are cached. Threaded into `with_pid` at
+    /// load; `use_pid` on the request is `is_some()` so the two stay in lockstep (the engine rejects a
+    /// mismatch). `None` ⇒ native FLUX.2 VAE decode.
+    pid: Option<gen_core::PidWeights>,
 }
 
 impl CandleStrictControl for Flux2StrictControl {
@@ -234,9 +239,16 @@ impl CandleStrictControl for Flux2StrictControl {
             root: self.base.clone(),
             control: self.control.clone(),
         };
-        Flux2Control::load(&paths, self.quant).map_err(|error| {
+        let model = Flux2Control::load(&paths, self.quant).map_err(|error| {
             WorkerError::Engine(format!("FLUX.2-dev strict-pose control load failed: {error}"))
-        })
+        })?;
+        // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND the snapshots are cached.
+        match &self.pid {
+            Some(pid) => model.with_pid(pid).map_err(|error| {
+                WorkerError::Engine(format!("FLUX.2 control PiD decoder load failed: {error}"))
+            }),
+            None => Ok(model),
+        }
     }
 
     fn generate_one(
@@ -255,9 +267,8 @@ impl CandleStrictControl for Flux2StrictControl {
             guidance: self.guidance,
             control_scale: self.control_scale,
             seed,
-            // No PiD backbone on this lane (native VAE decode) — behavior-preserving across the
-            // candle-gen PiD seam bump (sc-8373 / sc-9300); matches candle-gen Default.
-            use_pid: false,
+            // PiD opt-in (sc-8044): in lockstep with the `with_pid` load — `is_some()` ⇒ decoder loaded.
+            use_pid: self.pid.is_some(),
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {
@@ -309,7 +320,10 @@ async fn generate_candle_flux2_control_stream(
         .to_owned();
 
     let pose_count = pose_entries(request).len();
-    let raw_settings = flux2_control_candle_raw_settings(
+    // Per-generation PiD decode (epic 7840, sc-8044): resolve the `flux2` PiD student + Gemma when
+    // `advanced.usePid` is set and the snapshots are cached; else `None` → native FLUX.2 VAE.
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let mut raw_settings = flux2_control_candle_raw_settings(
         request,
         &repo,
         steps,
@@ -318,6 +332,8 @@ async fn generate_candle_flux2_control_stream(
         control_scale,
         pose_count,
     );
+    // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
+    raw_settings.insert("usePid".to_owned(), Value::Bool(pid_weights.is_some()));
 
     let provider = Flux2StrictControl {
         base,
@@ -329,6 +345,7 @@ async fn generate_candle_flux2_control_stream(
         steps,
         guidance,
         control_scale,
+        pid: pid_weights,
     };
 
     run_candle_strict_control(

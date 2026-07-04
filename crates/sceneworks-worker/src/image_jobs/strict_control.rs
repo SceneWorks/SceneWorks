@@ -75,8 +75,14 @@ const STRICT_CONTROL_ENGINES: &[StrictControlEngine] = &[
         supported_kinds: &[ControlKind::Pose, ControlKind::Canny, ControlKind::Depth],
     },
     StrictControlEngine {
+        // sc-9870 (epic 8236): the default control-weights repo is now the SceneWorks PACKED tier
+        // (`SceneWorks/qwen-image-2512-fun-controlnet-union`, per-quant q4/q8/bf16 subdirs, one
+        // `model.safetensors` overlay each), replacing the dense alibaba-pai overlay (sc-8350). BOTH the
+        // MLX (`qwen.rs`) and candle (`qwen_control.rs`) lanes resolve the tier subdir matching the
+        // selected transformer quant (`advanced.mlxQuantize`), so this `(engine_id, control_repo,
+        // supported_kinds)` row stays consistent across both drivers.
         engine_id: "qwen_image_control",
-        repo: "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union",
+        repo: "SceneWorks/qwen-image-2512-fun-controlnet-union",
         supported_kinds: &[ControlKind::Pose, ControlKind::Canny, ControlKind::Depth],
     },
     StrictControlEngine {

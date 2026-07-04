@@ -266,8 +266,15 @@ async fn generate_candle_flux2_edit_stream(
         },
     );
     let repo = flux2_edit_candle_repo(request);
-    let raw_settings =
+    // Per-generation PiD decode (epic 7840, sc-8044): resolve the `flux2` PiD student + Gemma when
+    // `advanced.usePid` is set and the snapshots are cached; else `None` → native FLUX.2 VAE. `use_pid`
+    // and the engine's `with_pid` load stay in lockstep (the engine rejects a mismatch).
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+    let mut raw_settings =
         flux2_edit_candle_raw_settings(request, &repo, steps, guidance, quant_bits, references.len());
+    // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
+    raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
     // Per-image work items: (seed, prompt) — `request.count` edits of the same reference set.
     let work: Vec<(i64, String)> = (0..request.count as usize)
@@ -288,6 +295,13 @@ async fn generate_candle_flux2_edit_stream(
                 Flux2Edit::load(&paths)
             }
             .map_err(|error| WorkerError::Engine(format!("FLUX.2 edit load failed: {error}")))?;
+            // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND snapshots cached.
+            let model = match &pid_weights {
+                Some(pid) => model.with_pid(pid).map_err(|error| {
+                    WorkerError::Engine(format!("FLUX.2 edit PiD decoder load failed: {error}"))
+                })?,
+                None => model,
+            };
             Ok((model, references))
         },
         move |(model, references), tx, cancel| {
@@ -303,9 +317,8 @@ async fn generate_candle_flux2_edit_stream(
                     steps: steps as usize,
                     guidance,
                     seed: seed as u64,
-                    // No PiD backbone on this lane (native VAE decode) — behavior-preserving across the
-                    // candle-gen PiD seam bump (sc-8373 / sc-9300); matches candle-gen Default.
-                    use_pid: false,
+                    // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
+                    use_pid,
                     cancel: cancel.clone(),
                 };
                 let result = model.generate(&req, &references, &mut *on_progress);

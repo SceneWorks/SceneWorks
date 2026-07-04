@@ -1,9 +1,29 @@
 /// The engine registry id for the Qwen-Image ControlNet-Union variant. The default control repo is
 /// the `STRICT_CONTROL_ENGINES` table row for this id (resolved via `strict_control_default_repo`),
 /// not a duplicated local constant — so a table repoint keeps the resolver, error message, and
-/// download hint in lockstep.
+/// download hint in lockstep. As of sc-9870 that row is the SceneWorks PACKED tier
+/// (`SceneWorks/qwen-image-2512-fun-controlnet-union`), replacing the dense alibaba-pai overlay.
 const QWEN_CONTROL_ENGINE_ID: &str = "qwen_image_control";
-const QWEN_CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
+/// The single packed control file inside each tier subdir (`q4/`, `q8/`, `bf16/`). Deterministic —
+/// the packed tier ships exactly one `model.safetensors` per subdir (sc-9870), so the sc-8350
+/// two-overlay ambiguity is naturally resolved.
+const QWEN_CONTROL_FILE: &str = "model.safetensors";
+
+/// The packed control tier subdir the request's `advanced.mlxQuantize` selects (sc-9870): `bf16` (opt
+/// out of quantization, `<= 0` / "none"), `q8` (`> 4`), else the `q4` default — the SAME mapping
+/// `standard_tier_subdir` uses for the base transformer tier, so the control overlay tier tracks the
+/// base tier for a coherent A/B. Mirrors the candle `qwen_control_tier_subdir` (`qwen_control.rs`).
+fn qwen_control_tier_subdir(request: &ImageRequest) -> &'static str {
+    let bits = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    match bits {
+        Some(b) if b <= 0 => "bf16",
+        Some(b) if b > 4 => "q8",
+        _ => "q4",
+    }
+}
 
 /// True when this is the base-Qwen strict-pose tier: `qwen_image` + non-empty object
 /// `advanced.poses`, not edit mode, and base weights available. A `referenceAssetId`, if present,
@@ -16,18 +36,42 @@ fn qwen_control_available(request: &ImageRequest, settings: &Settings) -> bool {
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
+/// Resolve the 2512-Fun-Controlnet-Union checkpoint to a single `.safetensors` in the HF cache
+/// (sc-9870). Default: the SceneWorks packed tier (repo from the shared `STRICT_CONTROL_ENGINES` row —
+/// single source of truth) at `<tier>/model.safetensors`, where `<tier>` tracks the selected transformer
+/// quant via [`qwen_control_tier_subdir`]. `advanced.controlWeights.{repo,filename}` overrides still
+/// address a flat repo with a plain-component file (sc-8821 / F-019); when a `filename` override is
+/// present the tier subdir is NOT applied. `Ok(None)` when the file is absent (the download flow /
+/// on-demand fetch provisions it ahead of generation, like base weights).
 fn resolve_qwen_control_weights(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    // Default repo from the shared strict-control table (single source of truth); the file stays
-    // engine-specific.
-    resolve_control_weights_for(
-        request,
-        settings,
-        strict_control_default_repo(QWEN_CONTROL_ENGINE_ID),
-        QWEN_CONTROL_FILE,
-    )
+    let control = request
+        .advanced
+        .get("controlWeights")
+        .and_then(Value::as_object);
+    let override_field = |key: &str| -> Option<String> {
+        control
+            .and_then(|control| control.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let repo =
+        override_field("repo").unwrap_or_else(|| strict_control_default_repo(QWEN_CONTROL_ENGINE_ID).to_owned());
+    // Repo-relative path: an explicit override filename (plain component, no tier subdir) else the packed
+    // tier subdir `<tier>/model.safetensors` selected by `advanced.mlxQuantize`.
+    let rel = match override_field("filename") {
+        Some(name) => safe_weight_filename(&name, "advanced.controlWeights.filename")?,
+        None => format!("{}/{QWEN_CONTROL_FILE}", qwen_control_tier_subdir(request)),
+    };
+    let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, &repo) else {
+        return Ok(None);
+    };
+    let path = snapshot.join(rel);
+    Ok(path.exists().then_some(path))
 }
 
 /// Load the Qwen-Image ControlNet-Union generator (base snapshot + 2512-Fun control overlay).
