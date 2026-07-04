@@ -538,4 +538,32 @@ mod shutdown_flag_tests {
         // Back outside the scope, the task-local is gone again.
         assert!(!shutdown_requested());
     }
+
+    /// sc-9618: the caption (`caption_jobs::run_training_caption_job`) and prompt-refine
+    /// (`prompt_refine_jobs`) GPU consumer loops both short-circuit their `check_cancel` API poll with
+    /// `if shutdown_requested() { cancel.cancel() }` at the heartbeat checkpoint. This asserts the exact
+    /// semantics that arm relies on: outside a shutdown, the engine `cancel` flag is left untouched
+    /// (normal operation is unaffected); once the process-shutdown flag trips, the checkpoint fires the
+    /// engine cancel so the captioner/decode bails at its next per-item/per-token check.
+    #[tokio::test]
+    async fn shutdown_checkpoint_trips_the_engine_cancel_only_on_shutdown() {
+        let shutdown = gen_core::CancelFlag::new();
+        let shutdown_for_scope = shutdown.clone();
+        with_shutdown_flag(shutdown_for_scope, async {
+            // The engine-side cancel flag the producer (blocking captioner / decode) polls.
+            let engine_cancel = gen_core::CancelFlag::new();
+            // Before shutdown, the checkpoint's `if shutdown_requested()` is false — no spurious cancel.
+            if shutdown_requested() {
+                engine_cancel.cancel();
+            }
+            assert!(!engine_cancel.is_cancelled());
+            // A process shutdown trips the task-local; the next checkpoint tick fires the engine cancel.
+            shutdown.cancel();
+            if shutdown_requested() {
+                engine_cancel.cancel();
+            }
+            assert!(engine_cancel.is_cancelled());
+        })
+        .await;
+    }
 }
