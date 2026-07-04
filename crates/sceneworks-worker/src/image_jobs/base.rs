@@ -1380,7 +1380,17 @@ fn load_engine(
     ip_adapter_dir: Option<PathBuf>,
 ) -> WorkerResult<Box<dyn Generator>> {
     let spec = load_spec(weights_dir, quant, adapters, ip_adapter_dir);
-    gen_core::load(engine_id, &spec)
+    load_control_engine(engine_id, &spec)
+}
+
+/// Shared real-weight smoke loader: resolve `engine_id` through the backend-neutral
+/// `gen_core::load` seam and wrap a failure as `WorkerError::Engine`. Every image
+/// control/base lane's `#[cfg(test)]` load wrapper funnels through here so the
+/// `gen_core::load` + `map_err` tail lives in one place (sc-8954). `cfg(target_os)`
+/// still decides which provider crate registered the engine, not this call.
+#[cfg(all(target_os = "macos", test))]
+fn load_control_engine(engine_id: &str, spec: &LoadSpec) -> WorkerResult<Box<dyn Generator>> {
+    gen_core::load(engine_id, spec)
         .map_err(|error| WorkerError::Engine(format!("{engine_id} load failed: {error}")))
 }
 

@@ -214,8 +214,7 @@ fn flux1_control_load(
     adapters: Vec<AdapterSpec>,
 ) -> WorkerResult<Box<dyn Generator>> {
     let spec = flux1_control_spec(weights_dir, control_weights, quant, adapters);
-    gen_core::load(FLUX1_DEV_CONTROL_ENGINE_ID, &spec)
-        .map_err(|error| WorkerError::Engine(format!("FLUX.1-dev control load failed: {error}")))
+    load_control_engine(FLUX1_DEV_CONTROL_ENGINE_ID, &spec)
 }
 
 /// Real FLUX.1-dev strict-control generation: one image per pose, each conditioned on the requested

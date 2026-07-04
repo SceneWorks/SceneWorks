@@ -144,8 +144,7 @@ fn zimage_control_load(
     adapters: Vec<AdapterSpec>,
 ) -> WorkerResult<Box<dyn Generator>> {
     let spec = zimage_control_spec(weights_dir, control_weights, quant, adapters);
-    gen_core::load(ZIMAGE_CONTROL_ENGINE_ID, &spec)
-        .map_err(|error| WorkerError::Engine(format!("Z-Image control load failed: {error}")))
+    load_control_engine(ZIMAGE_CONTROL_ENGINE_ID, &spec)
 }
 
 #[cfg(all(target_os = "macos", test))]
@@ -157,8 +156,7 @@ fn zimage_base_control_load(
 ) -> WorkerResult<Box<dyn Generator>> {
     // Shares the Turbo control's `LoadSpec` shape (base dir + control overlay); only the engine id differs.
     let spec = zimage_control_spec(weights_dir, control_weights, quant, adapters);
-    gen_core::load(ZIMAGE_BASE_CONTROL_ENGINE_ID, &spec)
-        .map_err(|error| WorkerError::Engine(format!("Z-Image base control load failed: {error}")))
+    load_control_engine(ZIMAGE_BASE_CONTROL_ENGINE_ID, &spec)
 }
 
 /// Generate one strict-pose image: the pre-built `conditioning` (the required `Control` plus an optional

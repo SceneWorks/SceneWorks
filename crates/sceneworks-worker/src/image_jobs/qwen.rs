@@ -56,9 +56,7 @@ fn qwen_control_load(
     adapters: Vec<AdapterSpec>,
 ) -> WorkerResult<Box<dyn Generator>> {
     let spec = qwen_control_spec(weights_dir, control_weights, quant, adapters);
-    gen_core::load(QWEN_CONTROL_ENGINE_ID, &spec).map_err(|error| {
-        WorkerError::Engine(format!("Qwen strict-pose control load failed: {error}"))
-    })
+    load_control_engine(QWEN_CONTROL_ENGINE_ID, &spec)
 }
 
 /// Generate one Qwen strict-pose image: the pre-built `conditioning` (the required `Control`, assembled by
