@@ -14,10 +14,12 @@
 //! Setup — point at the published turnkey `SceneWorks/lens-mlx` (the worker default). With the q4 tier
 //! already in the HF cache, no env is needed: the smoke auto-resolves the cached snapshot's `q4/` subdir
 //! (the same selection `image_jobs::base::standard_tier_subdir` makes for `mlxQuantize: 4`). Override
-//! `LENS_BASE_Q4_DIR` to point at a snapshot root or a `q4/`-bearing dir directly.
+//! `LENS_BASE_Q4_DIR` to point at a snapshot root or a `q4/`-bearing dir directly. Env keys are
+//! `LENS_BASE_*`-prefixed so this smoke and `lens_turbo_q4_mlx_smoke` (its `LENS_TURBO_*` sibling) can
+//! share one `--ignored` run without bleeding each other's step count / out dir (sc-8924).
 //! ```text
 //! # optional: LENS_BASE_Q4_DIR=/path/to/lens-mlx  (root containing q4/, or the q4/ dir itself)
-//! # optional: LENS_STEPS=20 LENS_W=1024 LENS_H=1024 LENS_PROMPT="..." LENS_OUT_DIR=/tmp/lens_base_q4_smoke
+//! # optional: LENS_BASE_STEPS=20 LENS_BASE_W=1024 LENS_BASE_H=1024 LENS_BASE_PROMPT="..." LENS_BASE_OUT_DIR=/tmp/lens_base_q4_smoke
 //! cargo test -p sceneworks-worker --release lens_base_q4_mlx_gpu_smoke -- --ignored --nocapture
 //! ```
 
@@ -127,14 +129,19 @@ fn lens_base_q4_mlx_gpu_smoke() {
     };
     let q4_dir = resolve_q4_dir(&root);
 
-    let out_dir = PathBuf::from(env_or("LENS_OUT_DIR", "/tmp/lens_base_q4_smoke"));
+    // Per-test env prefix `LENS_BASE_*` (sc-8924): previously this smoke and lens_turbo_q4 shared the
+    // bare `LENS_OUT_DIR` / `LENS_STEPS` / `LENS_W` / `LENS_H` / `LENS_PROMPT` keys, so co-running both
+    // under one `--ignored` invocation bled the turbo smoke's 4-step config into this 20-step base run.
+    let out_dir = PathBuf::from(env_or("LENS_BASE_OUT_DIR", "/tmp/lens_base_q4_smoke"));
     std::fs::create_dir_all(&out_dir).expect("create out dir");
 
-    let steps: u32 = env_or("LENS_STEPS", "20").parse().expect("LENS_STEPS");
-    let w: u32 = env_or("LENS_W", "1024").parse().expect("LENS_W");
-    let h: u32 = env_or("LENS_H", "1024").parse().expect("LENS_H");
+    let steps: u32 = env_or("LENS_BASE_STEPS", "20")
+        .parse()
+        .expect("LENS_BASE_STEPS");
+    let w: u32 = env_or("LENS_BASE_W", "1024").parse().expect("LENS_BASE_W");
+    let h: u32 = env_or("LENS_BASE_H", "1024").parse().expect("LENS_BASE_H");
     let prompt = env_or(
-        "LENS_PROMPT",
+        "LENS_BASE_PROMPT",
         "a photorealistic portrait of a red fox sitting in a sunlit autumn forest, sharp focus, \
          shallow depth of field",
     );
