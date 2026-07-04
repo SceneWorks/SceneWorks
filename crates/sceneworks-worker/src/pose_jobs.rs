@@ -489,16 +489,39 @@ impl Detector {
     /// off-Mac) and falling back to CPU if the provider can't initialise (mirrors
     /// Python `load_pose_detector`).
     fn load(det_path: &Path, pose_path: &Path) -> WorkerResult<Self> {
-        match (
-            build_session(det_path, true),
-            build_session(pose_path, true),
-        ) {
-            (Ok(det), Ok(pose)) => Ok(Self {
+        // Build the det session on the hardware EP first; only try the pose session on the
+        // EP if that succeeded — a failing accel provider fails identically for both, so
+        // building the second is wasted work (F-099). Bind and `warn!` the error before the
+        // CPU fallback so an accel-init failure leaves a breadcrumb instead of an
+        // unexplained "device = cpu" (sc-8901).
+        let accel = match build_session(det_path, true) {
+            Ok(det) => match build_session(pose_path, true) {
+                Ok(pose) => Some((det, pose)),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        provider = ACCEL_DEVICE,
+                        "DWPose pose-model {ACCEL_DEVICE} session build failed; falling back to CPU"
+                    );
+                    None
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    provider = ACCEL_DEVICE,
+                    "DWPose detector {ACCEL_DEVICE} session build failed; falling back to CPU"
+                );
+                None
+            }
+        };
+        match accel {
+            Some((det, pose)) => Ok(Self {
                 det,
                 pose,
                 device: ACCEL_DEVICE,
             }),
-            _ => Ok(Self {
+            None => Ok(Self {
                 det: build_session(det_path, false)?,
                 pose: build_session(pose_path, false)?,
                 device: "cpu",
