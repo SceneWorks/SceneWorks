@@ -228,6 +228,12 @@ fn preprocess(img: &RgbImage) -> (Vec<f32>, Letterbox) {
 
 /// Decode the (1,84,8400) channel-major output into person boxes (original px),
 /// pre-NMS. `data` is laid out as `data[channel * anchors + anchor]`.
+///
+/// The output shape/length are validated against the `(1, channels, anchors)` contract
+/// before any indexing (F-102): a user can pin an arbitrary ONNX export via
+/// `SCENEWORKS_PERSON_DETECTOR_WEIGHTS` whose output rank/length differs, and reading
+/// `shape[1]`/`shape[2]` or `data[channel*anchors + a]` on a shorter buffer would panic
+/// (OOB) and unwind the async task. Return an `Engine` error instead (sc-8904).
 fn decode(
     data: &[f32],
     shape: &[i64],
@@ -235,11 +241,25 @@ fn decode(
     conf: f32,
     frame_w: u32,
     frame_h: u32,
-) -> Vec<Detection> {
-    let channels = shape[1] as usize; // 84 = 4 box + 80 classes
-    let anchors = shape[2] as usize; // 8400
+) -> WorkerResult<Vec<Detection>> {
+    if shape.len() < 3 {
+        return Err(WorkerError::Engine(format!(
+            "yolo11m output rank {} < 3 (expected (1, channels, anchors))",
+            shape.len()
+        )));
+    }
+    let channels = shape[1].max(0) as usize; // 84 = 4 box + 80 classes
+    let anchors = shape[2].max(0) as usize; // 8400
     if channels < 5 {
-        return Vec::new();
+        return Ok(Vec::new());
+    }
+    if data.len() < channels.saturating_mul(anchors) {
+        return Err(WorkerError::Engine(format!(
+            "yolo11m output has {} values but the (channels={channels} × anchors={anchors}) \
+             contract needs {}",
+            data.len(),
+            channels.saturating_mul(anchors)
+        )));
     }
     let score_ch = 4 + PERSON_CLASS;
     let (fw, fh) = (frame_w as f32, frame_h as f32);
@@ -265,7 +285,7 @@ fn decode(
             score,
         });
     }
-    out
+    Ok(out)
 }
 
 fn iou(a: &Detection, b: &Detection) -> f32 {
@@ -719,7 +739,7 @@ impl Yolo {
             .map_err(|e| WorkerError::InvalidPayload(format!("yolo11m output reshape: {e}")))?;
         let data = out.as_slice::<f32>();
         let shape = [1_i64, 84, ANCHORS as i64];
-        let raw = decode(data, &shape, &lb, conf, img.width(), img.height());
+        let raw = decode(data, &shape, &lb, conf, img.width(), img.height())?;
         Ok(nms(raw, NMS_IOU))
     }
 }
@@ -891,7 +911,7 @@ impl OrtYolo {
         // so `decode` indexes it correctly regardless of the exact class count.
         let (shape, data) = outputs[0].try_extract_tensor::<f32>().map_err(ort_err)?;
         let shape: Vec<i64> = shape.to_vec();
-        let raw = decode(data, &shape, &lb, conf, img.width(), img.height());
+        let raw = decode(data, &shape, &lb, conf, img.width(), img.height())?;
         Ok(nms(raw, NMS_IOU))
     }
 }

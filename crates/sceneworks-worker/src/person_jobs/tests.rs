@@ -51,7 +51,7 @@ fn decode_keeps_person_anchors_above_conf_and_builds_xyxy() {
         pad_x: 0.0,
         pad_y: 0.0,
     };
-    let dets = decode(&data, &shape, &lb, 0.25, 640, 640);
+    let dets = decode(&data, &shape, &lb, 0.25, 640, 640).expect("valid shape decodes");
     assert_eq!(dets.len(), 1, "only the above-conf person anchor survives");
     let d = dets[0];
     assert!((d.x1 - 80.0).abs() < 1e-3);
@@ -71,10 +71,38 @@ fn decode_clamps_boxes_to_the_frame() {
         pad_x: 0.0,
         pad_y: 0.0,
     };
-    let dets = decode(&data, &shape, &lb, 0.25, 640, 640);
+    let dets = decode(&data, &shape, &lb, 0.25, 640, 640).expect("valid shape decodes");
     assert_eq!(dets.len(), 1);
     assert_eq!(dets[0].x1, 0.0);
     assert_eq!(dets[0].y1, 0.0);
+}
+
+#[test]
+fn decode_rejects_malformed_output_shape_and_length() {
+    let lb = Letterbox {
+        ratio: 1.0,
+        pad_x: 0.0,
+        pad_y: 0.0,
+    };
+    // Rank < 3 (a 2-D output from a mis-pinned ONNX export) → Engine error, not an OOB panic.
+    let rank2 = decode(&[0.0; 12], &[1, 6], &lb, 0.25, 640, 640);
+    assert!(
+        matches!(rank2, Err(WorkerError::Engine(_))),
+        "rank-2 output must be rejected, got {rank2:?}"
+    );
+    // Well-formed rank but the data buffer is shorter than channels×anchors → Engine error.
+    // (1,6,2) needs 12 values; hand it 5 so `data[score_ch*anchors + a]` would read OOB.
+    let short = decode(&[0.0; 5], &[1, 6, 2], &lb, 0.25, 640, 640);
+    assert!(
+        matches!(short, Err(WorkerError::Engine(_))),
+        "truncated data buffer must be rejected, got {short:?}"
+    );
+    // channels < 5 (no person class channel) is a benign "nothing to decode", not an error.
+    let no_person = decode(&[0.0; 8], &[1, 4, 2], &lb, 0.25, 640, 640);
+    assert!(
+        matches!(no_person, Ok(ref v) if v.is_empty()),
+        "channels<5 → empty, got {no_person:?}"
+    );
 }
 
 #[test]
