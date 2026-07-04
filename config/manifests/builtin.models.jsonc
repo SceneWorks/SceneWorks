@@ -3707,9 +3707,9 @@
       // macOS-only MLX backend. The MLX-SDXL generator is the Rust `mlx-gen-sdxl`
       // path, claimed by the in-process `mlx` GPU worker via the Rust API claim
       // layer (jobs_store::sdxl_mlx_eligible). sc-3060 RETIRED the old in-process
-      // vendored Apple `mlx-examples/stable_diffusion` (scene_worker/_vendor/mlx_sd/)
-      // adapter — the Python worker always routes the torch SdxlDiffusersAdapter now
-      // (every host, every shape); it never runs MLX-SDXL.
+      // vendored Apple `mlx-examples/stable_diffusion` MLX-SDXL adapter (it lived in
+      // the now-deleted Python worker, removed in epic 8283); MLX-SDXL now runs only
+      // through the Rust `mlx-gen-sdxl` path above.
       //
       // mlx.quantize/tier config below is consumed by the RUST worker
       // (standard_tier_subdir / resolve_quant), NOT the retired Apple adapter. The

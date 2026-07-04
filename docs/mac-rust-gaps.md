@@ -10,8 +10,9 @@ run it yet. When the list is empty, the Mac build can stop shipping a Python ven
 > inverse of the `*_mlx_eligible` predicates. The same routing constants are the source of
 > truth: `MLX_ROUTED_MODELS`, `VIDEO_MLX_ROUTED_MODELS`, `MLX_ROUTED_TRAINING_KERNELS`, and the
 > per-family `*_mlx_eligible` gates in `crates/sceneworks-core/src/jobs_store.rs`; the model
-> registry is `MODEL_TARGETS` (`apps/worker/scene_worker/image_adapters.py` /
-> `video_adapters.py`); training kernels are the builtin targets in
+> registry is the embedded `config/manifests/builtin.models.jsonc` (the Rust worker's engine
+> wiring in `crates/sceneworks-worker/src/engines.rs` restates the per-model defaults that the
+> retired Python `MODEL_TARGETS` once held); training kernels are the builtin targets in
 > `crates/sceneworks-core/src/training.rs`. **Keep this file in sync when a surface flips** —
 > when a model lands in a `*_ROUTED_*` set or an `*_mlx_eligible` gate opens, move its row to
 > *Done* and delete the gap. A row here that no longer matches the predicates is a bug.

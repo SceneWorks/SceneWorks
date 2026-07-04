@@ -5,6 +5,17 @@
 > **What this is**: The model-agnostic contract that lets Character Studio render a recognizable subject from a single reference image across diverse backbone families — IP-Adapter (Kolors, SDXL, RealVisXL, FLUX), face-specialized identity (InstantID), and edit-as-reference (Qwen-Image-Edit / 2509). Distilled from the shipped code, not designed up-front.
 >
 > **Audience**: Engineers wiring a new reference-capable image backbone into SceneWorks.
+>
+> **Note (epic 8283 / sc-9854):** the `apps/worker/scene_worker/*.py` worker-engine layer this
+> doc originally described was **deleted** when the Python worker was retired (epic 8283 Python
+> eradication). The current reference-conditioning implementation lives in the Rust worker
+> (`crates/sceneworks-worker/src/engines.rs`) with the model/tuning surface declared in
+> `config/manifests/builtin.models.jsonc`. The manifest (§3), web payload (§4), Rust passthrough
+> (§5), and CI-enforcement (§6) sections still describe current wiring; the `scene_worker/*.py`
+> pointers in §2 and §7 (including the "Engine templates" links below) are retained as the
+> historical mechanism description — read them for the *contract shape*, not as current file paths.
+> New backbones are wired through the Rust engine seam (`engines.rs` + the manifest), not the
+> deleted Python adapters.
 
 ---
 
@@ -23,7 +34,12 @@ The contract has four layers: worker engine, manifest declarations, web payload 
 
 ---
 
-## 2. Worker engine layer — `apps/worker/scene_worker/image_adapters.py`
+## 2. Worker engine layer — `apps/worker/scene_worker/image_adapters.py` *(retired — see epic-8283 note above)*
+
+> *(Retired file path. `scene_worker/image_adapters.py` was deleted in epic 8283; the current
+> worker-engine layer is the Rust engine seam in `crates/sceneworks-worker/src/engines.rs`. The
+> code shapes below are kept as the historical description of the conditioning contract, not as
+> current source.)*
 
 ### 2.1 Per-model registry (`MODEL_TARGETS`)
 
@@ -228,11 +244,11 @@ Plus `scripts/check-scaffold.mjs::assertCharacterImageTuningSurface()` runs audi
 Concrete recipe based on the sc-2007 → sc-2011 → sc-2014 cadence. Step-by-step for an IP-Adapter-family backbone; analogous for face-identity or edit-as-reference. Plan on 6–8 files touched, ~250–400 lines of new code, no Rust changes unless the backbone introduces a new typed payload field.
 
 1. **Spike** (desktop-first per sc-2010 / sc-2013 pattern): pick the upstream adapter weights, confirm license posture, identify the diffusers API shape (`FluxIPAdapterMixin` vs `IPAdapterMixin` vs custom pipeline), estimate Mac MPS memory peak. Capture findings in a Shortcut story comment.
-2. **Worker engine** ([apps/worker/scene_worker/image_adapters.py](../apps/worker/scene_worker/image_adapters.py)): add the `MODEL_TARGETS` entry with an `ipAdapter` block (or `instantId` for face-ID); add `_use_ip_adapter` / `_use_reference` static gate, `_text_ip_adapter` cache flag, `_ip_adapter_scale` + (for guidance-distilled backbones) `_true_cfg_scale` helpers; modify `_load_pipeline` for encoder load + `pipe.load_ip_adapter`; modify `_run_pipeline` to pass `ip_adapter_image=` (or `image=` for edit-style). Mirror the SDXL adapter as the template — it's the cleanest reference.
+2. **Worker engine** *(retired — see epic-8283 note; current wiring is the Rust engine seam `crates/sceneworks-worker/src/engines.rs`, not the deleted `scene_worker/image_adapters.py`)*: the historical Python recipe was — add the `MODEL_TARGETS` entry with an `ipAdapter` block (or `instantId` for face-ID); add `_use_ip_adapter` / `_use_reference` static gate, `_text_ip_adapter` cache flag, `_ip_adapter_scale` + (for guidance-distilled backbones) `_true_cfg_scale` helpers; wire encoder load + `pipe.load_ip_adapter` into the pipeline load path; pass `ip_adapter_image=` (or `image=` for edit-style) into the run path; mirror the SDXL adapter as the template. Today the equivalent lives in the Rust worker's engine wiring (`engines.rs` `CHARACTER_IMAGE_ENGINE_WIRING`); wire the new backbone there instead.
 3. **Manifest** ([config/manifests/builtin.models.jsonc](../config/manifests/builtin.models.jsonc)): add the model entry with `character_image` in `capabilities` + `ui.recommendedFor`; add per-model `ui.*` tuning hints (`referenceStrengthDefault`, `variationStrength`, etc.) as the mechanism requires; declare license / gating posture.
 4. **Web constants** ([apps/web/src/constants.js](../apps/web/src/constants.js)): mirror the manifest entry (fallback for desktop-disconnected mode).
 5. **Prompt guide** (`apps/web/public/prompt-guides/<id>.md`): scene-flexible prompt shape, comparison vs other backbones, tunable defaults.
-6. **Tests** ([tests/test_worker_runtime.py](../tests/test_worker_runtime.py)): mirror the SDXL or FLUX test set — `_model_target_defaults`, `_use_ip_adapter` gate, `_ip_adapter_scale` default + clamp, `_run_pipeline` torch-free verification with a **named-param** `FakePipe` (var-keyword params fail `filter_call_kwargs`).
+6. **Tests** *(retired file — `tests/test_worker_runtime.py` was deleted with the Python worker in epic 8283; cover the Rust engine wiring in `crates/sceneworks-worker/src/engines.rs` tests instead)*: the historical Python test set mirrored the SDXL or FLUX set — `_model_target_defaults`, `_use_ip_adapter` gate, `_ip_adapter_scale` default + clamp, `_run_pipeline` torch-free verification with a **named-param** `FakePipe` (var-keyword params fail `filter_call_kwargs`).
 7. **Run the sc-2018 audits** — they catch drift between (1)–(4). The scaffold check covers the picker-symmetry half at build time.
 8. **PR** with the standard test plan checklist: CI passes, Mac MPS E2E owed (the engine code is correct without a real hardware run, but identity quality + memory budget can only be confirmed there).
 
@@ -255,6 +271,6 @@ Rust changes are only needed if the new payload field needs typed validation (e.
 ## References
 
 - [Epic 2003 — SceneWorks: Multi-Model Character Studio Reference & Identity Conditioning](https://app.shortcut.com/trefry/epic/2003)
-- Engine templates: [SdxlDiffusersAdapter](../apps/worker/scene_worker/image_adapters.py), [InstantIDAdapter](../apps/worker/scene_worker/instantid_adapter.py), [FluxDiffusersAdapter](../apps/worker/scene_worker/image_adapters.py), [QwenImageAdapter](../apps/worker/scene_worker/image_adapters.py)
+- Engine templates *(retired — the Python adapters `SdxlDiffusersAdapter` / `InstantIDAdapter` / `FluxDiffusersAdapter` / `QwenImageAdapter` in `scene_worker/*.py` were deleted in epic 8283; current engine wiring is `CHARACTER_IMAGE_ENGINE_WIRING` in [engines.rs](../crates/sceneworks-worker/src/engines.rs))*
 - Picker: [ImageStudio.jsx](../apps/web/src/screens/ImageStudio.jsx)
-- Audits: [tests/test_worker_runtime.py](../tests/test_worker_runtime.py) (search for "Multi-model Character Studio reference matrix")
+- Audits: engine-wiring guards now live in [engines.rs](../crates/sceneworks-worker/src/engines.rs) (sc-9513, epic 8283); the pure-manifest guard is in [tests/test_builtin_manifest_audit.py](../tests/test_builtin_manifest_audit.py). *(The former `tests/test_worker_runtime.py` was deleted with the Python worker.)*

@@ -856,9 +856,9 @@ mod tests {
     // ── sc-9513 (F-059 follow-up of sc-8861): character_image ⇄ engine-wiring honesty guards ─────────
     //
     // These three guards were extracted to `tests/test_builtin_manifest_audit.py` by sc-8861 but still
-    // cross-referenced the retired Python worker's `scene_worker.image_adapters.MODEL_TARGETS` engine
-    // table via a lazy `importorskip` — so once epic-8283 deletes `apps/worker` they degrade to a clean
-    // SKIP and their coverage is lost. They are reimplemented here against the Rust worker's own engine
+    // cross-referenced the (now-deleted) Python worker's `MODEL_TARGETS` engine table via a lazy
+    // `importorskip` — so once epic-8283 deleted `apps/worker` they would have degraded to a clean
+    // SKIP and lost their coverage. They are reimplemented here against the Rust worker's own engine
     // wiring, reading the SAME embedded `config/manifests/builtin.models.jsonc` the Python audit parsed,
     // so the character_image ⇄ engine-declaration invariants keep running Python-free (and on CI's ubuntu
     // lane, since they need neither a linked provider registry nor a macos/candle build).
