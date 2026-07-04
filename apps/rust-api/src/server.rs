@@ -5,8 +5,8 @@
 //!
 //! Extracted from the crate-root grab-bag (sc-9736, the deferred remainder of
 //! sc-8890 / F-088). Behavior-preserving: `lib.rs` re-exports these four items
-//! (`pub use server::{run, run_worker}` and `pub(crate) use server::{AppState,
-//! Settings}`) so every external reference — `main.rs`, the handler modules'
+//! (`pub use server::{run, run_worker, AppState, Settings}`) so every external
+//! reference — `main.rs`, the handler modules'
 //! `use super::*`, and `tests.rs`'s `use super::{Settings, ...}` — keeps
 //! resolving unchanged. The startup helpers (`create_app`,
 //! `spawn_inprocess_utility_worker`, `shutdown_signal`, `should_warn_open_bind`,
