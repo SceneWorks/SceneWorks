@@ -23,7 +23,7 @@ import { LogsScreen } from "./screens/LogsScreen.jsx";
 import { LicensesScreen } from "./screens/LicensesScreen.jsx";
 import { SetupWizard } from "./screens/SetupWizard.jsx";
 import { editModelForAsset } from "./presetUtils.js";
-import { capTerminalJobs, sortNewest, sortOldest, sortWorkers, upsertJobNewest } from "./sorters.js";
+import { sortNewest, sortWorkers, upsertJobNewest } from "./sorters.js";
 import { useCharacters } from "./hooks/useCharacters.js";
 import { usePresets } from "./hooks/usePresets.js";
 import { useTraining } from "./hooks/useTraining.js";
@@ -32,7 +32,7 @@ import { usePersonTracks } from "./hooks/usePersonTracks.js";
 import { useTimelines } from "./hooks/useTimelines.js";
 import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
-import { ACCENTS, DEFAULT_ACCENT, isAccentId } from "./accents.js";
+import { ACCENTS, isAccentId } from "./accents.js";
 import {
   dropUpscaledVariants,
   findFoldedAssetById,
@@ -43,130 +43,29 @@ import { buildWorkersById } from "./workers.js";
 import { createEditorScratchRegistry } from "./editorScratch.js";
 import { isDesktop as isDesktopShell, tauriInvoke } from "./runtime.js";
 import { readAccessToken, storeAccessToken, clearAccessToken } from "./accessToken.js";
+import {
+  buildLocalJobStack,
+  failedJobNotice,
+  generatedResultAssetCount,
+  isActiveWorker,
+  isImageGenerationJob,
+  isInterleaveJob,
+  isPlaceholderOnlyGpuWorker,
+  isSelectableGpuWorker,
+  isVideoGenerationJob,
+  localJobStackLimit,
+  mergeFreshJobs,
+  noticeKindForJob,
+  parseSseJson,
+  readStoredAccent,
+  readStoredTheme,
+} from "./appHelpers.js";
 
 // Desktop (Tauri) shell detection (unified helper, epic 4484 story 6). The first-run
 // setup wizard is desktop-only; web/Docker (and a remote LAN browser) keep the
 // existing first-run project gate. Tauri commands persist the wizard state (the API
 // binds a random port each launch, so localStorage — keyed to the origin — can't be
 // relied on across launches).
-
-function isActiveWorker(worker) {
-  return worker.status !== "offline";
-}
-
-function hasCapability(worker, capability) {
-  return Array.isArray(worker.capabilities) && worker.capabilities.includes(capability);
-}
-
-function isPlaceholderOnlyGpuWorker(worker) {
-  if (!hasCapability(worker, "gpu")) {
-    return false;
-  }
-  const capabilities = Array.isArray(worker.capabilities) ? worker.capabilities : [];
-  return capabilities.every((capability) => ["placeholder", "gpu", "nvidia"].includes(capability));
-}
-
-function isSelectableGpuWorker(worker) {
-  return worker.gpuId && worker.gpuId !== "cpu" && hasCapability(worker, "gpu") && !isPlaceholderOnlyGpuWorker(worker);
-}
-
-function failedJobNotice(job) {
-  const label = String(job.type ?? "job").replaceAll("_", " ");
-  const detail = job.error || job.message || "Failed without additional worker detail.";
-  return `${label}: ${detail}`;
-}
-
-function isImageGenerationJob(job) {
-  return ["image_generate", "image_edit"].includes(job.type);
-}
-
-function isVideoGenerationJob(job) {
-  return ["video_generate", "video_extend", "video_bridge"].includes(job.type);
-}
-
-function isInterleaveJob(job) {
-  return job.type === "image_interleave";
-}
-
-function parseSseJson(event, label) {
-  try {
-    return JSON.parse(event.data);
-  } catch (err) {
-    console.warn(`Ignoring malformed ${label} SSE event`, err);
-    return null;
-  }
-}
-
-// sc-4198: notice kind for a job-failure banner. LoRA import/train failures get
-// their own kind so the matching job's later completion dismisses exactly that
-// banner (replacing the old "lora import:"/"lora training:" startsWith protocol);
-// everything else is a general error.
-function noticeKindForJob(job) {
-  if (job?.type === "lora_import") return "lora-import";
-  if (job?.type === "lora_train") return "lora-train";
-  return "general";
-}
-
-function jobFreshnessMs(job) {
-  const timestamp = job?.updatedAt ?? job?.completedAt ?? job?.canceledAt ?? job?.startedAt ?? job?.createdAt;
-  const parsed = Date.parse(timestamp ?? "");
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function mergeFreshJobs(currentJobs, serverJobs) {
-  const merged = new Map();
-  for (const job of serverJobs) {
-    merged.set(job.id, job);
-  }
-  for (const current of currentJobs) {
-    const server = merged.get(current.id);
-    if (!server || jobFreshnessMs(current) > jobFreshnessMs(server)) {
-      merged.set(current.id, current);
-    }
-  }
-  // sc-8860 (F-058): this deliberately keeps client-side entries the server no
-  // longer returns, so without a cap a long session grows unbounded. Cap the
-  // retained terminal-job tail (active jobs are never dropped) so a refresh can't
-  // monotonically grow `jobs`.
-  return capTerminalJobs([...merged.values()].sort(sortNewest));
-}
-
-function generatedResultAssetCount(job) {
-  if (Array.isArray(job.result?.assetIds)) {
-    return job.result.assetIds.length;
-  }
-  if (Array.isArray(job.result?.assets)) {
-    return job.result.assets.length;
-  }
-  return 0;
-}
-
-// Studios stack every running and queued run (plus the most recent finished run
-// until its successor starts), so a new submission no longer evicts the prior
-// progress card. Capped so a long session can't grow the visible stack unbounded.
-const localJobStackLimit = 25;
-
-// Build a studio's local-job stack: the runs it explicitly remembered plus any
-// still-active generation jobs for the open project, de-duped and ordered
-// oldest-first (running run on top, queued runs following in execution order),
-// keeping only the most recent `localJobStackLimit` entries.
-function buildLocalJobStack(rememberedIds, jobs, activeProjectId, isGenerationJob) {
-  const remembered = rememberedIds.map((id) => jobs.find((job) => job.id === id)).filter(Boolean);
-  const projectJobs = jobs.filter(
-    (job) =>
-      activeProjectId &&
-      job.projectId === activeProjectId &&
-      isGenerationJob(job) &&
-      !terminalStatuses.has(job.status),
-  );
-  const byId = new Map();
-  [...remembered, ...projectJobs].forEach((job) => {
-    if (job?.id && !byId.has(job.id)) {
-      byId.set(job.id, job);
-    }
-  });
-  return Array.from(byId.values()).sort(sortOldest).slice(-localJobStackLimit);
-}
 
 // Lazy-load the canvas editor so Konva (canvas-based, heavy) stays out of the
 // initial bundle and the jsdom test path — it only loads when the view is opened.
@@ -236,30 +135,6 @@ const viewTitles = {
     blurb: "Third-party components bundled with SceneWorks and their license notices.",
   },
 };
-
-function readStoredTheme() {
-  if (typeof window === "undefined") {
-    return "light";
-  }
-  try {
-    const saved = window.localStorage.getItem("sceneworks-theme");
-    return saved === "dark" || saved === "light" ? saved : "light";
-  } catch {
-    return "light";
-  }
-}
-
-function readStoredAccent() {
-  if (typeof window === "undefined") {
-    return DEFAULT_ACCENT;
-  }
-  try {
-    const saved = window.localStorage.getItem("sceneworks-accent");
-    return isAccentId(saved) ? saved : DEFAULT_ACCENT;
-  } catch {
-    return DEFAULT_ACCENT;
-  }
-}
 
 function ProjectSwitcher({ activeProject, projects, onSelect, onCreate, disabled }) {
   const [open, setOpen] = useState(false);
