@@ -1,8 +1,8 @@
-/// The engine registry id for the Qwen-Image ControlNet-Union variant.
+/// The engine registry id for the Qwen-Image ControlNet-Union variant. The default control repo is
+/// the `STRICT_CONTROL_ENGINES` table row for this id (resolved via `strict_control_default_repo`),
+/// not a duplicated local constant — so a table repoint keeps the resolver, error message, and
+/// download hint in lockstep.
 const QWEN_CONTROL_ENGINE_ID: &str = "qwen_image_control";
-/// Default alibaba-pai Qwen-Image-2512-Fun-Controlnet-Union weights (input-agnostic VACE branch:
-/// pose/canny/depth share one control path — sc-8267 source swap, sc-8250 canny+depth exposure).
-const QWEN_CONTROL_REPO: &str = "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union";
 const QWEN_CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
 
 /// True when this is the base-Qwen strict-pose tier: `qwen_image` + non-empty object
@@ -153,7 +153,8 @@ async fn generate_qwen_control_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("Qwen-Image weights not found".to_owned()))?;
     let control_weights = resolve_qwen_control_weights(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
-            "Qwen strict-pose control weights not found (download {QWEN_CONTROL_REPO})."
+            "Qwen strict-pose control weights not found (download {}).",
+            strict_control_default_repo(QWEN_CONTROL_ENGINE_ID)
         ))
     })?;
     let (quant, quant_bits) = resolve_quant(request);

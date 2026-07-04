@@ -1,15 +1,15 @@
-/// The engine registry id for the Z-Image Fun-Controlnet-Union variant.
+/// The engine registry id for the Z-Image Fun-Controlnet-Union variant. The default control repo is
+/// the `STRICT_CONTROL_ENGINES` table row for this id (resolved via `strict_control_default_repo`),
+/// so the resolver, error message, and download hint stay in lockstep on a table repoint (sc-2257
+/// parity).
 const ZIMAGE_CONTROL_ENGINE_ID: &str = "z_image_turbo_control";
-/// Default Fun-Controlnet-Union control-weights repo + file (sc-2257 parity).
-const ZIMAGE_CONTROL_REPO: &str = "alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1";
 const ZIMAGE_CONTROL_FILE: &str = "Z-Image-Turbo-Fun-Controlnet-Union-2.1-8steps.safetensors";
 
 /// The engine registry id for the **base** (non-distilled, full-CFG) Z-Image Fun-Controlnet-Union
 /// variant (sc-8251). Same VACE Fun-Union control branch as the Turbo variant, but assembled from a
-/// base `Tongyi-MAI/Z-Image` snapshot + the base control checkpoint, and driven with REAL CFG.
+/// base `Tongyi-MAI/Z-Image` snapshot + the base control checkpoint, and driven with REAL CFG. Default
+/// control repo comes from the `STRICT_CONTROL_ENGINES` table (via `strict_control_default_repo`).
 const ZIMAGE_BASE_CONTROL_ENGINE_ID: &str = "z_image_control";
-/// Default base Fun-Controlnet-Union control-weights repo + file (sc-8251).
-const ZIMAGE_BASE_CONTROL_REPO: &str = "alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1";
 const ZIMAGE_BASE_CONTROL_FILE: &str = "Z-Image-Fun-Controlnet-Union-2.1.safetensors";
 
 // `pose_entries` / `parse_poses` / `PoseInput` moved to `base.rs` (shared by the candle InstantID
@@ -251,7 +251,8 @@ async fn generate_zimage_control_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("Z-Image weights not found".to_owned()))?;
     let control_weights = resolve_control_weights(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
-            "Z-Image strict-pose control weights not found (download {ZIMAGE_CONTROL_REPO})."
+            "Z-Image strict-pose control weights not found (download {}).",
+            strict_control_default_repo(ZIMAGE_CONTROL_ENGINE_ID)
         ))
     })?;
     let (quant, quant_bits) = resolve_quant(request);
@@ -500,7 +501,8 @@ async fn generate_zimage_base_control_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("Z-Image base weights not found".to_owned()))?;
     let control_weights = resolve_base_control_weights(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
-            "Z-Image base strict-control weights not found (download {ZIMAGE_BASE_CONTROL_REPO})."
+            "Z-Image base strict-control weights not found (download {}).",
+            strict_control_default_repo(ZIMAGE_BASE_CONTROL_ENGINE_ID)
         ))
     })?;
     let (quant, quant_bits) = resolve_quant(request);
