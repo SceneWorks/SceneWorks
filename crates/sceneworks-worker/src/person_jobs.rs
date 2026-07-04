@@ -188,10 +188,38 @@ fn sample_rgb(img: &RgbImage, x: f32, y: f32, c: usize, border: f32) -> f32 {
     top * (1.0 - fy) + bot * fy
 }
 
-/// Build the (1,640,640,3) RGB `/255` letterboxed input in **NHWC** order (the layout
-/// `mlx_gen::nn::conv2d` expects) and return the geometry.
-#[cfg(target_os = "macos")]
-fn preprocess(img: &RgbImage) -> (Vec<f32>, Letterbox) {
+/// Destination layout for the shared letterbox preprocessor: NHWC (the layout
+/// `mlx_gen::nn::conv2d` expects, macOS) or NCHW (the `yolo11m.onnx` export expects,
+/// off-Mac). The two backends' letterbox + cv2 half-pixel sampling are byte-identical;
+/// only the destination index differs (sc-8906, F-104).
+#[derive(Clone, Copy)]
+enum InputLayout {
+    /// `hwc[(y * DET + x) * 3 + c]`.
+    #[cfg(target_os = "macos")]
+    Nhwc,
+    /// `chw[c * DET * DET + y * DET + x]`.
+    #[cfg(not(target_os = "macos"))]
+    Nchw,
+}
+
+impl InputLayout {
+    /// Flat destination index for pixel `(x, y)` channel `c` in the `3 * DET * DET` buffer.
+    #[inline]
+    fn index(self, x: usize, y: usize, c: usize) -> usize {
+        match self {
+            #[cfg(target_os = "macos")]
+            InputLayout::Nhwc => (y * DET + x) * 3 + c,
+            #[cfg(not(target_os = "macos"))]
+            InputLayout::Nchw => c * DET * DET + y * DET + x,
+        }
+    }
+}
+
+/// Build the (1,640,640,3) RGB `/255` letterboxed 640² input in `layout` order and return
+/// the geometry. The letterbox math + cv2 INTER_LINEAR half-pixel sampling are shared by
+/// both backends (macOS NHWC / off-Mac NCHW) — previously two byte-identical cfg-gated
+/// copies that could silently drift (sc-8906, F-104); only [`InputLayout::index`] differs.
+fn preprocess_letterbox(img: &RgbImage, layout: InputLayout) -> (Vec<f32>, Letterbox) {
     let lb = Letterbox::compute(img.width(), img.height());
     let (w, h) = (img.width() as f32, img.height() as f32);
     let new_w = (w * lb.ratio).round();
@@ -203,14 +231,13 @@ fn preprocess(img: &RgbImage) -> (Vec<f32>, Letterbox) {
     let pad_x = lb.pad_x as usize;
     let pad_y = lb.pad_y as usize;
 
-    // NHWC: hwc[(y * DET + x) * 3 + c].
-    let mut hwc = vec![PAD_VALUE / 255.0; DET * DET * 3];
+    let mut buf = vec![PAD_VALUE / 255.0; DET * DET * 3];
     for dy in 0..new_h {
         let src_y = (dy as f32 + 0.5) * sy - 0.5; // cv2 INTER_LINEAR half-pixel
-        let row = ((dy + pad_y) * DET + pad_x) * 3;
+        let y = dy + pad_y;
         for dx in 0..new_w {
             let src_x = (dx as f32 + 0.5) * sx - 0.5;
-            let base = row + dx * 3;
+            let x = dx + pad_x;
             for c in 0..3 {
                 let v = sample_rgb(
                     img,
@@ -219,11 +246,11 @@ fn preprocess(img: &RgbImage) -> (Vec<f32>, Letterbox) {
                     c,
                     0.0,
                 );
-                hwc[base + c] = v / 255.0;
+                buf[layout.index(x, y, c)] = v / 255.0;
             }
         }
     }
-    (hwc, lb)
+    (buf, lb)
 }
 
 /// Decode the (1,84,8400) channel-major output into person boxes (original px),
@@ -725,18 +752,21 @@ impl Yolo {
     }
 
     fn detect_people(&self, img: &RgbImage, conf: f32) -> WorkerResult<Vec<Detection>> {
-        let (input, lb) = preprocess(img);
+        let (input, lb) = preprocess_letterbox(img, InputLayout::Nhwc);
         let x = Array::from_slice(&input, &[1, DET as i32, DET as i32, 3]);
+        // A forward/reshape failure is an engine-execution fault, not a bad user payload —
+        // classify it as `Engine` like the `ort` sibling + the SAM2/SAM3 propagate paths
+        // (sc-8906, F-104); the old `InvalidPayload` mislabeled an MLX crash as user error.
         let out = self
             .run(&x)
-            .map_err(|e| WorkerError::InvalidPayload(format!("yolo11m forward: {e}")))?
+            .map_err(|e| WorkerError::Engine(format!("yolo11m forward: {e}")))?
             .output;
         // The head ends in a transpose, so `out` is a non-contiguous view; `as_slice`
         // would hand back the *physical* (pre-transpose) buffer. Flatten first to force a
         // logical-order copy → the `(1,84,8400)` channel-major layout `decode` indexes.
         let out = out
             .reshape(&[-1])
-            .map_err(|e| WorkerError::InvalidPayload(format!("yolo11m output reshape: {e}")))?;
+            .map_err(|e| WorkerError::Engine(format!("yolo11m output reshape: {e}")))?;
         let data = out.as_slice::<f32>();
         let shape = [1_i64, 84, ANCHORS as i64];
         let raw = decode(data, &shape, &lb, conf, img.width(), img.height())?;
@@ -799,45 +829,6 @@ pub(crate) fn detect_people_blocking(
 // with the CUDA EP (+ CPU fallback) and feeds its `(1,84,8400)` output into the shared
 // `decode`/`nms` math, exactly as the MLX path does.
 // ---------------------------------------------------------------------------
-
-/// Build the (1,3,640,640) RGB `/255` letterboxed input in **NCHW** order (the layout the
-/// `yolo11m.onnx` export expects) and return the geometry. Same letterbox + cv2 half-pixel
-/// sampling as the MLX `preprocess`, only the output channel order differs.
-#[cfg(not(target_os = "macos"))]
-fn preprocess_nchw(img: &RgbImage) -> (Vec<f32>, Letterbox) {
-    let lb = Letterbox::compute(img.width(), img.height());
-    let (w, h) = (img.width() as f32, img.height() as f32);
-    let new_w = (w * lb.ratio).round();
-    let new_h = (h * lb.ratio).round();
-    let sx = w / new_w.max(1.0);
-    let sy = h / new_h.max(1.0);
-    let new_w = new_w as usize;
-    let new_h = new_h as usize;
-    let pad_x = lb.pad_x as usize;
-    let pad_y = lb.pad_y as usize;
-
-    // NCHW: chw[c * DET * DET + y * DET + x].
-    let mut chw = vec![PAD_VALUE / 255.0; 3 * DET * DET];
-    for dy in 0..new_h {
-        let src_y = (dy as f32 + 0.5) * sy - 0.5; // cv2 INTER_LINEAR half-pixel
-        let y = dy + pad_y;
-        for dx in 0..new_w {
-            let src_x = (dx as f32 + 0.5) * sx - 0.5;
-            let x = dx + pad_x;
-            for c in 0..3 {
-                let v = sample_rgb(
-                    img,
-                    src_x.clamp(0.0, w - 1.0),
-                    src_y.clamp(0.0, h - 1.0),
-                    c,
-                    0.0,
-                );
-                chw[c * DET * DET + y * DET + x] = v / 255.0;
-            }
-        }
-    }
-    (chw, lb)
-}
 
 #[cfg(not(target_os = "macos"))]
 fn ort_err<R>(e: ort::Error<R>) -> WorkerError {
@@ -902,7 +893,7 @@ impl OrtYolo {
 
     /// Detect every person in one frame → NMS'd boxes in original px.
     fn detect_people(&mut self, img: &RgbImage, conf: f32) -> WorkerResult<Vec<Detection>> {
-        let (input, lb) = preprocess_nchw(img);
+        let (input, lb) = preprocess_letterbox(img, InputLayout::Nchw);
         let tensor = Tensor::from_array(([1_i64, 3, DET as i64, DET as i64].to_vec(), input))
             .map_err(ort_err)?;
         let outputs = self.session.run(ort::inputs![tensor]).map_err(ort_err)?;

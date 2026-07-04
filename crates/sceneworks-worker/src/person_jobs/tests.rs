@@ -105,6 +105,50 @@ fn decode_rejects_malformed_output_shape_and_length() {
     );
 }
 
+/// sc-8906 / F-104: the shared letterbox preprocessor places pixels + pads identically
+/// whichever layout the platform selects. Runs against the layout compiled on this lane
+/// (NHWC on macOS, NCHW off-Mac) via `InputLayout::index`, so the SAME buffer contents are
+/// asserted through the SAME indexing the production path uses — pinning that the dedup
+/// preserved both the geometry and the (previously divergent) per-layout index math.
+#[test]
+fn preprocess_letterbox_places_pixels_and_pads_per_layout() {
+    // A square image fills the 640² input edge-to-edge (ratio 1.0, no pad), so every
+    // in-bounds pixel is written and the buffer carries the source color, not PAD_VALUE.
+    let mut img = RgbImage::new(DET as u32, DET as u32);
+    for px in img.pixels_mut() {
+        *px = image::Rgb([10, 20, 30]);
+    }
+    #[cfg(target_os = "macos")]
+    let layout = InputLayout::Nhwc;
+    #[cfg(not(target_os = "macos"))]
+    let layout = InputLayout::Nchw;
+
+    let (buf, lb) = preprocess_letterbox(&img, layout);
+    assert_eq!(buf.len(), DET * DET * 3);
+    assert!((lb.ratio - 1.0).abs() < 1e-6, "square image → ratio 1.0");
+    assert_eq!((lb.pad_x, lb.pad_y), (0.0, 0.0), "no letterbox pad");
+    // A center pixel carries the source color at every channel via the layout's own index.
+    let (cx, cy) = (DET / 2, DET / 2);
+    for (c, &raw) in [10u8, 20, 30].iter().enumerate() {
+        let v = buf[layout.index(cx, cy, c)];
+        assert!(
+            (v - raw as f32 / 255.0).abs() < 1e-3,
+            "channel {c} at center should be {raw}/255, got {v}"
+        );
+    }
+
+    // A portrait image (narrower than tall) fits by height → horizontal pad columns stay
+    // at PAD_VALUE/255. Column 0 is entirely inside the pad band.
+    let portrait = RgbImage::from_pixel(200, 400, image::Rgb([255, 255, 255]));
+    let (pbuf, plb) = preprocess_letterbox(&portrait, layout);
+    assert!(plb.pad_x > 0.0, "portrait letterboxes with horizontal pad");
+    let pad = PAD_VALUE / 255.0;
+    assert!(
+        (pbuf[layout.index(0, DET / 2, 0)] - pad).abs() < 1e-6,
+        "left pad column stays at PAD_VALUE"
+    );
+}
+
 #[test]
 fn nms_drops_high_overlap_keeps_disjoint() {
     let strong = Detection {
