@@ -45,11 +45,38 @@ fn env_or(key: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
-/// `q4` -> Q4, anything else -> Q8 (the manifest default for all three SD3.5 tiers).
-fn quant_from_env() -> Quant {
-    match env_or("SD3_QUANT", "q8").to_ascii_lowercase().as_str() {
+/// `q4` -> Q4, `q8` -> Q8 (the manifest default for all three SD3.5 tiers). An unrecognized value
+/// panics with a clear hint rather than silently defaulting to Q8 (sc-8924): a hand-run tier
+/// validation with a typo'd `SD3_QUANT` would otherwise PASS the wrong tier and record a bogus result.
+/// Pure over the raw string so the reject behavior is unit-testable without touching process env.
+fn parse_quant(raw: &str) -> Quant {
+    match raw.trim().to_ascii_lowercase().as_str() {
         "q4" => Quant::Q4,
-        _ => Quant::Q8,
+        "q8" => Quant::Q8,
+        other => panic!("SD3_QUANT must be q4 or q8, got {other:?}"),
+    }
+}
+
+fn quant_from_env() -> Quant {
+    parse_quant(&env_or("SD3_QUANT", "q8"))
+}
+
+#[cfg(test)]
+mod quant_tests {
+    use super::{parse_quant, Quant};
+
+    #[test]
+    fn parse_quant_accepts_q4_q8_case_insensitively() {
+        assert!(matches!(parse_quant("q4"), Quant::Q4));
+        assert!(matches!(parse_quant("Q4"), Quant::Q4));
+        assert!(matches!(parse_quant(" q8 "), Quant::Q8));
+    }
+
+    #[test]
+    #[should_panic(expected = "SD3_QUANT must be q4 or q8")]
+    fn parse_quant_rejects_unknown_value() {
+        // A typo'd tier must NOT silently default (sc-8924) — it would record a bogus tier validation.
+        let _ = parse_quant("q5");
     }
 }
 

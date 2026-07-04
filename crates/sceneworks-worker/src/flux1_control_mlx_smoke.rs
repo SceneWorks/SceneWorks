@@ -150,7 +150,7 @@ fn flux1_dev_control_mlx_smoke() {
         "FLUX1_DEV_DIR must point at the dense FLUX.1-dev diffusers snapshot: {}",
         weights_dir.display()
     );
-    let out_dir = PathBuf::from(env_or("FLUX1_OUT_DIR", "flux1-control-smoke"));
+    let out_dir = PathBuf::from(env_or("FLUX1_OUT_DIR", "/tmp/flux1_control_smoke"));
     std::fs::create_dir_all(&out_dir).expect("create out dir");
     let w: u32 = env_or("FLUX1_W", "768").parse().expect("FLUX1_W");
     let h: u32 = env_or("FLUX1_H", "768").parse().expect("FLUX1_H");

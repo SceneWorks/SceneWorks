@@ -57,9 +57,50 @@ fn env_path(key: &str) -> PathBuf {
 }
 
 fn env_or(key: &str, default: &str) -> String {
+    // Filter set-but-empty values so `FLUX2_DEV_STEPS=` (or a whitespace-only value) falls back to the
+    // default instead of feeding "" into a downstream `.parse()` and panicking (sc-8924: unify on the
+    // empty-filtering env_or the MLX-side smokes already use).
     std::env::var(key)
+        .ok()
         .map(|v| v.trim().to_string())
-        .unwrap_or_else(|_| default.to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
+/// The requested quant tier + its lowercase label (for the output filename). `q4` -> Q4 (the shipped
+/// worker default), `q8` -> Q8 (optional contrast run). An unrecognized `FLUX2_DEV_QUANT` panics with a
+/// clear hint rather than silently defaulting to Q4 (sc-8924): a hand-run tier validation with a typo'd
+/// value would otherwise PASS the wrong tier and record a bogus result. Pure over the raw string so the
+/// reject behavior is unit-testable without touching process env.
+fn parse_quant(raw: &str) -> (Quant, &'static str) {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "q4" => (Quant::Q4, "q4"),
+        "q8" => (Quant::Q8, "q8"),
+        other => panic!("FLUX2_DEV_QUANT must be q4 or q8, got {other:?}"),
+    }
+}
+
+fn quant_from_env() -> (Quant, &'static str) {
+    parse_quant(&env_or("FLUX2_DEV_QUANT", "q4"))
+}
+
+#[cfg(test)]
+mod quant_tests {
+    use super::{parse_quant, Quant};
+
+    #[test]
+    fn parse_quant_accepts_q4_q8_case_insensitively() {
+        assert!(matches!(parse_quant("q4"), (Quant::Q4, "q4")));
+        assert!(matches!(parse_quant("Q8"), (Quant::Q8, "q8")));
+        assert!(matches!(parse_quant(" q4 "), (Quant::Q4, "q4")));
+    }
+
+    #[test]
+    #[should_panic(expected = "FLUX2_DEV_QUANT must be q4 or q8")]
+    fn parse_quant_rejects_unknown_value() {
+        // A typo'd tier must NOT silently default (sc-8924) — it would record a bogus tier validation.
+        let _ = parse_quant("q2");
+    }
 }
 
 /// Mean per-pixel std-dev across the RGB channels — a cheap "is the image non-degenerate" check. The
@@ -96,7 +137,7 @@ fn flux2_dev_candle_gpu_smoke() {
         "FLUX2_DEV_DIR must point at the dense FLUX.2-dev diffusers snapshot (model_index.json missing): {}",
         weights_dir.display()
     );
-    let out_dir = PathBuf::from(env_or("FLUX2_DEV_OUT_DIR", "flux2-dev-out"));
+    let out_dir = PathBuf::from(env_or("FLUX2_DEV_OUT_DIR", "/tmp/flux2_dev_smoke"));
     std::fs::create_dir_all(&out_dir).expect("create out dir");
 
     let steps: u32 = env_or("FLUX2_DEV_STEPS", "28")
@@ -109,10 +150,7 @@ fn flux2_dev_candle_gpu_smoke() {
         .expect("FLUX2_DEV_GUIDANCE");
     // The shipped worker forces Q4 (manifest `mlx.quantize: 4` → `resolve_quant`); allow Q8 for an
     // optional contrast run. dev advertises only Q4/Q8 — dense doesn't fit the GPU.
-    let quant = match env_or("FLUX2_DEV_QUANT", "q4").as_str() {
-        "q8" | "Q8" => Quant::Q8,
-        _ => Quant::Q4,
-    };
+    let (quant, quant_label) = quant_from_env();
     let prompt = env_or(
         "FLUX2_DEV_PROMPT",
         "a rusty robot holding a lit candle in a dark workshop, cinematic, sharp focus",
@@ -156,10 +194,7 @@ fn flux2_dev_candle_gpu_smoke() {
     };
 
     let std = image_std(&image);
-    let png = out_dir.join(format!(
-        "flux2_dev_{}_{steps}step.png",
-        env_or("FLUX2_DEV_QUANT", "q4")
-    ));
+    let png = out_dir.join(format!("flux2_dev_{quant_label}_{steps}step.png"));
     save_png(&image, &png);
     println!(
         "[smoke] flux2_dev {}x{} std {:.2} -> {}",
@@ -198,7 +233,7 @@ fn flux2_dev_edit_candle_gpu_smoke() {
         "FLUX2_DEV_DIR must point at the dense FLUX.2-dev diffusers snapshot: {}",
         weights_dir.display()
     );
-    let out_dir = PathBuf::from(env_or("FLUX2_DEV_OUT_DIR", "flux2-dev-out"));
+    let out_dir = PathBuf::from(env_or("FLUX2_DEV_OUT_DIR", "/tmp/flux2_dev_smoke"));
     std::fs::create_dir_all(&out_dir).expect("create out dir");
     let (w, h) = (
         env_or("FLUX2_DEV_W", "512").parse().expect("FLUX2_DEV_W"),
@@ -290,7 +325,7 @@ fn flux2_dev_control_candle_gpu_smoke() {
         "FLUX2_DEV_DIR must point at the dense FLUX.2-dev diffusers snapshot: {}",
         weights_dir.display()
     );
-    let out_dir = PathBuf::from(env_or("FLUX2_DEV_OUT_DIR", "flux2-dev-out"));
+    let out_dir = PathBuf::from(env_or("FLUX2_DEV_OUT_DIR", "/tmp/flux2_dev_smoke"));
     std::fs::create_dir_all(&out_dir).expect("create out dir");
     let (w, h) = (
         env_or("FLUX2_DEV_W", "768").parse().expect("FLUX2_DEV_W"),
