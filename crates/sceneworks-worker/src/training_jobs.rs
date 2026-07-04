@@ -937,6 +937,21 @@ impl SamplePersister {
 /// cancel ~every 2s (draining after a cancel so the blocking sender never blocks),
 /// and on the final `Done` event report completion with the result the UI shows.
 /// Mirrors `image_jobs::consume_gen_events`.
+///
+/// sc-9541 (F-034 follow-up): this deliberately does NOT fold into the shared
+/// [`analysis_jobs_common::run_batched_analysis_job`] scaffold (which the CLIP + face analysis jobs
+/// share). That scaffold abstracts "N homogeneous items, each a bare `usize` index → one record `R`,
+/// all ending in ONE sidecar POST"; training shares none of those axes — its channel carries a rich
+/// `TrainEvent`/`TrainingProgress` variant tree (not a `usize`), its progress spans five kernel bands
+/// via [`map_training_progress`] (not the analysis single-ramp `item_progress`), its `Sample` events
+/// have file-persistence side effects (`SamplePersister`), its cancel posts an interim non-terminal
+/// "Cancelling…" update (`begin_training_cancel`, the analysis loop trips a bare flag), and it emits an
+/// in-place `Done` result with NO sidecar POST (the engine writes the adapter; the API registers it
+/// separately). Forcing training through the analysis scaffold would require making it generic over an
+/// event type + an event→progress mapper + a stateful side-effect hook + a no-op sidecar branch —
+/// distorting the clean analysis-only seam for more complexity than the duplication it removes. The
+/// only genuinely shared machinery (the `CancelJoinGuard` + bounded-join teardown + deferred-terminal
+/// cancel, sc-8804/8917) is already reconciled across both by convention, not code sharing.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
