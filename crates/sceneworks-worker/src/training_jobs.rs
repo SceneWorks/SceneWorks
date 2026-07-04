@@ -975,7 +975,11 @@ async fn consume_training_events(
                     training_progress(status, stage, fraction, &message, None, backend),
                 )
                 .await?;
-                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                // No per-event heartbeat here: the `heartbeat_interval.tick()` arm above already
+                // pings `Busy` on the shared 5–15 s interval, keeping `last_seen` fresh independent of
+                // event cadence (posting progress does not refresh it). A heartbeat per progress event
+                // just doubled the API round-trips, throttling GPU stepping to API latency (sc-8917,
+                // F-115) with no keepalive benefit.
             }
             TrainEvent::Done(output) => {
                 let result = training_result(

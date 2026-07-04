@@ -134,6 +134,13 @@ where
     let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
     let mut interval = tokio::time::interval(progress_report_interval(settings));
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // A cancel poll must NOT post the terminal `Canceled` at acknowledgement time while the blocking
+    // embed loop is still running: doing so frees the worker row (`jobs_store::update_job_progress`)
+    // so the scheduler hands the "free" worker a new job while the current embed finishes on the GPU
+    // (sc-8917, F-115 — the pattern the training path already replaced). Instead poll with
+    // `cancel_requested_peek` (no terminal write), trip the engine flag, and defer the terminal
+    // `Canceled` until AFTER the task stops (mirrors `consume_training_events`).
+    let mut canceled = false;
     // Run the stream loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
     let loop_result: WorkerResult<()> = async {
@@ -161,10 +168,11 @@ where
                 }
                 _ = interval.tick() => {
                     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                    match check_cancel(api, &job.id, cfg.cancel_message).await {
-                        Ok(()) => {}
-                        Err(WorkerError::Canceled(_)) => cancel.cancel(),
-                        Err(error) => return Err(error),
+                    if !canceled && cancel_requested_peek(api, &job.id).await {
+                        // Trip the flag so the blocking loop bails at its next per-item check; the
+                        // terminal `Canceled` is posted below once the task has actually stopped.
+                        cancel.cancel();
+                        canceled = true;
                     }
                 }
             }
@@ -178,10 +186,19 @@ where
     }
 
     // Loop exited cleanly (channel closed) — reclaim the handle (disarming the drop-guard) and join.
-    let records = guard
+    let join_result = guard
         .into_handle()
         .await
-        .map_err(|error| task_join_error(cfg.join_error_label, error))??;
+        .map_err(|error| task_join_error(cfg.join_error_label, error))?;
+    if canceled {
+        // The embed loop has actually stopped now, so post the TERMINAL `Canceled` here (not at the
+        // earlier cancel poll, which only tripped the flag) — this terminal write frees the worker row
+        // as the worker returns to its claim loop, so the next queued job waits only until the GPU is
+        // genuinely free (sc-8917, F-115; mirrors the training path sc-5516).
+        mark_job_canceled(api, &job.id, cfg.cancel_message).await?;
+        return Err(WorkerError::Canceled(cfg.cancel_message.to_owned()));
+    }
+    let records = join_result?;
 
     update_job(
         api,

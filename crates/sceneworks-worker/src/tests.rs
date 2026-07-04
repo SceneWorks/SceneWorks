@@ -4039,6 +4039,153 @@ async fn begin_training_cancel_trips_flag_and_stays_non_terminal() {
     );
 }
 
+// sc-8917 (F-115) — the shared batched-analysis scaffold DEFERS the terminal `Canceled` to
+// actual-stop, exactly like the training/video pollers. A cancel observed on the heartbeat-tick
+// poll must only trip the engine flag (so the still-running embed loop bails at its next per-item
+// check); the terminal `Canceled` is posted only AFTER the blocking task has stopped, so the worker
+// row isn't freed — and the scheduler isn't told a busy worker is free — while the GPU is still
+// finishing the current embed. Regression: the old scaffold called `check_cancel` on the tick, which
+// posted the terminal `Canceled` at acknowledgement time.
+
+/// A capture stub for the analysis scaffold: the job GET/heartbeat report a user cancel (so the
+/// interval-tick poll trips), every progress POST body is recorded, and the heartbeat route answers.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn spawn_analysis_cancel_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+    use std::sync::{Arc, Mutex};
+    type Posts = Arc<Mutex<Vec<Value>>>;
+    async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
+        // Report the user cancel so `cancel_requested_peek` on the first (immediate) interval tick
+        // trips the flag.
+        Json(job_snapshot_json(&job_id, true)).into_response()
+    }
+    async fn progress_route(
+        State(posts): State<Posts>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+        Json(body): Json<Value>,
+    ) -> Response {
+        posts.lock().expect("posts lock").push(body);
+        Json(job_snapshot_json(&job_id, true)).into_response()
+    }
+    async fn heartbeat_route(
+        axum::extract::Path(worker_id): axum::extract::Path<String>,
+    ) -> Response {
+        Json(worker_snapshot_json(&worker_id)).into_response()
+    }
+    let posts: Posts = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new()
+        .route("/api/v1/jobs/:job_id", get(job_route))
+        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .route(
+            "/api/v1/workers/:worker_id/heartbeat",
+            post(heartbeat_route),
+        )
+        .with_state(posts.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    (format!("http://{address}"), posts)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[tokio::test]
+async fn batched_analysis_defers_terminal_canceled_until_the_task_stops() {
+    let (base_url, posts) = spawn_analysis_cancel_stub().await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    // A short heartbeat so the interval fires promptly; the first `interval.tick()` resolves
+    // immediately regardless, which is what drives the cancel poll here.
+    settings.heartbeat_seconds = 5;
+    let api = ApiClient::new(&settings);
+    let job: JobSnapshot = serde_json::from_value(job_snapshot_json("job-1", true))
+        .expect("job snapshot deserializes");
+
+    let cancel = gen_core::CancelFlag::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<usize>(4);
+    // The blocking task models a real embed loop: it sends NO item (so `rx.recv()` stays pending and
+    // the immediate interval tick wins the `select!`), waits for the flag, and — once tripped —
+    // returns `Canceled` exactly as the CLIP/face loops do at their per-item `is_cancelled()` check.
+    let task_cancel = cancel.clone();
+    let blocking = tokio::task::spawn_blocking(move || -> super::WorkerResult<Vec<u32>> {
+        // Keep `tx` alive until we bail so the channel isn't closed early (which would also break the
+        // loop, but via the `None` arm rather than the cancel path we want to exercise).
+        let _tx = tx;
+        for _ in 0..2_000 {
+            if task_cancel.is_cancelled() {
+                return Err(WorkerError::Canceled("Analysis canceled by user.".to_owned()));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(vec![1, 2, 3])
+    });
+
+    let cfg = super::AnalysisJobConfig {
+        endpoint_suffix: "analysis-embeddings",
+        space: "clip-vit-l14",
+        cancel_message: "Analysis canceled by user.",
+        saving_message: "Saving embeddings.",
+        join_error_label: "analysis task join",
+        item_message: &|index, total| format!("Analyzed image {} of {}.", index + 1, total),
+    };
+    let mut records_payload_calls = 0usize;
+    let result = super::run_batched_analysis_job(
+        &api,
+        &settings,
+        &job,
+        &cfg,
+        3,
+        "mlx",
+        cancel,
+        rx,
+        blocking,
+        |records: &[u32]| {
+            records_payload_calls += 1;
+            records.iter().map(|r| json!(r)).collect()
+        },
+        |_records, _stored| unreachable!("a canceled job must not build a completed update"),
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(WorkerError::Canceled(_))),
+        "a canceled analysis job returns WorkerError::Canceled, got {result:?}"
+    );
+    assert_eq!(
+        records_payload_calls, 0,
+        "the records → sidecar payload must never be built on cancel (no embeddings are POSTed)"
+    );
+    let posts = posts.lock().expect("posts lock");
+    // Exactly one terminal `canceled`, and it is the FINAL post — never a mid-run acknowledgement.
+    let canceled: Vec<&Value> = posts
+        .iter()
+        .filter(|p| p["status"] == "canceled")
+        .collect();
+    assert_eq!(
+        canceled.len(),
+        1,
+        "exactly one terminal canceled is posted, got posts: {posts:?}"
+    );
+    assert_eq!(
+        posts.last().map(|p| &p["status"]),
+        Some(&json!("canceled")),
+        "the terminal canceled must be the LAST post (deferred to after the task stopped)"
+    );
+    // The scaffold never reached the saving stage (the records POST) on the cancel path.
+    assert!(
+        posts.iter().all(|p| p["status"] != "saving"),
+        "a canceled job must not post the Saving stage: {posts:?}"
+    );
+}
+
 // sc-8804 (F-003) — the shared cancel-and-join guard. Every streaming job consumer binds its
 // blocking GPU/training task to its `CancelFlag` through `CancelJoinGuard`; on any early return
 // (a transient progress/heartbeat POST failure or a 409 stale-sweep reclaim propagating through
