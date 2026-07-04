@@ -3312,6 +3312,34 @@ fn import_source_symlink_escape_is_rejected() {
         .contains("LoRA import sourcePath must be inside"));
 }
 
+// sc-8898 / F-096: a missing import source now surfaces the friendly "LoRA source
+// not found" message. Previously `canonicalize()` failed NotFound first and the
+// `!exists()` branch that built this message was dead, so the user only saw the
+// raw OS error.
+#[tokio::test]
+async fn missing_lora_import_source_reports_friendly_not_found() {
+    let temp = tempdir().expect("tempdir creates");
+    let missing = temp.path().join("does-not-exist.safetensors");
+    let target_dir = temp.path().join("target");
+
+    let error = import_lora_source_path(&missing, &target_dir, false)
+        .await
+        .expect_err("missing source errors");
+
+    match error {
+        WorkerError::Io(io_error) => {
+            assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
+            assert!(
+                io_error.to_string().contains("LoRA source not found"),
+                "unexpected message: {io_error}"
+            );
+        }
+        other => panic!("expected NotFound Io error, got {other:?}"),
+    }
+    // The target dir is not created for a missing source (the copy never runs).
+    assert!(!target_dir.exists());
+}
+
 #[tokio::test]
 async fn ffmpeg_runner_surfaces_bounded_stderr_from_failing_process() {
     let args = if cfg!(windows) {
