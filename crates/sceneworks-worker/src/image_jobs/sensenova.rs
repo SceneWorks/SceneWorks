@@ -207,8 +207,8 @@ async fn generate_sensenova_edit_stream(
     // identity-likeness gate (incl. the sc-4411 plain-With-Character case). Scoring (epic 4406, sc-4409
     // angles / sc-4411 plain With-Character) is generator-agnostic — SenseNova-U1 produces the FINAL
     // image directly (no face-restore pass), so scoring the generated image scores what the user sees.
-    let grouping = flux2_grouping(request);
-    if matches!(grouping, Flux2Grouping::Poses(_)) {
+    let grouping = edit_grouping(request);
+    if matches!(grouping, EditGrouping::Poses(_)) {
         // Unreachable: strict pose is excluded by `sensenova_mlx_eligible` (no ControlNet).
         return Err(WorkerError::InvalidPayload(
             "SenseNova-U1 has no strict-pose (ControlNet) path".to_owned(),

@@ -576,7 +576,7 @@ fn qwen_edit_generate_one(
 /// Real Qwen-Image-Edit generation: load the `qwen_image_edit` engine model once, then
 /// one output per grouped iteration each conditioned on the shared reference set. Mirrors
 /// [`generate_flux2_edit_stream`]'s blocking-thread + streamed-events shape and reuses the
-/// shared grouping ([`flux2_grouping`]) and [`consume_gen_events`]; differs in true-CFG
+/// shared grouping ([`edit_grouping`]) and [`consume_gen_events`]; differs in true-CFG
 /// guidance (`trueCfgScale`) + the negative prompt, the `[reference, skeleton]` pose order
 /// (reference first drives the VL identity prompt), and the body-only pose skeleton.
 async fn generate_qwen_edit_stream(
@@ -654,7 +654,7 @@ async fn generate_qwen_edit_stream(
     // sc-4409 angles / sc-4410 poses / sc-4411 plain With-Character) is generator-agnostic — Qwen-Edit
     // produces the FINAL image directly (no face-restore pass), so scoring the generated image scores
     // what the user sees.
-    let grouping = flux2_grouping(request);
+    let grouping = edit_grouping(request);
     let EditBatch {
         seeds,
         prompts,

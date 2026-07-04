@@ -129,7 +129,7 @@ fn flux2_edit_candle_guidance(request: &ImageRequest, default: f32) -> f32 {
 /// Reference asset ids for a FLUX.2 edit, in order. The multi-image picker (sc-6211) sends the plural
 /// `referenceAssetIds` — take all of them, capped at [`FLUX2_EDIT_CANDLE_MAX_REFERENCES`]; with no plural
 /// list it falls back to the single Image-Edit `sourceAssetId` (`edit_image` mode). Mirrors the MLX
-/// `flux2_edit_reference_ids` (multi) + `boogu_edit_reference_ids`.
+/// `edit_reference_ids` (multi) + `boogu_edit_reference_ids`.
 fn flux2_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
     if !request.reference_asset_ids.is_empty() {
         // The parsed list is already trimmed + non-empty (sceneworks-core `string_list`).
