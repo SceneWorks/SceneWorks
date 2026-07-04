@@ -11,6 +11,10 @@ from uuid import uuid4
 import httpx
 import pytest
 
+# In CI a missing cargo means the workflow toolchain regressed, so `require_tool`
+# fails the e2e gate instead of letting it skip to a silent green (sc-8935 / F-133).
+from conftest import require_tool
+
 # Shared, corruption-free fixtures (sc-8934 / F-132): PNG + safetensors builders
 # and the API-spawn helpers, previously copy-pasted (and drifted) between this
 # file and test_rust_api_contract_snapshots.py.
@@ -209,8 +213,7 @@ def wait_for_job_status(base_url: str, job_id: str, status: str, process: subpro
 
 @pytest.fixture()
 def rust_api(tmp_path):
-    if shutil.which("cargo") is None:
-        pytest.skip("cargo is required for the Rust API smoke test")
+    require_tool("cargo", "the Rust API smoke test")
 
     port = free_port()
     base_url = f"http://127.0.0.1:{port}"
@@ -473,8 +476,7 @@ def test_character_image_angle_and_pose_sets_carry_loras_through_worker(rust_api
 
 
 def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(rust_api, tmp_path):
-    if shutil.which("cargo") is None:
-        pytest.skip("cargo is required for the Rust worker smoke test")
+    require_tool("cargo", "the Rust worker smoke test")
 
     # The Rust API only imports a sourcePath from app-managed roots (data/loras,
     # project loras, or staged uploads) for path safety; stage the source inside
@@ -531,8 +533,11 @@ def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(ru
 
 
 def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_binary(rust_api, tmp_path):
-    if shutil.which("cargo") is None:
-        pytest.skip("cargo is required for the Rust worker smoke test")
+    require_tool("cargo", "the Rust worker smoke test")
+    # ffmpeg is intentionally NOT provisioned in the `check.yml` CI (only in the
+    # desktop/release packaging workflows), so this stays a plain skip: it must not
+    # red the e2e gate. The all-skipped guard in conftest still fires if cargo (and
+    # thus every other e2e test) also went missing (sc-8935 / F-133).
     if shutil.which("ffmpeg") is None:
         pytest.skip("ffmpeg is required for the FFmpeg worker smoke test")
 

@@ -73,8 +73,15 @@ jobs:
       - name: Build Rust API before contract tests
         run: cargo build -q -p sceneworks-rust-api
       - name: Run end-to-end job pipeline test
+        # tests/conftest.py fails this gate (via `require_tool` + an all-skipped
+        # session guard) if `CI` is set and every collected test skips -- e.g. a
+        # future change dropping the cargo toolchain would otherwise turn the gate
+        # into a silent green no-op. GitHub Actions sets CI=true automatically
+        # (sc-8935 / F-133).
         run: python -m pytest -q -m e2e --strict-markers
       - name: Run Rust API contract snapshot tests
+        # Same all-skipped guard as the e2e step: a parity run that exercised
+        # nothing fails instead of reporting success (sc-8935 / F-133).
         run: python -m pytest -q -m parity --strict-markers
       - name: Smoke default Rust API Docker runtime
         run: npm run check:docker:rust-api
