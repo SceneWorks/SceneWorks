@@ -197,6 +197,12 @@ pub(crate) fn box_mask(box_value: Option<&Value>, width: u32, height: u32) -> Rg
 /// otherwise a box mask is rasterized from the (possibly corrected) box. Returns the masks
 /// plus the source mode: [`MODE_SEGMENTATION`] (all stored), [`MODE_DEGRADED_BOX`] (all
 /// box-derived), or [`MODE_MIXED`].
+///
+/// The sidecar `mask` string is confined under `project_path` (`safe_project_path`,
+/// Component::Normal-only) so a tampered project file can't traverse out to an arbitrary
+/// readable image (sc-8876 / F-074); an unsafe path OR a corrupt/undecodable stored mask
+/// degrades to a box mask for that frame — the whole video replacement is never failed by
+/// one bad mask (sc-8902 / F-100) — with the degraded frame counted as box-derived.
 pub(crate) fn load_track_masks(
     project_path: &Path,
     track: &Value,
@@ -215,25 +221,50 @@ pub(crate) fn load_track_masks(
     let mut segmentation = 0usize;
     for index in &indices {
         let frame = &frames[*index];
+        // Confine the sidecar-supplied `mask` string under the project dir (sc-8876 / F-074):
+        // `safe_project_path` joins Component::Normal-only, so an absolute or `..`-traversing value
+        // (a tampered project file) never resolves outside `project_path` to pull an arbitrary
+        // readable image into the output. A rejected path is treated exactly like a corrupt/missing
+        // mask below — degrade to a box mask rather than read outside the trust boundary.
         let stored = frame
             .get("mask")
             .and_then(Value::as_str)
-            .map(|rel| project_path.join(rel))
+            .and_then(|rel| match crate::safe_project_path(project_path, rel) {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    tracing::warn!(
+                        event = "replace_person_mask_unsafe_path",
+                        mask = rel,
+                        %error,
+                        "sidecar mask path escapes the project directory; degrading to box mask"
+                    );
+                    None
+                }
+            })
             .filter(|path| path.exists());
-        match stored {
-            Some(path) => {
-                let loaded = crate::image_decode::decode_image_any(&path)
-                    .map_err(|error| {
-                        WorkerError::InvalidPayload(format!(
-                            "replacement mask {}: {error}",
-                            path.display()
-                        ))
-                    })?
-                    .to_luma8();
+        // Decode the stored segmentation mask; on a corrupt/undecodable file degrade to a box mask
+        // for that frame (sc-8902 / F-100) instead of `?`-failing the whole replace-person job — a
+        // *missing* file already falls back this way and the contract never fails a located-person
+        // track in the mask pass. The degraded frame counts as box-derived, so the reported mode
+        // (`segmentation`/`mixed`/`degraded_box`) still reflects the true accounting.
+        let loaded = stored.and_then(|path| match crate::image_decode::decode_image_any(&path) {
+            Ok(image) => Some(image.to_luma8()),
+            Err(error) => {
+                tracing::warn!(
+                    event = "replace_person_mask_decode_failed",
+                    mask = %path.display(),
+                    %error,
+                    "stored replacement mask could not be decoded; degrading to box mask"
+                );
+                None
+            }
+        });
+        match loaded {
+            Some(luma) => {
                 // Match Pillow `convert("L").resize((w, h))` (default bilinear), then fan the
                 // single luma channel out to RGB (white = regenerate).
                 let resized = image::imageops::resize(
-                    &loaded,
+                    &luma,
                     width,
                     height,
                     image::imageops::FilterType::Triangle,
@@ -413,6 +444,83 @@ mod tests {
         assert_eq!(mode, MODE_SEGMENTATION);
         // The stored all-white mask resizes to a fully-white 32×32 (not the small box).
         assert_eq!(white_pixels(&masks[0]), 32 * 32);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_track_masks_confines_traversing_mask_path_to_box() {
+        // sc-8876 / F-074: an absolute or `..`-traversing sidecar mask path must never resolve
+        // outside the project dir. Even if a matching file exists at the traversal target, the
+        // loader confines the join (Component::Normal-only) and degrades to a box mask.
+        let root = std::env::temp_dir().join(format!("sw_masks_{}", uuid::Uuid::new_v4().simple()));
+        let project = root.join("project");
+        let outside = root.join("secret");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        // A readable image OUTSIDE the project that a traversal would otherwise pull in.
+        image::GrayImage::from_pixel(8, 8, image::Luma([255]))
+            .save(outside.join("leak.png"))
+            .unwrap();
+        let track = json!({
+            "frames": [
+                {
+                    "box": { "x": 0.25, "y": 0.25, "width": 0.5, "height": 0.5 },
+                    "mask": "../secret/leak.png"
+                }
+            ]
+        });
+        let (masks, mode) = load_track_masks(&project, &track, 64, 64, 1).unwrap();
+        // Confined + degraded: the box mask (not the leaked all-white image) is used.
+        assert_eq!(mode, MODE_DEGRADED_BOX);
+        // A 0.25..0.75 box (with 3% pad) is a strict subset of the frame — the leaked all-white
+        // image would have filled every pixel, so a partial fill proves the traversal was blocked.
+        assert!(white_pixels(&masks[0]) > 0);
+        assert!(white_pixels(&masks[0]) < 64 * 64);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn load_track_masks_degrades_to_box_on_corrupt_stored_mask() {
+        // sc-8902 / F-100: a stored mask that exists but can't be decoded must degrade to a box
+        // mask for that frame, not `?`-fail the whole replace-person job.
+        let dir = std::env::temp_dir().join(format!("sw_masks_{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A file with a `.png` name but garbage bytes → decode fails.
+        std::fs::write(dir.join("corrupt.png"), b"not a real image").unwrap();
+        let track = json!({
+            "frames": [
+                {
+                    "box": { "x": 0.25, "y": 0.25, "width": 0.5, "height": 0.5 },
+                    "mask": "corrupt.png"
+                }
+            ]
+        });
+        let (masks, mode) = load_track_masks(&dir, &track, 64, 64, 1).unwrap();
+        assert_eq!(masks.len(), 1);
+        // Degraded to a box mask (not segmentation) and did not error.
+        assert_eq!(mode, MODE_DEGRADED_BOX);
+        assert!(white_pixels(&masks[0]) > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_track_masks_mixed_mode_when_one_mask_is_corrupt() {
+        // A two-frame track where one stored mask decodes and one is corrupt → MIXED, still no error.
+        let dir = std::env::temp_dir().join(format!("sw_masks_{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        image::GrayImage::from_pixel(10, 10, image::Luma([255]))
+            .save(dir.join("good.png"))
+            .unwrap();
+        std::fs::write(dir.join("bad.png"), b"corrupt").unwrap();
+        let track = json!({
+            "frames": [
+                { "box": { "x": 0.1, "y": 0.1, "width": 0.1, "height": 0.1 }, "mask": "good.png" },
+                { "box": { "x": 0.2, "y": 0.2, "width": 0.1, "height": 0.1 }, "mask": "bad.png" }
+            ]
+        });
+        let (masks, mode) = load_track_masks(&dir, &track, 32, 32, 2).unwrap();
+        assert_eq!(masks.len(), 2);
+        assert_eq!(mode, MODE_MIXED);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

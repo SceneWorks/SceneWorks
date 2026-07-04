@@ -268,9 +268,11 @@ pub(crate) async fn mark_job_canceled(
 /// per-engine decision documented at its call site (sc-9123): the single-shot detectors
 /// (kps/SCRFD, person-detect/YOLO11) and the ArcFace embedding compare — each is one bounded
 /// forward pass on one image/frame (plus a cold weight load), so threading cancel through those
-/// engine surfaces would buy nothing the bounded join doesn't already give — and the interleave
-/// document write (bounded PNG encode + fs rename, where a mid-write abort is worse than
-/// finishing). Everything loop-shaped passes `Some`: SenseNova VQA/interleave threads a REAL
+/// engine surfaces would buy nothing the bounded join doesn't already give — the smart-select SAM3
+/// image ops (box/points, `segment_jobs`, sc-8908 / F-106), likewise one bounded SAM3 forward pass
+/// on one image with no per-step loop for a flag to poll (the video `propagate` path DOES thread a
+/// real flag) — and the interleave document write (bounded PNG encode + fs rename, where a mid-write
+/// abort is worse than finishing). Everything loop-shaped passes `Some`: SenseNova VQA/interleave threads a REAL
 /// `CancelFlag` the engines poll per decoded token and per denoise step (mlx-gen #634 + the candle
 /// sc-9123 sibling), and the worker-side pose loops (DWPose multi-image batch detect + the
 /// per-person skeleton render) check a real flag between iterations in worker code — no engine
@@ -413,7 +415,7 @@ pub(crate) fn progress_payload(
         result,
         eta_seconds,
         // The Rust utility worker doesn't run GPU work, so it never reports
-        // per-job peak GPU stats. The Python GPU worker (scene_worker) sets
+        // per-job peak GPU stats. The native GPU worker (MLX/candle) sets
         // these (sc-2086). Same for `backend` — utility jobs run on the CPU
         // worker which never advertises a GPU runtime.
         peak_gpu_memory_pct: None,

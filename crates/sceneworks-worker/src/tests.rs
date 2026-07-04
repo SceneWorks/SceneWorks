@@ -4253,6 +4253,52 @@ async fn run_blocking_with_heartbeat_waits_for_blocking_task_winddown_on_post_fa
     );
 }
 
+/// sc-8908 (F-106) — the smart-select SAM3 image ops (box/points) pass `None` for `cancel` by
+/// explicit per-engine decision: each is one bounded SAM3 forward pass on one image with no
+/// per-step loop for a flag to poll, so there is no seam a `Some(flag)` could interrupt. This test
+/// locks the `None`-path contract the decision relies on: a bounded single-shot blocking task run
+/// with `cancel = None` resolves to its value, and (unlike the `Some(flag)` paths) the consumer
+/// never consults the cancel poll — so no "canceled" is ever posted even mid-run. If someone
+/// re-adds a `Some(flag)` that the SAM3 engine can't read, this stays green but the flag is a no-op
+/// (the F-106 finding); the guard against that is the documented `None`-caller list at the
+/// `run_blocking_with_heartbeat` definition, kept in sync with this call site.
+#[tokio::test]
+async fn run_blocking_with_heartbeat_none_cancel_returns_single_shot_value() {
+    let (base_url, posts) = spawn_no_user_cancel_capture_stub().await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    settings.heartbeat_seconds = 5;
+    let api = ApiClient::new(&settings);
+
+    // A bounded single-shot blocking task, the smart-select SAM3 shape: one forward pass, returns a
+    // value, no cancel flag consulted.
+    let task = tokio::task::spawn_blocking(|| Ok::<u32, WorkerError>(42));
+    let result = crate::run_blocking_with_heartbeat(
+        &api,
+        &settings,
+        "job-1",
+        None,
+        "",
+        "smart-select none-cancel test task",
+        task,
+    )
+    .await;
+
+    assert_eq!(
+        result.expect("the None-cancel single-shot task resolves to its value"),
+        42
+    );
+    // No terminal "canceled" progress was posted — the None path never consults the cancel poll.
+    let posted = posts.lock().expect("posts lock");
+    assert!(
+        posted.iter().all(|body| body
+            .get("status")
+            .and_then(Value::as_str)
+            .is_none_or(|s| s != "canceled")),
+        "the None-cancel path must never post a terminal canceled status"
+    );
+}
+
 /// sc-8804 (F-003) — the child-process leg: `run_ffmpeg` (media_jobs) and the `hf` CLI download
 /// (model_jobs) build their `tokio::process::Command` with `kill_on_drop(true)` so a
 /// heartbeat/cancel `?` early return reaps the child instead of leaving ffmpeg/`hf` writing partial

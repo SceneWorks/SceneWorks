@@ -18,7 +18,14 @@
 //! the result is scale-free and round-trips through `generate_with_kps` (which draws
 //! `kps_norm · side` on a square canvas after letterboxing the reference the same way).
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::sync::{Mutex, OnceLock};
 
 // The neutral image type both backends operate on (`mlx_gen` and `candle_gen` both re-export
 // `gen_core::Image`; the single-rev skew gate keeps them the same type).
@@ -138,21 +145,77 @@ impl KpsExtraction {
     }
 }
 
+/// The SCRFD weight checkpoint parsed once and cached process-wide (sc-8910 / F-108). The safetensors
+/// parse (~100+ MB read) is the expensive, `Send` part; caching it here lets every `kps_extract` job —
+/// even one that lands on a fresh blocking thread — skip the disk re-read. Mirrors
+/// `pose_jobs::DETECTOR` / `person_segment_sam3::WEIGHTS` (poison-recovery: a poisoned lock drops the
+/// cached value and rebuilds). macOS only; `Weights` is the MLX weight container.
+#[cfg(target_os = "macos")]
+static WEIGHTS: OnceLock<Mutex<Option<Weights>>> = OnceLock::new();
+
+thread_local! {
+    /// The built [`Scrfd`] detector cached per blocking thread, keyed by weight path (sc-8910 /
+    /// F-108). The MLX model embeds an `Rc<…>` → `!Send`, so it can't live in a process-wide
+    /// `static Mutex` like the `Weights` above (this is exactly why `person_segment_sam3` caches
+    /// its built segmenter/tracker thread-local while caching `Weights` process-wide). `detect(&self,
+    /// …)` is a pure forward pass with no retained per-call state, so reuse across kps jobs is
+    /// byte-identical. Interactive kps extraction is serial, so one built detector stays resident per
+    /// blocking thread rather than being rebuilt from the cached weights on every job.
+    #[cfg(target_os = "macos")]
+    static SCRFD: RefCell<Option<(PathBuf, Scrfd)>> = const { RefCell::new(None) };
+
+    /// Off-Mac sibling (sc-8910 / F-108): the built candle SCRFD/ArcFace stack cached per blocking
+    /// thread, keyed by the staged `face_dir`. `candle_gen_face::load` re-reads both weight files and
+    /// rebuilds the models on every call, so caching skips that per-job cost the same way the MLX
+    /// `SCRFD`/`WEIGHTS` caches do. Thread-local (not a process-wide `Mutex`) keeps the two backends
+    /// symmetric and sidesteps any Send question on the candle analysis/device. `detect(&self, …)` is
+    /// a pure forward pass, so reuse across kps jobs is byte-identical.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    static CANDLE_FACE: RefCell<Option<(PathBuf, candle_gen_face::CandleFaceAnalysis)>> =
+        const { RefCell::new(None) };
+}
+
 /// Load SCRFD + detect the largest face's landmarks in `image`, normalized to the square
 /// preset space. Runs the `!Send` MLX work; call inside `spawn_blocking`.
+///
+/// The weight checkpoint is parsed once into the process-wide [`WEIGHTS`] cache and the built
+/// detector is cached per blocking thread in [`SCRFD`], so a repeated interactive `kps_extract`
+/// skips both the ~100+ MB weight re-read and the model rebuild (sc-8910 / F-108).
 #[cfg(target_os = "macos")]
 fn detect_largest_kps(scrfd_path: &Path, image: &Image) -> WorkerResult<KpsExtraction> {
-    let weights = Weights::from_file(scrfd_path)
-        .map_err(|error| WorkerError::Engine(format!("SCRFD weights {scrfd_path:?}: {error}")))?;
-    let scrfd = Scrfd::from_weights(&weights)
-        .map_err(|error| WorkerError::Engine(format!("SCRFD load: {error}")))?;
     // gen-core d8038beb (sc-7176 pin sync): `detector_blob` is now fallible (returns a `Result`).
     let (blob, det_scale) =
         detector_blob(&image.pixels, image.height as usize, image.width as usize)
             .map_err(|error| WorkerError::Engine(format!("SCRFD blob: {error}")))?;
-    let dets = scrfd
-        .detect(&blob, det_scale, DET_THRESH, NMS_THRESH)
-        .map_err(|error| WorkerError::Engine(format!("SCRFD detect: {error}")))?;
+    let dets = SCRFD.with(|cell| -> WorkerResult<_> {
+        {
+            let cached = cell.borrow();
+            if cached.as_ref().map(|(path, _)| path.as_path()) != Some(scrfd_path) {
+                drop(cached);
+                // Parse the weights once, process-wide (poison-recovery), then build the detector for
+                // this thread.
+                let weights_cell = WEIGHTS.get_or_init(|| Mutex::new(None));
+                let mut guard = weights_cell.lock().unwrap_or_else(|poisoned| {
+                    let mut guard = poisoned.into_inner();
+                    *guard = None;
+                    guard
+                });
+                if guard.is_none() {
+                    *guard = Some(Weights::from_file(scrfd_path).map_err(|error| {
+                        WorkerError::Engine(format!("SCRFD weights {scrfd_path:?}: {error}"))
+                    })?);
+                }
+                let scrfd = Scrfd::from_weights(guard.as_ref().expect("weights loaded"))
+                    .map_err(|error| WorkerError::Engine(format!("SCRFD load: {error}")))?;
+                *cell.borrow_mut() = Some((scrfd_path.to_path_buf(), scrfd));
+            }
+        }
+        let cached = cell.borrow();
+        let (_, scrfd) = cached.as_ref().expect("detector cached");
+        scrfd
+            .detect(&blob, det_scale, DET_THRESH, NMS_THRESH)
+            .map_err(|error| WorkerError::Engine(format!("SCRFD detect: {error}")))
+    })?;
 
     let (w, h) = (image.width, image.height);
     let largest = dets.into_iter().max_by(|a, b| {
@@ -190,11 +253,23 @@ fn detect_largest_kps(scrfd_path: &Path, image: &Image) -> WorkerResult<KpsExtra
 /// backend-identical. The candle stack runs f32 on CUDA; call inside `spawn_blocking`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn detect_largest_kps_candle(face_dir: &Path, image: &Image) -> WorkerResult<KpsExtraction> {
-    let analysis = candle_gen_face::load(face_dir)
-        .map_err(|error| WorkerError::Engine(format!("face stack {face_dir:?}: {error}")))?;
-    let dets = analysis
-        .detect(image)
-        .map_err(|error| WorkerError::Engine(format!("SCRFD detect: {error}")))?;
+    let dets = CANDLE_FACE.with(|cell| -> WorkerResult<_> {
+        {
+            let cached = cell.borrow();
+            if cached.as_ref().map(|(dir, _)| dir.as_path()) != Some(face_dir) {
+                drop(cached);
+                let analysis = candle_gen_face::load(face_dir).map_err(|error| {
+                    WorkerError::Engine(format!("face stack {face_dir:?}: {error}"))
+                })?;
+                *cell.borrow_mut() = Some((face_dir.to_path_buf(), analysis));
+            }
+        }
+        let cached = cell.borrow();
+        let (_, analysis) = cached.as_ref().expect("face analysis cached");
+        analysis
+            .detect(image)
+            .map_err(|error| WorkerError::Engine(format!("SCRFD detect: {error}")))
+    })?;
 
     let (w, h) = (image.width, image.height);
     let largest = dets.into_iter().max_by(|a, b| {
@@ -515,6 +590,17 @@ mod tests {
             "  extracted (score {:.3}, low_conf {}): le={le:?} re={re:?} nose={nose:?} ml={ml:?} mr={mr:?}",
             extraction.det_score, extraction.low_confidence
         );
+
+        // sc-8910 / F-108: a SECOND extraction on the same weights hits the cached `Weights` +
+        // per-thread `Scrfd` (no re-read, no rebuild) and must be byte-identical to the first —
+        // the cache reuse is transparent, not a source of drift.
+        let again = detect_largest_kps(&scrfd_path, &image).expect("cached detect");
+        assert_eq!(
+            again.kps.expect("kps on cached detect"),
+            kps,
+            "cached SCRFD detector must produce identical landmarks"
+        );
+        assert_eq!(again.det_score, extraction.det_score);
     }
 
     /// Real-weights smoke (sc-5497, candle): run the actual candle SCRFD/ArcFace path on a real face
@@ -577,5 +663,15 @@ mod tests {
             "  candle extracted (score {:.3}, low_conf {}): le={le:?} re={re:?} nose={nose:?} ml={ml:?} mr={mr:?}",
             extraction.det_score, extraction.low_confidence
         );
+
+        // sc-8910 / F-108: a SECOND extraction hits the cached candle face stack (no reload) and
+        // must be byte-identical — the cache reuse is transparent.
+        let again = detect_largest_kps_candle(&face_dir, &image).expect("cached detect");
+        assert_eq!(
+            again.kps.expect("kps on cached detect"),
+            kps,
+            "cached candle face stack must produce identical landmarks"
+        );
+        assert_eq!(again.det_score, extraction.det_score);
     }
 }

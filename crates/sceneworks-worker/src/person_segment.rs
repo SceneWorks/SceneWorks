@@ -1,8 +1,9 @@
 //! Native-MLX SAM2 person segmentation on the Rust worker (epic 3704, sc-3709 → sc-3715;
 //! Slice 3 of sc-3488 / epic 3482).
 //!
-//! Ports the Python `scene_worker/person_adapters.py` `segment_track` to Rust so the
-//! Replace-Person mask-generation step runs on a Python-free Mac. **sc-3715** upgrades the
+//! Runs the `segment_track` step natively in Rust (ported from the retired Python
+//! worker's `person_adapters.py`) so the Replace-Person mask-generation step runs on
+//! a Python-free Mac. **sc-3715** upgrades the
 //! per-frame box-prompt segmenter (sc-3709) to the native-MLX SAM2 **video predictor**
 //! (`mlx-gen-sam2` `Sam2VideoPredictor`, sc-3714): prompt SAM2 once on the selected track's
 //! first detected frame, then propagate temporally-consistent masks across the clip via the
@@ -177,11 +178,17 @@ pub(crate) fn propagate_track_blocking(
     cancel: Option<CancelFlag>,
     mut progress: Option<SegmentProgress>,
 ) -> WorkerResult<Vec<Vec<u8>>> {
-    assert_eq!(
-        clip_frame_paths.len(),
-        anchors.len(),
-        "frames/anchors mismatch"
-    );
+    // A frames/anchors length mismatch is a caller contract violation. The old `assert_eq!`
+    // panicked inside `spawn_blocking`, which `media_jobs` absorbed as a silent "degraded"
+    // (box-fallback) result rather than a surfaced error — return `InvalidPayload` so the
+    // mismatch fails the job loudly (sc-8903, F-101).
+    if clip_frame_paths.len() != anchors.len() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "propagate clip frames ({}) and anchors ({}) length mismatch",
+            clip_frame_paths.len(),
+            anchors.len()
+        )));
+    }
     check_segment_canceled(cancel.as_ref())?;
     let prompt =
         anchors.first().copied().flatten().ok_or_else(|| {
@@ -263,7 +270,18 @@ pub(crate) fn propagate_track_blocking(
             let mask = predictor
                 .mask_to_video_res(&state, low)
                 .map_err(|e| WorkerError::Engine(format!("sam2 mask resize: {e}")))?;
-            out[*frame_idx as usize] = mask.as_slice::<u8>().to_vec();
+            // Bounds-check the predictor's returned frame index rather than trusting it:
+            // a negative i32 would wrap via `as usize` and an out-of-range index would
+            // panic on `out[..]`, unwinding the blocking task (media_jobs would absorb it
+            // as a silent "degraded"). Surface an `Engine` error instead (sc-8905, F-103).
+            let idx = usize::try_from(*frame_idx).ok().filter(|&i| i < out.len());
+            let Some(idx) = idx else {
+                return Err(WorkerError::Engine(format!(
+                    "sam2 propagate returned frame index {frame_idx} out of range 0..{}",
+                    out.len()
+                )));
+            };
+            out[idx] = mask.as_slice::<u8>().to_vec();
         }
         Ok(out)
     };
@@ -345,6 +363,29 @@ mod tests {
         assert!(
             matches!(result, Err(WorkerError::Canceled(ref m)) if m == CANCEL_MESSAGE),
             "expected Canceled, got {result:?}"
+        );
+    }
+
+    /// sc-8903 / F-101: a frames/anchors length mismatch returns `InvalidPayload` (a surfaced
+    /// error) instead of the old `assert_eq!` panic that `media_jobs` absorbed as a silent
+    /// "degraded" box-fallback. The length check runs before any frame decode / weight load, so
+    /// the nonexistent paths are never touched — the returned error is the mismatch, not a
+    /// frame-open error.
+    #[test]
+    fn frames_anchors_length_mismatch_returns_invalid_payload() {
+        let result = propagate_track_blocking(
+            PathBuf::from("/nonexistent/sam2.safetensors"),
+            vec![
+                PathBuf::from("/nonexistent/a.png"),
+                PathBuf::from("/nonexistent/b.png"),
+            ],
+            vec![Some((0.1, 0.1, 0.5, 0.5))], // one anchor for two frames
+            None,
+            None,
+        );
+        assert!(
+            matches!(result, Err(WorkerError::InvalidPayload(ref m)) if m.contains("length mismatch")),
+            "expected InvalidPayload length mismatch, got {result:?}"
         );
     }
 

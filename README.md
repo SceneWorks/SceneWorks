@@ -249,8 +249,8 @@ mixture-of-experts denoisers (high/low-noise) as a per-expert LoRA pair.
 See [documents/TRAINING_QUICKSTART.md](documents/TRAINING_QUICKSTART.md) for a
 step-by-step first run, per-target notes, recommended dataset sizes and captions,
 VRAM/disk notes, where outputs live, and troubleshooting. Training contracts live
-in `crates/sceneworks-core/src/training.rs`; the execution kernel is
-`apps/worker/scene_worker/training_adapters.py`.
+in `crates/sceneworks-core/src/training.rs`; the execution kernel is the native
+Rust trainer in `crates/sceneworks-worker/src/training_jobs.rs`.
 
 ## Structure
 

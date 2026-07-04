@@ -5,10 +5,10 @@ machine. This guide walks through the first run: preparing a dataset, validating
 the plan with a dry run, training for real, and using the result in Image Studio.
 
 Native LoRA training is Rust-first: Rust owns the dataset store, training
-contracts, the target registry, queue routing, and LoRA registration. The Python
-worker is a narrow execution kernel that consumes a fully resolved plan and
-produces weights. See `crates/sceneworks-core/src/training.rs` and
-`apps/worker/scene_worker/training_adapters.py`.
+contracts, the target registry, queue routing, and LoRA registration. The native
+worker's execution kernel consumes a fully resolved plan and produces weights.
+See `crates/sceneworks-core/src/training.rs` and
+`crates/sceneworks-worker/src/training_jobs.rs`.
 
 ## Prerequisites
 

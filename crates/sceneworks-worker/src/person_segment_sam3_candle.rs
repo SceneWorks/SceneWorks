@@ -137,11 +137,17 @@ pub(crate) fn segment_track_blocking(
     cancel: Option<CancelFlag>,
     mut progress: Option<SegmentProgress>,
 ) -> WorkerResult<Vec<Vec<u8>>> {
-    assert_eq!(
-        clip_frame_paths.len(),
-        anchors.len(),
-        "frames/anchors mismatch"
-    );
+    // A frames/anchors length mismatch is a caller contract violation. The old `assert_eq!`
+    // panicked inside `spawn_blocking`, which `media_jobs` absorbed as a silent "degraded"
+    // (box-fallback) result rather than a surfaced error — return `InvalidPayload` so the
+    // mismatch fails the job loudly (sc-8903, F-101). Kept in sync with the MLX twin.
+    if clip_frame_paths.len() != anchors.len() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "segment clip frames ({}) and anchors ({}) length mismatch",
+            clip_frame_paths.len(),
+            anchors.len()
+        )));
+    }
     check_segment_canceled(cancel.as_ref())?;
     if !anchors.iter().any(Option::is_some) {
         return Err(WorkerError::InvalidPayload(
@@ -228,16 +234,32 @@ pub(crate) fn segment_track_blocking(
     };
     let masks = outputs
         .iter()
-        .map(|frame| {
-            frame
-                .obj_ids
-                .iter()
-                .position(|&o| o == selected)
-                .map(|i| mask_to_frame(&frame.masks[i], MASK_GRID, width, height))
-                .unwrap_or_default()
-        })
-        .collect();
+        .map(|frame| frame_mask_for_object(frame, selected, width, height))
+        .collect::<WorkerResult<Vec<_>>>()?;
     Ok(masks)
+}
+
+/// Emit the selected object's binary mask on one SAM3 frame, or an empty vec when the object
+/// isn't present (legitimate per-frame absence → orchestrator box-fallback). Guards the
+/// `obj_ids`/`masks` parallel-vec assumption: an id present in `obj_ids` but with no matching
+/// entry in `masks` is a malformed engine output, surfaced as an `Engine` error rather than
+/// indexing OOB (sc-8905, F-103). Kept in sync with the MLX twin.
+fn frame_mask_for_object(
+    frame: &VideoFrameOutput,
+    selected: i32,
+    width: u32,
+    height: u32,
+) -> WorkerResult<Vec<u8>> {
+    let Some(i) = frame.obj_ids.iter().position(|&o| o == selected) else {
+        return Ok(Vec::new());
+    };
+    let logits = frame.masks.get(i).ok_or_else(|| {
+        WorkerError::Engine(format!(
+            "sam3 frame has obj id {selected} at index {i} but only {} masks",
+            frame.masks.len()
+        ))
+    })?;
+    mask_to_frame(logits, MASK_GRID, width, height)
 }
 
 /// Segment + track every "person" across already-decoded RGB `frames` with the off-Mac candle SAM3
@@ -355,6 +377,10 @@ pub(crate) fn segment_all_persons_in_memory(
             .then(a.cmp(b))
     });
 
+    // `zip` already bounds to the shorter of obj_ids/masks; `mask_to_frame` now returns an
+    // `Engine` error on a malformed (grid-mismatched) mask instead of the empty-vec sentinel,
+    // so propagate rather than silently dropping it (sc-8905, F-103). Kept in sync with the MLX
+    // twin.
     let per_frame = outputs
         .iter()
         .map(|frame| {
@@ -362,11 +388,10 @@ pub(crate) fn segment_all_persons_in_memory(
                 .obj_ids
                 .iter()
                 .zip(&frame.masks)
-                .map(|(oid, logits)| (*oid, mask_to_frame(logits, MASK_GRID, width, height)))
-                .filter(|(_, mask)| !mask.is_empty())
-                .collect()
+                .map(|(oid, logits)| Ok((*oid, mask_to_frame(logits, MASK_GRID, width, height)?)))
+                .collect::<WorkerResult<Vec<_>>>()
         })
-        .collect();
+        .collect::<WorkerResult<Vec<_>>>()?;
 
     Ok(AllPersonMasks {
         order,
@@ -431,6 +456,29 @@ mod tests {
         assert!(
             matches!(all, Err(WorkerError::Canceled(_))),
             "segment_all_persons_in_memory: expected Canceled"
+        );
+    }
+
+    /// sc-8903 / F-101: a frames/anchors length mismatch returns `InvalidPayload` (a surfaced
+    /// error) instead of the old `assert_eq!` panic that `media_jobs` absorbed as a silent
+    /// "degraded" box-fallback. Kept in sync with the MLX twin's test. The length check runs
+    /// before any frame decode / weight load, so the nonexistent paths are never touched.
+    #[test]
+    fn frames_anchors_length_mismatch_returns_invalid_payload() {
+        let result = segment_track_blocking(
+            PathBuf::from("/nonexistent/model.safetensors"),
+            PathBuf::from("/nonexistent/tokenizer.json"),
+            vec![
+                PathBuf::from("/nonexistent/a.png"),
+                PathBuf::from("/nonexistent/b.png"),
+            ],
+            vec![Some((0.1, 0.1, 0.5, 0.5))], // one anchor for two frames
+            None,
+            None,
+        );
+        assert!(
+            matches!(result, Err(WorkerError::InvalidPayload(ref m)) if m.contains("length mismatch")),
+            "expected InvalidPayload length mismatch, got {result:?}"
         );
     }
 

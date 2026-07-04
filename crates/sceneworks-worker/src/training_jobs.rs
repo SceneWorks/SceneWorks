@@ -83,8 +83,8 @@ use candle_gen_wan as _;
 use candle_gen_z_image as _;
 
 /// Run a `lora_train` job: parse the resolved plan, then either validate it
-/// (dry run, the default) or execute real training. Mirrors the Python
-/// `run_lora_train_job` split (apps/worker/scene_worker/runtime.py).
+/// (dry run, the default) or execute real training. The dry-run/execute split was
+/// ported from the retired Python worker's `run_lora_train_job`.
 pub(crate) async fn run_lora_train_job(
     api: &ApiClient,
     settings: &Settings,
