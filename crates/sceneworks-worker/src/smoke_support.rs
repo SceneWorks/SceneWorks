@@ -19,6 +19,24 @@ use std::path::Path;
 
 use gen_core::Image;
 
+/// General degenerate-decode floor for the mean per-pixel std-dev sanity check (sc-9838, F-122).
+///
+/// This is the model-agnostic "is the decode alive?" guard: a NaN / all-black / flat collapse pulls
+/// `image_std` toward 0, so any coherent render for the common t2i/edit/control lanes clears this by a
+/// wide margin. Used by every smoke EXCEPT the Lens pair, which needs the tighter [`DEGENERATE_STD_FLOOR_LENS`]
+/// floor below. It is deliberately generous — it exists to catch a broken decode, not to grade quality
+/// (the real quality call is the saved-PNG eyeball).
+pub(crate) const DEGENERATE_STD_FLOOR_DEFAULT: f64 = 5.0;
+
+/// Tighter degenerate-decode floor for the Lens smokes (sc-9838, F-122).
+///
+/// Lens (turbo + base) packs the transformer DiT alongside the heavier gpt-oss-20b MoE text encoder, and
+/// its coherent output sits at a materially higher per-pixel std-dev than the other lanes. A render that
+/// clears the general [`DEGENERATE_STD_FLOOR_DEFAULT`] but stalls below this floor is a Lens-specific
+/// half-collapsed decode, so the Lens smokes intentionally hold to this stricter bar rather than the
+/// shared default. This is a per-model floor by design — do NOT collapse it back to the default.
+pub(crate) const DEGENERATE_STD_FLOOR_LENS: f64 = 20.0;
+
 /// Read `key` from the environment, falling back to `default` when it is unset, empty, or
 /// whitespace-only. Trims the value. Filtering set-but-empty values keeps a bare `FOO_STEPS=` (or a
 /// whitespace-only value) from feeding `""` into a downstream `.parse()` and panicking (sc-8924).

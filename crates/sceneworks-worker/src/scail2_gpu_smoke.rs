@@ -23,7 +23,7 @@ use gen_core::{
     ReplacementMode, WeightsSource,
 };
 
-use super::smoke_support::env_or;
+use super::smoke_support::{env_or, DEGENERATE_STD_FLOOR_DEFAULT};
 
 fn env_path(key: &str) -> PathBuf {
     // Trim: a cmd `set VAR=value && ...` keeps the trailing space before `&&`.
@@ -256,7 +256,7 @@ fn scail2_candle_gpu_smoke() {
         avg_std
     );
     assert!(
-        avg_std > 5.0,
+        avg_std > DEGENERATE_STD_FLOOR_DEFAULT,
         "output frames look degenerate (avg std {avg_std:.2}) — possible NaN / all-black decode"
     );
 }

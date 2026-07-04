@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use gen_core::{GenerationOutput, GenerationRequest, Image, LoadSpec, WeightsSource};
 
-use super::smoke_support::{env_or, image_std, save_png};
+use super::smoke_support::{env_or, image_std, save_png, DEGENERATE_STD_FLOOR_DEFAULT};
 
 fn env_path(key: &str) -> PathBuf {
     // Trim: a cmd `set VAR=value && ...` keeps the trailing space before `&&`.
@@ -129,7 +129,7 @@ fn realvisxl_lightning_candle_gpu_smoke() {
     }
 
     assert!(
-        lightning_std > 5.0,
+        lightning_std > DEGENERATE_STD_FLOOR_DEFAULT,
         "lightning render looks degenerate (std {lightning_std:.2}) — possible NaN / all-black decode"
     );
     println!("[smoke] DONE: lightning render coherent at {steps} steps");

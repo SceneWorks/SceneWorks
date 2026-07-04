@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 use gen_core::{GenerationOutput, GenerationRequest, Image, LoadSpec, Quant, WeightsSource};
 
-use super::smoke_support::{env_or, image_std, save_png};
+use super::smoke_support::{env_or, image_std, save_png, DEGENERATE_STD_FLOOR_DEFAULT};
 
 /// A synthetic RGB test image (a smooth diagonal gradient with a centered block) — enough to exercise
 /// the VAE encode + reference/control token path on real weights without shipping a fixture. The dev
@@ -171,7 +171,7 @@ fn flux2_dev_candle_gpu_smoke() {
     );
     assert_eq!((image.width, image.height), (w, h));
     assert!(
-        std > 5.0,
+        std > DEGENERATE_STD_FLOOR_DEFAULT,
         "flux2_dev render looks degenerate (std {std:.2}) — possible NaN / all-black decode \
          (check CUDA_COMPUTE_CAP=120: cap=80 JIT-no-ops the quantized matmul on sm_120, sc-7457)"
     );
@@ -262,7 +262,7 @@ fn flux2_dev_edit_candle_gpu_smoke() {
     );
     assert_eq!((image.width, image.height), (w, h));
     assert!(
-        std > 5.0,
+        std > DEGENERATE_STD_FLOOR_DEFAULT,
         "dev edit render degenerate (std {std:.2}) — check CUDA_COMPUTE_CAP=120"
     );
     println!("[smoke] DONE: flux2_dev edit (candle) coherent");
@@ -345,7 +345,7 @@ fn flux2_dev_control_candle_gpu_smoke() {
     );
     assert_eq!((image.width, image.height), (w, h));
     assert!(
-        std > 5.0,
+        std > DEGENERATE_STD_FLOOR_DEFAULT,
         "dev control render degenerate (std {std:.2}) — check CUDA_COMPUTE_CAP=120"
     );
     println!("[smoke] DONE: flux2_dev control (candle) coherent");
