@@ -280,7 +280,17 @@ async fn generate_candle_sdxl_ipadapter_stream(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| sdxl_ipadapter_default_repo(&request.model))
         .to_owned();
-    let raw_settings = sdxl_ipadapter_raw_settings(request, &repo, steps, guidance, ip_scale);
+    // Per-generation PiD decode (epic 7840, sc-8044): resolve the `sdxl` PiD student + Gemma when
+    // `advanced.usePid` is set and the snapshots are cached; else `None` → native VAE. The SDXL IP-Adapter
+    // composes the SDXL VAE, so it shares the one `sdxl` student. `use_pid` and the engine's `with_pid`
+    // load stay in lockstep (the engine rejects a mismatch).
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+
+    let mut raw_settings = sdxl_ipadapter_raw_settings(request, &repo, steps, guidance, ip_scale);
+    // Mark PiD output on the sidecar (epic 7840): the NSCLv1 NC restriction flows to PiD output. Record
+    // whether PiD ACTUALLY ran (opted in AND snapshots cached), not merely whether it was requested.
+    raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
     // Per-image work items: (seed, prompt) — `request.count` images at the reference identity.
     let (width, height) = (request.width, request.height);
@@ -303,6 +313,14 @@ async fn generate_candle_sdxl_ipadapter_stream(
             let model = IpAdapterSdxl::load(&paths).map_err(|error| {
                 WorkerError::Engine(format!("SDXL IP-Adapter load failed: {error}"))
             })?;
+            // Attach the optional PiD decoder (sc-8044): `Some` only when this generation opted in AND the
+            // snapshots are cached, so a native-VAE generation is a no-op here.
+            let model = match &pid_weights {
+                Some(pid) => model.with_pid(pid).map_err(|error| {
+                    WorkerError::Engine(format!("SDXL IP-Adapter PiD decoder load failed: {error}"))
+                })?,
+                None => model,
+            };
             // Per-job identity-likeness scorer built ONCE here (on the blocking thread where the `!Send`
             // face stack is allowed); source embedded once, reused across every output (sc-4411 caching
             // AC). `None` ⇒ non-fatal staging / construction failure ⇒ scores omitted.
@@ -333,10 +351,8 @@ async fn generate_candle_sdxl_ipadapter_stream(
                     seed: seed as u64,
                     sampler: sampler.clone(),
                     scheduler: scheduler.clone(),
-                    // This lane never resolves a PiD backbone (no `resolve_pid_weights` call), so keep
-                    // the native VAE decode — behavior-preserving across the candle-gen PiD seam bump
-                    // (sc-8373 / sc-9300). Matches the candle-gen request `Default` (use_pid: false).
-                    use_pid: false,
+                    // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
+                    use_pid,
                     cancel: cancel.clone(),
                 };
                 let out = match model.generate(&req, &reference, &mut *on_progress) {

@@ -184,6 +184,11 @@ mod scail2_gpu_smoke;
 // drives `gen_core::load("sdxl")` with the forced `lightning` sampler against the distilled checkpoint.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod realvisxl_lightning_gpu_smoke;
+// Real-weight GPU smoke for the candle SDXL edit + PiD super-resolving decode (epic 7840, sc-8044).
+// Test-only + candle-only; drives the bespoke `candle_gen_sdxl::SdxlEdit` provider (inpaint) with the
+// `pid_sdxl` student attached, asserting the PiD decode super-resolves the render-sized native decode.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod sdxl_edit_pid_gpu_smoke;
 // Real-weight GPU smoke for the candle FLUX.2-dev lane (epic 6564 sc-7458). Test-only + candle-only;
 // drives `gen_core::load("flux2_dev")` with a Q4 LoadSpec (CPU-stage → quantize-onto-GPU) against the
 // dense diffusers snapshot — the worker-lane validation backing the off-Mac candle routing wire.

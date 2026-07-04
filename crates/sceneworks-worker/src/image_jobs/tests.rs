@@ -8035,6 +8035,7 @@ fn candle_strict_control_trait_routes_each_provider() {
         guidance: 0.0,
         negative_prompt: String::new(),
         engine_id: ZIMAGE_CTRL_ENGINE_ID,
+        pid: None,
     };
     assert_eq!(zimage.engine_id(), ZIMAGE_CTRL_ENGINE_ID);
     assert_eq!(zimage.engine_label(), ZIMAGE_CTRL_ENGINE);
@@ -8055,6 +8056,7 @@ fn candle_strict_control_trait_routes_each_provider() {
         guidance: 4.0,
         negative_prompt: "blurry".to_owned(),
         engine_id: ZIMAGE_CTRL_BASE_ENGINE_ID,
+        pid: None,
     };
     assert_eq!(zimage_base.engine_id(), ZIMAGE_CTRL_BASE_ENGINE_ID);
     assert_eq!(zimage_base.engine_label(), ZIMAGE_CTRL_ENGINE);
@@ -8088,6 +8090,7 @@ fn candle_strict_control_trait_routes_each_provider() {
         steps: 28,
         guidance: 4.0,
         control_scale: 0.75,
+        pid: None,
     };
     assert_eq!(flux2.engine_id(), FLUX2_CONTROL_CANDLE_ENGINE_ID);
     assert_eq!(flux2.engine_label(), FLUX2_CONTROL_CANDLE_ENGINE);
@@ -8122,6 +8125,7 @@ fn candle_strict_control_trait_routes_each_provider() {
         control_scale: 1.0,
         sampler: None,
         scheduler: None,
+        pid: None,
     };
     assert_eq!(kolors.engine_id(), KOLORS_CONTROL_ENGINE_ID);
     assert_eq!(kolors.engine_label(), KOLORS_CONTROL_ENGINE);
