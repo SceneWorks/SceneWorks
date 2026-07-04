@@ -159,13 +159,10 @@ fn image_std(img: &Image) -> f64 {
 /// `get_active_memory()` post-gen WITHOUT releasing the cache, folding the gen's freeable transient
 /// INTO resident (inflating resident, understating peak−resident). Dropping the cache first leaves
 /// only the live weight arrays the generator still holds.
-fn measure_footprint(
-    model: &str,
-    tier: &str,
-    engine_id: &str,
-    dir: &Path,
-    req: GenerationRequest,
-) -> (u64, u64) {
+// Every caller discards the result — the resident/peak numbers are consumed off the printed
+// `[[FOOTPRINT]]` scrape line, not the return value — so this reports through stdout and returns
+// nothing (sc-8952).
+fn measure_footprint(model: &str, tier: &str, engine_id: &str, dir: &Path, req: GenerationRequest) {
     println!(
         "[footprint] loading {model} ({tier}) from {} ...",
         dir.display()
@@ -227,7 +224,6 @@ fn measure_footprint(
         transient as f64 / 1024.0 / 1024.0 / 1024.0,
         std,
     );
-    (resident, peak)
 }
 
 /// SDXL-family default request: 1024², real CFG. Kept modest on steps to keep the harness quick; the

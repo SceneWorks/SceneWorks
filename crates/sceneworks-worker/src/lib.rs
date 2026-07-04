@@ -571,7 +571,11 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
                 // mid-write), and posts a terminal `Canceled` for the job before returning
                 // `ShutdownDuringJob` so the loop exits with the job in a prompt terminal state.
                 match run_job_with_shutdown(&api, &settings, &http_client, job).await {
-                    JobOutcome::Completed => idle_heartbeat.mark_due(),
+                    // `run_utility_job` already posts a terminal Idle heartbeat at its end, so the
+                    // scheduler should treat that as the just-sent one and wait a full interval —
+                    // marking it *due* here made the next `poll_once` fire a redundant second Idle
+                    // heartbeat right away (sc-8952).
+                    JobOutcome::Completed => idle_heartbeat.mark_sent(),
                     JobOutcome::ShutdownDuringJob => {
                         let _ = heartbeat(&api, &settings, WorkerStatus::Offline, None).await;
                         return Ok(());
@@ -790,10 +794,6 @@ impl IdleHeartbeat {
 
     fn mark_sent(&mut self) {
         self.next_due = Instant::now() + self.interval;
-    }
-
-    fn mark_due(&mut self) {
-        self.next_due = Instant::now();
     }
 }
 

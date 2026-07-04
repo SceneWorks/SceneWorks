@@ -724,8 +724,10 @@ impl Yolo {
         let x = self.c3k2(&x, 8, true)?; // 20,512
         let x = self.sppf(&x, 9)?; // 20,512
         let x = self.c2psa(&x, 10)?; // 20,512
+
+        // One saved copy of the C2PSA output, reused by the P5 neck concat (below) and returned in
+        // `YoloForward.block10` (sc-8952).
         let block10 = x.clone();
-        let b10 = x.clone();
         // neck (PANet)
         let x = upsample_nearest(&x, 2)?; // 40,512
         let x = concatenate_axis(&[&x, &b6], 3)?; // 40,1024
@@ -738,7 +740,7 @@ impl Yolo {
         let x = concatenate_axis(&[&x, &b13], 3)?; // 40,768
         let p4 = self.c3k2(&x, 19, true)?; // 40,512  → P4
         let x = self.conv(&p4, "model.20", 2, 1, true)?; // 20,512
-        let x = concatenate_axis(&[&x, &b10], 3)?; // 20,1024
+        let x = concatenate_axis(&[&x, &block10], 3)?; // 20,1024
         let p5 = self.c3k2(&x, 22, true)?; // 20,512  → P5
 
         let output = self.detect(&p3, &p4, &p5)?;

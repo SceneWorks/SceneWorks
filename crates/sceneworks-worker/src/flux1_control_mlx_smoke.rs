@@ -19,8 +19,9 @@
 //! FLUX1_CONTROL=~/.cache/huggingface/.../diffusion_pytorch_model.safetensors \
 //! cargo test -p sceneworks-worker --release flux1_dev_control_mlx_smoke -- --ignored --nocapture
 //! ```
-
-#![cfg(all(test, target_os = "macos"))]
+//!
+//! The `mod flux1_control_mlx_smoke;` declaration in `lib.rs` already carries the same
+//! `#[cfg(all(test, target_os = "macos"))]`, so no inner `#![cfg]` is needed here (sc-8952).
 
 use std::path::PathBuf;
 

@@ -38,50 +38,37 @@ pub const DEPTH_ANYTHING_V2_SMALL_REPO: &str = "depth-anything/Depth-Anything-V2
 /// this one file.)
 pub const DEPTH_ANYTHING_V2_FILE: &str = "model.safetensors";
 
+// The Depth Anything V2 backend crate, aliased per build so the estimator body below is written
+// once (sc-8952). macOS uses the native-MLX `mlx_gen_depth` port (sc-8242); off-Mac + candle uses
+// the candle/CUDA `candle_gen_depth` sibling (sc-8413). Both expose the same
+// `DepthAnythingV2::from_dir` + `estimate_control_rgb8` surface, so only the crate differs.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_depth as depth_backend;
+#[cfg(target_os = "macos")]
+use mlx_gen_depth as depth_backend;
+
 /// Estimate a depth control image from an arbitrary RGB input, loading the Depth Anything V2
 /// estimator from `weights_dir` (a directory containing `model.safetensors`).
 ///
 /// `img` is the source RGB image; the returned [`image::RgbImage`] is the normalized
 /// grayscale-broadcast depth map at the SAME dimensions, drop-in for the `ControlKind::Depth`
-/// path (the sibling of `canny::canny_control_image_default`). macOS path: MLX inference.
-#[cfg(target_os = "macos")]
+/// path (the sibling of `canny::canny_control_image_default`).
+///
+/// The backend is chosen by `depth_backend` above: macOS runs the native-MLX inference (sc-8242);
+/// off-Mac + `backend-candle` runs the candle/CUDA port on the build's default device (CUDA when
+/// built+available, else CPU), replacing the prior "automatic depth estimation is macOS-only"
+/// error so the candle strict-control driver (sc-8304) can auto-estimate `ControlKind::Depth`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub fn depth_control_image(
     img: &image::RgbImage,
     weights_dir: &std::path::Path,
 ) -> crate::WorkerResult<image::RgbImage> {
     use crate::WorkerError;
 
-    let model = mlx_gen_depth::DepthAnythingV2::from_dir(weights_dir)
-        .map_err(|error| WorkerError::Engine(format!("depth estimator load: {error}")))?;
-    let (w, h) = (img.width(), img.height());
-    let control = model
-        .estimate_control_rgb8(img.as_raw(), w, h)
-        .map_err(|error| WorkerError::Engine(format!("depth estimate: {error}")))?;
-    image::RgbImage::from_raw(w, h, control).ok_or_else(|| {
-        WorkerError::Engine("depth estimator returned a mis-sized control buffer".to_owned())
-    })
-}
-
-/// Off-Mac (Windows/Linux) candle/CUDA depth auto-estimation — the sibling of the macOS MLX path
-/// above, backed by the from-scratch `candle_gen_depth` Depth Anything V2 port (sc-8413, the
-/// Windows/CUDA twin of `mlx-gen-depth`).
-///
-/// Identical signature + contract to the macOS function: `img` is the source RGB image,
-/// `weights_dir` is the Depth-Anything-V2-Small snapshot dir holding `model.safetensors`, and the
-/// returned [`image::RgbImage`] is the normalized grayscale-broadcast depth control map at the SAME
-/// dimensions. `DepthAnythingV2::from_dir` runs on the build's default candle device (CUDA when
-/// built+available, else CPU); `estimate_control_rgb8` returns the `w·h·3` RGB control buffer.
-///
-/// Replaces the prior off-Mac "automatic depth estimation is macOS-only" error so the candle
-/// strict-control driver (sc-8304) can auto-estimate `ControlKind::Depth`.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub fn depth_control_image(
-    img: &image::RgbImage,
-    weights_dir: &std::path::Path,
-) -> crate::WorkerResult<image::RgbImage> {
-    use crate::WorkerError;
-
-    let model = candle_gen_depth::DepthAnythingV2::from_dir(weights_dir)
+    let model = depth_backend::DepthAnythingV2::from_dir(weights_dir)
         .map_err(|error| WorkerError::Engine(format!("depth estimator load: {error}")))?;
     let (w, h) = (img.width(), img.height());
     let control = model
