@@ -3035,6 +3035,86 @@ fn lora_paths_resolve_symlinks_before_root_check() {
     assert!(error.to_string().contains("LoRA path must be inside"));
 }
 
+// sc-8877 / F-075: the write-target confinement helpers must canonicalize before the
+// root check so a symlink planted under a managed root can't smuggle a write outside
+// via a purely-lexical `starts_with`. Covers all five that used the weaker check.
+#[cfg(unix)]
+#[test]
+fn app_managed_helpers_resolve_symlinks_before_root_check() {
+    let temp = tempdir().expect("tempdir creates");
+    let data_dir = temp.path().join("data");
+    let models_dir = data_dir.join("models");
+    let loras_dir = data_dir.join("loras");
+    let outside_dir = temp.path().join("outside");
+    std::fs::create_dir_all(&models_dir).expect("models dir creates");
+    std::fs::create_dir_all(&loras_dir).expect("loras dir creates");
+    std::fs::create_dir_all(&outside_dir).expect("outside dir creates");
+
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.data_dir = data_dir.clone();
+
+    // A symlink under a managed root pointing at an outside dir: a lexical
+    // `starts_with` would accept it; canonicalization must make each helper reject it.
+    let outside_target = outside_dir.join("escape");
+    std::fs::create_dir_all(&outside_target).expect("outside target creates");
+
+    // normalize_app_managed_path (write target confined to data_dir)
+    let path_link = data_dir.join("path-escape");
+    std::os::unix::fs::symlink(&outside_target, &path_link).expect("symlink creates");
+    let err =
+        super::normalize_app_managed_path(&settings, &path_link.display().to_string(), "Path")
+            .expect_err("symlinked path escape rejects");
+    assert!(err.to_string().contains("app-managed directory"));
+
+    // normalize_app_managed_model_path (read source confined to data_dir/hf_cache)
+    let model_link = models_dir.join("model-escape");
+    std::os::unix::fs::symlink(&outside_target, &model_link).expect("symlink creates");
+    let err = super::normalize_app_managed_model_path(
+        &settings,
+        &model_link.display().to_string(),
+        "Model",
+    )
+    .expect_err("symlinked model escape rejects");
+    assert!(err.to_string().contains("app-managed directory"));
+
+    // resolve_lora_import_target (write target confined to data/loras)
+    let lora_link = loras_dir.join("lora-escape");
+    std::os::unix::fs::symlink(&outside_target, &lora_link).expect("symlink creates");
+    let mut lora_payload = JsonObject::new();
+    lora_payload.insert(
+        "targetDir".to_owned(),
+        Value::String(lora_link.display().to_string()),
+    );
+    let err = super::resolve_lora_import_target(&settings, &lora_payload, loras_dir.clone())
+        .expect_err("symlinked lora targetDir escape rejects");
+    assert!(err.to_string().contains("data/loras"));
+
+    // resolve_model_import_target (write target confined to data/models)
+    let import_link = models_dir.join("import-escape");
+    std::os::unix::fs::symlink(&outside_target, &import_link).expect("symlink creates");
+    let mut model_payload = JsonObject::new();
+    model_payload.insert(
+        "targetDir".to_owned(),
+        Value::String(import_link.display().to_string()),
+    );
+    let err = super::resolve_model_import_target(&settings, &model_payload, models_dir.clone())
+        .expect_err("symlinked model targetDir escape rejects");
+    assert!(err.to_string().contains("data/models"));
+
+    // resolve_model_convert_output (write target confined to data/models)
+    let convert_link = models_dir.join("convert-escape");
+    std::os::unix::fs::symlink(&outside_target, &convert_link).expect("symlink creates");
+    let err = super::resolve_model_convert_output(&settings, &convert_link.display().to_string())
+        .expect_err("symlinked convert outputDir escape rejects");
+    assert!(err.to_string().contains("data/models"));
+
+    // Sanity: a genuine dir under a managed root still resolves (not over-rejected).
+    let real = models_dir.join("real_model");
+    std::fs::create_dir_all(&real).expect("real model dir creates");
+    super::normalize_app_managed_model_path(&settings, &real.display().to_string(), "Model")
+        .expect("a real managed dir is still accepted");
+}
+
 // sc-8821 / F-019: payload-supplied weight filenames (`advanced.controlWeights.filename`,
 // `advanced.pidCheckpoint.filename`) are joined under a resolved HF snapshot / app-cache
 // dir, so they must be a single plain path component — traversal, absolute paths, and
