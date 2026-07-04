@@ -27,6 +27,12 @@ use gen_core::Image;
 /// whose coherent baseline runs materially hotter hold to the tighter [`DEGENERATE_STD_FLOOR_TIGHT`]
 /// floor below instead. It is deliberately generous — it exists to catch a broken decode, not to grade
 /// quality (the real quality call is the saved-PNG eyeball).
+///
+// Which smokes consume these floors is lane-conditional: several callers are MLX/macOS-gated, so on a
+// given build lane (e.g. candle) a floor can have no consumer and read as unused. That per-lane "unused"
+// is expected and benign — allow(dead_code) keeps clippy -D warnings green on every lane without
+// cfg-gating the constants themselves. It is a no-op on lanes where the const IS used.
+#[allow(dead_code)]
 pub(crate) const DEGENERATE_STD_FLOOR_DEFAULT: f64 = 5.0;
 
 /// Tighter degenerate-decode floor for the lanes whose coherent output runs hotter (sc-9838, F-122).
@@ -37,6 +43,11 @@ pub(crate) const DEGENERATE_STD_FLOOR_DEFAULT: f64 = 5.0;
 /// the Lens pair (transformer DiT alongside the heavy gpt-oss-20b MoE text encoder), chroma1_base, and
 /// sdxl_base all sit here. This is a per-model tighter floor by design — it is NOT Lens-specific, and it
 /// should NOT be collapsed back into the default.
+///
+// Lane-conditional consumer set (see DEGENERATE_STD_FLOOR_DEFAULT above): its callers are MLX/macOS-gated
+// smokes, so on a lane where those are cfg'd out this const is unused. allow(dead_code) keeps clippy
+// -D warnings green per-lane without cfg-gating; it is a no-op on lanes where the const IS used.
+#[allow(dead_code)]
 pub(crate) const DEGENERATE_STD_FLOOR_TIGHT: f64 = 20.0;
 
 /// Read `key` from the environment, falling back to `default` when it is unset, empty, or
