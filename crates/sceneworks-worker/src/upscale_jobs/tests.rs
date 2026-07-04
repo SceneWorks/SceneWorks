@@ -407,7 +407,10 @@ fn real_esrgan_candle_real_weights_upscales() {
     };
     let (sw, sh) = (src.width(), src.height());
 
-    let out = upscale_blocking(onnx, factor, src, CancelFlag::new()).expect("Real-ESRGAN upscale");
+    // `upscale_blocking` now returns the image plus the `ort` session's execution device
+    // (coreml/cuda/cpu, sc-8923); the smoke only checks the image, so bind the device for the trace.
+    let (out, device) =
+        upscale_blocking(onnx, factor, src, CancelFlag::new()).expect("Real-ESRGAN upscale");
     assert_eq!(
         (out.width(), out.height()),
         (sw * u32::from(factor), sh * u32::from(factor)),
@@ -419,7 +422,7 @@ fn real_esrgan_candle_real_weights_upscales() {
         "upscaled image must not be all-black"
     );
     eprintln!(
-        "Real-ESRGAN x{factor}: {sw}x{sh} -> {}x{}",
+        "Real-ESRGAN x{factor} ({device}): {sw}x{sh} -> {}x{}",
         out.width(),
         out.height()
     );
