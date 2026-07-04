@@ -4039,6 +4039,82 @@ async fn begin_training_cancel_trips_flag_and_stays_non_terminal() {
     );
 }
 
+// sc-9646 (sc-9595 follow-up) — the streaming SeedVR2 upscale writes the whole upscaled PNG sequence
+// to a scratch dir before the final encode, so its disk footprint is unbounded after the sc-8829
+// host-RAM cap was removed. `check_seedvr2_output_disk` is a fail-loud-before-decode preflight that
+// mirrors the removed RAM guard: estimate the output footprint, compare against a generous fraction
+// of the scratch volume's free space, and reject a clip that would fill the disk.
+
+#[test]
+fn seedvr2_output_bytes_scales_with_frames_and_pixels() {
+    // Raw RGB8 upper bound: 1 frame at 100×100 = 100·100·3 = 30_000 bytes.
+    assert_eq!(
+        crate::video_jobs::seedvr2_estimated_output_bytes(1, 100, 100),
+        30_000
+    );
+    // Linear in frame count and in each dimension.
+    assert_eq!(
+        crate::video_jobs::seedvr2_estimated_output_bytes(10, 100, 100),
+        300_000
+    );
+    assert_eq!(
+        crate::video_jobs::seedvr2_estimated_output_bytes(1, 200, 100),
+        60_000
+    );
+    // A degenerate zero dimension / frame count yields zero (the guard treats that as "unknown").
+    assert_eq!(
+        crate::video_jobs::seedvr2_estimated_output_bytes(0, 3840, 2160),
+        0
+    );
+    assert_eq!(
+        crate::video_jobs::seedvr2_estimated_output_bytes(100, 0, 2160),
+        0
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn seedvr2_disk_guard_passes_a_tiny_clip_and_is_noop_when_unknown() {
+    let dir = tempdir().expect("tempdir");
+    // A few small frames fit any real scratch volume — must pass.
+    crate::video_jobs::check_seedvr2_output_disk(dir.path(), 8, 64, 64)
+        .expect("a tiny output footprint fits available disk");
+    // Unknown frame count / dims short-circuit to Ok (the guard defers to the real count).
+    crate::video_jobs::check_seedvr2_output_disk(dir.path(), 0, 3840, 2160)
+        .expect("zero frames is a no-op guard");
+    crate::video_jobs::check_seedvr2_output_disk(dir.path(), 1_000, 0, 0)
+        .expect("zero dims is a no-op guard");
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn seedvr2_disk_guard_rejects_an_impossibly_large_clip() {
+    let dir = tempdir().expect("tempdir");
+    // 100M frames at 4096×4096 ≈ 4.7 exabytes of PNG — no scratch volume holds that, so the guard
+    // must fail loud with an actionable message (unless the free-space probe is unavailable, in which
+    // case the guard is a documented no-op and we skip the assertion).
+    if crate::video_jobs::available_disk_bytes(dir.path()).is_some() {
+        let error =
+            crate::video_jobs::check_seedvr2_output_disk(dir.path(), 100_000_000, 4096, 4096)
+                .expect_err("an exabyte-scale output must be rejected");
+        let message = error.to_string();
+        assert!(
+            message.contains("Not enough disk space"),
+            "the error names the disk-space limit: {message}"
+        );
+        assert!(
+            message.contains("Trim the clip"),
+            "the error is actionable (suggests trimming): {message}"
+        );
+    }
+}
+
 // sc-8917 (F-115) — the shared batched-analysis scaffold DEFERS the terminal `Canceled` to
 // actual-stop, exactly like the training/video pollers. A cancel observed on the heartbeat-tick
 // poll must only trip the engine flag (so the still-running embed loop bails at its next per-item
@@ -4121,7 +4197,9 @@ async fn batched_analysis_defers_terminal_canceled_until_the_task_stops() {
         let _tx = tx;
         for _ in 0..2_000 {
             if task_cancel.is_cancelled() {
-                return Err(WorkerError::Canceled("Analysis canceled by user.".to_owned()));
+                return Err(WorkerError::Canceled(
+                    "Analysis canceled by user.".to_owned(),
+                ));
             }
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -4165,10 +4243,7 @@ async fn batched_analysis_defers_terminal_canceled_until_the_task_stops() {
     );
     let posts = posts.lock().expect("posts lock");
     // Exactly one terminal `canceled`, and it is the FINAL post — never a mid-run acknowledgement.
-    let canceled: Vec<&Value> = posts
-        .iter()
-        .filter(|p| p["status"] == "canceled")
-        .collect();
+    let canceled: Vec<&Value> = posts.iter().filter(|p| p["status"] == "canceled").collect();
     assert_eq!(
         canceled.len(),
         1,
