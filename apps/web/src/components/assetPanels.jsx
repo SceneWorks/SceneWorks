@@ -22,6 +22,14 @@ export const PREVIEW_FIT_VIEW = { scale: 1, x: 0, y: 0 };
 
 const clampScale = (value) => Math.min(PREVIEW_MAX_SCALE, Math.max(PREVIEW_MIN_SCALE, value));
 
+// The seed used to generate a specific image. Each image records its own seed on its
+// per-asset recipe; the generation-set recipe only carries the batch's shared base
+// seed, so the per-asset value must win — otherwise every sibling in a set reports the
+// same seed. Used both for the "Keep seed" gate and to replay the exact seed on reuse.
+export function assetSeed(asset) {
+  return asset?.recipe?.seed ?? asset?.generationSet?.recipe?.seed ?? null;
+}
+
 // Cursor-anchored zoom: keep the image point under `pointer` (stage-relative px)
 // stationary while multiplying the scale by `factor`. Pure so the anchoring math
 // is unit-testable in isolation; mirrors ImageEditor's handleWheel/zoomAtCenter.
@@ -717,37 +725,18 @@ export function FullscreenPreview({
   }, [asset.id, asset.variants?.upscaled?.id]);
   const displayedAsset = hasUpscaleVariants ? asset.variants[variantMode] : asset;
 
-  // Seed lives on the generation recipe. Surface it so users can copy it and pair
-  // it with "Use this recipe" to reproduce the exact image (e.g. for PiD upscaling).
-  // Resolve the same way "Use this recipe" does. Guard with `!= null` — seed 0 is valid.
-  const recipe = asset.generationSet?.recipe ?? asset.recipe ?? null;
-  const seed = recipe?.seed;
+  // Each generated image has its OWN seed on its per-asset recipe (asset.recipe.seed).
+  // The generation-set recipe only carries the batch's base seed — shared across every
+  // image in the set — so prefer the per-asset seed; otherwise the value never changes
+  // as you navigate between siblings of the same set. Guard with `!= null` — seed 0 is valid.
+  const seed = assetSeed(asset);
   const hasSeed = seed != null && seed !== "";
-  const [seedCopied, setSeedCopied] = React.useState(false);
   // "Use this recipe" defaults to a random seed (a close variation). Toggle this on
-  // to replay the exact seed for a byte-for-byte reproduction (e.g. PiD upscaling).
+  // to replay THIS image's exact seed for a byte-for-byte reproduction (e.g. PiD upscaling).
   const [keepSeed, setKeepSeed] = React.useState(false);
   React.useEffect(() => {
     setKeepSeed(false);
   }, [asset.id]);
-  const copySeed = React.useCallback(async () => {
-    if (!hasSeed) {
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(String(seed));
-      setSeedCopied(true);
-    } catch {
-      // Clipboard unavailable (e.g. insecure context) — leave the label unchanged.
-    }
-  }, [hasSeed, seed]);
-  React.useEffect(() => {
-    if (!seedCopied) {
-      return undefined;
-    }
-    const timer = setTimeout(() => setSeedCopied(false), 1500);
-    return () => clearTimeout(timer);
-  }, [seedCopied]);
 
   // Zoom/pan is IMAGES ONLY — video keeps its native <video> controls and gets no
   // zoom overlay/UI (sc-8728). `isVideo` gates the whole zoom surface.
@@ -1061,18 +1050,6 @@ export function FullscreenPreview({
           <div className="preview-modal-meta">
             <strong>{asset.displayName}</strong>
             <span>{asset.recipe?.model}</span>
-            {hasSeed ? (
-              <button
-                className="preview-seed"
-                onClick={copySeed}
-                title="Copy seed to clipboard"
-                type="button"
-              >
-                <span className="preview-seed-label">Seed</span>
-                <span className="preview-seed-value">{seed}</span>
-                <span className="preview-seed-hint">{seedCopied ? "Copied" : "Copy"}</span>
-              </button>
-            ) : null}
           </div>
           {hasUpscaleVariants ? (
             <div className="segmented-control compact-segment preview-variant-toggle" aria-label="Image variant">
