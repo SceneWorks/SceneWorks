@@ -674,9 +674,12 @@ async fn ensure_ltx_upscaler_cached(
         .join(format!(".ltx-upscaler-fetch-{}", job.id));
     tokio::fs::create_dir_all(&scratch).await?;
     let files = vec![file.to_owned()];
+    // Bind-then-remove: the fetch's `?` must not leak the scratch dir under data/cache on the error
+    // path (F-118). Clean the scratch dir whether the download succeeded or failed, then propagate.
     let fetched =
-        download_model_with_hf_cli(api, settings, job, repo, "main", &files, &scratch).await?;
+        download_model_with_hf_cli(api, settings, job, repo, "main", &files, &scratch).await;
     let _ = tokio::fs::remove_dir_all(&scratch).await;
+    let fetched = fetched?;
     let snapshot = match fetched {
         Some(dir) => Some(dir),
         None => huggingface_snapshot_dir(&settings.data_dir, repo),
