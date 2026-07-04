@@ -1173,8 +1173,11 @@ async fn run_pose_detect_inner(
                     let skeleton =
                         draw_wholebody(side, side, &body_t, Some(&hands_t), Some(&face_t), stick);
                     let preview = out_dir.join(format!("{stem}_p{person_index}_skel.png"));
+                    // A failed preview encode/write is an output-side fault, not a bad user
+                    // payload — classify it as `Engine` so it isn't mislabeled as user error
+                    // (sc-8952). `ImageError` is not an `io::Error`, so `Io` doesn't fit.
                     skeleton.save(&preview).map_err(|e| {
-                        WorkerError::InvalidPayload(format!("pose preview write: {e}"))
+                        WorkerError::Engine(format!("pose preview write: {e}"))
                     })?;
 
                     poses.push(json!({

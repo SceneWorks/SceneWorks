@@ -41,16 +41,6 @@ pub(crate) const PALETTE: [[u8; 3]; 6] = [
 pub(crate) const BG_BLACK: [u8; 3] = [0, 0, 0];
 pub(crate) const BG_WHITE: [u8; 3] = [255, 255, 255];
 
-/// The palette color for an object id, or `None` if the object is past the 6-color cap (SCAIL-2's
-/// scheme has six person classes; extra people get no color and read as background).
-fn color_for(order: &[i32], oid: i32) -> Option<[u8; 3]> {
-    order
-        .iter()
-        .position(|&o| o == oid)
-        .filter(|&i| i < PALETTE.len())
-        .map(|i| PALETTE[i])
-}
-
 /// Fill an RGB pixel buffer with a solid background color.
 fn filled(width: usize, height: usize, bg: [u8; 3]) -> Vec<u8> {
     let mut px = vec![0u8; width * height * 3];
@@ -99,8 +89,11 @@ pub(crate) fn paint_driving_masks(masks: &AllPersonMasks, bg: [u8; 3]) -> Worker
         .iter()
         .map(|frame| {
             let mut px = filled(w, h, bg);
-            for &oid in &masks.order {
-                let Some(color) = color_for(&masks.order, oid) else {
+            // The paint order *is* the palette order, so a person's index in `order`
+            // is its color index — take it from `enumerate` instead of re-searching
+            // `order` per person (was O(n²) via `position`) (sc-8952).
+            for (index, &oid) in masks.order.iter().enumerate() {
+                let Some(&color) = PALETTE.get(index) else {
                     continue;
                 };
                 if let Some((_, mask)) = frame.iter().find(|(o, _)| *o == oid) {

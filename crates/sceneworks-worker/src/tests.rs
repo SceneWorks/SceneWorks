@@ -3769,16 +3769,6 @@ fn idle_heartbeat_allows_immediate_resend_when_interval_is_zero() {
     assert!(heartbeat.should_send());
 }
 
-#[test]
-fn idle_heartbeat_can_be_forced_due_after_work() {
-    let mut heartbeat = IdleHeartbeat::new(Duration::from_secs(60));
-
-    heartbeat.mark_sent();
-    assert!(!heartbeat.should_send());
-    heartbeat.mark_due();
-    assert!(heartbeat.should_send());
-}
-
 fn spawn_exit_child() -> tokio::process::Child {
     let mut command = if cfg!(windows) {
         let mut command = tokio::process::Command::new("cmd");

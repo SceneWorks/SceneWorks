@@ -115,6 +115,12 @@ fn prepend_dll_search_path(dirs: &[&PathBuf]) {
     let existing = std::env::var_os("PATH").unwrap_or_default();
     prefix.extend(std::env::split_paths(&existing));
     if let Ok(joined) = std::env::join_paths(prefix) {
+        // SAFETY (pre-written for the edition-2024 `set_var` unsafe reclassification): this
+        // mutates the process-global `PATH`, which is a data race if another thread reads/writes
+        // the environment concurrently. It is sound here because the only caller,
+        // `preload_cuda_dylibs`, runs this inside a `OnceLock::get_or_init` at CUDA-EP init —
+        // before any `ort` session (and its worker threads) is built — so no concurrent env
+        // access is in flight. When the workspace moves to edition 2024, wrap this in `unsafe {}`.
         std::env::set_var("PATH", joined);
     }
 }
