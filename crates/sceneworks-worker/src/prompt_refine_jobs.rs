@@ -186,15 +186,17 @@ fn build_refine_system_prompt(guide: Option<&str>, workflow: Option<&str>) -> St
     }
 }
 
-/// Strip `<think>…</think>` reasoning blocks, a wrapping code fence, and matching surrounding quotes
-/// from the model reply. Port of the Python `clean_output` (regex-free: the tags are ASCII, matched
-/// case-insensitively without lowercasing the whole — Unicode-safe — string).
+/// Shared prelude for cleaning a model reply: strip `<think>…</think>` reasoning blocks, drop the
+/// text before an orphan closing tag, and unwrap a single wrapping ```…``` code fence. Both
+/// [`clean_refine_output`] (which then strips surrounding quotes) and [`clean_json_output`] (which
+/// then isolates the outermost `{ … }` span) build on this identical prelude, so it lives in one
+/// place (F-116).
 #[cfg(any(
     test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn clean_refine_output(text: &str) -> String {
+fn strip_reasoning_and_fence(text: &str) -> String {
     let mut text = strip_think_blocks(text.trim()).trim().to_owned();
     // An orphan closing tag (no matching open): keep only what follows the last one.
     if let Some(pos) = last_ci(&text, "</think>") {
@@ -207,6 +209,19 @@ fn clean_refine_output(text: &str) -> String {
             text = lines[1..lines.len() - 1].join("\n").trim().to_owned();
         }
     }
+    text
+}
+
+/// Strip `<think>…</think>` reasoning blocks, a wrapping code fence, and matching surrounding quotes
+/// from the model reply. Port of the Python `clean_output` (regex-free: the tags are ASCII, matched
+/// case-insensitively without lowercasing the whole — Unicode-safe — string).
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn clean_refine_output(text: &str) -> String {
+    let mut text = strip_reasoning_and_fence(text);
     // Matching surrounding single/double quotes.
     let chars: Vec<char> = text.chars().collect();
     if chars.len() >= 2 {
@@ -581,16 +596,7 @@ fn load_caption_image_ref(path: &Path) -> WorkerResult<gen_core::core_llm::Image
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) fn clean_json_output(text: &str) -> String {
-    let mut text = strip_think_blocks(text.trim()).trim().to_owned();
-    if let Some(pos) = last_ci(&text, "</think>") {
-        text = text[pos + "</think>".len()..].trim().to_owned();
-    }
-    if text.starts_with("```") && text.ends_with("```") {
-        let lines: Vec<&str> = text.lines().collect();
-        if lines.len() >= 2 {
-            text = lines[1..lines.len() - 1].join("\n").trim().to_owned();
-        }
-    }
+    let text = strip_reasoning_and_fence(text);
     match (text.find('{'), text.rfind('}')) {
         (Some(start), Some(end)) if end > start => text[start..=end].to_owned(),
         _ => text,
