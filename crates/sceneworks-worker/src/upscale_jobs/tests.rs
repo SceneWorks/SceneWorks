@@ -206,6 +206,25 @@ fn onnx_filename_per_factor() {
     assert_eq!(onnx_file(4), "real_esrgan_x4.onnx");
 }
 
+/// F-118 / sc-9794 follow-up: image upscale accepts only 2x and 4x. Any other factor is rejected
+/// with a clear `InvalidPayload` error rather than silently coerced to 2x (which produced a
+/// quietly-different output), mirroring the video path's `resolve_video_upscale_factor`
+/// (F-118 / sc-8920). Both `run_image_upscale_job` and `run_dataset_upscale_job` route through
+/// this guard.
+#[test]
+fn image_upscale_factor_accepts_2_and_4_rejects_others() {
+    assert_eq!(resolve_image_upscale_factor(2).expect("2x"), 2);
+    assert_eq!(resolve_image_upscale_factor(4).expect("4x"), 4);
+    for bad in [0u64, 1, 3, 5, 8, 16] {
+        let err = resolve_image_upscale_factor(bad)
+            .expect_err("unsupported factor must be rejected, not coerced");
+        assert!(
+            matches!(err, WorkerError::InvalidPayload(ref m) if m.contains("factor 2 or 4")),
+            "factor {bad} should yield a clear InvalidPayload error, got {err:?}"
+        );
+    }
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
