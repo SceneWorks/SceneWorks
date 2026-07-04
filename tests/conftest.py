@@ -1,20 +1,15 @@
 from __future__ import annotations
 
 import os
-import sys
-from pathlib import Path
 
 import pytest
 
 
-# The retired Python worker's test suite (16 `tests/test_worker_*.py` /
-# `test_*_adapters.py` files + `worker_runtime_shared.py`) was deleted in sc-8863
-# once its live gates had been re-expressed against the Rust worker (sc-8861 e2e
-# pure-HTTP client + sc-9513 engine-wiring guards), so `apps/worker` is no longer
-# imported by any test. The surviving tests (Rust-API contract/smoke, manifest
-# audits, the convert-script unit test) only need `packages/shared` on the path.
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "packages" / "shared"))
+# The retired Python worker (`apps/worker/scene_worker`) and its shared
+# `packages/shared/sceneworks_shared` package were deleted in epic 8283 (sc-9728 /
+# sc-9704). No surviving test imports either, so this conftest no longer puts them
+# on `sys.path`. The remaining tests (Rust-API contract/smoke, manifest audits, the
+# convert-script unit test) drive the native Rust worker over HTTP.
 
 
 def running_in_ci() -> bool:
