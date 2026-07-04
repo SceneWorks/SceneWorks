@@ -254,8 +254,9 @@ fn depth_control_image(
 ) -> WorkerResult<Image> {
     let source = source.ok_or_else(|| {
         WorkerError::InvalidPayload(
-            "depth control requires either a source image to estimate from or a user-supplied \
-             depth map (advanced.controlImage)"
+            "depth control requires either a source image to estimate from \
+             (sourceAssetId / referenceAssetId) or a user-supplied depth map \
+             (advanced.controlImage)"
                 .to_owned(),
         )
     })?;
@@ -381,7 +382,10 @@ fn preprocess_control_entry(
         ControlKind::Canny => {
             let source = source.ok_or_else(|| {
                 WorkerError::InvalidPayload(
-                    "canny control requires a source image (advanced.controlImage)".to_owned(),
+                    "canny control requires either a source image to derive edges from \
+                     (sourceAssetId / referenceAssetId) or a user-supplied edge map \
+                     (advanced.controlImage)"
+                        .to_owned(),
                 )
             })?;
             let rgb = image::RgbImage::from_raw(source.width, source.height, source.pixels.clone())
