@@ -1,10 +1,10 @@
-import React, { useContext, useState } from "react";
+import React, { useState } from "react";
 import { apiFetch } from "./api.js";
 import { batchEligibleAssets, batchItemStatus, buildBatchJob, summarizeBatchProgress } from "./batchOps.js";
 import { assetSupportsCharacterLink } from "./components/assetPanels.jsx";
 import { assetUrl } from "./components/assetMedia.jsx";
 import { BatchOperationsPanel } from "./components/BatchOperationsPanel.jsx";
-import { AppContext } from "./context/AppContext.js";
+import { useAppContextOptional } from "./context/AppContext.js";
 import { detailCapableModels, editCapableModels, UPSCALE_ENGINES } from "./imageJobs.js";
 import { DEFAULT_MAC_CAPABILITIES, macUpscaleEngineBlocked } from "./macGating.js";
 
@@ -20,7 +20,11 @@ export const LIBRARY_MOVE_TARGET = "__sceneworks_library__";
 // and render <AssetSelectionBar batch={…}/> + <AssetBatchModal batch={…}/>.
 export function useAssetBatch() {
   // Read the app context optionally: the toolbar should stay inert (not crash) when a host
-  // component is rendered in isolation without an <AppContext.Provider> (e.g. unit tests).
+  // component is rendered in isolation without any provider (e.g. unit tests). The app
+  // renders the split AppStaticContext/AppLiveContext providers (not the legacy combined
+  // <AppContext.Provider>), so we read the merged view across both — useContext(AppContext)
+  // alone would resolve to null in the real app and blank the toolbar. `jobs` is a live
+  // field, so this still (correctly) re-renders the toolbar on job ticks.
   const {
     activeProject,
     assets = [],
@@ -33,7 +37,7 @@ export function useAssetBatch() {
     token = "",
     requestedGpu = "auto",
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
-  } = useContext(AppContext) ?? {};
+  } = useAppContextOptional() ?? {};
 
   const [selectedAssetIds, setSelectedAssetIds] = useState(() => new Set());
   const [batchOpen, setBatchOpen] = useState(false);
