@@ -27,6 +27,7 @@ import { editModelForAsset } from "./presetUtils.js";
 import { sortNewest, sortWorkers, upsertJobNewest } from "./sorters.js";
 import { useCharacters } from "./hooks/useCharacters.js";
 import { usePresets } from "./hooks/usePresets.js";
+import { usePromptBatches } from "./hooks/usePromptBatches.js";
 import { useTraining } from "./hooks/useTraining.js";
 import { useModelsAndLoras } from "./hooks/useModelsAndLoras.js";
 import { usePersonTracks } from "./hooks/usePersonTracks.js";
@@ -461,6 +462,7 @@ export function App() {
   const refreshCharactersRef = useRef(null);
   const refreshLorasRef = useRef(null);
   const refreshPresetsRef = useRef(null);
+  const refreshPromptBatchesRef = useRef(null);
   const refreshTrainingDatasetsRef = useRef(null);
   const refreshPersonTracksRef = useRef(null);
   const refreshTimelinesRef = useRef(null);
@@ -573,6 +575,16 @@ export function App() {
     duplicatePreset,
     deletePreset,
   } = usePresets({ token, activeProject, setError });
+
+  const {
+    promptBatches,
+    setPromptBatches,
+    refreshPromptBatches,
+    createPromptBatch,
+    updatePromptBatch,
+    duplicatePromptBatch,
+    deletePromptBatch,
+  } = usePromptBatches({ token, activeProject, setError });
 
   const {
     trainingDatasets,
@@ -1024,6 +1036,7 @@ export function App() {
     refreshCharactersRef.current?.(activeProject.id, { signal });
     refreshLorasRef.current?.(activeProject.id, { signal });
     refreshPresetsRef.current?.(activeProject.id, { signal });
+    refreshPromptBatchesRef.current?.(activeProject.id, { signal });
     refreshTrainingDatasetsRef.current?.(activeProject.id, { signal });
     refreshPersonTracksRef.current?.(activeProject.id, { signal });
     refreshTimelinesRef.current?.(activeProject.id, { signal });
@@ -1081,6 +1094,7 @@ export function App() {
       presetsResult,
       trainingTargetsResult,
       trainingPresetsResult,
+      promptBatchesResult,
     ] =
       await Promise.all([
         fetchInitial("Projects", "/api/v1/projects", []),
@@ -1091,6 +1105,7 @@ export function App() {
         fetchInitial("Presets", "/api/v1/recipe-presets", [], true),
         fetchInitial("Training targets", "/api/v1/training/targets", { schemaVersion: 1, targets: [] }),
         fetchInitial("Training presets", "/api/v1/training/presets", { schemaVersion: 1, presets: [] }),
+        fetchInitial("Prompt batches", "/api/v1/prompt-batches", [], true),
       ]);
     // Mac UI gating (sc-3486): optional + non-fatal — a fetch failure leaves gating inert.
     fetchInitial("Mac capabilities", "/api/v1/capabilities/mac", DEFAULT_MAC_CAPABILITIES, true)
@@ -1106,6 +1121,7 @@ export function App() {
     setModels(modelsResult.value);
     setLoras(lorasResult.value);
     setPresets(presetsResult.value);
+    setPromptBatches(promptBatchesResult.value);
     setTrainingTargets(trainingTargetsResult.value);
     setTrainingTargetsError(trainingTargetsResult.error);
     setTrainingPresets(trainingPresetsResult.value);
@@ -1176,6 +1192,7 @@ export function App() {
     refreshCharactersRef.current = refreshCharacters;
     refreshLorasRef.current = refreshLoras;
     refreshPresetsRef.current = refreshPresets;
+    refreshPromptBatchesRef.current = refreshPromptBatches;
     refreshTrainingDatasetsRef.current = refreshTrainingDatasets;
     refreshPersonTracksRef.current = refreshPersonTracks;
     refreshTimelinesRef.current = refreshTimelines;
@@ -1938,6 +1955,12 @@ export function App() {
     updatePreset,
     deletePreset,
     duplicatePreset,
+    // Prompt batches (sc-9954, epic 9952)
+    promptBatches,
+    createPromptBatch,
+    updatePromptBatch,
+    deletePromptBatch,
+    duplicatePromptBatch,
     // Auth (sc-4168): pairing token for screens that call apiFetch directly
     // (Image Editor, Logs, Pose Library, useUserPoseLoader). Empty string when
     // the deployment doesn't require auth.
@@ -2011,6 +2034,7 @@ export function App() {
     loras, deleteLora, deleteModel, createModelDownloadJob, createLoraDownloadJob, createModelConvertJob,
     createLoraImportJob, createModelImportJob, requestedGpu, setRequestedGpu,
     presets, createPreset, updatePreset, deletePreset, duplicatePreset, token, authenticated,
+    promptBatches, createPromptBatch, updatePromptBatch, deletePromptBatch, duplicatePromptBatch,
     trainingDatasets, trainingDatasetsProjectId, trainingDatasetsError, loadingTrainingDatasets,
     refreshTrainingDatasets, loadTrainingDataset, loadTrainingDatasetReadiness, setTrainingDatasetItemQualityAck, createTrainingDataset, uploadTrainingDatasetItem,
     updateTrainingDataset, batchRenameTrainingDataset, writeTrainingDatasetCaptionSidecars,

@@ -148,9 +148,9 @@ use dto::{
     HostCapabilitiesResponse, ImageJobRequest, InterleaveJobRequest, JobsQuery, LoraImportRequest,
     LorasQuery, ModelConvertRequest, ModelDownloadRequest, ModelImportRequest,
     PersonDetectionJobRequest, PersonTrackCorrectionsRequest, PersonTrackJobRequest,
-    ProjectCreateRequest, PromptRefineRequest, QualityAckBody, ReadinessQuery, RecipePresetsQuery,
-    TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest,
-    VerifyResponse, VideoJobRequest, VqaJobRequest,
+    ProjectCreateRequest, PromptBatchesQuery, PromptRefineRequest, QualityAckBody, ReadinessQuery,
+    RecipePresetsQuery, TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest,
+    TrainingCaptionJobRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
 use manifest::{
@@ -183,6 +183,11 @@ use recipe_presets::{
     create_recipe_preset, delete_recipe_preset, duplicate_recipe_preset, get_recipe_preset,
     list_recipe_presets, preset_lora_id, preset_lora_weight, preset_prompt, recipe_preset_catalog,
     recipe_preset_catalog_with, recipe_preset_loras, serialize_preset_lora, update_recipe_preset,
+};
+mod prompt_batches;
+use prompt_batches::{
+    create_prompt_batch, delete_prompt_batch, duplicate_prompt_batch, get_prompt_batch,
+    list_prompt_batches, update_prompt_batch,
 };
 mod credentials;
 use credentials::{delete_credential, list_credentials, set_credential};
@@ -1102,6 +1107,20 @@ pub(crate) fn create_app_with_state(
         .route(
             "/api/v1/recipe-presets/:preset_id/duplicate",
             post(duplicate_recipe_preset),
+        )
+        .route(
+            "/api/v1/prompt-batches",
+            get(list_prompt_batches).post(create_prompt_batch),
+        )
+        .route(
+            "/api/v1/prompt-batches/:batch_id",
+            get(get_prompt_batch)
+                .patch(update_prompt_batch)
+                .delete(delete_prompt_batch),
+        )
+        .route(
+            "/api/v1/prompt-batches/:batch_id/duplicate",
+            post(duplicate_prompt_batch),
         )
         .route("/api/v1/jobs", get(list_jobs).post(create_job))
         .route("/api/v1/jobs/claim", post(claim_job))
