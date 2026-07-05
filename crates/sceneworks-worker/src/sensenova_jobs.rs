@@ -1563,6 +1563,88 @@ mod tests {
         );
     }
 
+    /// sc-9960 (epic 9959) S0 engine-load de-risk: prove the NEW `Infographic-V2` checkpoint
+    /// (`sensenova/SenseNova-U1-8B-MoT-Infographic-V2`, ~33GB dense bf16) loads and runs on the
+    /// CURRENTLY pinned `mlx-gen-sensenova` with NO engine change. Static analysis already showed
+    /// V2's `config.json` is byte-identical to V1's and its tensor namespace adds nothing new, so
+    /// this is expected to be a no-op like the LTX-2.3 dense tier — but S0's AC requires an actual
+    /// render + VQA, not just the static diff. Exercises the full stack in one shot: config +
+    /// sharded weight load + tokenizer (V2 ships slow-only vocab.json/merges.txt, no tokenizer.json —
+    /// a `load_tokenizer` failure here means a derived-tokenizer overlay is an S1 conversion step,
+    /// NOT an architecture problem), the understanding path (VQA), and the generation path
+    /// (interleave decode + non-degenerate render check). Run on demand:
+    /// `cargo test -p sceneworks-worker --lib -- --ignored sensenova_v2_infographic_real_weights`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs real SenseNova-U1-8B-MoT-Infographic-V2 weights (~33GB) + Metal device"]
+    fn sensenova_v2_infographic_real_weights_load_render_vqa() {
+        let snapshot = hf_snapshot("models--sensenova--SenseNova-U1-8B-MoT-Infographic-V2");
+        let (model, tokenizer) =
+            load_sensenova_model(&snapshot).expect("load V2 model on the current pinned engine");
+
+        // Understanding path: VQA over a synthetic image must return non-empty text post think-strip.
+        let image = gradient_image(512, 512);
+        let pixel_values = image_to_chw01(&image, 256 * 256, 768 * 768).expect("preprocess");
+        let answer = model
+            .vqa(
+                &tokenizer,
+                "What colors appear in this image?",
+                std::slice::from_ref(&pixel_values),
+                64,
+                Sampler::Greedy,
+                None,
+            )
+            .expect("V2 vqa");
+        let answer = strip_reasoning(&answer);
+        assert!(
+            !answer.is_empty(),
+            "V2 VQA answer should be non-empty: {answer:?}"
+        );
+
+        // Generation path: the PRIMARY t2i render (what the Infographic-V2 checkpoint is tuned for).
+        // 512² + 16 steps for speed (production is 2048²/50); we only assert the decode is a real,
+        // non-degenerate image, not infographic quality (that's S4 on-device validation).
+        let opts = T2iOptions {
+            cfg_scale: 4.0,
+            img_cfg_scale: 1.0,
+            num_steps: 16,
+            timestep_shift: 3.0,
+            seed: 42,
+            think_mode: false,
+            ..Default::default()
+        };
+        let out = model
+            .generate(
+                &tokenizer,
+                "an infographic poster about the water cycle, clean vector style",
+                512,
+                512,
+                &opts,
+                None,
+                None,
+            )
+            .expect("V2 t2i generate");
+        let decoded = decoded_to_image(&out.image).expect("decode");
+        assert_eq!(
+            decoded.pixels.len(),
+            (decoded.width * decoded.height * 3) as usize
+        );
+        // Non-degenerate check: a NaN/all-black/flat decode collapses the per-pixel std toward 0.
+        let n = decoded.pixels.len() as f64;
+        let mean = decoded.pixels.iter().map(|&p| p as f64).sum::<f64>() / n;
+        let std = (decoded
+            .pixels
+            .iter()
+            .map(|&p| (p as f64 - mean).powi(2))
+            .sum::<f64>()
+            / n)
+            .sqrt();
+        assert!(
+            std > 10.0,
+            "V2 render looks degenerate (std {std:.2}, mean {mean:.2}) — possible NaN / all-black / flat decode"
+        );
+    }
+
     /// sc-8771 on-device verify (MLX, epic 8506 Group-B): drive the ACTUAL packed worker seam against
     /// the downloaded SceneWorks/sensenova-u1-8b-mlx **q4** turnkey tier. SenseNova-U1 is a unified MoT
     /// (no separate TE/VAE) whose whole backbone packs into a flat `q4/model.safetensors`; the worker's

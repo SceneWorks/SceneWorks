@@ -269,6 +269,13 @@ mod sana_mlx_smoke;
 // manifest footprint fields.
 #[cfg(all(test, target_os = "macos"))]
 mod footprint_measure;
+// On-device build helper for the Wan2.2 T2V-A14B quant matrix (sc-9942, epic 8506). Test-only +
+// macOS-only; an #[ignore]d helper that drives `mlx_gen_wan::convert::convert_t2v_14b` once per tier
+// (bf16/q8/q4) against the native checkpoint to produce the self-contained hosted tier subdirs, then
+// copies the tokenizer the converter omits. Run one-off to build the artifacts for
+// `SceneWorks/wan2.2-t2v-a14b-mlx`; not exercised in CI (needs the ~126GB native weights).
+#[cfg(all(test, target_os = "macos"))]
+mod wan_t2v_14b_tier_build;
 // The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
 // control path; on Mac AND the off-Mac candle DWPose lane (sc-5496) it backs the
 // `pose_jobs` skeleton render; on a candle-disabled box off Mac it still builds +

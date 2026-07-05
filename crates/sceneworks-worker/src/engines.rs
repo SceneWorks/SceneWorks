@@ -360,6 +360,18 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         adapter_label: "mlx_sensenova",
     },
     ModelRow {
+        // Infographic-V2 (epic 9959): coexisting checkpoint refresh of the base NEO-unify model.
+        // Its config + tensor layout are byte-identical to the base, so it rides the SAME engine
+        // (`engine_id: "sensenova_u1_8b"`) with no engine change — only a distinct SceneWorks
+        // quant-matrix re-host (q4/q8/bf16 packed tiers, epic 9959 S1). Same defaults as the base.
+        sceneworks_id: "sensenova_u1_8b_infographic_v2",
+        engine_id: "sensenova_u1_8b",
+        default_repo: "SceneWorks/sensenova-u1-8b-infographic-v2-mlx",
+        default_steps: 50,
+        default_guidance: 4.0,
+        adapter_label: "mlx_sensenova",
+    },
+    ModelRow {
         sceneworks_id: "sensenova_u1_8b_fast",
         engine_id: "sensenova_u1_8b_fast",
         // sc-8775: SceneWorks MLX quant-matrix re-host of the *distilled* variant — q4/q8/bf16 packed
