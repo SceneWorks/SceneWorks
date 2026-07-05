@@ -80,15 +80,20 @@ describe("BatchPromptPanel (sc-9955)", () => {
     expect(document.body.querySelector(".batch-total strong").textContent).toBe("12");
   });
 
-  it("adds a variable value as a chip on Enter and updates the total", async () => {
+  it("commits a typed value live, without pressing Enter", async () => {
     mount({ initialPrompts: "{{name}} portrait", count: 1 });
-    const input = document.body.querySelector(".batch-var-input");
-    await act(async () => {
-      setValue(input, "Alice");
-      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    });
-    const chips = [...document.body.querySelectorAll(".batch-chip")].map((el) => el.textContent.replace("×", "").trim());
-    expect(chips).toContain("Alice");
+    await act(async () => setValue(document.body.querySelector(".batch-var-input"), "Alice"));
+    expect(document.body.querySelector(".batch-var-count").textContent).toBe("1 value");
+  });
+
+  it("auto-expands to accept multiple values as you type", async () => {
+    mount({ initialPrompts: "{{c}}" });
+    const inputs = () => [...document.body.querySelectorAll(".batch-var-input")];
+    expect(inputs()).toHaveLength(1);
+    await act(async () => setValue(inputs()[0], "red"));
+    expect(inputs()).toHaveLength(2); // a fresh trailing box appears
+    await act(async () => setValue(inputs()[1], "blue"));
+    expect(document.body.querySelector(".batch-var-count").textContent).toBe("2 values");
   });
 
   it("disables Save until a name is entered", async () => {
@@ -100,13 +105,9 @@ describe("BatchPromptPanel (sc-9955)", () => {
     expect(saveButton.disabled).toBe(false);
   });
 
-  it("previews the first resolved prompt using entered values", async () => {
+  it("previews the first resolved prompt from a live-typed value", async () => {
     mount({ initialPrompts: "{{name}} portrait" });
-    const input = document.body.querySelector(".batch-var-input");
-    await act(async () => {
-      setValue(input, "Alice");
-      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    });
+    await act(async () => setValue(document.body.querySelector(".batch-var-input"), "Alice"));
     expect(document.body.querySelector(".batch-preview-text").textContent).toBe("Alice portrait");
   });
 
