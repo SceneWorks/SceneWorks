@@ -732,3 +732,85 @@ fn sana_sprint_manifest_entry_gates_correctly() {
         "sana-sprint UI description carries the NVIDIA non-commercial notice"
     );
 }
+
+/// sc-9942 (epic 8506): the Wan2.2 T2V-A14B builtin entry ships the macOS quant matrix as per-tier
+/// installable artifacts — `q4` (default) + `q8` + `bf16`, each a self-contained SceneWorks HF
+/// download tagged with a `variant` and carrying an `estimatedSizeBytes` + `footprint` (sc-8508). The
+/// video load path (`video_jobs::wan_t2v_14b_tier_subdir`) descends into the chosen tier, so a drift
+/// that drops a tier or its size would break the download UI + the RAM→tier suggestion — assert the
+/// shape here so it fails CI.
+#[test]
+fn wan_t2v_14b_manifest_ships_the_quant_matrix() {
+    let entry = builtin_model_entry("wan_2_2_t2v_14b");
+    assert_eq!(
+        entry.get("family").and_then(Value::as_str),
+        Some("wan-video"),
+        "wan T2V-14B family"
+    );
+    assert_eq!(
+        entry.get("type").and_then(Value::as_str),
+        Some("video"),
+        "wan T2V-14B is a video model"
+    );
+    let downloads = entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .expect("wan T2V-14B downloads");
+    // The macOS tiers, in order, from the SceneWorks quant-matrix repo.
+    let macos: Vec<&Value> = downloads
+        .iter()
+        .filter(|d| {
+            d.get("platforms")
+                .and_then(Value::as_array)
+                .map(|p| p.iter().any(|x| x.as_str() == Some("macos")))
+                .unwrap_or(false)
+        })
+        .collect();
+    let variants: Vec<&str> = macos
+        .iter()
+        .filter_map(|d| d.get("variant").and_then(Value::as_str))
+        .collect();
+    assert_eq!(
+        variants,
+        vec!["q4", "q8", "bf16"],
+        "wan T2V-14B ships the q4/q8/bf16 tier matrix on macOS"
+    );
+    for tier in &macos {
+        let variant = tier.get("variant").and_then(Value::as_str).unwrap();
+        assert_eq!(
+            tier.get("repo").and_then(Value::as_str),
+            Some("SceneWorks/wan2.2-t2v-a14b-mlx"),
+            "{variant} tier hosts on the SceneWorks quant-matrix repo"
+        );
+        let files: Vec<String> = tier
+            .get("files")
+            .and_then(Value::as_array)
+            .map(|f| f.iter().filter_map(Value::as_str).map(String::from).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            files,
+            vec![format!("{variant}/*")],
+            "{variant} tier installs only its own subdir"
+        );
+        assert!(
+            tier.get("estimatedSizeBytes")
+                .and_then(Value::as_u64)
+                .is_some_and(|b| b > 0),
+            "{variant} tier declares a nonzero estimatedSizeBytes"
+        );
+        assert!(
+            tier.get("footprint")
+                .and_then(|f| f.get("diskSizeBytes"))
+                .and_then(Value::as_u64)
+                .is_some_and(|b| b > 0),
+            "{variant} tier declares a footprint.diskSizeBytes"
+        );
+    }
+    // Exactly one macOS default, and it is the lean q4 tier (the big bf16 is a deliberate opt-in).
+    let defaults: Vec<&str> = macos
+        .iter()
+        .filter(|d| d.get("default").and_then(Value::as_bool) == Some(true))
+        .filter_map(|d| d.get("variant").and_then(Value::as_str))
+        .collect();
+    assert_eq!(defaults, vec!["q4"], "the macOS default tier is q4");
+}
