@@ -2799,6 +2799,35 @@ const WAN_T2V_14B_REPO: &str = "SceneWorks/wan2.2-t2v-a14b-mlx";
 #[cfg(target_os = "macos")]
 const WAN_T2V_14B_REVISION: &str = "991eb255c544bbb2e1f1e07da4355c2f0a5337b7";
 
+/// The turnkey SceneWorks Wan2.2 **I2V-A14B** MLX repo (sc-9943, epic 8506). The image→video sibling
+/// of [`WAN_T2V_14B_REPO`]: same self-contained `q4/`/`q8/`/`bf16/` tier layout (both MoE experts +
+/// UMT5 T5 + z16 VAE + tokenizer + `config.json`), differing only in the experts' `in_dim` (36
+/// image-concat conditioning vs 16 text-only). The worker descends into the chosen tier so a
+/// pre-packed snapshot loads with no install-time convert peak; the legacy flat root files stay for
+/// already-shipped workers.
+#[cfg(target_os = "macos")]
+const WAN_I2V_14B_REPO: &str = "SceneWorks/wan2.2-i2v-a14b-mlx";
+
+/// Pinned revision for [`WAN_I2V_14B_REPO`] (mirrors [`WAN_T2V_14B_REVISION`]). The commit that adds
+/// the `q4/`/`q8/`/`bf16/` tier subdirs to the I2V-A14B repo (sc-9943); pinning the exact commit (not
+/// the mutable `main`) stops an upstream re-push from silently swapping a checkpoint the on-demand
+/// `q8/*` + `bf16/*` fetch loads (the `hf` CLI still verifies each file's own hash on download).
+#[cfg(target_os = "macos")]
+const WAN_I2V_14B_REVISION: &str = "c6c786170031eccc3a1fac0f98f1ad4ff988271e";
+
+/// Map an A14B dual-expert MoE video model id to its `(quant-matrix repo, pinned revision)` for the
+/// on-demand tier fetch, or `None` for a non-A14B model. The T2V (sc-9942) and I2V (sc-9943) A14B
+/// turnkeys host the SAME self-contained `q4/`/`q8/`/`bf16/` tier layout (epic 8506); only the repo +
+/// pinned commit differ, so the whole tier-resolve/fetch path is shared and keyed only here.
+#[cfg(target_os = "macos")]
+fn wan_a14b_tier_repo(model: &str) -> Option<(&'static str, &'static str)> {
+    match model {
+        "wan_2_2_t2v_14b" => Some((WAN_T2V_14B_REPO, WAN_T2V_14B_REVISION)),
+        "wan_2_2_i2v_14b" => Some((WAN_I2V_14B_REPO, WAN_I2V_14B_REVISION)),
+        _ => None,
+    }
+}
+
 /// Parse `advanced.mlxQuantize` (int or numeric string) for the Wan A14B tier selector, if present.
 #[cfg(target_os = "macos")]
 fn wan_quant_bits(request: &VideoRequest) -> Option<i64> {
@@ -2808,13 +2837,13 @@ fn wan_quant_bits(request: &VideoRequest) -> Option<i64> {
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
 }
 
-/// The Wan2.2 T2V-A14B tier search order for a request — preferred tier first, then the
+/// The Wan2.2 A14B (T2V + I2V) tier search order for a request — preferred tier first, then the
 /// always-smaller fallback tiers so a repo missing the preferred subdir still loads (mirrors
 /// [`ltx_bundle_tier_order`]): `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, else the `q4` default.
 /// `bf16` is only ever tried when explicitly requested, so a default job never pulls the huge dense
 /// tier by accident.
 #[cfg(target_os = "macos")]
-fn wan_t2v_14b_tier_order(request: &VideoRequest) -> &'static [&'static str] {
+fn wan_a14b_tier_order(request: &VideoRequest) -> &'static [&'static str] {
     match wan_quant_bits(request) {
         Some(b) if b <= 0 => &["bf16", "q8", "q4"],
         Some(b) if b >= 8 => &["q8", "q4"],
@@ -2824,7 +2853,7 @@ fn wan_t2v_14b_tier_order(request: &VideoRequest) -> &'static [&'static str] {
 
 /// Whether `dir` is a COMPLETE self-contained Wan2.2 A14B tier snapshot: both MoE experts + the T5
 /// encoder + VAE + tokenizer + `config.json`. A partially-downloaded tier fails this so
-/// [`wan_t2v_14b_tier_subdir`] falls through to a smaller complete tier rather than half-loading.
+/// [`wan_a14b_tier_subdir`] falls through to a smaller complete tier rather than half-loading.
 #[cfg(target_os = "macos")]
 fn wan_a14b_tier_is_complete(dir: &Path) -> bool {
     [
@@ -2839,64 +2868,65 @@ fn wan_a14b_tier_is_complete(dir: &Path) -> bool {
     .all(|file| dir.join(file).is_file())
 }
 
-/// Descend a resolved Wan2.2 T2V-A14B repo `root` into the requested quant tier subdir (sc-9942,
+/// Descend a resolved Wan2.2 A14B repo `root` into the requested quant tier subdir (sc-9942/sc-9943,
 /// epic 8506), mirroring [`ltx_bundle_subdir`]. Returns the first COMPLETE tier in
-/// [`wan_t2v_14b_tier_order`] (both experts live in the SAME subdir, so one resolution covers the
-/// full MoE), or `None` when the repo has no complete tier subdir — a legacy flat snapshot, where the
+/// [`wan_a14b_tier_order`] (both experts live in the SAME subdir, so one resolution covers the full
+/// MoE), or `None` when the repo has no complete tier subdir — a legacy flat snapshot, where the
 /// caller keeps the root + load-time quant.
 #[cfg(target_os = "macos")]
-fn wan_t2v_14b_tier_subdir(root: &Path, request: &VideoRequest) -> Option<PathBuf> {
-    wan_t2v_14b_tier_order(request)
+fn wan_a14b_tier_subdir(root: &Path, request: &VideoRequest) -> Option<PathBuf> {
+    wan_a14b_tier_order(request)
         .iter()
         .map(|tier| root.join(tier))
         .find(|dir| wan_a14b_tier_is_complete(dir))
 }
 
-/// Resolve the Wan2.2 T2V-A14B `(model_dir, load-time quant)` for a generation, descending into the
-/// quant-matrix tier subdir when the turnkey ships them (sc-9942). A pre-packed tier's `config.json`
-/// is authoritative — [`WanTransformer::from_weights`] builds the experts at the stored bits and
-/// `resolve_load_time_quant` rejects a conflicting `spec.quantize` as a hard error — so a resolved
-/// tier loads with `quant = None`: `mlxQuantize` selects WHICH tier, never a load-time requant (the
-/// `bf16/` tier is dense, so `None` ⇒ dense too). A legacy flat snapshot (no tier subdirs) keeps
-/// today's behavior: load the root and quantize at load per [`resolve_wan_quant`].
+/// Resolve the Wan2.2 A14B `(model_dir, load-time quant)` for a generation, descending into the
+/// quant-matrix tier subdir when the turnkey ships them (sc-9942 T2V / sc-9943 I2V). A pre-packed
+/// tier's `config.json` is authoritative — [`WanTransformer::from_weights`] builds the experts at the
+/// stored bits and `resolve_load_time_quant` rejects a conflicting `spec.quantize` as a hard error —
+/// so a resolved tier loads with `quant = None`: `mlxQuantize` selects WHICH tier, never a load-time
+/// requant (the `bf16/` tier is dense, so `None` ⇒ dense too). A legacy flat snapshot (no tier
+/// subdirs) keeps today's behavior: load the root and quantize at load per [`resolve_wan_quant`].
 #[cfg(target_os = "macos")]
-fn resolve_wan_t2v_14b_dir_and_quant(
+fn resolve_wan_a14b_dir_and_quant(
     settings: &Settings,
     request: &VideoRequest,
     engine_id: &'static str,
 ) -> WorkerResult<(PathBuf, Option<Quant>)> {
     let root = resolve_wan_model_dir(settings, &request.model, engine_id)?;
-    match wan_t2v_14b_tier_subdir(&root, request) {
+    match wan_a14b_tier_subdir(&root, request) {
         Some(tier) => Ok((tier, None)),
         None => Ok((root, resolve_wan_quant(request))),
     }
 }
 
-/// On-demand fetch of a non-default Wan2.2 T2V-A14B tier subdir (sc-9942, mirrors
+/// On-demand fetch of a non-default Wan2.2 A14B tier subdir (sc-9942 T2V / sc-9943 I2V, mirrors
 /// [`ensure_ltx_q8_present`] / [`ensure_ltx_bf16_present`]). The macOS default download is the lean
 /// `q4/` tier; a job that opts into a heavier tier (`mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`) pulls
-/// just that subdir from the FIXED [`WAN_T2V_14B_REVISION`] the first time it is requested so
-/// [`wan_t2v_14b_tier_subdir`] can resolve it. No-op for a non-T2V-14B model, a `q4` (default) job,
-/// when the repo snapshot isn't downloaded yet (resolve surfaces the clear error), or when the tier
-/// is already complete. Fails loud on a real download error — fast, before any compute; a missing
-/// `hf` CLI leaves the tier absent so resolve gracefully falls back to a smaller complete tier.
+/// just that subdir from that model's FIXED [`wan_a14b_tier_repo`] revision the first time it is
+/// requested so [`wan_a14b_tier_subdir`] can resolve it. No-op for a non-A14B model, a `q4` (default)
+/// job, when the repo snapshot isn't downloaded yet (resolve surfaces the clear error), or when the
+/// tier is already complete. Fails loud on a real download error — fast, before any compute; a
+/// missing `hf` CLI leaves the tier absent so resolve gracefully falls back to a smaller complete
+/// tier.
 #[cfg(target_os = "macos")]
-async fn ensure_wan_t2v_14b_tier_present(
+async fn ensure_wan_a14b_tier_present(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
     request: &VideoRequest,
 ) -> WorkerResult<()> {
-    if request.model != "wan_2_2_t2v_14b" {
+    let Some((repo, revision)) = wan_a14b_tier_repo(&request.model) else {
         return Ok(());
-    }
+    };
     let tier = match wan_quant_bits(request) {
         Some(b) if b <= 0 => "bf16",
         Some(b) if b >= 8 => "q8",
         // q4 default — ships with the base install, nothing to fetch on demand.
         _ => return Ok(()),
     };
-    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, WAN_T2V_14B_REPO) else {
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, repo) else {
         return Ok(());
     };
     if wan_a14b_tier_is_complete(&root.join(tier)) {
@@ -2905,17 +2935,11 @@ async fn ensure_wan_t2v_14b_tier_present(
     let scratch = settings
         .data_dir
         .join("cache")
-        .join(format!(".wan-t2v-14b-{tier}-fetch-{}", job.id));
+        .join(format!(".wan-a14b-{tier}-fetch-{}", job.id));
     tokio::fs::create_dir_all(&scratch).await?;
     let files = vec![format!("{tier}/*")];
     let result = crate::model_jobs::download_model_with_hf_cli(
-        api,
-        settings,
-        job,
-        WAN_T2V_14B_REPO,
-        WAN_T2V_14B_REVISION,
-        &files,
-        &scratch,
+        api, settings, job, repo, revision, &files, &scratch,
     )
     .await;
     let _ = tokio::fs::remove_dir_all(&scratch).await;
@@ -5034,15 +5058,15 @@ async fn generate_wan(
         }
         _ => resolve_wan_conditioning(settings, request, project_path, engine_id)?,
     };
-    // T2V-A14B quant matrix (sc-9942, epic 8506): the macOS default install is the lean q4 tier; a
-    // q8/bf16 job fetches that subdir on demand before resolving. No-op for the 5B/I2V models, a q4
-    // job, or an already-present tier.
-    ensure_wan_t2v_14b_tier_present(api, settings, job, request).await?;
-    // Descend into the chosen quant-matrix tier subdir when the T2V-A14B turnkey ships them; a
-    // pre-packed tier loads with quant=None (config.json is authoritative). The 5B/I2V models and a
-    // legacy flat T2V snapshot keep the root + load-time quant.
-    let (model_dir, quant) = if engine_id == "wan2_2_t2v_14b" {
-        resolve_wan_t2v_14b_dir_and_quant(settings, request, engine_id)?
+    // A14B quant matrix (sc-9942 T2V / sc-9943 I2V, epic 8506): the macOS default install is the lean
+    // q4 tier; a q8/bf16 job fetches that subdir on demand before resolving. No-op for the 5B model, a
+    // q4 job, or an already-present tier.
+    ensure_wan_a14b_tier_present(api, settings, job, request).await?;
+    // Descend into the chosen quant-matrix tier subdir when the A14B turnkey ships them; a pre-packed
+    // tier loads with quant=None (config.json is authoritative). The 5B model and a legacy flat A14B
+    // snapshot keep the root + load-time quant.
+    let (model_dir, quant) = if engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b" {
+        resolve_wan_a14b_dir_and_quant(settings, request, engine_id)?
     } else {
         (
             resolve_wan_model_dir(settings, &request.model, engine_id)?,
@@ -9463,7 +9487,7 @@ mod tests {
     }
 
     /// Write the six files that make a Wan2.2 A14B tier subdir COMPLETE
-    /// ([`wan_a14b_tier_is_complete`]), so [`wan_t2v_14b_tier_subdir`] treats it as present.
+    /// ([`wan_a14b_tier_is_complete`]), so [`wan_a14b_tier_subdir`] treats it as present.
     #[cfg(target_os = "macos")]
     fn write_complete_wan_tier(root: &Path, tier: &str) {
         let dir = root.join(tier);
@@ -9480,89 +9504,93 @@ mod tests {
         }
     }
 
-    /// `mlxQuantize` selects the preferred T2V-A14B tier, then falls back to the always-smaller
+    /// `mlxQuantize` selects the preferred A14B tier, then falls back to the always-smaller
     /// present tiers (bf16 is only ever tried when explicitly requested).
     #[cfg(target_os = "macos")]
     #[test]
-    fn wan_t2v_14b_tier_order_prefers_then_falls_back() {
+    fn wan_a14b_tier_order_prefers_then_falls_back() {
         let bf16 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 0 } }));
-        assert_eq!(wan_t2v_14b_tier_order(&bf16), &["bf16", "q8", "q4"]);
+        assert_eq!(wan_a14b_tier_order(&bf16), &["bf16", "q8", "q4"]);
         let q8 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
-        assert_eq!(wan_t2v_14b_tier_order(&q8), &["q8", "q4"]);
+        assert_eq!(wan_a14b_tier_order(&q8), &["q8", "q4"]);
         let q4 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
-        assert_eq!(wan_t2v_14b_tier_order(&q4), &["q4", "q8"]);
+        assert_eq!(wan_a14b_tier_order(&q4), &["q4", "q8"]);
         // Absent knob defaults to the lean q4 tier; bf16 is never in a default job's search path.
         let absent = request(json!({ "projectId": "p" }));
-        assert_eq!(wan_t2v_14b_tier_order(&absent), &["q4", "q8"]);
+        assert_eq!(wan_a14b_tier_order(&absent), &["q4", "q8"]);
     }
 
-    /// [`wan_t2v_14b_tier_subdir`] resolves the requested tier, falls back to a smaller COMPLETE
+    /// [`wan_a14b_tier_subdir`] resolves the requested tier, falls back to a smaller COMPLETE
     /// tier, ignores a partially-downloaded one, and returns `None` for a legacy flat root.
     #[cfg(target_os = "macos")]
     #[test]
-    fn wan_t2v_14b_tier_subdir_resolves_and_falls_back() {
+    fn wan_a14b_tier_subdir_resolves_and_falls_back() {
         let root = std::env::temp_dir().join(format!("sw_wan_tier_{}", Uuid::new_v4().simple()));
         std::fs::create_dir_all(&root).unwrap();
         // Legacy flat root (no tier subdirs) → None (caller keeps root + load-time quant).
         let q8_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
-        assert_eq!(wan_t2v_14b_tier_subdir(&root, &q8_req), None);
+        assert_eq!(wan_a14b_tier_subdir(&root, &q8_req), None);
 
         // Only q4 present: a q8 request falls back to the smaller complete q4 tier.
         write_complete_wan_tier(&root, "q4");
-        assert_eq!(
-            wan_t2v_14b_tier_subdir(&root, &q8_req),
-            Some(root.join("q4"))
-        );
+        assert_eq!(wan_a14b_tier_subdir(&root, &q8_req), Some(root.join("q4")));
 
         // A partial q8 (missing a file) is skipped, still falling back to q4.
         std::fs::create_dir_all(root.join("q8")).unwrap();
         std::fs::write(root.join("q8").join("config.json"), b"x").unwrap();
-        assert_eq!(
-            wan_t2v_14b_tier_subdir(&root, &q8_req),
-            Some(root.join("q4"))
-        );
+        assert_eq!(wan_a14b_tier_subdir(&root, &q8_req), Some(root.join("q4")));
 
         // Completed q8 now wins for a q8 request; a default job still prefers q4.
         write_complete_wan_tier(&root, "q8");
-        assert_eq!(
-            wan_t2v_14b_tier_subdir(&root, &q8_req),
-            Some(root.join("q8"))
-        );
+        assert_eq!(wan_a14b_tier_subdir(&root, &q8_req), Some(root.join("q8")));
         let default_req = request(json!({ "projectId": "p" }));
         assert_eq!(
-            wan_t2v_14b_tier_subdir(&root, &default_req),
+            wan_a14b_tier_subdir(&root, &default_req),
             Some(root.join("q4"))
         );
 
         // bf16 request with no bf16 tier falls back to q8 (never silently to a default).
         let bf16_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 0 } }));
         assert_eq!(
-            wan_t2v_14b_tier_subdir(&root, &bf16_req),
+            wan_a14b_tier_subdir(&root, &bf16_req),
             Some(root.join("q8"))
         );
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The T2V-A14B tier repo must pin an exact commit (not the mutable `main`) so an upstream
-    /// re-push can't swap a checkpoint the on-demand fetch loads (mirrors the LTX/SeedVR2 pins).
+    /// Both A14B tier repos (T2V sc-9942 / I2V sc-9943) must pin an exact commit (not the mutable
+    /// `main`) so an upstream re-push can't swap a checkpoint the on-demand fetch loads (mirrors the
+    /// LTX/SeedVR2 pins). `wan_a14b_tier_repo` also routes each model id to its own repo+revision.
     #[cfg(target_os = "macos")]
     #[test]
-    fn wan_t2v_14b_revision_is_pinned_commit_not_main() {
-        assert_ne!(
-            WAN_T2V_14B_REVISION, "main",
-            "the T2V-A14B tier repo must pin a fixed revision before release"
+    fn wan_a14b_tier_revisions_are_pinned_commits_not_main() {
+        for (label, revision) in [("T2V", WAN_T2V_14B_REVISION), ("I2V", WAN_I2V_14B_REVISION)] {
+            assert_ne!(
+                revision, "main",
+                "the {label}-A14B tier repo must pin a fixed revision before release"
+            );
+            assert_eq!(
+                revision.len(),
+                40,
+                "a pinned HF revision is a 40-char commit sha ({label})"
+            );
+            assert!(
+                revision
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "the pinned {label} revision must be lowercase hex"
+            );
+        }
+        // Each A14B model id routes to its own repo + revision; a non-A14B model has no tier repo.
+        assert_eq!(
+            wan_a14b_tier_repo("wan_2_2_t2v_14b"),
+            Some((WAN_T2V_14B_REPO, WAN_T2V_14B_REVISION))
         );
         assert_eq!(
-            WAN_T2V_14B_REVISION.len(),
-            40,
-            "a pinned HF revision is a 40-char commit sha"
+            wan_a14b_tier_repo("wan_2_2_i2v_14b"),
+            Some((WAN_I2V_14B_REPO, WAN_I2V_14B_REVISION))
         );
-        assert!(
-            WAN_T2V_14B_REVISION
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-            "the pinned revision must be lowercase hex"
-        );
+        assert_eq!(wan_a14b_tier_repo("wan_2_2"), None);
     }
 
     /// The `.high_noise.safetensors` → `.low_noise.safetensors` sibling convention
@@ -9931,7 +9959,7 @@ mod tests {
                 model_dir: dir.clone(),
                 // Pre-packed tier: config.json carries the quant; the engine reconstructs the experts
                 // packed and rejects a conflicting override, so load with None (the worker path does
-                // the same in resolve_wan_t2v_14b_dir_and_quant).
+                // the same in resolve_wan_a14b_dir_and_quant).
                 quant: None,
                 prompt: "a calm ocean wave at sunset, cinematic".to_owned(),
                 // A few CFG steps WITHOUT the Lightning distill — enough to exercise the packed
@@ -9991,6 +10019,150 @@ mod tests {
         assert!(
             verified > 0,
             "no tier subdirs found under SCENEWORKS_WAN_T2V_14B_TIER_OUT"
+        );
+        eprintln!("verified {verified} tier(s)");
+    }
+
+    /// Real in-process load+generate verification for the Wan2.2 **I2V-A14B** quant-matrix tiers
+    /// (sc-9943, epic 8506) — the image→video sibling of [`wan_t2v_14b_tier_real_weights`]. For each
+    /// tier subdir present under `$SCENEWORKS_WAN_I2V_14B_TIER_OUT` (`bf16/`/`q8/`/`q4/`, the
+    /// wan_i2v_14b_tier_build output), loads the tier through the SAME engine path a job uses
+    /// (`run_video_generation`, `quant: None` — the pre-packed config.json is authoritative) and,
+    /// conditioning on a synthetic START IMAGE (the I2V in_dim-36 image-concat path a T2V run does not
+    /// exercise), denoises a tiny clip — asserting the frames come back RGB8-sized and NON-degenerate
+    /// (real pixel variance, so a broken packed load or a mis-wired image-cond path surfaces instead of
+    /// silent noise). This is the on-device evidence that every hosted I2V tier loads packed with no
+    /// install-time convert peak AND drives the image conditioning. Runs a few CFG steps WITHOUT the
+    /// Lightning distill so it is self-contained (no LoRA download); output is a coherence check, not a
+    /// quality bar. `#[ignore]` — needs the built tiers (~28–69 GB each) + a big-memory Mac; the cache
+    /// limit is capped so loading bf16 then q8 then q4 in one process does not accumulate residue
+    /// (sc-5567).
+    ///
+    /// ```sh
+    /// export SCENEWORKS_WAN_I2V_14B_TIER_OUT=<tier-out-root>   # holds bf16/ q8/ q4/
+    /// cargo test -p sceneworks-worker --release --lib wan_i2v_14b_tier_real_weights -- --ignored --nocapture
+    /// ```
+    #[cfg(target_os = "macos")]
+    #[ignore = "loads the built Wan2.2 I2V-A14B tiers; run manually on a Mac where they are present"]
+    #[test]
+    fn wan_i2v_14b_tier_real_weights() {
+        let Some(root) = std::env::var_os("SCENEWORKS_WAN_I2V_14B_TIER_OUT").map(PathBuf::from)
+        else {
+            eprintln!(
+                "skipping wan_i2v_14b_tier_real_weights: set SCENEWORKS_WAN_I2V_14B_TIER_OUT"
+            );
+            return;
+        };
+        const W: u32 = 256;
+        const H: u32 = 256;
+        // A non-degenerate synthetic start frame (a smooth two-axis gradient) so the image-concat
+        // conditioning carries real content the engine can propagate — fit through the SAME
+        // `fit_engine_image` the I2V resolve path calls, so the reference reaches the engine exactly
+        // as a job's would.
+        let source = {
+            let mut pixels = Vec::with_capacity((W * H * 3) as usize);
+            for y in 0..H {
+                for x in 0..W {
+                    pixels.push((x * 255 / W) as u8);
+                    pixels.push((y * 255 / H) as u8);
+                    pixels.push(128);
+                }
+            }
+            crate::image_jobs::fit_engine_image(
+                Image {
+                    width: W,
+                    height: H,
+                    pixels,
+                },
+                W,
+                H,
+                "pad",
+            )
+            .expect("fit synthetic I2V start frame")
+        };
+        // Cap the buffer cache so three sequential heavy loads release between tiers (sc-5567).
+        mlx_rs::memory::set_cache_limit(0);
+        let mut verified = 0;
+        for tier in ["bf16", "q8", "q4"] {
+            let dir = root.join(tier);
+            if !wan_a14b_tier_is_complete(&dir) {
+                eprintln!("skipping {tier}: {} is not a complete tier", dir.display());
+                continue;
+            }
+            eprintln!("verifying {tier} tier → {}", dir.display());
+            let input = VideoGenInput {
+                sampler: None,
+                scheduler: None,
+                engine_id: "wan2_2_i2v_14b",
+                model_dir: dir.clone(),
+                // Pre-packed tier: config.json carries the quant; the engine reconstructs the experts
+                // packed and rejects a conflicting override, so load with None (the worker path does
+                // the same in resolve_wan_a14b_dir_and_quant).
+                quant: None,
+                // The I2V-defining input: a source frame the engine VAE-encodes into its channel-concat
+                // conditioning (the in_dim-36 path). Without it the I2V engine errors, so this also
+                // proves the image-cond wiring on each packed tier.
+                conditioning: vec![Conditioning::Reference {
+                    image: source.clone(),
+                    strength: None,
+                }],
+                prompt: "the camera slowly pushes in, cinematic".to_owned(),
+                // A few CFG steps WITHOUT the Lightning distill — enough to exercise the packed
+                // experts + VAE decode and produce non-degenerate frames for a load check.
+                width: W,
+                height: H,
+                frames: 5,
+                fps: 16,
+                steps: Some(6),
+                guidance: Some(5.0),
+                seed: 7,
+                ..VideoGenInput::default()
+            };
+            let cancel = CancelFlag::new();
+            let mut steps = 0u32;
+            let mut on_progress = |progress: Progress| {
+                if let Progress::Step { .. } = progress {
+                    steps += 1;
+                }
+            };
+            let decoded = run_video_generation(input, &cancel, &mut on_progress)
+                .unwrap_or_else(|e| panic!("{tier} tier I2V generation failed: {e:?}"));
+            // The engine's temporal VAE fixes the decoded frame count (a 5-latent-frame request
+            // decodes to a multi-frame clip for the A14B); assert a real multi-frame clip.
+            assert!(
+                decoded.frames.len() > 1,
+                "{tier}: got {} frames, expected a multi-frame clip",
+                decoded.frames.len()
+            );
+            assert!(steps > 0, "{tier}: denoise progress streamed");
+            assert!(
+                decoded
+                    .frames
+                    .iter()
+                    .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize),
+                "{tier}: frames are RGB8-sized"
+            );
+            // Non-degenerate: a broken packed load or dropped image-cond tends to decode to a
+            // flat/NaN frame. Require real spatial variance in the first frame.
+            let f0 = &decoded.frames[0];
+            let mean = f0.pixels.iter().map(|&p| p as f64).sum::<f64>() / f0.pixels.len() as f64;
+            let var = f0
+                .pixels
+                .iter()
+                .map(|&p| (p as f64 - mean).powi(2))
+                .sum::<f64>()
+                / f0.pixels.len() as f64;
+            assert!(
+                var.sqrt() > 3.0,
+                "{tier}: frame 0 looks degenerate (std {:.2}) — packed load likely broken",
+                var.sqrt()
+            );
+            mlx_rs::memory::clear_cache();
+            verified += 1;
+        }
+        assert!(
+            verified > 0,
+            "no tier subdirs found under SCENEWORKS_WAN_I2V_14B_TIER_OUT"
         );
         eprintln!("verified {verified} tier(s)");
     }
