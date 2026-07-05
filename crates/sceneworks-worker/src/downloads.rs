@@ -345,32 +345,45 @@ impl HuggingFaceSnapshot {
         files: &[String],
     ) -> WorkerResult<Self> {
         let base_url = settings.huggingface_base_url.trim_end_matches('/');
-        let tree_url = format!(
+        // The HF tree API paginates the `expand=1` listing (default limit 50) and returns the next
+        // page as a `Link: <…?cursor=…>; rel="next"` header. A single request therefore sees only the
+        // first ~50 files, so for a multi-tier repo (bf16/q4/q8 subdirs) the later tiers' files fall
+        // past page 1 and go MISSING — a q8 download then resolves zero files and silently produces an
+        // empty cache (sc-9909). Follow `rel="next"` until exhausted so every file is seen. The page
+        // cap is a runaway backstop far above any real repo's file count.
+        let mut next_url = Some(format!(
             "{base_url}/api/models/{}/tree/{}?recursive=1&expand=1",
             quote_path(repo),
             quote_path(revision)
-        );
-        let payload = with_hf_auth(settings, client.get(tree_url))
-            .await
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<Value>()
-            .await?;
-        let entries = if let Some(entries) = payload.as_array() {
-            entries.clone()
-        } else {
-            payload
-                .get("siblings")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default()
-        };
-        let snapshot_files = entries
-            .iter()
-            .filter_map(|entry| snapshot_file_from_entry(base_url, repo, revision, entry))
-            .filter(|file| allow_pattern_matches(&file.path, files))
-            .collect();
+        ));
+        let mut snapshot_files = Vec::new();
+        for _ in 0..10_000 {
+            let Some(url) = next_url.take() else {
+                break;
+            };
+            let response = with_hf_auth(settings, client.get(&url))
+                .await
+                .send()
+                .await?
+                .error_for_status()?;
+            next_url = next_page_url(response.headers());
+            let payload = response.json::<Value>().await?;
+            let entries = if let Some(entries) = payload.as_array() {
+                entries.clone()
+            } else {
+                payload
+                    .get("siblings")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            snapshot_files.extend(
+                entries
+                    .iter()
+                    .filter_map(|entry| snapshot_file_from_entry(base_url, repo, revision, entry))
+                    .filter(|file| allow_pattern_matches(&file.path, files)),
+            );
+        }
         Ok(Self {
             files: snapshot_files,
         })
@@ -381,6 +394,35 @@ impl HuggingFaceSnapshot {
             .iter()
             .try_fold(0_u64, |total, file| Some(total.saturating_add(file.size?)))
     }
+}
+
+/// Extract the `rel="next"` target from an RFC 5988 `Link` header, if present. The HF tree API
+/// paginates its `expand=1` listing this way — the header looks like
+/// `<https://…/tree/main?expand=true&recursive=true&limit=50&cursor=…>; rel="next"`. Returns the
+/// absolute next-page URL (the server preserves the `expand`/`recursive` params in it).
+fn next_page_url(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let link = headers.get(reqwest::header::LINK)?.to_str().ok()?;
+    for part in link.split(',') {
+        let mut segments = part.split(';');
+        let Some(url) = segments.next() else {
+            continue;
+        };
+        let is_next = segments.any(|attribute| {
+            let attribute = attribute.trim();
+            attribute == "rel=\"next\"" || attribute == "rel=next"
+        });
+        if is_next {
+            let url = url
+                .trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .trim();
+            if !url.is_empty() {
+                return Some(url.to_owned());
+            }
+        }
+    }
+    None
 }
 
 pub(crate) fn snapshot_file_from_entry(
