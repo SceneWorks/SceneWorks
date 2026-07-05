@@ -2310,7 +2310,7 @@ fn kolors_real_weights_pose_generates_one_image() {
             Conditioning::Control {
                 image: skeleton,
                 kind: ControlKind::Pose,
-                scale: 0.7,
+                scale: Some(0.7),
             },
             Conditioning::Reference {
                 image: reference,
@@ -6644,7 +6644,8 @@ fn build_control_conditioning_matches_legacy_shape() {
         Conditioning::Control { image, kind, scale } => {
             assert_eq!(image.pixels, control.pixels);
             assert_eq!(*kind, ControlKind::Pose);
-            assert!((*scale - 0.9).abs() < 1e-6);
+            // gen-core drift (sc-9940): scale is now Option<f32>.
+            assert!((scale.expect("control scale") - 0.9).abs() < 1e-6);
         }
         other => panic!("expected Control, got {other:?}"),
     }

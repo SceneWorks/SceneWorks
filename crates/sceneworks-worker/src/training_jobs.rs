@@ -504,6 +504,10 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         sample_every: advanced_u32(advanced, "sampleEvery", 0),
         sample_steps: advanced_u32(advanced, "sampleSteps", 20),
         sample_guidance_scale: advanced_f32(advanced, "sampleGuidanceScale", 1.0),
+        // Mid-schedule resume (gen-core sc-9560 / F-125): not yet surfaced on the SceneWorks
+        // training path — default `false` preserves the current from-scratch behavior. Wiring the
+        // resume toggle from the plan's `advanced` bag is a separate training-feature story.
+        resume: false,
         // sc-8671 — the engine renders one preview per prompt, capped at `sampleCount` (default 4 =
         // the historical fixed `[:4]` cap). The UI always supplies `samplePrompts` (prefilled from the
         // trigger phrase); an absent/empty pool ⇒ no previews, exactly as before (sampling is gated by
@@ -2399,6 +2403,7 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
+            resume: false,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -2503,6 +2508,7 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
+            resume: false,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -2610,6 +2616,7 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
+            resume: false,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -2756,6 +2763,7 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
+            resume: false,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {

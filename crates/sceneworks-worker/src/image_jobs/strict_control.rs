@@ -430,7 +430,9 @@ fn build_control_conditioning(
         kind => vec![Conditioning::Control {
             image: control,
             kind,
-            scale,
+            // gen-core drift (sc-9940): Conditioning::Control.scale is now Option<f32> (None = engine
+            // default). This lane always has an explicit control scale → Some.
+            scale: Some(scale),
         }],
     };
     if let Some((image, strength)) = identity_init {
