@@ -150,6 +150,14 @@ pub(crate) struct RecipePresetsQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PromptBatchesQuery {
+    pub(crate) project_id: Option<String>,
+    pub(crate) include_archived: Option<bool>,
+    pub(crate) scope: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct EventsQuery {
     pub(crate) ticket: Option<String>,
 }
