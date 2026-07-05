@@ -5621,12 +5621,13 @@ fn ltx_available(request: &VideoRequest, settings: &Settings) -> bool {
 #[cfg(target_os = "macos")]
 const LTX_BUNDLE_REPO: &str = "SceneWorks/ltx-2.3-mlx";
 /// Pinned revision for the fixed [`LTX_BUNDLE_REPO`] (sc-9879, F-077 follow-up). The bundle repo is a
-/// hard-coded const (no manifest/payload override reaches this on-demand `q8/*` fetch), so pulling the
-/// mutable `main` branch would let an upstream re-push silently swap the Q8 checkpoint we load. Pin the
-/// exact commit for defense-in-depth (mirrors the SeedVR2/Real-ESRGAN pins, sc-8879/sc-9682). The `hf`
-/// CLI still verifies each file's own hash on download.
+/// hard-coded const (no manifest/payload override reaches the on-demand `q8/*` + `bf16/*` fetches), so
+/// pulling the mutable `main` branch would let an upstream re-push silently swap a checkpoint we load.
+/// Pin the exact commit for defense-in-depth (mirrors the SeedVR2/Real-ESRGAN pins, sc-8879/sc-9682).
+/// The `hf` CLI still verifies each file's own hash on download. Bumped to the commit that added the
+/// dense `bf16/` tier (sc-8513) — a superset of the prior commit, so the q8 fetch is unaffected.
 #[cfg(target_os = "macos")]
-const LTX_BUNDLE_REVISION: &str = "254989c3ca7ee691187647f350b112c0c448789d";
+const LTX_BUNDLE_REVISION: &str = "01df27d308466533aa09d251e3aebdcc627d07eb";
 
 /// Whether `dir` is a converted LTX snapshot **complete for the current engine** — it must
 /// carry the audio `vocoder` + I2V `vae_encoder` + single `upsampler`/`vae_decoder` the
@@ -5647,28 +5648,55 @@ fn ltx_dir_is_complete(dir: &Path) -> bool {
     .all(|file| dir.join(file).is_file())
 }
 
-/// Whether the request opts into the higher-quality Q8 LTX checkpoint (`advanced.mlxQuantize: 8`,
-/// accepted as int or string). The default is Q4 (sc-5608).
+/// Parse `advanced.mlxQuantize` (int or numeric string) → the requested bit width, if present.
 #[cfg(target_os = "macos")]
-fn ltx_wants_q8(request: &VideoRequest) -> bool {
+fn ltx_quant_bits(request: &VideoRequest) -> Option<i64> {
     request
         .advanced
         .get("mlxQuantize")
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+}
+
+/// Whether the request opts into the higher-quality Q8 LTX checkpoint (`advanced.mlxQuantize: 8`,
+/// accepted as int or string). The default is Q4 (sc-5608).
+#[cfg(target_os = "macos")]
+fn ltx_wants_q8(request: &VideoRequest) -> bool {
+    ltx_quant_bits(request)
         .map(|bits| bits >= 8)
         .unwrap_or(false)
 }
 
-/// Pick the engine-complete `q4/`/`q8/` checkpoint subdir of a SceneWorks LTX bundle `root`,
-/// preferring the requested quant (sc-5608). Returns the first **complete** ([`ltx_dir_is_complete`])
-/// subdir — so a partially-downloaded bundle falls through rather than half-loading — or `None`.
+/// Whether the request opts into the dense **bf16** LTX checkpoint (`advanced.mlxQuantize <= 0`,
+/// int or string) — the ~47 GB power-user tier (sc-8513, epic 8506). Never the default: absent ⇒ Q4,
+/// so the big bf16 bundle is a deliberate opt-in (mirrors [`resolve_mlx_dense_quant`]'s `<= 0` rule).
 #[cfg(target_os = "macos")]
-fn ltx_bundle_subdir(root: &Path, wants_q8: bool) -> Option<PathBuf> {
-    let order: &[&str] = if wants_q8 {
+fn ltx_wants_bf16(request: &VideoRequest) -> bool {
+    ltx_quant_bits(request)
+        .map(|bits| bits <= 0)
+        .unwrap_or(false)
+}
+
+/// The SceneWorks LTX bundle tier search order for a request — preferred tier first, then the
+/// always-smaller fallback tiers so a bundle missing the preferred subdir still loads (sc-8513):
+/// `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, else the `q4` default. bf16 is only ever tried when
+/// explicitly requested, so a default job never loads the huge dense tier by accident.
+#[cfg(target_os = "macos")]
+fn ltx_bundle_tier_order(request: &VideoRequest) -> &'static [&'static str] {
+    if ltx_wants_bf16(request) {
+        &["bf16", "q8", "q4"]
+    } else if ltx_wants_q8(request) {
         &["q8", "q4"]
     } else {
         &["q4", "q8"]
-    };
+    }
+}
+
+/// Pick the engine-complete `bf16/`/`q8/`/`q4/` checkpoint subdir of a SceneWorks LTX bundle `root`,
+/// trying `order` (preferred tier first, sc-5608/sc-8513). Returns the first **complete**
+/// ([`ltx_dir_is_complete`]) subdir — so a partially-downloaded bundle falls through rather than
+/// half-loading — or `None`.
+#[cfg(target_os = "macos")]
+fn ltx_bundle_subdir(root: &Path, order: &[&str]) -> Option<PathBuf> {
     order
         .iter()
         .map(|sub| root.join(sub))
@@ -5695,9 +5723,15 @@ fn resolve_ltx_model_dir(settings: &Settings, request: &VideoRequest) -> WorkerR
             return Ok(path);
         }
     }
+    let wants_bf16 = ltx_wants_bf16(request);
     let wants_q8 = ltx_wants_q8(request);
     let candidates: &[&str] = if eros {
         &["ltx_2_3_eros"]
+    } else if wants_bf16 {
+        // No local bf16 conversion id exists (install-time convert only emits Q4/Q8), so don't let a
+        // local quantized dir shadow the dense turnkey tier — fall straight through to the bundle's
+        // bf16/ subdir below.
+        &[]
     } else if wants_q8 {
         &["ltx_2_3_base_q8", "ltx_2_3_base_q4", "ltx_2_3"]
     } else {
@@ -5709,12 +5743,13 @@ fn resolve_ltx_model_dir(settings: &Settings, request: &VideoRequest) -> WorkerR
             return Ok(dir);
         }
     }
-    // Turnkey SceneWorks bundle for the base model (sc-5608): one repo with `q4/` + `q8/` LTX
-    // subdirs (+ a bundled `gemma/` the engine reads via $LTX_GEMMA_DIR). Pick the quant subdir;
-    // the engine reads the actual bits from split_model.json, so this only selects which to load.
+    // Turnkey SceneWorks bundle for the base model (sc-5608): one repo with `bf16/` + `q8/` + `q4/`
+    // LTX subdirs (+ a bundled `gemma/` the engine reads via $LTX_GEMMA_DIR). Pick the preferred tier
+    // subdir; the engine reads the actual bits from split_model.json, so this only selects which to
+    // load.
     if !eros {
         if let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) {
-            if let Some(dir) = ltx_bundle_subdir(&root, wants_q8) {
+            if let Some(dir) = ltx_bundle_subdir(&root, ltx_bundle_tier_order(request)) {
                 return Ok(dir);
             }
         }
@@ -5782,6 +5817,46 @@ async fn ensure_ltx_q8_present(
         .join(format!(".ltx-q8-fetch-{}", job.id));
     tokio::fs::create_dir_all(&scratch).await?;
     let files = vec!["q8/*".to_owned()];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api,
+        settings,
+        job,
+        LTX_BUNDLE_REPO,
+        LTX_BUNDLE_REVISION,
+        &files,
+        &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
+}
+
+/// Fetch the SceneWorks LTX bundle's dense `bf16/` subdir on demand (sc-8513, epic 8506). The macOS
+/// default download is lean (`q4/` + `gemma/`); a bf16 job ([`ltx_wants_bf16`]) pulls the ~47 GB
+/// `bf16/*` from the FIXED [`LTX_BUNDLE_REVISION`] the first time it is requested. No-op for eros, for
+/// non-bf16 jobs, or when `bf16/` is already complete. Mirrors [`ensure_ltx_q8_present`].
+#[cfg(target_os = "macos")]
+async fn ensure_ltx_bf16_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+) -> WorkerResult<()> {
+    if request.model == "ltx_2_3_eros" || !ltx_wants_bf16(request) {
+        return Ok(());
+    }
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) else {
+        return Ok(());
+    };
+    if ltx_dir_is_complete(&root.join("bf16")) {
+        return Ok(());
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".ltx-bf16-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec!["bf16/*".to_owned()];
     let result = crate::model_jobs::download_model_with_hf_cli(
         api,
         settings,
@@ -6301,9 +6376,11 @@ async fn generate_ltx(
         }
         _ => resolve_ltx_conditioning(settings, request, project_path)?,
     };
-    // The macOS default download is lean (q4 + gemma); a Q8 job fetches the bundle's q8/ on demand
-    // before resolving (sc-5679). No-op unless Q8 is requested and q8/ is absent.
+    // The macOS default download is lean (q4 + gemma); a Q8 / bf16 job fetches the bundle's q8/ or
+    // bf16/ on demand before resolving (sc-5679 / sc-8513). No-op unless that tier is requested and
+    // its subdir is absent.
     ensure_ltx_q8_present(api, settings, job, request).await?;
+    ensure_ltx_bf16_present(api, settings, job, request).await?;
     let model_dir = resolve_ltx_model_dir(settings, request)?;
     // When the resolved dir is the SceneWorks bundle subdir, its sibling `gemma/` is the text
     // encoder — thread it onto the LoadSpec (sc-8827, was `$LTX_GEMMA_DIR`). `None` for legacy/local
@@ -9796,19 +9873,29 @@ mod tests {
             }
         }
         let root = std::env::temp_dir().join(format!("sw_ltx_bundle_{}", Uuid::new_v4().simple()));
-        let (q4, q8) = (root.join("q4"), root.join("q8"));
+        let (q4, q8, bf16) = (root.join("q4"), root.join("q8"), root.join("bf16"));
         write_complete_ltx_dir(&q4);
         write_complete_ltx_dir(&q8);
+        write_complete_ltx_dir(&bf16);
         std::fs::create_dir_all(root.join("gemma")).unwrap();
 
-        // Default prefers q4; mlxQuantize: 8 prefers q8.
+        // Each tier order prefers its own subdir (default q4, mlxQuantize:8 q8, mlxQuantize<=0 bf16).
         assert_eq!(
-            ltx_bundle_subdir(&root, false).as_deref(),
+            ltx_bundle_subdir(&root, &["q4", "q8"]).as_deref(),
             Some(q4.as_path())
         );
         assert_eq!(
-            ltx_bundle_subdir(&root, true).as_deref(),
+            ltx_bundle_subdir(&root, &["q8", "q4"]).as_deref(),
             Some(q8.as_path())
+        );
+        assert_eq!(
+            ltx_bundle_subdir(&root, &["bf16", "q8", "q4"]).as_deref(),
+            Some(bf16.as_path())
+        );
+        // The default order never loads the huge bf16 tier even when present.
+        assert_eq!(
+            ltx_bundle_subdir(&root, &["q4", "q8"]).as_deref(),
+            Some(q4.as_path())
         );
 
         // The gemma encoder is found as a sibling of the loaded quant dir.
@@ -9817,17 +9904,22 @@ mod tests {
             Some(root.join("gemma").as_path())
         );
 
-        // An incomplete preferred subdir falls back to the complete sibling.
+        // An incomplete preferred subdir falls back to the complete sibling (q8 → q4, bf16 → q8).
         std::fs::remove_file(q8.join("vocoder.safetensors")).unwrap();
         assert_eq!(
-            ltx_bundle_subdir(&root, true).as_deref(),
+            ltx_bundle_subdir(&root, &["q8", "q4"]).as_deref(),
+            Some(q4.as_path())
+        );
+        std::fs::remove_file(bf16.join("vocoder.safetensors")).unwrap();
+        assert_eq!(
+            ltx_bundle_subdir(&root, &["bf16", "q8", "q4"]).as_deref(),
             Some(q4.as_path())
         );
 
         // No complete subdir → None; no gemma sibling → None.
         let bare = std::env::temp_dir().join(format!("sw_ltx_bare_{}", Uuid::new_v4().simple()));
         std::fs::create_dir_all(bare.join("q4")).unwrap();
-        assert!(ltx_bundle_subdir(&bare, false).is_none());
+        assert!(ltx_bundle_subdir(&bare, &["q4", "q8"]).is_none());
         assert!(bundled_ltx_gemma_dir(&bare.join("q4")).is_none());
 
         let _ = std::fs::remove_dir_all(&root);
@@ -9880,6 +9972,34 @@ mod tests {
         assert!(!ltx_wants_q8(&request(
             json!({ "projectId": "p", "model": "ltx_2_3", "prompt": "x" })
         )));
+    }
+
+    /// bf16 opt-in detection (sc-8513): `advanced.mlxQuantize <= 0` (int or string) → true; Q4/Q8 /
+    /// absent → false. Drives the dense-tier preference + the on-demand bf16 fetch. Also asserts the
+    /// tier order the three cases resolve to (bf16 only ever tried on an explicit opt-in).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_wants_bf16_and_tier_order() {
+        let with = |adv: Value| {
+            request(json!({ "projectId": "p", "model": "ltx_2_3", "prompt": "x", "advanced": adv }))
+        };
+        assert!(ltx_wants_bf16(&with(json!({ "mlxQuantize": 0 }))));
+        assert!(ltx_wants_bf16(&with(json!({ "mlxQuantize": -1 }))));
+        assert!(ltx_wants_bf16(&with(json!({ "mlxQuantize": "0" }))));
+        assert!(!ltx_wants_bf16(&with(json!({ "mlxQuantize": 4 }))));
+        assert!(!ltx_wants_bf16(&with(json!({ "mlxQuantize": 8 }))));
+        let plain = request(json!({ "projectId": "p", "model": "ltx_2_3", "prompt": "x" }));
+        assert!(!ltx_wants_bf16(&plain));
+
+        assert_eq!(
+            ltx_bundle_tier_order(&with(json!({ "mlxQuantize": 0 }))),
+            &["bf16", "q8", "q4"]
+        );
+        assert_eq!(
+            ltx_bundle_tier_order(&with(json!({ "mlxQuantize": 8 }))),
+            &["q8", "q4"]
+        );
+        assert_eq!(ltx_bundle_tier_order(&plain), &["q4", "q8"]);
     }
 
     #[cfg(target_os = "macos")]
