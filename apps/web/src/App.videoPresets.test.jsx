@@ -283,7 +283,8 @@ describe("SceneWorks app shell", () => {
     await changeField(field(container, "Model"), "wan_2_2");
     await settle();
 
-    expect(container.textContent).toContain("No preset selected");
+    // No preset selected → no guidance strip (it only appears when a preset is active).
+    expect(document.body.querySelector(".guidance-strip")).toBeNull();
     expect(container.textContent).not.toContain("LTX Story");
   });
 

@@ -110,7 +110,6 @@ import { pickClosestResolution } from "../resolutionMatch.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
-  macBlockedModels,
   macGatingActive,
   macModelFeatureBlock,
 } from "../macGating.js";
@@ -549,10 +548,6 @@ export function ImageStudio() {
   // picker so the user can't select something that would only error. Inert elsewhere.
   const macImageModels = useMemo(
     () => macAvailableModels(imageModels, macCapabilities),
-    [imageModels, macCapabilities],
-  );
-  const macHiddenImageModels = useMemo(
-    () => macBlockedModels(imageModels, macCapabilities),
     [imageModels, macCapabilities],
   );
   const macGating = macGatingActive(macCapabilities);
@@ -1969,19 +1964,11 @@ export function ImageStudio() {
           </div>
 
           {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
-          {macHiddenImageModels.length ? (
-            <p className="mac-gating-note">
-              {macHiddenImageModels.length} model
-              {macHiddenImageModels.length === 1 ? "" : "s"} unavailable on Mac (Rust/MLX only) —
-              see Models for details.
-            </p>
-          ) : null}
 
           <PresetGuidanceStrip
             selectedPreset={selectedPreset}
             presetPromptParts={presetPromptParts}
             presetLoraDetails={presetLoraDetails}
-            noPresetHint="Generation uses only the prompt, model, and visible preset settings."
           />
 
           <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
