@@ -11003,41 +11003,22 @@ details[open] > summary.lora-scope-group-heading::before,
   font-size: 11px;
   color: var(--text-muted);
 }
-.batch-var-chips {
+.batch-var-values {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 6px;
+}
+.batch-value {
+  display: flex;
   align-items: center;
-}
-.batch-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12.5px;
-  padding: 3px 4px 3px 9px;
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  border-radius: 999px;
-}
-.batch-chip-remove {
-  border: 0;
-  background: none;
-  cursor: pointer;
-  color: inherit;
-  font-size: 14px;
-  line-height: 1;
-  padding: 0 4px;
-  opacity: 0.7;
-}
-.batch-chip-remove:hover {
-  opacity: 1;
+  gap: 6px;
 }
 .batch-var-input {
   flex: 1;
-  min-width: 110px;
+  min-width: 0;
   font-family: var(--font-ui);
   font-size: 12.5px;
-  padding: 5px 8px;
+  padding: 6px 9px;
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
@@ -11046,6 +11027,18 @@ details[open] > summary.lora-scope-group-heading::before,
 .batch-var-input:focus {
   outline: none;
   border-color: var(--accent);
+}
+.batch-value-remove {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+.batch-value-remove:hover {
+  color: var(--danger);
 }
 .batch-hint {
   font-size: 12.5px;
