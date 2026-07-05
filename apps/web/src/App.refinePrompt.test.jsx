@@ -55,18 +55,14 @@ describe("refine my prompt (sc-2041)", () => {
       );
     });
 
-    // Prompt tools (UI-refinement 1b): the "Refine my prompt" tile toggles the panel open;
-    // the actual refine runs from the RefinePromptControl button revealed inside it.
+    // Prompt tools (UI-refinement 1b): selecting the "Refine my prompt" tile opens its panel and
+    // auto-runs the refine (autoStart) — no separate trigger button, the panel goes straight to
+    // the suggested rewrite.
     const refineTile = [...document.body.querySelectorAll(".prompt-tool")].find((button) =>
       button.textContent.includes("Refine my prompt"),
     );
     await act(async () => {
       refineTile.click();
-    });
-    await settle();
-    const refine = document.body.querySelector(".refine-button");
-    await act(async () => {
-      refine.click();
     });
     await settle();
 

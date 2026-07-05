@@ -39,8 +39,17 @@ export function RefinePromptControl({
   onApply,
   refineModel,
   onDownloadRefineModel,
+  // When true (the Image Studio prompt-tools tile), run the refine as soon as the control
+  // mounts and hide the standalone trigger button — the tile is the trigger, so the panel
+  // goes straight to the suggested rewrite. Default off keeps the inline button for callers
+  // that render this control persistently (e.g. Video Studio).
+  autoStart = false,
 }) {
-  const [status, setStatus] = useState("idle"); // idle | loading | review | error
+  // Start in "loading" when we'll auto-run on mount, so the trigger button never flashes before
+  // the effect fires (the effect below actually kicks off the refine).
+  const [status, setStatus] = useState(() =>
+    autoStart && (prompt ?? "").trim() && typeof refinePrompt === "function" ? "loading" : "idle",
+  ); // idle | loading | review | error
   const [refined, setRefined] = useState("");
   const [error, setError] = useState("");
   const [downloadRequested, setDownloadRequested] = useState(false);
@@ -69,6 +78,15 @@ export function RefinePromptControl({
     },
     [],
   );
+
+  // Auto-run once on mount when the control opens as a prompt-tool tile (autoStart). Guard on a
+  // non-empty prompt + a usable refine fn so an empty composer just shows the idle button instead.
+  useEffect(() => {
+    if (autoStart && trimmed && typeof refinePrompt === "function") {
+      handleRefine();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function handleRefine() {
     refineControllerRef.current?.abort();
@@ -131,9 +149,18 @@ export function RefinePromptControl({
 
   return (
     <div className="refine-control">
-      <button className="hero-link refine-button" disabled={disabled} onClick={handleRefine} type="button">
-        <Icon.Wand size={14} /> {busy ? "Refining…" : "Refine my prompt"}
-      </button>
+      {/* With autoStart the tile is the trigger, so hide the button while refining/reviewing —
+          it reappears (as a re-run) only once the user keeps the original or an error needs a retry. */}
+      {autoStart && (status === "loading" || status === "review") ? null : (
+        <button className="hero-link refine-button" disabled={disabled} onClick={handleRefine} type="button">
+          <Icon.Wand size={14} /> {busy ? "Refining…" : "Refine my prompt"}
+        </button>
+      )}
+      {autoStart && status === "loading" ? (
+        <p className="refine-status">
+          <Icon.Wand size={14} /> Refining…
+        </p>
+      ) : null}
 
       {status === "error" && modelMissing ? (
         <div className="refine-missing-model" role="alert">
