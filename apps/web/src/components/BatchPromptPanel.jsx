@@ -17,49 +17,60 @@ import { Icon } from "./Icons.jsx";
 // (usePromptBatches via callbacks + promptBatchIO for the portable file). The actual
 // fan-out on "Run batch" is wired by the parent (slice 4, sc-9956).
 
-// One variable's chip editor: type a value, Enter/"Add" appends a chip. Values may
-// contain commas ("red, wavy"), so this is a chip list — never a comma split.
+// One variable's value editor: an auto-expanding list of inputs. A typed value counts
+// LIVE (no "press Enter to commit" step — that stranded a typed value as 0 values); a
+// trailing empty box always sits at the end, so more values appear as you type. Each is
+// its own input (not a comma split) so a value may contain commas ("red, wavy"). Empty
+// values are ignored everywhere by the engine and stripped from the saved payload.
 function VariableChips({ label, values, onChange }) {
-  const [draft, setDraft] = useState("");
-  const add = () => {
-    const value = draft.trim();
-    if (!value) return;
-    onChange([...values, value]);
-    setDraft("");
+  const list = Array.isArray(values) ? values : [];
+  // Ensure exactly one trailing empty slot to type the next value into.
+  const slots = list.length && list[list.length - 1].trim() === "" ? list : [...list, ""];
+  const filled = list.filter((value) => value.trim() !== "").length;
+
+  const setAt = (index, value) => {
+    const next = [...slots];
+    next[index] = value;
+    onChange(next);
   };
+  const removeAt = (index) => onChange(slots.filter((_, i) => i !== index));
+
   return (
     <div className="batch-var">
       <div className="batch-var-head">
         <code className="batch-var-key">{`{{${label}}}`}</code>
-        <span className="batch-var-count">{values.length === 1 ? "1 value" : `${values.length} values`}</span>
+        <span className="batch-var-count">{filled === 1 ? "1 value" : `${filled} values`}</span>
       </div>
-      <div className="batch-var-chips">
-        {values.map((value, index) => (
-          <span className="batch-chip" key={`${value}-${index}`}>
-            {value}
-            <button
-              aria-label={`Remove ${value}`}
-              className="batch-chip-remove"
-              onClick={() => onChange(values.filter((_, i) => i !== index))}
-              type="button"
-            >
-              ×
-            </button>
-          </span>
+      <div className="batch-var-values">
+        {slots.map((value, index) => (
+          <div className="batch-value" key={index}>
+            <input
+              aria-label={`Value ${index + 1} for ${label}`}
+              className="batch-var-input"
+              onChange={(event) => setAt(index, event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                } else if (event.key === "Backspace" && value === "" && slots.length > 1) {
+                  event.preventDefault();
+                  removeAt(index);
+                }
+              }}
+              placeholder={index === 0 ? "Type a value" : "Another value"}
+              value={value}
+            />
+            {value.trim() !== "" ? (
+              <button
+                aria-label={`Remove ${value}`}
+                className="batch-value-remove"
+                onClick={() => removeAt(index)}
+                type="button"
+              >
+                ×
+              </button>
+            ) : null}
+          </div>
         ))}
-        <input
-          aria-label={`Add a value for ${label}`}
-          className="batch-var-input"
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              add();
-            }
-          }}
-          placeholder={values.length ? "Add another…" : "Type a value, press Enter"}
-          value={draft}
-        />
       </div>
     </div>
   );

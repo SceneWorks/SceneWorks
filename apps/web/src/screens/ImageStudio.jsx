@@ -381,7 +381,13 @@ export function ImageStudio() {
 
   const batchPrompts = useMemo(() => splitPromptLines(batchPromptsText), [batchPromptsText]);
   const batchVariables = useMemo(
-    () => extractKeys(batchPrompts).map((key) => ({ key, values: batchVariableValues[key] ?? [] })),
+    () =>
+      extractKeys(batchPrompts).map((key) => ({
+        key,
+        // The value editor keeps a trailing empty slot; drop blanks so saved batches
+        // and the run payload carry only real values (the engine ignores them anyway).
+        values: (batchVariableValues[key] ?? []).filter((value) => value.trim() !== ""),
+      })),
     [batchPrompts, batchVariableValues],
   );
   const batchTotal = useMemo(
