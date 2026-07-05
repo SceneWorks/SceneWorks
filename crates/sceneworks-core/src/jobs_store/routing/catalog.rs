@@ -583,6 +583,16 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("chroma1_flash", true, true, false, false, false),
     // SenseNova-U1 (epic 3180 / sc-3900 MLX; sc-5576 candle). Pure txt2img on candle.
     ModelCaps::new("sensenova_u1_8b", true, true, false, false, false),
+    // Infographic-V2 (epic 9959): coexisting checkpoint refresh of the SAME NEO-unify engine as the
+    // base id — routes identically (MLX full surface; candle pure txt2img).
+    ModelCaps::new(
+        "sensenova_u1_8b_infographic_v2",
+        true,
+        true,
+        false,
+        false,
+        false,
+    ),
     ModelCaps::new("sensenova_u1_8b_fast", true, true, false, false, false),
     // Kolors (epic 3090): full surface on the Rust `kolors` engine (SDXL-family U-Net + ChatGLM3);
     // candle serves txt2img + bespoke IP/pose lanes (sc-5488/sc-5489).
@@ -871,6 +881,7 @@ mod tests {
         "chroma1_flash",
         "sensenova_u1_8b",
         "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2",
         "kolors",
         "lens",
         "lens_turbo",
@@ -908,6 +919,7 @@ mod tests {
         "chroma1_flash",
         "kolors",
         "sensenova_u1_8b",
+        "sensenova_u1_8b_infographic_v2",
         "sensenova_u1_8b_fast",
         "ideogram_4",
         "ideogram_4_turbo",

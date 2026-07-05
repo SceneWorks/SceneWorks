@@ -63,7 +63,9 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "instantid_realvisxl" => instantid_mlx_eligible(payload),
         "pulid_flux_dev" => pulid_flux_mlx_eligible(payload),
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => chroma_mlx_eligible(payload),
-        "sensenova_u1_8b" | "sensenova_u1_8b_fast" => sensenova_mlx_eligible(payload),
+        "sensenova_u1_8b" | "sensenova_u1_8b_infographic_v2" | "sensenova_u1_8b_fast" => {
+            sensenova_mlx_eligible(payload)
+        }
         "kolors" => kolors_mlx_eligible(payload),
         "lens" | "lens_turbo" => lens_mlx_eligible(payload),
         "bernini_image" => bernini_image_mlx_eligible(payload),

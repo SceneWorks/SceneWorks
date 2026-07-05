@@ -1120,6 +1120,94 @@
       }
     },
     {
+      // SenseNova-U1-8B-MoT-Infographic-V2 (epic 9959): a coexisting checkpoint refresh of the SAME
+      // NEO-unify architecture as `sensenova_u1_8b` (identical config.json + tensor namespace — verified
+      // byte-for-byte), specialized for infographic generation with sharper dense small-text, more stable
+      // complex layouts, better aesthetics, and a black-background fix. Because the architecture is
+      // unchanged, it rides the EXISTING `sensenova_u1_8b` engine (engines.rs ModelRow engine_id) with no
+      // engine change — only a new hosted quant-matrix re-host + this catalog entry. Not `recommended`
+      // yet (pending on-device A/B vs V1). Full capability surface, identical to V1.
+      "id": "sensenova_u1_8b_infographic_v2",
+      "name": "SenseNova-U1 8B Infographic V2",
+      "family": "sensenova-u1",
+      "type": "image",
+      "adapter": "sensenova_u1",
+      "capabilities": ["text_to_image", "edit_image", "character_image", "vqa", "interleave"],
+      "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (epic 9959, S1): a public/ungated re-host of
+        // sensenova/SenseNova-U1-8B-MoT-Infographic-V2 built with the same `prequantize_turnkey` harness
+        // as the base. Per-tier subdirs (each a complete from_snapshot tree: packed/dense backbone +
+        // tokenizer + config): q4/ (default), q8/, bf16/. Byte sizes are EXACT on-disk measurements of
+        // the hosted repo per subdir.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 11824526363,
+          "footprint": { "diskSizeBytes": 11824526363, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 19927923905,
+          "footprint": { "diskSizeBytes": 19927923905, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 35121744859,
+          "footprint": { "diskSizeBytes": 35121744859, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/sensenova-u1-8b-infographic-v2-mlx"
+      },
+      "gated": false,
+      "defaults": {
+        "resolution": "2048x2048",
+        "steps": 50,
+        "guidanceScale": 4.0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "shift",
+        "schedulerShift": 3.0
+      },
+      "limits": {
+        "resolutions": ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"],
+        "count": [1, 2, 4],
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "loraCompatibility": {
+        "families": ["sensenova-u1"],
+        "types": []
+      },
+      "mlx": {
+        "quantize": 4,
+        "standardTierLayout": true
+      },
+      "ui": {
+        "label": "SenseNova-U1 8B Infographic V2",
+        "description": "Infographic-specialized variant of SenseNova-U1 (NEO-unify, ~16B), a coexisting checkpoint refresh of the base 8B model. Tuned for information-dense visual content — posters, presentations, comics, resumes, knowledge illustrations — with sharper dense small-text, more stable complex layouts, improved aesthetics, and a fix for the black-background issue. Same unified surface as the base: text-to-image, instruction editing, wardrobe-preserving Character Studio, VQA, and Document Studio (interleaved text+image). Heavy: ~35GB bf16, ~50 steps; runs on large-VRAM GPUs and 96GB+ Apple Silicon (MPS).",
+        "recommendedFor": ["text_to_image", "edit_image", "character_image"],
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "promptGuide": {
+          "title": "SenseNova-U1 8B Infographic V2 Prompt Guide",
+          "path": "/prompt-guides/sensenova-u1-8b-infographic-v2.md",
+          "sources": [
+            { "label": "SenseNova-U1 Infographic V2 model card", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT-Infographic-V2" },
+            { "label": "SenseNova-U1 prompt enhancement doc", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT/blob/main/docs/prompt_enhancement.md" }
+          ]
+        }
+      }
+    },
+    {
       "id": "sensenova_u1_8b_fast",
       "name": "SenseNova-U1 8B Fast",
       "family": "sensenova-u1",
