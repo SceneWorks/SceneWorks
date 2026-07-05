@@ -80,6 +80,31 @@ function promptReferences(prompt, key) {
   return false;
 }
 
+// Turn the authoring textarea into a prompt-template array. Default is one prompt
+// per line (blank lines ignored) — the overwhelmingly common case of pasting a list.
+// For multi-line prompts, a line that is exactly `---` acts as an explicit delimiter;
+// as soon as any `---` line is present the whole text switches to block mode, where
+// each `---`-separated block (trimmed, newlines preserved) is one prompt.
+export function splitPromptLines(text) {
+  if (typeof text !== "string") return [];
+  const lines = text.split(/\r?\n/);
+  if (!lines.some((line) => line.trim() === "---")) {
+    return lines.map((line) => line.trim()).filter((line) => line !== "");
+  }
+  const blocks = [];
+  let current = [];
+  for (const line of lines) {
+    if (line.trim() === "---") {
+      blocks.push(current.join("\n").trim());
+      current = [];
+    } else {
+      current.push(line);
+    }
+  }
+  blocks.push(current.join("\n").trim());
+  return blocks.filter((block) => block !== "");
+}
+
 // Unique {{key}} names referenced across the prompts, trimmed, in first-seen order.
 export function extractKeys(prompts) {
   const seen = new Set();

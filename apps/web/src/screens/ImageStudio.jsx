@@ -9,6 +9,8 @@ import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
 import StructuredPromptBuilder from "../components/StructuredPromptBuilder.jsx";
 import ReferenceCaptionPicker from "../components/ReferenceCaptionPicker.jsx";
+import BatchPromptPanel from "../components/BatchPromptPanel.jsx";
+import { cardinality, extractKeys, splitPromptLines } from "../promptBatch.js";
 import {
   emptyCaption,
   orderCaption,
@@ -144,6 +146,13 @@ const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x128
 // character share the text_to_image workflow.
 const IMAGE_MODES = ["text_to_image", "edit_image", "character_image"];
 
+// Join a saved batch's prompts back into the authoring textarea: multi-line prompts
+// round-trip through the `---` delimiter, a flat list joins on newlines.
+function batchTextFromPrompts(prompts) {
+  const list = Array.isArray(prompts) ? prompts : [];
+  return list.join(list.some((prompt) => prompt.includes("\n")) ? "\n---\n" : "\n");
+}
+
 function preferredOption(defaultValue, options) {
   return options.includes(defaultValue) ? defaultValue : options[0] ?? "default";
 }
@@ -250,6 +259,10 @@ export function ImageStudio() {
     setActiveView,
     setPreviewAsset,
     presets = [],
+    promptBatches = [],
+    createPromptBatch,
+    updatePromptBatch,
+    deletePromptBatch,
     requestedGpu,
     selectedAsset,
     setRequestedGpu,
@@ -342,6 +355,95 @@ export function ImageStudio() {
   };
   const suggestions = mode === "character_image" ? characterSuggestions : sceneSuggestions;
   const [count, setCount] = useState(saved.count ?? 4);
+
+  // Batch Prompt Processing (epic 9952). Batch mode is orthogonal to the T2I/Edit/
+  // Character tab — it swaps the single prompt for a list of {{templated}} prompts run
+  // as one batch against the current settings. State persists like the rest of the
+  // studio; the fan-out on "Run batch" is wired in sc-9956 (slice 4).
+  const [batchMode, setBatchMode] = useState(saved.batchMode ?? false);
+  const [batchPromptsText, setBatchPromptsText] = useState(saved.batchPromptsText ?? "");
+  const [batchVariableValues, setBatchVariableValues] = useState(saved.batchVariableValues ?? {});
+  const [batchName, setBatchName] = useState(saved.batchName ?? "");
+  const [batchScope, setBatchScope] = useState(saved.batchScope ?? "global");
+  const [loadedBatchId, setLoadedBatchId] = useState(saved.loadedBatchId ?? null);
+  const [batchError, setBatchError] = useState("");
+  const [batchBusy, setBatchBusy] = useState(false);
+
+  const batchPrompts = useMemo(() => splitPromptLines(batchPromptsText), [batchPromptsText]);
+  const batchVariables = useMemo(
+    () => extractKeys(batchPrompts).map((key) => ({ key, values: batchVariableValues[key] ?? [] })),
+    [batchPrompts, batchVariableValues],
+  );
+  const batchTotal = useMemo(
+    () => cardinality(batchPrompts, batchVariables, count),
+    [batchPrompts, batchVariables, count],
+  );
+
+  const applyBatchContent = useCallback(({ prompts, variables, lastValues, name }) => {
+    setBatchPromptsText(batchTextFromPrompts(prompts));
+    const values = {};
+    for (const variable of variables ?? []) {
+      if (variable?.key) values[variable.key] = Array.isArray(variable.values) ? variable.values : [];
+    }
+    for (const [key, vals] of Object.entries(lastValues ?? {})) {
+      if (!(key in values) && Array.isArray(vals)) values[key] = vals;
+    }
+    setBatchVariableValues(values);
+    if (name !== undefined) setBatchName(name ?? "");
+    setBatchError("");
+  }, []);
+
+  const handleSaveBatch = useCallback(async () => {
+    setBatchBusy(true);
+    setBatchError("");
+    try {
+      const payload = {
+        name: batchName.trim(),
+        scope: batchScope,
+        prompts: batchPrompts,
+        variables: batchVariables,
+        lastValues: Object.fromEntries(batchVariables.map((variable) => [variable.key, variable.values])),
+      };
+      const result = loadedBatchId
+        ? await updatePromptBatch(loadedBatchId, payload, batchScope)
+        : await createPromptBatch(payload);
+      if (result?.id) setLoadedBatchId(result.id);
+    } catch (err) {
+      setBatchError(err.message);
+    } finally {
+      setBatchBusy(false);
+    }
+  }, [batchName, batchScope, batchPrompts, batchVariables, loadedBatchId, updatePromptBatch, createPromptBatch]);
+
+  const handleLoadBatch = useCallback(
+    (batch) => {
+      applyBatchContent(batch);
+      setBatchScope(batch.scope === "project" ? "project" : "global");
+      setLoadedBatchId(batch.id ?? null);
+    },
+    [applyBatchContent],
+  );
+
+  const handleDeleteBatch = useCallback(
+    async (batch) => {
+      setBatchError("");
+      try {
+        await deletePromptBatch(batch.id, batch.scope);
+        setLoadedBatchId((current) => (current === batch.id ? null : current));
+      } catch (err) {
+        setBatchError(err.message);
+      }
+    },
+    [deletePromptBatch],
+  );
+
+  const handleImportBatch = useCallback(
+    (payload) => {
+      applyBatchContent(payload);
+      setLoadedBatchId(null);
+    },
+    [applyBatchContent],
+  );
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   const [model, setModel] = useState(saved.model ?? imageModels[0]?.id ?? "z_image_turbo");
   const [seed, setSeed] = useState(saved.seed ?? "");
@@ -1257,6 +1359,12 @@ export function ImageStudio() {
     loraWeights,
     showIncompatibleLoras,
     selectedPresetId,
+    batchMode,
+    batchPromptsText,
+    batchVariableValues,
+    batchName,
+    batchScope,
+    loadedBatchId,
     sampler,
     scheduler,
     schedulerShift,
@@ -1286,6 +1394,11 @@ export function ImageStudio() {
 
   async function submit(event) {
     event.preventDefault();
+    // Batch mode runs through its own "Run batch" action (sc-9956), never the single
+    // Generate submit — guard so a stray Enter in a batch field can't queue one image.
+    if (batchMode) {
+      return;
+    }
     if (submitting) {
       return;
     }
@@ -1509,6 +1622,15 @@ export function ImageStudio() {
                 );
               })}
             </div>
+            <button
+              aria-pressed={batchMode}
+              className={batchMode ? "batch-toggle active" : "batch-toggle"}
+              onClick={() => setBatchMode((on) => !on)}
+              title="Run a list of prompts as one batch with the current settings"
+              type="button"
+            >
+              <Icon.Stars size={13} /> Batch
+            </button>
             <div className="prompt-hero-links">
               <button className="hero-link" onClick={() => setGuideOpen(true)} type="button">
                 <Icon.Book size={14} /> Prompt guide
@@ -1521,6 +1643,33 @@ export function ImageStudio() {
             </div>
           </div>
 
+          {batchMode ? (
+            <div className="prompt-input-row batch">
+              <BatchPromptPanel
+                promptsText={batchPromptsText}
+                onPromptsTextChange={setBatchPromptsText}
+                variableValues={batchVariableValues}
+                onVariableValuesChange={setBatchVariableValues}
+                count={count}
+                batches={promptBatches}
+                projectId={activeProject?.id ?? null}
+                name={batchName}
+                onNameChange={setBatchName}
+                scope={batchScope}
+                onScopeChange={setBatchScope}
+                loadedBatchId={loadedBatchId}
+                onSave={handleSaveBatch}
+                onLoad={handleLoadBatch}
+                onDelete={handleDeleteBatch}
+                onImport={handleImportBatch}
+                busy={batchBusy}
+                error={batchError}
+              />
+              <button className="prompt-cta" disabled title="Batch run lands in sc-9956" type="button">
+                <Icon.Play size={14} /> Run batch · {batchTotal}
+              </button>
+            </div>
+          ) : (
           <div className={`prompt-input-row${structuredPromptModel ? " structured" : ""}`}>
             {structuredPromptModel ? (
               <StructuredPromptBuilder
@@ -1572,6 +1721,7 @@ export function ImageStudio() {
               {submitting ? (expanding ? "Expanding…" : "Queueing…") : "Generate"}
             </button>
           </div>
+          )}
           {/* Auto-expand failure (sc-6501): a structured model couldn't turn the plain-text idea
               into a caption (e.g. the prompt-refiner model isn't installed). We never fall back to
               sending raw plain text, so surface the reason and the path forward. */}

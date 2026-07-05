@@ -10897,3 +10897,307 @@ details[open] > summary.lora-scope-group-heading::before,
   font-size: 12px;
   padding: 3px 9px;
 }
+
+/* ── Batch Prompt Processing (epic 9952) ─────────────────────────────────────
+   The Batch toggle sits by the mode tabs; when on, the single prompt is swapped
+   for the two-column authoring panel (prompt list + variables | save/load/io). */
+.batch-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.batch-toggle:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.batch-toggle.active {
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.prompt-input-row.batch {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  align-items: stretch;
+}
+.batch-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 264px;
+  gap: 18px;
+}
+@media (max-width: 900px) {
+  .batch-panel {
+    grid-template-columns: 1fr;
+  }
+}
+.batch-panel-main,
+.batch-panel-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.batch-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.batch-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.batch-prompts {
+  min-height: 132px;
+  resize: vertical;
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.batch-prompts:focus {
+  outline: 2px solid var(--accent);
+  border-color: var(--accent);
+}
+.batch-vars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.batch-var {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 8px 10px;
+  background: var(--surface-2);
+}
+.batch-var-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.batch-var-key {
+  font-size: 12.5px;
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+.batch-var-count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.batch-var-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.batch-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12.5px;
+  padding: 3px 4px 3px 9px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border-radius: 999px;
+}
+.batch-chip-remove {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
+  opacity: 0.7;
+}
+.batch-chip-remove:hover {
+  opacity: 1;
+}
+.batch-var-input {
+  flex: 1;
+  min-width: 110px;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  padding: 5px 8px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.batch-var-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.batch-hint {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.batch-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.batch-preview-text {
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  white-space: pre-wrap;
+}
+.batch-total {
+  font-size: 14px;
+  color: var(--text);
+}
+.batch-total strong {
+  font-size: 18px;
+  color: var(--accent-strong);
+}
+.batch-total-detail {
+  display: block;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.batch-warning {
+  font-size: 12.5px;
+  color: var(--warn);
+}
+.batch-save,
+.batch-load {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.batch-name {
+  width: 100%;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  padding: 7px 10px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.batch-scope {
+  display: flex;
+  gap: 14px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.batch-scope label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+.batch-scope-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.batch-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 12px;
+  border-radius: var(--r-sm);
+  border: 0;
+  cursor: pointer;
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.batch-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.batch-btn.ghost {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.batch-io {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+}
+.batch-io .batch-btn {
+  flex: 1;
+}
+.batch-file-input {
+  display: none;
+}
+.batch-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 184px;
+  overflow-y: auto;
+}
+.batch-list-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.batch-list-load {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  padding: 6px 8px;
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  cursor: pointer;
+}
+.batch-list-item.active .batch-list-load {
+  border-color: var(--accent);
+}
+.batch-list-scope {
+  margin-left: auto;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+.batch-list-delete {
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+.batch-list-delete:hover {
+  color: var(--danger);
+}

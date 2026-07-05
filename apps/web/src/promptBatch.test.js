@@ -1,6 +1,37 @@
 import { describe, expect, it } from "vitest";
 
-import { cardinality, expandBatch, extractKeys, missingKeys, resolvePrompt } from "./promptBatch.js";
+import {
+  cardinality,
+  expandBatch,
+  extractKeys,
+  missingKeys,
+  resolvePrompt,
+  splitPromptLines,
+} from "./promptBatch.js";
+
+describe("splitPromptLines", () => {
+  it("splits one prompt per line, ignoring blank lines", () => {
+    expect(splitPromptLines("cat\n\n  dog  \nbird\n")).toEqual(["cat", "dog", "bird"]);
+  });
+
+  it("does NOT merge newline-separated lines into one prompt", () => {
+    expect(splitPromptLines("a\nb\nc")).toHaveLength(3);
+  });
+
+  it("switches to block mode when a --- delimiter is present", () => {
+    const text = "line one\nline two\n---\nsecond prompt\n---\nthird";
+    expect(splitPromptLines(text)).toEqual(["line one\nline two", "second prompt", "third"]);
+  });
+
+  it("drops empty blocks and trims each block in delimiter mode", () => {
+    expect(splitPromptLines("---\n  only  \n---")).toEqual(["only"]);
+  });
+
+  it("returns [] for blank or non-string input", () => {
+    expect(splitPromptLines("   \n  ")).toEqual([]);
+    expect(splitPromptLines(null)).toEqual([]);
+  });
+});
 
 describe("extractKeys", () => {
   it("collects unique keys in first-seen order", () => {
