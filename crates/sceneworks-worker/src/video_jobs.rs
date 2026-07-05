@@ -5937,8 +5937,11 @@ fn bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
 /// non-destructive: returns `None` when an explicit operator `$LTX_GEMMA_DIR` is set (the provider
 /// reads the env var itself), and `None` when no bundled `gemma/` sibling exists
 /// ([`bundled_ltx_gemma_dir`]) so the provider falls back to the HF-cache gemma snapshot.
+///
+/// `pub(crate)` so the LoRA trainer path reuses it (sc-9989): training resolves the TE identically to
+/// inference, so a self-contained install trains without a separate `mlx-community/gemma` download.
 #[cfg(target_os = "macos")]
-fn resolve_bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
+pub(crate) fn resolve_bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
     if std::env::var_os("LTX_GEMMA_DIR").is_some() {
         return None; // honor an explicit operator override (the provider reads the env var).
     }
