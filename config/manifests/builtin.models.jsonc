@@ -4279,17 +4279,53 @@
       // mlx-community (gemma) mirrors. Windows/Linux keep loading the multi-file torch checkpoint
       // set from Lightricks/LTX-2.3 (the resources block below is untouched).
       "downloads": [
+        // macOS quant matrix (sc-8513, epic 8506): each LTX tier is a SEPARATE user-selectable
+        // artifact tagged with a `variant`; `q4` (default) installs when no tier is chosen. The shared
+        // Gemma-3-12b-it-bf16 text encoder is a `coRequisite` (sc-9696) — installed alongside whichever
+        // tier(s) the user picks, tracked once, excluded from the tier matrix, and NOT double-counted in
+        // the per-tier footprint. The worker still fetches a toggled-but-not-downloaded tier on demand
+        // (ensure_ltx_{q8,bf16}_present, video_jobs.rs), so advanced.mlxQuantize works without a pre-pick.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.3-mlx",
-          // Lean default (sc-5679): LTX-2.3 MLX `q4/` (~20.5 GB) + the `gemma/` gemma-3-12b-it-bf16
-          // text encoder (~26.4 GB). The `q8/` subdir (~29.7 GB, higher quality) is NOT pulled here;
-          // the worker fetches it on demand the first time a job opts into Q8 (advanced
-          // mlxQuantize: 8) — see ensure_ltx_q8_present / resolve_ltx_model_dir in video_jobs.rs.
-          // No separate gemma download — the worker points the engine at gemma/ via $LTX_GEMMA_DIR.
-          "files": ["q4/*", "gemma/*"],
+          // Shared gemma-3-12b-it-bf16 text encoder (~26.4 GB); the worker points the engine at the
+          // sibling gemma/ (resolve_bundled_ltx_gemma_dir). Fetched with any tier, kept while any
+          // remains. Windows/Linux load Gemma from the resources.gemma repo instead, so macOS-only.
+          "coRequisite": true,
+          "files": ["gemma/*"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 46895585378
+          "estimatedSizeBytes": 26427894918
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.3-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 20467690460,
+          "footprint": { "diskSizeBytes": 20467690460, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.3-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 29728720716,
+          "footprint": { "diskSizeBytes": 29728720716, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.3-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos"],
+          // Dense bf16 tier (sc-8513): built from ltx-2.3-22b-distilled-1.1 via convert_and_assemble
+          // (LtxConvertOpts::default, quantize:false). Exact on-disk size of the hosted bf16/ subdir
+          // (transformer 37.98 GB dense BF16 + the already-bf16 connector/vae/upsampler/vocoder).
+          "estimatedSizeBytes": 47092811992,
+          "footprint": { "diskSizeBytes": 47092811992, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
