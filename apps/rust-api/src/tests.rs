@@ -7417,6 +7417,95 @@ async fn quant_matrix_model_with_single_tier_reads_installed_not_incomplete() {
     }
 }
 
+#[tokio::test]
+async fn quant_matrix_empty_cache_skeleton_reads_missing_not_incomplete() {
+    // sc-9909: a tier that isn't published upstream resolves ZERO files, leaving an empty HF cache
+    // skeleton (bare blobs/, no snapshots) PLUS a stale repo-level completion marker. That must read
+    // as a clean not-installed model — NOT a false "installed" (from the marker) and NOT the confusing
+    // "Cached files are incomplete: snapshots/<revision>" repair banner.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+            {
+              "schemaVersion": 1,
+              "models": [{
+                "id": "sdxl",
+                "name": "SDXL",
+                "type": "image",
+                "family": "sdxl",
+                "downloads": [
+                  { "provider": "huggingface", "repo": "SceneWorks/sdxl-base-mlx", "variant": "q4", "default": true, "files": ["q4/*"] },
+                  { "provider": "huggingface", "repo": "SceneWorks/sdxl-base-mlx", "variant": "q8", "files": ["q8/*"] },
+                  { "provider": "huggingface", "repo": "SceneWorks/sdxl-base-mlx", "variant": "bf16", "files": ["bf16/*"] }
+                ]
+              }]
+            }
+            "#,
+    )
+    .expect("builtin models writes");
+    for file in [
+        "user.models.jsonc",
+        "builtin.loras.jsonc",
+        "user.loras.jsonc",
+        "builtin.recipe-presets.jsonc",
+        "user.recipe-presets.jsonc",
+    ] {
+        let key = if file.contains("preset") {
+            "presets"
+        } else if file.contains("lora") {
+            "loras"
+        } else {
+            "models"
+        };
+        std::fs::write(
+            config_dir.join(file),
+            format!(r#"{{ "schemaVersion": 1, "{key}": [] }}"#),
+        )
+        .expect("empty manifest writes");
+    }
+    // Empty HF cache skeleton: the repo dir exists (bare blobs/) but has NO snapshot revision.
+    let repo_root = temp_dir
+        .path()
+        .join("data/cache/huggingface/hub/models--SceneWorks--sdxl-base-mlx");
+    std::fs::create_dir_all(repo_root.join("blobs")).expect("blobs dir creates");
+    // ...plus a stale repo-level completion marker in the app-managed dir.
+    let managed = temp_dir
+        .path()
+        .join("data/models/SceneWorks__sdxl-base-mlx");
+    std::fs::create_dir_all(&managed).expect("managed dir creates");
+    std::fs::write(
+        managed.join(".sceneworks-download-complete.json"),
+        r#"{ "repo": "SceneWorks/sdxl-base-mlx" }"#,
+    )
+    .expect("marker writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["id"], "sdxl");
+    // Clean not-installed — no phantom "installed" from the marker, no incomplete/repair banner.
+    assert_eq!(models[0]["installState"], "missing");
+    assert_eq!(models[0]["cacheState"], "missing");
+    assert_eq!(models[0]["repairAvailable"], false);
+    for variant in models[0]["variants"].as_array().expect("variants array") {
+        assert_eq!(
+            variant["installState"], "missing",
+            "{} installState",
+            variant["variant"]
+        );
+        assert_eq!(
+            variant["cacheState"], "missing",
+            "{} cacheState",
+            variant["variant"]
+        );
+    }
+}
+
 #[cfg(windows)]
 fn create_test_symlink_file(
     target: &std::path::Path,
