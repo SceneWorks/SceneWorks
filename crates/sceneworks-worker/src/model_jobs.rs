@@ -129,6 +129,28 @@ pub(crate) async fn run_model_download_job(
     })?;
     let snapshot =
         HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
+    // A download that resolves to ZERO files is not a success: the repo/revision has nothing under
+    // the requested filter — e.g. a quant tier whose weights aren't uploaded yet (sc-8513 rollout).
+    // Failing here, instead of downloading nothing and still writing a completion marker, surfaces a
+    // clear error rather than a silent no-op that later reads as an empty/phantom install (sc-9909).
+    if snapshot.files.is_empty() {
+        let scope = if files.is_empty() {
+            String::new()
+        } else {
+            format!(" matching {}", files.join(", "))
+        };
+        fail_job(
+            api,
+            &job.id,
+            &format!("No files to download for {repo}{scope}. This tier may not be published yet."),
+            Some(
+                "The Hugging Face repository/revision matched zero files for the requested filter."
+                    .to_owned(),
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
     if let Some(total_bytes) = snapshot.total_bytes() {
         update_job(
             api,

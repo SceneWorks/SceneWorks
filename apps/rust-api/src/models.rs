@@ -976,7 +976,13 @@ fn install_state_for(
                     .unwrap_or_default();
                 (installed, incomplete, missing)
             };
-        let managed_installed = model_is_installed(&managed_path);
+        // A quant-matrix model's top-level state is the aggregate of its tier-aware variant states
+        // computed above (cache_installed = "any tier installed"). The repo-level managed marker must
+        // NOT independently mark it installed (sc-9909): a stale .sceneworks-download-complete.json
+        // left by an empty download would otherwise read the whole model as installed while every tier
+        // reads missing. Single-variant models keep the repo-level managed contract.
+        let managed_installed =
+            !model_has_variant_matrix(model) && model_is_installed(&managed_path);
         let primary_installed = managed_installed || cache_installed;
         let installed_path = if cache_installed || cache_incomplete {
             cache_path.clone()
@@ -1724,7 +1730,17 @@ pub(crate) fn huggingface_cache_health(
     }
     let snapshots = huggingface_snapshot_dirs(repo_root);
     if snapshots.is_empty() {
-        return HuggingFaceCacheHealth::missing(vec!["snapshots/<revision>".to_owned()]);
+        // The repo cache dir exists but holds no snapshot revision at all — an empty skeleton
+        // (bare refs/blobs, e.g. a download that resolved zero files against an unpublished tier, or
+        // a cache whose weights were pruned). Nothing is partially there, so this is MISSING, not a
+        // repairable "incomplete": reporting incomplete surfaced a confusing "Cached files are
+        // incomplete: snapshots/<revision>" banner for a tier that simply was never downloaded
+        // (sc-9909). incomplete:false keeps it a clean not-installed state.
+        return HuggingFaceCacheHealth {
+            installed: false,
+            incomplete: false,
+            missing_files: vec!["snapshots/<revision>".to_owned()],
+        };
     }
     if !files.is_empty() {
         return huggingface_filtered_cache_health(&snapshots, files);

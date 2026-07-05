@@ -110,7 +110,6 @@ import { pickClosestResolution } from "../resolutionMatch.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
-  macBlockedModels,
   macGatingActive,
   macModelFeatureBlock,
 } from "../macGating.js";
@@ -451,6 +450,15 @@ export function ImageStudio() {
   const [expanding, setExpanding] = useState(false);
   const [submitError, setSubmitError] = useState("");
   const [guideOpen, setGuideOpen] = useState(false);
+  // Prompt tools (epic UI-refinement): which inline prompt-tool panel is open —
+  // null | "describe" (reference-image caption) | "refine" (rewrite my prompt).
+  // Replaces the always-rendered ReferenceCaptionPicker + RefinePromptControl pair
+  // with two toggle tiles; only one panel opens at a time.
+  const [promptTool, setPromptTool] = useState(null);
+  const togglePromptTool = useCallback(
+    (tool) => setPromptTool((current) => (current === tool ? null : tool)),
+    [],
+  );
   const editImageAssets = useMemo(
     () =>
       assets.filter(
@@ -499,6 +507,15 @@ export function ImageStudio() {
     setUpscaleFactor,
   });
 
+  // PiD decode and Upscale both super-resolve, so they're mutually exclusive in the UI (each
+  // disables the other while active). If a saved/preset state carries both on, drop PiD (keep
+  // Upscale) so neither checkbox is left permanently disabled.
+  useEffect(() => {
+    if (usePid && upscaleEnabled) {
+      setUsePid(false);
+    }
+  }, [usePid, upscaleEnabled]);
+
   useEffect(() => {
     if (mode === "edit_image" && selectedAssetEditableSourceId) {
       setSourceAssetId(selectedAssetEditableSourceId);
@@ -540,10 +557,6 @@ export function ImageStudio() {
   // picker so the user can't select something that would only error. Inert elsewhere.
   const macImageModels = useMemo(
     () => macAvailableModels(imageModels, macCapabilities),
-    [imageModels, macCapabilities],
-  );
-  const macHiddenImageModels = useMemo(
-    () => macBlockedModels(imageModels, macCapabilities),
     [imageModels, macCapabilities],
   );
   const macGating = macGatingActive(macCapabilities);
@@ -1471,17 +1484,20 @@ export function ImageStudio() {
       <form className="studio-shell" onSubmit={submit}>
         <div className="surface-header hero studio-prompt-hero">
           <div className="prompt-hero-top">
-            <div className="segmented-control" role="tablist" aria-label="Image mode">
+            <div className="mode-tabs" role="tablist" aria-label="Image mode">
               {[
                 ["text_to_image", "Text"],
                 ["edit_image", "Edit"],
                 ["character_image", "With character"],
               ].map(([value, label]) => {
                 const macBlock = macModeTabBlock(value);
+                const active = mode === value;
                 return (
                   <button
-                    className={mode === value ? "active" : ""}
+                    className={active ? "mode-tab active" : "mode-tab"}
                     key={value}
+                    role="tab"
+                    aria-selected={active}
                     onClick={() => handleModeChange(value)}
                     type="button"
                     disabled={Boolean(macBlock)}
@@ -1565,72 +1581,114 @@ export function ImageStudio() {
             </p>
           ) : null}
 
-          {/* Reference-image → plain-text prompt (epic 8203, sc-8208). For NON-structured t2i models,
-              offer the same "start from a reference image" affordance Ideogram has — but it fills the
-              plain prompt box with a description (prose, or booru tags for `captionStyle:"tags"` models).
-              Gated to text-to-image only; the section is hidden unless the macOS-first captioner is
-              platform-eligible (ready, or an install offer exists — both false off-Mac, so it stays
-              hidden there, matching the Ideogram surface). C1: captioning-only, never sent to generation. */}
-          {!structuredPromptModel &&
-          mode === "text_to_image" &&
-          typeof imageDescribe === "function" &&
-          (visionCaptionReady || visionCaptionOffers.length > 0) ? (
-            <ReferenceCaptionPicker
-              onCaption={onImageDescribe}
-              onApply={(text) => setPromptFromUser(text)}
-              onReferenceImageLoaded={onReferenceImageLoaded}
-              referenceAssets={editImageAssets}
-              referenceCharacters={characters}
-              importAsset={importAsset}
-              projectId={activeProject?.id ?? ""}
-              hint="Start from a reference image — the captioner reads it into a detailed prompt you can edit. The image is only used to write the prompt; it isn’t sent to generation."
-              buttonLabel="✨ Describe image"
-              busyLabel="Describing…"
-              emptyMessage="The image did not produce a usable description. Try another reference."
-              errorFallback="Could not describe the image."
-              gateDescription="Download the vision captioner to turn a reference image into a prompt. It runs locally on the native worker; the image is only used to write the prompt."
-              visionCaptionReady={visionCaptionReady}
-              visionCaptionOffers={visionCaptionOffers}
-              visionCaptionDownloadJobs={modelDownloadJobs}
-              onDownloadModel={createModelDownloadJob}
-              onOpenModels={() => setActiveView("Models")}
-              onOpenQueue={onOpenQueue}
-              onCancelJob={onCancelJob}
-            />
-          ) : null}
-
-          {/* Plain-text refine + scene suggestions only make sense for free-text
-              prompts; structured models get the builder + (later) magic-prompt. */}
+          {/* Scene suggestions sit directly under the prompt (UI-refinement 4a). Free-text
+              prompts only; structured models get the builder + (later) magic-prompt. */}
           {structuredPromptModel ? null : (
-            <>
-              <RefinePromptControl
-                guidePath={promptGuide.path}
-                modelId={model}
-                onApply={setPromptFromUser}
-                prompt={prompt}
-                refinePrompt={refinePrompt}
-                refineModel={refineModel}
-                onDownloadRefineModel={refineModel ? () => createModelDownloadJob(refineModel) : undefined}
-                workflow="image"
-              />
-
-              <div className="suggestion-row">
-                <span className="suggestion-row-label">Try:</span>
-                {suggestions.map((suggestion) => (
-                  <button
-                    className="suggestion"
-                    key={suggestion}
-                    onClick={() => setPromptFromUser(suggestion)}
-                    type="button"
-                  >
-                    <Icon.Sparkle size={11} />
-                    {suggestion}
-                  </button>
-                ))}
-              </div>
-            </>
+            <div className="suggestion-row">
+              <span className="suggestion-row-label">Try:</span>
+              {suggestions.map((suggestion) => (
+                <button
+                  className="suggestion"
+                  key={suggestion}
+                  onClick={() => setPromptFromUser(suggestion)}
+                  type="button"
+                >
+                  <Icon.Sparkle size={11} />
+                  {suggestion}
+                </button>
+              ))}
+            </div>
           )}
-        </div>
+
+          {/* Prompt tools (UI-refinement 1b): one framed strip of two equally-weighted toggle
+              tiles that replace the disjointed ReferenceCaptionPicker card + lone Refine link.
+              Tile A wraps the reference-image → plain-text describe flow (epic 8203, sc-8208):
+              gated to text-to-image and hidden unless the macOS-first captioner is platform-
+              eligible (ready, or an install offer exists — both false off-Mac). C1: captioning-
+              only, never sent to generation. Tile B wraps RefinePromptControl (sc-2041). Only
+              one panel opens at a time; both are free-text only (structured models excluded). */}
+          {structuredPromptModel ? null : (() => {
+            const describeAvailable =
+              mode === "text_to_image" &&
+              typeof imageDescribe === "function" &&
+              (visionCaptionReady || visionCaptionOffers.length > 0);
+            const describeActive = describeAvailable && promptTool === "describe";
+            const refineActive = promptTool === "refine";
+            return (
+              <div className="prompt-tools">
+                <div className="prompt-tools-head">
+                  <span className="prompt-tools-title">Prompt tools</span>
+                  <span className="hairline" />
+                </div>
+                <div className="prompt-tools-tiles">
+                  {describeAvailable ? (
+                    <button
+                      type="button"
+                      className={describeActive ? "prompt-tool active" : "prompt-tool"}
+                      aria-pressed={describeActive}
+                      onClick={() => togglePromptTool("describe")}
+                    >
+                      <span className="prompt-tool-title">
+                        <Icon.Image size={15} /> Start from an image
+                      </span>
+                      <span className="prompt-tool-desc">Caption a reference into an editable prompt</span>
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className={refineActive ? "prompt-tool active" : "prompt-tool"}
+                    aria-pressed={refineActive}
+                    onClick={() => togglePromptTool("refine")}
+                  >
+                    <span className="prompt-tool-title">
+                      <Icon.Wand size={15} /> Refine my prompt
+                    </span>
+                    <span className="prompt-tool-desc">Rewrite what you typed for clarity &amp; detail</span>
+                  </button>
+                </div>
+                {describeActive ? (
+                  <div className="prompt-tool-panel">
+                    <ReferenceCaptionPicker
+                      onCaption={onImageDescribe}
+                      onApply={(text) => setPromptFromUser(text)}
+                      onReferenceImageLoaded={onReferenceImageLoaded}
+                      referenceAssets={editImageAssets}
+                      referenceCharacters={characters}
+                      importAsset={importAsset}
+                      projectId={activeProject?.id ?? ""}
+                      hint="Start from a reference image — the captioner reads it into a detailed prompt you can edit. The image is only used to write the prompt; it isn’t sent to generation."
+                      buttonLabel="✨ Describe image"
+                      busyLabel="Describing…"
+                      emptyMessage="The image did not produce a usable description. Try another reference."
+                      errorFallback="Could not describe the image."
+                      gateDescription="Download the vision captioner to turn a reference image into a prompt. It runs locally on the native worker; the image is only used to write the prompt."
+                      visionCaptionReady={visionCaptionReady}
+                      visionCaptionOffers={visionCaptionOffers}
+                      visionCaptionDownloadJobs={modelDownloadJobs}
+                      onDownloadModel={createModelDownloadJob}
+                      onOpenModels={() => setActiveView("Models")}
+                      onOpenQueue={onOpenQueue}
+                      onCancelJob={onCancelJob}
+                    />
+                  </div>
+                ) : null}
+                {refineActive ? (
+                  <div className="prompt-tool-panel">
+                    <RefinePromptControl
+                      guidePath={promptGuide.path}
+                      modelId={model}
+                      onApply={setPromptFromUser}
+                      prompt={prompt}
+                      refinePrompt={refinePrompt}
+                      refineModel={refineModel}
+                      onDownloadRefineModel={refineModel ? () => createModelDownloadJob(refineModel) : undefined}
+                      workflow="image"
+                    />
+                  </div>
+                ) : null}
+              </div>
+            );
+          })()}
 
         {mode === "edit_image" || mode === "character_image" ? (
           <div className="studio-source-band">
@@ -1861,80 +1919,37 @@ export function ImageStudio() {
           </div>
         ) : null}
 
-        <div className="studio-results">
-          <section className="review-panel">
-            <div className="review-panel-head">
-              <h2>Latest batch</h2>
-              <span className="kbd-hint">
-                <kbd>⌘</kbd>
-                <kbd>↵</kbd>
-                to generate
-              </span>
-            </div>
-            {localJobGroups.length ? (
-              <div className="worker-progress-card-stack local-job-stack">
-                {localJobGroups.map(({ job, completedAssets, expectedCount }) => (
-                  <WorkerProgressCard
-                    key={job.id}
-                    job={job}
-                    thumbnailsVariant="image-grid"
-                    thumbnailAssets={completedAssets}
-                    expectedThumbnailCount={expectedCount}
-                    onThumbnailClick={(asset) => onPreview(asset, completedAssets)}
-                    onCancel={onCancelJob}
-                    onOpenQueue={onOpenQueue}
-                  />
-                ))}
-              </div>
-            ) : null}
-            {latestAssets.length ? (
-              <div className="recent-assets">
-                {localJobGroups.length ? <h3 className="recent-assets__title">Recent Assets</h3> : null}
-                <div className="review-grid">
-                  {latestAssets.map((asset) => (
-                    <AssetCard
-                      asset={asset}
-                      deleteAsset={deleteAsset}
-                      key={asset.id}
-                      onPreview={(previewed) => onPreview(previewed, latestAssets)}
-                      purgeAsset={purgeAsset}
-                      updateAssetStatus={updateAssetStatus}
-                    />
+          {/* Generation settings (UI-refinement 2b): the everyday knobs — Model, Aspect,
+              Variations, Style preset — sit in a bar directly under the composer instead of a
+              detached right rail. Power-user knobs fold into Advanced below; the results area
+              reclaims the full width (single-column .studio-results). */}
+          <div className="settings-bar">
+            <div className="settings-bar-row">
+              <label className="settings-field settings-field-model">
+                Model
+                <select onChange={(event) => setModel(event.target.value)} value={model}>
+                  {pickerModels.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
+                    </option>
                   ))}
-                </div>
-              </div>
-            ) : localJobGroups.length ? null : (
-              <div className="empty-panel">No fresh image batch</div>
-            )}
-          </section>
-
-          <section className="studio-controls preset-rail">
-            <div className="preset-rail-head">
-              <h3>Preset</h3>
-              <span className="preset-rail-model-tag">{selectedModel?.name ?? "—"}</span>
+                </select>
+              </label>
+              <label className="settings-field settings-field-aspect">
+                Aspect
+                <select onChange={(event) => setResolution(event.target.value)} value={resolution}>
+                  {resolutionOptions.map((option) => (
+                    <option key={option} value={option}>{formatResolutionLabel(option)}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="settings-field settings-field-count">
+                Variations
+                <input min="1" max="8" onChange={(event) => setCount(Number(event.target.value))} type="number" value={count} />
+              </label>
             </div>
-
-            <label>
-              Model
-              <select onChange={(event) => setModel(event.target.value)} value={model}>
-                {pickerModels.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
-            {macHiddenImageModels.length ? (
-              <p className="mac-gating-note">
-                {macHiddenImageModels.length} model
-                {macHiddenImageModels.length === 1 ? "" : "s"} unavailable on Mac (Rust/MLX only) —
-                see Models for details.
-              </p>
-            ) : null}
-
-            <div className="style-preset-strip">
-              <span className="style-preset-label">Style preset</span>
+            <div className="settings-bar-styles">
+              <span className="settings-bar-label">Style preset</span>
               <div className="preset-chips">
                 <button
                   className={!selectedPreset ? "preset-chip active" : "preset-chip"}
@@ -1955,45 +1970,20 @@ export function ImageStudio() {
                 ))}
               </div>
             </div>
+          </div>
 
-            <SavePresetPanel
-              presetName={presetName}
-              setPresetName={setPresetName}
-              savingPreset={savingPreset}
-              presetSaveMessage={presetSaveMessage}
-              setPresetSaveMessage={setPresetSaveMessage}
-              onSave={handleSaveAsPreset}
-              presetScope={presetScope}
-              setPresetScope={setPresetScope}
-              activeProject={activeProject}
-            />
+          {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
 
-            <div className="control-grid preset-rail-row">
-              <label>
-                Variations
-                <input min="1" max="8" onChange={(event) => setCount(Number(event.target.value))} type="number" value={count} />
-              </label>
-              <label>
-                Aspect
-                <select onChange={(event) => setResolution(event.target.value)} value={resolution}>
-                  {resolutionOptions.map((option) => (
-                    <option key={option} value={option}>{formatResolutionLabel(option)}</option>
-                  ))}
-                </select>
-              </label>
-            </div>
+          <PresetGuidanceStrip
+            selectedPreset={selectedPreset}
+            presetPromptParts={presetPromptParts}
+            presetLoraDetails={presetLoraDetails}
+          />
 
-            <PresetGuidanceStrip
-              selectedPreset={selectedPreset}
-              presetPromptParts={presetPromptParts}
-              presetLoraDetails={presetLoraDetails}
-              noPresetHint="Generation uses only the prompt, model, and visible preset settings."
-            />
-
-            <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
-              <Icon.ChevDown className={advancedOpen ? "chev-rotate open" : "chev-rotate"} size={14} />
-              {advancedOpen ? "Hide advanced" : "Advanced"}
-            </button>
+          <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
+            <Icon.ChevDown className={advancedOpen ? "chev-rotate open" : "chev-rotate"} size={14} />
+            {advancedOpen ? "Hide advanced" : "Advanced"}
+          </button>
 
             {advancedOpen ? (
               <div className="advanced-panel">
@@ -2159,15 +2149,20 @@ export function ImageStudio() {
                   >
                     <input
                       checked={usePid}
+                      disabled={upscaleEnabled}
                       onChange={(event) => setUsePid(event.target.checked)}
                       type="checkbox"
                     />
                     PiD decoder · 2K/4K <span className="badge badge-nc">Non-Commercial</span>
                   </label>
                 ) : null}
-                <label className="checkline upscale-toggle">
+                <label
+                  className="checkline upscale-toggle"
+                  title={usePid ? "Disabled while the PiD decoder is on — PiD already super-resolves to 2K/4K." : undefined}
+                >
                   <input
                     checked={upscaleEnabled}
+                    disabled={usePid}
                     onChange={(event) => setUpscaleEnabled(event.target.checked)}
                     type="checkbox"
                   />
@@ -2175,7 +2170,7 @@ export function ImageStudio() {
                 </label>
                 <label>
                   Scale
-                  <select disabled={!upscaleEnabled} onChange={(event) => setUpscaleFactor(Number(event.target.value))} value={upscaleFactor}>
+                  <select disabled={!upscaleEnabled || usePid} onChange={(event) => setUpscaleFactor(Number(event.target.value))} value={upscaleFactor}>
                     {upscaleFactorsForEngine(upscaleEngine).map((factor) => (
                       <option key={factor} value={factor}>
                         {factor}x
@@ -2185,7 +2180,7 @@ export function ImageStudio() {
                 </label>
                 <label>
                   Engine
-                  <select disabled={!upscaleEnabled} onChange={(event) => handleUpscaleEngineChange(event.target.value)} value={upscaleEngine}>
+                  <select disabled={!upscaleEnabled || usePid} onChange={(event) => handleUpscaleEngineChange(event.target.value)} value={upscaleEngine}>
                     {availableUpscaleEngines.map((engine) => (
                       <option key={engine.key} value={engine.key}>
                         {engine.label}
@@ -2198,7 +2193,7 @@ export function ImageStudio() {
                     Detail
                     <input
                       aria-label="SeedVR2 detail (softness)"
-                      disabled={!upscaleEnabled}
+                      disabled={!upscaleEnabled || usePid}
                       max="1"
                       min="0"
                       onChange={(event) => setUpscaleSoftness(Number(event.target.value))}
@@ -2226,15 +2221,75 @@ export function ImageStudio() {
                   setLoraWeight={setLoraWeight}
                   loraEmptyMessage={loraEmptyMessage}
                 />
+                {/* Save-as-preset folds into Advanced with the rest of the power-user
+                    knobs (UI-refinement 2b). */}
+                <SavePresetPanel
+                  presetName={presetName}
+                  setPresetName={setPresetName}
+                  savingPreset={savingPreset}
+                  presetSaveMessage={presetSaveMessage}
+                  setPresetSaveMessage={setPresetSaveMessage}
+                  onSave={handleSaveAsPreset}
+                  presetScope={presetScope}
+                  setPresetScope={setPresetScope}
+                  activeProject={activeProject}
+                />
               </div>
             ) : null}
 
-            <PresetValidationWarnings presetValidationResult={presetValidationResult} selectedModel={selectedModel} />
-            {selectedLoraValidationResult.incompatible.length ? (
-              <p className="inline-warning">
-                Generate is blocked because these selected LoRAs are incompatible with {selectedModel?.name ?? "the selected model"}: {selectedLoraValidationResult.incompatible.join(", ")}.
-              </p>
+          <PresetValidationWarnings presetValidationResult={presetValidationResult} selectedModel={selectedModel} />
+          {selectedLoraValidationResult.incompatible.length ? (
+            <p className="inline-warning">
+              Generate is blocked because these selected LoRAs are incompatible with {selectedModel?.name ?? "the selected model"}: {selectedLoraValidationResult.incompatible.join(", ")}.
+            </p>
+          ) : null}
+        </div>
+
+        <div className="studio-results">
+          <section className="review-panel">
+            <div className="review-panel-head">
+              <h2>Latest batch</h2>
+              <span className="kbd-hint">
+                <kbd>⌘</kbd>
+                <kbd>↵</kbd>
+                to generate
+              </span>
+            </div>
+            {localJobGroups.length ? (
+              <div className="worker-progress-card-stack local-job-stack">
+                {localJobGroups.map(({ job, completedAssets, expectedCount }) => (
+                  <WorkerProgressCard
+                    key={job.id}
+                    job={job}
+                    thumbnailsVariant="image-grid"
+                    thumbnailAssets={completedAssets}
+                    expectedThumbnailCount={expectedCount}
+                    onThumbnailClick={(asset) => onPreview(asset, completedAssets)}
+                    onCancel={onCancelJob}
+                    onOpenQueue={onOpenQueue}
+                  />
+                ))}
+              </div>
             ) : null}
+            {latestAssets.length ? (
+              <div className="recent-assets">
+                {localJobGroups.length ? <h3 className="recent-assets__title">Recent Assets</h3> : null}
+                <div className="review-grid">
+                  {latestAssets.map((asset) => (
+                    <AssetCard
+                      asset={asset}
+                      deleteAsset={deleteAsset}
+                      key={asset.id}
+                      onPreview={(previewed) => onPreview(previewed, latestAssets)}
+                      purgeAsset={purgeAsset}
+                      updateAssetStatus={updateAssetStatus}
+                    />
+                  ))}
+                </div>
+              </div>
+            ) : localJobGroups.length ? null : (
+              <div className="empty-panel">No fresh image batch</div>
+            )}
           </section>
         </div>
       </form>

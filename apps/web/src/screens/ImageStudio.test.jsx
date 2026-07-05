@@ -105,6 +105,8 @@ describe("ImageStudio Save as Preset", () => {
     const context = baseContext();
     await render(context);
 
+    // Save-as-preset now lives inside the Advanced panel (UI-refinement 2b).
+    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Advanced"));
     const input = nameInput(container);
     expect(input).toBeTruthy();
     await act(async () => setInput(input, "Atrium Look"));
@@ -140,6 +142,7 @@ describe("ImageStudio Save as Preset", () => {
     });
     await render(context);
 
+    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Advanced"));
     await act(async () => setInput(nameInput(container), "Atrium Look"));
     await click(saveButton(container));
 
@@ -385,7 +388,7 @@ describe("ImageStudio edit source picker", () => {
 
   async function openEditSourcePicker(context) {
     await render(context);
-    await click([...document.body.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "Edit"));
+    await click([...document.body.querySelectorAll(".mode-tabs button")].find((button) => button.textContent === "Edit"));
     await click([...document.body.querySelectorAll(".asset-picker-head button")].find((button) => button.textContent === "Select image"));
     return document.body.querySelector('[role="dialog"]');
   }
@@ -531,7 +534,7 @@ describe("ImageStudio edit source picker", () => {
         selectedAsset: null,
       }),
     );
-    await click([...document.body.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "Edit"));
+    await click([...document.body.querySelectorAll(".mode-tabs button")].find((button) => button.textContent === "Edit"));
 
     // The multi-image picker ("Select images") replaces the single source picker ("Select image").
     const headButtons = () => [...document.body.querySelectorAll(".asset-picker-head button")];
@@ -620,7 +623,7 @@ describe("ImageStudio model picker capability gating", () => {
 
   const modelOptionValues = () => [...field(container, "Model").options].map((option) => option.value);
   const modeButton = (label) =>
-    [...document.body.querySelectorAll(".segmented-control button")].find((button) => button.textContent === label);
+    [...document.body.querySelectorAll(".mode-tabs button")].find((button) => button.textContent === label);
 
   it("Text tab lists only text_to_image models, excluding edit-only and character-only (sc-5549)", async () => {
     await render(baseContext({ imageModels: [EDIT_ONLY, T2I, VARIATIONS, CHARACTER_ONLY] }));
@@ -799,6 +802,44 @@ describe("ImageStudio model picker capability gating", () => {
     await openAdvanced(container);
     await act(async () => {});
     expect(tierPicker(container)).toBeFalsy();
+  });
+
+  // PiD decode and Upscale both super-resolve, so they're mutually exclusive: enabling one
+  // disables the other (and the upscale sub-controls).
+  it("makes PiD and Upscale mutually exclusive in Advanced", async () => {
+    const PID_MODEL = {
+      ...Z_IMAGE,
+      id: "qwen_image",
+      name: "Qwen Image",
+      ui: { pid: { checkpointId: "pid_qwenimage" } },
+    };
+    await render(
+      baseContext({
+        imageModels: [PID_MODEL],
+        models: [{ id: "pid_qwenimage", installState: "installed" }],
+      }),
+    );
+    await openAdvanced(container);
+    await act(async () => {});
+
+    const pid = () => container.querySelector('.pid-decoder-toggle input[type="checkbox"]');
+    const upscale = () => container.querySelector('.upscale-toggle input[type="checkbox"]');
+    expect(pid()).toBeTruthy();
+    expect(upscale()).toBeTruthy();
+    // Both start enabled.
+    expect(pid().disabled).toBe(false);
+    expect(upscale().disabled).toBe(false);
+
+    // PiD on → Upscale + its Scale/Engine sub-controls disable.
+    await act(async () => pid().click());
+    expect(upscale().disabled).toBe(true);
+    expect(field(container, "Scale").disabled).toBe(true);
+    expect(field(container, "Engine").disabled).toBe(true);
+
+    // PiD off, Upscale on → PiD disables.
+    await act(async () => pid().click());
+    await act(async () => upscale().click());
+    expect(pid().disabled).toBe(true);
   });
 
   it("omits advanced.mlxQuantize on Generate when only one tier is installed (sc-8515)", async () => {

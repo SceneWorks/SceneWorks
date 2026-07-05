@@ -73,7 +73,6 @@ import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
-  macBlockedModels,
   macGatingActive,
   macVideoModeBlock,
 } from "../macGating.js";
@@ -187,10 +186,6 @@ export function VideoStudio() {
   // Mac UI gating (sc-3486): hide torch-only video models (e.g. SVD) and snap off one if selected.
   const macVideoModels = useMemo(
     () => macAvailableModels(videoModels, macCapabilities),
-    [videoModels, macCapabilities],
-  );
-  const macHiddenVideoModels = useMemo(
-    () => macBlockedModels(videoModels, macCapabilities),
     [videoModels, macCapabilities],
   );
   useEffect(() => {
@@ -864,15 +859,18 @@ export function VideoStudio() {
       <form className="studio-shell" onSubmit={submit}>
         <div className="surface-header hero studio-prompt-hero video-prompt-hero">
           <div className="prompt-hero-top">
-            <div className="segmented-control mode-control" role="tablist" aria-label="Video mode">
+            <div className="mode-tabs mode-control" role="tablist" aria-label="Video mode">
               {modeOptions.map(([value, label]) => {
                 // Disabled only when no available model serves this mode on Mac — and never the
                 // active tab, so the user can always switch away (sc-5716).
                 const blocked = value !== mode && macModeTabBlocked(value);
+                const active = mode === value;
                 return (
                   <button
-                    className={mode === value ? "active" : ""}
+                    className={active ? "mode-tab active" : "mode-tab"}
                     key={value}
+                    role="tab"
+                    aria-selected={active}
                     onClick={() => setMode(value)}
                     type="button"
                     disabled={blocked}
@@ -1278,12 +1276,6 @@ export function VideoStudio() {
                   ))}
                 </select>
               </label>
-              {macHiddenVideoModels.length ? (
-                <p className="mac-gating-note">
-                  {macHiddenVideoModels.length} model
-                  {macHiddenVideoModels.length === 1 ? "" : "s"} unavailable on Mac (Rust/MLX only).
-                </p>
-              ) : null}
 
               <div className="style-preset-strip">
                 <span className="style-preset-label">Style preset</span>
@@ -1378,7 +1370,6 @@ export function VideoStudio() {
                 selectedPreset={selectedPreset}
                 presetPromptParts={presetPromptParts}
                 presetLoraDetails={presetLoraDetails}
-                noPresetHint="Generation uses only the prompt, model, and visible render settings."
               />
 
               {durationHint ? <p className="helper-copy">{durationHint}</p> : null}

@@ -531,6 +531,21 @@ export function ModelManagerScreen() {
   const [modelFileInputKey, setModelFileInputKey] = useState(0);
   const [deletingItem, setDeletingItem] = useState("");
   const [deleteMessage, setDeleteMessage] = useState({ tone: "neutral", text: "" });
+  // Expandable model rows (UI-refinement 1c): each model is a collapsed row (name · family ·
+  // status · size) that expands to reveal capabilities, description, repo/MLX and actions —
+  // the same rhythm as the LoRA rows. Rows needing attention (an active download/convert, an
+  // incomplete cache) auto-expand.
+  const [expandedModels, setExpandedModels] = useState(() => new Set());
+  const toggleModel = (id) =>
+    setExpandedModels((current) => {
+      const next = new Set(current);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
   // Read the host's memory so MLX models can be gated against their memory tier.
   // Desktop reads it from the Tauri GPU probe; a remote LAN browser reads the
   // auth-protected REST signal (epic 4484 story 9). `isDesktop`/`tauriInvoke` come
@@ -895,25 +910,37 @@ export function ModelManagerScreen() {
     // Quant-matrix models (sc-8509): render the per-tier download panel with a RAM-based suggestion
     // + multi-select instead of the single Download button. Single-variant models are unchanged.
     const hasTierMatrix = model.hasVariantMatrix === true && orderedMatrixVariants(model).length > 0;
+    const autoOpen =
+      Boolean(localDownloadJob) || incomplete || Boolean(convertJob) || Boolean(failedConvert) || Boolean(failedDownload);
+    const open = expandedModels.has(model.id) || autoOpen;
+    const firstCapability = capabilities.length ? capabilityLabel(capabilities[0]) : null;
+    const familyMeta = [model.family ?? "unassociated", firstCapability].filter(Boolean).join(" · ");
     return (
-      <article className="model-card" key={model.id}>
-        <div>
-          <p className="eyebrow">{model.family ?? "unassociated"}</p>
-          <h3>{model.name}</h3>
-        </div>
-        <span className={incomplete ? "status-badge warning" : installed ? "status-badge installed" : "status-badge"}>
-          {incomplete ? "incomplete" : installed ? "installed" : "missing"}
-        </span>
-        {unassociated ? (
-          <span className="status-badge warning" title="Set this model's family in user.models.jsonc before using it for generation.">
-            needs family
+      <div className="model-row" key={model.id}>
+        <button className="model-row-summary" type="button" aria-expanded={open} onClick={() => toggleModel(model.id)}>
+          <span className={open ? "model-row-caret open" : "model-row-caret"} aria-hidden="true">
+            ▶
           </span>
-        ) : null}
-        {macModelBlock(model, macCapabilities) ? (
-          <span className="status-badge warning" title={macModelBlock(model, macCapabilities).text}>
-            not on Mac
+          <span className="model-row-heading">
+            <strong>{model.name}</strong>
+            <small>{familyMeta}</small>
           </span>
-        ) : null}
+          <span className={incomplete ? "status-badge warning" : installed ? "status-badge installed" : "status-badge"}>
+            {incomplete ? "incomplete" : installed ? "installed" : "missing"}
+          </span>
+          {unassociated ? (
+            <span className="status-badge warning" title="Set this model's family in user.models.jsonc before using it for generation.">
+              needs family
+            </span>
+          ) : null}
+          {macModelBlock(model, macCapabilities) ? (
+            <span className="status-badge warning" title={macModelBlock(model, macCapabilities).text}>
+              not on Mac
+            </span>
+          ) : null}
+          <span className="model-row-size">{downloadSize}</span>
+        </button>
+        <div className="model-row-body" hidden={!open}>
         {capabilities.length ? (
           <ul className="model-capabilities">
             {capabilities.map((capability) => (
@@ -1047,7 +1074,8 @@ export function ModelManagerScreen() {
             {model.removable === false ? "Protected" : deletingItem === deleteKey ? "Deleting" : "Delete"}
           </button>
         </div>
-      </article>
+        </div>
+      </div>
     );
   }
 

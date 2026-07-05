@@ -615,25 +615,45 @@ describe("SceneWorks app shell", () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
     });
 
+    // Add-on-demand LoRA picker (UI-refinement 3b): open the "Add LoRA" dropdown and click a
+    // compatible row to add each LoRA. built_in (scope "builtin") doesn't count toward the
+    // four-user cap, so we can add it plus four user LoRAs.
+    const addLora = async (name) => {
+      await act(async () => {
+        [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
+      });
+      await act(async () => {
+        [...document.body.querySelectorAll(".lora-pick-row")]
+          .find((button) => button.textContent.includes(name))
+          .click();
+      });
+    };
+    await addLora("Built In");
+    await addLora("Global Style");
+    await addLora("Project Mira");
+    await addLora("Third User");
+    await addLora("Fourth User");
+
     expect(container.textContent).toContain("Built In");
-    const checkboxes = [...document.body.querySelectorAll('.lora-choice input[type="checkbox"]')];
+
+    // At the four-user cap, the fifth user LoRA's Add row is disabled in the dropdown.
     await act(async () => {
-      checkboxes[0].click();
-      checkboxes[1].click();
-      checkboxes[2].click();
-      checkboxes[3].click();
-      checkboxes[4].click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
     });
+    const fifthRow = [...document.body.querySelectorAll(".lora-pick-row")].find((button) =>
+      button.textContent.includes("Fifth User"),
+    );
+    expect(fifthRow.disabled).toBe(true);
 
-    // built_in is scope "builtin" and doesn't count toward the user cap, so four
-    // user LoRAs are selected here; the fifth user LoRA is disabled at the cap.
-    expect(checkboxes[5].disabled).toBe(true);
-
+    // The Show-incompatible toggle reveals incompatible LoRAs in the same dropdown.
     await act(async () => {
       document.body.querySelector('.lora-picker .checkline input[type="checkbox"]').click();
     });
-
-    expect(container.textContent).toContain("Qwen Only");
+    expect(
+      [...document.body.querySelectorAll(".lora-pick-row")].some((button) =>
+        button.textContent.includes("Qwen Only"),
+      ),
+    ).toBe(true);
     expect(container.textContent).not.toContain("Missing LoRA");
 
     await act(async () => {
@@ -686,8 +706,12 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
     });
+    // Open the Add-LoRA dropdown to inspect which LoRAs the model offers as compatible.
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
+    });
 
-    const loraNames = [...document.body.querySelectorAll(".lora-choice strong")].map((node) => node.textContent);
+    const loraNames = [...document.body.querySelectorAll(".lora-pick-row strong")].map((node) => node.textContent);
     // A kolors-family model must not offer a z-image LoRA as compatible.
     expect(loraNames).toContain("Kolors Style");
     expect(loraNames).not.toContain("Z Style");
@@ -721,11 +745,17 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
     });
+    // Reveal the incompatible LoRA in the dropdown, then add it via its Add row.
     await act(async () => {
       document.body.querySelector('.lora-picker .checkline input[type="checkbox"]').click();
     });
     await act(async () => {
-      document.body.querySelector('.lora-choice input[type="checkbox"]').click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
+    });
+    await act(async () => {
+      [...document.body.querySelectorAll(".lora-pick-row")]
+        .find((button) => button.textContent.includes("Qwen Only"))
+        .click();
     });
 
     const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate");
@@ -988,12 +1018,12 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    // Primary preset controls are surfaced in the rail (no longer behind Advanced),
-    // alongside the hero-mounted prompt + preset chip strip.
-    const railLabels = [...document.body.querySelectorAll(".preset-rail > label, .preset-rail .preset-rail-row label")].map(
+    // Primary generation controls sit in the settings bar under the composer (UI-refinement 2b),
+    // no longer in a right-hand rail; power-user knobs stay behind Advanced.
+    const settingsLabels = [...document.body.querySelectorAll(".settings-bar label")].map(
       (label) => label.childNodes[0]?.textContent.trim(),
     );
-    expect(railLabels).toEqual(expect.arrayContaining(["Model", "Variations", "Aspect"]));
+    expect(settingsLabels).toEqual(expect.arrayContaining(["Model", "Variations", "Aspect"]));
     expect(document.body.querySelector(".prompt-input")).not.toBeNull();
     expect(document.body.querySelector(".preset-chips").textContent).toContain("None");
     // sc-5875: a fresh studio defaults to None, so the preset's count (2) is NOT
@@ -1016,7 +1046,9 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.textContent).toContain("No preset selected");
+    // With no preset selected the guidance strip renders nothing (the visible controls
+    // already describe the run); it only appears once a preset is active.
+    expect(document.body.querySelector(".guidance-strip")).toBeNull();
     expect(field(container, "Variations").value).toBe("4");
 
     await act(async () => {
@@ -1626,7 +1658,7 @@ describe("SceneWorks app shell", () => {
     const sceneSuggestions = [...document.body.querySelectorAll(".suggestion")].map((button) => button.textContent).join("|");
 
     await act(async () => {
-      [...document.body.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "With character").click();
+      [...document.body.querySelectorAll(".mode-tabs button")].find((button) => button.textContent === "With character").click();
     });
     await settle();
 
@@ -1728,7 +1760,7 @@ describe("SceneWorks app shell", () => {
 
     await changeField(document.body.querySelector(".prompt-input"), "my own deliberate scene");
     await act(async () => {
-      [...document.body.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "With character").click();
+      [...document.body.querySelectorAll(".mode-tabs button")].find((button) => button.textContent === "With character").click();
     });
     await changeField(field(container, "Character"), "char-1");
     await settle();
@@ -2070,20 +2102,25 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    // Only the ltx-video LoRA is compatible; the z-image one is filtered out.
-    expect(container.textContent).toContain("LTX Style");
-    expect(container.textContent).not.toContain("Z Glow");
-
-    const loraCheckbox = document.body.querySelector(".lora-choice-list input[type=checkbox]");
+    // Add-on-demand LoRA picker (UI-refinement 3b): open the dropdown. Only the ltx-video LoRA is
+    // compatible; the z-image one is filtered out.
     await act(async () => {
-      loraCheckbox.click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
+    });
+    const pickNames = [...document.body.querySelectorAll(".lora-pick-row strong")].map((node) => node.textContent);
+    expect(pickNames).toContain("LTX Style");
+    expect(pickNames).not.toContain("Z Glow");
+
+    // Adding a LoRA drops in a slot with its weight slider, defaulting to the LoRA weight (0.8).
+    await act(async () => {
+      [...document.body.querySelectorAll(".lora-pick-row")]
+        .find((button) => button.textContent.includes("LTX Style"))
+        .click();
     });
     await settle();
-
-    // Selecting a LoRA reveals its weight slider, defaulting to the LoRA weight (0.8).
-    const weightSlider = document.body.querySelector(".lora-weight-row input[type=range]");
+    const weightSlider = document.body.querySelector(".lora-slot-weight input[type=range]");
     expect(weightSlider).toBeTruthy();
-    expect(document.body.querySelector(".lora-weight-value").textContent).toBe("0.80");
+    expect(document.body.querySelector(".lora-slot-weight-value").textContent).toBe("0.80");
     await changeField(weightSlider, "0.5");
 
     const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
@@ -2241,7 +2278,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...document.body.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "Edit").click();
+      [...document.body.querySelectorAll(".mode-tabs button")].find((button) => button.textContent === "Edit").click();
     });
     await settle();
 
