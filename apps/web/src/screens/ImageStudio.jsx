@@ -147,6 +147,10 @@ const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x128
 // character share the text_to_image workflow.
 const IMAGE_MODES = ["text_to_image", "edit_image", "character_image"];
 
+// Above this many resolved images a batch run needs explicit confirmation, so a stray
+// value or an over-eager cross-product can't silently queue a huge job (sc-9957).
+const BATCH_RENDER_CAP = 100;
+
 // Join a saved batch's prompts back into the authoring textarea: multi-line prompts
 // round-trip through the `---` delimiter, a flat list joins on newlines.
 function batchTextFromPrompts(prompts) {
@@ -372,6 +376,8 @@ export function ImageStudio() {
   // An in-flight / just-finished batch run: { submitting, items: [{ prompt, jobId }] }.
   // Progress + cancel are derived off the live jobs feed, mirroring the asset batch (sc-6112).
   const [batchRun, setBatchRun] = useState(null);
+  // True once a run over BATCH_RENDER_CAP is awaiting the user's explicit confirmation.
+  const [batchConfirmPending, setBatchConfirmPending] = useState(false);
 
   const batchPrompts = useMemo(() => splitPromptLines(batchPromptsText), [batchPromptsText]);
   const batchVariables = useMemo(
@@ -382,6 +388,12 @@ export function ImageStudio() {
     () => cardinality(batchPrompts, batchVariables, count),
     [batchPrompts, batchVariables, count],
   );
+
+  // A pending large-run confirmation is for one specific count — reset it whenever the
+  // batch size changes so the user always re-confirms against the current total.
+  useEffect(() => {
+    setBatchConfirmPending(false);
+  }, [batchTotal]);
 
   const applyBatchContent = useCallback(({ prompts, variables, lastValues, name }) => {
     setBatchPromptsText(batchTextFromPrompts(prompts));
@@ -1651,7 +1663,7 @@ export function ImageStudio() {
   // Fan out one image job per resolved prompt (mirrors the asset batch, sc-6112): each
   // posts independently so the worker runs them serially with its between-image cache
   // release, and progress/cancel read the live jobs feed.
-  async function runBatch() {
+  async function runBatch(confirmed = false) {
     if (batchRun?.submitting || !activeProject) {
       return;
     }
@@ -1659,6 +1671,12 @@ export function ImageStudio() {
     if (!resolved.length) {
       return;
     }
+    // Soft cap: a large run must be confirmed once, showing the exact image count.
+    if (!confirmed && resolved.length * count > BATCH_RENDER_CAP) {
+      setBatchConfirmPending(true);
+      return;
+    }
+    setBatchConfirmPending(false);
     setBatchRun({ submitting: true, items: resolved.map((entry) => ({ prompt: entry.prompt, jobId: null })) });
     const items = [];
     for (const entry of resolved) {
@@ -1801,6 +1819,12 @@ export function ImageStudio() {
                   <p className="batch-warning">
                     Batch mode isn’t available for structured-caption models yet.
                   </p>
+                ) : batchMissingKeys.length > 0 ? (
+                  <p className="batch-warning">
+                    Fill in a value for {batchMissingKeys.map((key) => `{{${key}}}`).join(", ")} to run.
+                  </p>
+                ) : batchTotal === 0 ? (
+                  <p className="batch-hint">Add at least one prompt to run a batch.</p>
                 ) : null}
                 {batchRun ? (
                   <div className="batch-run-progress" aria-live="polite">
@@ -1819,10 +1843,27 @@ export function ImageStudio() {
                     )}
                   </div>
                 ) : null}
-                <button className="prompt-cta" disabled={batchRunDisabled} onClick={runBatch} type="button">
-                  <Icon.Play size={14} />
-                  {batchRun?.submitting ? "Queueing…" : `Run batch · ${batchTotal}`}
-                </button>
+                {batchConfirmPending ? (
+                  <div className="batch-confirm" role="alertdialog">
+                    <span>Queue {batchTotal} images? That’s a large batch.</span>
+                    <button className="prompt-cta" onClick={() => runBatch(true)} type="button">
+                      <Icon.Play size={14} /> Queue {batchTotal}
+                    </button>
+                    <button className="batch-btn ghost" onClick={() => setBatchConfirmPending(false)} type="button">
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    className="prompt-cta"
+                    disabled={batchRunDisabled}
+                    onClick={() => runBatch(false)}
+                    type="button"
+                  >
+                    <Icon.Play size={14} />
+                    {batchRun?.submitting ? "Queueing…" : `Run batch · ${batchTotal}`}
+                  </button>
+                )}
               </div>
             </div>
           ) : (
