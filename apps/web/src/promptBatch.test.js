@@ -4,6 +4,8 @@ import {
   cardinality,
   expandBatch,
   extractKeys,
+  firstResolvedPrompt,
+  linkedGroupIssues,
   missingKeys,
   resolvePrompt,
   splitPromptLines,
@@ -230,5 +232,115 @@ describe("missingKeys", () => {
 
   it("ignores unreferenced variables", () => {
     expect(missingKeys(["plain"], [{ key: "mood", values: [] }])).toEqual([]);
+  });
+
+  it("ignores inline and linked placeholders (their values are inline)", () => {
+    expect(missingKeys(["{{a|b}} and {{p:he|she}} {{p:his|her}}"], [])).toEqual([]);
+  });
+});
+
+describe("inline alternation {{a|b|c}}", () => {
+  it("expands an inline placeholder into one render per option", () => {
+    expect(expandBatch(["a {{small|large}} cat"], []).map((entry) => entry.prompt)).toEqual([
+      "a small cat",
+      "a large cat",
+    ]);
+  });
+
+  it("is not a named key — no chip editor, never missing", () => {
+    expect(extractKeys(["{{he|she|they}} waves"])).toEqual([]);
+    expect(missingKeys(["{{he|she|they}} waves"], [])).toEqual([]);
+  });
+
+  it("treats each occurrence as an independent axis (cross-product)", () => {
+    const out = expandBatch(["{{a|b}}-{{a|b}}"], []).map((entry) => entry.prompt);
+    expect(out).toEqual(["a-a", "a-b", "b-a", "b-b"]);
+  });
+
+  it("cross-products inline with named variables (named first, then inline fastest)", () => {
+    const out = expandBatch(["{{name}} the {{small|big}} one"], [
+      { key: "name", values: ["Alice", "Bob"] },
+    ]).map((entry) => entry.prompt);
+    expect(out).toEqual([
+      "Alice the small one",
+      "Alice the big one",
+      "Bob the small one",
+      "Bob the big one",
+    ]);
+  });
+
+  it("keeps empty options as a valid empty choice", () => {
+    expect(expandBatch(["a{{|-large}} cat"], []).map((entry) => entry.prompt)).toEqual([
+      "a cat",
+      "a-large cat",
+    ]);
+  });
+
+  it("counts inline options in cardinality", () => {
+    expect(cardinality(["{{a|b|c}} {{x|y}}"], [], 2)).toBe(3 * 2 * 2);
+  });
+});
+
+describe("linked groups {{label:a|b|c}} (zip)", () => {
+  it("advances same-label placeholders together (pronouns stay grammatical)", () => {
+    const out = expandBatch(
+      ["{{p:he|she|they}} took {{p:his|her|their}} bag; it was {{p:his|hers|theirs}}."],
+      [],
+    ).map((entry) => entry.prompt);
+    expect(out).toEqual([
+      "he took his bag; it was his.",
+      "she took her bag; it was hers.",
+      "they took their bag; it was theirs.",
+    ]);
+  });
+
+  it("zips (not cross-products) — 3 renders, not 27", () => {
+    expect(cardinality(["{{p:he|she|they}} {{p:his|her|their}} {{p:him|her|them}}"], [], 1)).toBe(3);
+  });
+
+  it("cross-products DIFFERENT labels but zips within each", () => {
+    const out = expandBatch(["{{p:he|she}} likes {{c:red|blue}}"], []).map((entry) => entry.prompt);
+    // p (2) × c (2) = 4, but each label zips internally
+    expect(out).toEqual(["he likes red", "he likes blue", "she likes red", "she likes blue"]);
+  });
+
+  it("a label:value with no pipe is still a named key, not a group", () => {
+    expect(extractKeys(["{{time:noon}}"])).toEqual(["time:noon"]);
+  });
+
+  it("clamps a mismatched group to the shortest for expansion", () => {
+    const out = expandBatch(["{{p:he|she|they}}/{{p:his|her}}"], []).map((entry) => entry.prompt);
+    expect(out).toEqual(["he/his", "she/her"]);
+  });
+});
+
+describe("linkedGroupIssues", () => {
+  it("reports a same-label group with differing option counts", () => {
+    expect(linkedGroupIssues(["{{p:he|she|they}} {{p:his|her}}"])).toEqual([
+      { label: "p", lengths: [2, 3] },
+    ]);
+  });
+
+  it("is empty when every same-label group matches", () => {
+    expect(linkedGroupIssues(["{{p:he|she}} {{p:his|her}}"])).toEqual([]);
+    expect(linkedGroupIssues(["{{a|b}} plain {{name}}"])).toEqual([]);
+  });
+});
+
+describe("firstResolvedPrompt", () => {
+  it("resolves line 1 with the first choice of every axis, no full materialization", () => {
+    expect(
+      firstResolvedPrompt(["{{name}} in {{a|b|c}} {{p:he|she}}/{{p:his|her}}", "second"], [
+        { key: "name", values: ["Alice", "Bob"] },
+      ]),
+    ).toBe("Alice in a he/his");
+  });
+
+  it("is empty for a blank batch", () => {
+    expect(firstResolvedPrompt([], [])).toBe("");
+  });
+
+  it("leaves an unfilled named key literal", () => {
+    expect(firstResolvedPrompt(["{{name}} {{a|b}}"], [])).toBe("{{name}} a");
   });
 });

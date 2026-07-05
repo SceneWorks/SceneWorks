@@ -2,8 +2,9 @@ import React, { useMemo, useRef, useState } from "react";
 
 import {
   cardinality,
-  expandBatch,
   extractKeys,
+  firstResolvedPrompt,
+  linkedGroupIssues,
   missingKeys,
   splitPromptLines,
 } from "../promptBatch.js";
@@ -106,8 +107,12 @@ export default function BatchPromptPanel({
     [keys, variableValues],
   );
   const total = useMemo(() => cardinality(prompts, variables, count), [prompts, variables, count]);
-  const previewPrompt = useMemo(() => expandBatch(prompts, variables)[0]?.prompt ?? "", [prompts, variables]);
+  // firstResolvedPrompt (not expandBatch()[0]) so the live preview never materializes the
+  // whole expansion, which inline alternation can make enormous.
+  const previewPrompt = useMemo(() => firstResolvedPrompt(prompts, variables), [prompts, variables]);
   const missing = useMemo(() => missingKeys(prompts, variables), [prompts, variables]);
+  const groupIssues = useMemo(() => linkedGroupIssues(prompts), [prompts]);
+  const hasPlaceholders = useMemo(() => prompts.some((prompt) => /\{\{[^{}]+\}\}/.test(prompt)), [prompts]);
 
   const setKeyValues = (key, values) =>
     onVariableValuesChange({ ...variableValues, [key]: values });
@@ -160,7 +165,7 @@ export default function BatchPromptPanel({
             aria-label="Batch prompts"
             className="batch-prompts"
             onChange={(event) => onPromptsTextChange(event.target.value)}
-            placeholder={"{{name}} with {{hair}} hair, front view\n{{name}} profile, soft light\n\nUse --- on its own line for multi-line prompts"}
+            placeholder={"{{name}} with {{hair}} hair, front view\n{{name}} in a {{red|blue|green}} coat\n{{p:he|she|they}} adjusts {{p:his|her|their}} scarf\n\nUse --- on its own line for multi-line prompts"}
             value={promptsText}
           />
         </label>
@@ -177,10 +182,15 @@ export default function BatchPromptPanel({
               />
             ))}
           </div>
+        ) : hasPlaceholders ? (
+          <p className="batch-hint">
+            Inline choices like <code>{"{{red|blue}}"}</code> and linked groups like{" "}
+            <code>{"{{p:he|she|they}}"}</code> expand automatically — no value boxes needed.
+          </p>
         ) : (
           <p className="batch-hint">
-            Add <code>{"{{placeholders}}"}</code> in your prompts (e.g. <code>{"{{name}}"}</code>) to get a value box per
-            variable.
+            Add <code>{"{{name}}"}</code> for a value box, <code>{"{{a|b|c}}"}</code> for inline choices, or{" "}
+            <code>{"{{p:he|she}}"}</code> to link correlated options (pronouns).
           </p>
         )}
 
@@ -202,6 +212,15 @@ export default function BatchPromptPanel({
         {missing.length > 0 ? (
           <p className="batch-warning" role="status">
             Add at least one value for: {missing.map((key) => `{{${key}}}`).join(", ")}
+          </p>
+        ) : null}
+
+        {groupIssues.length > 0 ? (
+          <p className="batch-warning" role="status">
+            {groupIssues
+              .map((issue) => `Linked group {{${issue.label}:…}} has mismatched lengths (${issue.lengths.join(" vs ")})`)
+              .join("; ")}
+            . Give every <code>{`{{${groupIssues[0].label}:…}}`}</code> the same number of options.
           </p>
         ) : null}
       </div>
