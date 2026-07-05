@@ -1073,3 +1073,157 @@ async fn download_progress_tick_cancels_from_progress_post_snapshot() {
         "the tick must not GET the job for its cancel decision"
     );
 }
+
+/// A stub whose HF tree resolve returns an EMPTY file list, plus the job/progress/heartbeat routes a
+/// download job touches. Progress POSTs are recorded so the test can assert the job was FAILED.
+async fn spawn_empty_tree_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+    use std::sync::{Arc, Mutex};
+    type Posts = Arc<Mutex<Vec<Value>>>;
+    async fn tree_route() -> Response {
+        // No files at this revision under any filter — the unpublished-tier case.
+        Json(json!([])).into_response()
+    }
+    async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
+        Json(job_snapshot_json(&job_id, false)).into_response()
+    }
+    async fn progress_route(
+        State(posts): State<Posts>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+        Json(body): Json<Value>,
+    ) -> Response {
+        posts.lock().expect("posts lock").push(body);
+        Json(job_snapshot_json(&job_id, false)).into_response()
+    }
+    async fn heartbeat_route(
+        axum::extract::Path(worker_id): axum::extract::Path<String>,
+    ) -> Response {
+        Json(worker_snapshot_json(&worker_id)).into_response()
+    }
+    let posts: Posts = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new()
+        .route("/api/models/:owner/:repo/tree/:revision", get(tree_route))
+        .route("/api/v1/jobs/:job_id", get(job_route))
+        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .route("/api/v1/workers/:worker_id/heartbeat", post(heartbeat_route))
+        .with_state(posts.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    (format!("http://{address}"), posts)
+}
+
+#[tokio::test]
+async fn model_download_fails_when_the_tier_resolves_no_files() {
+    // sc-9909: installing a quant tier whose weights aren't published yet (sc-8513 rollout) resolves
+    // ZERO files. That must FAIL with a clear message rather than silently "succeed" and leave an
+    // empty cache + a stale completion marker.
+    let temp = tempdir().expect("tempdir creates");
+    let (base_url, posts) = spawn_empty_tree_stub().await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url.clone();
+    settings.data_dir = temp.path().to_path_buf();
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+
+    let mut job_json = job_snapshot_json("job-1", false);
+    job_json["type"] = json!("model_download");
+    job_json["payload"] = json!({
+        "modelId": "sdxl",
+        "repo": "SceneWorks/sdxl-base-mlx",
+        "files": ["q8/*"],
+    });
+    let job: JobSnapshot = serde_json::from_value(job_json).expect("job deserializes");
+
+    super::model_jobs::run_model_download_job(&api, &settings, &client, &job)
+        .await
+        .expect("returns Ok — the failure is reported via a progress post, not an Err");
+
+    // The completion marker must NOT have been written for an empty download.
+    let marker = temp
+        .path()
+        .join("models")
+        .join(safe_download_dir("SceneWorks/sdxl-base-mlx"))
+        .join(INSTALL_MARKER);
+    assert!(!marker.exists(), "no completion marker for a zero-file download");
+
+    // A Failed progress post naming the empty tier was recorded.
+    let posts = posts.lock().expect("posts lock");
+    let failed = posts.iter().any(|post| {
+        post.get("status").and_then(Value::as_str) == Some("failed")
+            && post
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("No files to download"))
+    });
+    assert!(failed, "expected a failed progress post, got {posts:?}");
+}
+
+/// A tree stub that paginates: page 1 (no cursor) returns bf16/q4 files plus a `Link: rel="next"`
+/// header pointing at page 2; page 2 (cursor=next) returns the q8 file and no further link.
+async fn spawn_paginated_tree_stub() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    let base = format!("http://{address}");
+    let base_for_handler = base.clone();
+    async fn page(
+        base: String,
+        axum::extract::RawQuery(query): axum::extract::RawQuery,
+    ) -> Response {
+        let on_page_two = query.as_deref().is_some_and(|q| q.contains("cursor=next"));
+        if on_page_two {
+            // The later tier — only visible if pagination is followed.
+            Json(json!([
+                { "type": "file", "path": "q8/unet/model.safetensors", "size": 3_000_000_000u64 }
+            ]))
+            .into_response()
+        } else {
+            let mut response = Json(json!([
+                { "type": "file", "path": "bf16/model_index.json", "size": 600 },
+                { "type": "file", "path": "q4/model_index.json", "size": 600 }
+            ]))
+            .into_response();
+            let link = format!("<{base}/api/models/owner/repo/tree/main?recursive=true&expand=true&limit=50&cursor=next>; rel=\"next\"");
+            response.headers_mut().insert(
+                reqwest::header::LINK,
+                axum::http::HeaderValue::from_str(&link).expect("valid link header"),
+            );
+            response
+        }
+    }
+    let app = Router::new().route(
+        "/api/models/:owner/:repo/tree/:revision",
+        get(move |raw| page(base_for_handler.clone(), raw)),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    base
+}
+
+#[tokio::test]
+async fn resolve_follows_tree_pagination_across_pages() {
+    // sc-9909: the HF tree `expand=1` view is paginated (limit 50). A later tier's files land on a
+    // subsequent page, so resolve MUST follow `Link: rel="next"` — otherwise a `q8/*` filter matches
+    // nothing (the q8 files are on page 2) and the tier silently "downloads" empty.
+    let base_url = spawn_paginated_tree_stub().await;
+    let settings = test_settings(base_url, None);
+    let client = reqwest::Client::new();
+
+    let snapshot =
+        HuggingFaceSnapshot::resolve(&client, &settings, "owner/repo", "main", &["q8/*".to_owned()])
+            .await
+            .expect("resolves across pages");
+
+    let paths: Vec<&str> = snapshot.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        vec!["q8/unet/model.safetensors"],
+        "the q8 file from page 2 must be resolved (pagination followed)"
+    );
+}
