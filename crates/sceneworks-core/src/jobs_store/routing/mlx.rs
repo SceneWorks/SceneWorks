@@ -63,9 +63,10 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "instantid_realvisxl" => instantid_mlx_eligible(payload),
         "pulid_flux_dev" => pulid_flux_mlx_eligible(payload),
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => chroma_mlx_eligible(payload),
-        "sensenova_u1_8b" | "sensenova_u1_8b_infographic_v2" | "sensenova_u1_8b_fast" => {
-            sensenova_mlx_eligible(payload)
-        }
+        "sensenova_u1_8b"
+        | "sensenova_u1_8b_infographic_v2"
+        | "sensenova_u1_8b_fast"
+        | "sensenova_u1_8b_infographic_v2_fast" => sensenova_mlx_eligible(payload),
         "kolors" => kolors_mlx_eligible(payload),
         "lens" | "lens_turbo" => lens_mlx_eligible(payload),
         "bernini_image" => bernini_image_mlx_eligible(payload),
@@ -123,7 +124,17 @@ pub(crate) fn understanding_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("sensenova_u1_8b");
-    matches!(model, "sensenova_u1_8b" | "sensenova_u1_8b_fast")
+    // All SenseNova-U1 ids (base + Infographic-V2 + distilled) serve the understanding surface via
+    // the same in-process T2iModel. V2 base advertises vqa/interleave; the `_fast` ids don't (their
+    // manifests omit those caps, so a VQA/interleave job is never created for them) but are listed for
+    // parity with the base+fast pattern — harmless.
+    matches!(
+        model,
+        "sensenova_u1_8b"
+            | "sensenova_u1_8b_infographic_v2"
+            | "sensenova_u1_8b_fast"
+            | "sensenova_u1_8b_infographic_v2_fast"
+    )
 }
 
 /// SDXL MLX-routing conditions. sc-3026 brought txt2img + LoRA; sc-3060 (epic 3041) adds the

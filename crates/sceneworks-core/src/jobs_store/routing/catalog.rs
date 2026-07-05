@@ -594,6 +594,15 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
         false,
     ),
     ModelCaps::new("sensenova_u1_8b_fast", true, true, false, false, false),
+    // Infographic-V2 8-step distilled variant (epic 9959): same fast engine, routes like the base fast.
+    ModelCaps::new(
+        "sensenova_u1_8b_infographic_v2_fast",
+        true,
+        true,
+        false,
+        false,
+        false,
+    ),
     // Kolors (epic 3090): full surface on the Rust `kolors` engine (SDXL-family U-Net + ChatGLM3);
     // candle serves txt2img + bespoke IP/pose lanes (sc-5488/sc-5489).
     ModelCaps::new("kolors", true, true, false, false, false),
@@ -893,6 +902,7 @@ mod tests {
         "sensenova_u1_8b",
         "sensenova_u1_8b_fast",
         "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v2_fast",
         "kolors",
         "lens",
         "lens_turbo",
@@ -932,6 +942,7 @@ mod tests {
         "sensenova_u1_8b",
         "sensenova_u1_8b_infographic_v2",
         "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2_fast",
         "ideogram_4",
         "ideogram_4_turbo",
         "boogu_image",

@@ -1328,6 +1328,100 @@
       }
     },
     {
+      // Infographic-V2 8-step distilled variant (epic 9959, sc-9963). The V1 8-step distill LoRA
+      // (sensenova/SenseNova-U1-8B-MoT-LoRAs) merges cleanly onto V2 (296/296 gen-path targets) and
+      // renders coherent 8-step infographics — validated on-device. Pre-merged + packed per tier
+      // (distill_merged.json marker → load_fast skips the load-time merge), riding the existing
+      // sensenova_u1_8b_fast engine. T2I / edit / character only (no VQA / interleave), 8 steps / cfg 1.0.
+      "id": "sensenova_u1_8b_infographic_v2_fast",
+      "name": "SenseNova-U1 8B Infographic V2 Fast",
+      "family": "sensenova-u1",
+      "type": "image",
+      "adapter": "sensenova_u1",
+      "capabilities": ["text_to_image", "edit_image", "character_image"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 11824526409,
+          "footprint": { "diskSizeBytes": 11824526409, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 19927924235,
+          "footprint": { "diskSizeBytes": 19927924235, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 35121633249,
+          "footprint": { "diskSizeBytes": 35121633249, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx"
+      },
+      "gated": false,
+      "defaults": {
+        "resolution": "2048x2048",
+        "steps": 8,
+        "guidanceScale": 1.0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "shift",
+        "schedulerShift": 3.0
+      },
+      "limits": {
+        "resolutions": ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"],
+        "count": [1, 2, 4],
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "loraCompatibility": {
+        "families": ["sensenova-u1"],
+        "types": []
+      },
+      "mlx": {
+        "quantize": 4,
+        "standardTierLayout": true
+      },
+      "ui": {
+        "label": "SenseNova-U1 8B Infographic V2 Fast",
+        "description": "8-step distilled SenseNova-U1 Infographic V2 — ~5–6× faster infographic/poster text-to-image, editing, and Character Studio reference at a small quality trade-off. Same infographic strengths as the V2 base (dense small-text, stable layouts, black-background fix) at 8 steps / cfg 1.0. Ships as its own pre-built quant-matrix (q4 default / q8 / bf16), each a self-contained tier with the 8-step distill LoRA already merged in — no separate LoRA download. Use the V2 base for max-quality dense-text work.",
+        "recommendedFor": ["text_to_image", "edit_image", "character_image"],
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "viewAngles": [
+          { "id": "three_quarter_left", "label": "Three-quarter left" },
+          { "id": "three_quarter_right", "label": "Three-quarter right" },
+          { "id": "left_profile", "label": "Left profile" },
+          { "id": "right_profile", "label": "Right profile" },
+          { "id": "up", "label": "Looking up" },
+          { "id": "down", "label": "Looking down" },
+          { "id": "up_left", "label": "Up · left" },
+          { "id": "up_right", "label": "Up · right" },
+          { "id": "down_left", "label": "Down · left" },
+          { "id": "down_right", "label": "Down · right" },
+          { "id": "front", "label": "Front" }
+        ],
+        "promptGuide": {
+          "title": "SenseNova-U1 8B Infographic V2 Fast Prompt Guide",
+          "path": "/prompt-guides/sensenova-u1-8b-infographic-v2.md",
+          "sources": [
+            { "label": "SenseNova-U1 Infographic V2 model card", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT-Infographic-V2" },
+            { "label": "SenseNova-U1 prompt enhancement doc", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT/blob/main/docs/prompt_enhancement.md" }
+          ]
+        }
+      }
+    },
+    {
       "id": "flux_schnell",
       "name": "FLUX.1 [schnell]",
       "family": "flux",
