@@ -11,6 +11,7 @@ import StructuredPromptBuilder from "../components/StructuredPromptBuilder.jsx";
 import ReferenceCaptionPicker from "../components/ReferenceCaptionPicker.jsx";
 import BatchPromptPanel from "../components/BatchPromptPanel.jsx";
 import { cardinality, expandBatch, extractKeys, missingKeys, splitPromptLines } from "../promptBatch.js";
+import { resolveEffectiveDimensions } from "../resolutionOverride.js";
 import { batchItemStatus, summarizeBatchProgress } from "../batchOps.js";
 import {
   emptyCaption,
@@ -524,6 +525,12 @@ export function ImageStudio() {
   // clear the override.
   const [stepsOverride, setStepsOverride] = useState(saved.steps ?? "");
   const [guidanceOverride, setGuidanceOverride] = useState(saved.guidanceScale ?? "");
+  // Advanced resolution override: a custom Width/Height to experiment beyond the model's
+  // pre-declared Aspect options (e.g. Krea 2 up to 4K). "" = "use the Aspect dropdown" for
+  // that axis, mirroring the Steps/Guidance overrides. Effective dims are derived below and
+  // ride the existing top-level width/height payload; the backend caps each at 256–4096.
+  const [widthOverride, setWidthOverride] = useState(saved.widthOverride ?? "");
+  const [heightOverride, setHeightOverride] = useState(saved.heightOverride ?? "");
   // Flash attention (sc-3674): fused attention on the candle (Windows/CUDA) SDXL backend — faster +
   // less VRAM. Per-payload (sent in `advanced.flashAttn`); the worker honors it only on candle, and
   // ignores it on every other backend. Default on. Sticky pref (persisted), not model-reset.
@@ -1188,7 +1195,16 @@ export function ImageStudio() {
       setUpscaleSoftness(upscale.softness);
     }
   }, [launchRequest?.id]);
-  const [width, height] = resolution.split("x").map((value) => Number(value));
+  const [dropdownWidth, dropdownHeight] = resolution.split("x").map((value) => Number(value));
+  // A non-empty Width/Height override wins for that axis; empty falls back to the Aspect
+  // dropdown. The resulting dims flow through the existing top-level width/height payload,
+  // so submit() and the batch builder need no further change. Logic lives in the pure,
+  // unit-tested resolveEffectiveDimensions helper.
+  const { width, height, invalid: dimensionsInvalid } = resolveEffectiveDimensions({
+    resolution,
+    widthOverride,
+    heightOverride,
+  });
 
   // Magic-prompt expansion (sc-5997): expand the plain-text idea into an editable caption via the
   // native utility model (same backend as Refine), recording which model drafted it. Returns the
@@ -1367,6 +1383,8 @@ export function ImageStudio() {
     seed,
     negativePrompt,
     resolution,
+    widthOverride,
+    heightOverride,
     fitMode,
     referenceAssetIds,
     ipAdapterScale,
@@ -1422,6 +1440,10 @@ export function ImageStudio() {
       return;
     }
     if (submitting) {
+      return;
+    }
+    if (dimensionsInvalid) {
+      setSubmitError("Width and height must each be between 256 and 4096.");
       return;
     }
     setSubmitting(true);
@@ -1677,6 +1699,11 @@ export function ImageStudio() {
     if (!resolved.length) {
       return;
     }
+    if (dimensionsInvalid) {
+      setBatchError("Width and height must each be between 256 and 4096.");
+      return;
+    }
+    setBatchError("");
     // Soft cap: a large run must be confirmed once, showing the exact image count.
     if (!confirmed && resolved.length * count > BATCH_RENDER_CAP) {
       setBatchConfirmPending(true);
@@ -2355,6 +2382,31 @@ export function ImageStudio() {
                   Seed
                   <input onChange={(event) => setSeed(event.target.value)} placeholder="Random" type="number" value={seed} />
                 </label>
+                <label>
+                  Width override
+                  <input
+                    min="256"
+                    max="4096"
+                    onChange={(event) => setWidthOverride(event.target.value)}
+                    placeholder={String(dropdownWidth)}
+                    type="number"
+                    value={widthOverride}
+                  />
+                </label>
+                <label>
+                  Height override
+                  <input
+                    min="256"
+                    max="4096"
+                    onChange={(event) => setHeightOverride(event.target.value)}
+                    placeholder={String(dropdownHeight)}
+                    type="number"
+                    value={heightOverride}
+                  />
+                </label>
+                <span className="field-hint">
+                  Custom size overrides the Aspect dropdown (256–4096 per side; leave blank to use it).
+                </span>
                 {showSamplerPicker ? (
                   <label>
                     Sampler
