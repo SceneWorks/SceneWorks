@@ -2083,21 +2083,27 @@ export function App() {
           </div>
           <span className="topbar-spacer" />
           <div className="topbar-status">
-            <span className={health?.status === "ok" ? "status-pill" : "status-pill warning"}>
+            {/* Status collapses to one summary pill (UI-refinement 1d): API health · workers · GPU.
+                Clicking through opens the Queue, where the per-worker/job detail lives. */}
+            <button
+              className={health?.status === "ok" ? "status-pill status-summary" : "status-pill status-summary warning"}
+              onClick={() => setActiveView("Queue")}
+              title="Workers and GPU activity — open the Queue for detail"
+              type="button"
+            >
               <StatusDot ok={health?.status === "ok"} />
-              {health?.status === "ok" ? "API ready" : "API offline"}
-            </span>
-            <span className="status-pill">
-              <span className={visibleWorkers.length ? "dot" : "dot idle"} />
-              {visibleWorkers.length ? `${visibleWorkers.length} worker${visibleWorkers.length === 1 ? "" : "s"}` : "No workers"}
-            </span>
-            <span className="status-pill">
-              {gpuOptions.length > 1 ? `${gpuOptions.length - 1} GPU slot${gpuOptions.length === 2 ? "" : "s"}` : "GPU auto"}
-            </span>
+              {health?.status === "ok" ? "Ready" : "API offline"}
+              <span className="status-summary-sep">·</span>
+              {visibleWorkers.length} worker{visibleWorkers.length === 1 ? "" : "s"}
+              <span className="status-summary-sep">·</span>
+              {gpuOptions.length > 1 ? `${gpuOptions.length - 1} GPU` : "GPU auto"}
+              <Icon.ChevDown className="status-summary-caret" size={13} />
+            </button>
             <button className="queue-chip" onClick={() => setActiveView("Queue")} type="button">
               Queue {queueCounts.active}
             </button>
           </div>
+          <span className="topbar-divider" aria-hidden="true" />
           <button className="icon-btn" title="Notifications" type="button">
             <Icon.Bell />
           </button>

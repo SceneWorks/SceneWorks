@@ -862,6 +862,36 @@ button:focus-visible {
   color: var(--text);
 }
 
+/* One summary status pill (UI-refinement 1d) — a clickable button that folds API health,
+   worker count and GPU count into a single chip with a chevron. */
+.topbar-status button.status-summary {
+  gap: 6px;
+  font-family: var(--font-ui);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.topbar-status button.status-summary:hover {
+  background: var(--surface-hover);
+}
+
+.status-summary-sep {
+  color: var(--text-faint);
+}
+
+.status-summary-caret {
+  opacity: 0.5;
+  margin-left: 2px;
+}
+
+/* Divider between the system-status group and the personal controls (bell · accent · theme). */
+.topbar-divider {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 22px;
+  background: var(--border);
+}
+
 .queue-chip {
   display: inline-flex;
   align-items: center;
@@ -1554,6 +1584,196 @@ label {
   flex-wrap: wrap;
 }
 
+/* Mode tabs (UI-refinement 1a): flat underline tabs replacing the segmented pill for the
+   Text / Edit / With-character switch. A shared class so Video/Character studios can adopt
+   the same treatment. Sits on a shared 1px baseline; the active tab carries a 2px accent
+   underline + heavier weight. */
+.mode-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+}
+
+.mode-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 0;
+  padding: 11px 2px;
+  margin-right: 26px;
+  margin-bottom: -1px;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color var(--t-fast);
+}
+
+.mode-tab:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.mode-tab.active {
+  color: var(--text);
+  font-weight: 700;
+  border-bottom-color: var(--accent);
+}
+
+.mode-tab:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Prompt tools (UI-refinement 1b): one framed strip of two equally-weighted toggle tiles;
+   the active tile lights up in accent and reveals its panel inline below. */
+.prompt-tools {
+  display: grid;
+  gap: 8px;
+}
+
+.prompt-tools-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.prompt-tools-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.prompt-tools-head .hairline {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.prompt-tools-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.prompt-tool {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+
+.prompt-tool:hover {
+  border-color: var(--border-strong);
+}
+
+.prompt-tool.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.prompt-tool-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.prompt-tool-desc {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.prompt-tool-panel {
+  margin-top: 2px;
+}
+
+/* Settings bar (UI-refinement 2b): the everyday knobs (Model / Aspect / Variations, then a
+   Style-preset row) in a bordered strip directly under the composer. Advanced holds the
+   power-user knobs. */
+.settings-bar {
+  display: grid;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.settings-bar-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: flex-end;
+}
+
+.settings-field {
+  display: grid;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.settings-field-model {
+  flex: 2 1 200px;
+  min-width: 160px;
+}
+
+.settings-field-aspect {
+  flex: 1 1 130px;
+  min-width: 120px;
+}
+
+.settings-field-count {
+  flex: 0 1 96px;
+  min-width: 82px;
+}
+
+.settings-field select,
+.settings-field input {
+  width: 100%;
+  height: 36px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  color: var(--text);
+  font: 400 13px var(--font-ui);
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.settings-bar-styles {
+  display: grid;
+  gap: 7px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.settings-bar-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
 .refine-control {
   display: grid;
   gap: 8px;
@@ -2142,17 +2362,13 @@ label {
 }
 
 /* ---------- Studio results: latest batch + preset rail ---------- */
+/* Single column (UI-refinement 2b): the generation settings moved into the composer, so the
+   results area reclaims the full width the preset rail used to take. */
 .studio-results {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+  grid-template-columns: 1fr;
   gap: 16px;
   align-items: start;
-}
-
-@media (max-width: 1100px) {
-  .studio-results {
-    grid-template-columns: 1fr;
-  }
 }
 
 /* Document Studio (interleaved text-image) — sc-1607/1608. The screen wraps in
@@ -4188,10 +4404,12 @@ label {
 }
 
 /* ---------- Model + LoRA panels ---------- */
+/* Model catalog is a single-column list of expandable rows (UI-refinement 1c), the same
+   rhythm as the LoRA rows — no longer a dense card grid. */
 .model-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: var(--gap-3);
+  grid-template-columns: 1fr;
+  gap: 8px;
 }
 
 /* Type-grouped model sections (Image / Video / Utility) + family-grouped LoRAs. */
@@ -4348,7 +4566,7 @@ details[open] > summary.lora-scope-group-heading::before,
   font-variant-numeric: tabular-nums;
 }
 
-.model-card,
+.model-row,
 .lora-panel,
 .lora-row,
 .preset-list,
@@ -4417,43 +4635,109 @@ details[open] > summary.lora-scope-group-heading::before,
   white-space: nowrap;
 }
 
-.model-card {
+/* Expandable model rows (UI-refinement 1c): a collapsed summary line (caret · name ·
+   family/capability · status · size) over an expandable body of details + actions. */
+.model-row {
+  overflow: hidden;
+}
+
+.model-row-summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 11px 14px;
+  background: none;
+  border: 0;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.model-row-summary:hover {
+  background: var(--surface-hover);
+}
+
+.model-row-caret {
+  flex: 0 0 auto;
+  width: 10px;
+  font-size: 10px;
+  color: var(--text-faint);
+  transition: transform var(--t-fast);
+}
+
+.model-row-caret.open {
+  transform: rotate(90deg);
+}
+
+.model-row-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.model-row-heading strong {
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-row-heading small {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.model-row-size {
+  flex: 0 0 auto;
+  min-width: 64px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.model-row-body {
   display: grid;
   gap: 12px;
   align-content: start;
-  padding: 14px;
+  padding: 12px 16px 14px 36px;
+  border-top: 1px solid var(--border);
 }
 
-.model-card h3,
-.model-card p,
-.model-card dl {
+.model-row-body[hidden] {
+  display: none;
+}
+
+.model-row-body h3,
+.model-row-body p,
+.model-row-body dl {
   margin: 0;
 }
 
-.model-card h3 {
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.model-card p {
+.model-row-body p {
   color: var(--text-muted);
   line-height: 1.5;
   font-size: 13px;
 }
 
-.model-card dl {
+.model-row-body dl {
   display: grid;
   gap: 8px;
 }
 
-.model-card dt {
+.model-row-body dt {
   color: var(--text-faint);
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
 
-.model-card dd {
+.model-row-body dd {
   margin: 0;
   font-family: var(--font-mono);
   font-size: 12px;
@@ -5459,10 +5743,21 @@ details[open] > summary.lora-scope-group-heading::before,
 }
 
 .lora-slot-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
   min-width: 0;
+}
+
+.lora-slot-meta strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lora-slot-meta small {
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 .lora-slot-remove {
@@ -5580,12 +5875,37 @@ details[open] > summary.lora-scope-group-heading::before,
   transition: border-color var(--t-fast);
 }
 
-.lora-pick-row:hover {
+.lora-pick-row:hover:not(:disabled) {
   border-color: var(--accent);
+  background: var(--surface-hover);
+}
+
+.lora-pick-row:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .lora-pick-row strong {
   font-weight: 600;
+}
+
+/* Accent "Add" affordance on the right of each dropdown row (UI-refinement 3b). */
+.lora-pick-add {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.lora-pick-row:disabled .lora-pick-add {
+  color: var(--text-faint);
+}
+
+/* Mono weight readout in an added LoRA slot's Weight header row. */
+.lora-slot-weight-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
 }
 
 .lora-pick-empty {

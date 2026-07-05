@@ -847,7 +847,7 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      document.body.querySelector(".model-card .danger-action").click();
+      document.body.querySelector(".model-row .danger-action").click();
     });
 
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Delete model "Z-Image Turbo"?'));
