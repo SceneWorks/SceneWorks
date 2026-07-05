@@ -583,12 +583,29 @@ fn sana_manifest_entry_gates_correctly() {
         repo, "SceneWorks/Sana_1600M_1024px_mlx",
         "sana downloads from the un-gated SceneWorks/* MLX mirror, got {repo:?}"
     );
-    // Dense bf16: NO `mlx.quantize` (the SANA `load` rejects any `spec.quantize`; the worker resolves
-    // no quant for it via the `supports_quant()` gate). minMemoryGb drives the admit/hide gate.
+    // Quant matrix (sc-8489/sc-8513): the q4/q8/bf16 turnkey tiers are packed-detected on load, so the
+    // descriptor advertises Q4/Q8 and the manifest defaults to the packed q4 tier (`mlx.quantize: 4`;
+    // `standard_tier_subdir` resolves `q4/`). minMemoryGb drives the admit/hide gate.
     let mlx = entry.get("mlx").expect("sana mlx block");
-    assert!(
-        mlx.get("quantize").is_none(),
-        "sana ships dense bf16 — no mlx.quantize"
+    assert_eq!(
+        mlx.get("quantize").and_then(Value::as_u64),
+        Some(4),
+        "sana defaults to the packed q4 tier"
+    );
+    // Per-tier variants present (q4 default + q8 + bf16), each its own installable artifact (sc-8508).
+    let variants: Vec<&str> = entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|d| d.get("variant").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        variants,
+        vec!["q4", "q8", "bf16"],
+        "sana ships the q4/q8/bf16 tier matrix"
     );
     assert!(
         mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
@@ -621,8 +638,8 @@ fn sana_manifest_entry_gates_correctly() {
 
 /// sc-8490: the SANA-Sprint builtin entry gates exactly like base SANA — `sana` family, text_to_image
 /// only (CFG-free few-step distillation, no edit/reference surface), un-gated `SceneWorks/*` MLX
-/// re-host carrying the NVIDIA non-commercial notice, dense bf16 (no mlx.quantize), and the SANA LoRA
-/// family reserved. The few-step default (2 steps) is asserted so a manifest drift to the base 20-step
+/// re-host carrying the NVIDIA non-commercial notice, the q4/q8/bf16 quant matrix (default q4), and the
+/// SANA LoRA family reserved. The few-step default (2 steps) is asserted so a manifest drift to the base 20-step
 /// loop fails CI. Descriptor-derived guidance/negative/backend flags are covered by
 /// `model_table_rows_resolve_and_flags_match_descriptor`.
 #[test]
@@ -667,11 +684,26 @@ fn sana_sprint_manifest_entry_gates_correctly() {
         Some(2),
         "sana-sprint is a few-step (2-step) distillation"
     );
-    // Dense bf16: NO `mlx.quantize`.
+    // Quant matrix (sc-8490/sc-8513): default q4 (`mlx.quantize: 4`); q4/q8/bf16 tiers packed-detected.
     let mlx = entry.get("mlx").expect("sana-sprint mlx block");
-    assert!(
-        mlx.get("quantize").is_none(),
-        "sana-sprint ships dense bf16 — no mlx.quantize"
+    assert_eq!(
+        mlx.get("quantize").and_then(Value::as_u64),
+        Some(4),
+        "sana-sprint defaults to the packed q4 tier"
+    );
+    let variants: Vec<&str> = entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|d| d.get("variant").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        variants,
+        vec!["q4", "q8", "bf16"],
+        "sana-sprint ships the q4/q8/bf16 tier matrix"
     );
     assert!(
         mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),

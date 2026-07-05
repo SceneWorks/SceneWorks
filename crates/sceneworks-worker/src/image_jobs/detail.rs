@@ -104,7 +104,8 @@ fn detail_refine_tile(
             Conditioning::Control {
                 image: tile,
                 kind: ControlKind::Other("tile".to_owned()),
-                scale: params.cn_scale,
+                // gen-core drift (sc-9940): scale is now Option<f32>; explicit tile-CN scale → Some.
+                scale: Some(params.cn_scale),
             },
         ],
         cancel: cancel.clone(),
