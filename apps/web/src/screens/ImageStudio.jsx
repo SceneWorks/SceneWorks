@@ -10,7 +10,8 @@ import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
 import StructuredPromptBuilder from "../components/StructuredPromptBuilder.jsx";
 import ReferenceCaptionPicker from "../components/ReferenceCaptionPicker.jsx";
 import BatchPromptPanel from "../components/BatchPromptPanel.jsx";
-import { cardinality, extractKeys, splitPromptLines } from "../promptBatch.js";
+import { cardinality, expandBatch, extractKeys, missingKeys, splitPromptLines } from "../promptBatch.js";
+import { batchItemStatus, summarizeBatchProgress } from "../batchOps.js";
 import {
   emptyCaption,
   orderCaption,
@@ -368,6 +369,9 @@ export function ImageStudio() {
   const [loadedBatchId, setLoadedBatchId] = useState(saved.loadedBatchId ?? null);
   const [batchError, setBatchError] = useState("");
   const [batchBusy, setBatchBusy] = useState(false);
+  // An in-flight / just-finished batch run: { submitting, items: [{ prompt, jobId }] }.
+  // Progress + cancel are derived off the live jobs feed, mirroring the asset batch (sc-6112).
+  const [batchRun, setBatchRun] = useState(null);
 
   const batchPrompts = useMemo(() => splitPromptLines(batchPromptsText), [batchPromptsText]);
   const batchVariables = useMemo(
@@ -1570,6 +1574,133 @@ export function ImageStudio() {
     }
   }
 
+  // One image-job request for a single resolved batch prompt. Reuses the current
+  // studio settings (model, loras, upscale, reference/source per mode, and the whole
+  // advanced knob set via the tested buildImageJobAdvanced). Batch deliberately omits
+  // the single-shot pose-library / strict-control conditioning and never sends a
+  // structured caption — each resolved prompt is a plain prompt. `count` still
+  // multiplies within each job (images = jobs × count).
+  const buildBatchJobRequest = (resolvedPrompt) => ({
+    mode,
+    prompt: resolvedPrompt,
+    negativePrompt,
+    model,
+    count,
+    seed: seed === "" ? null : Number(seed),
+    width,
+    height,
+    recipePresetId: selectedPreset?.id ?? null,
+    characterId: mode === "character_image" ? characterId || null : null,
+    characterLookId: mode === "character_image" ? characterLookId || null : null,
+    sourceAssetId: mode === "edit_image" && !multiReference ? sourceAssetId || null : null,
+    referenceAssetIds:
+      mode === "edit_image" && multiReference && referenceAssetIds.length ? referenceAssetIds : undefined,
+    fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
+    referenceAssetId: mode === "character_image" ? referenceAssetId || null : null,
+    loras: selectedLoras.map((lora) => serializeLora(lora, { weight: effectiveLoraWeight(lora) })),
+    ...(upscaleEnabled
+      ? {
+          upscale: {
+            enabled: true,
+            factor: upscaleFactor,
+            engine: upscaleEngine,
+            ...(upscaleEngineHasSoftness(upscaleEngine) ? { softness: upscaleSoftness } : {}),
+          },
+        }
+      : {}),
+    advanced: buildImageJobAdvanced({
+      resolution,
+      sendStructured: false,
+      submitIntent: resolvedPrompt,
+      submitCaption: caption,
+      submitBackend: magicPromptBackend,
+      sampler,
+      scheduler,
+      schedulerShift,
+      stepsOverride,
+      guidanceOverride,
+      guidanceMethod,
+      flashAttn,
+      promptEnhance,
+      enhancePrompt,
+      precisionToggle,
+      bf16Precision,
+      showTierPicker,
+      quantTier,
+      showPidToggle,
+      usePid,
+      mode,
+      referenceAssetId,
+      hideReferenceStrength,
+      ipAdapterScale,
+      identityStructure,
+      controlnetScale,
+      variationStrength,
+      trueCfgScale,
+      viewAngles,
+      viewAngle,
+      posePayload: [],
+      faceRestore,
+      controlActive: false,
+      activeControlMode,
+      controlPassthroughId: null,
+      effectiveControlScale,
+    }),
+  });
+
+  // Fan out one image job per resolved prompt (mirrors the asset batch, sc-6112): each
+  // posts independently so the worker runs them serially with its between-image cache
+  // release, and progress/cancel read the live jobs feed.
+  async function runBatch() {
+    if (batchRun?.submitting || !activeProject) {
+      return;
+    }
+    const resolved = expandBatch(batchPrompts, batchVariables);
+    if (!resolved.length) {
+      return;
+    }
+    setBatchRun({ submitting: true, items: resolved.map((entry) => ({ prompt: entry.prompt, jobId: null })) });
+    const items = [];
+    for (const entry of resolved) {
+      try {
+        const job = await createImageJob(buildBatchJobRequest(entry.prompt));
+        items.push({ prompt: entry.prompt, jobId: job?.id ?? null });
+      } catch {
+        items.push({ prompt: entry.prompt, jobId: null });
+      }
+    }
+    setBatchRun({ submitting: false, items });
+  }
+
+  // Cancel every still-pending job in the current run; completed/failed items are left.
+  function cancelBatchRun() {
+    if (!batchRun) {
+      return;
+    }
+    for (const item of batchRun.items) {
+      if (!item.jobId) {
+        continue;
+      }
+      const status = batchItemStatus(item.jobId, jobs);
+      if (status !== "queued" && status !== "running") {
+        continue;
+      }
+      const job = jobs.find((entry) => entry.id === item.jobId);
+      if (job) {
+        jobAction(job, "cancel");
+      }
+    }
+  }
+
+  const batchRunProgress = batchRun ? summarizeBatchProgress(batchRun.items, jobs) : null;
+  const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
+  const batchRunDisabled =
+    !activeProject ||
+    structuredPromptModel ||
+    batchTotal === 0 ||
+    batchMissingKeys.length > 0 ||
+    Boolean(batchRun?.submitting);
+
   const generateDisabled =
     submitting ||
     !activeProject ||
@@ -1665,9 +1796,34 @@ export function ImageStudio() {
                 busy={batchBusy}
                 error={batchError}
               />
-              <button className="prompt-cta" disabled title="Batch run lands in sc-9956" type="button">
-                <Icon.Play size={14} /> Run batch · {batchTotal}
-              </button>
+              <div className="batch-run">
+                {structuredPromptModel ? (
+                  <p className="batch-warning">
+                    Batch mode isn’t available for structured-caption models yet.
+                  </p>
+                ) : null}
+                {batchRun ? (
+                  <div className="batch-run-progress" aria-live="polite">
+                    <span>
+                      {batchRunProgress.done}/{batchRunProgress.total} done
+                      {batchRunProgress.failed ? ` · ${batchRunProgress.failed} failed` : ""}
+                    </span>
+                    {batchRunProgress.allDone ? (
+                      <button className="batch-btn ghost" onClick={() => setBatchRun(null)} type="button">
+                        Clear
+                      </button>
+                    ) : (
+                      <button className="batch-btn ghost" onClick={cancelBatchRun} type="button">
+                        Cancel remaining
+                      </button>
+                    )}
+                  </div>
+                ) : null}
+                <button className="prompt-cta" disabled={batchRunDisabled} onClick={runBatch} type="button">
+                  <Icon.Play size={14} />
+                  {batchRun?.submitting ? "Queueing…" : `Run batch · ${batchTotal}`}
+                </button>
+              </div>
             </div>
           ) : (
           <div className={`prompt-input-row${structuredPromptModel ? " structured" : ""}`}>
