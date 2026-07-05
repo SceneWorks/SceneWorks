@@ -384,6 +384,18 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 1.0,
         adapter_label: "mlx_sensenova",
     },
+    ModelRow {
+        // Infographic-V2 8-step distilled variant (epic 9959, sc-9963): the V1 distill LoRA merges
+        // cleanly onto V2 (296/296 gen-path targets) and renders coherent 8-step infographics. Same
+        // pre-merged + packed layout as the base fast (distill_merged.json marker → load_fast skip),
+        // so it rides the SAME `sensenova_u1_8b_fast` engine id — only the re-host repo differs.
+        sceneworks_id: "sensenova_u1_8b_infographic_v2_fast",
+        engine_id: "sensenova_u1_8b_fast",
+        default_repo: "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx",
+        default_steps: 8,
+        default_guidance: 1.0,
+        adapter_label: "mlx_sensenova",
+    },
     // Microsoft Lens / Lens-Turbo (epic 3164 engine / sc-5105 cutover) — gpt-oss-20b MoE text
     // encoder + 48-layer dual-stream MMDiT + the Flux.2 VAE. Pure **T2I** (the descriptor advertises
     // no conditioning — no img2img / ControlNet / IP), so both ids ride the base [`generate_stream`]
