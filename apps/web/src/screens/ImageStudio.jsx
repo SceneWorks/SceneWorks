@@ -507,6 +507,15 @@ export function ImageStudio() {
     setUpscaleFactor,
   });
 
+  // PiD decode and Upscale both super-resolve, so they're mutually exclusive in the UI (each
+  // disables the other while active). If a saved/preset state carries both on, drop PiD (keep
+  // Upscale) so neither checkbox is left permanently disabled.
+  useEffect(() => {
+    if (usePid && upscaleEnabled) {
+      setUsePid(false);
+    }
+  }, [usePid, upscaleEnabled]);
+
   useEffect(() => {
     if (mode === "edit_image" && selectedAssetEditableSourceId) {
       setSourceAssetId(selectedAssetEditableSourceId);
@@ -2140,15 +2149,20 @@ export function ImageStudio() {
                   >
                     <input
                       checked={usePid}
+                      disabled={upscaleEnabled}
                       onChange={(event) => setUsePid(event.target.checked)}
                       type="checkbox"
                     />
                     PiD decoder · 2K/4K <span className="badge badge-nc">Non-Commercial</span>
                   </label>
                 ) : null}
-                <label className="checkline upscale-toggle">
+                <label
+                  className="checkline upscale-toggle"
+                  title={usePid ? "Disabled while the PiD decoder is on — PiD already super-resolves to 2K/4K." : undefined}
+                >
                   <input
                     checked={upscaleEnabled}
+                    disabled={usePid}
                     onChange={(event) => setUpscaleEnabled(event.target.checked)}
                     type="checkbox"
                   />
@@ -2156,7 +2170,7 @@ export function ImageStudio() {
                 </label>
                 <label>
                   Scale
-                  <select disabled={!upscaleEnabled} onChange={(event) => setUpscaleFactor(Number(event.target.value))} value={upscaleFactor}>
+                  <select disabled={!upscaleEnabled || usePid} onChange={(event) => setUpscaleFactor(Number(event.target.value))} value={upscaleFactor}>
                     {upscaleFactorsForEngine(upscaleEngine).map((factor) => (
                       <option key={factor} value={factor}>
                         {factor}x
@@ -2166,7 +2180,7 @@ export function ImageStudio() {
                 </label>
                 <label>
                   Engine
-                  <select disabled={!upscaleEnabled} onChange={(event) => handleUpscaleEngineChange(event.target.value)} value={upscaleEngine}>
+                  <select disabled={!upscaleEnabled || usePid} onChange={(event) => handleUpscaleEngineChange(event.target.value)} value={upscaleEngine}>
                     {availableUpscaleEngines.map((engine) => (
                       <option key={engine.key} value={engine.key}>
                         {engine.label}
@@ -2179,7 +2193,7 @@ export function ImageStudio() {
                     Detail
                     <input
                       aria-label="SeedVR2 detail (softness)"
-                      disabled={!upscaleEnabled}
+                      disabled={!upscaleEnabled || usePid}
                       max="1"
                       min="0"
                       onChange={(event) => setUpscaleSoftness(Number(event.target.value))}

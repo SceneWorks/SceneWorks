@@ -804,6 +804,44 @@ describe("ImageStudio model picker capability gating", () => {
     expect(tierPicker(container)).toBeFalsy();
   });
 
+  // PiD decode and Upscale both super-resolve, so they're mutually exclusive: enabling one
+  // disables the other (and the upscale sub-controls).
+  it("makes PiD and Upscale mutually exclusive in Advanced", async () => {
+    const PID_MODEL = {
+      ...Z_IMAGE,
+      id: "qwen_image",
+      name: "Qwen Image",
+      ui: { pid: { checkpointId: "pid_qwenimage" } },
+    };
+    await render(
+      baseContext({
+        imageModels: [PID_MODEL],
+        models: [{ id: "pid_qwenimage", installState: "installed" }],
+      }),
+    );
+    await openAdvanced(container);
+    await act(async () => {});
+
+    const pid = () => container.querySelector('.pid-decoder-toggle input[type="checkbox"]');
+    const upscale = () => container.querySelector('.upscale-toggle input[type="checkbox"]');
+    expect(pid()).toBeTruthy();
+    expect(upscale()).toBeTruthy();
+    // Both start enabled.
+    expect(pid().disabled).toBe(false);
+    expect(upscale().disabled).toBe(false);
+
+    // PiD on → Upscale + its Scale/Engine sub-controls disable.
+    await act(async () => pid().click());
+    expect(upscale().disabled).toBe(true);
+    expect(field(container, "Scale").disabled).toBe(true);
+    expect(field(container, "Engine").disabled).toBe(true);
+
+    // PiD off, Upscale on → PiD disables.
+    await act(async () => pid().click());
+    await act(async () => upscale().click());
+    expect(pid().disabled).toBe(true);
+  });
+
   it("omits advanced.mlxQuantize on Generate when only one tier is installed (sc-8515)", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     await render(
