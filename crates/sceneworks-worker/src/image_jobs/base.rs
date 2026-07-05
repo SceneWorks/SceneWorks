@@ -1679,7 +1679,10 @@ fn is_flux_model(model: &str) -> bool {
 /// `mlx-gen-sensenova` engine (sc-3900).
 #[cfg(target_os = "macos")]
 fn is_sensenova_model(model: &str) -> bool {
-    matches!(model, "sensenova_u1_8b" | "sensenova_u1_8b_fast")
+    matches!(
+        model,
+        "sensenova_u1_8b" | "sensenova_u1_8b_infographic_v2" | "sensenova_u1_8b_fast"
+    )
 }
 
 /// Stage the engine's IP-Adapter dir contract from the two cached HF snapshots:
@@ -3236,6 +3239,7 @@ fn is_candle_engine(model: &str) -> bool {
             | "lens_turbo"
             | "kolors"
             | "sensenova_u1_8b"
+            | "sensenova_u1_8b_infographic_v2"
             | "sensenova_u1_8b_fast"
             | "ideogram_4"
             | "ideogram_4_turbo"
@@ -3284,7 +3288,9 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
-        "sensenova_u1_8b" | "sensenova_u1_8b_fast" => "candle_sensenova",
+        "sensenova_u1_8b" | "sensenova_u1_8b_infographic_v2" | "sensenova_u1_8b_fast" => {
+            "candle_sensenova"
+        }
         "ideogram_4" | "ideogram_4_turbo" => "candle_ideogram",
         "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => "candle_boogu",
         "krea_2_turbo" => "candle_krea",

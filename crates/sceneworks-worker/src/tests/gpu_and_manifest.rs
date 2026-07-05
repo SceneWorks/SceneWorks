@@ -348,6 +348,9 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("chroma1_base", false, true),
         ("chroma1_flash", false, true),
         ("sensenova_u1_8b", true, false),
+        // Infographic-V2 (epic 9959): rides the base `sensenova_u1_8b` engine id, so its descriptor
+        // flags are identical to the base (guidance true, negative false).
+        ("sensenova_u1_8b_infographic_v2", true, false),
         ("sensenova_u1_8b_fast", true, false),
         // Lens / Lens-Turbo (epic 3164 / sc-5105): the `mlx-gen-lens` descriptor advertises the
         // norm-rescaled CFG path (`supports_guidance=true`) + a negative prompt
