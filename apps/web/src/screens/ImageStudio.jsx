@@ -1656,7 +1656,7 @@ export function ImageStudio() {
                       referenceCharacters={characters}
                       importAsset={importAsset}
                       projectId={activeProject?.id ?? ""}
-                      hint="Start from a reference image — the captioner reads it into a detailed prompt you can edit. The image is only used to write the prompt; it isn’t sent to generation."
+                      hint="The image is only used to write the prompt — it isn’t sent to generation."
                       buttonLabel="✨ Describe image"
                       busyLabel="Describing…"
                       emptyMessage="The image did not produce a usable description. Try another reference."
@@ -1675,6 +1675,7 @@ export function ImageStudio() {
                 {refineActive ? (
                   <div className="prompt-tool-panel">
                     <RefinePromptControl
+                      autoStart
                       guidePath={promptGuide.path}
                       modelId={model}
                       onApply={setPromptFromUser}

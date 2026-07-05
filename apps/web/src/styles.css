@@ -1697,8 +1697,62 @@ label {
   color: var(--text-muted);
 }
 
+/* The inline panel a prompt-tool tile reveals (UI-refinement 1b) — a bordered surface-2 card.
+   It wraps the reused ReferenceCaptionPicker / RefinePromptControl, so normalize their internal
+   spacing and flatten the refine-review so it's not a card inside a card. */
 .prompt-tool-panel {
   margin-top: 2px;
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.prompt-tool-panel .structured-reference,
+.prompt-tool-panel .refine-control {
+  display: grid;
+  gap: 10px;
+}
+
+/* Flatten the nested review card — the panel already provides the surface + border. */
+.prompt-tool-panel .refine-review {
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+/* Primary "Describe image" action reads as accent inside the panel (matches the design). Scoped
+   to the reference flow so the refine Apply/Keep buttons keep their neutral treatment. */
+.prompt-tool-panel .structured-reference .secondary-action {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: transparent;
+}
+
+.prompt-tool-panel .structured-reference .secondary-action:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+/* Apply (the primary action in the rewrite review) reads as accent; Keep original stays neutral. */
+.prompt-tool-panel .refine-review-actions .secondary-action:first-child {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: transparent;
+}
+
+.prompt-tool-panel .refine-review-actions .secondary-action:first-child:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.refine-status {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-muted);
 }
 
 /* Settings bar (UI-refinement 2b): the everyday knobs (Model / Aspect / Variations, then a
