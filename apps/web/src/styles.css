@@ -6335,6 +6335,15 @@ details[open] > summary.lora-scope-group-heading::before,
   border: 1px solid var(--border);
 }
 
+/* Uniform control height so every select and number/text field in the panel lines up
+   on one baseline (the intrinsic heights of <select> and <input type=number> differ
+   otherwise). Excludes the negative-prompt textarea, checkbox toggles, and range sliders. */
+.advanced-panel select,
+.advanced-panel input:not([type="checkbox"]):not([type="range"]) {
+  height: 38px;
+  box-sizing: border-box;
+}
+
 /* Checkbox toggles are single-line rows (checkbox + label + any badge), not the
    stacked label-over-control grid every other field uses — without overriding
    the more-specific `.studio-controls label` grid rule they stack vertically and

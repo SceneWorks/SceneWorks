@@ -665,14 +665,10 @@ export function SavePresetPanel({
 }
 
 // The "what this preset adds" strip shown under the preset picker in both studios.
-export function PresetGuidanceStrip({ selectedPreset, presetPromptParts, presetLoraDetails, noPresetHint }) {
+export function PresetGuidanceStrip({ selectedPreset, presetPromptParts, presetLoraDetails }) {
+  // Nothing to say when no preset is active — the visible controls already describe the run.
   if (!selectedPreset) {
-    return (
-      <div className="guidance-strip">
-        <strong>No preset selected</strong>
-        <span>{noPresetHint}</span>
-      </div>
-    );
+    return null;
   }
   return (
     <div className="guidance-strip">
