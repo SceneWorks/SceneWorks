@@ -459,11 +459,31 @@ export function LoraPickerSection({
   setLoraWeight,
   loraEmptyMessage,
 }) {
+  // Add-on-demand picker (UI-refinement 3b): only the LoRAs you've added render as
+  // slots; everything else lives behind the "Add LoRA" dropdown. This replaces the
+  // checkbox-per-LoRA wall so a large library no longer floods the panel. "Show
+  // incompatible" now filters the dropdown (through compatibleLoras) instead of an
+  // always-visible list. Slot styles (.lora-stack/.lora-slot/.lora-add/
+  // .lora-picker-panel/.lora-pick-row) already live in styles.css.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const availableLoras = compatibleLoras.filter((lora) => !selectedLoraIds.includes(lora.id));
+  const atUserLimit = userSelectedLoraCount >= MAX_USER_JOB_LORAS;
+  const loraMeta = (lora) => {
+    const scope = lora.scope ?? "global";
+    return lora.family ? `${scope} · ${lora.family}` : scope;
+  };
+
   return (
     <section className="lora-picker" aria-label="LoRA selection">
       <div>
         <strong>LoRAs</strong>
-        <span>{selectedLoras.length ? `${selectedLoras.length} selected` : selectedModel ? "Installed and compatible" : "Choose a model"}</span>
+        <span>
+          {selectedLoras.length
+            ? `${selectedLoras.length} selected`
+            : selectedModel
+              ? "Installed and compatible"
+              : "Choose a model"}
+        </span>
       </div>
       <label className="checkline">
         <input
@@ -473,49 +493,92 @@ export function LoraPickerSection({
         />
         Show incompatible
       </label>
-      {compatibleLoras.length ? (
-        <div className="lora-choice-list">
-          {compatibleLoras.map((lora) => {
-            const checked = selectedLoraIds.includes(lora.id);
-            const userLimitReached = lora.scope !== "builtin" && !checked && userSelectedLoraCount >= MAX_USER_JOB_LORAS;
-            const weight = effectiveLoraWeight(lora);
-            return (
-              <div className="lora-choice-item" key={lora.id}>
-                <label className={checked ? "lora-choice active" : "lora-choice"}>
-                  <input
-                    checked={checked}
-                    disabled={userLimitReached}
-                    onChange={() => toggleLora(lora)}
-                    type="checkbox"
-                  />
-                  <span>
-                    <strong>{lora.name ?? lora.id}</strong>
-                    <small>
-                      {lora.scope ?? "global"} {lora.family ? `| ${lora.family}` : ""}
-                    </small>
-                  </span>
-                </label>
-                {checked ? (
-                  <div className="lora-weight-row">
-                    <span>Weight</span>
-                    <input
-                      aria-label={`${lora.name ?? lora.id} weight`}
-                      max="2"
-                      min="0"
-                      onChange={(event) => setLoraWeight(lora.id, Number(event.target.value))}
-                      step="0.05"
-                      type="range"
-                      value={weight}
-                    />
-                    <span className="lora-weight-value">{weight.toFixed(2)}</span>
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
-        </div>
-      ) : (
+
+      {!selectedLoras.length && !availableLoras.length ? (
         <div className="empty-panel compact-panel">{loraEmptyMessage}</div>
+      ) : (
+        <>
+          {selectedLoras.length ? (
+            <div className="lora-stack">
+              {selectedLoras.map((lora) => {
+                const weight = effectiveLoraWeight(lora);
+                return (
+                  <div className="lora-slot" key={lora.id}>
+                    <div className="lora-slot-head">
+                      <span className="lora-slot-meta">
+                        <strong>{lora.name ?? lora.id}</strong>
+                        <small>{loraMeta(lora)}</small>
+                      </span>
+                      <button
+                        aria-label={`Remove ${lora.name ?? lora.id}`}
+                        className="lora-slot-remove"
+                        onClick={() => toggleLora(lora)}
+                        title="Remove"
+                        type="button"
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <div className="lora-slot-weight">
+                      <label>
+                        <span>Weight</span>
+                        <span className="lora-slot-weight-value">{weight.toFixed(2)}</span>
+                      </label>
+                      <input
+                        aria-label={`${lora.name ?? lora.id} weight`}
+                        max="2"
+                        min="0"
+                        onChange={(event) => setLoraWeight(lora.id, Number(event.target.value))}
+                        step="0.05"
+                        type="range"
+                        value={weight}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+
+          <button
+            className="lora-add"
+            data-count={`· ${availableLoras.length} available`}
+            disabled={!availableLoras.length}
+            onClick={() => setPickerOpen((open) => !open)}
+            type="button"
+          >
+            <Icon.Plus size={15} />
+            <span>Add LoRA</span>
+          </button>
+
+          {pickerOpen && availableLoras.length ? (
+            <div className="lora-picker-panel">
+              <div className="lora-picker-list">
+                {availableLoras.map((lora) => {
+                  const disabled = lora.scope !== "builtin" && atUserLimit;
+                  return (
+                    <button
+                      className="lora-pick-row"
+                      disabled={disabled}
+                      key={lora.id}
+                      onClick={() => {
+                        toggleLora(lora);
+                        setPickerOpen(false);
+                      }}
+                      type="button"
+                    >
+                      <span className="lora-slot-meta">
+                        <strong>{lora.name ?? lora.id}</strong>
+                        <small>{loraMeta(lora)}</small>
+                      </span>
+                      <span className="lora-pick-add">{disabled ? "Limit reached" : "Add"}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+        </>
       )}
     </section>
   );

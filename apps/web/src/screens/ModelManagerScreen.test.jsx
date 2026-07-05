@@ -538,7 +538,7 @@ describe("ModelManagerScreen type-grouped layout", () => {
     // Each group holds exactly its own type's card.
     const groups = container.querySelectorAll(".model-type-group");
     expect(groups.length).toBe(3);
-    expect(groups[0].querySelectorAll(".model-card").length).toBe(1);
+    expect(groups[0].querySelectorAll(".model-row").length).toBe(1);
     expect(groups[0].textContent).toContain("Z-Image-Turbo");
     expect(groups[1].textContent).toContain("Wan T2V");
     expect(groups[2].textContent).toContain("Real-ESRGAN");
@@ -559,13 +559,13 @@ describe("ModelManagerScreen type-grouped layout", () => {
     const imageGroup = container.querySelector(".model-type-group");
     const recommendedGrid = imageGroup.querySelector(".model-subgroup .model-grid");
     expect(imageGroup.textContent).toContain("Recommended Models");
-    expect(recommendedGrid.querySelectorAll(".model-card").length).toBe(1);
+    expect(recommendedGrid.querySelectorAll(".model-row").length).toBe(1);
     expect(recommendedGrid.textContent).toContain("Z-Image-Turbo");
     const additional = imageGroup.querySelector(".model-subgroup-additional");
     expect(additional.tagName).toBe("DETAILS");
     expect(additional.open).toBe(false); // collapsed by default to cut clutter
     expect(additional.textContent).toContain("Additional Supported Models");
-    expect(additional.querySelectorAll(".model-card").length).toBe(1);
+    expect(additional.querySelectorAll(".model-row").length).toBe(1);
     expect(additional.textContent).toContain("FLUX.1 [dev]");
   });
 
@@ -574,7 +574,7 @@ describe("ModelManagerScreen type-grouped layout", () => {
     const imageGroup = container.querySelector(".model-type-group");
     expect(imageGroup.textContent).not.toContain("Recommended Models");
     expect(imageGroup.querySelector(".model-subgroup-additional")).toBeNull();
-    expect(imageGroup.querySelectorAll(".model-card").length).toBe(1);
+    expect(imageGroup.querySelectorAll(".model-row").length).toBe(1);
   });
 
   it("describes each model's capabilities as chips on the card", async () => {

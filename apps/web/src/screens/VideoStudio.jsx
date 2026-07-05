@@ -864,15 +864,18 @@ export function VideoStudio() {
       <form className="studio-shell" onSubmit={submit}>
         <div className="surface-header hero studio-prompt-hero video-prompt-hero">
           <div className="prompt-hero-top">
-            <div className="segmented-control mode-control" role="tablist" aria-label="Video mode">
+            <div className="mode-tabs mode-control" role="tablist" aria-label="Video mode">
               {modeOptions.map(([value, label]) => {
                 // Disabled only when no available model serves this mode on Mac — and never the
                 // active tab, so the user can always switch away (sc-5716).
                 const blocked = value !== mode && macModeTabBlocked(value);
+                const active = mode === value;
                 return (
                   <button
-                    className={mode === value ? "active" : ""}
+                    className={active ? "mode-tab active" : "mode-tab"}
                     key={value}
+                    role="tab"
+                    aria-selected={active}
                     onClick={() => setMode(value)}
                     type="button"
                     disabled={blocked}

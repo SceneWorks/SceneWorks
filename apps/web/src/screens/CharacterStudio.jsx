@@ -519,12 +519,12 @@ export function CharacterStudio() {
           <div className="empty-panel">No characters yet — use “New character” to start.</div>
         ) : (
           <section className="character-detail">
-            <div className="segmented-control character-tabs" role="tablist" aria-label="Character workspace">
+            <div className="mode-tabs character-tabs" role="tablist" aria-label="Character workspace">
               {CHARACTER_TABS.map(([id, label]) => (
                 <button
                   aria-controls={activeTab === id ? `character-panel-${id}` : undefined}
                   aria-selected={activeTab === id}
-                  className={activeTab === id ? "active" : ""}
+                  className={activeTab === id ? "mode-tab active" : "mode-tab"}
                   id={`character-tab-${id}`}
                   key={id}
                   onClick={() => setActiveTab(id)}

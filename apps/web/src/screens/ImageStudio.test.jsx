@@ -105,6 +105,8 @@ describe("ImageStudio Save as Preset", () => {
     const context = baseContext();
     await render(context);
 
+    // Save-as-preset now lives inside the Advanced panel (UI-refinement 2b).
+    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Advanced"));
     const input = nameInput(container);
     expect(input).toBeTruthy();
     await act(async () => setInput(input, "Atrium Look"));
@@ -140,6 +142,7 @@ describe("ImageStudio Save as Preset", () => {
     });
     await render(context);
 
+    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Advanced"));
     await act(async () => setInput(nameInput(container), "Atrium Look"));
     await click(saveButton(container));
 
@@ -385,7 +388,7 @@ describe("ImageStudio edit source picker", () => {
 
   async function openEditSourcePicker(context) {
     await render(context);
-    await click([...document.body.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "Edit"));
+    await click([...document.body.querySelectorAll(".mode-tabs button")].find((button) => button.textContent === "Edit"));
     await click([...document.body.querySelectorAll(".asset-picker-head button")].find((button) => button.textContent === "Select image"));
     return document.body.querySelector('[role="dialog"]');
   }
@@ -531,7 +534,7 @@ describe("ImageStudio edit source picker", () => {
         selectedAsset: null,
       }),
     );
-    await click([...document.body.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "Edit"));
+    await click([...document.body.querySelectorAll(".mode-tabs button")].find((button) => button.textContent === "Edit"));
 
     // The multi-image picker ("Select images") replaces the single source picker ("Select image").
     const headButtons = () => [...document.body.querySelectorAll(".asset-picker-head button")];
@@ -620,7 +623,7 @@ describe("ImageStudio model picker capability gating", () => {
 
   const modelOptionValues = () => [...field(container, "Model").options].map((option) => option.value);
   const modeButton = (label) =>
-    [...document.body.querySelectorAll(".segmented-control button")].find((button) => button.textContent === label);
+    [...document.body.querySelectorAll(".mode-tabs button")].find((button) => button.textContent === label);
 
   it("Text tab lists only text_to_image models, excluding edit-only and character-only (sc-5549)", async () => {
     await render(baseContext({ imageModels: [EDIT_ONLY, T2I, VARIATIONS, CHARACTER_ONLY] }));
