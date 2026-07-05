@@ -1161,3 +1161,69 @@ async fn model_download_fails_when_the_tier_resolves_no_files() {
     });
     assert!(failed, "expected a failed progress post, got {posts:?}");
 }
+
+/// A tree stub that paginates: page 1 (no cursor) returns bf16/q4 files plus a `Link: rel="next"`
+/// header pointing at page 2; page 2 (cursor=next) returns the q8 file and no further link.
+async fn spawn_paginated_tree_stub() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    let base = format!("http://{address}");
+    let base_for_handler = base.clone();
+    async fn page(
+        base: String,
+        axum::extract::RawQuery(query): axum::extract::RawQuery,
+    ) -> Response {
+        let on_page_two = query.as_deref().is_some_and(|q| q.contains("cursor=next"));
+        if on_page_two {
+            // The later tier — only visible if pagination is followed.
+            Json(json!([
+                { "type": "file", "path": "q8/unet/model.safetensors", "size": 3_000_000_000u64 }
+            ]))
+            .into_response()
+        } else {
+            let mut response = Json(json!([
+                { "type": "file", "path": "bf16/model_index.json", "size": 600 },
+                { "type": "file", "path": "q4/model_index.json", "size": 600 }
+            ]))
+            .into_response();
+            let link = format!("<{base}/api/models/owner/repo/tree/main?recursive=true&expand=true&limit=50&cursor=next>; rel=\"next\"");
+            response.headers_mut().insert(
+                reqwest::header::LINK,
+                axum::http::HeaderValue::from_str(&link).expect("valid link header"),
+            );
+            response
+        }
+    }
+    let app = Router::new().route(
+        "/api/models/:owner/:repo/tree/:revision",
+        get(move |raw| page(base_for_handler.clone(), raw)),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    base
+}
+
+#[tokio::test]
+async fn resolve_follows_tree_pagination_across_pages() {
+    // sc-9909: the HF tree `expand=1` view is paginated (limit 50). A later tier's files land on a
+    // subsequent page, so resolve MUST follow `Link: rel="next"` — otherwise a `q8/*` filter matches
+    // nothing (the q8 files are on page 2) and the tier silently "downloads" empty.
+    let base_url = spawn_paginated_tree_stub().await;
+    let settings = test_settings(base_url, None);
+    let client = reqwest::Client::new();
+
+    let snapshot =
+        HuggingFaceSnapshot::resolve(&client, &settings, "owner/repo", "main", &["q8/*".to_owned()])
+            .await
+            .expect("resolves across pages");
+
+    let paths: Vec<&str> = snapshot.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        vec!["q8/unet/model.safetensors"],
+        "the q8 file from page 2 must be resolved (pagination followed)"
+    );
+}
