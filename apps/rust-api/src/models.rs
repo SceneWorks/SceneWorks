@@ -1131,10 +1131,14 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 .as_ref()
                 .map(|health| health.missing_files.clone())
                 .unwrap_or_default();
-            // The managed dir mirrors the default-download install path; a variant that is present
-            // there (a directly-downloaded turnkey) counts as installed too.
+            // The managed dir mirrors the default-download install path; a variant present there (a
+            // directly-downloaded turnkey) counts as installed too — but the check must be TIER-aware.
+            // A quant-matrix repo writes ONE repo-level completion marker no matter which tier was
+            // fetched, so keying a per-tier "installed" on the bare marker made EVERY tier report
+            // installed after any single tier's download (sc-9909). Require the tier's own files to
+            // actually exist under the managed dir, not just the marker.
             let managed_path = data_dir.join("models").join(safe_download_dir(&repo));
-            let managed_installed = model_is_installed(&managed_path);
+            let managed_installed = managed_tier_installed(&managed_path, &files);
             let installed_path = if installed || cache_incomplete {
                 cache_path
             } else if managed_installed {
@@ -1159,6 +1163,23 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
             }
         })
         .collect()
+}
+
+// Whether a tier's OWN artifacts live in the app-managed turnkey dir (data/models/<repo>), as opposed
+// to the shared HF cache. The repo-level completion marker (.sceneworks-download-complete.json) alone
+// does NOT certify a tier: a quant-matrix repo writes exactly one marker regardless of which tier was
+// downloaded, so a bare-marker check reported every tier of a repo installed after any single tier's
+// fetch (sc-9909). Require BOTH the marker AND — for a tier that declares a `files` filter — that the
+// tier's files actually exist under the managed dir. A single-variant turnkey (empty `files`) is
+// certified by the marker alone, preserving the pre-matrix contract.
+fn managed_tier_installed(managed_path: &FsPath, files: &[String]) -> bool {
+    if !model_is_installed(managed_path) {
+        return false;
+    }
+    files.is_empty()
+        || files
+            .iter()
+            .all(|pattern| snapshot_contains_pattern(managed_path, pattern))
 }
 
 // The on-disk size a `downloads[].footprint.diskSizeBytes` declares, if any — the tier-scoped

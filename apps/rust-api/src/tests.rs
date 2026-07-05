@@ -7373,6 +7373,18 @@ async fn quant_matrix_model_with_single_tier_reads_installed_not_incomplete() {
         .join("data/cache/huggingface/hub/models--SceneWorks--z-image-turbo-mlx/snapshots/abc123");
     std::fs::create_dir_all(snapshot.join("q8")).expect("q8 dir creates");
     std::fs::write(snapshot.join("q8/model_index.json"), "{}").expect("q8 file writes");
+    // sc-9909: the real download flow ALSO writes a repo-level completion marker into the app-managed
+    // dir (data/models/<repo>). It is tier-agnostic (one marker per repo, no matter which tier was
+    // fetched), so the per-tier state must NOT treat its presence as "every tier installed".
+    let managed = temp_dir
+        .path()
+        .join("data/models/SceneWorks__z-image-turbo-mlx");
+    std::fs::create_dir_all(&managed).expect("managed dir creates");
+    std::fs::write(
+        managed.join(".sceneworks-download-complete.json"),
+        r#"{ "repo": "SceneWorks/z-image-turbo-mlx" }"#,
+    )
+    .expect("marker writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
     let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
