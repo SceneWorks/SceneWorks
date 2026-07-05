@@ -179,7 +179,7 @@ fn flux1_dev_control_mlx_smoke() {
             kind => vec![Conditioning::Control {
                 image: control_map.clone(),
                 kind,
-                scale: control_scale,
+                scale: Some(control_scale),
             }],
         };
         let image = render(&*generator, &prompt, w, h, steps, guidance, conditioning);
