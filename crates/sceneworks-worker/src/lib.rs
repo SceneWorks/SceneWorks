@@ -252,6 +252,15 @@ mod lens_base_q4_mlx_smoke;
 // never quantizes its T5, so no denseTextEncoderTier). hd/flash share this crate + layout.
 #[cfg(all(test, target_os = "macos"))]
 mod chroma1_base_q4_mlx_smoke;
+// Real-weight MLX smoke for the SANA quant-matrix lane (sc-8489/sc-8513, epic 8506). macOS-only;
+// drives `gen_core::load("sana_1600m"|"sana_sprint_1600m")` with a per-tier LoadSpec against the
+// packed q4/q8 + dense bf16 turnkey subdirs. On-device evidence that the SceneWorks/Sana_*_mlx
+// pre-quantized turnkeys load through the worker packed path (`STANDARD_TIER_MODELS` →
+// `standard_tier_subdir` resolves the tier) and render non-degenerate at EVERY downloaded tier. SANA
+// packs the Linear-DiT transformer + Gemma-2 CHI TE per-tier (DC-AE VAE dense); q4/q8 are a no-op on
+// the already-packed weights (packed-detected) and bf16 loads dense (Quant::None).
+#[cfg(all(test, target_os = "macos"))]
+mod sana_mlx_smoke;
 // On-device per-tier memory-footprint measurement harness (sc-8516, epic 8506). Test-only + macOS-only;
 // #[ignore]d real-weight smokes that drive `gen_core::load(id)` + ONE generation while sampling the MLX
 // process-global memory counters (mlx_rs::memory::{reset_peak_memory, get_active_memory, get_peak_memory})

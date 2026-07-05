@@ -535,8 +535,9 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // the latter bundling the SceneWorks/gemma-2-2b-it TE so the load path resolves one snapshot dir —
     // SanaTextEncoder::from_snapshot reads `<dir>/text_encoder/gemma-2-2b-it.safetensors` + tokenizer.json).
     // Generator self-registers via the shared force-link (`use mlx_gen_sana as _;` in image_jobs.rs);
-    // reaches the generic MODEL_TABLE / `generate_stream` path. No runtime quant (the 2-bit quant is NOT
-    // ported); ships dense bf16. 32× DC-AE divisor → width/height must be multiples of 32.
+    // reaches the generic MODEL_TABLE / `generate_stream` path. Quant matrix (sc-8489/sc-8513): ships
+    // pre-packed q4/q8/bf16 tiers (transformer + Gemma-2 TE packed, DC-AE VAE dense), packed-detected
+    // on load — NOT the (unported) 2-bit SANA quant. 32× DC-AE divisor → W/H must be multiples of 32.
     ModelRow {
         sceneworks_id: "sana_1600m",
         engine_id: "sana_1600m",
@@ -553,8 +554,9 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // ~2 steps (the `sana_sprint_1600m` descriptor advertises NO supports_true_cfg / supports_negative).
     // Loads the un-gated `SceneWorks/Sana_Sprint_1.6B_1024px_mlx` MLX snapshot (same transformer/ vae/
     // text_encoder/ layout as base SANA; the text_encoder/ bundles the SceneWorks/gemma-2-2b-it TE so it is
-    // NOT duplicated). Dense bf16 (no quant). 32× DC-AE divisor → width/height multiples of 32. NVIDIA
-    // non-commercial (NSCLv1) — the re-host carries the upstream LICENSE + NOTICE.
+    // NOT duplicated). Quant matrix (sc-8490/sc-8513): pre-packed q4/q8/bf16 tiers, packed-detected on
+    // load. 32× DC-AE divisor → width/height multiples of 32. NVIDIA non-commercial (NSCLv1) — the
+    // re-host carries the upstream LICENSE + NOTICE.
     ModelRow {
         sceneworks_id: "sana_sprint_1600m",
         engine_id: "sana_sprint_1600m",

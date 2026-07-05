@@ -226,7 +226,8 @@ fn kolors_control_generate_one(
         Conditioning::Control {
             image: control,
             kind: ControlKind::Pose,
-            scale: control_scale,
+            // gen-core drift (sc-9940): scale is now Option<f32>; explicit control scale → Some.
+            scale: Some(control_scale),
         },
         Conditioning::Reference {
             image: reference.clone(),

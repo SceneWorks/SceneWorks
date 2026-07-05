@@ -1056,13 +1056,15 @@ fn load_sensenova_model(weights_dir: &Path) -> WorkerResult<(T2iModel, TextToken
 fn image_to_chw01(img: &Image, min_pixels: i64, max_pixels: i64) -> WorkerResult<Array> {
     let (in_w, in_h) = (img.width as i32, img.height as i32);
     let (out_h, out_w) = smart_resize(in_h, in_w, 32, min_pixels, max_pixels);
+    // gen-core drift (sc-9940): imageops::resize_*_u8 became fallible.
     let hwc = resize_bicubic_u8(
         &img.pixels,
         in_h as usize,
         in_w as usize,
         out_h as usize,
         out_w as usize,
-    );
+    )
+    .map_err(|error| WorkerError::InvalidPayload(format!("image resize: {error}")))?;
     let hwc = Array::from_slice(&hwc, &[out_h, out_w, 3]);
     let chw = hwc
         .transpose_axes(&[2, 0, 1])
