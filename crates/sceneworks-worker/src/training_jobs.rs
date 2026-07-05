@@ -615,6 +615,29 @@ enum TrainEvent {
     Done(TrainingOutput),
 }
 
+/// The trainer's `LoadSpec::text_encoder` override for `engine_id`, or `None` to keep the engine's
+/// own resolution. Only LTX-2.3 needs one: its Gemma-3 TE lives OUTSIDE the weights dir (the turnkey
+/// bundle ships it as a sibling `gemma/`, sc-5608), so — mirroring the inference path (sc-8827) —
+/// resolve the bundled sibling and thread it on, letting a self-contained install train without a
+/// separate `mlx-community/gemma-3-12b-it-bf16` download (sc-9989). `None` for every other family (TE
+/// lives inside the weights dir) and for a legacy LTX conversion with no sibling or an operator
+/// `$LTX_GEMMA_DIR` (the engine's env/HF-cache fallback stays in force). LTX training is mlx-only, so
+/// off-Mac this is always `None`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn training_text_encoder(engine_id: &str, weights_dir: &std::path::Path) -> Option<WeightsSource> {
+    #[cfg(target_os = "macos")]
+    if engine_id == "ltx_2_3" {
+        return crate::video_jobs::resolve_bundled_ltx_gemma_dir(weights_dir)
+            .map(WeightsSource::Dir);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (engine_id, weights_dir);
+    None
+}
+
 /// Execute a real training run on the in-process native engine (mlx-gen on macOS, candle-gen
 /// off-Mac via `backend-candle`, sc-7817). Loads the (frozen) base model via a [`LoadSpec`] (exactly
 /// as inference's `load_engine`), runs the family trainer on a blocking thread, streams staged
@@ -662,6 +685,10 @@ async fn run_training_execution(
         &plan.target.base_model_path,
         "Training baseModelPath",
     )?;
+
+    // LTX-2.3's Gemma-3 text encoder lives OUTSIDE `weights_dir` — thread the bundled sibling onto the
+    // trainer `LoadSpec` so a self-contained install trains without a separate gemma download (sc-9989).
+    let ltx_text_encoder = training_text_encoder(engine_id, &weights_dir);
 
     let output_dir =
         resolve_training_output_dir(settings, &plan.output.output_dir, "Training outputDir")?;
@@ -716,6 +743,9 @@ async fn run_training_execution(
                 engine_id,
                 &LoadSpec {
                     precision: load_precision,
+                    // LTX-2.3's bundled Gemma-3 TE (sc-9989); `None` for every other family (TE lives
+                    // inside `weights_dir`) and for legacy/env-override LTX installs.
+                    text_encoder: ltx_text_encoder,
                     ..LoadSpec::new(WeightsSource::Dir(weights_dir))
                 },
             )
@@ -1425,6 +1455,44 @@ mod tests {
     /// validation read (the intermittent "must be inside an app-managed
     /// directory" flake on the macOS nax-worker CI lane).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// sc-9989: only LTX-2.3 gets a trainer `LoadSpec::text_encoder` override, and only from the
+    /// bundled sibling `gemma/` (the self-contained turnkey install). Every other family's TE lives
+    /// inside the weights dir → `None`. An operator `$LTX_GEMMA_DIR` is the intended passthrough → the
+    /// engine reads the env var itself, so the override is `None`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn training_text_encoder_gates_on_engine_and_bundle() {
+        let root = std::env::temp_dir().join(format!(
+            "sw_ltx_train_te_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let (tier, gemma) = (root.join("q4"), root.join("gemma"));
+        std::fs::create_dir_all(&tier).unwrap();
+        std::fs::create_dir_all(&gemma).unwrap();
+
+        // Non-LTX engines never resolve an external TE (theirs lives inside the weights dir).
+        assert!(training_text_encoder("kolors", &tier).is_none());
+        assert!(training_text_encoder("sdxl", &tier).is_none());
+
+        // LTX with a bundled `gemma/` sibling → threads it (unless an operator `$LTX_GEMMA_DIR` is set,
+        // in which case the engine reads the env var and the override is `None`).
+        let te = training_text_encoder("ltx_2_3", &tier);
+        if std::env::var_os("LTX_GEMMA_DIR").is_none() {
+            assert!(
+                matches!(&te, Some(WeightsSource::Dir(p)) if *p == gemma),
+                "expected the bundled gemma sibling to be threaded onto the trainer LoadSpec"
+            );
+        }
+
+        // LTX with no `gemma/` sibling → `None` (engine falls back to its env/HF-cache path).
+        let bare = root.join("no_sibling").join("q4");
+        std::fs::create_dir_all(&bare).unwrap();
+        assert!(training_text_encoder("ltx_2_3", &bare).is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn test_settings(data_dir: &Path) -> Settings {
         Settings {
