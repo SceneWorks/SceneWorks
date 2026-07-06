@@ -2419,19 +2419,20 @@
       // + generation share one download — no separate diffusers tree. The bf16 tier is byte-identical to
       // the retired `krea/Krea-2-Raw` diffusers base, so training behavior is unchanged.
       //
-      // MAC-FIRST (epic 9992): `mlx-gen-krea` registers the `krea_2_raw` GENERATOR; the candle
-      // (Windows/Linux) generator is not wired yet (sc-9994 / P2), so `krea_2_raw` is candle_routed=false
-      // in the routing table and GENERATION is Mac-only until then. The tier downloads stay all-platform
-      // because the candle TRAINER trains cross-platform off the same `bf16/` tier (CANDLE_ROUTED_TRAINING
-      // _KERNELS includes `krea_lora`). Krea 2 Community License (non-commercial OK; the re-host carries
-      // the license + "Krea" name prefix + attribution).
+      // ALL-PLATFORM (epic 9992): both backends register the `krea_2_raw` GENERATOR — `mlx-gen-krea`
+      // (macOS) + `candle-gen-krea` (Windows/Linux CUDA, sc-9994 / candle-gen #350), so `krea_2_raw` is
+      // candle_routed=true (`candle_quant_lora`, mirroring Turbo) and GENERATION runs on all three
+      // platforms. The tier downloads are all-platform for both generation AND the candle TRAINER (which
+      // trains cross-platform off the same `bf16/` tier — CANDLE_ROUTED_TRAINING_KERNELS includes
+      // `krea_lora`). Krea 2 Community License (non-commercial OK; the re-host carries the license +
+      // "Krea" name prefix + attribution).
       "autoDownload": false,
       "name": "Krea 2 Raw",
       "family": "krea_2",
       "type": "image",
       "adapter": "mlx_krea",
-      // Routing (not this flag) drives availability: `krea_2_raw` is mlx-routed; candle generation lands
-      // in P2 (sc-9994). All-platform downloads so the candle trainer can install the bf16 tier off-Mac.
+      // Routing (not this flag) drives availability: `krea_2_raw` is BOTH mlx- and candle-routed
+      // (sc-9994). All-platform downloads serve generation on all three platforms + the candle trainer.
       "macOnly": false,
       "downloads": [
         {
@@ -2526,10 +2527,23 @@
         "quantize": 8,
         "repo": "SceneWorks/krea-2-raw-mlx"
       },
+      // candle/CUDA VRAM gate (sc-9994, epic 9992). Raw shares Turbo's resident surface (the 12B
+      // single-stream DiT + Qwen3-VL-4B TE + Qwen-Image VAE), and the resident weights dominate the peak.
+      // q8 MEASURED @1024² on an RTX PRO 6000 (Blackwell sm_120) via the nvidia-smi peak monitor: 33.4 GB
+      // overall-peak — a ~2.4 GB bump over Turbo's estimated q8 31 GB, consistent with Raw's TRUE CFG (two
+      // SEQUENTIAL DiT forwards/step + the extra encoded uncond context; not 2× — the forwards don't
+      // co-reside). q4/bf16 ESTIMATED from the measured q8 using Turbo's inter-tier gaps (q8−q4 ≈ 4.6,
+      // bf16−q8 ≈ 13). No `int8-convrot` tier (that checkpoint is Turbo-only, sc-9300). minMemoryGb 32
+      // gates visibility (the default q8 tier needs 33.4, so a 32 GB card falls to q4 via the per-tier pick).
+      "candle": {
+        "minMemoryGb": 32,
+        "vramGbByTier": { "q4": 28.8, "q8": 33.4, "bf16": 46.4 },
+        "measured": false
+      },
       "licenseUrl": "https://www.krea.ai/krea-2-licensing",
       "ui": {
         "label": "Krea 2 Raw",
-        "description": "Krea 2 Raw — Krea AI's undistilled 12B single-stream rectified-flow DiT with a Qwen3-VL-4B text encoder, native MLX (Apple Silicon). The full-fidelity, TRUE classifier-free-guidance counterpart to the fast CFG-free Krea 2 Turbo: run ~52 steps with a real guidance scale (~3.5) and an optional negative prompt for the highest quality and the most control. Pre-quantized Q8 (~20.5 GB download, default); the dense bf16 tier doubles as the Krea 2 LoRA training base. Krea 2 Community License (non-commercial). Needs a 48 GB-class Mac. (Windows/Linux generation lands with the candle engine — epic 9992 P2.)",
+        "description": "Krea 2 Raw — Krea AI's undistilled 12B single-stream rectified-flow DiT with a Qwen3-VL-4B text encoder, native MLX (Apple Silicon). The full-fidelity, TRUE classifier-free-guidance counterpart to the fast CFG-free Krea 2 Turbo: run ~52 steps with a real guidance scale (~3.5) and an optional negative prompt for the highest quality and the most control. Pre-quantized Q8 (~20.5 GB download, default); the dense bf16 tier doubles as the Krea 2 LoRA training base. Krea 2 Community License (non-commercial). Runs on Apple Silicon (MLX) and Windows/Linux NVIDIA GPUs (candle/CUDA, sc-9994); needs a 48 GB-class Mac or a ~32 GB-class CUDA GPU.",
         "recommendedFor": ["text_to_image"],
         // PiD decoder (epic 7840, qwenimage latent space — Krea 2 Raw reuses the Qwen VAE, like Turbo) —
         // optional per-generation VAE replacement, decode + 2K/4K SR; NC output. See `qwen_image`.
