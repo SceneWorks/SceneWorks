@@ -42,6 +42,7 @@ export function buildImageJobAdvanced(state) {
     // PiD decoder (epic 7840).
     showPidToggle,
     usePid,
+    pidTarget,
     // Character-reference knobs.
     mode,
     referenceAssetId,
@@ -146,6 +147,10 @@ export function buildImageJobAdvanced(state) {
     // rawAdapterSettings — that recorded `usePid:true` is the output's non-commercial
     // marker. The worker independently no-ops to the native VAE if the checkpoint is gone.
     ...(showPidToggle && usePid ? { usePid: true } : {}),
+    // PiD output tier (sc-10054): PiD super-resolves the base render 4×, so the tier sets the output
+    // size by capping the effective base. Emit `pidTarget:"2k"` only when the PiD toggle is shown+on AND
+    // 2K is picked; "4k" is the worker default, so omitting it keeps existing usePid recipes byte-identical.
+    ...(showPidToggle && usePid && pidTarget === "2k" ? { pidTarget: "2k" } : {}),
     // IP-Adapter / InstantID reference strength only applies when a character
     // reference is attached AND the model uses the IP-Adapter knob; Qwen's
     // edit pipeline ignores this scalar (hideReferenceStrength gates it out).
