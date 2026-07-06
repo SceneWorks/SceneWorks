@@ -195,7 +195,13 @@ async fn generate_candle_sdxl_edit_stream(
             "SDXL edit requires edit_image mode + a source image".to_owned(),
         )
     })?;
-    let (width, height) = (request.width, request.height);
+    // Per-generation PiD decode (epic 7840, sc-8044) + output tier (sc-10054), resolved BEFORE the
+    // source/mask fit so a 2K tier sizes the effective base and the edit source + mask are fit to THAT
+    // base (source, mask, and latent stay aligned). `use_pid`/`with_pid` stay paired at the load below.
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+    let (width, height) =
+        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
     let source = load_sdxl_edit_source(request, project_path, settings)?;
 
     let is_inpaint = matches!(
@@ -278,15 +284,10 @@ async fn generate_candle_sdxl_edit_stream(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| sdxl_edit_candle_default_repo(&request.model))
         .to_owned();
-    // Per-generation PiD decode (epic 7840, sc-8044): resolve the `sdxl` PiD student + Gemma when
-    // `advanced.usePid` is set and the snapshots are cached; else `None` → native VAE. SDXL edit composes
-    // the SDXL VAE, so it shares the one `sdxl` student. The inpaint/outpaint mask blend runs in latent
-    // space and ends in a single decode, so PiD sees the same final latent as the VAE path — the output
-    // is just 2K/4K. `use_pid` and the engine's `with_pid` load stay in lockstep (the engine rejects a
-    // mismatch).
-    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
-    let use_pid = pid_weights.is_some();
-
+    // `pid_weights`/`use_pid`/`width`/`height` were resolved above (ahead of the source+mask fit) so the
+    // PiD output tier (sc-10054) could size the effective base. SDXL edit composes the SDXL VAE, so it
+    // shares the one `sdxl` student; the inpaint/outpaint mask blend ends in a single decode, so PiD sees
+    // the same final latent as the VAE path — the output is just the tier's 2K/4K.
     let mut raw_settings =
         sdxl_edit_candle_raw_settings(request, &repo, steps, guidance, strength, mode_tag);
     // Mark PiD output on the sidecar (epic 7840): the NSCLv1 non-commercial restriction flows to PiD-

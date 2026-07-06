@@ -163,6 +163,24 @@ describe("buildImageJobAdvanced", () => {
     expect(buildImageJobAdvanced(offState({ showPidToggle: true, usePid: true })).usePid).toBe(true);
   });
 
+  it("emits pidTarget only for a shown+on PiD toggle set to 2k (4k is the worker default)", () => {
+    // 2K → emitted alongside usePid.
+    const twoK = buildImageJobAdvanced(offState({ showPidToggle: true, usePid: true, pidTarget: "2k" }));
+    expect(twoK.pidTarget).toBe("2k");
+    expect(twoK.usePid).toBe(true);
+    // 4K (default) → omitted, keeping existing usePid recipes byte-identical.
+    expect(buildImageJobAdvanced(offState({ showPidToggle: true, usePid: true, pidTarget: "4k" }))).not.toHaveProperty(
+      "pidTarget",
+    );
+    // 2K but PiD off / toggle hidden → never emitted (can't shrink a native-VAE gen).
+    expect(buildImageJobAdvanced(offState({ showPidToggle: true, usePid: false, pidTarget: "2k" }))).not.toHaveProperty(
+      "pidTarget",
+    );
+    expect(buildImageJobAdvanced(offState({ showPidToggle: false, usePid: true, pidTarget: "2k" }))).not.toHaveProperty(
+      "pidTarget",
+    );
+  });
+
   it("embeds a structured-prompt recipe only for structured submissions", () => {
     expect(buildImageJobAdvanced(offState({ sendStructured: false }))).not.toHaveProperty("structuredPrompt");
     const structured = buildImageJobAdvanced(

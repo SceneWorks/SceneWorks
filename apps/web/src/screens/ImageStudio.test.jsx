@@ -1387,6 +1387,44 @@ describe("ImageStudio PiD decoder toggle (sc-7851)", () => {
     await click(generateButton());
     expect(createImageJob.mock.calls[1][0].advanced.usePid).toBe(true);
   });
+
+  const pidTargetSelect = () => document.body.querySelector(".pid-target-select select");
+
+  it("reveals the 2K/4K output selector only when PiD is on (default 4K)", async () => {
+    await render(baseContext({ imageModels: [PID_QWEN], models: [PID_QWEN, PID_CKPT("installed")] }));
+    await openAdvanced();
+    await act(async () => {});
+    // Off → no selector.
+    expect(pidTargetSelect()).toBeFalsy();
+    // On → selector appears, defaulting to 4k.
+    await act(async () => pidLabel().querySelector('input[type="checkbox"]').click());
+    expect(pidTargetSelect()).toBeTruthy();
+    expect(pidTargetSelect().value).toBe("4k");
+  });
+
+  it("emits advanced.pidTarget:'2k' only when 2K is picked (4K default omits it)", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(
+      baseContext({ createImageJob, imageModels: [PID_QWEN], models: [PID_QWEN, PID_CKPT("installed")] }),
+    );
+    await openAdvanced();
+    await act(async () => {});
+    await act(async () => pidLabel().querySelector('input[type="checkbox"]').click());
+
+    // Default 4K → usePid but no pidTarget.
+    await click(generateButton());
+    expect(createImageJob.mock.calls[0][0].advanced.usePid).toBe(true);
+    expect(createImageJob.mock.calls[0][0].advanced).not.toHaveProperty("pidTarget");
+
+    // Pick 2K → pidTarget:"2k" rides advanced.
+    await act(async () => {
+      const select = pidTargetSelect();
+      select.value = "2k";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await click(generateButton());
+    expect(createImageJob.mock.calls[1][0].advanced.pidTarget).toBe("2k");
+  });
 });
 
 describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {

@@ -248,6 +248,14 @@ impl CandleStrictControl for Flux2StrictControl {
         "flux2_control"
     }
 
+    fn out_width(&self) -> u32 {
+        self.width
+    }
+
+    fn out_height(&self) -> u32 {
+        self.height
+    }
+
     fn load(&self) -> WorkerResult<Self::Model> {
         let paths = Flux2ControlPaths {
             root: self.base.clone(),
@@ -337,6 +345,12 @@ async fn generate_candle_flux2_control_stream(
     // Per-generation PiD decode (epic 7840, sc-8044): resolve the `flux2` PiD student + Gemma when
     // `advanced.usePid` is set and the snapshots are cached; else `None` → native FLUX.2 VAE.
     let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+    // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
+    // 4K/native leaves the requested dims untouched). The shared driver renders the control map at these
+    // same dims (via `out_width`/`out_height`), keeping control + latent aligned.
+    let (width, height) =
+        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
     let mut raw_settings = flux2_control_candle_raw_settings(
         request,
         &repo,
@@ -347,15 +361,15 @@ async fn generate_candle_flux2_control_stream(
         pose_count,
     );
     // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
-    raw_settings.insert("usePid".to_owned(), Value::Bool(pid_weights.is_some()));
+    raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
     let provider = Flux2StrictControl {
         base,
         control,
         quant,
         prompt: request.prompt.clone(),
-        width: request.width,
-        height: request.height,
+        width,
+        height,
         steps,
         guidance,
         control_scale,

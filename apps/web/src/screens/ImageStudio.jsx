@@ -573,6 +573,11 @@ export function ImageStudio() {
   // toggle only renders + emits when the model is PiD-eligible AND its checkpoint is installed
   // (showPidToggle), so a stale `true` on a non-eligible model is inert — mirrors bf16Precision.
   const [usePid, setUsePid] = useState(saved.usePid ?? false);
+  // PiD output tier (epic 7840, sc-10054): PiD always super-resolves the base latent 4×, so this picks
+  // the effective base — "4k" keeps the requested base (~4096 output, the pre-tier behavior), "2k" caps
+  // it (~2048 output, faster + less GPU memory). Sticky pref, default "4k". Rides `advanced.pidTarget`
+  // (emitted only when the PiD toggle is shown+on AND "2k" is picked — "4k" is the worker default).
+  const [pidTarget, setPidTarget] = useState(saved.pidTarget === "2k" ? "2k" : "4k");
   const [faceRestore, setFaceRestore] = useState(false);
   // User-created poses (reserved global project) join the built-in library in both
   // the picker and the id→keypoints resolver below, so saved poses can generate.
@@ -1458,6 +1463,7 @@ export function ImageStudio() {
     enhancePrompt,
     bf16Precision,
     usePid,
+    pidTarget,
     lastUsedTiers,
   });
 
@@ -1612,6 +1618,7 @@ export function ImageStudio() {
           quantTier,
           showPidToggle,
           usePid,
+          pidTarget,
           mode,
           referenceAssetId,
           hideReferenceStrength,
@@ -2642,18 +2649,35 @@ export function ImageStudio() {
                   </label>
                 ) : null}
                 {showPidToggle ? (
-                  <label
-                    className="checkline pid-decoder-toggle"
-                    title="Decode this generation through NVIDIA's PiD pixel-diffusion decoder instead of the model's VAE: it decodes and super-resolves in one pass, so output comes out at 2K/4K (sharper detail, but slower and more memory). Non-commercial use only — PiD output is licensed for research/evaluation, unlike the rest of the pipeline. Off = the model's native VAE at the selected resolution."
-                  >
-                    <input
-                      checked={usePid}
-                      disabled={upscaleEnabled}
-                      onChange={(event) => setUsePid(event.target.checked)}
-                      type="checkbox"
-                    />
-                    PiD decoder · 2K/4K <span className="badge badge-nc">Non-Commercial</span>
-                  </label>
+                  <>
+                    <label
+                      className="checkline pid-decoder-toggle"
+                      title="Decode this generation through NVIDIA's PiD pixel-diffusion decoder instead of the model's VAE: it decodes and super-resolves in one pass to 2K or 4K (pick the tier at right — sharper detail, but slower and more memory). Non-commercial use only — PiD output is licensed for research/evaluation, unlike the rest of the pipeline. Off = the model's native VAE at the selected resolution."
+                    >
+                      <input
+                        checked={usePid}
+                        disabled={upscaleEnabled}
+                        onChange={(event) => setUsePid(event.target.checked)}
+                        type="checkbox"
+                      />
+                      PiD decoder <span className="badge badge-nc">Non-Commercial</span>
+                    </label>
+                    {usePid ? (
+                      <label
+                        className="pid-target-select"
+                        title="PiD super-resolves the base render 4×, so this sets the output size: 4K (~4096px, max detail) or 2K (~2048px, faster and less GPU memory). Both are super-resolved from the model's latent."
+                      >
+                        Output
+                        <select
+                          onChange={(event) => setPidTarget(event.target.value)}
+                          value={pidTarget}
+                        >
+                          <option value="4k">4K · max detail</option>
+                          <option value="2k">2K · faster</option>
+                        </select>
+                      </label>
+                    ) : null}
+                  </>
                 ) : null}
                 <label
                   className="checkline upscale-toggle"
