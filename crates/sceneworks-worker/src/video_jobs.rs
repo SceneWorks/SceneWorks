@@ -3791,7 +3791,7 @@ fn run_loaded_video_generation(
     };
     let output = generator
         .generate(&req, on_progress)
-        .map_err(|error| WorkerError::Engine(format!("video generation failed: {error}")))?;
+        .map_err(|error| crate::classify_engine_error("video generation failed", error))?;
     match output {
         GenerationOutput::Video { frames, fps, audio } => Ok(DecodedVideo {
             frames: frames
@@ -3819,7 +3819,7 @@ fn run_loaded_video_generation(
 fn load_video_generation_for_tests(input: &VideoGenInput) -> WorkerResult<Box<dyn Generator>> {
     let spec = video_load_spec(input);
     gen_core::load(input.engine_id, &spec)
-        .map_err(|error| WorkerError::Engine(format!("video load failed: {error}")))
+        .map_err(|error| crate::classify_engine_error("video load failed", error))
 }
 
 #[cfg(all(target_os = "macos", test))]
