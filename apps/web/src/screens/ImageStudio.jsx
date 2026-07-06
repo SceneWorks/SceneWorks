@@ -10,7 +10,14 @@ import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
 import StructuredPromptBuilder from "../components/StructuredPromptBuilder.jsx";
 import ReferenceCaptionPicker from "../components/ReferenceCaptionPicker.jsx";
 import BatchPromptPanel from "../components/BatchPromptPanel.jsx";
-import { cardinality, expandBatch, extractKeys, missingKeys, splitPromptLines } from "../promptBatch.js";
+import {
+  cardinality,
+  expandBatch,
+  extractKeys,
+  linkedGroupIssues,
+  missingKeys,
+  splitPromptLines,
+} from "../promptBatch.js";
 import { resolveEffectiveDimensions } from "../resolutionOverride.js";
 import { batchItemStatus, summarizeBatchProgress } from "../batchOps.js";
 import {
@@ -1745,11 +1752,13 @@ export function ImageStudio() {
 
   const batchRunProgress = batchRun ? summarizeBatchProgress(batchRun.items, jobs) : null;
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
+  const batchGroupIssues = linkedGroupIssues(batchPrompts);
   const batchRunDisabled =
     !activeProject ||
     structuredPromptModel ||
     batchTotal === 0 ||
     batchMissingKeys.length > 0 ||
+    batchGroupIssues.length > 0 ||
     Boolean(batchRun?.submitting);
 
   const generateDisabled =
@@ -1855,6 +1864,11 @@ export function ImageStudio() {
                 ) : batchMissingKeys.length > 0 ? (
                   <p className="batch-warning">
                     Fill in a value for {batchMissingKeys.map((key) => `{{${key}}}`).join(", ")} to run.
+                  </p>
+                ) : batchGroupIssues.length > 0 ? (
+                  <p className="batch-warning">
+                    Give each {batchGroupIssues.map((issue) => `{{${issue.label}:…}}`).join(", ")} the same number of
+                    options to run.
                   </p>
                 ) : batchTotal === 0 ? (
                   <p className="batch-hint">Add at least one prompt to run a batch.</p>

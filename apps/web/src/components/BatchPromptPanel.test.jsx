@@ -69,10 +69,24 @@ describe("BatchPromptPanel (sc-9955)", () => {
     expect(varKeys()).toEqual(["{{name}}", "{{hair}}"]);
   });
 
-  it("shows the placeholder hint when there are no variables", () => {
+  it("shows the syntax hint when there are no placeholders at all", () => {
     mount({ initialPrompts: "a plain prompt" });
     expect(varKeys()).toEqual([]);
-    expect(document.body.querySelector(".batch-hint").textContent).toContain("placeholders");
+    expect(document.body.querySelector(".batch-hint").textContent).toContain("value box");
+  });
+
+  it("shows no chip editors for inline-only prompts, with an auto-expand note", () => {
+    mount({ initialPrompts: "a {{red|blue}} {{p:he|she}} {{p:his|her}}" });
+    expect(varKeys()).toEqual([]);
+    expect(document.body.querySelector(".batch-hint").textContent).toContain("expand automatically");
+  });
+
+  it("warns on a mismatched linked group and blocks (via the warning)", () => {
+    mount({ initialPrompts: "{{p:he|she|they}} {{p:his|her}}" });
+    const warning = [...document.body.querySelectorAll(".batch-warning")].find((el) =>
+      /mismatched lengths/.test(el.textContent),
+    );
+    expect(warning).toBeTruthy();
   });
 
   it("reflects the live total (prompts × variations)", () => {
