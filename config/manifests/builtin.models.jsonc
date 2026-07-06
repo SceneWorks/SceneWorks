@@ -5583,17 +5583,49 @@
         "ads2v"
       ],
       "downloads": [
+        // Bernini quant matrix (sc-9945, epic 8506): self-contained q4/ (default) + q8/ + bf16/ tier
+        // subdirs on SceneWorks/bernini-mlx. Each tier is a COMPLETE composite snapshot — the Qwen2.5-VL
+        // planner (backbone packed q4/q8, vision tower + connector + clip-diff dense) + both Wan renderer
+        // experts (packed q4/q8) + the shared dense T5/VAE/tokenizer + config sidecars. Pre-packed tiers
+        // load with no dense-staging peak (the flat layout staged ~82 GiB bf16 then quantized at load).
+        // The dense T5 repeats per tier (epic decision #3: storage non-issue; keeps the load path a
+        // single self-contained dir). The worker fetches a toggled-but-not-downloaded tier on demand
+        // (ensure_bernini_tier_present, video_jobs.rs), so advanced.mlxQuantize works without a pre-pick.
+        // The legacy flat root files stay hosted for already-shipped workers that resolve the repo root;
+        // a new worker only ever resolves the tier subdirs. Shared by bernini + bernini_image (one repo,
+        // HF cache dedupes). estimatedSizeBytes/footprint are measured from the built tiers.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/bernini-mlx",
-          "files": [],
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
           "platforms": ["macos"],
-          // Pre-converted MLX snapshot (planner + dual-expert renderer + stock
-          // Wan2.2 UMT5/VAE/tokenizer), bf16 ≈ 82 GiB (lean — the diffusers-format
-          // t5_text_encoder/t5_tokenizer/vae/scheduler dirs the engine never loads
-          // are excluded). Self-contained — no Wan base or diffusers source needed
-          // at runtime. Q4 default / Q8 opt-in applied at load.
-          "estimatedSizeBytes": 88046829568
+          // ~35.2 GiB measured (experts + planner backbone at 4-bit; dense T5/VAE/vision shared).
+          "estimatedSizeBytes": 37815703819,
+          "footprint": { "diskSizeBytes": 37815703819, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/bernini-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos"],
+          // ~51.3 GiB measured (experts + planner backbone at 8-bit; dense T5/VAE/vision shared).
+          "estimatedSizeBytes": 55129270617,
+          "footprint": { "diskSizeBytes": 55129270617, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/bernini-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos"],
+          // Dense bf16 tier: the same content as the legacy flat root (lean ≈ 82 GiB — the diffusers-format
+          // t5_text_encoder/t5_tokenizer/vae/scheduler dirs the engine never loads are excluded), hosted
+          // under bf16/ for the uniform tier layout (~81.6 GiB measured).
+          "estimatedSizeBytes": 87591990679,
+          "footprint": { "diskSizeBytes": 87591990679, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -5683,15 +5715,37 @@
       "adapter": "bernini",
       "capabilities": ["text_to_image", "edit_image"],
       "downloads": [
+        // Bernini quant matrix (sc-9945, epic 8506) — the SAME q4/ (default) + q8/ + bf16/ tier subdirs
+        // on SceneWorks/bernini-mlx the video `bernini` id uses (one repo, HF cache dedupes even with
+        // both ids installed). Per-tier layout + on-demand fetch (ensure_bernini_tier_present) mirror the
+        // video entry; the image lane resolves through the same tier machinery. estimatedSizeBytes/footprint are measured from the built tiers.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/bernini-mlx",
-          "files": [],
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
           "platforms": ["macos"],
-          // Same pre-converted MLX snapshot the video `bernini` id uses (planner + dual-expert
-          // renderer + stock Wan2.2 UMT5/VAE/tokenizer), bf16 ≈ 82 GiB. Shared HF repo — the
-          // cache stores it once even with both ids installed.
-          "estimatedSizeBytes": 88046829568
+          "estimatedSizeBytes": 37815703819,
+          "footprint": { "diskSizeBytes": 37815703819, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/bernini-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 55129270617,
+          "footprint": { "diskSizeBytes": 55129270617, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/bernini-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 87591990679,
+          "footprint": { "diskSizeBytes": 87591990679, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {

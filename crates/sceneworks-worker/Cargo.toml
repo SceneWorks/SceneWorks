@@ -485,6 +485,12 @@ sceneworks-core = { path = "../sceneworks-core" }
 # candle-gen pin below moves to 7c43ec8f IN LOCKSTEP (candle-gen #301: consumes `text_encoder` in the
 # LTX provider AND re-pins candle-gen's own gen-core 330d339 -> b520a0e7) so `--features backend-candle`
 # resolves the SINGLE gen-core rev b520a0e7. mlx-rs + mlx-llm pins unchanged.
+# NB (sc-9945, epic 8506): the current `91ba8b9` pin (set by the kolors sc-9946 bump) IS the mlx-gen
+# #658 merge commit — it carries the Bernini pre-packable planner quant tier (`mlx-gen-bernini`'s pub
+# `quantize_qwen_planner_backbone` + packed-aware `Qwen25VlText` loader), the engine half of this
+# worker's Bernini quant-matrix wiring (`video_jobs.rs` bernini_tier_* + `bernini_tier_build.rs`). The
+# candle-gen `08a13a01` pin below re-pins candle-gen's own gen-core to `91ba8b9` in lockstep (bernini's
+# gen-core delta is EMPTY — mlx-gen-bernini-only), so `--features backend-candle` stays single-rev.
 sceneworks-gen-core = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "91ba8b9b44326206c11c2417252990df27fd2602" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

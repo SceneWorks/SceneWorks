@@ -1090,3 +1090,81 @@ fn wan_ti2v_5b_manifest_ships_the_quant_matrix() {
         .collect();
     assert_eq!(defaults, vec!["q4"], "the macOS default tier is q4");
 }
+
+/// sc-9945 (epic 8506): BOTH Bernini catalog ids — the `bernini` video id and the `bernini_image`
+/// still-image companion — ship the same macOS quant matrix (per-tier `q4` default + `q8` + `bf16`
+/// self-contained SceneWorks HF downloads, each `variant`-tagged with an `estimatedSizeBytes` +
+/// `footprint`, all from the shared `SceneWorks/bernini-mlx` repo). Both load paths descend into the
+/// chosen tier (`video_jobs::bernini_tier_subdir`), so a drift that drops a tier, its size, or lets the
+/// two ids diverge would break the download UI + the RAM→tier suggestion — assert the shape here.
+#[test]
+fn bernini_manifest_ships_the_quant_matrix() {
+    for (id, ty) in [("bernini", "video"), ("bernini_image", "image")] {
+        let entry = builtin_model_entry(id);
+        assert_eq!(
+            entry.get("family").and_then(Value::as_str),
+            Some("bernini"),
+            "{id} family"
+        );
+        assert_eq!(entry.get("type").and_then(Value::as_str), Some(ty), "{id} type");
+        let downloads = entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("{id} downloads"));
+        let macos: Vec<&Value> = downloads
+            .iter()
+            .filter(|d| {
+                d.get("platforms")
+                    .and_then(Value::as_array)
+                    .map(|p| p.iter().any(|x| x.as_str() == Some("macos")))
+                    .unwrap_or(false)
+            })
+            .collect();
+        let variants: Vec<&str> = macos
+            .iter()
+            .filter_map(|d| d.get("variant").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            variants,
+            vec!["q4", "q8", "bf16"],
+            "{id} ships the q4/q8/bf16 tier matrix on macOS"
+        );
+        for tier in &macos {
+            let variant = tier.get("variant").and_then(Value::as_str).unwrap();
+            assert_eq!(
+                tier.get("repo").and_then(Value::as_str),
+                Some("SceneWorks/bernini-mlx"),
+                "{id} {variant} tier hosts on the shared SceneWorks Bernini repo"
+            );
+            let files: Vec<String> = tier
+                .get("files")
+                .and_then(Value::as_array)
+                .map(|f| f.iter().filter_map(Value::as_str).map(String::from).collect())
+                .unwrap_or_default();
+            assert_eq!(
+                files,
+                vec![format!("{variant}/*")],
+                "{id} {variant} tier installs only its own subdir"
+            );
+            assert!(
+                tier.get("estimatedSizeBytes")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|b| b > 0),
+                "{id} {variant} tier declares a nonzero estimatedSizeBytes"
+            );
+            assert!(
+                tier.get("footprint")
+                    .and_then(|f| f.get("diskSizeBytes"))
+                    .and_then(Value::as_u64)
+                    .is_some_and(|b| b > 0),
+                "{id} {variant} tier declares a footprint.diskSizeBytes"
+            );
+        }
+        let defaults: Vec<&str> = macos
+            .iter()
+            .filter(|d| d.get("default").and_then(Value::as_bool) == Some(true))
+            .filter_map(|d| d.get("variant").and_then(Value::as_str))
+            .collect();
+        assert_eq!(defaults, vec!["q4"], "{id} macOS default tier is q4");
+    }
+}
