@@ -1427,6 +1427,51 @@ describe("ImageStudio PiD decoder toggle (sc-7851)", () => {
   });
 });
 
+describe("ImageStudio img2img reference tile (epic 8588 slice A, sc-8593)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  // Krea-like img2img model: a `ui.img2img` toggle, plain text-to-image capability, no vision
+  // captioner in context (baseContext leaves `imageDescribe` undefined → describe flow unavailable).
+  const KREA_IMG2IMG = { ...Z_IMAGE, id: "krea_2_turbo", name: "Krea 2 Turbo", ui: { img2img: true } };
+  const startFromImageTile = () =>
+    [...document.body.querySelectorAll("button")].find((b) =>
+      b.textContent.includes("Start from an image"),
+    );
+
+  it("hides the 'Start from an image' tile for a plain t2i model with no captioner", async () => {
+    await render(baseContext({ imageModels: [Z_IMAGE], models: [Z_IMAGE] }));
+    expect(startFromImageTile()).toBeFalsy();
+  });
+
+  it("shows the tile for a ui.img2img model even without the vision captioner (sc-8593)", async () => {
+    await render(baseContext({ imageModels: [KREA_IMG2IMG], models: [KREA_IMG2IMG] }));
+    expect(startFromImageTile()).toBeTruthy();
+  });
+});
+
 describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
   let container;
   let root;

@@ -47,6 +47,17 @@ export default function ReferenceCaptionPicker({
   onOpenModels,
   onOpenQueue,
   onCancelJob,
+  // img2img double-duty (epic 8588 slice A, sc-8593): when the selected model supports img2img,
+  // the SAME picked reference can drive generation (reference-guided / latent-init) via a strength
+  // slider — in addition to (or instead of) the describe → prompt flow above. All additive + default
+  // off, so the Ideogram-JSON + all-t2i describe consumers are byte-unaffected. `onReferenceAssetChange`
+  // lifts the picked asset id so the parent can send it as `referenceAssetId`. `showImg2imgStrength`
+  // also un-gates the picker without the vision captioner (img2img needs no captioner).
+  onReferenceAssetChange,
+  showImg2imgStrength = false,
+  img2imgStrength = 0.5,
+  onImg2imgStrengthChange,
+  img2imgStrengthConfig,
 }) {
   const [referenceAssetId, setReferenceAssetId] = useState("");
   const [busy, setBusy] = useState(false);
@@ -69,6 +80,7 @@ export default function ReferenceCaptionPicker({
   function handleReferenceChange(assetId) {
     setReferenceAssetId(assetId);
     setError("");
+    onReferenceAssetChange?.(assetId);
   }
 
   // Run the auto-preset from an effect on the SELECTED id rather than the picker's onChange: a freshly
@@ -104,7 +116,7 @@ export default function ReferenceCaptionPicker({
   return (
     <div className="structured-reference">
       <ModelAvailabilityGate
-        ready={visionCaptionReady}
+        ready={visionCaptionReady || showImg2imgStrength}
         title={gateTitle}
         description={gateDescription}
         offers={visionCaptionOffers}
@@ -127,14 +139,35 @@ export default function ReferenceCaptionPicker({
           projectId={projectId}
           value={referenceAssetId}
         />
-        <button
-          type="button"
-          className="secondary-action"
-          disabled={!referenceAssetId || busy}
-          onClick={handleCaption}
-        >
-          {busy ? busyLabel : buttonLabel}
-        </button>
+        {/* Describe → prompt (epic 8203): only when the vision captioner is present. An img2img-only
+            model (no captioner) still gets the picker + strength slider below via `showImg2imgStrength`. */}
+        {visionCaptionReady ? (
+          <button
+            type="button"
+            className="secondary-action"
+            disabled={!referenceAssetId || busy}
+            onClick={handleCaption}
+          >
+            {busy ? busyLabel : buttonLabel}
+          </button>
+        ) : null}
+        {/* img2img strength (epic 8588 slice A, sc-8593): the SAME picked reference guides generation
+            (reference-guided / latent-init) at this strength. Shown only for img2img-capable models
+            once a reference is chosen. */}
+        {showImg2imgStrength && referenceAssetId ? (
+          <label className="reference-strength img2img-strength">
+            {img2imgStrengthConfig?.label ?? "Reference strength"}
+            <input
+              max={img2imgStrengthConfig?.max ?? 1}
+              min={img2imgStrengthConfig?.min ?? 0}
+              onChange={(event) => onImg2imgStrengthChange?.(Number(event.target.value))}
+              step={img2imgStrengthConfig?.step ?? 0.05}
+              type="range"
+              value={img2imgStrength}
+            />
+            <span>{Number(img2imgStrength).toFixed(2)}</span>
+          </label>
+        ) : null}
         {error ? (
           <p className="structured-error" role="alert">
             {error}
