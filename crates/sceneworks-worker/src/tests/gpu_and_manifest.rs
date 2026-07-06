@@ -741,7 +741,7 @@ fn sana_sprint_manifest_entry_gates_correctly() {
 /// sc-9942 (epic 8506): the Wan2.2 T2V-A14B builtin entry ships the macOS quant matrix as per-tier
 /// installable artifacts — `q4` (default) + `q8` + `bf16`, each a self-contained SceneWorks HF
 /// download tagged with a `variant` and carrying an `estimatedSizeBytes` + `footprint` (sc-8508). The
-/// video load path (`video_jobs::wan_a14b_tier_subdir`) descends into the chosen tier, so a drift
+/// video load path (`video_jobs::wan_tier_subdir`) descends into the chosen tier, so a drift
 /// that drops a tier or its size would break the download UI + the RAM→tier suggestion — assert the
 /// shape here so it fails CI.
 #[test]
@@ -823,7 +823,7 @@ fn wan_t2v_14b_manifest_ships_the_quant_matrix() {
 /// sc-9943 (epic 8506): the Wan2.2 I2V-A14B builtin entry ships the SAME macOS quant matrix as its
 /// T2V sibling — per-tier `q4` (default) + `q8` + `bf16` self-contained SceneWorks HF downloads
 /// tagged with a `variant`, each with an `estimatedSizeBytes` + `footprint` (sc-8508). The video load
-/// path (`video_jobs::wan_a14b_tier_subdir`) descends into the chosen tier for BOTH A14B models, so a
+/// path (`video_jobs::wan_tier_subdir`) descends into the chosen tier for BOTH A14B models, so a
 /// drift that drops an I2V tier or its size would break the download UI + the RAM→tier suggestion —
 /// assert the shape here so it fails CI.
 #[test]
@@ -868,6 +868,88 @@ fn wan_i2v_14b_manifest_ships_the_quant_matrix() {
             tier.get("repo").and_then(Value::as_str),
             Some("SceneWorks/wan2.2-i2v-a14b-mlx"),
             "{variant} tier hosts on the SceneWorks I2V quant-matrix repo"
+        );
+        let files: Vec<String> = tier
+            .get("files")
+            .and_then(Value::as_array)
+            .map(|f| f.iter().filter_map(Value::as_str).map(String::from).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            files,
+            vec![format!("{variant}/*")],
+            "{variant} tier installs only its own subdir"
+        );
+        assert!(
+            tier.get("estimatedSizeBytes")
+                .and_then(Value::as_u64)
+                .is_some_and(|b| b > 0),
+            "{variant} tier declares a nonzero estimatedSizeBytes"
+        );
+        assert!(
+            tier.get("footprint")
+                .and_then(|f| f.get("diskSizeBytes"))
+                .and_then(Value::as_u64)
+                .is_some_and(|b| b > 0),
+            "{variant} tier declares a footprint.diskSizeBytes"
+        );
+    }
+    // Exactly one macOS default, and it is the lean q4 tier (the big bf16 is a deliberate opt-in).
+    let defaults: Vec<&str> = macos
+        .iter()
+        .filter(|d| d.get("default").and_then(Value::as_bool) == Some(true))
+        .filter_map(|d| d.get("variant").and_then(Value::as_str))
+        .collect();
+    assert_eq!(defaults, vec!["q4"], "the macOS default tier is q4");
+}
+
+/// sc-9941 (epic 8506): the single-expert Wan2.2 TI2V-5B builtin entry (`wan_2_2`) ships the SAME
+/// macOS quant matrix as its A14B siblings — per-tier `q4` (default) + `q8` + `bf16` self-contained
+/// SceneWorks HF downloads tagged with a `variant`, each with an `estimatedSizeBytes` + `footprint`
+/// (sc-8508). The video load path (`video_jobs::wan_tier_subdir`) descends into the chosen tier, so a
+/// drift that drops a tier or its size would break the download UI + the RAM→tier suggestion — assert
+/// the shape here so it fails CI.
+#[test]
+fn wan_ti2v_5b_manifest_ships_the_quant_matrix() {
+    let entry = builtin_model_entry("wan_2_2");
+    assert_eq!(
+        entry.get("family").and_then(Value::as_str),
+        Some("wan-video"),
+        "wan TI2V-5B family"
+    );
+    assert_eq!(
+        entry.get("type").and_then(Value::as_str),
+        Some("video"),
+        "wan TI2V-5B is a video model"
+    );
+    let downloads = entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .expect("wan TI2V-5B downloads");
+    // The macOS tiers, in order, from the SceneWorks quant-matrix repo.
+    let macos: Vec<&Value> = downloads
+        .iter()
+        .filter(|d| {
+            d.get("platforms")
+                .and_then(Value::as_array)
+                .map(|p| p.iter().any(|x| x.as_str() == Some("macos")))
+                .unwrap_or(false)
+        })
+        .collect();
+    let variants: Vec<&str> = macos
+        .iter()
+        .filter_map(|d| d.get("variant").and_then(Value::as_str))
+        .collect();
+    assert_eq!(
+        variants,
+        vec!["q4", "q8", "bf16"],
+        "wan TI2V-5B ships the q4/q8/bf16 tier matrix on macOS"
+    );
+    for tier in &macos {
+        let variant = tier.get("variant").and_then(Value::as_str).unwrap();
+        assert_eq!(
+            tier.get("repo").and_then(Value::as_str),
+            Some("SceneWorks/wan2.2-ti2v-5b-mlx"),
+            "{variant} tier hosts on the SceneWorks TI2V-5B quant-matrix repo"
         );
         let files: Vec<String> = tier
             .get("files")
