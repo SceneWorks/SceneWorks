@@ -6,6 +6,7 @@ import {
   firstResolvedPrompt,
   linkedGroupIssues,
   missingKeys,
+  parsePromptResolution,
   splitPromptLines,
 } from "../promptBatch.js";
 import { fromPromptBatchImport, serializePromptBatchExport } from "../promptBatchIO.js";
@@ -108,8 +109,14 @@ export default function BatchPromptPanel({
   );
   const total = useMemo(() => cardinality(prompts, variables, count), [prompts, variables, count]);
   // firstResolvedPrompt (not expandBatch()[0]) so the live preview never materializes the
-  // whole expansion, which inline alternation can make enormous.
-  const previewPrompt = useMemo(() => firstResolvedPrompt(prompts, variables), [prompts, variables]);
+  // whole expansion, which inline alternation can make enormous. Strip any leading [WxH]
+  // directive for display and surface the size as a badge (sc-10063).
+  const preview = useMemo(
+    () => parsePromptResolution(firstResolvedPrompt(prompts, variables)),
+    [prompts, variables],
+  );
+  const previewPrompt = preview.prompt;
+  const previewResolution = preview.resolution;
   const missing = useMemo(() => missingKeys(prompts, variables), [prompts, variables]);
   const groupIssues = useMemo(() => linkedGroupIssues(prompts), [prompts]);
   const hasPlaceholders = useMemo(() => prompts.some((prompt) => /\{\{[^{}]+\}\}/.test(prompt)), [prompts]);
@@ -165,7 +172,7 @@ export default function BatchPromptPanel({
             aria-label="Batch prompts"
             className="batch-prompts"
             onChange={(event) => onPromptsTextChange(event.target.value)}
-            placeholder={"{{name}} with {{hair}} hair, front view\n{{name}} in a {{red|blue|green}} coat\n{{p:he|she|they}} adjusts {{p:his|her|their}} scarf\n\nUse --- on its own line for multi-line prompts"}
+            placeholder={"{{name}} with {{hair}} hair, front view\n{{name}} in a {{red|blue|green}} coat\n[832x1216] {{name}} full-body portrait\n\nStart a line with [WxH] for a per-prompt size · use --- for multi-line prompts"}
             value={promptsText}
           />
         </label>
@@ -194,9 +201,16 @@ export default function BatchPromptPanel({
           </p>
         )}
 
-        {previewPrompt ? (
+        {previewPrompt || previewResolution ? (
           <div className="batch-preview">
-            <span className="batch-field-label">First prompt preview</span>
+            <span className="batch-field-label">
+              First prompt preview
+              {previewResolution ? (
+                <span className="batch-preview-res">
+                  {previewResolution.width}×{previewResolution.height}
+                </span>
+              ) : null}
+            </span>
             <p className="batch-preview-text">{previewPrompt}</p>
           </div>
         ) : null}

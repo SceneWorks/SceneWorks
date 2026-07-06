@@ -11066,6 +11066,17 @@ details[open] > summary.lora-scope-group-heading::before,
   padding: 8px 10px;
   white-space: pre-wrap;
 }
+.batch-preview-res {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
 .batch-total {
   font-size: 14px;
   color: var(--text);

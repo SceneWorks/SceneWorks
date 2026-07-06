@@ -16,9 +16,14 @@ import {
   extractKeys,
   linkedGroupIssues,
   missingKeys,
+  parsePromptResolution,
   splitPromptLines,
 } from "../promptBatch.js";
-import { resolveEffectiveDimensions } from "../resolutionOverride.js";
+import {
+  MAX_IMAGE_DIMENSION,
+  MIN_IMAGE_DIMENSION,
+  resolveEffectiveDimensions,
+} from "../resolutionOverride.js";
 import { batchItemStatus, summarizeBatchRun } from "../batchOps.js";
 import {
   emptyCaption,
@@ -1644,8 +1649,9 @@ export function ImageStudio() {
     model,
     count: posePayload.length ? 1 : count,
     seed: seed === "" ? null : Number(seed),
-    width,
-    height,
+    // A per-prompt [WxH] directive (sc-10063) overrides the studio resolution for this job.
+    width: opts.resolution?.width ?? width,
+    height: opts.resolution?.height ?? height,
     recipePresetId: selectedPreset?.id ?? null,
     characterId: mode === "character_image" ? characterId || null : null,
     characterLookId: mode === "character_image" ? characterLookId || null : null,
@@ -1667,7 +1673,7 @@ export function ImageStudio() {
         }
       : {}),
     advanced: buildImageJobAdvanced({
-      resolution,
+      resolution: opts.resolution ? `${opts.resolution.width}x${opts.resolution.height}` : resolution,
       sendStructured: opts.sendStructured ?? false,
       submitIntent: resolvedPrompt,
       submitCaption: opts.submitCaption ?? caption,
@@ -1739,29 +1745,33 @@ export function ImageStudio() {
         break;
       }
       const entry = resolved[i];
+      // Strip a leading [WxH] directive (sc-10063): the model gets the clean prompt, the job
+      // gets that per-prompt resolution.
+      const { prompt: cleanPrompt, resolution } = parsePromptResolution(entry.prompt);
       try {
         let request;
         if (structuredPromptModel) {
           // Structured-caption models (Ideogram 4) reject raw plain text, so auto-expand each
           // resolved prompt into a JSON caption first (sc-9980) — N sequential refine calls.
           // A prompt that fails to expand fails only that item; the rest continue.
-          const expanded = await onMagicExpand(entry.prompt);
+          const expanded = await onMagicExpand(cleanPrompt);
           if (!validateCaption(expanded).ok) {
             throw new Error("Auto-generated caption was invalid.");
           }
-          request = buildBatchJobRequest(entry.prompt, {
+          request = buildBatchJobRequest(cleanPrompt, {
             promptToSend: serializeCaption(expanded),
             sendStructured: true,
             submitCaption: expanded,
             submitBackend: PROMPT_REFINE_MODEL_ID,
+            resolution,
           });
         } else {
-          request = buildBatchJobRequest(entry.prompt);
+          request = buildBatchJobRequest(cleanPrompt, { resolution });
         }
         const job = await createImageJob(request);
-        items[i] = { prompt: entry.prompt, jobId: job?.id ?? null, error: !job?.id };
+        items[i] = { prompt: cleanPrompt, jobId: job?.id ?? null, error: !job?.id };
       } catch {
-        items[i] = { prompt: entry.prompt, jobId: null, error: true };
+        items[i] = { prompt: cleanPrompt, jobId: null, error: true };
       }
       setBatchRun({ submitting: true, items: items.map((item) => ({ ...item })) });
     }
@@ -1793,6 +1803,18 @@ export function ImageStudio() {
   const batchRunProgress = batchRun ? summarizeBatchRun(batchRun.items, jobs) : null;
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
   const batchGroupIssues = linkedGroupIssues(batchPrompts);
+  // Prompt lines whose leading [WxH] directive (sc-10063) is out of the backend 256–4096
+  // range — block the run and name the offending size.
+  const batchResolutionIssues = batchPrompts
+    .map((line) => parsePromptResolution(line).resolution)
+    .filter(
+      (res) =>
+        res &&
+        (res.width < MIN_IMAGE_DIMENSION ||
+          res.width > MAX_IMAGE_DIMENSION ||
+          res.height < MIN_IMAGE_DIMENSION ||
+          res.height > MAX_IMAGE_DIMENSION),
+    );
   // A structured-caption model can batch, but only if the prompt-refiner is available to
   // auto-write a caption per resolved prompt (sc-9980).
   const batchStructuredExpandBlocked =
@@ -1803,6 +1825,7 @@ export function ImageStudio() {
     batchTotal === 0 ||
     batchMissingKeys.length > 0 ||
     batchGroupIssues.length > 0 ||
+    batchResolutionIssues.length > 0 ||
     Boolean(batchRun?.submitting);
 
   const generateDisabled =
@@ -1914,6 +1937,11 @@ export function ImageStudio() {
                   <p className="batch-warning">
                     Give each {batchGroupIssues.map((issue) => `{{${issue.label}:…}}`).join(", ")} the same number of
                     options to run.
+                  </p>
+                ) : batchResolutionIssues.length > 0 ? (
+                  <p className="batch-warning">
+                    A prompt&rsquo;s [{batchResolutionIssues[0].width}×{batchResolutionIssues[0].height}] size is out of
+                    range — each side must be {MIN_IMAGE_DIMENSION}–{MAX_IMAGE_DIMENSION}.
                   </p>
                 ) : batchTotal === 0 ? (
                   <p className="batch-hint">Add at least one prompt to run a batch.</p>
