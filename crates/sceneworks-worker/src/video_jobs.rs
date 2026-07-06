@@ -2995,13 +2995,13 @@ async fn ensure_wan_tier_present(
     result.map(|_| ())
 }
 
-/// On-demand fetch of the mandatory 4-step Lightning distill LoRA pair (`lightx2v/Wan2.2-Lightning`)
-/// for the A14B MoE models (sc-10030). Normally the pair installs as a manifest `coRequisite`
-/// alongside the model (sc-9696), but a worker that installed the model BEFORE the coRequisite was
-/// added has the tiers without the LoRA — and [`resolve_wan_adapters`] then hard-errors because the
-/// distill is mandatory (`wan_sampling` forces 4-step / CFG-off). This self-heals that case: it pulls
-/// just the per-architecture high/low pair the first time a gen needs it (twin of
-/// [`ensure_wan_tier_present`] / the candle `ensure_qwen_lightning_lora_cached`). No-op for a
+/// On-demand fetch of the 4-step Lightning distill LoRA pair (`lightx2v/Wan2.2-Lightning`) for the
+/// A14B MoE models (sc-10030). Normally the pair installs as a manifest `coRequisite` alongside the
+/// model (sc-9696), but a worker that installed the model BEFORE the coRequisite was added has the
+/// tiers without the LoRA — and [`resolve_wan_adapters`] then hard-errors when the toggle is on. This
+/// self-heals that case: it pulls just the per-architecture high/low pair the first time a gen needs
+/// it (twin of [`ensure_wan_tier_present`] / the candle `ensure_qwen_lightning_lora_cached`). No-op
+/// when the Lightning toggle is off (sc-10047 — the native multi-step recipe needs no LoRA), for a
 /// non-A14B engine, when the pair is already cached, or when the `hf` CLI is absent (resolve then
 /// surfaces the clear "fetch it via the model manager" error). Fails loud on a real download error —
 /// fast, before any compute.
@@ -3010,8 +3010,15 @@ async fn ensure_wan_lightning_present(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    request: &VideoRequest,
     engine_id: &str,
 ) -> WorkerResult<()> {
+    // sc-10047: Lightning is a default-on toggle now. When the job opted out (`advanced.lightning`
+    // = false), the native multi-step CFG recipe runs with no Lightning adapter, so we need nothing
+    // here. Default-on (or explicitly on) still wants the pair present and self-heals if absent.
+    if !wan_lightning_on(engine_id, request) {
+        return Ok(());
+    }
     // Per-architecture subdir (NOT cross-compatible, sc-4997); must match `resolve_lightning_loras`.
     let subdir = match engine_id {
         "wan2_2_t2v_14b" => "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
@@ -3120,9 +3127,13 @@ fn resolve_wan_adapters(
     let is_moe = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
     let mut specs: Vec<AdapterSpec> = Vec::new();
 
-    // Lightning distill (both A14B MoE models — T2V + I2V, sc-4997): 4-step, applied
-    // per-expert at strength 1.0. The subdir is resolved per architecture (not cross-compatible).
-    if is_moe {
+    // Lightning distill (both A14B MoE models — T2V + I2V, sc-4997): 4-step, applied per-expert at
+    // strength 1.0 through the standard adapter path. As of sc-10047 this is a **default-on toggle**
+    // (`advanced.lightning`) rather than mandatory — the mlx-gen additive path (epic 10043) applies
+    // it on the quantized tiers, so the pair is added only when the toggle is on. When off, the
+    // native multi-step CFG recipe runs ([`wan_sampling`]) with no Lightning adapter. User LoRAs
+    // below are honored in both states. The subdir is resolved per architecture (not cross-compatible).
+    if is_moe && wan_lightning_on(engine_id, request) {
         let (high, low) = resolve_lightning_loras(settings, engine_id)?;
         specs.push(moe_adapter(high, 1.0, AdapterKind::Lora, MoeExpert::High));
         specs.push(moe_adapter(low, 1.0, AdapterKind::Lora, MoeExpert::Low));
@@ -3517,15 +3528,51 @@ fn advanced_opt_f32(request: &VideoRequest, key: &str) -> Option<f32> {
     })
 }
 
-/// Per-model sampling for the base Wan path (sc-3034 / sc-4997). Both A14B MoE models (T2V + I2V)
-/// bake the 4-step Lightning distill → forced 4 steps / CFG-off (guide 1.0); the distill is
-/// mandatory, so a user `steps`/`guidanceScale` can't break it. The dense TI2V-5B has no distill
-/// LoRA yet (sc-4999): honor an explicit user `steps`/`guidanceScale`, else apply the interim
-/// default ([`WAN5B_INTERIM_STEPS`], CFG retained). `None` ⇒ the engine config default.
+/// `true` if the A14B MoE Lightning distill is engaged for this request (sc-10047). The Lightning
+/// 4-step distill is now a **default-on toggle** (`advanced.lightning`) rather than mandatory: the
+/// mlx-gen additive path (epic 10043) applies the high/low pair on the quantized tiers, so a job can
+/// opt out and run the native multi-step CFG recipe instead. Only the two A14B MoE models (T2V + I2V)
+/// bake Lightning — for every other engine (the dense 5B, non-Wan) this is irrelevant and returns
+/// `false`. Backward compatible: an absent flag on an A14B job defaults to `true` (the prior
+/// always-on behavior). A strict-bool `false` opts out; `true` (or absent) opts in.
+#[cfg(target_os = "macos")]
+fn wan_lightning_on(engine_id: &str, request: &VideoRequest) -> bool {
+    let is_moe = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
+    if !is_moe {
+        return false;
+    }
+    // Absent ⇒ default-on for A14B; only an explicit strict-bool `false` opts out.
+    request
+        .advanced
+        .get("lightning")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// Per-model sampling for the base Wan path (sc-3034 / sc-4997 / sc-10047). On the A14B MoE models
+/// (T2V + I2V) the recipe is now conditional on the Lightning toggle ([`wan_lightning_on`]):
+/// - toggle **on** (default) → the 4-step Lightning distill preset: forced 4 steps / CFG-off
+///   (guide 1.0), unchanged from before.
+/// - toggle **off** → the native Wan2.2 A14B multi-step + CFG recipe: honor an explicit user
+///   `steps`/`guidanceScale`, else `None` so the engine's own config.json A14B defaults (40 steps,
+///   dual CFG) stand exactly.
+///
+/// The dense TI2V-5B has no distill LoRA yet (sc-4999) and no toggle: honor an explicit user
+/// `steps`/`guidanceScale`, else apply the interim default ([`WAN5B_INTERIM_STEPS`], CFG retained).
+/// `None` ⇒ the engine config default.
 #[cfg(target_os = "macos")]
 fn wan_sampling(engine_id: &str, request: &VideoRequest) -> (Option<u32>, Option<f32>) {
     if engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b" {
-        return (Some(4), Some(1.0));
+        if wan_lightning_on(engine_id, request) {
+            // Lightning distill (default): 4 steps / CFG-off. The distill is applied as an
+            // adapter (resolve_wan_adapters), so a user `steps`/`guidanceScale` can't break it.
+            return (Some(4), Some(1.0));
+        }
+        // Toggle off: native multi-step CFG. Honor an explicit user override, else `None` so the
+        // engine's config.json A14B non-distill defaults (multi-step + CFG on) stand exactly.
+        let steps = advanced_opt_u32(request, "steps");
+        let guidance = advanced_opt_f32(request, "guidanceScale");
+        return (steps, guidance);
     }
     // wan2_2_ti2v_5b (dense): user override wins, else the interim default; CFG left to the
     // engine (guide 5.0) unless the user disables it via `guidanceScale`.
@@ -5162,11 +5209,11 @@ async fn generate_wan(
     // install is the lean q4 tier; a q8/bf16 job fetches that subdir on demand before resolving. No-op
     // for a model with no hosted tier matrix, a q4 job, or an already-present tier.
     ensure_wan_tier_present(api, settings, job, request).await?;
-    // The A14B MoE recipe bakes a MANDATORY Lightning distill LoRA (sc-10030). It normally installs as
-    // a manifest coRequisite, but self-heal a worker that installed the model before the coRequisite
-    // existed so resolve_wan_adapters below doesn't dead-end. No-op for the 5B model (no Lightning) or
-    // an already-cached pair.
-    ensure_wan_lightning_present(api, settings, job, engine_id).await?;
+    // The A14B MoE recipe uses the Lightning distill LoRA by default (sc-10030 / sc-10047 default-on
+    // toggle). It normally installs as a manifest coRequisite, but self-heal a worker that installed
+    // the model before the coRequisite existed so resolve_wan_adapters below doesn't dead-end. No-op
+    // for the 5B model (no Lightning), an already-cached pair, or a job that opted out of Lightning.
+    ensure_wan_lightning_present(api, settings, job, request, engine_id).await?;
     // Descend into the chosen quant-matrix tier subdir when the turnkey ships them; a pre-packed tier
     // loads with quant=None (config.json is authoritative). A legacy flat snapshot (or a model with no
     // hosted matrix) keeps the root + load-time quant.
@@ -9874,14 +9921,14 @@ mod tests {
         assert_eq!(wan_engine_id("wan_2_2_vace_fun_14b"), None);
     }
 
-    /// Per-model sampling (sc-4997): both A14B MoE models (T2V + I2V) force the 4-step
-    /// Lightning preset (CFG off); the dense 5B honors an explicit user `steps`/`guidanceScale`
-    /// and otherwise applies the interim default with CFG retained.
+    /// Per-model sampling (sc-4997 / sc-10047): with the Lightning toggle on (the default) both A14B
+    /// MoE models (T2V + I2V) force the 4-step Lightning preset (CFG off); the dense 5B honors an
+    /// explicit user `steps`/`guidanceScale` and otherwise applies the interim default with CFG retained.
     #[cfg(target_os = "macos")]
     #[test]
     fn wan_sampling_overrides_both_14b_and_5b_interim() {
         let req = request(json!({ "projectId": "p" }));
-        // Both A14B MoE models: forced 4-step / guide 1.0 (Lightning baked).
+        // Both A14B MoE models default to Lightning on → forced 4-step / guide 1.0.
         assert_eq!(wan_sampling("wan2_2_t2v_14b", &req), (Some(4), Some(1.0)));
         assert_eq!(wan_sampling("wan2_2_i2v_14b", &req), (Some(4), Some(1.0)));
         // 5B, no override → interim default steps, CFG left to the engine (None ⇒ guide 5.0).
@@ -9894,9 +9941,72 @@ mod tests {
             "projectId": "p", "advanced": { "steps": 6, "guidanceScale": 1.0 }
         }));
         assert_eq!(wan_sampling("wan2_2_ti2v_5b", &over), (Some(6), Some(1.0)));
-        // The 14B Lightning preset ignores user overrides — the distill is mandatory.
+        // The 14B Lightning preset (toggle on) ignores user steps/guidance — the distill forces 4/1.0.
         assert_eq!(wan_sampling("wan2_2_t2v_14b", &over), (Some(4), Some(1.0)));
         assert_eq!(wan_sampling("wan2_2_i2v_14b", &over), (Some(4), Some(1.0)));
+    }
+
+    /// sc-10047: `wan_lightning_on` — default-on toggle. Absent / explicit `true` on an A14B MoE model
+    /// ⇒ on; explicit `false` ⇒ off; the dense 5B and any non-Wan engine are never Lightning.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wan_lightning_on_defaults_on_for_a14b_and_honors_toggle() {
+        let absent = request(json!({ "projectId": "p" }));
+        // A14B MoE: absent ⇒ default-on (backward compatible with the prior always-on behavior).
+        assert!(wan_lightning_on("wan2_2_t2v_14b", &absent));
+        assert!(wan_lightning_on("wan2_2_i2v_14b", &absent));
+        // Explicit true ⇒ on.
+        let on = request(json!({ "projectId": "p", "advanced": { "lightning": true } }));
+        assert!(wan_lightning_on("wan2_2_t2v_14b", &on));
+        assert!(wan_lightning_on("wan2_2_i2v_14b", &on));
+        // Explicit false ⇒ off.
+        let off = request(json!({ "projectId": "p", "advanced": { "lightning": false } }));
+        assert!(!wan_lightning_on("wan2_2_t2v_14b", &off));
+        assert!(!wan_lightning_on("wan2_2_i2v_14b", &off));
+        // The dense 5B and non-Wan engines are never Lightning regardless of the flag.
+        assert!(!wan_lightning_on("wan2_2_ti2v_5b", &absent));
+        assert!(!wan_lightning_on("wan2_2_ti2v_5b", &on));
+        assert!(!wan_lightning_on("some_other_engine", &on));
+    }
+
+    /// sc-10047: with the Lightning toggle OFF, the A14B MoE models run the native multi-step CFG
+    /// recipe — honor an explicit user `steps`/`guidanceScale`, else `None` so the engine's config.json
+    /// A14B non-distill defaults (40 steps, dual CFG) stand. 5B is unaffected by the toggle.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wan_sampling_toggle_off_runs_native_multistep_cfg() {
+        // Toggle off, no user override → (None, None): the engine's A14B non-distill defaults stand.
+        let off = request(json!({ "projectId": "p", "advanced": { "lightning": false } }));
+        assert_eq!(wan_sampling("wan2_2_t2v_14b", &off), (None, None));
+        assert_eq!(wan_sampling("wan2_2_i2v_14b", &off), (None, None));
+        // Toggle off, user override → honored (multi-step + CFG on).
+        let off_over = request(json!({
+            "projectId": "p",
+            "advanced": { "lightning": false, "steps": 30, "guidanceScale": 4.0 }
+        }));
+        assert_eq!(
+            wan_sampling("wan2_2_t2v_14b", &off_over),
+            (Some(30), Some(4.0))
+        );
+        assert_eq!(
+            wan_sampling("wan2_2_i2v_14b", &off_over),
+            (Some(30), Some(4.0))
+        );
+        // Toggle on with the same overrides → still the forced 4-step Lightning preset.
+        let on_over = request(json!({
+            "projectId": "p",
+            "advanced": { "lightning": true, "steps": 30, "guidanceScale": 4.0 }
+        }));
+        assert_eq!(
+            wan_sampling("wan2_2_t2v_14b", &on_over),
+            (Some(4), Some(1.0))
+        );
+        // 5B ignores the lightning flag entirely (no toggle) — interim default steps still apply.
+        let five_b = request(json!({ "projectId": "p", "advanced": { "lightning": false } }));
+        assert_eq!(
+            wan_sampling("wan2_2_ti2v_5b", &five_b),
+            (Some(WAN5B_INTERIM_STEPS), None)
+        );
     }
 
     /// `advanced.mlxQuantize` maps to a quant level; absent → dense / engine-resolved.
@@ -10278,6 +10388,103 @@ mod tests {
             resolve_wan_vace_adapters(&settings, &over),
             Err(WorkerError::InvalidPayload(_))
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Lay down a fake `lightx2v/Wan2.2-Lightning` HF snapshot under `data_dir` with the
+    /// per-architecture high/low pair, so [`resolve_lightning_loras`] resolves the Lightning
+    /// distill in a hermetic test (mirrors `write_complete_wan_tier`). Returns the two file paths.
+    #[cfg(target_os = "macos")]
+    fn write_fake_wan_lightning(data_dir: &Path, engine_id: &str) -> (PathBuf, PathBuf) {
+        let subdir = match engine_id {
+            "wan2_2_t2v_14b" => "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
+            "wan2_2_i2v_14b" => "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1",
+            other => panic!("no Lightning subdir for {other}"),
+        };
+        let base = data_dir
+            .join("cache")
+            .join("huggingface")
+            .join("hub")
+            .join("models--lightx2v--Wan2.2-Lightning")
+            .join("snapshots")
+            .join("deadbeef")
+            .join(subdir);
+        std::fs::create_dir_all(&base).unwrap();
+        let high = base.join("high_noise_model.safetensors");
+        let low = base.join("low_noise_model.safetensors");
+        std::fs::write(&high, b"x").unwrap();
+        std::fs::write(&low, b"x").unwrap();
+        (high, low)
+    }
+
+    /// sc-10047: `resolve_wan_adapters` gates the A14B Lightning distill pair on the default-on
+    /// toggle. Toggle on (default) → the high/low Lightning pair is prepended (per-expert tagged),
+    /// then user LoRAs. Toggle off → NO Lightning adapters, but user LoRAs are still honored. Only an
+    /// explicit `lightning:false` opts out; absent defaults to on (backward compatible). This test is
+    /// hermetic: env vars pointing HF cache elsewhere would break the fixture, so skip when set.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wan_adapters_gate_lightning_on_toggle() {
+        // The fake HF snapshot only resolves when the cache-dir env overrides are unset (else the
+        // real cache is consulted). Skip rather than assert-false in that unusual local config.
+        if std::env::var_os("HF_HUB_CACHE").is_some()
+            || std::env::var_os("HUGGINGFACE_HUB_CACHE").is_some()
+            || std::env::var_os("HF_HOME").is_some()
+        {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sw_wan_light_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (high, low) = write_fake_wan_lightning(&dir, "wan2_2_t2v_14b");
+        // A user LoRA lives under data_dir so the confinement check passes.
+        let user_lora = dir.join("style.safetensors");
+        write_lora_fixture(&user_lora, None);
+
+        let settings = Settings {
+            data_dir: dir.clone(),
+            ..Settings::from_env()
+        };
+
+        // Toggle ON (default / absent) → Lightning high/low pair, then the user LoRA (3 specs).
+        for adv in [json!({}), json!({ "lightning": true })] {
+            let req = request(json!({
+                "projectId": "p",
+                "advanced": adv,
+                "loras": [ { "path": user_lora.to_string_lossy(), "weight": 0.5 } ],
+            }));
+            let specs = resolve_wan_adapters(&settings, &req, "wan2_2_t2v_14b")
+                .expect("resolve adapters (lightning on)");
+            assert_eq!(specs.len(), 3, "lightning pair + user lora");
+            assert_eq!(specs[0].path, high);
+            assert_eq!(specs[0].moe_expert, Some(MoeExpert::High));
+            assert_eq!(specs[1].path, low);
+            assert_eq!(specs[1].moe_expert, Some(MoeExpert::Low));
+            // The user LoRA is the single-file shared spec (no high_noise sibling).
+            assert_eq!(specs[2].path, user_lora.canonicalize().unwrap());
+            assert!(specs[2].moe_expert.is_none());
+            assert!((specs[2].scale - 0.5).abs() < 1e-6);
+        }
+
+        // Toggle OFF → NO Lightning adapters; the user LoRA is still applied (1 spec).
+        let off = request(json!({
+            "projectId": "p",
+            "advanced": { "lightning": false },
+            "loras": [ { "path": user_lora.to_string_lossy(), "weight": 0.5 } ],
+        }));
+        let specs = resolve_wan_adapters(&settings, &off, "wan2_2_t2v_14b")
+            .expect("resolve adapters (lightning off)");
+        assert_eq!(specs.len(), 1, "no Lightning, user LoRA only");
+        assert_eq!(specs[0].path, user_lora.canonicalize().unwrap());
+        assert!(specs[0].moe_expert.is_none());
+
+        // Toggle OFF works even when the Lightning snapshot is absent (nothing to resolve): remove
+        // the fake snapshot and confirm the off path still succeeds with just the user LoRA.
+        std::fs::remove_file(&high).unwrap();
+        std::fs::remove_file(&low).unwrap();
+        let specs_no_light = resolve_wan_adapters(&settings, &off, "wan2_2_t2v_14b")
+            .expect("lightning-off needs no Lightning snapshot");
+        assert_eq!(specs_no_light.len(), 1);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

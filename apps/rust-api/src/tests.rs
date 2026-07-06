@@ -11961,11 +11961,13 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
 
 #[test]
 fn builtin_manifest_registers_wan_a14b_lightning_corequisite() {
-    // sc-10030 (epic 8506): both A14B MoE video models bake the 4-step lightx2v Lightning distill as a
-    // MANDATORY dependency (wan_sampling forces 4-step/CFG-off; resolve_wan_adapters always applies the
-    // high/low pair). It must install as a macOS `coRequisite` so the model manager provisions it and
-    // install_state gates on it — without this the model errors "not downloaded — fetch it via the
-    // model manager" with no way to fetch it. The subdir is per-architecture and NOT cross-compatible.
+    // sc-10030 (epic 8506): both A14B MoE video models use the 4-step lightx2v Lightning distill by
+    // default. As of sc-10047 Lightning is a DEFAULT-ON toggle (`advanced.lightning`) rather than
+    // mandatory — a job can opt out and run the native multi-step CFG recipe — but the default path
+    // still applies the high/low pair (wan_sampling → 4-step/CFG-off; resolve_wan_adapters prepends the
+    // pair when the toggle is on). So it must still install as a macOS `coRequisite` so the model
+    // manager provisions it and install_state gates on it — without this the default gen errors "not
+    // downloaded — fetch it via the model manager". The subdir is per-architecture, NOT cross-compatible.
     let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../config/manifests/builtin.models.jsonc");
     let raw = std::fs::read_to_string(&manifest_path).expect("read builtin.models.jsonc");
