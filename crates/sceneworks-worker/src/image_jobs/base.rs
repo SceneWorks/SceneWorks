@@ -547,6 +547,14 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     // resolve_quant + reconcile path as every other matrix model (no more no-quant special case).
     "sana_1600m",
     "sana_sprint_1600m",
+    // Kolors (sc-9946, epic 8506): the `SceneWorks/kolors-mlx` turnkey ships standard q4/q8/bf16
+    // tiers. mlx-gen #659 packs the SDXL-style UNet + the ChatGLM3-6B `ChatGlmLinear` projections
+    // and packed-detects on load; the SDXL VAE stays dense in every tier. Like flux1/sana (and
+    // UNLIKE the dense-TE klein class) the ChatGLM3 TE is packed, so the q4/q8 load-quant is a
+    // harmless no-op on the already-packed weights and bf16 resolves to Quant::None — no
+    // DENSE_TE_TIER_MODELS guard. The kolors descriptor already advertises supported_quants Q4/Q8,
+    // so it flows through the same resolve_quant + reconcile path as every other matrix model.
+    "kolors",
 ];
 
 /// Standard-tier models whose text encoder ships DENSE bf16 in EVERY tier (epic 8506, sc-8711:
