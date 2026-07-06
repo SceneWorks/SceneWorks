@@ -6,7 +6,7 @@
 //! per tier with the matching quant. Each tier is a COMPLETE self-contained dual-expert snapshot
 //! (both MoE experts at `in_dim` 36 image-concat conditioning, the UMT5 T5, the z16 VAE and
 //! `config.json` with the quant baked in); this helper additionally copies the `tokenizer.json` the
-//! converter does not emit into every tier so the load path (`video_jobs::wan_a14b_tier_is_complete`)
+//! converter does not emit into every tier so the load path (`video_jobs::wan_tier_is_complete`)
 //! treats each as present.
 //!
 //! This is an `#[ignore]`d test, not part of CI — it needs the ~126 GB native checkpoint on disk and
@@ -140,7 +140,7 @@ fn wan_i2v_14b_build_tiers() {
         // Release any retained buffers before the next (heavier) tier so residue never accumulates.
         mlx_rs::memory::clear_cache();
         // The converter does not emit tokenizer.json; copy it so the tier is complete for the load
-        // path (video_jobs::wan_a14b_tier_is_complete).
+        // path (video_jobs::wan_tier_is_complete).
         std::fs::copy(&tokenizer, out_dir.join("tokenizer.json"))
             .unwrap_or_else(|e| panic!("copy tokenizer.json into {tier} failed: {e:?}"));
         // Sanity: the six files the load path requires must all exist.

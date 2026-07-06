@@ -283,6 +283,14 @@ mod wan_t2v_14b_tier_build;
 // `SceneWorks/wan2.2-i2v-a14b-mlx`; not exercised in CI (needs the ~126GB native weights).
 #[cfg(all(test, target_os = "macos"))]
 mod wan_i2v_14b_tier_build;
+// On-device build helper for the Wan2.2 TI2V-5B quant matrix (sc-9941, epic 8506). The single-expert
+// sibling of the A14B helpers: drives `mlx_gen_wan::convert::convert_ti2v_5b` for the dense bf16 tier,
+// then derives the q8/q4 tiers worker-side (load the bf16 `model.safetensors` →
+// `quantize_wan_transformer` → save + reuse the shared dense T5/VAE/tokenizer + a `config.json` quant
+// patch) — byte-identical to an inline convert, no mlx-gen change. Run one-off to build the artifacts
+// for `SceneWorks/wan2.2-ti2v-5b-mlx`; not exercised in CI (needs the native checkpoint).
+#[cfg(all(test, target_os = "macos"))]
+mod wan_ti2v_5b_tier_build;
 // The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
 // control path; on Mac AND the off-Mac candle DWPose lane (sc-5496) it backs the
 // `pose_jobs` skeleton render; on a candle-disabled box off Mac it still builds +

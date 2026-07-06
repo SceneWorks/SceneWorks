@@ -4928,17 +4928,54 @@
       // SceneWorks HF org (sc-5599, epic 5594); Windows/Linux load the diffusers layout via the
       // torch wan_video adapter. The API serves only the entry matching the running OS.
       "downloads": [
+        // macOS quant matrix (sc-9941, epic 8506): each tier is a SEPARATE user-selectable artifact
+        // tagged with a `variant`; `q4` (default) installs when no tier is chosen. Each tier subdir is
+        // fully self-contained (the single-expert DiT `model.safetensors` + UMT5 T5 + z16 VAE +
+        // tokenizer + config.json with the quant baked in), so the dense T5/VAE repeat per tier (epic
+        // decision #3: storage is a non-issue; keeps the load path a single self-contained dir with no
+        // engine change). The worker fetches a toggled-but-not-downloaded tier on demand
+        // (ensure_wan_tier_present, video_jobs.rs), so advanced.mlxQuantize works without a pre-pick.
+        // The legacy flat root files stay hosted for already-shipped workers that resolve the repo
+        // root; a new worker only ever resolves the tier subdirs (cleanup follow-up sc-9977).
+        // estimatedSizeBytes/footprint are backfilled with the exact hosted subdir sizes post-build.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
-          "files": [],
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 24197123156
+          // The dense UMT5 T5 (~11.4 GB) + z16 VAE (~2.8 GB) are shared bf16 in every tier, so the q4
+          // DiT (~2.9 GB) makes this only modestly smaller than q8/bf16 (same shape as SD3.5).
+          "estimatedSizeBytes": 17142889289,
+          "footprint": { "diskSizeBytes": 17142889289, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 19596557565,
+          "footprint": { "diskSizeBytes": 19596557565, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos"],
+          // Dense bf16 tier (sc-9941): the same content as the legacy flat root (single-expert DiT +
+          // T5 + VAE + tokenizer), hosted under bf16/ for the uniform tier layout. Exact on-disk size
+          // of the built bf16/ subdir.
+          "estimatedSizeBytes": 24197122980,
+          "footprint": { "diskSizeBytes": 24197122980, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
           "files": [],
+          "default": true,
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 34203021834
         }
@@ -4992,12 +5029,14 @@
         }
       },
       "mlx": {
-        // Turnkey pre-converted MLX snapshot on the SceneWorks HF org (sc-5599, epic 5594):
-        // dense bf16, self-contained (DiT + UMT5 encoder + VAE + tokenizer), downloaded on
-        // first use — no in-app conversion. The worker still resolves env override
-        // (SCENEWORKS_MLX_WAN5B_DIR) → local <data>/models/mlx/wan_2_2 (a local conversion
-        // supersedes) → this turnkey snapshot. Source Wan-AI/Wan2.2-TI2V-5B is Apache-2.0;
-        // converter "wan_ti2v_5b" emits bf16 (Q4/Q8 applied at load, not baked in).
+        // Turnkey pre-converted MLX snapshot on the SceneWorks HF org (sc-5599, epic 5594),
+        // self-contained (single-expert DiT + UMT5 encoder + VAE + tokenizer). As of the quant matrix
+        // (sc-9941, epic 8506) it ships pre-built q4/q8/bf16 tier subdirs (the quant baked into each
+        // tier's config.json so nothing quantizes at load). The worker resolves env override
+        // (SCENEWORKS_MLX_WAN5B_DIR) → local <data>/models/mlx/wan_2_2 (a local conversion supersedes)
+        // → the requested tier subdir of this snapshot (wan_tier_subdir), loading with no install-time
+        // convert peak. Source Wan-AI/Wan2.2-TI2V-5B is Apache-2.0; converter "wan_ti2v_5b" builds the
+        // bf16 tier and the q8/q4 tiers are derived from it (quantize_wan_transformer, group 64).
         "minMemoryGb": 45,
         "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
         // macOS curated menu (sc-7296): mlx Wan adopts the unified framework over its native
