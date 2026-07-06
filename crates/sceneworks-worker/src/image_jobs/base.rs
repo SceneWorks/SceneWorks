@@ -2265,6 +2265,39 @@ fn resolve_identity_init(
     Ok(Some((image, strength)))
 }
 
+/// Resolve the **Krea 2 Turbo img2img** init (epic 8588 slice A, sc-8591): `Some((reference, strength))`
+/// from a `referenceAssetId` + `advanced.strength`, or `None` when no reference asset is supplied (the
+/// lane then falls back to plain txt2img). `strength` is the full-range 0.0–1.0 reference-fidelity
+/// slider (default 0.5); the worker does NOT clamp beyond `[0, 1]` — the usable band is model-specific
+/// (A0/sc-8589 mapped Krea Turbo's sweet spot at ~0.35–0.65, but that is guidance, not a hard clamp).
+/// The single `Conditioning::Reference` this produces is routed by the engine to
+/// `generate_turbo_img2img` (sc-10135), whose `preprocess_init_image` LANCZOS-resizes the reference to
+/// the output W×H — so, like Z-Image's [`resolve_identity_init`], the reference is fed raw (the
+/// `edit_image`-only [`should_fit_edit_source`] crop/pad-fit never applies to Krea's t2i-only surface).
+#[cfg(target_os = "macos")]
+fn resolve_krea_img2img_init(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Option<(Image, f32)>> {
+    let Some(asset_id) = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let image = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        asset_id,
+        project_path,
+    )?;
+    let strength = advanced::f32_clamped(&request.advanced, "strength", 0.5, 0.0..=1.0);
+    Ok(Some((image, strength)))
+}
+
 /// The source identity reference (decoded image + its asset id) a strict-control pose set scores its
 /// finished poses against (epic 4406, sc-4410), or `None` when the job carries no identity reference.
 ///
@@ -2856,6 +2889,16 @@ fn resolve_generic_lane_conditioning(
             }),
             None => Ok(LaneConditioning::default()),
         }
+    } else if request.model == "krea_2_turbo" && has_reference {
+        // Krea 2 Turbo reference-guided generation = img2img latent-init (epic 8588 slice A, sc-8591):
+        // a `referenceAssetId` + `advanced.strength` seeds the CFG-free Turbo denoise from the
+        // VAE-encoded reference. Text-only model (no `edit_image` mode), so the reference is optional
+        // within plain t2i; the engine routes the single `Conditioning::Reference` to
+        // `generate_turbo_img2img` (sc-10135). Candle parity is sc-10134.
+        Ok(LaneConditioning {
+            identity_init: resolve_krea_img2img_init(request, settings, project_path)?,
+            ..Default::default()
+        })
     } else {
         // Boogu instruction edit resolves its (1..5) references separately into `boogu_refs` below —
         // it uses the `MultiReference`-capable path, not the single `identity_init` reference.

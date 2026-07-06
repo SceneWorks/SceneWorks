@@ -4511,14 +4511,21 @@ fn generic_lane_conditioning_defaults_when_no_reference() {
     // The generic MLX lane's per-family conditioning resolver (sc-8828, F-026): a plain t2i job (no
     // reference, no edit source) resolves to the all-`None` default for every family that reaches the
     // generic lane — the Z-Image arm (via `resolve_zimage_identity_init` returning `None`), the Kolors
-    // arm, and the final Boogu/plain fall-through. No disk access; just proves the dispatch order picks
-    // the right arm and each yields the empty conditioning when its reference precondition is absent.
+    // arm, the Krea img2img arm (sc-8591, gated on `has_reference`), and the final Boogu/plain
+    // fall-through. No disk access; just proves the dispatch order picks the right arm and each yields
+    // the empty conditioning when its reference precondition is absent.
     let dir = tempfile::tempdir().unwrap();
     let mut settings = Settings::from_env();
     settings.data_dir = dir.path().to_path_buf();
     let project_path = dir.path();
 
-    for model in ["z_image_turbo", "kolors", "sdxl", "flux_dev"] {
+    for model in [
+        "z_image_turbo",
+        "kolors",
+        "sdxl",
+        "flux_dev",
+        "krea_2_turbo",
+    ] {
         let req = request(json!({
             "projectId": "p", "model": model, "count": 1,
         }));
