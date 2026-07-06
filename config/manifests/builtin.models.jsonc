@@ -5743,17 +5743,49 @@
         "replace_person"
       ],
       "downloads": [
+        // macOS quant matrix (sc-9944, epic 8506): each tier is a SEPARATE user-selectable artifact
+        // tagged with a `variant`; `q4` (default) installs when no tier is chosen. Each tier subdir is
+        // fully self-contained (the DiT `dit.safetensors` at the tier's precision + the shared dense
+        // Wan2.1 z16 VAE + UMT5 T5 encoder + open-CLIP ViT-H/14 visual tower + tokenizer + config.json
+        // with the quant baked in), so the dense VAE/T5/CLIP repeat per tier (epic decision #3: storage
+        // is a non-issue; keeps the load path a single self-contained dir with no engine change). The
+        // worker fetches a toggled-but-not-downloaded tier on demand (ensure_scail2_tier_present,
+        // video_jobs.rs), so advanced.mlxQuantize works without a pre-pick. The legacy flat root files
+        // (the shipped Q4 snapshot + the DPO LoRA pickle) stay hosted for already-shipped workers that
+        // resolve the repo root; a new worker only ever resolves the tier subdirs.
+        // estimatedSizeBytes/footprint are the exact hosted subdir sizes measured post-build.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/scail2-mlx",
-          "files": [],
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
           "platforms": ["macos"],
-          // Pre-converted, pre-quantized MLX snapshot: Q4-packed DiT (~8.9 GB) + stock
-          // Wan2.1 VAE / umt5-xxl + open-CLIP ViT-H/14 visual tower + Bias-Aware DPO LoRA.
-          // Self-contained — no Wan base needed at runtime. Size MEASURED from the HF tree
-          // after sc-5445 shipped the lean Q4 repo (the redundant raw torch pickles —
-          // ~14.4 GB — were pruned; the loaders use only the safetensors).
-          "estimatedSizeBytes": 25241936201
+          // The dense T5 (~11.4 GB) + open-CLIP tower (~2.5 GB) are shared bf16 in every tier, so the
+          // Q4 DiT (~9.6 GB) makes this only modestly smaller than q8/bf16 (same shape as SD3.5).
+          "estimatedSizeBytes": 23993093306,
+          "footprint": { "diskSizeBytes": 23993093306, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/scail2-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 32067131269,
+          "footprint": { "diskSizeBytes": 32067131269, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/scail2-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos"],
+          // Dense bf16 tier (sc-9944): the DiT as a true dense mirror of the zai-org fp32 checkpoint
+          // (reconstructed for this story; the pre-sc-5445 dense snapshot had been pruned) + the shared
+          // dense VAE/T5/CLIP/tokenizer. Exact on-disk size of the built bf16/ subdir.
+          "estimatedSizeBytes": 47205846839,
+          "footprint": { "diskSizeBytes": 47205846839, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
