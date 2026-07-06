@@ -176,7 +176,7 @@ impl GeneratorCache {
         if self.entry.as_ref().map_or(true, |entry| entry.key != key) {
             self.entry = None;
             let generator = gen_core::load(&key.engine_id, &spec)
-                .map_err(|error| WorkerError::Engine(format!("{load_error_context}: {error}")))?;
+                .map_err(|error| crate::classify_engine_error(&load_error_context, error))?;
             self.entry = Some(GeneratorCacheEntry {
                 key: key.clone(),
                 generator,
