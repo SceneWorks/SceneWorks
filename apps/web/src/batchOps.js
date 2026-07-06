@@ -124,3 +124,27 @@ export function summarizeBatchProgress(items, jobs) {
   summary.allDone = summary.total > 0 && summary.done === summary.total;
   return summary;
 }
+
+// Progress for a prompt-batch run (sc-9980). Unlike summarizeBatchProgress, this fan-out
+// enqueues incrementally — a structured-caption model auto-expands each resolved prompt
+// before posting, so enqueueing can be slow. An item with no jobId and no `error` is
+// therefore PENDING submission (NOT failed); `error: true` marks a submission that threw.
+// `active` = queued + running (jobs that Cancel can still stop).
+export function summarizeBatchRun(items, jobs) {
+  const summary = { total: items?.length ?? 0, pending: 0, queued: 0, running: 0, completed: 0, failed: 0 };
+  for (const item of items ?? []) {
+    if (item.error) {
+      summary.failed += 1;
+      continue;
+    }
+    if (!item.jobId) {
+      summary.pending += 1;
+      continue;
+    }
+    summary[batchItemStatus(item.jobId, jobs)] += 1;
+  }
+  summary.done = summary.completed + summary.failed;
+  summary.active = summary.queued + summary.running;
+  summary.allDone = summary.total > 0 && summary.done === summary.total;
+  return summary;
+}

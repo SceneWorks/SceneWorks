@@ -7,6 +7,7 @@ import {
   batchItemStatus,
   batchItemResultAsset,
   summarizeBatchProgress,
+  summarizeBatchRun,
 } from "./batchOps.js";
 
 const project = { id: "project_1", name: "My Project" };
@@ -129,5 +130,33 @@ describe("batch ops (sc-6112)", () => {
       [{ id: "j1", status: "completed" }],
     );
     expect(allTerminal).toMatchObject({ total: 1, completed: 1, done: 1, allDone: true });
+  });
+});
+
+describe("summarizeBatchRun (sc-9980)", () => {
+  it("counts not-yet-submitted items as pending, not failed", () => {
+    const summary = summarizeBatchRun(
+      [{ jobId: "j1" }, { jobId: null }, { jobId: null }],
+      [{ id: "j1", status: "queued" }],
+    );
+    expect(summary).toMatchObject({ total: 3, pending: 2, queued: 1, failed: 0, done: 0, allDone: false });
+  });
+
+  it("marks a thrown submission as failed via the error flag", () => {
+    const summary = summarizeBatchRun([{ jobId: null, error: true }, { jobId: "j1" }], [
+      { id: "j1", status: "completed" },
+    ]);
+    expect(summary).toMatchObject({ total: 2, failed: 1, completed: 1, pending: 0, done: 2 });
+  });
+
+  it("reports active = queued + running and allDone only when every item is terminal", () => {
+    const jobs = [
+      { id: "j1", status: "completed" },
+      { id: "j2", status: "running" },
+    ];
+    const mid = summarizeBatchRun([{ jobId: "j1" }, { jobId: "j2" }], jobs);
+    expect(mid).toMatchObject({ completed: 1, running: 1, active: 1, allDone: false });
+    const doneAll = summarizeBatchRun([{ jobId: "j1" }], [{ id: "j1", status: "completed" }]);
+    expect(doneAll).toMatchObject({ done: 1, active: 0, allDone: true });
   });
 });
