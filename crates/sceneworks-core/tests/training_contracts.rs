@@ -315,7 +315,12 @@ fn builtin_registry_exposes_krea_target() {
     assert_eq!(target.family, "krea_2");
     assert_eq!(target.base_model, "krea_2_raw");
     assert_eq!(target.kernel, "krea_lora");
-    assert_eq!(target.base_model_repo.as_deref(), Some("krea/Krea-2-Raw"));
+    // Path 1 (epic 9992): training shares the generation turnkey re-host; the trainer reads its dense
+    // `bf16/` tier (rust-api resolve_base_model_path descends into it).
+    assert_eq!(
+        target.base_model_repo.as_deref(),
+        Some("SceneWorks/krea-2-raw-mlx")
+    );
     // Single-stream DiT attention modules (separate q/k/v + the joint-attention output
     // projection `to_out.0`), matching the engine trainer's default target set.
     assert_eq!(

@@ -3344,6 +3344,19 @@ mod candle_routing_tests {
                 image_request_candle_eligible(model, &object(json!({ "prompt": "an aurora" }))),
                 "{model} plain txt2img must be candle-eligible"
             );
+            // sc-9607/sc-9983: a Q8/Q4 tier-select stays on candle (ideogram is in CANDLE_QUANT_MODELS —
+            // the packed q4/q8 turnkeys load off-Mac; the `mlxQuantize` value picks the subdir).
+            for bits in [8, 4] {
+                assert!(
+                    image_request_candle_eligible(
+                        model,
+                        &object(
+                            json!({ "prompt": "an aurora", "advanced": { "mlxQuantize": bits } })
+                        )
+                    ),
+                    "{model} Q{bits} tier-select should stay on candle"
+                );
+            }
             // Edit shapes → the bespoke dispatcher branch (img2img, inpaint, outpaint all need a source).
             for payload in [
                 json!({ "model": model, "mode": "edit_image", "sourceAssetId": "a" }),
@@ -3422,11 +3435,32 @@ mod candle_routing_tests {
         assert!(!boogu_edit_candle_eligible(&object(json!({
             "model": "boogu_image_edit", "mode": "edit_image", "referenceAssetIds": []
         }))));
-        // bf16-only: a deliberate Q8/Q4 quant request defers (boogu is not in CANDLE_QUANT_LORA_MODELS).
-        assert!(!image_request_candle_eligible(
-            "boogu_image",
-            &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 8 } }))
-        ));
+        // sc-9607/sc-9983: a Q8/Q4 tier-select now STAYS on candle (boogu is in CANDLE_QUANT_MODELS — the
+        // packed q4/q8 turnkeys load off-Mac, the `mlxQuantize` value picks the subdir). A LoRA still
+        // defers (boogu advertises no inference LoRA on candle).
+        for model in ["boogu_image", "boogu_image_turbo", "boogu_image_edit"] {
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 8 } }))
+                ),
+                "{model} Q8 tier-select should stay on candle"
+            );
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 4 } }))
+                ),
+                "{model} Q4 tier-select should stay on candle"
+            );
+            assert!(
+                !image_request_candle_eligible(
+                    model,
+                    &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
+                ),
+                "{model} with a LoRA must defer to torch (no candle inference LoRA)"
+            );
+        }
     }
 
     #[test]
@@ -3551,13 +3585,14 @@ mod candle_routing_tests {
     }
 
     #[test]
-    fn krea_lora_stays_on_candle_but_quant_and_conditioning_defer() {
-        // sc-7836 (epic 7565 P4): the candle `candle-gen-krea` descriptor advertises
-        // supports_lora/supports_lokr: true (it merges a `krea_2_raw`-trained adapter at Turbo
-        // inference) but `supported_quants: &[]`, so — the inverse of SD3.5 — a LoRA stays on the candle
-        // lane while an explicit quant request (and every conditioning shape) defers to the Python torch
-        // worker. Regression guard for the missed router un-gate: before this, a Krea LoRA hit the
-        // no-torch-fallback candle gap instead of routing to candle.
+    fn krea_lora_and_quant_stay_on_candle_but_conditioning_defers() {
+        // sc-7836 (epic 7565 P4) + sc-9607/sc-9983 (epic 9083): the candle `candle-gen-krea` descriptor
+        // advertises supports_lora/supports_lokr: true (it merges a `krea_2_raw`-trained adapter at Turbo
+        // inference) AND, since sc-9607, `supported_quants: [Q4, Q8]` (a no-op on the already-packed q4/q8
+        // turnkey subdir), so BOTH a LoRA and a Q8/Q4 tier-select stay on the candle lane (Krea is in
+        // CANDLE_QUANT_LORA_MODELS). Only the conditioning shapes (edit/reference/mask/pose) defer to the
+        // Python torch worker. Regression guard for the two missed router un-gates: before sc-7836 a Krea
+        // LoRA, and before sc-9983 a Krea Q8/Q4, each hit the no-torch-fallback candle gap off-Mac.
         let model = "krea_2_turbo";
         // Plain txt2img is eligible.
         assert!(
@@ -3572,14 +3607,14 @@ mod candle_routing_tests {
             ),
             "{model} with a LoRA should stay on candle"
         );
-        // Q8 / Q4 requests defer (Krea's candle provider is dense bf16 only).
+        // sc-9607/sc-9983: a Q8 / Q4 tier-select now STAYS on candle (the packed turnkey loads off-Mac).
         for bits in [8, 4] {
             assert!(
-                !image_request_candle_eligible(
+                image_request_candle_eligible(
                     model,
                     &object(json!({ "advanced": { "mlxQuantize": bits } }))
                 ),
-                "{model} Q{bits} request must fall back to torch (no candle quant lane)"
+                "{model} Q{bits} tier-select should stay on candle"
             );
         }
         // Every conditioning shape defers (txt2img + LoRA only).
@@ -4746,6 +4781,23 @@ mod candle_routing_tests {
             &understanding_job(
                 "image_interleave",
                 json!({ "model": "sensenova_u1_8b_fast", "prompt": "a short illustrated story" })
+            )
+        ));
+        // Infographic-V2 base advertises the SAME understanding surface (epic 9959): the eligibility
+        // list must include its id, else V2 VQA / Document-Studio jobs never route to the in-process
+        // worker (regression guard for the sc-9963 fix).
+        assert!(worker_supports_job(
+            &candle,
+            &understanding_job(
+                "image_vqa",
+                json!({ "model": "sensenova_u1_8b_infographic_v2", "question": "what is this?", "sourceAssetId": "a1" })
+            )
+        ));
+        assert!(worker_supports_job(
+            &candle,
+            &understanding_job(
+                "image_interleave",
+                json!({ "model": "sensenova_u1_8b_infographic_v2", "prompt": "an illustrated explainer" })
             )
         ));
         // Refuses a non-SenseNova understanding job → falls back to the Python torch worker.

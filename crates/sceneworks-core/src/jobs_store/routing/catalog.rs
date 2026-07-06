@@ -583,7 +583,26 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("chroma1_flash", true, true, false, false, false),
     // SenseNova-U1 (epic 3180 / sc-3900 MLX; sc-5576 candle). Pure txt2img on candle.
     ModelCaps::new("sensenova_u1_8b", true, true, false, false, false),
+    // Infographic-V2 (epic 9959): coexisting checkpoint refresh of the SAME NEO-unify engine as the
+    // base id — routes identically (MLX full surface; candle pure txt2img).
+    ModelCaps::new(
+        "sensenova_u1_8b_infographic_v2",
+        true,
+        true,
+        false,
+        false,
+        false,
+    ),
     ModelCaps::new("sensenova_u1_8b_fast", true, true, false, false, false),
+    // Infographic-V2 8-step distilled variant (epic 9959): same fast engine, routes like the base fast.
+    ModelCaps::new(
+        "sensenova_u1_8b_infographic_v2_fast",
+        true,
+        true,
+        false,
+        false,
+        false,
+    ),
     // Kolors (epic 3090): full surface on the Rust `kolors` engine (SDXL-family U-Net + ChatGLM3);
     // candle serves txt2img + bespoke IP/pose lanes (sc-5488/sc-5489).
     ModelCaps::new("kolors", true, true, false, false, false),
@@ -599,18 +618,35 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("bernini_image", true, false, false, false, false),
     // Ideogram 4 + Turbo (epic 4725 MLX; sc-6597 candle): 9.3B flow DiT + Qwen3-VL-8B TE. T2I + edit on
     // MLX (sc-6303); candle serves txt2img + the in-lane edit path (sc-6598) via the generic stream.
-    ModelCaps::new("ideogram_4", true, true, false, false, false),
-    ModelCaps::new("ideogram_4_turbo", true, true, false, false, false),
+    // Candle advertises Q4/Q8 (sc-9607 flipped `supported_quants: [Q4, Q8]`, dropping the loader's
+    // `spec.quantize` reject — a no-op on the already-packed q4/q8 turnkey), so `candle_quant` is set
+    // (sc-9983 — the routing half of sc-9607, previously missed): a tier-select `mlxQuantize` stays on
+    // candle. No inference LoRA on candle, so NOT quant/lora-exempt.
+    ModelCaps::new("ideogram_4", true, true, true, false, false),
+    ModelCaps::new("ideogram_4_turbo", true, true, true, false, false),
     // Boogu-Image-0.1 (epic 6387 MLX; sc-7524 candle): ~10.3B flow DiT + Qwen3-VL-8B + FLUX.1 VAE. Base +
-    // Turbo are txt2img; Edit adds the instruction image-edit path. bf16-only on candle (the provider
-    // rejects on-the-fly quant), so deliberately NOT quant/lora-exempt.
-    ModelCaps::new("boogu_image", true, true, false, false, false),
-    ModelCaps::new("boogu_image_turbo", true, true, false, false, false),
-    ModelCaps::new("boogu_image_edit", true, true, false, false, false),
+    // Turbo are txt2img; Edit adds the instruction image-edit path. Candle advertises Q4/Q8 (sc-9607
+    // flipped `supported_quants: [Q4, Q8]`, the packed-tier no-op), so `candle_quant` is set (sc-9983 —
+    // the routing half of sc-9607). No inference LoRA on candle, so NOT quant/lora-exempt.
+    ModelCaps::new("boogu_image", true, true, true, false, false),
+    ModelCaps::new("boogu_image_turbo", true, true, true, false, false),
+    ModelCaps::new("boogu_image_edit", true, true, true, false, false),
     // Krea 2 Turbo (epic 7565 / sc-7572 MLX; sc-7581 candle): 12B rectified-flow DiT, TDM-distilled
-    // CFG-free. Candle advertises inference LoRA/LoKr but NOT on-the-fly quant (`supported_quants: &[]`),
-    // so `candle_lora` is set (sc-7836 — merges a `krea_2_raw`-trained adapter at Turbo inference).
-    ModelCaps::new("krea_2_turbo", true, true, false, true, false),
+    // CFG-free. Candle advertises inference LoRA/LoKr (sc-7836 — merges a `krea_2_raw`-trained adapter at
+    // Turbo inference) AND, since sc-9607, on-the-fly Q4/Q8 (`supported_quants: [Q4, Q8]`, a no-op on the
+    // already-packed q4/q8 turnkey), so `candle_quant_lora` is set (sc-9983 — the routing half of sc-9607,
+    // moving Krea from `candle_lora` to BOTH): a tier-select `mlxQuantize` AND a LoRA both stay on candle.
+    ModelCaps::new("krea_2_turbo", true, true, false, false, true),
+    // Krea 2 Raw (epic 9992) — the undistilled 12B DiT exposed as a full-CFG generation model (52 steps /
+    // guidance 3.5 + negative prompt), alongside the distilled Turbo (the Boogu base/turbo precedent).
+    // Both backends wired: `mlx-gen-krea` (PR #656) + `candle-gen-krea` (sc-9994, candle-gen #350 —
+    // `render_base`, two DiT forwards/step, the reference `sampling.py:129` CFG combine). Candle
+    // advertises inference LoRA/LoKr (the shared Krea merge, sc-7836) AND on-the-fly Q4/Q8 (a no-op on
+    // the already-packed q4/q8 turnkey, sc-9607), so `candle_quant_lora` is set — mirroring `krea_2_turbo`
+    // exactly (Raw + Turbo share the arch / loader; only the DiT weights differ). `krea_2_raw` is ALSO the
+    // LoRA-training base id (Path 1 unify); training routes via the trainer registry, independent of this
+    // image-caps row.
+    ModelCaps::new("krea_2_raw", true, true, false, false, true),
     // Stable Diffusion 3.5 Large / Large Turbo / Medium (epic 7841 / sc-7871 MLX; sc-7880 candle):
     // pure txt2img. Candle advertises Q4/Q8 (sc-7879) but NOT inference LoRA (`supports_lora: false`), so
     // `candle_quant` is set — an explicit quant request stays on candle while a LoRA still defers to torch.
@@ -703,24 +739,28 @@ derive_model_list! {
 
 derive_model_list! {
     /// The candle image families that advertise on-the-fly Q4/Q8 quant AND LoRA/LoKr adapters — Lens /
-    /// Lens-Turbo (derived from [`IMAGE_MODEL_CAPS`]`.candle_quant_lora`, sc-9495). For these a LoRA or an
-    /// explicit quant request does NOT force the job to torch. Subset of [`CANDLE_ROUTED_MODELS`].
+    /// Lens-Turbo and Krea 2 Turbo (derived from [`IMAGE_MODEL_CAPS`]`.candle_quant_lora`, sc-9495; Krea
+    /// added sc-9983 once sc-9607 flipped its `supported_quants`). For these a LoRA or an explicit quant
+    /// request does NOT force the job to torch. Subset of [`CANDLE_ROUTED_MODELS`].
     pub(crate) CANDLE_QUANT_LORA_MODELS, IMAGE_MODEL_CAPS, candle_quant_lora
 }
 
 derive_model_list! {
     /// The candle image families that advertise on-the-fly Q4/Q8 quant but NOT inference LoRA — Stable
-    /// Diffusion 3.5 (derived from [`IMAGE_MODEL_CAPS`]`.candle_quant`, sc-9495). Quant stays on candle;
-    /// a LoRA still defers to torch. Disjoint from [`CANDLE_QUANT_LORA_MODELS`]; both are consulted by the
-    /// gate. Subset of [`CANDLE_ROUTED_MODELS`].
+    /// Diffusion 3.5, Ideogram 4 (+Turbo), and Boogu (Base/Turbo/Edit) (derived from
+    /// [`IMAGE_MODEL_CAPS`]`.candle_quant`, sc-9495; the ideogram/boogu packed families added sc-9983 once
+    /// sc-9607 flipped their `supported_quants`). Quant stays on candle; a LoRA still defers to torch.
+    /// Disjoint from [`CANDLE_QUANT_LORA_MODELS`]; both are consulted by the gate. Subset of
+    /// [`CANDLE_ROUTED_MODELS`].
     pub(crate) CANDLE_QUANT_MODELS, IMAGE_MODEL_CAPS, candle_quant
 }
 
 derive_model_list! {
-    /// The candle image families that advertise inference LoRA/LoKr but NOT on-the-fly quant — Krea 2
-    /// Turbo (derived from [`IMAGE_MODEL_CAPS`]`.candle_lora`, sc-9495). A LoRA stays on candle; an explicit
-    /// quant request still defers to torch. The mirror of [`CANDLE_QUANT_MODELS`]; both plus
-    /// [`CANDLE_QUANT_LORA_MODELS`] are disjoint and all consulted by the gate. Subset of
+    /// The candle image families that advertise inference LoRA/LoKr but NOT on-the-fly quant (derived from
+    /// [`IMAGE_MODEL_CAPS`]`.candle_lora`, sc-9495). Currently EMPTY: Krea 2 Turbo was the sole member until
+    /// sc-9983 moved it to [`CANDLE_QUANT_LORA_MODELS`] (sc-9607 gave it Q4/Q8 too). Kept as the vocabulary
+    /// for the next candle family that advertises LoRA but not quant. The mirror of [`CANDLE_QUANT_MODELS`];
+    /// both plus [`CANDLE_QUANT_LORA_MODELS`] are disjoint and all consulted by the gate. Subset of
     /// [`CANDLE_ROUTED_MODELS`].
     pub(crate) CANDLE_LORA_MODELS, IMAGE_MODEL_CAPS, candle_lora
 }
@@ -871,6 +911,8 @@ mod tests {
         "chroma1_flash",
         "sensenova_u1_8b",
         "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v2_fast",
         "kolors",
         "lens",
         "lens_turbo",
@@ -881,6 +923,7 @@ mod tests {
         "boogu_image_turbo",
         "boogu_image_edit",
         "krea_2_turbo",
+        "krea_2_raw",
         "sd3_5_large",
         "sd3_5_large_turbo",
         "sd3_5_medium",
@@ -908,24 +951,42 @@ mod tests {
         "chroma1_flash",
         "kolors",
         "sensenova_u1_8b",
+        "sensenova_u1_8b_infographic_v2",
         "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2_fast",
         "ideogram_4",
         "ideogram_4_turbo",
         "boogu_image",
         "boogu_image_turbo",
         "boogu_image_edit",
         "krea_2_turbo",
+        "krea_2_raw",
         "sd3_5_large",
         "sd3_5_large_turbo",
         "sd3_5_medium",
     ];
 
-    const EXPECTED_CANDLE_QUANT_LORA_MODELS: &[&str] = &["lens", "lens_turbo"];
+    // sc-9983: Krea joins Lens as a BOTH-quant-and-LoRA candle family (sc-9607 flipped its
+    // `supported_quants` to [Q4, Q8]; it already advertised inference LoRA via sc-7836). sc-9994 adds the
+    // Raw variant (candle-gen #350) with the same both-set advertisement.
+    const EXPECTED_CANDLE_QUANT_LORA_MODELS: &[&str] =
+        &["lens", "lens_turbo", "krea_2_turbo", "krea_2_raw"];
 
-    const EXPECTED_CANDLE_QUANT_MODELS: &[&str] =
-        &["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"];
+    // sc-9983: ideogram/boogu join SD3.5 as quant-only candle families (sc-9607 flipped their
+    // `supported_quants` to [Q4, Q8]; no inference LoRA on candle).
+    const EXPECTED_CANDLE_QUANT_MODELS: &[&str] = &[
+        "sd3_5_large",
+        "sd3_5_large_turbo",
+        "sd3_5_medium",
+        "ideogram_4",
+        "ideogram_4_turbo",
+        "boogu_image",
+        "boogu_image_turbo",
+        "boogu_image_edit",
+    ];
 
-    const EXPECTED_CANDLE_LORA_MODELS: &[&str] = &["krea_2_turbo"];
+    // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH), so the LoRA-only list is now empty.
+    const EXPECTED_CANDLE_LORA_MODELS: &[&str] = &[];
 
     const EXPECTED_CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[
         "wan_2_2",

@@ -55,7 +55,8 @@ fn pid_backbone_for(model: &str) -> Option<&'static str> {
         | "qwen_image_edit_2509"
         | "qwen_image_edit_2511"
         | "qwen_image_edit_2511_lightning"
-        | "krea_2_turbo" => Some("qwenimage"),
+        | "krea_2_turbo"
+        | "krea_2_raw" => Some("qwenimage"),
         // flux (sc-7846): FLUX.1, Boogu-Image, Chroma, and Z-Image — Z-Image is in the FLUX.1 VAE latent
         // space (PiD's zimage tags alias the flux checkpoint), not the qwenimage space.
         "flux_dev"
@@ -262,6 +263,7 @@ mod pid_tests {
         assert_eq!(pid_backbone_for("qwen_image"), Some("qwenimage"));
         assert_eq!(pid_backbone_for("qwen_image_edit"), Some("qwenimage"));
         assert_eq!(pid_backbone_for("krea_2_turbo"), Some("qwenimage"));
+        assert_eq!(pid_backbone_for("krea_2_raw"), Some("qwenimage"));
         // flux (sc-7846) — incl. Z-Image, which is in the FLUX.1 VAE latent space.
         assert_eq!(pid_backbone_for("flux_dev"), Some("flux"));
         assert_eq!(pid_backbone_for("boogu_image_turbo"), Some("flux"));

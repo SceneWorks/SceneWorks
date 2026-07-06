@@ -259,6 +259,15 @@ mod chroma1_base_q4_mlx_smoke;
 // mapping actually changes the output resolution on real weights.
 #[cfg(all(test, target_os = "macos"))]
 mod pid_tier_mlx_smoke;
+// Real-weight MLX smoke for the SANA quant-matrix lane (sc-8489/sc-8513, epic 8506). macOS-only;
+// drives `gen_core::load("sana_1600m"|"sana_sprint_1600m")` with a per-tier LoadSpec against the
+// packed q4/q8 + dense bf16 turnkey subdirs. On-device evidence that the SceneWorks/Sana_*_mlx
+// pre-quantized turnkeys load through the worker packed path (`STANDARD_TIER_MODELS` →
+// `standard_tier_subdir` resolves the tier) and render non-degenerate at EVERY downloaded tier. SANA
+// packs the Linear-DiT transformer + Gemma-2 CHI TE per-tier (DC-AE VAE dense); q4/q8 are a no-op on
+// the already-packed weights (packed-detected) and bf16 loads dense (Quant::None).
+#[cfg(all(test, target_os = "macos"))]
+mod sana_mlx_smoke;
 // On-device per-tier memory-footprint measurement harness (sc-8516, epic 8506). Test-only + macOS-only;
 // #[ignore]d real-weight smokes that drive `gen_core::load(id)` + ONE generation while sampling the MLX
 // process-global memory counters (mlx_rs::memory::{reset_peak_memory, get_active_memory, get_peak_memory})
@@ -267,6 +276,28 @@ mod pid_tier_mlx_smoke;
 // manifest footprint fields.
 #[cfg(all(test, target_os = "macos"))]
 mod footprint_measure;
+// On-device build helper for the Wan2.2 T2V-A14B quant matrix (sc-9942, epic 8506). Test-only +
+// macOS-only; an #[ignore]d helper that drives `mlx_gen_wan::convert::convert_t2v_14b` once per tier
+// (bf16/q8/q4) against the native checkpoint to produce the self-contained hosted tier subdirs, then
+// copies the tokenizer the converter omits. Run one-off to build the artifacts for
+// `SceneWorks/wan2.2-t2v-a14b-mlx`; not exercised in CI (needs the ~126GB native weights).
+#[cfg(all(test, target_os = "macos"))]
+mod wan_t2v_14b_tier_build;
+// On-device build helper for the Wan2.2 I2V-A14B quant matrix (sc-9943, epic 8506). The image→video
+// sibling of the above; drives `mlx_gen_wan::convert::convert_i2v_14b` (in_dim 36 image-concat) once
+// per tier (bf16/q8/q4) against the native checkpoint to produce the self-contained hosted tier
+// subdirs, then copies the tokenizer the converter omits. Run one-off to build the artifacts for
+// `SceneWorks/wan2.2-i2v-a14b-mlx`; not exercised in CI (needs the ~126GB native weights).
+#[cfg(all(test, target_os = "macos"))]
+mod wan_i2v_14b_tier_build;
+// On-device build helper for the Wan2.2 TI2V-5B quant matrix (sc-9941, epic 8506). The single-expert
+// sibling of the A14B helpers: drives `mlx_gen_wan::convert::convert_ti2v_5b` for the dense bf16 tier,
+// then derives the q8/q4 tiers worker-side (load the bf16 `model.safetensors` →
+// `quantize_wan_transformer` → save + reuse the shared dense T5/VAE/tokenizer + a `config.json` quant
+// patch) — byte-identical to an inline convert, no mlx-gen change. Run one-off to build the artifacts
+// for `SceneWorks/wan2.2-ti2v-5b-mlx`; not exercised in CI (needs the native checkpoint).
+#[cfg(all(test, target_os = "macos"))]
+mod wan_ti2v_5b_tier_build;
 // The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
 // control path; on Mac AND the off-Mac candle DWPose lane (sc-5496) it backs the
 // `pose_jobs` skeleton render; on a candle-disabled box off Mac it still builds +

@@ -8070,8 +8070,16 @@ details[open] > summary.lora-scope-group-heading::before,
   cursor: grabbing;
 }
 
+/* Do NOT add `will-change: transform` here. It promotes the wrapper to a
+   compositor layer whose backing store is rasterized once at the fit (layout)
+   size; the zoom `scale()` then GPU-stretches that low-res texture, so zooming
+   in pixelates the full-resolution image (it never resamples from the decoded
+   source). Leaving the transform un-hinted lets the compositor re-rasterize the
+   static scaled layer at on-screen resolution — sharp up to the image's native
+   pixels. Pan is driven by per-pointermove React state, not a CSS animation, so
+   the hint bought no smoothness anyway. */
 .preview-zoom-inner {
-  will-change: transform;
+  transform-origin: 0 0;
 }
 
 .preview-zoom-inner img {
@@ -10896,4 +10904,337 @@ details[open] > summary.lora-scope-group-heading::before,
   right: 12px;
   font-size: 12px;
   padding: 3px 9px;
+}
+
+/* ── Batch Prompt Processing (epic 9952) ─────────────────────────────────────
+   The Batch toggle sits by the mode tabs; when on, the single prompt is swapped
+   for the two-column authoring panel (prompt list + variables | save/load/io). */
+.batch-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.batch-toggle:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.batch-toggle.active {
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.prompt-input-row.batch {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  align-items: stretch;
+}
+.batch-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 264px;
+  gap: 18px;
+}
+@media (max-width: 900px) {
+  .batch-panel {
+    grid-template-columns: 1fr;
+  }
+}
+.batch-panel-main,
+.batch-panel-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.batch-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.batch-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.batch-prompts {
+  min-height: 132px;
+  resize: vertical;
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.batch-prompts:focus {
+  outline: 2px solid var(--accent);
+  border-color: var(--accent);
+}
+.batch-vars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.batch-var {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 8px 10px;
+  background: var(--surface-2);
+}
+.batch-var-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.batch-var-key {
+  font-size: 12.5px;
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+.batch-var-count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.batch-var-values {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.batch-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.batch-var-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  padding: 6px 9px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.batch-var-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.batch-value-remove {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+.batch-value-remove:hover {
+  color: var(--danger);
+}
+.batch-hint {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.batch-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.batch-preview-text {
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  white-space: pre-wrap;
+}
+.batch-preview-res {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.batch-total {
+  font-size: 14px;
+  color: var(--text);
+}
+.batch-total strong {
+  font-size: 18px;
+  color: var(--accent-strong);
+}
+.batch-total-detail {
+  display: block;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.batch-warning {
+  font-size: 12.5px;
+  color: var(--warn);
+}
+.batch-save,
+.batch-load {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.batch-name {
+  width: 100%;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  padding: 7px 10px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.batch-scope {
+  display: flex;
+  gap: 14px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.batch-scope label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+.batch-scope-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.batch-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 12px;
+  border-radius: var(--r-sm);
+  border: 0;
+  cursor: pointer;
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.batch-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.batch-btn.ghost {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.batch-io {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+}
+.batch-io .batch-btn {
+  flex: 1;
+}
+.batch-file-input {
+  display: none;
+}
+.batch-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 184px;
+  overflow-y: auto;
+}
+.batch-list-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.batch-list-load {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  padding: 6px 8px;
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  cursor: pointer;
+}
+.batch-list-item.active .batch-list-load {
+  border-color: var(--accent);
+}
+.batch-list-scope {
+  margin-left: auto;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+.batch-list-delete {
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+.batch-list-delete:hover {
+  color: var(--danger);
+}
+.batch-run {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+}
+.batch-run .prompt-cta {
+  min-width: 184px;
+}
+.batch-run-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.batch-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--text);
 }

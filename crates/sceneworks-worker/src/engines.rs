@@ -288,8 +288,12 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // `kolors_mlx_eligible` until their dedicated streams land (subsequent epic-3090 slices).
     ModelRow {
         sceneworks_id: "kolors",
+        // sc-9946 (epic 8506): flipped to the SceneWorks re-host `SceneWorks/kolors-mlx`, which ships
+        // the pre-quantized q4/q8/bf16 turnkey tiers (mlx-gen #659). Was upstream
+        // `Kwai-Kolors/Kolors-diffusers` (dense + install-time quant). The derived fast tokenizer is
+        // baked into every tier, so the install-time tokenizer overlay is no longer needed here.
         engine_id: "kolors",
-        default_repo: "Kwai-Kolors/Kolors-diffusers",
+        default_repo: "SceneWorks/kolors-mlx",
         default_steps: 25,
         default_guidance: 5.0,
         adapter_label: "mlx_kolors",
@@ -360,6 +364,18 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         adapter_label: "mlx_sensenova",
     },
     ModelRow {
+        // Infographic-V2 (epic 9959): coexisting checkpoint refresh of the base NEO-unify model.
+        // Its config + tensor layout are byte-identical to the base, so it rides the SAME engine
+        // (`engine_id: "sensenova_u1_8b"`) with no engine change — only a distinct SceneWorks
+        // quant-matrix re-host (q4/q8/bf16 packed tiers, epic 9959 S1). Same defaults as the base.
+        sceneworks_id: "sensenova_u1_8b_infographic_v2",
+        engine_id: "sensenova_u1_8b",
+        default_repo: "SceneWorks/sensenova-u1-8b-infographic-v2-mlx",
+        default_steps: 50,
+        default_guidance: 4.0,
+        adapter_label: "mlx_sensenova",
+    },
+    ModelRow {
         sceneworks_id: "sensenova_u1_8b_fast",
         engine_id: "sensenova_u1_8b_fast",
         // sc-8775: SceneWorks MLX quant-matrix re-host of the *distilled* variant — q4/q8/bf16 packed
@@ -368,6 +384,18 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         // so the engine's `load_fast` loads it directly without re-merging (a packed base can't
         // re-merge). Replaces the old dense-base + distill-LoRA-at-load path.
         default_repo: "SceneWorks/sensenova-u1-8b-fast-mlx",
+        default_steps: 8,
+        default_guidance: 1.0,
+        adapter_label: "mlx_sensenova",
+    },
+    ModelRow {
+        // Infographic-V2 8-step distilled variant (epic 9959, sc-9963): the V1 distill LoRA merges
+        // cleanly onto V2 (296/296 gen-path targets) and renders coherent 8-step infographics. Same
+        // pre-merged + packed layout as the base fast (distill_merged.json marker → load_fast skip),
+        // so it rides the SAME `sensenova_u1_8b_fast` engine id — only the re-host repo differs.
+        sceneworks_id: "sensenova_u1_8b_infographic_v2_fast",
+        engine_id: "sensenova_u1_8b_fast",
+        default_repo: "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx",
         default_steps: 8,
         default_guidance: 1.0,
         adapter_label: "mlx_sensenova",
@@ -469,6 +497,19 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 0.0,
         adapter_label: "mlx_krea",
     },
+    // Krea 2 Raw (epic 9992) — native MLX, the undistilled 12B DiT run with TRUE classifier-free guidance
+    // (the `krea_2_raw` descriptor advertises supports_guidance + supports_negative_prompt, unlike the
+    // CFG-free Turbo). 52 steps / guidance 3.5. Loads the packed bf16 / Q8 (default) / Q4 turnkey subdir
+    // (`SceneWorks/krea-2-raw-mlx`, the same `krea_model_subdir` resolver as Turbo). Shares the Krea
+    // pipeline with Turbo (arch-identical); the `krea_2_raw` id is also the LoRA-training base (Path 1).
+    ModelRow {
+        sceneworks_id: "krea_2_raw",
+        engine_id: "krea_2_raw",
+        default_repo: "SceneWorks/krea-2-raw-mlx",
+        default_steps: 52,
+        default_guidance: 3.5,
+        adapter_label: "mlx_krea",
+    },
     // Stable Diffusion 3.5 Large (epic 7841 / sc-7871) — native MLX, gated. 8B MMDiT + triple text
     // encoder (CLIP-L + CLIP-G + T5-XXL) + 16-ch VAE. True-CFG flagship: 28 steps / guidance 3.5 +
     // negative prompt (the `sd3_5_large` descriptor advertises supports_guidance + supports_negative
@@ -523,8 +564,9 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // the latter bundling the SceneWorks/gemma-2-2b-it TE so the load path resolves one snapshot dir —
     // SanaTextEncoder::from_snapshot reads `<dir>/text_encoder/gemma-2-2b-it.safetensors` + tokenizer.json).
     // Generator self-registers via the shared force-link (`use mlx_gen_sana as _;` in image_jobs.rs);
-    // reaches the generic MODEL_TABLE / `generate_stream` path. No runtime quant (the 2-bit quant is NOT
-    // ported); ships dense bf16. 32× DC-AE divisor → width/height must be multiples of 32.
+    // reaches the generic MODEL_TABLE / `generate_stream` path. Quant matrix (sc-8489/sc-8513): ships
+    // pre-packed q4/q8/bf16 tiers (transformer + Gemma-2 TE packed, DC-AE VAE dense), packed-detected
+    // on load — NOT the (unported) 2-bit SANA quant. 32× DC-AE divisor → W/H must be multiples of 32.
     ModelRow {
         sceneworks_id: "sana_1600m",
         engine_id: "sana_1600m",
@@ -541,8 +583,9 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // ~2 steps (the `sana_sprint_1600m` descriptor advertises NO supports_true_cfg / supports_negative).
     // Loads the un-gated `SceneWorks/Sana_Sprint_1.6B_1024px_mlx` MLX snapshot (same transformer/ vae/
     // text_encoder/ layout as base SANA; the text_encoder/ bundles the SceneWorks/gemma-2-2b-it TE so it is
-    // NOT duplicated). Dense bf16 (no quant). 32× DC-AE divisor → width/height multiples of 32. NVIDIA
-    // non-commercial (NSCLv1) — the re-host carries the upstream LICENSE + NOTICE.
+    // NOT duplicated). Quant matrix (sc-8490/sc-8513): pre-packed q4/q8/bf16 tiers, packed-detected on
+    // load. 32× DC-AE divisor → width/height multiples of 32. NVIDIA non-commercial (NSCLv1) — the
+    // re-host carries the upstream LICENSE + NOTICE.
     ModelRow {
         sceneworks_id: "sana_sprint_1600m",
         engine_id: "sana_sprint_1600m",

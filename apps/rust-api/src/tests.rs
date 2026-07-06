@@ -1,6 +1,8 @@
 use super::auth::{loopback_trusted, requires_token};
 use super::events::{EventHub, EventMessage};
-use super::training::{insufficient_disk_space, resolve_base_model_path};
+use super::training::{
+    insufficient_disk_space, resolve_base_model_path, training_base_model_installed,
+};
 use super::workers::person_readiness_from_workers;
 use super::{
     create_app, create_app_with_state, huggingface_repo_cache_path, inject_converted_model_path,
@@ -8746,6 +8748,174 @@ async fn recipe_preset_crud_routes_persist_global_and_project_presets() {
 }
 
 #[tokio::test]
+async fn prompt_batch_crud_routes_persist_global_and_project_batches() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // Create a global batch with templated prompts + multi-valued variables.
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompt-batches",
+        json!({
+            "name": "Character Turnaround",
+            "prompts": [
+                "{{name}} with {{hair}} hair, front view",
+                "{{name}} with {{hair}} hair, profile"
+            ],
+            "variables": [
+                { "key": "name", "values": ["Alice"] },
+                { "key": "hair", "values": ["red", "blue"] }
+            ],
+            "lastValues": { "name": ["Alice"], "hair": ["red", "blue"] }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["id"], "character_turnaround");
+    assert_eq!(created["scope"], "global");
+    assert_eq!(
+        created["prompts"][0],
+        "{{name}} with {{hair}} hair, front view"
+    );
+    assert_eq!(created["variables"][1]["values"][1], "blue");
+    assert!(created["createdAt"].is_string());
+    assert!(created["updatedAt"].is_string());
+
+    let (status, list) = request(app.clone(), "GET", "/api/v1/prompt-batches", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list.as_array().expect("list array").len(), 1);
+    assert_eq!(list[0]["id"], "character_turnaround");
+
+    let (status, fetched) = request(
+        app.clone(),
+        "GET",
+        "/api/v1/prompt-batches/character_turnaround",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["name"], "Character Turnaround");
+
+    // Patch replaces prompts + variables and stamps updatedAt.
+    let (status, updated) = request(
+        app.clone(),
+        "PATCH",
+        "/api/v1/prompt-batches/character_turnaround",
+        json!({
+            "prompts": ["{{name}} smiling"],
+            "variables": [{ "key": "name", "values": ["Bob"] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["prompts"].as_array().expect("prompts").len(), 1);
+    assert_eq!(updated["variables"][0]["values"][0], "Bob");
+
+    // Duplicate carries the current (patched) state under a copied id/name.
+    let (status, duplicated) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompt-batches/character_turnaround/duplicate",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(duplicated["id"], "character_turnaround_copy");
+    assert_eq!(duplicated["name"], "Character Turnaround Copy");
+    assert_eq!(duplicated["prompts"][0], "{{name}} smiling");
+
+    // Non-string variable values are rejected.
+    let (status, bad) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompt-batches",
+        json!({ "name": "Bad", "variables": [{ "key": "x", "values": [1, 2] }] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        bad["detail"],
+        "Prompt batch variable values must be an array of strings"
+    );
+
+    // Read-only-ish scopes are rejected on the query.
+    let (status, _) = request(
+        app.clone(),
+        "GET",
+        "/api/v1/prompt-batches?scope=builtin",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Project-scoped batch lives in the project's own manifest.
+    let (status, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Batch Project" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (status, project_batch) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/prompt-batches?scope=project&projectId={project_id}"),
+        json!({
+            "name": "Project Batch",
+            "prompts": ["{{subject}} portrait"],
+            "variables": [{ "key": "subject", "values": ["cat"] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(project_batch["scope"], "project");
+
+    // With the project in context, both global and project batches list together.
+    let (status, both) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/prompt-batches?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<&str> = both
+        .as_array()
+        .expect("both array")
+        .iter()
+        .filter_map(|batch| batch["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"character_turnaround"));
+    assert!(ids.contains(&"project_batch"));
+
+    // Delete soft-archives: hidden from the default list, duplicate survives.
+    let (status, archived) = request(
+        app.clone(),
+        "DELETE",
+        "/api/v1/prompt-batches/character_turnaround",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(archived["archived"], true);
+
+    let (status, after) = request(app.clone(), "GET", "/api/v1/prompt-batches", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let remaining: Vec<&str> = after
+        .as_array()
+        .expect("after array")
+        .iter()
+        .filter_map(|batch| batch["id"].as_str())
+        .collect();
+    assert!(!remaining.contains(&"character_turnaround"));
+    assert!(remaining.contains(&"character_turnaround_copy"));
+}
+
+#[tokio::test]
 async fn recipe_preset_accepts_full_studio_snapshot_and_rejects_bad_defaults() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -11572,6 +11742,57 @@ fn resolve_base_model_path_descends_into_hf_snapshot() {
 }
 
 #[test]
+fn tiered_turnkey_base_trains_on_bf16_tier() {
+    // epic 9992 Krea 2 Raw (Path 1): SceneWorks/krea-2-raw-mlx ships bf16/ q8/ q4/ tier subdirs with NO
+    // component tree at the snapshot root. Training reads the DENSE bf16 tier; a repo with only the q8
+    // GENERATION tier installed is NOT training-ready (no dense weights to LoRA-train on).
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+
+    let target = super::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|t| t.base_model == "krea_2_raw")
+        .expect("krea_2_raw target");
+    assert_eq!(
+        target.base_model_repo.as_deref(),
+        Some("SceneWorks/krea-2-raw-mlx"),
+        "Path 1: training shares the generation turnkey re-host"
+    );
+    let repo = target.base_model_repo.clone().expect("repo set");
+
+    let repo_root = huggingface_repo_cache_path(&data_dir, &repo).expect("repo cache path");
+    let revision = "abc123";
+    let snapshot = repo_root.join("snapshots").join(revision);
+    // Only the q8 GENERATION tier installed so far (no bf16 dense weights).
+    std::fs::create_dir_all(snapshot.join("q8").join("transformer")).expect("q8 tree");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("create refs");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("write refs/main");
+
+    // The resolver points training at the bf16 tier (whether or not it is present yet).
+    let resolved = resolve_base_model_path(&target, &data_dir);
+    assert_eq!(
+        resolved,
+        snapshot.join("bf16").display().to_string(),
+        "training must read the dense bf16 tier of a tiered turnkey"
+    );
+    // q8-only → NOT training-ready (the run-gate blocks it).
+    assert!(
+        !training_base_model_installed(&data_dir, &target),
+        "a q8-only tiered turnkey is not training-ready"
+    );
+
+    // Install the dense bf16 component tree → training-ready.
+    std::fs::create_dir_all(snapshot.join("bf16").join("transformer")).expect("bf16 transformer");
+    std::fs::create_dir_all(snapshot.join("bf16").join("text_encoder")).expect("bf16 te");
+    std::fs::create_dir_all(snapshot.join("bf16").join("vae")).expect("bf16 vae");
+    assert!(
+        training_base_model_installed(&data_dir, &target),
+        "bf16 tier present → training-ready"
+    );
+}
+
+#[test]
 fn resolve_base_model_path_prefers_converted_mlx_dir_for_conversion_models() {
     // `requiresConversion` models (Wan) keep usable weights in <data>/models/mlx/<id>, while the
     // HF cache holds only the native *source* checkpoint the converter consumes. Resolving Wan
@@ -11736,6 +11957,81 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
         model.get("quantization").is_none(),
         "native-first: no Torch GGUF quantization block"
     );
+}
+
+#[test]
+fn builtin_manifest_registers_wan_a14b_lightning_corequisite() {
+    // sc-10030 (epic 8506): both A14B MoE video models bake the 4-step lightx2v Lightning distill as a
+    // MANDATORY dependency (wan_sampling forces 4-step/CFG-off; resolve_wan_adapters always applies the
+    // high/low pair). It must install as a macOS `coRequisite` so the model manager provisions it and
+    // install_state gates on it — without this the model errors "not downloaded — fetch it via the
+    // model manager" with no way to fetch it. The subdir is per-architecture and NOT cross-compatible.
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../config/manifests/builtin.models.jsonc");
+    let raw = std::fs::read_to_string(&manifest_path).expect("read builtin.models.jsonc");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(&raw)).expect("parse builtin.models.jsonc");
+    let models = manifest["models"].as_array().expect("models array");
+
+    // (engine id, expected per-architecture Lightning subdir prefix)
+    let cases = [
+        (
+            "wan_2_2_t2v_14b",
+            "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
+        ),
+        (
+            "wan_2_2_i2v_14b",
+            "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1",
+        ),
+    ];
+    for (model_id, subdir) in cases {
+        let model = models
+            .iter()
+            .find(|entry| entry["id"] == model_id)
+            .unwrap_or_else(|| panic!("{model_id} is registered in the catalog"));
+        let downloads = model["downloads"].as_array().expect("downloads array");
+        let lightning = downloads
+            .iter()
+            .find(|download| download["coRequisite"] == Value::Bool(true))
+            .unwrap_or_else(|| panic!("{model_id} declares a Lightning coRequisite"));
+        assert_eq!(lightning["provider"], "huggingface");
+        assert_eq!(
+            lightning["repo"], "lightx2v/Wan2.2-Lightning",
+            "{model_id} coRequisite points at the lightx2v Lightning repo"
+        );
+        // macOS-only (the native MLX path is Mac; Windows/Linux use the torch adapter).
+        let platforms: Vec<&str> = lightning["platforms"]
+            .as_array()
+            .expect("coRequisite platforms array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(
+            platforms,
+            vec!["macos"],
+            "{model_id} Lightning is macOS-only"
+        );
+        // Exactly the per-architecture high/low pair — nothing cross-compatible, no preview assets.
+        let files: Vec<&str> = lightning["files"]
+            .as_array()
+            .expect("coRequisite files array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(
+            files,
+            vec![
+                format!("{subdir}/high_noise_model.safetensors").as_str(),
+                format!("{subdir}/low_noise_model.safetensors").as_str(),
+            ],
+            "{model_id} fetches exactly its per-architecture Lightning pair"
+        );
+        // A coRequisite is never a selectable quant tier.
+        assert!(
+            lightning.get("variant").is_none(),
+            "{model_id} Lightning coRequisite is not a quant tier"
+        );
+    }
 }
 
 #[test]

@@ -537,6 +537,24 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     // q4-default / per-variant / q8-default layouts) and are NOT registered here.
     "lens",
     "lens_turbo",
+    // SANA + SANA-Sprint (sc-8489/sc-8513, epic 8506): the `SceneWorks/Sana_1600M_1024px_mlx` /
+    // `Sana_Sprint_1.6B_1024px_mlx` turnkeys ship standard q4/q8/bf16 tiers. mlx-gen #653 packs the
+    // Linear-DiT transformer + the Gemma-2 CHI TE and packed-detects on load; the DC-AE VAE stays
+    // dense in every tier. Like flux1/qwen (and UNLIKE the dense-TE klein class) the q4/q8 load-quant
+    // is a harmless no-op on the already-packed weights and bf16 resolves to Quant::None — so these do
+    // NOT need a DENSE_TE_TIER_MODELS guard. The SANA descriptor now advertises supported_quants
+    // Q4/Q8 (mlx-gen #654), so `supports_quant()` is true and they flow through the same
+    // resolve_quant + reconcile path as every other matrix model (no more no-quant special case).
+    "sana_1600m",
+    "sana_sprint_1600m",
+    // Kolors (sc-9946, epic 8506): the `SceneWorks/kolors-mlx` turnkey ships standard q4/q8/bf16
+    // tiers. mlx-gen #659 packs the SDXL-style UNet + the ChatGLM3-6B `ChatGlmLinear` projections
+    // and packed-detects on load; the SDXL VAE stays dense in every tier. Like flux1/sana (and
+    // UNLIKE the dense-TE klein class) the ChatGLM3 TE is packed, so the q4/q8 load-quant is a
+    // harmless no-op on the already-packed weights and bf16 resolves to Quant::None — no
+    // DENSE_TE_TIER_MODELS guard. The kolors descriptor already advertises supported_quants Q4/Q8,
+    // so it flows through the same resolve_quant + reconcile path as every other matrix model.
+    "kolors",
 ];
 
 /// Standard-tier models whose text encoder ships DENSE bf16 in EVERY tier (epic 8506, sc-8711:
@@ -1669,7 +1687,13 @@ fn is_flux_model(model: &str) -> bool {
 /// `mlx-gen-sensenova` engine (sc-3900).
 #[cfg(target_os = "macos")]
 fn is_sensenova_model(model: &str) -> bool {
-    matches!(model, "sensenova_u1_8b" | "sensenova_u1_8b_fast")
+    matches!(
+        model,
+        "sensenova_u1_8b"
+            | "sensenova_u1_8b_infographic_v2"
+            | "sensenova_u1_8b_fast"
+            | "sensenova_u1_8b_infographic_v2_fast"
+    )
 }
 
 /// Stage the engine's IP-Adapter dir contract from the two cached HF snapshots:
@@ -2866,12 +2890,13 @@ async fn generate_stream(
     } else {
         model.backend()
     };
-    // Descriptor-gated quant (mirrors the candle lane below): the generic MLX families all advertise
-    // Q4/Q8 (`supported_quants`) and tolerate the Q8 default (a real quant on a dense convert, a no-op on
-    // an already-packed turnkey). SANA (sc-8489) is the lone exception — its descriptor advertises
-    // `supported_quants: &[]` and its `load` REJECTS any `spec.quantize`, so resolve no quant for it and
-    // let it load dense bf16. Every pre-existing family keeps `supports_quant() == true`, so their
-    // resolved quant is byte-identical.
+    // Descriptor-gated quant (mirrors the candle lane below): the MLX families advertise Q4/Q8
+    // (`supported_quants`) and tolerate the Q8 default (a real quant on a dense convert, a no-op on an
+    // already-packed turnkey). SANA joined this set in mlx-gen #654 (sc-8489): its descriptor now
+    // advertises Q4/Q8 and its `load` ACCEPTS an advisory `spec.quantize` (the pre-quantized tier is
+    // packed-detected from disk, #653), so it flows through the normal resolve_quant path like every
+    // other matrix model. The `else` arm stays for any future engine that genuinely advertises no
+    // quant — such a model loads dense.
     let (quant, quant_bits) = if model.supports_quant() {
         resolve_quant(request)
     } else {
@@ -2882,8 +2907,8 @@ async fn generate_stream(
     // REQUEST — so a bf16 pick with only `q4/` present would render Q4 while the recipe records dense,
     // lying to the epic 8506 quant A/B workflow. Reconcile against the tier subdir actually resolved:
     // record the precision that ran + `warn!`/emit `quant_tier_downgraded` on a real fallback. SANA
-    // (no quant support) has no tier subdir, so `tier_quant_from_resolved_dir` returns `None` and this
-    // is a no-op for it.
+    // (sc-8489) now ships standard q4/q8/bf16 turnkey tiers and advertises Q4/Q8, so it reconciles here
+    // exactly like the other matrix models.
     //
     // sc-9362 (F-018 follow-up): dense-TE turnkeys (FLUX.2-klein) always derive `(None, None)` from
     // `resolve_quant` (the load quant must stay `None` so the dense bf16 TE is never re-quantized),
@@ -3229,7 +3254,9 @@ fn is_candle_engine(model: &str) -> bool {
             | "lens_turbo"
             | "kolors"
             | "sensenova_u1_8b"
+            | "sensenova_u1_8b_infographic_v2"
             | "sensenova_u1_8b_fast"
+            | "sensenova_u1_8b_infographic_v2_fast"
             | "ideogram_4"
             | "ideogram_4_turbo"
             // Boogu-Image-0.1 (sc-7524, epic 6831): Base + Turbo (txt2img) and the Edit checkpoint, all
@@ -3277,7 +3304,10 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
-        "sensenova_u1_8b" | "sensenova_u1_8b_fast" => "candle_sensenova",
+        "sensenova_u1_8b"
+        | "sensenova_u1_8b_infographic_v2"
+        | "sensenova_u1_8b_fast"
+        | "sensenova_u1_8b_infographic_v2_fast" => "candle_sensenova",
         "ideogram_4" | "ideogram_4_turbo" => "candle_ideogram",
         "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => "candle_boogu",
         "krea_2_turbo" => "candle_krea",
