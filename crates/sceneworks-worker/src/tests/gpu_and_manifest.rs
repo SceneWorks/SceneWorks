@@ -769,10 +769,15 @@ fn wan_t2v_14b_manifest_ships_the_quant_matrix() {
     let macos: Vec<&Value> = downloads
         .iter()
         .filter(|d| {
-            d.get("platforms")
+            let is_macos = d
+                .get("platforms")
                 .and_then(Value::as_array)
                 .map(|p| p.iter().any(|x| x.as_str() == Some("macos")))
-                .unwrap_or(false)
+                .unwrap_or(false);
+            // The Lightning coRequisite (sc-10030) is a macOS download too, but it is a mandatory
+            // dependency, not a selectable quant tier — exclude it from the tier assertions.
+            let is_corequisite = d.get("coRequisite").and_then(Value::as_bool) == Some(true);
+            is_macos && !is_corequisite
         })
         .collect();
     let variants: Vec<&str> = macos
@@ -851,10 +856,15 @@ fn wan_i2v_14b_manifest_ships_the_quant_matrix() {
     let macos: Vec<&Value> = downloads
         .iter()
         .filter(|d| {
-            d.get("platforms")
+            let is_macos = d
+                .get("platforms")
                 .and_then(Value::as_array)
                 .map(|p| p.iter().any(|x| x.as_str() == Some("macos")))
-                .unwrap_or(false)
+                .unwrap_or(false);
+            // The Lightning coRequisite (sc-10030) is a macOS download too, but it is a mandatory
+            // dependency, not a selectable quant tier — exclude it from the tier assertions.
+            let is_corequisite = d.get("coRequisite").and_then(Value::as_bool) == Some(true);
+            is_macos && !is_corequisite
         })
         .collect();
     let variants: Vec<&str> = macos

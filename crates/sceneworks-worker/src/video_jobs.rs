@@ -2995,6 +2995,57 @@ async fn ensure_wan_tier_present(
     result.map(|_| ())
 }
 
+/// On-demand fetch of the mandatory 4-step Lightning distill LoRA pair (`lightx2v/Wan2.2-Lightning`)
+/// for the A14B MoE models (sc-10030). Normally the pair installs as a manifest `coRequisite`
+/// alongside the model (sc-9696), but a worker that installed the model BEFORE the coRequisite was
+/// added has the tiers without the LoRA — and [`resolve_wan_adapters`] then hard-errors because the
+/// distill is mandatory (`wan_sampling` forces 4-step / CFG-off). This self-heals that case: it pulls
+/// just the per-architecture high/low pair the first time a gen needs it (twin of
+/// [`ensure_wan_tier_present`] / the candle `ensure_qwen_lightning_lora_cached`). No-op for a
+/// non-A14B engine, when the pair is already cached, or when the `hf` CLI is absent (resolve then
+/// surfaces the clear "fetch it via the model manager" error). Fails loud on a real download error —
+/// fast, before any compute.
+#[cfg(target_os = "macos")]
+async fn ensure_wan_lightning_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    engine_id: &str,
+) -> WorkerResult<()> {
+    // Per-architecture subdir (NOT cross-compatible, sc-4997); must match `resolve_lightning_loras`.
+    let subdir = match engine_id {
+        "wan2_2_t2v_14b" => "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
+        "wan2_2_i2v_14b" => "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1",
+        // Only the A14B MoE models bake Lightning — every other engine needs nothing here.
+        _ => return Ok(()),
+    };
+    const REPO: &str = "lightx2v/Wan2.2-Lightning";
+    // Fast path: both halves already materialized in the hub cache (the common case after install).
+    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, REPO) {
+        let base = snapshot.join(subdir);
+        if base.join("high_noise_model.safetensors").is_file()
+            && base.join("low_noise_model.safetensors").is_file()
+        {
+            return Ok(());
+        }
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".wan-lightning-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec![
+        format!("{subdir}/high_noise_model.safetensors"),
+        format!("{subdir}/low_noise_model.safetensors"),
+    ];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api, settings, job, REPO, "main", &files, &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
+}
+
 /// The 4-step Lightning distill LoRA pair (high/low) for an A14B MoE model
 /// (`lightx2v/Wan2.2-Lightning`, the rank-64 Seko distill). The subdir is architecture-specific:
 /// T2V-A14B (V1.1) and I2V-A14B (V1) ship distinct LoRAs that are NOT cross-compatible (sc-4997).
@@ -5111,6 +5162,11 @@ async fn generate_wan(
     // install is the lean q4 tier; a q8/bf16 job fetches that subdir on demand before resolving. No-op
     // for a model with no hosted tier matrix, a q4 job, or an already-present tier.
     ensure_wan_tier_present(api, settings, job, request).await?;
+    // The A14B MoE recipe bakes a MANDATORY Lightning distill LoRA (sc-10030). It normally installs as
+    // a manifest coRequisite, but self-heal a worker that installed the model before the coRequisite
+    // existed so resolve_wan_adapters below doesn't dead-end. No-op for the 5B model (no Lightning) or
+    // an already-cached pair.
+    ensure_wan_lightning_present(api, settings, job, engine_id).await?;
     // Descend into the chosen quant-matrix tier subdir when the turnkey ships them; a pre-packed tier
     // loads with quant=None (config.json is authoritative). A legacy flat snapshot (or a model with no
     // hosted matrix) keeps the root + load-time quant.
