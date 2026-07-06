@@ -2465,7 +2465,12 @@ struct ReindexCounts {
 /// gate and never got the column — the dataset list query then failed with
 /// "no such column: character_id". Bumping forces the idempotent migration to
 /// replay and add the column on existing databases.
-const PROJECT_SCHEMA_VERSION: i64 = 3;
+///
+/// v4: sc-10117 — no schema change, but the bump forces the one-time reindex in
+/// `ensure_project_db_ready`, which now heals inline-upscaled asset sidecars that
+/// were missing their fold lineage (`extra.upscaledFromAssetId` / `lineage`), so
+/// existing upscale pairs collapse in the Library on next open.
+const PROJECT_SCHEMA_VERSION: i64 = 4;
 
 fn project_schema_version(connection: &Connection) -> ProjectStoreResult<i64> {
     Ok(connection.query_row("pragma user_version", [], |row| row.get(0))?)
@@ -2542,7 +2547,130 @@ pub fn ensure_project_db_ready(project_path: &Path) -> ProjectStoreResult<()> {
     Ok(())
 }
 
+/// sc-10117: heal upscale-variant lineage on inline-upscaled asset sidecars.
+///
+/// The Image Studio inline "Upscale" post-pass historically linked each `(Nx upscaled)` variant to
+/// its base image with a bare `upscaledFrom` field that nothing read — and that was dropped at
+/// sidecar-build time — so those variants never carried `extra.upscaledFromAssetId` /
+/// `lineage.sourceAssetId` and never folded with their originals in the Library / Recent Batches.
+/// The link was never persisted, so it is reconstructed from generation-set structure: within a
+/// generation set an upscaled file `…_{index}_up{N}x.<ext>` is the upscaled variant of the base
+/// `…_{index}.<ext>`. Rewrites only upscaled sidecars still missing the link (idempotent + additive)
+/// and returns how many were healed. A reconstruction with no matching base is left untouched rather
+/// than inventing a bogus parent.
+fn backfill_upscale_variant_lineage(project_path: &Path) -> ProjectStoreResult<usize> {
+    let sidecars = asset_sidecars(project_path)?;
+    // (generationSetId, relative media path) -> asset id, for every asset in the project.
+    let mut base_ids: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new();
+    let mut parsed: Vec<(PathBuf, Value)> = Vec::with_capacity(sidecars.len());
+    for sidecar_path in sidecars {
+        let Ok(asset) = read_json(&sidecar_path) else {
+            continue;
+        };
+        if let (Some(id), Some(genset), Some(path)) = (
+            asset.get("id").and_then(Value::as_str),
+            asset.get("generationSetId").and_then(Value::as_str),
+            asset.pointer("/file/path").and_then(Value::as_str),
+        ) {
+            base_ids.insert((genset.to_owned(), path.to_owned()), id.to_owned());
+        }
+        parsed.push((sidecar_path, asset));
+    }
+
+    let mut healed = 0usize;
+    for (sidecar_path, mut asset) in parsed {
+        // Already linked (a standalone image_upscale asset, or a prior heal) — skip.
+        if asset
+            .pointer("/extra/upscaledFromAssetId")
+            .and_then(Value::as_str)
+            .is_some()
+        {
+            continue;
+        }
+        // Only touch assets the inline upscale post-pass produced (they carry an `upscale` record).
+        if asset
+            .pointer("/recipe/rawAdapterSettings/upscale")
+            .is_none()
+        {
+            continue;
+        }
+        let (Some(genset), Some(path)) = (
+            asset
+                .get("generationSetId")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            asset
+                .pointer("/file/path")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        ) else {
+            continue;
+        };
+        let Some((base_path, factor)) = strip_upscale_suffix(&path) else {
+            continue;
+        };
+        // The reconstructed base must actually exist in the same generation set.
+        let Some(base_id) = base_ids.get(&(genset, base_path)).cloned() else {
+            continue;
+        };
+        let engine = asset
+            .pointer("/recipe/rawAdapterSettings/upscale/engine")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        apply_upscale_variant_link(&mut asset, &base_id, factor, &engine);
+        // A single failed rewrite must not abort the whole heal (or the reindex that calls it).
+        if write_json(&sidecar_path, &asset).is_ok() {
+            healed += 1;
+        }
+    }
+    Ok(healed)
+}
+
+/// Split an upscaled media path `…_up{N}x.<ext>` into its base path `….<ext>` and the factor `N`.
+/// Returns `None` when the filename doesn't carry the inline-upscale suffix.
+fn strip_upscale_suffix(path: &str) -> Option<(String, u8)> {
+    let (stem, ext) = path.rsplit_once('.')?;
+    let marker = stem.rfind("_up")?;
+    let factor: u8 = stem[marker + 3..].strip_suffix('x')?.parse().ok()?;
+    Some((format!("{}.{ext}", &stem[..marker]), factor))
+}
+
+/// Stamp the fold/lineage keys the Library reads onto an upscaled asset in place, mirroring the
+/// worker's standalone `image_upscale` fact (`sourceAssetId` / `parents` / `extra` markers).
+fn apply_upscale_variant_link(asset: &mut Value, base_id: &str, factor: u8, engine: &str) {
+    let Some(object) = asset.as_object_mut() else {
+        return;
+    };
+    if let Some(lineage) = object
+        .entry("lineage")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    {
+        lineage.insert("sourceAssetId".to_owned(), json!(base_id));
+        lineage.insert("parents".to_owned(), json!([base_id]));
+    }
+    if let Some(extra) = object
+        .entry("extra")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    {
+        extra.insert("isUpscaled".to_owned(), json!(true));
+        extra.insert("upscaledFromAssetId".to_owned(), json!(base_id));
+        extra.insert("factor".to_owned(), json!(factor));
+        if !engine.is_empty() {
+            extra.insert("engine".to_owned(), json!(engine));
+        }
+    }
+}
+
 fn reindex_project_path(project_path: &Path) -> ProjectStoreResult<ReindexCounts> {
+    // sc-10117: rewrite inline-upscaled sidecars missing their fold link BEFORE indexing, so the
+    // rebuilt index — and the Library, which reads the sidecars directly — sees the healed lineage.
+    // Additive + idempotent, so it is safe to run on every reindex.
+    backfill_upscale_variant_lineage(project_path)?;
+
     let mut connection = connect_project_db(project_path)?;
     let transaction = connection.transaction()?;
     apply_project_migrations(&transaction)?;
@@ -3954,12 +4082,12 @@ fn move_or_copy_file(source: &Path, destination: &Path) -> ProjectStoreResult<()
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_project_migrations, build_generated_asset_sidecar, connect_project_db,
-        find_timeline_file, guess_mime_from_filename, index_timeline, is_safe_relative_path,
-        is_safe_upload_extension, normalize_asset_tags, sniff_image_format, upload_extension,
-        AssetScope, CharacterCreateInput, CharacterLookInput, ProjectStore, ProjectStoreError,
-        UploadAsset, GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS,
-        PROJECT_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
+        apply_project_migrations, backfill_upscale_variant_lineage, build_generated_asset_sidecar,
+        connect_project_db, find_timeline_file, guess_mime_from_filename, index_timeline,
+        is_safe_relative_path, is_safe_upload_extension, normalize_asset_tags, read_json,
+        sniff_image_format, upload_extension, AssetScope, CharacterCreateInput, CharacterLookInput,
+        ProjectStore, ProjectStoreError, UploadAsset, GLOBAL_KEYPOINTS_PROJECT_ID,
+        GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
     };
     use rusqlite::Connection;
     use serde_json::{json, Value};
@@ -4103,7 +4231,7 @@ mod tests {
     /// alongside a deliberate schema change — and when you do, you MUST bump
     /// `PROJECT_SCHEMA_VERSION` so the `user_version=` line below changes too.
     const EXPECTED_PROJECT_DB_SCHEMA: &str = concat!(
-        "user_version=3\n",
+        "user_version=4\n",
         "table assets: id TEXT notnull=0 default=NULL pk=1, type TEXT notnull=1 default=NULL pk=0, display_name TEXT notnull=1 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, generation_set_id TEXT notnull=0 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, favorite INTEGER notnull=1 default=0 pk=0, rating INTEGER notnull=1 default=0 pk=0, rejected INTEGER notnull=1 default=0 pk=0, trashed INTEGER notnull=1 default=0 pk=0, sidecar_path TEXT notnull=0 default=NULL pk=0, origin TEXT notnull=0 default=NULL pk=0\n",
         "table character_looks: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, description TEXT notnull=1 default='' pk=0, approved_reference_ids TEXT notnull=1 default='[]' pk=0, recipe_settings TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
         "table character_loras: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, lora_id TEXT notnull=0 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, source_path TEXT notnull=0 default=NULL pk=0, project_path TEXT notnull=0 default=NULL pk=0, copied_into_project INTEGER notnull=1 default=0 pk=0, category TEXT notnull=1 default='character' pk=0, scope TEXT notnull=1 default='project' pk=0, trigger_words TEXT notnull=1 default='[]' pk=0, default_weight REAL notnull=1 default=1.0 pk=0, compatibility TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
@@ -4810,6 +4938,86 @@ mod tests {
         );
         assert_eq!(asset["extra"]["factor"], json!(2));
         assert_eq!(asset["extra"]["engine"], json!("real-esrgan"));
+    }
+
+    /// sc-10117: the inline Image Studio upscale post-pass used to link its `(Nx upscaled)` variant
+    /// to the base only via a dead `upscaledFrom` field, so existing upscaled assets have no fold
+    /// lineage. The backfill reconstructs it from the `_up{N}x` filename within the generation set so
+    /// the pair collapses in the Library. Additive + idempotent.
+    #[test]
+    fn backfill_reconstructs_inline_upscale_variant_lineage() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Upscales").expect("project creates");
+
+        // A base image and its inline-upscaled variant in one generation set. The upscaled fact
+        // mirrors the OLD write_upscaled_asset output: an `upscale` recipe record but NO
+        // sourceAssetId/extra link (the dead `upscaledFrom` field never reached the sidecar).
+        let base = json!({
+            "assetId": "base_1",
+            "mediaPath": "assets/images/genset_up/2026-07-01_z_image_turbo_scene_0001.png",
+            "mimeType": "image/png",
+            "displayName": "Scene #1",
+            "createdAt": "2026-07-01T00:00:00Z",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+        });
+        let upscaled = json!({
+            "assetId": "up_1",
+            "mediaPath": "assets/images/genset_up/2026-07-01_z_image_turbo_scene_0001_up2x.png",
+            "mimeType": "image/png",
+            "displayName": "Scene #1 (2x upscaled)",
+            "createdAt": "2026-07-01T00:00:01Z",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "rawAdapterSettings": { "upscale": { "enabled": true, "engine": "seedvr2", "factor": 2 } },
+        });
+        store
+            .persist_generated_asset(&project.id, "job-1", "genset_up", &base)
+            .expect("base persists");
+        store
+            .persist_generated_asset(&project.id, "job-1", "genset_up", &upscaled)
+            .expect("upscaled persists");
+
+        let project_path = store.find_project_path(&project.id).expect("project path");
+        let up_sidecar = project_path.join(
+            "assets/images/genset_up/2026-07-01_z_image_turbo_scene_0001_up2x.sceneworks.json",
+        );
+
+        // Precondition: the upscaled sidecar has no fold link yet.
+        let before = read_json(&up_sidecar).expect("read upscaled sidecar");
+        assert!(
+            before.pointer("/extra/upscaledFromAssetId").is_none(),
+            "precondition: the buggy inline upscale left no fold link"
+        );
+        assert!(before
+            .pointer("/lineage/sourceAssetId")
+            .and_then(Value::as_str)
+            .is_none());
+
+        let healed = backfill_upscale_variant_lineage(&project_path).expect("backfill runs");
+        assert_eq!(healed, 1, "exactly the one upscaled variant is healed");
+
+        let after = read_json(&up_sidecar).expect("re-read healed sidecar");
+        assert_eq!(after["extra"]["upscaledFromAssetId"], json!("base_1"));
+        assert_eq!(after["extra"]["isUpscaled"], json!(true));
+        assert_eq!(after["extra"]["factor"], json!(2));
+        assert_eq!(after["extra"]["engine"], json!("seedvr2"));
+        assert_eq!(after["lineage"]["sourceAssetId"], json!("base_1"));
+        assert_eq!(after["lineage"]["parents"], json!(["base_1"]));
+
+        // The base sidecar is untouched — it must NOT be marked as an upscale.
+        let base_sidecar = project_path
+            .join("assets/images/genset_up/2026-07-01_z_image_turbo_scene_0001.sceneworks.json");
+        let base_after = read_json(&base_sidecar).expect("read base sidecar");
+        assert!(
+            base_after.pointer("/extra/isUpscaled").is_none(),
+            "the base image must not be marked upscaled"
+        );
+
+        // Idempotent: a second pass heals nothing (the link is now present).
+        let again = backfill_upscale_variant_lineage(&project_path).expect("second backfill");
+        assert_eq!(again, 0, "already-linked variants are skipped");
     }
 
     #[test]

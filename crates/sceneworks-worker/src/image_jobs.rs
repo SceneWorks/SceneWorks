@@ -1357,10 +1357,25 @@ fn write_upscaled_asset(
     fact.insert("displayName".to_owned(), json!(display_name));
     fact.insert("createdAt".to_owned(), json!(now_rfc3339()));
     fact.insert("rawAdapterSettings".to_owned(), Value::Object(raw_settings));
-    fact.insert(
-        "upscaledFrom".to_owned(),
-        base_fact.get("assetId").cloned().unwrap_or(Value::Null),
-    );
+    // Link the upscaled variant back to its base image using the SAME lineage keys the standalone
+    // `image_upscale` job writes (upscale_jobs.rs), so the Library / Recent-Batches fold and the
+    // Original↔Upscaled A/B toggle collapse the pair (sc-10117). This previously wrote a bare
+    // `upscaledFrom` field that nothing read (not the web `assetVariants.js`, not `project_store`) and
+    // that was dropped at sidecar-build time, so inline upscales never folded with their originals.
+    let source_asset_id = base_fact.get("assetId").cloned().unwrap_or(Value::Null);
+    fact.insert("sourceAssetId".to_owned(), source_asset_id.clone());
+    fact.insert("parents".to_owned(), json!([source_asset_id.clone()]));
+    // Preserve any base `extra` (e.g. character metadata) and layer the upscale markers on top.
+    let mut extra = base_fact
+        .get("extra")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    extra.insert("isUpscaled".to_owned(), json!(true));
+    extra.insert("upscaledFromAssetId".to_owned(), source_asset_id);
+    extra.insert("factor".to_owned(), json!(factor));
+    extra.insert("engine".to_owned(), json!(engine_id));
+    fact.insert("extra".to_owned(), Value::Object(extra));
     Ok(fact)
 }
 
