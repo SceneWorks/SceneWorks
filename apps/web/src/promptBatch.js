@@ -244,6 +244,22 @@ export function firstResolvedPrompt(prompts, variables) {
   ).prompt;
 }
 
+// A prompt line may start with a `[WxH]` directive to render that prompt at its own size,
+// overriding the studio Aspect (sc-10063): `[832x1216] a full-body portrait`. Only a numeric
+// `[W x H]` at the very start counts — `[cinematic] …` stays part of the prompt. Returns the
+// stripped `prompt` and the parsed `{width,height}` (or null when absent). Range is NOT checked
+// here (the caller validates against the backend 256–4096 bounds).
+const RESOLUTION_DIRECTIVE = /^\s*\[\s*(\d{2,5})\s*[x×X]\s*(\d{2,5})\s*\]\s*/;
+export function parsePromptResolution(text) {
+  if (typeof text !== "string") return { prompt: "", resolution: null };
+  const match = RESOLUTION_DIRECTIVE.exec(text);
+  if (!match) return { prompt: text, resolution: null };
+  return {
+    prompt: text.slice(match[0].length),
+    resolution: { width: Number(match[1]), height: Number(match[2]) },
+  };
+}
+
 // Number of images a batch will queue: Σ over lines of Π(axis sizes), times `count`.
 // Computed from the factors — never materializes the expansion — so it is safe to call
 // live on every keystroke even when the product is enormous.
