@@ -4398,6 +4398,242 @@ fn resolve_candle_video_conditioning(
     }])
 }
 
+// ---------------------------------------------------------------------------
+// Candle (Windows/CUDA) Wan Lightning toggle + adapter resolution (sc-10138) — the off-Mac analog of
+// the macOS `wan_lightning_on` / `wan_sampling` / `ensure_wan_lightning_present` / `resolve_wan_adapters`
+// (all `#[cfg(target_os = "macos")]`). The candle Wan engine now ACCEPTS adapters on a packed q4/q8 tier
+// via the additive branch (candle-gen sc-10094/10095, epic 10043), so off-Mac the A14B can get its 4-step
+// distill through the Lightning toggle and user LoRAs apply on the candle Wan video path. These are
+// candle-lane copies (the macOS lane keeps its own), reusing the backend-neutral helpers `lora_scale` /
+// `resolve_lora_file` / `crate::image_jobs::{lora_path, classify_adapter}` / `MAX_JOB_LORAS` /
+// `advanced_opt_*` / `huggingface_snapshot_dir` / `download_model_with_hf_cli`.
+// ---------------------------------------------------------------------------
+
+/// (sc-10138) The interim step default for the dense candle TI2V-5B (no distill LoRA exists yet) — the
+/// candle analog of the macOS `WAN5B_INTERIM_STEPS`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_WAN5B_INTERIM_STEPS: u32 = 20;
+
+/// (sc-10138) `true` if the A14B MoE 4-step Lightning distill is engaged for this candle request — the
+/// candle analog of `wan_lightning_on`. A **default-on toggle** (`advanced.lightning`): absent or `true`
+/// opts in, a strict-bool `false` opts out (native multi-step CFG). Only the two A14B MoE models bake
+/// Lightning; every other engine returns `false`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_wan_lightning_on(engine_id: &str, request: &VideoRequest) -> bool {
+    let is_moe = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
+    if !is_moe {
+        return false;
+    }
+    request
+        .advanced
+        .get("lightning")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// (sc-10138) Per-model sampling for the candle Wan path — the candle analog of `wan_sampling`. On the
+/// A14B MoE models the recipe is conditional on the Lightning toggle: on (default) → 4 steps / CFG-off
+/// (the distill rides an adapter, so a user override can't break it); off → native multi-step CFG
+/// (honor an explicit user `steps`/`guidanceScale`, else `None` so the engine's config defaults stand).
+/// The dense TI2V-5B has no distill: user override wins, else the interim default.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_wan_sampling(engine_id: &str, request: &VideoRequest) -> (Option<u32>, Option<f32>) {
+    if engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b" {
+        if candle_wan_lightning_on(engine_id, request) {
+            return (Some(4), Some(1.0));
+        }
+        return (
+            advanced_opt_u32(request, "steps"),
+            advanced_opt_f32(request, "guidanceScale"),
+        );
+    }
+    (
+        advanced_opt_u32(request, "steps").or(Some(CANDLE_WAN5B_INTERIM_STEPS)),
+        advanced_opt_f32(request, "guidanceScale"),
+    )
+}
+
+/// (sc-10138) The `.low_noise.safetensors` sibling of a Wan A14B MoE high-noise LoRA file, or `None`
+/// when the file is not the high-noise half of a pair — the candle analog of `wan_moe_low_noise_sibling`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_wan_moe_low_noise_sibling(primary: &Path) -> Option<PathBuf> {
+    const HIGH: &str = ".high_noise.safetensors";
+    let name = primary.file_name()?.to_str()?;
+    if !name.to_ascii_lowercase().ends_with(HIGH) {
+        return None;
+    }
+    let stem = &name[..name.len() - HIGH.len()];
+    let sibling = primary.with_file_name(format!("{stem}.low_noise.safetensors"));
+    sibling.is_file().then_some(sibling)
+}
+
+/// (sc-10138) The per-architecture 4-step Lightning distill LoRA pair (high/low) for an A14B MoE model
+/// (`lightx2v/Wan2.2-Lightning`, rank-64 Seko) — the candle analog of `resolve_lightning_loras`. T2V-A14B
+/// (V1.1) and I2V-A14B (V1) ship distinct, NOT cross-compatible LoRAs (sc-4997).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_resolve_lightning_loras(
+    settings: &Settings,
+    engine_id: &str,
+) -> WorkerResult<(PathBuf, PathBuf)> {
+    let snapshot =
+        crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "lightx2v/Wan2.2-Lightning")
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "{engine_id}: the Lightning distill LoRA (lightx2v/Wan2.2-Lightning) is not \
+                     downloaded — fetch it via the model manager"
+                ))
+            })?;
+    let base = match engine_id {
+        "wan2_2_t2v_14b" => "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
+        "wan2_2_i2v_14b" => "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1",
+        other => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{other}: no Lightning distill LoRA — only the A14B MoE models bake Lightning"
+            )))
+        }
+    };
+    let high = snapshot.join(base).join("high_noise_model.safetensors");
+    let low = snapshot.join(base).join("low_noise_model.safetensors");
+    for file in [&high, &low] {
+        if !file.is_file() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{engine_id}: Lightning LoRA file missing: {}",
+                file.display()
+            )));
+        }
+    }
+    Ok((high, low))
+}
+
+/// (sc-10138) On-demand fetch of the A14B Lightning distill pair for the candle lane — the analog of
+/// `ensure_wan_lightning_present`. Self-heals a worker that installed the tiers before the Lightning
+/// `coRequisite`. No-op when the toggle is off, for a non-A14B engine, when the pair is cached, or when
+/// `hf` is absent (resolve then surfaces the clear "fetch it via the model manager" error).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn candle_ensure_wan_lightning_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    engine_id: &str,
+) -> WorkerResult<()> {
+    if !candle_wan_lightning_on(engine_id, request) {
+        return Ok(());
+    }
+    let subdir = match engine_id {
+        "wan2_2_t2v_14b" => "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
+        "wan2_2_i2v_14b" => "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1",
+        _ => return Ok(()),
+    };
+    const REPO: &str = "lightx2v/Wan2.2-Lightning";
+    if let Some(snapshot) = crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, REPO) {
+        let base = snapshot.join(subdir);
+        if base.join("high_noise_model.safetensors").is_file()
+            && base.join("low_noise_model.safetensors").is_file()
+        {
+            return Ok(());
+        }
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".wan-lightning-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec![
+        format!("{subdir}/high_noise_model.safetensors"),
+        format!("{subdir}/low_noise_model.safetensors"),
+    ];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api, settings, job, REPO, "main", &files, &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
+}
+
+/// (sc-10138) Tag an A14B MoE Lightning/user LoRA to a specific expert — the candle analog of
+/// `moe_adapter`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_moe_adapter(
+    path: PathBuf,
+    scale: f32,
+    kind: gen_core::AdapterKind,
+    expert: gen_core::MoeExpert,
+) -> AdapterSpec {
+    AdapterSpec {
+        path,
+        scale,
+        kind,
+        pass_scales: None,
+        moe_expert: Some(expert),
+    }
+}
+
+/// (sc-10138) Build the adapter specs for a candle Wan generation — the candle analog of
+/// `resolve_wan_adapters`. The Lightning distill pair (both A14B MoE models, tagged high/low, only when
+/// the toggle is on) followed by the user LoRAs. On the MoE models a user `*.high_noise.safetensors` with
+/// a `.low_noise` sibling tags high→High / low→Low; a single-file LoRA is shared (both experts on MoE,
+/// the single model on the 5B). The candle Wan engine applies these additively on a packed q4/q8 tier
+/// (sc-10094/10095) or folds them on a dense tier.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_resolve_wan_adapters(
+    settings: &Settings,
+    request: &VideoRequest,
+    engine_id: &str,
+) -> WorkerResult<Vec<AdapterSpec>> {
+    if request.loras.len() > MAX_JOB_LORAS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
+        )));
+    }
+    let is_moe = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
+    let mut specs: Vec<AdapterSpec> = Vec::new();
+
+    // Lightning distill (both A14B MoE models): 4-step, per-expert at strength 1.0, added only when the
+    // toggle is on. When off, the native multi-step CFG recipe runs with no Lightning adapter.
+    if is_moe && candle_wan_lightning_on(engine_id, request) {
+        let (high, low) = candle_resolve_lightning_loras(settings, engine_id)?;
+        specs.push(candle_moe_adapter(
+            high,
+            1.0,
+            gen_core::AdapterKind::Lora,
+            gen_core::MoeExpert::High,
+        ));
+        specs.push(candle_moe_adapter(
+            low,
+            1.0,
+            gen_core::AdapterKind::Lora,
+            gen_core::MoeExpert::Low,
+        ));
+    }
+
+    for lora in &request.loras {
+        let path = crate::image_jobs::lora_path(lora).ok_or_else(|| {
+            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
+        })?;
+        let file = resolve_lora_file(settings, path)?;
+        let kind = crate::image_jobs::classify_adapter(&file)?;
+        let scale = lora_scale(lora);
+        match (is_moe, candle_wan_moe_low_noise_sibling(&file)) {
+            (true, Some(low)) => {
+                let low_kind = crate::image_jobs::classify_adapter(&low)?;
+                specs.push(candle_moe_adapter(file, scale, kind, gen_core::MoeExpert::High));
+                specs.push(candle_moe_adapter(low, scale, low_kind, gen_core::MoeExpert::Low));
+            }
+            _ => {
+                specs.push(AdapterSpec {
+                    path: file,
+                    scale,
+                    kind,
+                    pass_scales: None,
+                    moe_expert: None,
+                });
+            }
+        }
+    }
+    Ok(specs)
+}
+
 /// Windows/CUDA candle video path (sc-5097 txt2video; sc-5175 adds the Wan2.2 14B MoE T2V + I2V).
 /// Resolves the engine + weights, provisions the LTX Gemma encoder, resolves any i2v source-image
 /// conditioning, builds a `VideoGenInput`, and runs it through the shared [`generate_video`] streaming
@@ -4471,15 +4707,30 @@ async fn generate_candle_video(
         return Ok((decoded, adapter, raw_settings));
     }
 
-    // Descriptor-narrowed sampling surface: wan (5B + 14B) takes guidance + a negative prompt; the
-    // distilled ltx takes neither (single-stage, no CFG). Steps/guidance default to the provider's own
-    // constants when the request omits them.
-    let steps = advanced_opt_u32(request, "steps");
-    let (guidance, negative_prompt) = if is_ltx {
-        (None, None)
+    let is_wan = engine_id == "wan2_2_ti2v_5b"
+        || engine_id == "wan2_2_t2v_14b"
+        || engine_id == "wan2_2_i2v_14b";
+
+    // Wan Lightning toggle + adapters (sc-10138): self-heal the A14B Lightning distill pair when the
+    // toggle is on, then resolve the adapter specs (Lightning + user LoRAs, per-expert on the MoE). The
+    // candle Wan engine applies these additively on a packed q4/q8 tier (candle-gen sc-10094/10095) or
+    // folds them on a dense tier. `Vec::new()` for the non-Wan (ltx) engine.
+    let adapters = if is_wan {
+        candle_ensure_wan_lightning_present(api, settings, job, request, engine_id).await?;
+        candle_resolve_wan_adapters(settings, request, engine_id)?
     } else {
-        let guidance = advanced_opt_f32(request, "guidanceScale");
-        (guidance, non_empty_negative_prompt(request))
+        Vec::new()
+    };
+
+    // Descriptor-narrowed sampling surface: wan (5B + 14B) takes guidance + a negative prompt; the
+    // distilled ltx takes neither (single-stage, no CFG). Wan uses the Lightning-aware recipe
+    // ([`candle_wan_sampling`]: 4-step/CFG-off when the toggle is on, else native multi-step + CFG);
+    // ltx keeps its own step default and no CFG.
+    let (steps, guidance, negative_prompt) = if is_ltx {
+        (advanced_opt_u32(request, "steps"), None, None)
+    } else {
+        let (steps, guidance) = candle_wan_sampling(engine_id, request);
+        (steps, guidance, non_empty_negative_prompt(request))
     };
     // Coerce the requested frame count onto each engine's temporal stride (wan: ≡1 mod 4; ltx: 8k+1).
     let frames = if is_ltx {
@@ -4492,6 +4743,7 @@ async fn generate_candle_video(
         scheduler: None,
         engine_id,
         model_dir,
+        adapters,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
@@ -12939,5 +13191,45 @@ mod candle_video_label_tests {
                 "{engine_id} without a source image must error"
             );
         }
+    }
+
+    /// The candle Wan Lightning toggle (sc-10138) drives the sampling recipe: A14B MoE default-on
+    /// (absent flag) ⇒ 4-step / CFG-off; explicit opt-out ⇒ native multi-step CFG (engine defaults, or a
+    /// user override); the dense 5B has no toggle and applies the interim step default.
+    #[test]
+    fn candle_wan_lightning_toggle_drives_sampling() {
+        let req =
+            |advanced: Value| VideoRequest::from_payload(json!({ "advanced": advanced }).as_object().unwrap());
+
+        for moe in ["wan2_2_t2v_14b", "wan2_2_i2v_14b"] {
+            // Default-on (absent flag): the 4-step / CFG-off Lightning recipe.
+            let on = req(json!({}));
+            assert!(candle_wan_lightning_on(moe, &on), "{moe} default-on");
+            assert_eq!(
+                candle_wan_sampling(moe, &on),
+                (Some(4), Some(1.0)),
+                "{moe} lightning recipe"
+            );
+
+            // Explicit opt-out → native multi-step CFG: no user override ⇒ (None, None) so the engine
+            // config defaults stand; a user override is honored verbatim.
+            let off = req(json!({ "lightning": false }));
+            assert!(!candle_wan_lightning_on(moe, &off), "{moe} opt-out");
+            assert_eq!(candle_wan_sampling(moe, &off), (None, None), "{moe} native defaults");
+            let off_override = req(json!({ "lightning": false, "steps": 30, "guidanceScale": 3.5 }));
+            assert_eq!(candle_wan_sampling(moe, &off_override), (Some(30), Some(3.5)));
+        }
+
+        // Dense TI2V-5B: no Lightning toggle (always off), interim step default, user override wins.
+        let five_b = req(json!({}));
+        assert!(!candle_wan_lightning_on("wan2_2_ti2v_5b", &five_b));
+        assert_eq!(
+            candle_wan_sampling("wan2_2_ti2v_5b", &five_b),
+            (Some(CANDLE_WAN5B_INTERIM_STEPS), None)
+        );
+        assert_eq!(
+            candle_wan_sampling("wan2_2_ti2v_5b", &req(json!({ "steps": 12 }))).0,
+            Some(12)
+        );
     }
 }
