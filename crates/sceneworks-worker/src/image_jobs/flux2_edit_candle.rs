@@ -237,7 +237,13 @@ async fn generate_candle_flux2_edit_stream(
         ));
     }
     let is_dev = is_flux2_edit_candle_dev(&request.model);
-    let (width, height) = (request.width, request.height);
+    // Per-generation PiD decode (epic 7840, sc-8044) + output tier (sc-10054), resolved BEFORE the
+    // references are loaded/fit so a 2K tier sizes the effective base and the edit references land at THAT
+    // base (references + latent stay aligned). `use_pid`/`with_pid` stay paired below.
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+    let (width, height) =
+        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
     let references = load_flux2_edit_references(request, project_path, settings, width, height)?;
 
     // dev (32B) loads Q4 (manifest `mlx.quantize: 4` → `resolve_quant`); klein loads dense. The dev
@@ -266,11 +272,8 @@ async fn generate_candle_flux2_edit_stream(
         },
     );
     let repo = flux2_edit_candle_repo(request);
-    // Per-generation PiD decode (epic 7840, sc-8044): resolve the `flux2` PiD student + Gemma when
-    // `advanced.usePid` is set and the snapshots are cached; else `None` → native FLUX.2 VAE. `use_pid`
-    // and the engine's `with_pid` load stay in lockstep (the engine rejects a mismatch).
-    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
-    let use_pid = pid_weights.is_some();
+    // `pid_weights`/`use_pid`/`width`/`height` were resolved above (ahead of the reference fit) so the
+    // PiD output tier (sc-10054) could size the effective base; `use_pid`/`with_pid` stay in lockstep.
     let mut raw_settings =
         flux2_edit_candle_raw_settings(request, &repo, steps, guidance, quant_bits, references.len());
     // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.

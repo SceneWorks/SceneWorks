@@ -242,6 +242,14 @@ impl CandleStrictControl for Flux1StrictControl {
         "flux1_control"
     }
 
+    fn out_width(&self) -> u32 {
+        self.width
+    }
+
+    fn out_height(&self) -> u32 {
+        self.height
+    }
+
     fn load(&self) -> WorkerResult<Self::Model> {
         let paths = Flux1ControlPaths {
             flux_base: self.base.clone(),

@@ -299,7 +299,10 @@ async fn generate_candle_sdxl_ipadapter_stream(
     raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
     // Per-image work items: (seed, prompt) — `request.count` images at the reference identity.
-    let (width, height) = (request.width, request.height);
+    // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
+    // 4K/native leaves the requested dims untouched).
+    let (width, height) =
+        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();

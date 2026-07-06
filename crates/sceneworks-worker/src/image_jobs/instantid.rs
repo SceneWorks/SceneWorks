@@ -673,6 +673,15 @@ async fn generate_instantid_stream(
     // Per-image work items: (seed, prompt, action). Pose + angle sets share one seed (only the
     // pose changes across the set — noise-derived attributes stay constant); single identity is
     // per-seed at the reference's natural pose.
+    //
+    // PiD output tier (sc-10054): when PiD runs, 2K caps the effective base so its fixed 4× lands on
+    // ~2048 (default 4K/native leaves the requested dims untouched). The skeleton/keypoints render at
+    // this same base, so control + latent stay aligned. Gated to the PiD-capable face backends (where
+    // `use_pid` + the helpers exist); the no-face build keeps the requested dims verbatim.
+    #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
+    let (width, height) =
+        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
+    #[cfg(not(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle"))))]
     let (width, height) = (request.width, request.height);
     let work: Vec<(i64, String, InstantIdAction)> = match &mode {
         InstantIdMode::PoseSet(_) => {

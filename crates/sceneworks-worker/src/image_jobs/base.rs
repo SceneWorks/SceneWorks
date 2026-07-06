@@ -3034,6 +3034,10 @@ async fn generate_stream(
     // the native VAE. `use_pid` and `spec.pid` stay in lockstep (the engine rejects a mismatch).
     let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
     let use_pid = pid_weights.is_some();
+    // PiD output tier (sc-10054): PiD super-resolves the base latent by a fixed 4×, so the effective
+    // base picks whether the output lands on ~2K or ~4K. `4k`/native leave the requested dims untouched;
+    // `2k` caps the base (also lowering the F-013 decode peak). Rebind before `generate_one`.
+    let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
     let mut spec = load_spec(weights_dir, quant, adapters, flux_ip_dir);
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
@@ -3527,6 +3531,9 @@ async fn generate_candle_stream(
         resolve_pid_weights(request, &settings.data_dir, &request.model)?
     };
     let use_pid = pid_weights.is_some();
+    // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
+    // 4K/native leaves the requested dims untouched). Rebind before `generate_one`.
+    let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
     let mut spec = load_spec(weights_dir, quant, adapters, None);
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);

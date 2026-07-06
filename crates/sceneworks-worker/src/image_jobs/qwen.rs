@@ -257,14 +257,19 @@ async fn generate_qwen_control_stream(
     .await;
 
     let prompt = request.prompt.clone();
-    let (width, height) = (request.width, request.height);
-    let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
-    let adapter_count = adapters.len();
     // Per-generation PiD decode (epic 7840, sc-7849): the strict-pose control engine shares the
     // `qwenimage` latent space, so route its decode through PiD when `advanced.usePid` is set and the
-    // snapshots are cached; otherwise native VAE. `use_pid` and `spec.pid` stay in lockstep.
+    // snapshots are cached; otherwise native VAE. `use_pid` and `spec.pid` stay in lockstep. Resolved
+    // before the dims so the PiD output tier (sc-10054) can size the base — the pose skeleton is
+    // rendered at that same base, so control + latent stay aligned.
     let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
     let use_pid = pid_weights.is_some();
+    // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
+    // 4K/native leaves the requested dims untouched).
+    let (width, height) =
+        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
+    let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
+    let adapter_count = adapters.len();
     let mut spec = qwen_control_spec(weights_dir, control_weights, quant, adapters);
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
@@ -694,15 +699,21 @@ async fn generate_qwen_edit_stream(
             "Qwen-Image-Edit requires a reference image".to_owned(),
         ));
     }
-    // sc-3030 fit_image: pre-fit the Image-Edit source to the output W×H (crop / pad /
+    // Per-generation PiD decode (epic 7840, sc-7849) + output tier (sc-10054). Resolved here, ahead of
+    // the source pre-fit and generation, so a 2K tier sizes the effective base and the Image-Edit source
+    // is fit to THAT base — source and latent stay in lockstep. `use_pid`/`spec.pid` stay paired below.
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+    let (width, height) =
+        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
+
+    // sc-3030 fit_image: pre-fit the Image-Edit source to the (effective) output W×H (crop / pad /
     // outpaint→pad) so an off-aspect edit doesn't stretch. Character-Studio references
     // stay native (the `should_fit_edit_source` gate excludes them).
     if should_fit_edit_source(request) {
         references = references
             .into_iter()
-            .map(|reference| {
-                fit_engine_image(reference, request.width, request.height, &request.fit_mode)
-            })
+            .map(|reference| fit_engine_image(reference, width, height, &request.fit_mode))
             .collect::<WorkerResult<Vec<_>>>()?;
     }
 
@@ -758,14 +769,10 @@ async fn generate_qwen_edit_stream(
     let likeness_source = (score_likeness && face_stack_dir.is_some()).then(|| references[0].clone());
     let likeness_source_ref = reference_ids.first().cloned();
 
-    let (width, height) = (request.width, request.height);
+    // `width`/`height`, `pid_weights`, and `use_pid` were resolved above (ahead of the source pre-fit)
+    // so the PiD output tier could size the effective base; reuse them here for the skeleton + spec.
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
-    // Per-generation PiD decode (epic 7840, sc-7849): Qwen-Image-Edit shares the `qwenimage` latent
-    // space, so route its decode through PiD when `advanced.usePid` is set and the snapshots are
-    // cached; otherwise native VAE. `use_pid` and `spec.pid` stay in lockstep.
-    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
-    let use_pid = pid_weights.is_some();
     let mut spec = load_spec(weights_dir, quant, adapters, None);
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
