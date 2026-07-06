@@ -8070,8 +8070,16 @@ details[open] > summary.lora-scope-group-heading::before,
   cursor: grabbing;
 }
 
+/* Do NOT add `will-change: transform` here. It promotes the wrapper to a
+   compositor layer whose backing store is rasterized once at the fit (layout)
+   size; the zoom `scale()` then GPU-stretches that low-res texture, so zooming
+   in pixelates the full-resolution image (it never resamples from the decoded
+   source). Leaving the transform un-hinted lets the compositor re-rasterize the
+   static scaled layer at on-screen resolution — sharp up to the image's native
+   pixels. Pan is driven by per-pointermove React state, not a CSS animation, so
+   the hint bought no smoothness anyway. */
 .preview-zoom-inner {
-  will-change: transform;
+  transform-origin: 0 0;
 }
 
 .preview-zoom-inner img {

@@ -276,6 +276,13 @@ mod footprint_measure;
 // `SceneWorks/wan2.2-t2v-a14b-mlx`; not exercised in CI (needs the ~126GB native weights).
 #[cfg(all(test, target_os = "macos"))]
 mod wan_t2v_14b_tier_build;
+// On-device build helper for the Wan2.2 I2V-A14B quant matrix (sc-9943, epic 8506). The image→video
+// sibling of the above; drives `mlx_gen_wan::convert::convert_i2v_14b` (in_dim 36 image-concat) once
+// per tier (bf16/q8/q4) against the native checkpoint to produce the self-contained hosted tier
+// subdirs, then copies the tokenizer the converter omits. Run one-off to build the artifacts for
+// `SceneWorks/wan2.2-i2v-a14b-mlx`; not exercised in CI (needs the ~126GB native weights).
+#[cfg(all(test, target_os = "macos"))]
+mod wan_i2v_14b_tier_build;
 // The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
 // control path; on Mac AND the off-Mac candle DWPose lane (sc-5496) it backs the
 // `pose_jobs` skeleton render; on a candle-disabled box off Mac it still builds +
