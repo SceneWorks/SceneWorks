@@ -5496,6 +5496,147 @@ fn resolve_scail2_quant(request: &VideoRequest) -> Option<Quant> {
     resolve_mlx_dense_quant(request)
 }
 
+/// The turnkey SceneWorks SCAIL-2 MLX repo (sc-9944, epic 8506). Hosts the quant matrix as
+/// self-contained tier subdirs `q4/` (default) + `q8/` + `bf16/`, each a COMPLETE snapshot (the DiT
+/// `dit.safetensors` at the tier's precision + the shared dense Wan2.1 z16 VAE + UMT5 T5 encoder +
+/// open-CLIP ViT-H/14 visual tower + tokenizer + `config.json` carrying the quant manifest). This
+/// augments the flat Q4 layout the repo shipped before (a single pre-quantized snapshot, sc-5445);
+/// the worker now descends into the chosen tier so a pre-packed snapshot loads with no install-time
+/// convert peak. The flat root files stay for back-compat with already-shipped workers that resolve
+/// the repo root; a new worker only ever resolves the tier subdirs.
+#[cfg(target_os = "macos")]
+const SCAIL2_REPO: &str = "SceneWorks/scail2-mlx";
+
+/// Pinned revision for [`SCAIL2_REPO`] (mirrors [`WAN_T2V_14B_REVISION`]). The repo is a hard-coded
+/// const — no manifest/payload override reaches the on-demand `q8/*` + `bf16/*` fetches — so pulling
+/// the mutable `main` branch would let an upstream re-push silently swap a checkpoint we load. This is
+/// the commit that added the `q4/`/`q8/`/`bf16/` tier subdirs (sc-9944); the `hf` CLI still verifies
+/// each file's own hash on download.
+#[cfg(target_os = "macos")]
+const SCAIL2_REVISION: &str = "ce88cfdb1008f395e9c820e525e6db7b6695f7b3";
+
+/// The files that make a SCAIL-2 tier subdir COMPLETE — the six files the snapshot loader opens
+/// (`mlx-gen-scail2` `generate.rs`): the DiT plus the shared dense Wan2.1 z16 VAE, UMT5 T5 encoder,
+/// open-CLIP ViT-H/14 visual tower, UMT5 tokenizer, and `config.json` (which carries the quant
+/// manifest for `q4`/`q8`, or none for the dense `bf16` tier). A partially-downloaded tier fails this
+/// so [`scail2_tier_subdir`] falls through to a smaller complete tier rather than half-loading.
+#[cfg(target_os = "macos")]
+const SCAIL2_TIER_FILES: &[&str] = &[
+    "dit.safetensors",
+    "vae.safetensors",
+    "t5_encoder.safetensors",
+    "clip.safetensors",
+    "tokenizer.json",
+    "config.json",
+];
+
+/// Map a SCAIL-2 model id to its `(quant-matrix repo, pinned revision)` for the on-demand tier fetch,
+/// or `None` for a non-SCAIL-2 id. Keyed here so the whole tier-resolve/fetch path (mirroring the Wan
+/// [`wan_tier_repo`] machinery) routes on `scail2_tier_repo(..).is_some()`.
+#[cfg(target_os = "macos")]
+fn scail2_tier_repo(model: &str) -> Option<(&'static str, &'static str)> {
+    (model == "scail2_14b").then_some((SCAIL2_REPO, SCAIL2_REVISION))
+}
+
+/// The SCAIL-2 quant-matrix tier search order for a request — preferred tier first, then the
+/// always-smaller fallback tiers so a repo missing the preferred subdir still loads (mirrors
+/// [`wan_tier_order`]): `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, else the `q4` default. `bf16` is
+/// only ever tried when explicitly requested, so a default job never pulls the huge dense tier by
+/// accident. Reuses [`resolve_scail2_quant`] (the shared `mlxQuantize` parse) as the selector.
+#[cfg(target_os = "macos")]
+fn scail2_tier_order(request: &VideoRequest) -> &'static [&'static str] {
+    match resolve_scail2_quant(request) {
+        None => &["bf16", "q8", "q4"],
+        Some(Quant::Q8) => &["q8", "q4"],
+        _ => &["q4", "q8"],
+    }
+}
+
+/// Whether `dir` is a COMPLETE self-contained SCAIL-2 tier snapshot ([`SCAIL2_TIER_FILES`]). A
+/// partially-downloaded tier fails this so [`scail2_tier_subdir`] falls through to a smaller complete
+/// tier rather than half-loading.
+#[cfg(target_os = "macos")]
+fn scail2_tier_is_complete(dir: &Path) -> bool {
+    SCAIL2_TIER_FILES
+        .iter()
+        .all(|file| dir.join(file).is_file())
+}
+
+/// Descend a resolved SCAIL-2 quant-matrix repo `root` into the requested quant tier subdir (sc-9944,
+/// epic 8506), mirroring [`wan_tier_subdir`]. Returns the first COMPLETE tier in [`scail2_tier_order`],
+/// or `None` when the repo has no complete tier subdir — a legacy flat snapshot, where the caller
+/// keeps the root + load-time quant.
+#[cfg(target_os = "macos")]
+fn scail2_tier_subdir(root: &Path, request: &VideoRequest) -> Option<PathBuf> {
+    scail2_tier_order(request)
+        .iter()
+        .map(|tier| root.join(tier))
+        .find(|dir| scail2_tier_is_complete(dir))
+}
+
+/// Resolve the SCAIL-2 `(model_dir, load-time quant)` for a generation, descending into the
+/// quant-matrix tier subdir when the turnkey ships them (sc-9944). A pre-packed tier's `config.json`
+/// is authoritative — [`Scail2Config::from_model_dir`] reads its `quantization` block and the DiT
+/// loader builds each Linear from packed parts directly — so a resolved tier loads with `quant = None`
+/// (`mlxQuantize` selects WHICH tier, never a load-time requant; the `bf16/` tier is dense, so `None`
+/// ⇒ dense too). A legacy flat snapshot (no tier subdirs) keeps today's behavior: load the root and
+/// quantize at load per [`resolve_scail2_quant`].
+#[cfg(target_os = "macos")]
+fn resolve_scail2_tier_dir_and_quant(
+    settings: &Settings,
+    request: &VideoRequest,
+) -> WorkerResult<(PathBuf, Option<Quant>)> {
+    let root = resolve_scail2_model_dir(settings)?;
+    match scail2_tier_subdir(&root, request) {
+        Some(tier) => Ok((tier, None)),
+        None => Ok((root, resolve_scail2_quant(request))),
+    }
+}
+
+/// On-demand fetch of a non-default SCAIL-2 quant-matrix tier subdir (sc-9944, mirrors
+/// [`ensure_wan_tier_present`]). The macOS default download is the lean `q4/` tier; a job that opts
+/// into a heavier tier (`mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`) pulls just that subdir from the
+/// FIXED [`scail2_tier_repo`] revision the first time it is requested so [`scail2_tier_subdir`] can
+/// resolve it. No-op for a non-SCAIL-2 model, a `q4` (default) job, when the repo snapshot isn't
+/// downloaded yet (resolve surfaces the clear error), or when the tier is already complete. Fails loud
+/// on a real download error — fast, before any compute; a missing `hf` CLI leaves the tier absent so
+/// resolve gracefully falls back to a smaller complete tier.
+#[cfg(target_os = "macos")]
+async fn ensure_scail2_tier_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+) -> WorkerResult<()> {
+    let Some((repo, revision)) = scail2_tier_repo(&request.model) else {
+        return Ok(());
+    };
+    let tier = match resolve_scail2_quant(request) {
+        None => "bf16",
+        Some(Quant::Q8) => "q8",
+        // q4 default — ships with the base install, nothing to fetch on demand.
+        _ => return Ok(()),
+    };
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, repo) else {
+        return Ok(());
+    };
+    if scail2_tier_is_complete(&root.join(tier)) {
+        return Ok(());
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".scail2-tier-{tier}-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec![format!("{tier}/*")];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api, settings, job, repo, revision, &files, &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
+}
+
 /// Raw-settings recorded on a real MLX SCAIL-2 asset (mirrors `bernini_raw_settings`). When the
 /// lightx2v lightning LoRA is applied (`lightning`, sc-5700), records the effective step-distill recipe
 /// the worker dispatched — so the chosen steps/CFG/shift is inspectable on the asset, not silent
@@ -5683,12 +5824,19 @@ async fn generate_scail2(
     let adapters = resolve_scail2_adapters(settings, request)?;
     let lightning = scail2_adapters_have_lightning(&adapters);
     let (steps, guidance, scheduler_shift) = scail2_sampling(request, lightning);
+    // SCAIL-2 quant matrix (sc-9944, epic 8506): the macOS default install is the lean q4 tier; a
+    // q8/bf16 job fetches that subdir on demand before resolving. No-op for a q4 job or an
+    // already-present tier. Then descend into the chosen tier subdir when the turnkey ships them (a
+    // pre-packed tier loads with quant=None, config.json authoritative); a legacy flat snapshot keeps
+    // the root + load-time quant.
+    ensure_scail2_tier_present(api, settings, job, request).await?;
+    let (model_dir, quant) = resolve_scail2_tier_dir_and_quant(settings, request)?;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
-        model_dir: resolve_scail2_model_dir(settings)?,
-        quant: resolve_scail2_quant(request),
+        model_dir,
+        quant,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
@@ -5855,12 +6003,17 @@ async fn generate_scail2_replace(
     let negative_prompt = non_empty_negative_prompt(request);
     let (conditioning, status) =
         resolve_scail2_replace_conditioning(api, settings, job, request, project_path).await?;
+    // Same quant-matrix tier resolution as the animate path (sc-9944): fetch a toggled q8/bf16 tier on
+    // demand, then descend into the chosen tier subdir (pre-packed ⇒ quant=None) or keep the flat root
+    // + load-time quant for a legacy snapshot.
+    ensure_scail2_tier_present(api, settings, job, request).await?;
+    let (model_dir, quant) = resolve_scail2_tier_dir_and_quant(settings, request)?;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
-        model_dir: resolve_scail2_model_dir(settings)?,
-        quant: resolve_scail2_quant(request),
+        model_dir,
+        quant,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
@@ -9726,6 +9879,97 @@ mod tests {
         let req = request(json!({ "projectId": "p", "model": "wan_2_2" }));
         assert_eq!(wan_tier_subdir(&root, &req), Some(dir));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Write the six files that make a SCAIL-2 tier subdir COMPLETE ([`scail2_tier_is_complete`]), so
+    /// [`scail2_tier_subdir`] treats it as present.
+    #[cfg(target_os = "macos")]
+    fn write_complete_scail2_tier(root: &Path, tier: &str) {
+        let dir = root.join(tier);
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in SCAIL2_TIER_FILES {
+            std::fs::write(dir.join(file), b"x").unwrap();
+        }
+    }
+
+    /// `mlxQuantize` selects the preferred SCAIL-2 tier, then falls back to the always-smaller present
+    /// tiers (bf16 is only ever tried when explicitly requested) — mirrors [`wan_tier_order`].
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scail2_tier_order_prefers_then_falls_back() {
+        let bf16 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 0 } }));
+        assert_eq!(scail2_tier_order(&bf16), &["bf16", "q8", "q4"]);
+        let q8 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
+        assert_eq!(scail2_tier_order(&q8), &["q8", "q4"]);
+        let q4 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
+        assert_eq!(scail2_tier_order(&q4), &["q4", "q8"]);
+        // Absent knob defaults to the lean q4 tier; bf16 is never in a default job's search path.
+        let absent = request(json!({ "projectId": "p" }));
+        assert_eq!(scail2_tier_order(&absent), &["q4", "q8"]);
+    }
+
+    /// [`scail2_tier_subdir`] resolves the requested tier, falls back to a smaller COMPLETE tier,
+    /// ignores a partially-downloaded one, and returns `None` for a legacy flat root.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scail2_tier_subdir_resolves_and_falls_back() {
+        let root = std::env::temp_dir().join(format!("sw_scail2_tier_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&root).unwrap();
+        // Legacy flat root (no tier subdirs) → None (caller keeps root + load-time quant).
+        let q8_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
+        assert_eq!(scail2_tier_subdir(&root, &q8_req), None);
+
+        // Only q4 present: a q8 request falls back to the smaller complete q4 tier.
+        write_complete_scail2_tier(&root, "q4");
+        assert_eq!(scail2_tier_subdir(&root, &q8_req), Some(root.join("q4")));
+
+        // A partial q8 (missing files) is skipped, still falling back to q4.
+        std::fs::create_dir_all(root.join("q8")).unwrap();
+        std::fs::write(root.join("q8").join("config.json"), b"x").unwrap();
+        assert_eq!(scail2_tier_subdir(&root, &q8_req), Some(root.join("q4")));
+
+        // Completed q8 now wins for a q8 request; a default job still prefers q4.
+        write_complete_scail2_tier(&root, "q8");
+        assert_eq!(scail2_tier_subdir(&root, &q8_req), Some(root.join("q8")));
+        let default_req = request(json!({ "projectId": "p" }));
+        assert_eq!(
+            scail2_tier_subdir(&root, &default_req),
+            Some(root.join("q4"))
+        );
+
+        // bf16 request with no bf16 tier falls back to q8 (never silently to a default).
+        let bf16_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 0 } }));
+        assert_eq!(scail2_tier_subdir(&root, &bf16_req), Some(root.join("q8")));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The SCAIL-2 quant-matrix tier repo (sc-9944) must pin an exact commit (not the mutable `main`)
+    /// so an upstream re-push can't swap a checkpoint the on-demand fetch loads (mirrors the Wan pins),
+    /// and `scail2_tier_repo` routes only the `scail2_14b` id to it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scail2_tier_revision_is_pinned_commit_not_main() {
+        assert_ne!(
+            SCAIL2_REVISION, "main",
+            "the SCAIL-2 tier repo must pin a fixed revision before release"
+        );
+        assert_eq!(
+            SCAIL2_REVISION.len(),
+            40,
+            "a pinned HF revision is a 40-char commit sha"
+        );
+        assert!(
+            SCAIL2_REVISION
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "the pinned SCAIL-2 revision must be lowercase hex"
+        );
+        assert_eq!(
+            scail2_tier_repo("scail2_14b"),
+            Some((SCAIL2_REPO, SCAIL2_REVISION))
+        );
+        assert_eq!(scail2_tier_repo("wan_2_2"), None);
+        assert_eq!(scail2_tier_repo("bernini"), None);
     }
 
     /// The `.high_noise.safetensors` → `.low_noise.safetensors` sibling convention
