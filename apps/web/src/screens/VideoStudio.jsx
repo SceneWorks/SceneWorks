@@ -69,7 +69,7 @@ import { ReplacePersonPanel } from "./ReplacePersonPanel.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { downloadOffersFor, videoModelUsable } from "../modelEligibility.js";
-import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
+import { PROMPT_REFINE_MODEL_ID, WAN_A14B_LIGHTNING_MODEL_IDS } from "../constants.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
@@ -236,6 +236,12 @@ export function VideoStudio() {
   const [schedulerShift, setSchedulerShift] = useState(saved.schedulerShift ?? 3.0);
   const [stepsOverride, setStepsOverride] = useState(saved.steps ?? "");
   const [guidanceOverride, setGuidanceOverride] = useState(saved.guidanceScale ?? "");
+  // Lightning fast-4-step toggle for Wan2.2 A14B MoE (T2V + I2V) — epic 10043, sc-10048.
+  // Default ON: the worker (sc-10047) reads `advanced.lightning` and, when on, derives the
+  // 4-step / CFG-off distilled recipe; when off it honors the user's steps/guidance (or the
+  // native multi-step CFG default). Only the two A14B engines honor it (see showLightning),
+  // so the dense 5B and non-Wan models never see the control. Persisted per-workspace.
+  const [lightning, setLightning] = useState(saved.lightning ?? true);
   // LTX-2.3 native guidance knobs (epic 1753 sc-1769). The native ltx-core
   // path has no diffusers scheduler to swap — these three values (cfg + STG +
   // rescale) drive its sealed MultiModalGuiderParams instead.
@@ -286,6 +292,12 @@ export function VideoStudio() {
   // per-platform default (Q8_0 on MPS, Q4_K_M on CUDA).
   const quantVariants = Object.entries(selectedModel?.quantization?.variants ?? {});
   const supportsQuantization = quantVariants.length > 0;
+  // Lightning is only meaningful for the two Wan2.2 A14B MoE engines (T2V + I2V); the dense
+  // 5B and every non-Wan engine ignore `advanced.lightning`, so hide the control there
+  // (sc-10048, epic 10043). When it's shown and on, the worker governs steps/guidance with the
+  // 4-step recipe, so the manual Steps/Guidance inputs are disabled to reflect that.
+  const showLightning = WAN_A14B_LIGHTNING_MODEL_IDS.has(selectedModel?.id);
+  const lightningActive = showLightning && lightning;
   const implementedMode = [
     "image_to_video",
     "text_to_video",
@@ -575,6 +587,7 @@ export function VideoStudio() {
     schedulerShift,
     steps: stepsOverride,
     guidanceScale: guidanceOverride,
+    lightning,
     videoCfgGuidanceScale: ltxVideoCfg,
     videoStgGuidanceScale: ltxVideoStg,
     videoRescaleScale: ltxVideoRescale,
@@ -777,10 +790,16 @@ export function VideoStudio() {
           Number.isFinite(Number(schedulerShift))
             ? { schedulerShift: Number(schedulerShift) }
             : {}),
-          ...(stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
+          // Lightning fast-4-step toggle for Wan2.2 A14B MoE (sc-10048, epic 10043). Only the two
+          // A14B engines honor it; emit the explicit bool for them (worker sc-10047 reads
+          // `advanced.lightning`: absent → defaults on, false → off). When on the worker derives
+          // the 4-step/CFG-off recipe, so we suppress the manual steps/guidance overrides below to
+          // keep the payload consistent with the recipe the UI is reflecting.
+          ...(showLightning ? { lightning } : {}),
+          ...(!lightningActive && stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
             ? { steps: Number(stepsOverride) }
             : {}),
-          ...(guidanceOverride !== "" && Number.isFinite(Number(guidanceOverride))
+          ...(!lightningActive && guidanceOverride !== "" && Number.isFinite(Number(guidanceOverride))
             ? { guidanceScale: Number(guidanceOverride) }
             : {}),
           // LTX native guidance knobs (epic 1753 sc-1769). Only emitted for
@@ -1381,6 +1400,23 @@ export function VideoStudio() {
 
               {advancedOpen ? (
                 <div className="advanced-panel">
+                  {showLightning ? (
+                    <div className="lightning-toggle">
+                      <label className="checkline">
+                        <input
+                          checked={lightning}
+                          onChange={(event) => setLightning(event.target.checked)}
+                          type="checkbox"
+                        />
+                        Lightning (fast 4-step)
+                      </label>
+                      <p className="helper-copy">
+                        {lightning
+                          ? "On: ~10× faster, 4 steps, CFG off, small quality trade-off. Steps and guidance are governed by the recipe."
+                          : "Off: full multi-step quality with CFG (slower). Use the Steps and Guidance controls below."}
+                      </p>
+                    </div>
+                  ) : null}
                   {model === ltxVideoModelId ? (
                     <>
                       <label>
@@ -1547,10 +1583,12 @@ export function VideoStudio() {
                     <input
                       min="1"
                       max="80"
+                      disabled={lightningActive}
                       onChange={(event) => setStepsOverride(event.target.value)}
-                      placeholder={String(stepsDefaultFromModel(selectedModel) ?? "")}
+                      placeholder={lightningActive ? "4 (Lightning)" : String(stepsDefaultFromModel(selectedModel) ?? "")}
+                      title={lightningActive ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps." : undefined}
                       type="number"
-                      value={stepsOverride}
+                      value={lightningActive ? "" : stepsOverride}
                     />
                   </label>
                   <label>
@@ -1558,14 +1596,16 @@ export function VideoStudio() {
                     <input
                       min="0"
                       max="30"
+                      disabled={lightningActive}
                       onChange={(event) => setGuidanceOverride(event.target.value)}
-                      placeholder={(() => {
+                      placeholder={lightningActive ? "off (Lightning)" : (() => {
                         const value = guidanceDefaultFromModel(selectedModel);
                         return value == null ? "" : String(value);
                       })()}
                       step="0.1"
+                      title={lightningActive ? "Governed by Lightning (fast 4-step). Turn Lightning off to set guidance." : undefined}
                       type="number"
-                      value={guidanceOverride}
+                      value={lightningActive ? "" : guidanceOverride}
                     />
                   </label>
                   <label>
