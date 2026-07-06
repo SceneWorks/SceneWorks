@@ -405,7 +405,7 @@
       "outputKind": "lora",
       "family": "krea_2",
       "baseModel": "krea_2_raw",
-      "baseModelRepo": "krea/Krea-2-Raw",
+      "baseModelRepo": "SceneWorks/krea-2-raw-mlx",
       "kernel": "krea_lora",
       "defaults": {
         "rank": 16,
