@@ -16,8 +16,13 @@
 
 /// SceneWorks model id for native PuLID-FLUX (FLUX.1-dev backbone + PuLID injection).
 const PULID_CANDLE_MODEL: &str = "pulid_flux_dev";
-/// FLUX.1-dev backbone repo when the manifest omits `repo` (the same default the MLX route uses).
-const PULID_CANDLE_FLUX_REPO: &str = "black-forest-labs/FLUX.1-dev";
+/// FLUX.1-dev backbone repo when the manifest omits `repo`. As of sc-10103 (epic 9083) this is the
+/// ungated `SceneWorks/flux1-dev-mlx` quant-matrix turnkey — the SAME repo `flux_dev` uses — so the
+/// candle PuLID lane consumes the packed q4/q8 + bf16 tiers instead of the gated dense BFL checkpoint
+/// (the candle twin of the MLX repoint, sc-9947). The tier subdir is resolved by
+/// [`resolve_pulid_candle_base`] via [`standard_tier_subdir`]; `candle_gen_pulid`'s `FluxRefBackbone`
+/// packed-detects whichever tier landed.
+const PULID_CANDLE_FLUX_REPO: &str = "SceneWorks/flux1-dev-mlx";
 /// The PuLID-FLUX adapter (IDFormer + the 20 PerceiverAttention CA blocks). Public repo.
 const PULID_CANDLE_ADAPTER_REPO: &str = "guozinan/PuLID";
 const PULID_CANDLE_ADAPTER_FILE: &str = "pulid_flux_v0.9.1.safetensors";
@@ -63,9 +68,13 @@ const PULID_CANDLE_DEFAULT_ID_WEIGHT: f32 = 1.0;
 const PULID_CANDLE_ENGINE: &str = "candle_pulid_flux";
 
 /// Resolve the FLUX.1-dev backbone snapshot for candle PuLID-FLUX: an explicit `modelPath` dir
-/// (advanced or manifest) wins, else the HF cache snapshot for the manifest `repo` (default
-/// FLUX.1-dev). `None` means the base is not present locally, so the job is not candle-runnable (falls
-/// through to torch). Mirrors `resolve_flux_ipadapter_base` / the MLX `resolve_pulid_flux_base`.
+/// (advanced or manifest) wins (used verbatim — an app-managed override picks its own layout), else the
+/// HF cache snapshot for the manifest `repo` (default `SceneWorks/flux1-dev-mlx`) descended into the
+/// selected quant-matrix **tier subdir** via [`standard_tier_subdir`] (sc-10103): `bf16/` when the
+/// request opts out of quant, `q8/` for Q8, else `q4/`. `candle_gen_pulid`'s `FluxRefBackbone`
+/// packed-detects whichever tier landed (or a dense BFL snapshot for a legacy `modelPath`). `None` means
+/// the base is not present locally, so the job is not candle-runnable (falls through to torch). Mirrors
+/// `resolve_flux_ipadapter_base` / the MLX `resolve_pulid_flux_base`.
 fn resolve_pulid_candle_base(
     request: &ImageRequest,
     settings: &Settings,
@@ -88,7 +97,8 @@ fn resolve_pulid_candle_base(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(PULID_CANDLE_FLUX_REPO);
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
+    Ok(huggingface_snapshot_dir(&settings.data_dir, repo)
+        .map(|root| standard_tier_subdir(&root, request)))
 }
 
 /// True when this is a candle-eligible PuLID-FLUX job: the `pulid_flux_dev` model in `character_image`
