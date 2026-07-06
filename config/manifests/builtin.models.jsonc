@@ -4959,15 +4959,36 @@
       // Windows/Linux load the diffusers/GGUF layout via the torch wan_video adapter.
       "downloads": [
         // macOS quant matrix (sc-9942, epic 8506): each tier is a SEPARATE user-selectable artifact
-        // tagged with a `variant`; `q4` (default) installs when no tier is chosen. Unlike LTX there
-        // is NO shared coRequisite — every tier subdir is fully self-contained (both MoE experts +
-        // UMT5 T5 + z16 VAE + tokenizer + config.json), so the dense T5/VAE repeat per tier (epic
-        // decision #3: storage is a non-issue; keeps the load path a single self-contained dir with
-        // no engine change). The worker fetches a toggled-but-not-downloaded tier on demand
-        // (ensure_wan_t2v_14b_tier_present, video_jobs.rs), so advanced.mlxQuantize works without a
-        // pre-pick. The legacy flat root files stay hosted for already-shipped workers that resolve
-        // the repo root; a new worker only ever resolves the tier subdirs (cleanup follow-up sc-9977).
-        // estimatedSizeBytes/footprint are backfilled with the exact hosted subdir sizes post-build.
+        // tagged with a `variant`; `q4` (default) installs when no tier is chosen. Unlike LTX the
+        // TIER subdirs carry no shared TE/VAE coRequisite — every tier subdir is fully self-contained
+        // (both MoE experts + UMT5 T5 + z16 VAE + tokenizer + config.json), so the dense T5/VAE repeat
+        // per tier (epic decision #3: storage is a non-issue; keeps the load path a single
+        // self-contained dir with no engine change). The worker fetches a toggled-but-not-downloaded
+        // tier on demand (ensure_wan_a14b_tier_present, video_jobs.rs), so advanced.mlxQuantize works
+        // without a pre-pick. The legacy flat root files stay hosted for already-shipped workers that
+        // resolve the repo root; a new worker only ever resolves the tier subdirs (cleanup follow-up
+        // sc-9977). estimatedSizeBytes/footprint are backfilled with the exact hosted subdir sizes
+        // post-build.
+        //
+        // The 4-step Lightning distill LoRA (lightx2v/Wan2.2-Lightning) IS a `coRequisite` (sc-10030):
+        // the A14B MoE recipe bakes it as MANDATORY (wan_sampling forces 4 steps / CFG-off and
+        // resolve_wan_adapters always applies the high/low pair), so the model cannot generate without
+        // it. It lives in a separate upstream repo under a per-architecture subdir (T2V ⇒ Seko-V1.1,
+        // NOT cross-compatible with I2V), installs alongside whichever tier(s) the user picks, and
+        // gates install_state. Mirrors the PiD/LTX gemma coRequisite precedent (sc-9696). The worker
+        // also self-heals an already-installed pre-coRequisite worker via ensure_wan_lightning_present
+        // (video_jobs.rs) at gen time.
+        {
+          "provider": "huggingface",
+          "repo": "lightx2v/Wan2.2-Lightning",
+          "coRequisite": true,
+          "files": [
+            "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1/high_noise_model.safetensors",
+            "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1/low_noise_model.safetensors"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 2453954848
+        },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
@@ -5069,7 +5090,8 @@
         // requested tier subdir of this snapshot (wan_t2v_14b_tier_subdir; both MoE experts live in
         // one subdir), loading with no install-time convert peak. Source Wan-AI/Wan2.2-T2V-A14B is
         // Apache-2.0; converter "wan_t2v_14b" (mlx-gen-wan convert_t2v_14b) builds each tier. The
-        // lightx2v 4-step Lightning LoRA is downloaded on demand by MlxVideoAdapter at gen time.
+        // mandatory lightx2v 4-step Lightning distill LoRA installs as a `coRequisite` above (sc-10030;
+        // ensure_wan_lightning_present also self-heals a pre-coRequisite worker at gen time).
         "minMemoryGb": 133,
         "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
         // macOS curated menu (sc-7296): the full curated fold-in over the A14B native flow σ
@@ -5117,6 +5139,24 @@
         // already-shipped workers that resolve the repo root; a new worker only ever resolves the tier
         // subdirs (cleanup follow-up sc-9977). estimatedSizeBytes/footprint are the exact hosted
         // subdir sizes measured from the on-device build.
+        //
+        // Mandatory 4-step Lightning distill LoRA as a `coRequisite` (sc-10030): the I2V-A14B recipe
+        // bakes it (wan_sampling forces 4 steps / CFG-off; resolve_wan_adapters always applies the
+        // high/low pair), so the model cannot generate without it. Per-architecture subdir (I2V ⇒
+        // Seko-V1, NOT cross-compatible with the T2V Seko-V1.1 LoRA). Same upstream repo as T2V's
+        // coRequisite; each model tracks only its own subdir files. See the T2V entry + sc-9696 for
+        // the coRequisite pattern; ensure_wan_lightning_present self-heals a pre-coRequisite worker.
+        {
+          "provider": "huggingface",
+          "repo": "lightx2v/Wan2.2-Lightning",
+          "coRequisite": true,
+          "files": [
+            "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/high_noise_model.safetensors",
+            "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/low_noise_model.safetensors"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 2453954848
+        },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",

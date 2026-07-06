@@ -11907,6 +11907,81 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
 }
 
 #[test]
+fn builtin_manifest_registers_wan_a14b_lightning_corequisite() {
+    // sc-10030 (epic 8506): both A14B MoE video models bake the 4-step lightx2v Lightning distill as a
+    // MANDATORY dependency (wan_sampling forces 4-step/CFG-off; resolve_wan_adapters always applies the
+    // high/low pair). It must install as a macOS `coRequisite` so the model manager provisions it and
+    // install_state gates on it — without this the model errors "not downloaded — fetch it via the
+    // model manager" with no way to fetch it. The subdir is per-architecture and NOT cross-compatible.
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../config/manifests/builtin.models.jsonc");
+    let raw = std::fs::read_to_string(&manifest_path).expect("read builtin.models.jsonc");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(&raw)).expect("parse builtin.models.jsonc");
+    let models = manifest["models"].as_array().expect("models array");
+
+    // (engine id, expected per-architecture Lightning subdir prefix)
+    let cases = [
+        (
+            "wan_2_2_t2v_14b",
+            "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
+        ),
+        (
+            "wan_2_2_i2v_14b",
+            "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1",
+        ),
+    ];
+    for (model_id, subdir) in cases {
+        let model = models
+            .iter()
+            .find(|entry| entry["id"] == model_id)
+            .unwrap_or_else(|| panic!("{model_id} is registered in the catalog"));
+        let downloads = model["downloads"].as_array().expect("downloads array");
+        let lightning = downloads
+            .iter()
+            .find(|download| download["coRequisite"] == Value::Bool(true))
+            .unwrap_or_else(|| panic!("{model_id} declares a Lightning coRequisite"));
+        assert_eq!(lightning["provider"], "huggingface");
+        assert_eq!(
+            lightning["repo"], "lightx2v/Wan2.2-Lightning",
+            "{model_id} coRequisite points at the lightx2v Lightning repo"
+        );
+        // macOS-only (the native MLX path is Mac; Windows/Linux use the torch adapter).
+        let platforms: Vec<&str> = lightning["platforms"]
+            .as_array()
+            .expect("coRequisite platforms array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(
+            platforms,
+            vec!["macos"],
+            "{model_id} Lightning is macOS-only"
+        );
+        // Exactly the per-architecture high/low pair — nothing cross-compatible, no preview assets.
+        let files: Vec<&str> = lightning["files"]
+            .as_array()
+            .expect("coRequisite files array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(
+            files,
+            vec![
+                format!("{subdir}/high_noise_model.safetensors").as_str(),
+                format!("{subdir}/low_noise_model.safetensors").as_str(),
+            ],
+            "{model_id} fetches exactly its per-architecture Lightning pair"
+        );
+        // A coRequisite is never a selectable quant tier.
+        assert!(
+            lightning.get("variant").is_none(),
+            "{model_id} Lightning coRequisite is not a quant tier"
+        );
+    }
+}
+
+#[test]
 fn builtin_manifest_registers_the_joycaption_model() {
     // sc-5620: the native captioner (caption_jobs.rs, the training_caption job) resolves an
     // already-cached HF snapshot via the same resolve_app_managed_model_dir seam and does NOT
