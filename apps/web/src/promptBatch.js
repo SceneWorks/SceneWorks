@@ -1,29 +1,32 @@
-// Prompt-batch template engine (sc-9953, epic 9952 — Batch Prompt Processing).
-// Pure, mode-agnostic logic: pull {{key}} placeholders out of a list of prompt
-// templates, resolve them against a value map, and expand a batch to its concrete
-// prompts via cross-product over multi-valued variables. React/DOM/network-free so
-// the fan-out math is unit-tested in isolation; the authoring UI (slice 3) and the
-// execution fan-out (slice 4) consume these functions.
+// Prompt-batch template engine (sc-9953 / sc-9958, epic 9952 — Batch Prompt Processing).
+// Pure, mode-agnostic logic: parse a prompt line into text + {{placeholder}} tokens and
+// expand a batch to its concrete prompts. React/DOM/network-free so the fan-out math is
+// unit-tested in isolation; the authoring UI and the run fan-out consume these functions.
 //
-// Design notes that the tests pin down:
-//  - A key is `{{name}}`; surrounding whitespace is trimmed so `{{ name }}` ==
-//    `{{name}}`. Any name is allowed (it just can't contain braces).
-//  - Expansion is PER LINE: each prompt fans out only over the variables it
-//    actually references. A variable referenced in some lines but not others (or
-//    in none) does not multiply the lines that omit it into identical duplicate
-//    renders. So cardinality() is a sum over lines, not one global product.
-//  - A referenced key with no usable value is NOT silently dropped: it is skipped
-//    for expansion (its placeholder stays literal) and surfaced via missingKeys()
-//    so the caller (slice 5) can block the run.
-//  - Cross-product ordering is deterministic: prompts vary slowest (outer loop),
-//    then variables in array order, with the LAST variable varying fastest.
-//  - Invariant the tests pin: cardinality(p, v, count) === expandBatch(p, v).length
-//    × count (for a positive integer count). expandBatch's length is the job count;
-//    cardinality is the image count once each job's `count` variations are applied.
+// A `{{...}}` placeholder is one of three kinds (sc-9958):
+//  - **named**  `{{name}}` — no `|`. Values come from the external variables list (the
+//    per-key chip editors). The same key used twice in a line shares one value.
+//  - **inline** `{{a|b|c}}` — has `|`. An anonymous, independent axis whose values are
+//    the inline options. Each occurrence is its own axis (`{{a|b}} {{a|b}}` → 4 combos).
+//  - **linked** `{{label:a|b|c}}` — a `label:` prefix + `|`. All same-label placeholders
+//    in a line advance TOGETHER by index (zip), not cross-producted — so correlated sets
+//    like pronouns stay grammatical: `{{p:he|she|they}} … {{p:his|her|their}}` → 3 renders,
+//    not 9. Unequal-length same-label groups are clamped to the shortest for expansion and
+//    surfaced by linkedGroupIssues() so the caller can block the run.
+//
+// Design invariants the tests pin:
+//  - Expansion is PER LINE: each line fans out only over the axes it contains.
+//  - A named key with no usable value is NOT silently dropped: its placeholder stays
+//    literal and it is surfaced by missingKeys() (inline/linked are never "missing" —
+//    their values are inline).
+//  - Ordering is deterministic: prompts slowest (outer), then axes in first-seen order
+//    with the LAST axis varying fastest.
+//  - cardinality(p, v, count) === expandBatch(p, v).length × count (positive integer count).
+//  - Escaping: a literal `|` can't appear in an inline option; use a named variable
+//    (separate value box) for values that must contain a pipe.
 
-// Fresh regex per call — a shared /g regex carries lastIndex state across
-// matchAll/replace and would desync. `[^{}]` can't span across `}}`, so a lazy
-// inner group is enough to isolate one placeholder.
+// Fresh regex per call — a shared /g regex carries lastIndex state across matchAll and
+// would desync. `[^{}]` can't span across `}}`, so a lazy inner group isolates one token.
 const keyPattern = () => /\{\{([^{}]+?)\}\}/g;
 
 // Normalize the raw prompt input to a list of non-blank template strings.
@@ -35,56 +38,136 @@ function promptList(prompts) {
     .filter((prompt) => prompt.trim() !== "");
 }
 
-// A variable's usable values: trimmed, blanks dropped. Order is preserved and
-// duplicates are kept (a repeat is treated as intent, not silently collapsed).
-function variableValues(variable) {
-  const values = Array.isArray(variable?.values) ? variable.values : [];
-  return values
-    .map((value) => (typeof value === "string" ? value.trim() : ""))
-    .filter((value) => value !== "");
+// Split inline-alternation options on `|`, trimming each (empty options are kept as
+// valid empty choices, e.g. `{{|red}}` = "" or "red").
+function splitOptions(text) {
+  return text.split("|").map((option) => option.trim());
 }
 
-// The variables that actually drive expansion: referenced in the prompts, first
-// entry wins per key, and carrying at least one usable value.
-function effectiveVariables(prompts, variables) {
-  const referenced = new Set(extractKeys(prompts));
-  const list = Array.isArray(variables) ? variables : [];
-  const seen = new Set();
-  const result = [];
-  for (const variable of list) {
-    const key = typeof variable?.key === "string" ? variable.key.trim() : "";
-    if (!key || !referenced.has(key) || seen.has(key)) continue;
-    const values = variableValues(variable);
-    if (values.length === 0) continue; // unfilled — surfaced by missingKeys(), skipped here
-    seen.add(key);
-    result.push({ key, values });
+// Classify one `{{...}}` inner string into a placeholder descriptor.
+function parsePlaceholder(inner) {
+  const trimmed = inner.trim();
+  const labelMatch = /^([A-Za-z0-9_-]+)\s*:\s*([\s\S]*)$/.exec(trimmed);
+  if (labelMatch && labelMatch[2].includes("|")) {
+    return { kind: "linked", label: labelMatch[1], options: splitOptions(labelMatch[2]) };
   }
-  return result;
+  if (trimmed.includes("|")) {
+    return { kind: "inline", options: splitOptions(trimmed) };
+  }
+  return { kind: "named", key: trimmed };
 }
 
-// Cartesian product of value lists. Empty input → `[[]]` (one empty combination),
-// so a line with no active variables still yields exactly one render. The last
-// list varies fastest, matching the documented ordering.
-function cartesian(lists) {
-  return lists.reduce(
-    (combos, list) => combos.flatMap((combo) => list.map((value) => [...combo, value])),
+// Tokenize a line into literal-text and placeholder tokens. `{{}}` / `{{ }}` (empty
+// inner) is left as literal text so a stray empty brace pair renders verbatim.
+function tokenizeLine(line) {
+  const tokens = [];
+  let last = 0;
+  for (const match of line.matchAll(keyPattern())) {
+    if (match.index > last) tokens.push({ text: line.slice(last, match.index) });
+    if (match[1].trim() === "") {
+      tokens.push({ text: match[0] });
+    } else {
+      tokens.push({ ph: parsePlaceholder(match[1]) });
+    }
+    last = match.index + match[0].length;
+  }
+  if (last < line.length) tokens.push({ text: line.slice(last) });
+  return tokens;
+}
+
+// Map of usable named-variable values: trimmed, blanks dropped, first entry wins per key.
+function buildVariableMap(variables) {
+  const map = new Map();
+  for (const variable of Array.isArray(variables) ? variables : []) {
+    const key = typeof variable?.key === "string" ? variable.key.trim() : "";
+    if (!key || map.has(key)) continue;
+    const values = (Array.isArray(variable?.values) ? variable.values : [])
+      .map((value) => (typeof value === "string" ? value.trim() : ""))
+      .filter((value) => value !== "");
+    if (values.length) map.set(key, values);
+  }
+  return map;
+}
+
+// Build the independent axes for one line + the per-token resolution data. Each axis is
+// `{ size }`; a combination is an index per axis. Named tokens resolve through a shared
+// per-key axis, inline tokens each own an axis, linked tokens share one axis per label.
+function linePlan(prompt, variableMap) {
+  const tokens = tokenizeLine(prompt);
+  const named = new Map(); // key -> { axis, values }
+  const linked = new Map(); // label -> { axis, size }
+  const axes = [];
+  for (const token of tokens) {
+    const ph = token.ph;
+    if (!ph) continue;
+    if (ph.kind === "named") {
+      const values = variableMap.get(ph.key);
+      if (values && !named.has(ph.key)) {
+        named.set(ph.key, { axis: axes.length, values });
+        axes.push({ size: values.length });
+      }
+    } else if (ph.kind === "linked") {
+      const existing = linked.get(ph.label);
+      if (!existing) {
+        linked.set(ph.label, { axis: axes.length, size: ph.options.length });
+        axes.push({ size: ph.options.length });
+      } else {
+        // Clamp a mismatched same-label group to the shortest; linkedGroupIssues() reports it.
+        existing.size = Math.min(existing.size, ph.options.length);
+        axes[existing.axis].size = existing.size;
+      }
+    } else {
+      token.axis = axes.length; // inline: one independent axis per occurrence
+      axes.push({ size: ph.options.length });
+    }
+  }
+  return { tokens, named, linked, axes };
+}
+
+// Cartesian product of the axis sizes as index tuples. `[]` axes → `[[]]` (one empty
+// combination), so a line with no axes still yields exactly one render. The last axis
+// varies fastest, matching the documented ordering.
+function axisCombos(axes) {
+  return axes.reduce(
+    (combos, axis) =>
+      combos.flatMap((combo) => Array.from({ length: axis.size }, (_, i) => [...combo, i])),
     [[]],
   );
 }
 
-// Whether a single prompt line references a given (already-trimmed) key.
-function promptReferences(prompt, key) {
-  for (const match of prompt.matchAll(keyPattern())) {
-    if (match[1].trim() === key) return true;
+// Resolve one line for a combination (an index per axis). Named tokens with no axis
+// (unfilled) stay literal; the returned `values` map carries the chosen named values.
+function resolveLine(plan, combo) {
+  let out = "";
+  const values = {};
+  for (const token of plan.tokens) {
+    if (token.text !== undefined) {
+      out += token.text;
+      continue;
+    }
+    const ph = token.ph;
+    if (ph.kind === "named") {
+      const axis = plan.named.get(ph.key);
+      if (!axis) {
+        out += `{{${ph.key}}}`;
+        continue;
+      }
+      const value = axis.values[combo[axis.axis]];
+      out += value;
+      values[ph.key] = value;
+    } else if (ph.kind === "linked") {
+      out += ph.options[combo[plan.linked.get(ph.label).axis]] ?? "";
+    } else {
+      out += ph.options[combo[token.axis]] ?? "";
+    }
   }
-  return false;
+  return { prompt: out, values };
 }
 
-// Turn the authoring textarea into a prompt-template array. Default is one prompt
-// per line (blank lines ignored) — the overwhelmingly common case of pasting a list.
-// For multi-line prompts, a line that is exactly `---` acts as an explicit delimiter;
-// as soon as any `---` line is present the whole text switches to block mode, where
-// each `---`-separated block (trimmed, newlines preserved) is one prompt.
+// Turn the authoring textarea into a prompt-template array. Default is one prompt per
+// line (blank lines ignored) — the common case of pasting a list. For multi-line prompts,
+// a line that is exactly `---` is an explicit delimiter; once any `---` line is present
+// the text switches to block mode (each `---`-separated block, trimmed, is one prompt).
 export function splitPromptLines(text) {
   if (typeof text !== "string") return [];
   const lines = text.split(/\r?\n/);
@@ -105,25 +188,26 @@ export function splitPromptLines(text) {
   return blocks.filter((block) => block !== "");
 }
 
-// Unique {{key}} names referenced across the prompts, trimmed, in first-seen order.
+// Unique NAMED `{{key}}` names referenced across the prompts, in first-seen order. Inline
+// (`{{a|b}}`) and linked (`{{p:a|b}}`) placeholders are NOT keys — they carry their own
+// values inline — so they never surface a chip editor.
 export function extractKeys(prompts) {
   const seen = new Set();
   const keys = [];
   for (const prompt of promptList(prompts)) {
-    for (const match of prompt.matchAll(keyPattern())) {
-      const key = match[1].trim();
-      if (key && !seen.has(key)) {
-        seen.add(key);
-        keys.push(key);
+    for (const token of tokenizeLine(prompt)) {
+      if (token.ph?.kind === "named" && !seen.has(token.ph.key)) {
+        seen.add(token.ph.key);
+        keys.push(token.ph.key);
       }
     }
   }
   return keys;
 }
 
-// Substitute a single value map into one template. Keys absent from the map are
-// left as their literal `{{key}}` placeholder (so an unfilled key stays visible in
-// a preview rather than becoming an empty string).
+// Substitute a single named-value map into one template (named `{{key}}` only). Keys
+// absent from the map are left as their literal placeholder. Retained for callers that
+// resolve a single named binding; batch expansion uses the token model above.
 export function resolvePrompt(template, valueMap) {
   if (typeof template !== "string") return "";
   const map = valueMap ?? {};
@@ -133,51 +217,86 @@ export function resolvePrompt(template, valueMap) {
   });
 }
 
-// Expand a batch to its concrete prompts. Each prompt line fans out over only the
-// variables it references (their cross-product); a line with none yields exactly
-// one render. Each entry carries the resolved `prompt` plus the `values` map that
-// produced it. Ordering is deterministic (prompts slowest, last variable fastest).
+// Expand a batch to its concrete prompts. Each prompt line fans out over its own axes
+// (named cross-product × inline occurrences × linked groups zipped). Each entry carries
+// the resolved `prompt` plus the `values` map of the named bindings that produced it.
 export function expandBatch(prompts, variables) {
-  const lines = promptList(prompts);
-  const vars = effectiveVariables(prompts, variables);
+  const variableMap = buildVariableMap(variables);
   const out = [];
-  for (const prompt of lines) {
-    const lineVars = vars.filter((variable) => promptReferences(prompt, variable.key));
-    const combos = cartesian(lineVars.map((variable) => variable.values));
-    for (const combo of combos) {
-      const values = {};
-      lineVars.forEach((variable, index) => {
-        values[variable.key] = combo[index];
-      });
-      out.push({ prompt: resolvePrompt(prompt, values), values });
+  for (const prompt of promptList(prompts)) {
+    const plan = linePlan(prompt, variableMap);
+    for (const combo of axisCombos(plan.axes)) {
+      out.push(resolveLine(plan, combo));
     }
   }
   return out;
 }
 
-// Number of images a batch will queue: Σ over prompt lines of Π(value counts of the
-// variables that line references), times `count`. Computed directly from the
-// factors — never materializes the expansion — so it is safe to call live on every
-// keystroke even when the product is enormous.
+// The first resolved prompt (line 1, first choice of every axis) — for a live preview
+// without materializing the whole expansion, which can be enormous with inline axes.
+export function firstResolvedPrompt(prompts, variables) {
+  const lines = promptList(prompts);
+  if (!lines.length) return "";
+  const plan = linePlan(lines[0], buildVariableMap(variables));
+  return resolveLine(
+    plan,
+    plan.axes.map(() => 0),
+  ).prompt;
+}
+
+// Number of images a batch will queue: Σ over lines of Π(axis sizes), times `count`.
+// Computed from the factors — never materializes the expansion — so it is safe to call
+// live on every keystroke even when the product is enormous.
 export function cardinality(prompts, variables, count = 1) {
   const lines = promptList(prompts);
   if (lines.length === 0) return 0;
-  const vars = effectiveVariables(prompts, variables);
+  const variableMap = buildVariableMap(variables);
   const jobs = lines.reduce((total, prompt) => {
-    const product = vars.reduce(
-      (acc, variable) => (promptReferences(prompt, variable.key) ? acc * variable.values.length : acc),
-      1,
-    );
-    return total + product;
+    const plan = linePlan(prompt, variableMap);
+    return total + plan.axes.reduce((product, axis) => product * axis.size, 1);
   }, 0);
   const n = Number(count);
   const multiplier = Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
   return jobs * multiplier;
 }
 
-// Referenced keys that have no usable value — the batch cannot run until these are
-// filled. Slice 5 uses this to block the run and name the offending key(s).
+// Named keys referenced with no usable value — the batch cannot run until these are
+// filled. Inline/linked placeholders are never missing (their values are inline).
 export function missingKeys(prompts, variables) {
-  const filled = new Set(effectiveVariables(prompts, variables).map((variable) => variable.key));
-  return extractKeys(prompts).filter((key) => !filled.has(key));
+  const filled = buildVariableMap(variables);
+  const seen = new Set();
+  const missing = [];
+  for (const prompt of promptList(prompts)) {
+    for (const token of tokenizeLine(prompt)) {
+      if (token.ph?.kind === "named" && !filled.has(token.ph.key) && !seen.has(token.ph.key)) {
+        seen.add(token.ph.key);
+        missing.push(token.ph.key);
+      }
+    }
+  }
+  return missing;
+}
+
+// Linked-group length mismatches: a `label:` used in one line with differing option
+// counts (e.g. `{{p:he|she|they}} {{p:his|her}}`) can't zip cleanly. Returns
+// `[{ label, lengths }]` (lengths ascending) so the caller can block the run and explain.
+export function linkedGroupIssues(prompts) {
+  const issues = [];
+  const reported = new Set();
+  for (const prompt of promptList(prompts)) {
+    const lengths = new Map();
+    for (const token of tokenizeLine(prompt)) {
+      if (token.ph?.kind === "linked") {
+        if (!lengths.has(token.ph.label)) lengths.set(token.ph.label, new Set());
+        lengths.get(token.ph.label).add(token.ph.options.length);
+      }
+    }
+    for (const [label, set] of lengths) {
+      if (set.size > 1 && !reported.has(label)) {
+        reported.add(label);
+        issues.push({ label, lengths: [...set].sort((a, b) => a - b) });
+      }
+    }
+  }
+  return issues;
 }

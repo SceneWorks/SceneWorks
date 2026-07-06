@@ -5186,17 +5186,53 @@
       // from the SceneWorks HF org (sc-5600, epic 5594); Windows/Linux load the diffusers/GGUF
       // layout via the torch wan_video adapter. The API serves only the entry matching the OS.
       "downloads": [
+        // macOS quant matrix (sc-9943, epic 8506): the image→video sibling of the T2V-A14B matrix.
+        // Each tier is a SEPARATE user-selectable artifact tagged with a `variant`; `q4` (default)
+        // installs when no tier is chosen. Every tier subdir is fully self-contained (both MoE
+        // experts at in_dim 36 image-concat + UMT5 T5 + z16 VAE + tokenizer + config.json), so the
+        // dense T5/VAE repeat per tier (epic decision #3: storage is a non-issue; keeps the load path
+        // a single self-contained dir with no engine change). The worker fetches a toggled-but-not-
+        // downloaded tier on demand (ensure_wan_a14b_tier_present, video_jobs.rs), so
+        // advanced.mlxQuantize works without a pre-pick. The legacy flat root files stay hosted for
+        // already-shipped workers that resolve the repo root; a new worker only ever resolves the tier
+        // subdirs (cleanup follow-up sc-9977). estimatedSizeBytes/footprint are the exact hosted
+        // subdir sizes measured from the on-device build.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
-          "files": [],
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 69042107874
+          "estimatedSizeBytes": 28645879665,
+          "footprint": { "diskSizeBytes": 28645879665, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 42696802013,
+          "footprint": { "diskSizeBytes": 42696802013, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos"],
+          // Dense bf16 tier (sc-9943): both experts bf16 + T5 + VAE + tokenizer — the same content as
+          // the legacy flat root, hosted under bf16/ for the uniform tier layout. Exact on-disk size
+          // of the built bf16/ subdir.
+          "estimatedSizeBytes": 69042107982,
+          "footprint": { "diskSizeBytes": 69042107982, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
           "files": [],
+          "default": true,
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 72000000000
         }
@@ -5252,12 +5288,15 @@
       },
       "mlx": {
         // Turnkey pre-converted dual-expert MLX snapshot on the SceneWorks HF org (sc-5600,
-        // epic 5594): dense bf16, self-contained (high/low-noise experts + UMT5 encoder + z16
-        // VAE + tokenizer; in_dim 36 image-concat), downloaded on first use — no in-app
-        // conversion. The worker resolves env override (SCENEWORKS_MLX_WAN14B_I2V_DIR) → local
-        // <data>/models/mlx/wan_2_2_i2v_14b (a local conversion supersedes) → this snapshot.
-        // Source Wan-AI/Wan2.2-I2V-A14B is Apache-2.0; converter "wan_i2v_14b" emits bf16
-        // (Q4/Q8 at load). Its distill LoRA is applied at run time.
+        // epic 5594). As of the quant matrix (sc-9943, epic 8506) it ships pre-built q4/q8/bf16 tier
+        // subdirs (each self-contained: high/low-noise experts at in_dim 36 image-concat + UMT5
+        // encoder + z16 VAE + tokenizer + config.json, the quant baked in via config.json so nothing
+        // quantizes at load). The worker resolves env override (SCENEWORKS_MLX_WAN14B_I2V_DIR) →
+        // local <data>/models/mlx/wan_2_2_i2v_14b (a local conversion supersedes) → the requested
+        // tier subdir of this snapshot (wan_a14b_tier_subdir; both MoE experts live in one subdir),
+        // loading with no install-time convert peak. Source Wan-AI/Wan2.2-I2V-A14B is Apache-2.0;
+        // converter "wan_i2v_14b" (mlx-gen-wan convert_i2v_14b) builds each tier. Its distill LoRA is
+        // applied at run time.
         "minMemoryGb": 133,
         "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
         // macOS curated menu (sc-7296): the full curated fold-in over the A14B native flow σ

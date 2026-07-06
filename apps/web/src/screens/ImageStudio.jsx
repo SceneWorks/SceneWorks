@@ -10,9 +10,16 @@ import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
 import StructuredPromptBuilder from "../components/StructuredPromptBuilder.jsx";
 import ReferenceCaptionPicker from "../components/ReferenceCaptionPicker.jsx";
 import BatchPromptPanel from "../components/BatchPromptPanel.jsx";
-import { cardinality, expandBatch, extractKeys, missingKeys, splitPromptLines } from "../promptBatch.js";
+import {
+  cardinality,
+  expandBatch,
+  extractKeys,
+  linkedGroupIssues,
+  missingKeys,
+  splitPromptLines,
+} from "../promptBatch.js";
 import { resolveEffectiveDimensions } from "../resolutionOverride.js";
-import { batchItemStatus, summarizeBatchProgress } from "../batchOps.js";
+import { batchItemStatus, summarizeBatchRun } from "../batchOps.js";
 import {
   emptyCaption,
   orderCaption,
@@ -379,6 +386,8 @@ export function ImageStudio() {
   const [batchRun, setBatchRun] = useState(null);
   // True once a run over BATCH_RENDER_CAP is awaiting the user's explicit confirmation.
   const [batchConfirmPending, setBatchConfirmPending] = useState(false);
+  // Set by Stop/Cancel to break the (possibly slow, structured) enqueue loop mid-flight.
+  const batchAbortRef = useRef(false);
 
   const batchPrompts = useMemo(() => splitPromptLines(batchPromptsText), [batchPromptsText]);
   const batchVariables = useMemo(
@@ -391,16 +400,12 @@ export function ImageStudio() {
       })),
     [batchPrompts, batchVariableValues],
   );
-  const batchTotal = useMemo(
-    () => cardinality(batchPrompts, batchVariables, count),
-    [batchPrompts, batchVariables, count],
+  // Number of resolved-prompt jobs (pose-independent). Image count = jobs × images-per-prompt,
+  // computed as batchTotal once the pose payload is known (poses replace `count`).
+  const batchJobCount = useMemo(
+    () => cardinality(batchPrompts, batchVariables, 1),
+    [batchPrompts, batchVariables],
   );
-
-  // A pending large-run confirmation is for one specific count — reset it whenever the
-  // batch size changes so the user always re-confirms against the current total.
-  useEffect(() => {
-    setBatchConfirmPending(false);
-  }, [batchTotal]);
 
   const applyBatchContent = useCallback(({ prompts, variables, lastValues, name }) => {
     setBatchPromptsText(batchTextFromPrompts(prompts));
@@ -776,6 +781,39 @@ export function ImageStudio() {
   const showControlPanel = mode === "text_to_image" && controlModes.length > 0;
   const effectiveControlScale =
     typeof controlScale === "number" ? controlScale : controlScaleConfig?.default ?? 0.9;
+
+  // Pose-library + strict-control conditioning, derived once so the single Generate
+  // (submit) and the batch run (buildBatchJobRequest) share them (sc-9980). Pose emits one
+  // image per selected pose instead of `count` variations; canny/depth carry a control image
+  // routed by the preprocess (derive → sourceAssetId) vs passthrough (advanced.controlImage) toggle.
+  const usePosePayload =
+    (mode === "character_image" && referenceAssetId && poseLibrary) ||
+    (showControlPanel && activeControlMode === "pose");
+  const posePayload =
+    usePosePayload && selectedPoseIds.length
+      ? selectedPoseIds
+          .map((id) => poseById[id])
+          .filter(Boolean)
+          .map((pose) => ({ id: pose.id, keypoints: pose.keypoints }))
+      : [];
+  const controlActive = showControlPanel && Boolean(activeControlMode);
+  const controlIsImageMode = controlActive && activeControlMode !== "pose";
+  const controlPreprocessSourceId =
+    controlIsImageMode && !controlImagePassthrough && controlImageAssetId ? controlImageAssetId : null;
+  const controlPassthroughId =
+    controlIsImageMode && controlImagePassthrough && controlImageAssetId ? controlImageAssetId : null;
+
+  // Images each resolved-prompt job emits: the pose count when poses are selected (they
+  // replace `count` variations), else `count`. Total batch image count feeds the run label
+  // and the cardinality cap.
+  const batchImagesPerPrompt = posePayload.length || count;
+  const batchTotal = batchJobCount * batchImagesPerPrompt;
+
+  // A pending large-run confirmation is for one specific total — reset it whenever the batch
+  // size changes so the user always re-confirms against the current count.
+  useEffect(() => {
+    setBatchConfirmPending(false);
+  }, [batchTotal]);
   // Whether the model exposes its built-in prompt upsampler ("Enhance prompt" toggle) — FLUX.2-dev.
   const promptEnhance = Boolean(selectedModel?.ui?.promptEnhance);
   // Whether the model ships a packed default + a hosted full-precision bf16 build, exposing the
@@ -1448,29 +1486,8 @@ export function ImageStudio() {
     }
     setSubmitting(true);
     try {
-      // Pose library: when poses are selected, the job emits one image per pose
-      // (advanced.poses) instead of `count` variations. Two pose surfaces share this payload:
-      //   * character_image — InstantID pose set (needs an approved reference).
-      //   * text_to_image — the strict-control panel's pose mode (sc-8245): a Fun-Union backbone
-      //     conditions each render on the selected library skeleton; no reference needed.
-      const usePosePayload =
-        (mode === "character_image" && referenceAssetId && poseLibrary) ||
-        (showControlPanel && activeControlMode === "pose");
-      const posePayload =
-        usePosePayload && selectedPoseIds.length
-          ? selectedPoseIds.map((id) => poseById[id]).filter(Boolean).map((pose) => ({ id: pose.id, keypoints: pose.keypoints }))
-          : [];
-      // Strict-control conditioning (sc-8245). Active only for a text-to-image control backbone.
-      // Pose flows through `posePayload` above; canny/depth carry the control type + the uploaded
-      // control image, routed by the preprocess-vs-passthrough toggle:
-      //   * preprocess (derive) → request `sourceAssetId` (the worker auto-derives the map).
-      //   * use-as-is (passthrough) → `advanced.controlImage` (the map is fed verbatim).
-      const controlActive = showControlPanel && Boolean(activeControlMode);
-      const controlIsImageMode = controlActive && activeControlMode !== "pose";
-      const controlPreprocessSourceId =
-        controlIsImageMode && !controlImagePassthrough && controlImageAssetId ? controlImageAssetId : null;
-      const controlPassthroughId =
-        controlIsImageMode && controlImagePassthrough && controlImageAssetId ? controlImageAssetId : null;
+      // posePayload / controlActive / controlPreprocessSourceId / controlPassthroughId are
+      // derived at component scope (shared with the batch run, sc-9980).
       // Resolve the prompt + structured-caption payload. Structured models (Ideogram 4) are
       // JSON-caption-only: raw plain text is out-of-distribution and renders the "Image blocked by
       // safety filter" placeholder (sc-6307/sc-6501). So a structured model ALWAYS sends a JSON
@@ -1614,25 +1631,26 @@ export function ImageStudio() {
     }
   }
 
-  // One image-job request for a single resolved batch prompt. Reuses the current
-  // studio settings (model, loras, upscale, reference/source per mode, and the whole
-  // advanced knob set via the tested buildImageJobAdvanced). Batch deliberately omits
-  // the single-shot pose-library / strict-control conditioning and never sends a
-  // structured caption — each resolved prompt is a plain prompt. `count` still
-  // multiplies within each job (images = jobs × count).
-  const buildBatchJobRequest = (resolvedPrompt) => ({
+  // One image-job request for a single resolved batch prompt. Reuses the current studio
+  // settings (model, loras, upscale, reference/source per mode, pose-library + strict-control
+  // conditioning, and the whole advanced knob set via the tested buildImageJobAdvanced).
+  // `count` multiplies within each job UNLESS poses are selected, in which case each job
+  // emits one image per pose (images = jobs × posePayload.length). For a structured-caption
+  // model (sc-9980) the caller passes the per-prompt auto-expanded caption via `opts`.
+  const buildBatchJobRequest = (resolvedPrompt, opts = {}) => ({
     mode,
-    prompt: resolvedPrompt,
+    prompt: opts.promptToSend ?? resolvedPrompt,
     negativePrompt,
     model,
-    count,
+    count: posePayload.length ? 1 : count,
     seed: seed === "" ? null : Number(seed),
     width,
     height,
     recipePresetId: selectedPreset?.id ?? null,
     characterId: mode === "character_image" ? characterId || null : null,
     characterLookId: mode === "character_image" ? characterLookId || null : null,
-    sourceAssetId: mode === "edit_image" && !multiReference ? sourceAssetId || null : null,
+    sourceAssetId:
+      mode === "edit_image" && !multiReference ? sourceAssetId || null : controlPreprocessSourceId,
     referenceAssetIds:
       mode === "edit_image" && multiReference && referenceAssetIds.length ? referenceAssetIds : undefined,
     fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
@@ -1650,10 +1668,10 @@ export function ImageStudio() {
       : {}),
     advanced: buildImageJobAdvanced({
       resolution,
-      sendStructured: false,
+      sendStructured: opts.sendStructured ?? false,
       submitIntent: resolvedPrompt,
-      submitCaption: caption,
-      submitBackend: magicPromptBackend,
+      submitCaption: opts.submitCaption ?? caption,
+      submitBackend: opts.submitBackend ?? magicPromptBackend,
       sampler,
       scheduler,
       schedulerShift,
@@ -1679,11 +1697,11 @@ export function ImageStudio() {
       trueCfgScale,
       viewAngles,
       viewAngle,
-      posePayload: [],
+      posePayload,
       faceRestore,
-      controlActive: false,
+      controlActive,
       activeControlMode,
-      controlPassthroughId: null,
+      controlPassthroughId,
       effectiveControlScale,
     }),
   });
@@ -1705,26 +1723,55 @@ export function ImageStudio() {
     }
     setBatchError("");
     // Soft cap: a large run must be confirmed once, showing the exact image count.
-    if (!confirmed && resolved.length * count > BATCH_RENDER_CAP) {
+    if (!confirmed && resolved.length * batchImagesPerPrompt > BATCH_RENDER_CAP) {
       setBatchConfirmPending(true);
       return;
     }
     setBatchConfirmPending(false);
-    setBatchRun({ submitting: true, items: resolved.map((entry) => ({ prompt: entry.prompt, jobId: null })) });
-    const items = [];
-    for (const entry of resolved) {
-      try {
-        const job = await createImageJob(buildBatchJobRequest(entry.prompt));
-        items.push({ prompt: entry.prompt, jobId: job?.id ?? null });
-      } catch {
-        items.push({ prompt: entry.prompt, jobId: null });
+    batchAbortRef.current = false;
+    // Items carry `error` so not-yet-submitted rows read as pending, not failed, while a
+    // (possibly slow, structured) enqueue is in flight. Updated after each post so progress
+    // ticks up live.
+    const items = resolved.map((entry) => ({ prompt: entry.prompt, jobId: null, error: false }));
+    setBatchRun({ submitting: true, items: items.map((item) => ({ ...item })) });
+    for (let i = 0; i < resolved.length; i += 1) {
+      if (batchAbortRef.current) {
+        break;
       }
+      const entry = resolved[i];
+      try {
+        let request;
+        if (structuredPromptModel) {
+          // Structured-caption models (Ideogram 4) reject raw plain text, so auto-expand each
+          // resolved prompt into a JSON caption first (sc-9980) — N sequential refine calls.
+          // A prompt that fails to expand fails only that item; the rest continue.
+          const expanded = await onMagicExpand(entry.prompt);
+          if (!validateCaption(expanded).ok) {
+            throw new Error("Auto-generated caption was invalid.");
+          }
+          request = buildBatchJobRequest(entry.prompt, {
+            promptToSend: serializeCaption(expanded),
+            sendStructured: true,
+            submitCaption: expanded,
+            submitBackend: PROMPT_REFINE_MODEL_ID,
+          });
+        } else {
+          request = buildBatchJobRequest(entry.prompt);
+        }
+        const job = await createImageJob(request);
+        items[i] = { prompt: entry.prompt, jobId: job?.id ?? null, error: !job?.id };
+      } catch {
+        items[i] = { prompt: entry.prompt, jobId: null, error: true };
+      }
+      setBatchRun({ submitting: true, items: items.map((item) => ({ ...item })) });
     }
     setBatchRun({ submitting: false, items });
   }
 
-  // Cancel every still-pending job in the current run; completed/failed items are left.
+  // Stop the enqueue loop (if still running) and cancel every still-pending job in the run;
+  // completed/failed items are left as-is.
   function cancelBatchRun() {
+    batchAbortRef.current = true;
     if (!batchRun) {
       return;
     }
@@ -1743,13 +1790,19 @@ export function ImageStudio() {
     }
   }
 
-  const batchRunProgress = batchRun ? summarizeBatchProgress(batchRun.items, jobs) : null;
+  const batchRunProgress = batchRun ? summarizeBatchRun(batchRun.items, jobs) : null;
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
+  const batchGroupIssues = linkedGroupIssues(batchPrompts);
+  // A structured-caption model can batch, but only if the prompt-refiner is available to
+  // auto-write a caption per resolved prompt (sc-9980).
+  const batchStructuredExpandBlocked =
+    structuredPromptModel && (magicModelMissing || typeof magicPrompt !== "function");
   const batchRunDisabled =
     !activeProject ||
-    structuredPromptModel ||
+    batchStructuredExpandBlocked ||
     batchTotal === 0 ||
     batchMissingKeys.length > 0 ||
+    batchGroupIssues.length > 0 ||
     Boolean(batchRun?.submitting);
 
   const generateDisabled =
@@ -1832,7 +1885,7 @@ export function ImageStudio() {
                 onPromptsTextChange={setBatchPromptsText}
                 variableValues={batchVariableValues}
                 onVariableValuesChange={setBatchVariableValues}
-                count={count}
+                count={batchImagesPerPrompt}
                 batches={promptBatches}
                 projectId={activeProject?.id ?? null}
                 name={batchName}
@@ -1848,13 +1901,19 @@ export function ImageStudio() {
                 error={batchError}
               />
               <div className="batch-run">
-                {structuredPromptModel ? (
+                {batchStructuredExpandBlocked ? (
                   <p className="batch-warning">
-                    Batch mode isn’t available for structured-caption models yet.
+                    Batch on a structured-caption model needs the prompt-refiner model installed — it
+                    auto-writes a caption for each prompt.
                   </p>
                 ) : batchMissingKeys.length > 0 ? (
                   <p className="batch-warning">
                     Fill in a value for {batchMissingKeys.map((key) => `{{${key}}}`).join(", ")} to run.
+                  </p>
+                ) : batchGroupIssues.length > 0 ? (
+                  <p className="batch-warning">
+                    Give each {batchGroupIssues.map((issue) => `{{${issue.label}:…}}`).join(", ")} the same number of
+                    options to run.
                   </p>
                 ) : batchTotal === 0 ? (
                   <p className="batch-hint">Add at least one prompt to run a batch.</p>
@@ -1862,16 +1921,22 @@ export function ImageStudio() {
                 {batchRun ? (
                   <div className="batch-run-progress" aria-live="polite">
                     <span>
-                      {batchRunProgress.done}/{batchRunProgress.total} done
+                      {batchRun.submitting
+                        ? `Queued ${batchRunProgress.total - batchRunProgress.pending}/${batchRunProgress.total}`
+                        : `${batchRunProgress.done}/${batchRunProgress.total} done`}
                       {batchRunProgress.failed ? ` · ${batchRunProgress.failed} failed` : ""}
                     </span>
-                    {batchRunProgress.allDone ? (
-                      <button className="batch-btn ghost" onClick={() => setBatchRun(null)} type="button">
-                        Clear
+                    {batchRun.submitting ? (
+                      <button className="batch-btn ghost" onClick={cancelBatchRun} type="button">
+                        Stop
                       </button>
-                    ) : (
+                    ) : batchRunProgress.active > 0 ? (
                       <button className="batch-btn ghost" onClick={cancelBatchRun} type="button">
                         Cancel remaining
+                      </button>
+                    ) : (
+                      <button className="batch-btn ghost" onClick={() => setBatchRun(null)} type="button">
+                        Clear
                       </button>
                     )}
                   </div>
