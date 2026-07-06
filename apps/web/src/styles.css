@@ -4886,6 +4886,21 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--accent-contrast, var(--text));
 }
 
+/* Per-tier RAM advisory (sc-10042): a tier whose estimated peak exceeds the host budget. Advisory
+   pill only — the tier stays installable (SUGGEST-NEVER-WITHHOLD). Distinct from `.status-badge` so
+   it does not collide with the per-tier install-state badge. */
+.model-tier-memory-warning {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklch, var(--danger) 45%, transparent);
+  background: var(--danger-soft);
+  color: color-mix(in oklch, var(--danger) 85%, var(--text));
+  white-space: nowrap;
+}
+
 .model-tier-size {
   font-family: var(--font-mono);
   font-size: 12px;

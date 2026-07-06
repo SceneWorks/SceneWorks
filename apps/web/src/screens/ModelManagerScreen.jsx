@@ -443,9 +443,11 @@ function ModelTierDownloadPanel({
                 <span className="model-tier-label">
                   {tierLabel(tier)}
                   {isSuggested ? <span className="model-tier-suggested-badge">Suggested</span> : null}
+                  {/* Distinct class (NOT `.status-badge`) so it never collides with the per-row
+                      install-state status badge query/rendering — this is a separate RAM advisory. */}
                   {overBudget ? (
                     <span
-                      className="status-badge warning"
+                      className="model-tier-memory-warning"
                       title={`This tier's peak memory is estimated above this machine's ~${Math.round(unifiedMemoryGb)} GB. It can still install, but may run out of memory during generation.`}
                     >
                       may exceed memory
