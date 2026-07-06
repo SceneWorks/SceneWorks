@@ -47,6 +47,9 @@ function offState(overrides = {}) {
     activeControlMode: null,
     controlPassthroughId: null,
     effectiveControlScale: 0.7,
+    supportsImg2img: false,
+    img2imgReferenceAssetId: null,
+    img2imgStrength: 0.5,
     ...overrides,
   };
 }
@@ -68,6 +71,23 @@ describe("buildImageJobAdvanced", () => {
     const custom = buildImageJobAdvanced(offState({ sampler: "euler", scheduler: "karras" }));
     expect(custom.sampler).toBe("euler");
     expect(custom.scheduler).toBe("karras");
+  });
+
+  it("emits advanced.strength only for an img2img model with a reference (sc-8593)", () => {
+    // No img2img support → omitted even with a reference asset present.
+    expect(
+      buildImageJobAdvanced(offState({ img2imgReferenceAssetId: "ref-1", img2imgStrength: 0.4 })),
+    ).not.toHaveProperty("strength");
+    // img2img model but no reference picked → omitted.
+    expect(
+      buildImageJobAdvanced(offState({ supportsImg2img: true, img2imgReferenceAssetId: null })),
+    ).not.toHaveProperty("strength");
+    // img2img model + a picked reference → the full-range strength rides advanced.
+    expect(
+      buildImageJobAdvanced(
+        offState({ supportsImg2img: true, img2imgReferenceAssetId: "ref-1", img2imgStrength: 0.4 }),
+      ).strength,
+    ).toBe(0.4);
   });
 
   it("omits guidanceMethod for the engine no-op 'cfg' and rides a non-default method", () => {

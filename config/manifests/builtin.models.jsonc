@@ -2238,6 +2238,16 @@
       "type": "image",
       "adapter": "mlx_krea",
       "capabilities": ["text_to_image"],
+      // img2img reference-guided generation (epic 8588 slice A, sc-8593): the shared "Start from an
+      // image" picker doubles as a reference-guided init on Krea — the picked image + `img2imgStrength`
+      // seed the CFG-free Turbo denoise (worker resolve_krea_img2img_init → generate_turbo_img2img).
+      // A `ui.img2img` toggle (not a capabilities value — z-image already owns "image_to_image" for its
+      // distinct edit-mode img2img). Full 0–1 slider (default 0.5); NOT clamped — the usable band is
+      // model-specific (A0/sc-8589 ~0.35–0.65) and the worker owns the semantics.
+      "ui": {
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 }
+      },
       // macOnly is now a no-op label (mirroring klein/flux2_dev): candle availability is driven by the
       // routing tables (`CANDLE_ROUTED_MODELS` / `is_candle_engine`), not this flag. sc-9092: the candle
       // (Windows/Linux) lane now packed-loads the SAME `SceneWorks/krea-2-turbo-mlx` q4/q8/bf16 turnkey

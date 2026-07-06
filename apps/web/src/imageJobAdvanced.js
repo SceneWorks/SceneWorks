@@ -52,6 +52,10 @@ export function buildImageJobAdvanced(state) {
     controlnetScale,
     variationStrength,
     trueCfgScale,
+    // img2img reference-guided generation (epic 8588 slice A, sc-8593).
+    supportsImg2img,
+    img2imgReferenceAssetId,
+    img2imgStrength,
     viewAngles,
     viewAngle,
     // Pose library.
@@ -167,6 +171,14 @@ export function buildImageJobAdvanced(state) {
     // declares a variationStrength slider AND a reference is attached.
     ...(mode === "character_image" && referenceAssetId && variationStrength
       ? { trueCfgScale }
+      : {}),
+    // img2img reference-guided generation (epic 8588 slice A, sc-8593): emit advanced.strength when an
+    // img2img-capable model (Krea 2 Turbo) has a reference picked in the shared "Start from an image"
+    // panel. The worker's krea arm routes referenceAssetId + this strength to generate_turbo_img2img.
+    // Full 0.0–1.0 (default 0.5, the slider midpoint); always sent when a reference is attached so the
+    // worker owns the band semantics (the usable window is model-specific — A0/sc-8589).
+    ...(supportsImg2img && img2imgReferenceAssetId
+      ? { strength: img2imgStrength }
       : {}),
     // View angle (InstantID) — only when a specific angle is chosen and no pose is
     // selected (a library pose drives the whole body, superseding the head angle).

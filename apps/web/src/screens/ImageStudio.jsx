@@ -498,6 +498,13 @@ export function ImageStudio() {
   // InstantID, `controlnetScale` (IdentityNet landmark lock) rides there too.
   const [referenceAssetId, setReferenceAssetId] = useState("");
   const [ipAdapterScale, setIpAdapterScale] = useState(saved.ipAdapterScale ?? 0.6);
+  // img2img reference-guided generation (epic 8588 slice A, sc-8593): the reference picked in the
+  // "Start from an image" panel (lifted from ReferenceCaptionPicker) drives generation at this
+  // strength on an img2img-capable model (Krea 2 Turbo). Distinct from the character `referenceAssetId`
+  // above — same picker, different purpose. Default 0.5 (the full-range slider midpoint; the usable
+  // band is model-specific, so no clamp beyond the slider's 0–1).
+  const [img2imgReferenceAssetId, setImg2imgReferenceAssetId] = useState("");
+  const [img2imgStrength, setImg2imgStrength] = useState(saved.img2imgStrength ?? 0.5);
   const [controlnetScale, setControlnetScale] = useState(saved.controlnetScale ?? 0.8);
   // Variation knob for backbones whose CFG is decoupled from IP-Adapter:
   // FLUX (true_cfg_scale alongside ipAdapterScale) and Qwen-Image-Edit (true_cfg_scale
@@ -771,6 +778,14 @@ export function ImageStudio() {
   // Optional label/range override for the primary reference-strength slider (sc-8278: klein maps it
   // to image-guidance over 1.0–2.5). Absent ⇒ the legacy "Reference strength" 0–1 slider.
   const referenceStrengthCfg = selectedModel?.ui?.referenceStrength;
+  // img2img / reference-guided generation (epic 8588 slice A, sc-8593): a `ui.img2img` flag (Krea 2
+  // Turbo) — a UI toggle like poseLibrary/multiReference, NOT a `capabilities` value (z-image already
+  // uses "image_to_image" for its distinct edit-mode img2img, so a capability gate would collide).
+  // Turns the shared "Start from an image" picker double-duty: the same reference can be described into
+  // a prompt AND/OR guide the render via a strength slider, without needing the vision captioner.
+  // `ui.img2imgStrength` optionally overrides the slider label/range.
+  const supportsImg2img = Boolean(selectedModel?.ui?.img2img);
+  const img2imgStrengthConfig = selectedModel?.ui?.img2imgStrength ?? null;
   // Whether the edit model can outpaint (generate the padded border) — only models that
   // accept an inpaint mask (image_inpaint, SDXL family). Gates the Outpaint fit option.
   const editInpaintCapable = (selectedModel?.capabilities ?? []).includes("image_inpaint");
@@ -1377,6 +1392,7 @@ export function ImageStudio() {
       ["schedulerShift", setSchedulerShift],
       ["guidanceMethod", setGuidanceMethod],
       ["ipAdapterScale", setIpAdapterScale],
+      ["img2imgStrength", setImg2imgStrength],
       ["controlnetScale", setControlnetScale],
       ["trueCfgScale", setTrueCfgScale],
       ["viewAngle", setViewAngle],
@@ -1580,7 +1596,15 @@ export function ImageStudio() {
         // Fit mode applies to edits only; coerced so a stale "outpaint" never reaches a
         // non-inpaint model (epic 2551). Omitted for non-edit modes (worker default crop).
         fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
-        referenceAssetId: mode === "character_image" ? referenceAssetId || null : null,
+        // character_image: the IP-Adapter identity reference. Otherwise, on an img2img-capable model
+        // (Krea 2 Turbo, sc-8593), the reference picked in the "Start from an image" panel — sent so the
+        // worker's krea arm routes it to img2img latent-init (advanced.strength below).
+        referenceAssetId:
+          mode === "character_image"
+            ? referenceAssetId || null
+            : supportsImg2img
+              ? img2imgReferenceAssetId || null
+              : null,
         loras: selectedLoras.map((lora) => serializeLora(lora, { weight: effectiveLoraWeight(lora) })),
         ...(upscaleEnabled
           ? {
@@ -1623,6 +1647,10 @@ export function ImageStudio() {
           referenceAssetId,
           hideReferenceStrength,
           ipAdapterScale,
+          // img2img (sc-8593): emit advanced.strength when an img2img-capable model has a reference.
+          supportsImg2img,
+          img2imgReferenceAssetId,
+          img2imgStrength,
           identityStructure,
           controlnetScale,
           variationStrength,
@@ -2092,7 +2120,12 @@ export function ImageStudio() {
               mode === "text_to_image" &&
               typeof imageDescribe === "function" &&
               (visionCaptionReady || visionCaptionOffers.length > 0);
-            const describeActive = describeAvailable && promptTool === "describe";
+            // The "Start from an image" tile serves BOTH the describe→prompt flow AND img2img
+            // reference-guided generation (sc-8593). img2img needs no vision captioner, so it can open
+            // the panel on its own — the picked reference then rides generation via the strength slider.
+            const img2imgAvailable = supportsImg2img && mode === "text_to_image";
+            const referenceToolAvailable = describeAvailable || img2imgAvailable;
+            const describeActive = referenceToolAvailable && promptTool === "describe";
             const refineActive = promptTool === "refine";
             return (
               <div className="prompt-tools">
@@ -2101,7 +2134,7 @@ export function ImageStudio() {
                   <span className="hairline" />
                 </div>
                 <div className="prompt-tools-tiles">
-                  {describeAvailable ? (
+                  {referenceToolAvailable ? (
                     <button
                       type="button"
                       className={describeActive ? "prompt-tool active" : "prompt-tool"}
@@ -2111,7 +2144,11 @@ export function ImageStudio() {
                       <span className="prompt-tool-title">
                         <Icon.Image size={15} /> Start from an image
                       </span>
-                      <span className="prompt-tool-desc">Caption a reference into an editable prompt</span>
+                      <span className="prompt-tool-desc">
+                        {img2imgAvailable
+                          ? "Describe it into a prompt, or guide the render with it"
+                          : "Caption a reference into an editable prompt"}
+                      </span>
                     </button>
                   ) : null}
                   <button
@@ -2132,11 +2169,20 @@ export function ImageStudio() {
                       onCaption={onImageDescribe}
                       onApply={(text) => setPromptFromUser(text)}
                       onReferenceImageLoaded={onReferenceImageLoaded}
+                      onReferenceAssetChange={setImg2imgReferenceAssetId}
+                      showImg2imgStrength={img2imgAvailable}
+                      img2imgStrength={img2imgStrength}
+                      onImg2imgStrengthChange={setImg2imgStrength}
+                      img2imgStrengthConfig={img2imgStrengthConfig}
                       referenceAssets={editImageAssets}
                       referenceCharacters={characters}
                       importAsset={importAsset}
                       projectId={activeProject?.id ?? ""}
-                      hint="The image is only used to write the prompt — it isn’t sent to generation."
+                      hint={
+                        img2imgAvailable
+                          ? "Describe it into a prompt, or set a reference strength below to guide the render."
+                          : "The image is only used to write the prompt — it isn’t sent to generation."
+                      }
                       buttonLabel="✨ Describe image"
                       busyLabel="Describing…"
                       emptyMessage="The image did not produce a usable description. Try another reference."
