@@ -4271,6 +4271,80 @@ fn instantid_resolves_user_loras_into_adapters() {
     );
 }
 
+/// sc-10117: the inline Image Studio "Upscale" variant must carry the SAME lineage keys the
+/// standalone `image_upscale` job writes (`sourceAssetId` / `parents` / `extra.upscaledFromAssetId`),
+/// or the Library / Recent-Batches fold and the Original↔Upscaled toggle can't pair it with its
+/// original. The old bare `upscaledFrom` field was read by nothing (web `assetVariants.js`,
+/// `project_store`) and dropped at sidecar-build time, so inline upscales never folded.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn inline_upscaled_asset_links_back_to_base_for_library_fold() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path();
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let req = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "prompt": "Mist over hills",
+        "count": 1, "width": 320, "height": 256, "seed": 7,
+        "modelManifestEntry": { "family": "z-image" }
+    }));
+    let plan = ImagePlan::new(&req);
+
+    // A real base image asset (its fresh assetId lives inside the returned fact).
+    let seed = resolve_seed(&req, 0);
+    let pixels = stub_rgb8(req.width, req.height, seed);
+    let base_fact = write_image_asset(
+        &plan,
+        0,
+        seed,
+        req.width,
+        req.height,
+        pixels,
+        STUB_ADAPTER,
+        stub_raw_settings(&req),
+        project_path,
+    )
+    .unwrap();
+    let base_id = base_fact
+        .get("assetId")
+        .and_then(Value::as_str)
+        .unwrap()
+        .to_owned();
+
+    // Upscale it 2x — a solid buffer is fine; we only assert the lineage metadata here.
+    let upscaled =
+        image::RgbImage::from_pixel(req.width * 2, req.height * 2, image::Rgb([10, 20, 30]));
+    let fact = write_upscaled_asset(
+        &plan,
+        &base_fact,
+        &upscaled,
+        "seedvr2",
+        2,
+        0.5,
+        project_path,
+    )
+    .unwrap();
+
+    // A fresh id, but linked back to the base by EVERY key the fold reads.
+    assert_ne!(
+        fact["assetId"], base_fact["assetId"],
+        "upscaled variant gets its own id"
+    );
+    assert_eq!(fact["sourceAssetId"], json!(base_id));
+    assert_eq!(fact["parents"], json!([base_id]));
+    assert_eq!(fact["extra"]["isUpscaled"], json!(true));
+    assert_eq!(fact["extra"]["upscaledFromAssetId"], json!(base_id));
+    assert_eq!(fact["extra"]["factor"], json!(2));
+    assert_eq!(fact["extra"]["engine"], json!("seedvr2"));
+    // The dead field that never folded must be gone.
+    assert!(
+        !fact.contains_key("upscaledFrom"),
+        "the unread `upscaledFrom` field must not be written"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn image_route_count_follows_dispatch_order() {
