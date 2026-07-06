@@ -4530,21 +4530,63 @@
       // alone so it appears solely in the "With character" picker. License: FLUX.1
       // [dev] NC (same posture as the flux_dev built-in).
       "capabilities": ["character_image"],
+      // Per-platform backbone source (sc-9947, epic 8506), mirroring LTX's sc-5608 split:
+      //   - macOS (MLX): the SAME ungated `SceneWorks/flux1-dev-mlx` quant-matrix turnkey the base
+      //     `flux_dev` built-in consumes — self-contained q4/ (default) + q8/ + bf16/ subdirs, each a
+      //     complete from_snapshot tree (packed transformer + CLIP + T5 + VAE + tokenizers). The
+      //     `mlx-gen-pulid` loader delegates its FLUX.1-dev backbone to `mlx_gen_flux::load_flux1`, which
+      //     packed-detects the tier subdir — so PuLID loads the SELECTED packed tier with NO install-time
+      //     convert peak and NO upstream BFL gate. The PuLID adapter / EVA / face stack stay f32 and are
+      //     fetched on demand (mirrors Kolors/InstantID).
+      //   - Windows/Linux (candle): unchanged — the bespoke `candle_gen_pulid::PulidFlux` loader still
+      //     reads the upstream BFL dense layout (`flux1-dev.safetensors` + `ae.safetensors`); its packed
+      //     quant-matrix consumption is a separate epic-9083 slice. So Windows/Linux keep the gated BFL
+      //     download (resolved via the `PULID_CANDLE_FLUX_REPO` const, NOT this manifest `repo`).
       "downloads": [
         {
-          // FLUX.1-dev base (BFL flow + VAE + T5 + CLIP-L); the worker loads the
-          // BFL flux1-dev.safetensors + ae.safetensors directly via the vendored
-          // BFL flow loader (skip the diffusers transformer shards). NC + gated;
-          // the PuLID-FLUX adapter weights (~1.5GB) and the QuanSun EVA-CLIP-L
-          // checkpoint (~1.6GB) are fetched on demand (mirrors Kolors/InstantID).
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux1-dev-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 9617334683,
+          "footprint": { "diskSizeBytes": 9617334683, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux1-dev-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 18010071290,
+          "footprint": { "diskSizeBytes": 18010071290, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux1-dev-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 33746402173,
+          "footprint": { "diskSizeBytes": 33746402173, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // Windows/Linux candle: the BFL flow + VAE + T5 + CLIP-L; the candle `PulidFlux` loads the
+          // BFL flux1-dev.safetensors + ae.safetensors directly via the vendored flow loader. NC + gated;
+          // the PuLID-FLUX adapter (~1.5GB) + EVA-CLIP-L (~1.6GB) are fetched on demand.
           "provider": "huggingface",
           "repo": "black-forest-labs/FLUX.1-dev",
           "files": [],
+          "default": true,
+          "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 33500000000
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/black-forest-labs/FLUX.1-dev"
+        // macOS install/display path (the MLX turnkey); Windows/Linux candle resolves the BFL snapshot
+        // via its own const, not this field (mirrors LTX's per-platform paths.model).
+        "model": "${HF_CACHE}/SceneWorks/flux1-dev-mlx"
       },
       "defaults": {
         // sc-2012 spike: 30 steps at guidance 4.0; id_weight=1.0,
@@ -4571,15 +4613,19 @@
       },
       // Native MLX path (sc-3344): PuLID-FLUX runs on the Rust `mlx-gen-pulid` engine — the
       // FLUX.1-dev backbone + the f32 EVA/IDFormer/CA conditioning — retiring the torch MPS path
-      // that drove the old 64 GB gate (an 85.3 GB peak on MPS bf16, sc-2012). Q8 is the default:
-      // near-lossless for identity (engine sc-3076 — Q8 ArcFace 0.6841 ≈ bf16 0.68; the conditioning
-      // stays f32 either way) and far lighter. minMemoryGb mirrors the native `flux_dev` sibling
-      // (42, a measured Q8 FLUX.1-dev gate) plus the ~1.6 GB f32 EVA tower + CA overhead. Q4
-      // (`advanced.mlxQuantize: 4`) drops the backbone to ~6.5 GB for tighter hosts; dense bf16
-      // (`mlxQuantize: 0`) is the sc-2012-exact identity at a higher floor.
+      // that drove the old 64 GB gate (an 85.3 GB peak on MPS bf16, sc-2012). As of sc-9947 the
+      // backbone loads from the `SceneWorks/flux1-dev-mlx` quant-matrix turnkey (see `downloads`):
+      // the worker resolves the SELECTED q4/q8/bf16 tier subdir (`standard_tier_subdir`) and the
+      // packed weights load directly — no install-time convert peak. `quantize: 4` is the DEFAULT
+      // tier (matching the turnkey's `q4` default + the base `flux_dev` sibling): near-lossless for
+      // identity (engine sc-3076 — Q4 ArcFace 0.6835 / Q8 0.6841 ≈ bf16 0.68; the conditioning stays
+      // f32 either way) and the lightest floor (~6.5 GB backbone). Q8 (`advanced.mlxQuantize: 8`) and
+      // dense bf16 (`mlxQuantize: 0`, the sc-2012-exact identity) are user-selectable. minMemoryGb
+      // stays conservative (the measured Q8 `flux_dev` gate + the ~1.6 GB f32 EVA tower + CA overhead);
+      // a follow-up re-measures the now-lighter q4 default on-device.
       "mlx": {
         "minMemoryGb": 44,
-        "quantize": 8
+        "quantize": 4
       },
       "loraCompatibility": {
         // FLUX-family backbone, so flux LoRAs apply (sc-1927: declare a real
@@ -4589,7 +4635,7 @@
       },
       "ui": {
         "label": "PuLID-FLUX (FLUX.1 [dev])",
-        "description": "Identity-preserving FLUX character generation: holds a person's face from a single reference image while the prompt drives scene, pose, and wardrobe. Built on FLUX.1-dev with PuLID's IDFormer cross-attention adapter — the sc-2012 spike measured 0.8016 ArcFace cosine vs reference at id_weight=1.0 / start-cfg=4 (above the InstantID-SDXL no-restore baseline; no face-restoration pass needed). Pick a character with an approved reference image, then raise Variations to explore takes. ~30 steps at guidance 4.0; ~85 GB peak unified memory at 1024². Needs the PuLID-FLUX adapter (~1.5GB) + EVA-CLIP-L (~1.6GB) + antelopev2 face pack, fetched on first use. License: FLUX.1 [dev] non-commercial (gated).",
+        "description": "Identity-preserving FLUX character generation: holds a person's face from a single reference image while the prompt drives scene, pose, and wardrobe. Built on FLUX.1-dev with PuLID's IDFormer cross-attention adapter — the sc-2012 spike measured 0.8016 ArcFace cosine vs reference at id_weight=1.0 / start-cfg=4 (above the InstantID-SDXL no-restore baseline; no face-restoration pass needed). Pick a character with an approved reference image, then raise Variations to explore takes. ~30 steps at guidance 4.0. On Apple Silicon the FLUX.1-dev backbone loads from the ungated SceneWorks quant-matrix rehost at a user-selectable tier (q4 default / q8 / bf16) — the identity conditioning stays full-precision, so even q4 holds the face (ArcFace ~0.68). Needs the PuLID-FLUX adapter (~1.5GB) + EVA-CLIP-L (~1.6GB) + antelopev2 face pack, fetched on first use. License: FLUX.1 [dev] non-commercial.",
         "recommendedFor": ["character_image"],
         // PuLID identity tuning surfaced in the character-image picker. The
         // reference-strength slider drives idWeight (PuLID's identity-strength

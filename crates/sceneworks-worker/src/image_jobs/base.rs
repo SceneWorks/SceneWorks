@@ -525,6 +525,13 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     // weights, bf16 resolves to Quant::None). Replaces the gated BFL download + install-time quantize.
     "flux_schnell",
     "flux_dev",
+    // PuLID-FLUX (sc-9947, epic 8506): the MLX lane's FLUX.1-dev backbone now loads from the SAME
+    // `SceneWorks/flux1-dev-mlx` q4/q8/bf16 turnkey as base `flux_dev` (its bespoke `pulid.rs` resolver
+    // calls `standard_tier_subdir` directly; `mlx-gen-pulid` delegates the backbone to `load_flux1`, which
+    // packed-detects the tier). Registering it here makes `uses_standard_tier_layout` true for that
+    // resolver. The candle (Windows/Linux) PuLID lane keeps the upstream dense BFL backbone and never
+    // reaches the base tier path, so this is inert there (epic-9083 covers the candle packed lane).
+    "pulid_flux_dev",
     // Lens / Lens-Turbo (sc-9092, epic 9083 gap #3): the SceneWorks re-hosted `SceneWorks/lens-mlx` /
     // `SceneWorks/lens-turbo-mlx` turnkeys are standard q4/q8/bf16 tiers (their manifests already flag
     // `mlx.standardTierLayout: true`, so `uses_standard_tier_layout` was already true via the manifest —
