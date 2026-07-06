@@ -288,8 +288,12 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // `kolors_mlx_eligible` until their dedicated streams land (subsequent epic-3090 slices).
     ModelRow {
         sceneworks_id: "kolors",
+        // sc-9946 (epic 8506): flipped to the SceneWorks re-host `SceneWorks/kolors-mlx`, which ships
+        // the pre-quantized q4/q8/bf16 turnkey tiers (mlx-gen #659). Was upstream
+        // `Kwai-Kolors/Kolors-diffusers` (dense + install-time quant). The derived fast tokenizer is
+        // baked into every tier, so the install-time tokenizer overlay is no longer needed here.
         engine_id: "kolors",
-        default_repo: "Kwai-Kolors/Kolors-diffusers",
+        default_repo: "SceneWorks/kolors-mlx",
         default_steps: 25,
         default_guidance: 5.0,
         adapter_label: "mlx_kolors",
