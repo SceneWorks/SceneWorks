@@ -1431,7 +1431,7 @@ pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath
             // root, exactly as inference does. Fall back to the cache root when no snapshot is
             // materialized yet (the path need not exist at dry-run time).
             if let Some(snapshot) = huggingface_snapshot_dirs(&cache_path).into_iter().next() {
-                return snapshot.display().to_string();
+                return tiered_turnkey_train_dir(snapshot).display().to_string();
             }
             return cache_path.display().to_string();
         }
@@ -1441,6 +1441,37 @@ pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath
         .join(safe_download_dir(&target.base_model))
         .display()
         .to_string()
+}
+
+/// Whether a resolved HF snapshot is a tiered-turnkey re-host (epic 9992): tier subdirs (`bf16/ q8/
+/// q4/`) with NO flat component tree at the root. A flat diffusers snapshot (z-image / lens / the
+/// retired `krea/Krea-2-Raw` tree) has `transformer/` at the root and is NOT tiered.
+fn snapshot_is_tiered_turnkey(snapshot: &FsPath) -> bool {
+    !snapshot.join("transformer").is_dir()
+        && (snapshot.join("bf16").is_dir()
+            || snapshot.join("q8").is_dir()
+            || snapshot.join("q4").is_dir())
+}
+
+/// Whether a `bf16/` tier holds the dense component tree the trainer needs (`transformer/`,
+/// `text_encoder/`, `vae/`). The repo-level completion marker does NOT certify a tier (sc-9909), so
+/// check the actual dirs.
+fn bf16_component_tree_present(bf16: &FsPath) -> bool {
+    bf16.join("transformer").is_dir()
+        && bf16.join("text_encoder").is_dir()
+        && bf16.join("vae").is_dir()
+}
+
+/// For a tiered-turnkey re-host (epic 9992 Krea 2 Raw: `SceneWorks/krea-2-raw-mlx` ships `bf16/ q8/ q4/`
+/// tier subdirs), training reads the DENSE `bf16/` tier — the trainer needs the full-precision base, and
+/// the bf16 tier is byte-identical to the retired `krea/Krea-2-Raw` diffusers tree. A flat diffusers
+/// snapshot (transformer/ at the root) is returned unchanged, so this is backward-compatible. Mirrors
+/// how generation resolves a tier subdir via `krea_model_subdir`.
+fn tiered_turnkey_train_dir(snapshot: std::path::PathBuf) -> std::path::PathBuf {
+    if snapshot_is_tiered_turnkey(&snapshot) {
+        return snapshot.join("bf16");
+    }
+    snapshot
 }
 
 /// GPU selection for a training job, read from the config's advanced bag (the
@@ -1544,6 +1575,15 @@ pub(crate) fn training_base_model_installed(data_dir: &FsPath, target: &Training
         .filter(|repo| !repo.is_empty())
     {
         if let Some(cache_path) = huggingface_repo_cache_path(data_dir, repo) {
+            // Tiered-turnkey re-host (epic 9992 Krea 2 Raw): training reads the DENSE `bf16/` tier, but
+            // generation may have installed only the q8 default. The repo-level completion marker does
+            // NOT certify a tier (sc-9909), so require the bf16 component tree specifically — otherwise
+            // the run-gate would green-light training on a repo that has no dense weights to train.
+            if let Some(snapshot) = huggingface_snapshot_dirs(&cache_path).into_iter().next() {
+                if snapshot_is_tiered_turnkey(&snapshot) {
+                    return bf16_component_tree_present(&snapshot.join("bf16"));
+                }
+            }
             if models::huggingface_cache_health(&cache_path, &[]).installed {
                 return true;
             }

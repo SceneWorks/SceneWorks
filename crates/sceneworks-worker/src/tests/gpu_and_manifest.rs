@@ -374,6 +374,10 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // (supports_guidance=false) with no user negative prompt (supports_negative_prompt=false) — the
         // z_image_turbo / boogu_image_turbo distilled-turbo pattern.
         ("krea_2_turbo", false, false),
+        // Krea 2 Raw (epic 9992): the UNDISTILLED base run with TRUE CFG — supports_guidance=true +
+        // supports_negative_prompt=true (unlike the CFG-free distilled Turbo). The Boogu-base pattern,
+        // but Raw ALSO accepts a user negative prompt (the reference `sample()` takes `negative_prompts`).
+        ("krea_2_raw", true, true),
         // SD3.5 Large (epic 7841 / sc-7871): true-CFG MMDiT flagship — supports_guidance=true +
         // supports_negative_prompt=true (the `sd3_5_large` descriptor advertises supports_true_cfg).
         ("sd3_5_large", true, true),

@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
-import { downloadOffersFor } from "../modelEligibility.js";
 import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../macGating.js";
 import { API_BASE_URL, isAbortError } from "../api.js";
 import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
@@ -508,19 +507,39 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // install reads the true state). Only gated when targets exist but every trainable base is
   // missing — a target-registry error keeps its own "registry unavailable" message.
   const usableTrainingTargets = trainingTargets.filter((target) => !macTargetBlocked(target));
+  // A training base that is a quant-matrix re-host (epic 9992 Krea 2 Raw) is trained on its DENSE `bf16`
+  // tier — generation may have installed only the q8 default, but LoRA training needs the full-precision
+  // weights. Readiness + the install offer therefore track the `bf16` variant when present; a non-matrix
+  // base (z-image / sdxl / lens) has no such variant and uses its default tier.
+  const trainingBaseTier = (base) =>
+    base?.variants?.some((variant) => variant.variant === "bf16") ? "bf16" : undefined;
+  const trainingBaseState = (base) => {
+    const tier = trainingBaseTier(base);
+    if (tier) {
+      return base.variants.find((variant) => variant.variant === tier)?.installState ?? "missing";
+    }
+    return base.installState;
+  };
   const trainingBaseMissing = (target) => {
     const base = models.find((item) => item.id === target?.baseModel);
-    return Boolean(base) && base.installState === "missing";
+    return Boolean(base) && trainingBaseState(base) === "missing";
   };
   const trainingReady =
     usableTrainingTargets.length === 0 ||
     usableTrainingTargets.some((target) => !trainingBaseMissing(target));
   const trainingBaseIds = new Set(usableTrainingTargets.map((target) => target.baseModel).filter(Boolean));
   const trainingOffers = useMemo(
-    () => downloadOffersFor(models, (item) => trainingBaseIds.has(item.id), macCapabilities),
+    () =>
+      (models ?? []).filter(
+        (item) => trainingBaseIds.has(item.id) && trainingBaseState(item) === "missing",
+      ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [models, macCapabilities, [...trainingBaseIds].join("|")],
   );
+  // Install the DENSE bf16 tier for a quant-matrix training base (else the default tier). Mirrors the
+  // Models-page tier picker's `createModelDownloadJob(model, { variant })` (sc-8509).
+  const installTrainingBase = (model, options = {}) =>
+    createModelDownloadJob(model, { variant: trainingBaseTier(model), ...options });
   const trainingDownloadJobs = useMemo(
     () => (jobs ?? []).filter((job) => job.type === "model_download"),
     [jobs],
@@ -1434,7 +1453,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       description="LoRA training needs a downloaded base model (e.g. Z-Image-Turbo or SDXL). Download one to get started."
       offers={trainingOffers}
       downloadJobs={trainingDownloadJobs}
-      onDownload={createModelDownloadJob}
+      onDownload={installTrainingBase}
       onOpenModels={() => setActiveView("Models")}
       onOpenQueue={() => setActiveView("Queue")}
     >
