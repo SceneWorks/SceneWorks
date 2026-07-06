@@ -1528,16 +1528,21 @@ describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
     [...document.body.querySelectorAll(".control-mode-tab")].map((b) => b.textContent.trim());
   const controlTabByLabel = (label) =>
     [...document.body.querySelectorAll(".control-mode-tab")].find((b) => b.textContent.trim() === label);
+  // The structure-control panel is collapsed by default; expand it so the gated inner content
+  // (mode tabs, control-image upload, slider) mounts before the assertions below.
+  const expandControlPanel = async () => click(document.body.querySelector(".control-panel-head"));
   const generate = async () =>
     click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
 
   it("gates the picker to the backbone's supported modes (all three)", async () => {
     await render(baseContext({ imageModels: [FULL_CONTROL] }));
+    await expandControlPanel();
     expect(controlTabs()).toEqual(["Pose", "Canny", "Depth"]);
   });
 
   it("shows only the pose tab for a pose-only backbone", async () => {
     await render(baseContext({ imageModels: [POSE_ONLY] }));
+    await expandControlPanel();
     expect(controlTabs()).toEqual(["Pose"]);
   });
 
@@ -1548,6 +1553,7 @@ describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
 
   it("re-gates and resets an unsupported mode when the backbone switches", async () => {
     await render(baseContext({ imageModels: [FULL_CONTROL, POSE_ONLY] }));
+    await expandControlPanel();
     // Pick canny on the multi-mode backbone.
     await click(controlTabByLabel("Canny"));
     expect(controlTabByLabel("Canny").getAttribute("aria-pressed")).toBe("true");
@@ -1562,6 +1568,7 @@ describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     const plate = { id: "ctrl-plate", projectId: "project_1", type: "image", displayName: "Plate", status: {} };
     await render(baseContext({ createImageJob, imageModels: [FULL_CONTROL], assets: [plate] }));
+    await expandControlPanel();
     await click(controlTabByLabel("Canny"));
     // Open the control-image picker and double-click the asset to confirm it.
     await click(
@@ -1585,6 +1592,7 @@ describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     const plate = { id: "ctrl-plate", projectId: "project_1", type: "image", displayName: "Plate", status: {} };
     await render(baseContext({ createImageJob, imageModels: [FULL_CONTROL], assets: [plate] }));
+    await expandControlPanel();
     await click(controlTabByLabel("Depth"));
     await click(
       [...document.body.querySelectorAll(".asset-picker-head button")].find((b) => b.textContent === "Select image"),
