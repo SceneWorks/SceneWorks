@@ -29,6 +29,13 @@ const PID_FLUX2_REPO: &str = "SceneWorks/pid-flux2";
 const PID_FLUX2_FILE: &str = "pid_flux2_2kto4k.safetensors";
 const PID_SDXL_REPO: &str = "SceneWorks/pid-sdxl";
 const PID_SDXL_FILE: &str = "pid_sdxl_2kto4k.safetensors";
+// res2k (2K-tuned) students — flux + flux2 ONLY (sc-10056 re-host / sc-10057 wiring). NVIDIA ships a
+// dedicated `res2k` 4-step student (tuned for 512→2048) for these two latent spaces; the 2K output tier
+// loads it in place of the multi-res `2kto4k` student when it's cached. qwenimage + sdxl have NO upstream
+// res2k student, so they stay on their 2kto4k file at every tier (the Option-A base-cap still gives them a
+// real 2K output). Live alongside the 2kto4k files in the SAME re-host repos (whole-repo download).
+const PID_FLUX_FILE_2K: &str = "pid_flux_2k.safetensors";
+const PID_FLUX2_FILE_2K: &str = "pid_flux2_2k.safetensors";
 // gemma-2-2b-it is the PiD caption encoder (shared by every backbone). sc-8025 re-hosts the stock
 // weights (no conversion) at the non-gated `SceneWorks/gemma-2-2b-it` mirror so the in-app download
 // needs no Gemma-gated HF token; the catalog `downloads[]` + `pidDecoders.<bb>.gemmaRepo` point here
@@ -169,6 +176,38 @@ fn pid_requested(request: &ImageRequest) -> bool {
         .unwrap_or(false)
 }
 
+/// The `res2k` (2K-tuned) student filename for a backbone that ships one — flux + flux2 (sc-10056).
+/// qwenimage + sdxl have no upstream res2k student → `None` (they stay on their 2kto4k file at every tier).
+fn pid_res2k_file(backbone: &str) -> Option<&'static str> {
+    match backbone {
+        "flux" => Some(PID_FLUX_FILE_2K),
+        "flux2" => Some(PID_FLUX2_FILE_2K),
+        _ => None,
+    }
+}
+
+/// The effective default PiD checkpoint filename for `backbone` at `tier`, given the resolved `snapshot`
+/// dir (sc-10057). The 2K tier prefers the 2K-tuned res2k student when this backbone ships one AND it is
+/// actually present on disk; otherwise (4K tier, no res2k student, or res2k not yet cached) the multi-res
+/// `2kto4k` student. The on-disk check is the graceful fallback: an install that predates the res2k file
+/// keeps working on 2kto4k rather than resolving a missing path. A per-request `advanced.pidCheckpoint`
+/// override still wins over this (applied by the caller).
+fn pid_default_file(
+    backbone: &str,
+    tier: PidOutputTier,
+    snapshot: &Path,
+    file_2kto4k: &'static str,
+) -> &'static str {
+    if tier == PidOutputTier::Res2k {
+        if let Some(res2k) = pid_res2k_file(backbone) {
+            if snapshot.join(res2k).exists() {
+                return res2k;
+            }
+        }
+    }
+    file_2kto4k
+}
+
 /// Resolve the per-generation PiD decoder weights for `model`, or `None` to keep the native VAE decode.
 ///
 /// Returns `Ok(None)` whenever ANY of: the request did not opt in (`advanced.usePid` unset/false); the
@@ -192,7 +231,7 @@ fn resolve_pid_weights(
     let Some(backbone) = pid_backbone_for(model) else {
         return Ok(None);
     };
-    let (default_repo, default_file) = match backbone {
+    let (default_repo, default_2kto4k_file) = match backbone {
         "qwenimage" => (PID_QWENIMAGE_REPO, PID_QWENIMAGE_FILE),
         "flux" => (PID_FLUX_REPO, PID_FLUX_FILE),
         "flux2" => (PID_FLUX2_REPO, PID_FLUX2_FILE),
@@ -210,15 +249,16 @@ fn resolve_pid_weights(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(default_repo);
-    let filename = safe_weight_filename(
-        ckpt_cfg
-            .and_then(|c| c.get("filename"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(default_file),
-        "advanced.pidCheckpoint.filename",
-    )?;
+    // Validate a per-request filename override EARLY — before the cache check below — so a traversal /
+    // non-plain-component filename is rejected with a field-pointed `InvalidPayload` rather than silently
+    // ignored when the repo happens not to be cached (sc-8821 / F-019). `None` ⇒ use the tier default.
+    let filename_override = ckpt_cfg
+        .and_then(|c| c.get("filename"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| safe_weight_filename(s, "advanced.pidCheckpoint.filename"))
+        .transpose()?;
     let gemma_repo = request
         .advanced
         .get("pidGemma")
@@ -231,6 +271,14 @@ fn resolve_pid_weights(
     let Some(snapshot) = huggingface_snapshot_dir(data_dir, repo) else {
         return Ok(None);
     };
+    // No override → the tier-aware default (sc-10057): the 2K output tier loads the 2K-tuned res2k student
+    // for the backbones that ship one (flux/flux2) when it's actually cached; otherwise the 2kto4k student.
+    // Resolved after the snapshot dir so the on-disk check gates the swap — an existing install that
+    // predates the res2k file (whole-repo installs mark "installed" without re-fetching) falls back to
+    // 2kto4k. The default filenames are trusted consts, so they skip the override's traversal validation.
+    let filename = filename_override.unwrap_or_else(|| {
+        pid_default_file(backbone, pid_output_tier(request), &snapshot, default_2kto4k_file).to_owned()
+    });
     let checkpoint = snapshot.join(filename);
     if !checkpoint.exists() {
         return Ok(None);
@@ -365,6 +413,58 @@ mod pid_tests {
             assert!(ew >= 256 && eh >= 256, "{ew}x{eh} below min");
             assert!(ew.max(eh) <= 512, "{ew}x{eh} base long side exceeds 2K cap");
         }
+    }
+
+    #[test]
+    fn pid_default_file_selects_res2k_for_2k_when_cached_else_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap = dir.path();
+        // 4K tier → always the 2kto4k student, even for a res2k-capable backbone with the file present.
+        std::fs::write(snap.join(PID_FLUX_FILE_2K), b"x").unwrap();
+        assert_eq!(
+            pid_default_file("flux", PidOutputTier::Res4k, snap, PID_FLUX_FILE),
+            PID_FLUX_FILE
+        );
+        // 2K tier + res2k present → the tuned student.
+        assert_eq!(
+            pid_default_file("flux", PidOutputTier::Res2k, snap, PID_FLUX_FILE),
+            PID_FLUX_FILE_2K
+        );
+        // flux2 too.
+        std::fs::write(snap.join(PID_FLUX2_FILE_2K), b"x").unwrap();
+        assert_eq!(
+            pid_default_file("flux2", PidOutputTier::Res2k, snap, PID_FLUX2_FILE),
+            PID_FLUX2_FILE_2K
+        );
+    }
+
+    #[test]
+    fn pid_default_file_falls_back_when_res2k_absent_or_unsupported() {
+        let empty = tempfile::tempdir().unwrap();
+        let snap = empty.path(); // no res2k file staged
+        // 2K tier but the res2k file isn't cached yet → graceful fallback to 2kto4k (existing installs).
+        assert_eq!(
+            pid_default_file("flux", PidOutputTier::Res2k, snap, PID_FLUX_FILE),
+            PID_FLUX_FILE
+        );
+        // qwenimage + sdxl have no upstream res2k student → 2kto4k at the 2K tier (even if a stray file
+        // existed, `pid_res2k_file` returns None so it's never chosen).
+        assert_eq!(
+            pid_default_file("qwenimage", PidOutputTier::Res2k, snap, PID_QWENIMAGE_FILE),
+            PID_QWENIMAGE_FILE
+        );
+        assert_eq!(
+            pid_default_file("sdxl", PidOutputTier::Res2k, snap, PID_SDXL_FILE),
+            PID_SDXL_FILE
+        );
+    }
+
+    #[test]
+    fn pid_res2k_file_only_flux_and_flux2() {
+        assert_eq!(pid_res2k_file("flux"), Some(PID_FLUX_FILE_2K));
+        assert_eq!(pid_res2k_file("flux2"), Some(PID_FLUX2_FILE_2K));
+        assert_eq!(pid_res2k_file("qwenimage"), None);
+        assert_eq!(pid_res2k_file("sdxl"), None);
     }
 
     #[test]
