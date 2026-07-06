@@ -1,6 +1,8 @@
 use super::auth::{loopback_trusted, requires_token};
 use super::events::{EventHub, EventMessage};
-use super::training::{insufficient_disk_space, resolve_base_model_path};
+use super::training::{
+    insufficient_disk_space, resolve_base_model_path, training_base_model_installed,
+};
 use super::workers::person_readiness_from_workers;
 use super::{
     create_app, create_app_with_state, huggingface_repo_cache_path, inject_converted_model_path,
@@ -11736,6 +11738,57 @@ fn resolve_base_model_path_descends_into_hf_snapshot() {
             .join("tokenizer.json")
             .is_file(),
         "the component tree must be reachable from the resolved path"
+    );
+}
+
+#[test]
+fn tiered_turnkey_base_trains_on_bf16_tier() {
+    // epic 9992 Krea 2 Raw (Path 1): SceneWorks/krea-2-raw-mlx ships bf16/ q8/ q4/ tier subdirs with NO
+    // component tree at the snapshot root. Training reads the DENSE bf16 tier; a repo with only the q8
+    // GENERATION tier installed is NOT training-ready (no dense weights to LoRA-train on).
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+
+    let target = super::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|t| t.base_model == "krea_2_raw")
+        .expect("krea_2_raw target");
+    assert_eq!(
+        target.base_model_repo.as_deref(),
+        Some("SceneWorks/krea-2-raw-mlx"),
+        "Path 1: training shares the generation turnkey re-host"
+    );
+    let repo = target.base_model_repo.clone().expect("repo set");
+
+    let repo_root = huggingface_repo_cache_path(&data_dir, &repo).expect("repo cache path");
+    let revision = "abc123";
+    let snapshot = repo_root.join("snapshots").join(revision);
+    // Only the q8 GENERATION tier installed so far (no bf16 dense weights).
+    std::fs::create_dir_all(snapshot.join("q8").join("transformer")).expect("q8 tree");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("create refs");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("write refs/main");
+
+    // The resolver points training at the bf16 tier (whether or not it is present yet).
+    let resolved = resolve_base_model_path(&target, &data_dir);
+    assert_eq!(
+        resolved,
+        snapshot.join("bf16").display().to_string(),
+        "training must read the dense bf16 tier of a tiered turnkey"
+    );
+    // q8-only → NOT training-ready (the run-gate blocks it).
+    assert!(
+        !training_base_model_installed(&data_dir, &target),
+        "a q8-only tiered turnkey is not training-ready"
+    );
+
+    // Install the dense bf16 component tree → training-ready.
+    std::fs::create_dir_all(snapshot.join("bf16").join("transformer")).expect("bf16 transformer");
+    std::fs::create_dir_all(snapshot.join("bf16").join("text_encoder")).expect("bf16 te");
+    std::fs::create_dir_all(snapshot.join("bf16").join("vae")).expect("bf16 vae");
+    assert!(
+        training_base_model_installed(&data_dir, &target),
+        "bf16 tier present → training-ready"
     );
 }
 

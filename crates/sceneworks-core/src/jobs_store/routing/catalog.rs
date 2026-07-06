@@ -637,6 +637,14 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // already-packed q4/q8 turnkey), so `candle_quant_lora` is set (sc-9983 — the routing half of sc-9607,
     // moving Krea from `candle_lora` to BOTH): a tier-select `mlxQuantize` AND a LoRA both stay on candle.
     ModelCaps::new("krea_2_turbo", true, true, false, false, true),
+    // Krea 2 Raw (epic 9992) — the undistilled 12B DiT exposed as a full-CFG generation model (52 steps /
+    // guidance 3.5 + negative prompt), alongside the distilled Turbo (the Boogu base/turbo precedent).
+    // MLX-first: `mlx-gen-krea` registers the `krea_2_raw` generator (PR #656). Candle is NOT wired yet
+    // (`candle-gen-krea` has no `krea_2_raw` generator until epic 9992 P2 / sc-9994), so candle_routed is
+    // false — this flips to `(true, true, false, false, true)` (mirroring Turbo) when the candle engine
+    // lands. `krea_2_raw` is ALSO the LoRA-training base id (Path 1 unify); training routes via the
+    // trainer registry, independent of this image-caps row.
+    ModelCaps::new("krea_2_raw", true, false, false, false, false),
     // Stable Diffusion 3.5 Large / Large Turbo / Medium (epic 7841 / sc-7871 MLX; sc-7880 candle):
     // pure txt2img. Candle advertises Q4/Q8 (sc-7879) but NOT inference LoRA (`supports_lora: false`), so
     // `candle_quant` is set — an explicit quant request stays on candle while a LoRA still defers to torch.
@@ -913,6 +921,7 @@ mod tests {
         "boogu_image_turbo",
         "boogu_image_edit",
         "krea_2_turbo",
+        "krea_2_raw",
         "sd3_5_large",
         "sd3_5_large_turbo",
         "sd3_5_medium",
