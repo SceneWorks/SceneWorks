@@ -18,9 +18,15 @@
 const PULID_MODEL: &str = "pulid_flux_dev";
 /// The mlx-gen registry id the worker loads through `gen_core::load`.
 const PULID_ENGINE_ID: &str = "pulid_flux";
-/// FLUX.1-dev backbone repo when the manifest omits `repo` (the torch `pulid_flux_dev`
-/// MODEL_TARGETS default). NC-gated — same posture as the base `flux_dev` built-in.
-const PULID_FLUX_REPO: &str = "black-forest-labs/FLUX.1-dev";
+/// FLUX.1-dev backbone repo for the MLX path (sc-9947): the SAME ungated `SceneWorks/flux1-dev-mlx`
+/// quant-matrix turnkey the base `flux_dev` built-in consumes — self-contained q4/q8/bf16 tier subdirs,
+/// packed-detected by `mlx_gen_flux::load_flux1` (which `mlx-gen-pulid` delegates the backbone to). This
+/// de-gates PuLID on macOS (no HF token / license-accept, the sc-8669 `flux_dev` precedent) and drops the
+/// install-time convert peak (the packed tier loads directly). The candle (Windows/Linux) lane keeps the
+/// upstream gated dense BFL layout via its own `PULID_CANDLE_FLUX_REPO` const — its packed consumption is a
+/// separate epic-9083 slice — so this const is the MLX-only lever, NOT a shared manifest `repo` (which both
+/// resolvers would read).
+const PULID_FLUX_REPO: &str = "SceneWorks/flux1-dev-mlx";
 /// The PuLID-FLUX adapter checkpoint (IDFormer + PerceiverAttention CA blocks). Public repo,
 /// downloaded directly (the torch path used the same `guozinan/PuLID` / `v0.9.1` weight).
 const PULID_ADAPTER_REPO: &str = "guozinan/PuLID";
@@ -52,10 +58,13 @@ const PULID_MAX_SEQUENCE_LENGTH: u32 = 128;
 /// recipe; mirrors `mlx_instantid` for the InstantID path).
 const PULID_ADAPTER_LABEL: &str = "mlx_pulid_flux";
 
-/// Resolve the FLUX.1-dev backbone snapshot for PuLID-FLUX: an explicit `modelPath` dir wins,
-/// else the HF cache snapshot for the manifest `repo` (default FLUX.1-dev). `None` means the
-/// base is not present, so the job is not MLX-runnable (it stays on the torch path until the
-/// retirement slice removes it). Mirrors `resolve_instantid_sdxl_base`.
+/// Resolve the FLUX.1-dev backbone snapshot for PuLID-FLUX: an explicit `modelPath` dir wins (a
+/// pre-staged complete FLUX dir — used as-is, never tier-resolved), else the HF cache snapshot for the
+/// manifest `repo` (default `SceneWorks/flux1-dev-mlx`, sc-9947). For the quant-matrix turnkey that root
+/// holds `q4/`/`q8/`/`bf16/` tier subdirs, so pick the SELECTED tier via `standard_tier_subdir` — the SAME
+/// resolver the base `flux_dev` MLX lane uses — exactly as `mlx_gen_flux::load_flux1` (which
+/// `mlx-gen-pulid` delegates the backbone to) packed-loads it. `None` means the base is not present, so the
+/// job is not MLX-runnable. Mirrors `resolve_instantid_sdxl_base` + `base::snapshot_dir_for_request`.
 fn resolve_pulid_flux_base(
     request: &ImageRequest,
     settings: &Settings,
@@ -78,7 +87,16 @@ fn resolve_pulid_flux_base(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(PULID_FLUX_REPO);
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
+    let root = huggingface_snapshot_dir(&settings.data_dir, repo);
+    // Quant-matrix turnkey (sc-9947): descend into the selected q4/q8/bf16 tier subdir. A non-turnkey
+    // `repo`/root (no tier subdirs) falls through to the root untouched inside `standard_tier_subdir`.
+    Ok(root.map(|root| {
+        if uses_standard_tier_layout(request) {
+            standard_tier_subdir(&root, request)
+        } else {
+            root
+        }
+    }))
 }
 
 /// True when this is a native-MLX-eligible PuLID-FLUX job: the production model in
@@ -126,32 +144,6 @@ fn pulid_timestep_to_start_cfg(request: &ImageRequest) -> u32 {
         PULID_DEFAULT_TIMESTEP_TO_START_CFG,
         0..=20,
     )
-}
-
-/// Resolve PuLID quantization. **Dense (bf16) is the default** — the torch-parity production
-/// baseline (64 GB-tier; ArcFace cosine ~0.80 @1024²/30-step). Q8/Q4 only on an explicit
-/// `advanced.mlxQuantize` / manifest opt-in, which materially lowers the RAM floor (the FLUX.1-dev
-/// backbone 23.8 → 12 → 6.5 GB; the PuLID conditioning stays f32 either way, so identity is
-/// near-lossless — engine e2e Q8 0.6841 / Q4 0.6835 vs bf16 0.68 @512²). Returns the engine
-/// `Quant` + the recipe bit count.
-fn pulid_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
-    let raw = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(quant_int)
-        .or_else(|| {
-            request
-                .model_manifest_entry
-                .get("mlx")
-                .and_then(|mlx| mlx.get("quantize"))
-                .and_then(quant_int)
-        });
-    match raw {
-        Some(bits) if bits > 0 && bits <= 4 => (Some(Quant::Q4), Some(4)),
-        Some(bits) if bits > 4 => (Some(Quant::Q8), Some(8)),
-        // None / 0 / negative → dense bf16 (the default + the validated torch-parity envelope).
-        _ => (None, None),
-    }
 }
 
 /// The resolved engine weight inputs: the three files/dirs the engine reads from its env-var seam.
@@ -316,7 +308,20 @@ async fn generate_pulid_flux_stream(
     let guidance = pulid_guidance(request);
     let id_weight = pulid_id_weight(request);
     let start_cfg = pulid_timestep_to_start_cfg(request);
-    let (quant, recipe_bits) = pulid_quant(request);
+    // Quant-matrix backbone (sc-9947): the FLUX.1-dev backbone always supports quant, so resolve the
+    // request quant the SAME way the base `flux_dev` MLX lane does and reconcile it against the tier
+    // subdir actually resolved (`flux_base`) — record the precision that ran + emit `quant_tier_downgraded`
+    // on a genuine fallback (requested tier absent). On an already-packed q4/q8 tier the load quant is a
+    // harmless no-op; the bf16 tier resolves to `None`. The PuLID conditioning (EVA/IDFormer/CA) stays f32
+    // in every case — `load_flux1` quantizes only the backbone linears (sc-3076).
+    let (quant, recipe_bits) = reconcile_resolved_tier_quant(
+        resolve_quant(request),
+        &flux_base,
+        true,
+        &request.model,
+        &job.id,
+        backend,
+    );
     // Curated unified-sampler selection (epic 7114, sc-7432): PuLID-FLUX delegates its denoise to the
     // FLUX backbone, which honors a curated solver/scheduler on the `GenerationRequest` (#537). Read +
     // N3-normalize against the shared curated menu (an unknown name drops to the engine default + emits
