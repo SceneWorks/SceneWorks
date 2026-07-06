@@ -252,6 +252,13 @@ mod lens_base_q4_mlx_smoke;
 // never quantizes its T5, so no denseTextEncoderTier). hd/flash share this crate + layout.
 #[cfg(all(test, target_os = "macos"))]
 mod chroma1_base_q4_mlx_smoke;
+// Real-weight MLX smoke for the PiD 2K/4K output tier (epic 7840, sc-10054). Test-only + macOS-only;
+// drives the REAL `pid_output_tier` + `pid_effective_dims` mapping then renders z_image_turbo through
+// `gen_core::load(...).with_pid(pid_flux, gemma)` + `use_pid`, asserting `pidTarget:"2k"` yields a 2048²
+// image (base 512 × 4) and `"4k"` yields 4096² (base 1024 × 4) — the on-device evidence that the tier
+// mapping actually changes the output resolution on real weights.
+#[cfg(all(test, target_os = "macos"))]
+mod pid_tier_mlx_smoke;
 // On-device per-tier memory-footprint measurement harness (sc-8516, epic 8506). Test-only + macOS-only;
 // #[ignore]d real-weight smokes that drive `gen_core::load(id)` + ONE generation while sampling the MLX
 // process-global memory counters (mlx_rs::memory::{reset_peak_memory, get_active_memory, get_peak_memory})

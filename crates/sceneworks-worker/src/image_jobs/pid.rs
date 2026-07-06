@@ -92,7 +92,7 @@ fn pid_backbone_for(model: &str) -> Option<&'static str> {
 /// the factor — the only lever on the output resolution is the base fed to the decode. `advanced.pidTarget`
 /// (opt-in, opaque pass-through like `usePid`) picks which tier that base×4 lands on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PidOutputTier {
+pub(crate) enum PidOutputTier {
     /// ~2048-px-ceiling output: the effective base long side is capped to 512 (×4 = 2048). Lower
     /// pixel-space decode peak (F-013 memory-relief valve).
     Res2k,
@@ -110,7 +110,7 @@ const PID_DIM_MULTIPLE: u32 = 32;
 
 /// Resolve the requested PiD output tier from `advanced.pidTarget` (sc-10054). Default + any
 /// unrecognized value → `Res4k` (today's full-resolution behavior); only an explicit `"2k"` opts down.
-fn pid_output_tier(request: &ImageRequest) -> PidOutputTier {
+pub(crate) fn pid_output_tier(request: &ImageRequest) -> PidOutputTier {
     match request
         .advanced
         .get("pidTarget")
@@ -128,7 +128,12 @@ fn pid_output_tier(request: &ImageRequest) -> PidOutputTier {
 /// non-PiD generation can never shrink a native-VAE image). For `2k`, scales the requested aspect down
 /// so the longer output side is ~2048 (base long side ≤ 512), snapping each side to `PID_DIM_MULTIPLE`
 /// (min 256). Never upscales: a base already at/under the 2K ceiling is left as-is.
-fn pid_effective_dims(width: u32, height: u32, use_pid: bool, tier: PidOutputTier) -> (u32, u32) {
+pub(crate) fn pid_effective_dims(
+    width: u32,
+    height: u32,
+    use_pid: bool,
+    tier: PidOutputTier,
+) -> (u32, u32) {
     if !use_pid || tier == PidOutputTier::Res4k {
         return (width, height);
     }
