@@ -7,6 +7,7 @@ import {
   firstResolvedPrompt,
   linkedGroupIssues,
   missingKeys,
+  parsePromptResolution,
   resolvePrompt,
   splitPromptLines,
 } from "./promptBatch.js";
@@ -342,5 +343,42 @@ describe("firstResolvedPrompt", () => {
 
   it("leaves an unfilled named key literal", () => {
     expect(firstResolvedPrompt(["{{name}} {{a|b}}"], [])).toBe("{{name}} a");
+  });
+});
+
+describe("parsePromptResolution", () => {
+  it("strips a leading [WxH] and returns the parsed size", () => {
+    expect(parsePromptResolution("[832x1216] a portrait")).toEqual({
+      prompt: "a portrait",
+      resolution: { width: 832, height: 1216 },
+    });
+  });
+
+  it("accepts x / X / × separators and surrounding whitespace", () => {
+    expect(parsePromptResolution("[ 1024 X 768 ]  wide").resolution).toEqual({ width: 1024, height: 768 });
+    expect(parsePromptResolution("[512×512] sq").resolution).toEqual({ width: 512, height: 512 });
+  });
+
+  it("returns null resolution when there is no directive", () => {
+    expect(parsePromptResolution("just a prompt")).toEqual({ prompt: "just a prompt", resolution: null });
+  });
+
+  it("only triggers on a numeric bracket — [cinematic] stays part of the prompt", () => {
+    expect(parsePromptResolution("[cinematic] a cat")).toEqual({
+      prompt: "[cinematic] a cat",
+      resolution: null,
+    });
+  });
+
+  it("only strips a LEADING directive, not one mid-prompt", () => {
+    expect(parsePromptResolution("a cat [1024x1024]").resolution).toBeNull();
+  });
+
+  it("parses out-of-range values (the caller range-checks)", () => {
+    expect(parsePromptResolution("[10x10] tiny").resolution).toEqual({ width: 10, height: 10 });
+  });
+
+  it("handles non-string input", () => {
+    expect(parsePromptResolution(null)).toEqual({ prompt: "", resolution: null });
   });
 });
