@@ -10831,6 +10831,401 @@ mod tests {
         eprintln!("verified {verified} tier(s)");
     }
 
+    /// Locate a tier subdir (`q4`/`q8`/`bf16`) for a hosted Wan A14B mirror, honoring an explicit
+    /// env override first, then the HF hub cache (`~/.cache/huggingface/hub/models--<repo>/snapshots/
+    /// <rev>/<tier>`). Returns the tier dir only when it is a COMPLETE A14B tier (the six-file set),
+    /// else `None` so the on-device test skips cleanly. Used by
+    /// [`wan_a14b_lightning_additive_ondevice`] to drive the real q4 tier + Lightning additive path
+    /// (sc-10049, epic 10043) exactly as a job does.
+    #[cfg(target_os = "macos")]
+    fn wan_a14b_cached_tier(env_var: &str, repo: &str, tier: &str) -> Option<PathBuf> {
+        if let Ok(root) = std::env::var(env_var) {
+            let dir = PathBuf::from(root.trim()).join(tier);
+            if wan_tier_is_complete(&dir, WAN_A14B_TIER_FILES) {
+                return Some(dir);
+            }
+        }
+        // HF hub cache: models--<org>--<name>/snapshots/<rev>/<tier>.
+        let home = std::env::var("HOME").ok()?;
+        let cache = PathBuf::from(&home)
+            .join(".cache/huggingface/hub")
+            .join(format!("models--{}", repo.replace('/', "--")))
+            .join("snapshots");
+        let snapshots = std::fs::read_dir(&cache).ok()?;
+        for entry in snapshots.flatten() {
+            let dir = entry.path().join(tier);
+            if wan_tier_is_complete(&dir, WAN_A14B_TIER_FILES) {
+                return Some(dir);
+            }
+        }
+        None
+    }
+
+    /// Resolve the cached Lightning distill high/low pair for an A14B engine straight from the HF
+    /// hub cache (the same layout [`resolve_lightning_loras`] reads under `data_dir`, but pointed at
+    /// `~/.cache/huggingface`). Returns `None` when the pair is absent so the on-device test skips.
+    #[cfg(target_os = "macos")]
+    fn wan_a14b_cached_lightning(engine_id: &str) -> Option<(PathBuf, PathBuf)> {
+        let subdir = match engine_id {
+            "wan2_2_t2v_14b" => "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
+            "wan2_2_i2v_14b" => "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1",
+            _ => return None,
+        };
+        let home = std::env::var("HOME").ok()?;
+        let cache = PathBuf::from(&home)
+            .join(".cache/huggingface/hub/models--lightx2v--Wan2.2-Lightning/snapshots");
+        for entry in std::fs::read_dir(&cache).ok()?.flatten() {
+            let base = entry.path().join(subdir);
+            let high = base.join("high_noise_model.safetensors");
+            let low = base.join("low_noise_model.safetensors");
+            if high.is_file() && low.is_file() {
+                return Some((high, low));
+            }
+        }
+        None
+    }
+
+    /// **sc-10049 (epic 10043) — the on-device close of the loop on sc-10030.** Drives the REAL
+    /// Wan2.2 T2V-A14B **q4** tier through the exact engine path a job uses (`run_video_generation`
+    /// → `gen_core::load` → `Generator::generate`) with the Lightning distill pair installed as
+    /// **forward-time additive adapters** on the pre-quantized (packed) experts. This is the exact
+    /// case that FAILED before this epic with the mlx-gen `model.rs:614` rejection —
+    /// `"LoRA adapters on a pre-quantized snapshot need dequantize-then-merge … not yet wired"` —
+    /// and must now complete a 4-step distilled clip with the base STAYING packed (the low-memory-Mac
+    /// guarantee this epic exists for: NO ~28 GB/expert dense dequant spike).
+    ///
+    /// Three sub-cases on the same cached q4 tier:
+    ///   1. **Lightning ON, 4 steps** — the Lightning high/low pair (per-expert tagged) as additive
+    ///      adapters; asserts a coherent multi-frame clip (the additive path completed, no 614 error).
+    ///   2. **Lightning OFF, multi-step CFG** — no adapters, several CFG steps; the native recipe
+    ///      still runs on the packed tier (regression guard the toggle-off path is intact).
+    ///   3. **Lightning ON + a plain user LoRA** — the distill pair PLUS a single-file plain LoRA
+    ///      (the additive user-LoRA path on a packed base). A real Civitai-style LoRA is used when
+    ///      `SCENEWORKS_WAN_USER_LORA` points at one; otherwise the low-noise Lightning half doubles
+    ///      as a valid single-file plain-LoRA fixture (same PEFT `diffusion_model.`-prefixed keys),
+    ///      still exercising the plain-LoRA additive install onto the packed experts.
+    ///
+    /// Peak RSS is sampled around each generation and printed so the run's log is the memory evidence
+    /// (a dequant-then-merge of a 14B bf16 expert would spike ~28 GB/expert; the packed q4 path holds
+    /// far below that). `#[ignore]` — needs the cached q4 tier + the Lightning pair + a Metal device.
+    ///
+    /// ```sh
+    /// # tiers + Lightning are auto-discovered in ~/.cache/huggingface; override the tier root with
+    /// # SCENEWORKS_WAN_T2V_14B_TIER_OUT and a user LoRA with SCENEWORKS_WAN_USER_LORA if desired.
+    /// cargo test -p sceneworks-worker --release --lib \
+    ///   wan_a14b_lightning_additive_ondevice -- --ignored --nocapture
+    /// ```
+    #[cfg(target_os = "macos")]
+    #[ignore = "loads the real Wan2.2 T2V-A14B q4 tier + Lightning pair; run manually on a Mac (sc-10049)"]
+    #[test]
+    fn wan_a14b_lightning_additive_ondevice() {
+        const ENGINE: &str = "wan2_2_t2v_14b";
+        let Some(tier) = wan_a14b_cached_tier(
+            "SCENEWORKS_WAN_T2V_14B_TIER_OUT",
+            "SceneWorks/wan2.2-t2v-a14b-mlx",
+            "q4",
+        ) else {
+            eprintln!(
+                "skipping wan_a14b_lightning_additive_ondevice: no complete q4 T2V-A14B tier in \
+                 ~/.cache/huggingface (or SCENEWORKS_WAN_T2V_14B_TIER_OUT/q4)"
+            );
+            return;
+        };
+        let Some((light_high, light_low)) = wan_a14b_cached_lightning(ENGINE) else {
+            eprintln!(
+                "skipping wan_a14b_lightning_additive_ondevice: Lightning distill pair not cached"
+            );
+            return;
+        };
+        eprintln!("q4 tier   → {}", tier.display());
+        eprintln!("lightning → {}", light_high.display());
+
+        // Cap the buffer cache so the sequential heavy loads release between sub-cases (sc-5567).
+        mlx_rs::memory::set_cache_limit(0);
+
+        // Sub-case common frame/coherence assertions.
+        fn assert_coherent(label: &str, decoded: &DecodedVideo, steps: u32) {
+            assert!(
+                decoded.frames.len() > 1,
+                "{label}: got {} frames, expected a multi-frame clip",
+                decoded.frames.len()
+            );
+            assert!(steps > 0, "{label}: denoise progress streamed");
+            assert!(
+                decoded
+                    .frames
+                    .iter()
+                    .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize),
+                "{label}: frames are RGB8-sized"
+            );
+            let f0 = &decoded.frames[0];
+            let mean = f0.pixels.iter().map(|&p| p as f64).sum::<f64>() / f0.pixels.len() as f64;
+            let var = f0
+                .pixels
+                .iter()
+                .map(|&p| (p as f64 - mean).powi(2))
+                .sum::<f64>()
+                / f0.pixels.len() as f64;
+            assert!(
+                var.sqrt() > 3.0,
+                "{label}: frame 0 looks degenerate (std {:.2}) — additive load likely broken",
+                var.sqrt()
+            );
+            eprintln!(
+                "{label}: OK — {} frames, {steps} steps, frame0 std {:.2}",
+                decoded.frames.len(),
+                var.sqrt()
+            );
+        }
+
+        let run = |label: &str, adapters: Vec<AdapterSpec>, steps: u32, guidance: Option<f32>| {
+            let input = VideoGenInput {
+                sampler: None,
+                scheduler: None,
+                engine_id: ENGINE,
+                model_dir: tier.clone(),
+                // Pre-packed q4 tier: config.json is authoritative, so load with None (the worker
+                // path does the same). Adapters install ADDITIVELY on the packed experts.
+                quant: None,
+                adapters,
+                prompt: "a calm ocean wave at sunset, cinematic".to_owned(),
+                width: 256,
+                height: 256,
+                frames: 5,
+                fps: 16,
+                steps: Some(steps),
+                guidance,
+                seed: 7,
+                ..VideoGenInput::default()
+            };
+            let cancel = CancelFlag::new();
+            let mut n_steps = 0u32;
+            let mut on_progress = |p: Progress| {
+                if let Progress::Step { .. } = p {
+                    n_steps += 1;
+                }
+            };
+            // Reset the MLX GPU allocator's peak counter so `get_peak_memory` below reports THIS
+            // sub-case's peak — the number a dense dequant-then-merge would blow up (a 14B bf16
+            // expert dequant is ~28 GB/expert; the packed q4 additive path stays far below that).
+            mlx_rs::memory::reset_peak_memory();
+            let decoded = run_video_generation(input, &cancel, &mut on_progress)
+                .unwrap_or_else(|e| panic!("{label} generation failed: {e:?}"));
+            assert_coherent(label, &decoded, n_steps);
+            let mlx_peak_gib =
+                mlx_rs::memory::get_peak_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
+            eprintln!(
+                "{label}: MLX peak GPU mem {mlx_peak_gib:.2} GiB, process RSS {} MiB",
+                peak_rss_mib()
+            );
+            // Guard: the packed q4 additive path must hold well under a dense dequant spike. Two
+            // dequantized 14B bf16 experts alone would be ~56 GB resident; assert the MLX peak stays
+            // below a generous 40 GB ceiling so a regression that dequantizes-then-merges is caught.
+            assert!(
+                mlx_peak_gib < 40.0,
+                "{label}: MLX peak {mlx_peak_gib:.2} GiB — a dense per-expert dequant spike \
+                 (~28 GB/expert) appears to have happened; the packed q4 additive path regressed"
+            );
+            mlx_rs::memory::clear_cache();
+        };
+
+        // 1) Lightning ON, 4 steps — the exact pre-epic model.rs:614 failure case, now additive.
+        run(
+            "q4+lightning(4-step)",
+            vec![
+                moe_adapter(light_high.clone(), 1.0, AdapterKind::Lora, MoeExpert::High),
+                moe_adapter(light_low.clone(), 1.0, AdapterKind::Lora, MoeExpert::Low),
+            ],
+            4,
+            None,
+        );
+
+        // 2) Lightning OFF — native multi-step CFG on the packed tier (regression guard).
+        run("q4+lightning-off(6-step CFG)", Vec::new(), 6, Some(5.0));
+
+        // 3) Lightning ON + a plain single-file user LoRA (additive user-LoRA on a packed base).
+        let user_lora = std::env::var("SCENEWORKS_WAN_USER_LORA")
+            .ok()
+            .map(|s| PathBuf::from(s.trim().to_owned()))
+            .filter(|p| p.is_file())
+            // Fall back to the low-noise Lightning half as a valid single-file plain LoRA fixture.
+            .unwrap_or_else(|| light_low.clone());
+        eprintln!("user LoRA → {}", user_lora.display());
+        run(
+            "q4+lightning+userLoRA",
+            vec![
+                moe_adapter(light_high.clone(), 1.0, AdapterKind::Lora, MoeExpert::High),
+                moe_adapter(light_low.clone(), 1.0, AdapterKind::Lora, MoeExpert::Low),
+                // Single-file → shared across both experts (moe_expert: None), the plain-LoRA
+                // additive path (the exact user-Civitai-LoRA shape).
+                AdapterSpec::new(user_lora, 0.6, AdapterKind::Lora),
+            ],
+            4,
+            None,
+        );
+    }
+
+    /// Best-effort current-process resident set size in MiB, read dependency-free via `ps -o rss=`
+    /// (macOS reports RSS in KiB). Used only to print memory evidence in the on-device tests — a
+    /// coarse guard that the packed q4 additive path holds well below a dense per-expert dequant
+    /// spike (~28 GB/expert). Returns 0 when `ps` is unavailable / unparsable (evidence-only).
+    #[cfg(target_os = "macos")]
+    fn peak_rss_mib() -> u64 {
+        let pid = std::process::id().to_string();
+        let out = match std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &pid])
+            .output()
+        {
+            Ok(o) if o.status.success() => o.stdout,
+            _ => return 0,
+        };
+        String::from_utf8_lossy(&out)
+            .trim()
+            .parse::<u64>()
+            .map(|kib| kib / 1024)
+            .unwrap_or(0)
+    }
+
+    /// **sc-10049 (epic 10043) — the I2V sibling of [`wan_a14b_lightning_additive_ondevice`].**
+    /// Drives the REAL Wan2.2 **I2V**-A14B **q4** tier with a synthesized start frame + the Lightning
+    /// distill pair installed additively on the packed experts. Same close-the-loop assertion as the
+    /// T2V case (the pre-epic `model.rs:614` rejection is gone; a 4-step distilled clip completes with
+    /// the base staying packed), for the image-to-video engine. A start image is REQUIRED for I2V, so
+    /// the test builds a small gradient RGB8 frame (no asset store needed) and passes it as the
+    /// `Conditioning::Reference`. Prints the MLX GPU peak per sub-case as the memory evidence and
+    /// asserts it holds below the dense-dequant ceiling. `#[ignore]` — needs the cached I2V q4 tier +
+    /// the I2V Lightning pair + a Metal device.
+    ///
+    /// ```sh
+    /// cargo test -p sceneworks-worker --release --lib \
+    ///   wan_i2v_a14b_lightning_additive_ondevice -- --ignored --nocapture
+    /// ```
+    #[cfg(target_os = "macos")]
+    #[ignore = "loads the real Wan2.2 I2V-A14B q4 tier + Lightning pair; run manually on a Mac (sc-10049)"]
+    #[test]
+    fn wan_i2v_a14b_lightning_additive_ondevice() {
+        const ENGINE: &str = "wan2_2_i2v_14b";
+        let Some(tier) = wan_a14b_cached_tier(
+            "SCENEWORKS_WAN_I2V_14B_TIER_OUT",
+            "SceneWorks/wan2.2-i2v-a14b-mlx",
+            "q4",
+        ) else {
+            eprintln!(
+                "skipping wan_i2v_a14b_lightning_additive_ondevice: no complete q4 I2V-A14B tier"
+            );
+            return;
+        };
+        let Some((light_high, light_low)) = wan_a14b_cached_lightning(ENGINE) else {
+            eprintln!(
+                "skipping wan_i2v_a14b_lightning_additive_ondevice: Lightning pair not cached"
+            );
+            return;
+        };
+        eprintln!("q4 I2V tier → {}", tier.display());
+
+        mlx_rs::memory::set_cache_limit(0);
+
+        // A small non-flat start frame (diagonal gradient) so the VAE-encoded `y` is meaningful.
+        let (w, h) = (256u32, 256u32);
+        let mut pixels = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                pixels.push((x % 256) as u8);
+                pixels.push((y % 256) as u8);
+                pixels.push(((x + y) % 256) as u8);
+            }
+        }
+        let start = gen_core::Image {
+            width: w,
+            height: h,
+            pixels,
+        };
+        let conditioning = vec![Conditioning::Reference {
+            image: start,
+            strength: None,
+        }];
+
+        let run = |label: &str, adapters: Vec<AdapterSpec>, steps: u32, guidance: Option<f32>| {
+            let input = VideoGenInput {
+                sampler: None,
+                scheduler: None,
+                engine_id: ENGINE,
+                model_dir: tier.clone(),
+                quant: None,
+                adapters,
+                conditioning: conditioning.clone(),
+                prompt: "a calm ocean wave at sunset, cinematic".to_owned(),
+                width: w,
+                height: h,
+                frames: 5,
+                fps: 16,
+                steps: Some(steps),
+                guidance,
+                seed: 7,
+                ..VideoGenInput::default()
+            };
+            let cancel = CancelFlag::new();
+            let mut n_steps = 0u32;
+            let mut on_progress = |p: Progress| {
+                if let Progress::Step { .. } = p {
+                    n_steps += 1;
+                }
+            };
+            mlx_rs::memory::reset_peak_memory();
+            let decoded = run_video_generation(input, &cancel, &mut on_progress)
+                .unwrap_or_else(|e| panic!("{label} I2V generation failed: {e:?}"));
+            assert!(
+                decoded.frames.len() > 1,
+                "{label}: expected a multi-frame clip, got {}",
+                decoded.frames.len()
+            );
+            assert!(n_steps > 0, "{label}: denoise progress streamed");
+            assert!(
+                decoded
+                    .frames
+                    .iter()
+                    .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize),
+                "{label}: frames RGB8-sized"
+            );
+            let f0 = &decoded.frames[0];
+            let mean = f0.pixels.iter().map(|&p| p as f64).sum::<f64>() / f0.pixels.len() as f64;
+            let var = f0
+                .pixels
+                .iter()
+                .map(|&p| (p as f64 - mean).powi(2))
+                .sum::<f64>()
+                / f0.pixels.len() as f64;
+            assert!(
+                var.sqrt() > 3.0,
+                "{label}: frame 0 degenerate (std {:.2})",
+                var.sqrt()
+            );
+            let mlx_peak_gib =
+                mlx_rs::memory::get_peak_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
+            eprintln!(
+                "{label}: OK — {} frames, {n_steps} steps, std {:.2}, MLX peak {mlx_peak_gib:.2} GiB",
+                decoded.frames.len(),
+                var.sqrt()
+            );
+            assert!(
+                mlx_peak_gib < 40.0,
+                "{label}: MLX peak {mlx_peak_gib:.2} GiB — dense dequant spike; q4 additive regressed"
+            );
+            mlx_rs::memory::clear_cache();
+        };
+
+        // I2V q4 Lightning ON (4-step) — the close-the-loop case for the image-to-video engine.
+        run(
+            "i2v-q4+lightning(4-step)",
+            vec![
+                moe_adapter(light_high, 1.0, AdapterKind::Lora, MoeExpert::High),
+                moe_adapter(light_low, 1.0, AdapterKind::Lora, MoeExpert::Low),
+            ],
+            4,
+            None,
+        );
+    }
+
     /// Real in-process load+generate verification for the Wan2.2 **TI2V-5B** quant-matrix tiers
     /// (sc-9941, epic 8506) — the single-expert sibling of [`wan_t2v_14b_tier_real_weights`]. For each
     /// tier subdir present under `$SCENEWORKS_WAN_TI2V_5B_TIER_OUT` (`bf16/`/`q8/`/`q4/`, the
