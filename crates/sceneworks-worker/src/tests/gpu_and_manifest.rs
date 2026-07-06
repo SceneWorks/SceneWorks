@@ -742,6 +742,99 @@ fn sana_sprint_manifest_entry_gates_correctly() {
     );
 }
 
+/// sc-9946 (epic 8506): the Kolors builtin entry ships the standard q4/q8/bf16 quant matrix from the
+/// un-gated `SceneWorks/kolors-mlx` re-host (was upstream `Kwai-Kolors/Kolors-diffusers` dense +
+/// install-time quant). Unlike SANA, Kolors keeps its full capability surface. Asserts the flip to the
+/// SceneWorks repo, the per-tier variants (q4 default + q8 + bf16) each an installable artifact with a
+/// `footprint`, `mlx.quantize: 4` (packed q4 default) + `minMemoryGb`, and the reserved kolors LoRA
+/// family — so a manifest drift fails CI without a real download. Descriptor guidance/steps are covered
+/// by `model_table_rows_resolve_and_flags_match_descriptor`.
+#[test]
+fn kolors_manifest_entry_gates_correctly() {
+    let entry = builtin_model_entry("kolors");
+
+    assert_eq!(
+        entry.get("family").and_then(Value::as_str),
+        Some("kolors"),
+        "kolors family"
+    );
+    // Kolors keeps its full surface (unlike base SANA's t2i-only): edit/character/style variations.
+    let caps: Vec<&str> = entry
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        caps,
+        vec![
+            "text_to_image",
+            "edit_image",
+            "character_image",
+            "style_variations"
+        ],
+        "kolors keeps its full capability surface"
+    );
+    // Un-gated SceneWorks/* MLX re-host (the tier LICENSE travels with the weights) — NO `gated: true`.
+    assert_ne!(
+        entry.get("gated").and_then(Value::as_bool),
+        Some(true),
+        "kolors is un-gated (re-host carries the license)"
+    );
+    // Every tier downloads from the flipped SceneWorks re-host (was Kwai-Kolors/Kolors-diffusers).
+    let downloads = entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .expect("kolors downloads");
+    for d in downloads {
+        assert_eq!(
+            d.get("repo").and_then(Value::as_str),
+            Some("SceneWorks/kolors-mlx"),
+            "kolors tier downloads from the SceneWorks re-host"
+        );
+        // Each tier is an installable artifact with a footprint (sc-8508).
+        assert!(
+            d.get("footprint")
+                .and_then(|f| f.get("diskSizeBytes"))
+                .and_then(Value::as_u64)
+                .is_some(),
+            "each kolors tier carries a footprint.diskSizeBytes"
+        );
+    }
+    let variants: Vec<&str> = downloads
+        .iter()
+        .filter_map(|d| d.get("variant").and_then(Value::as_str))
+        .collect();
+    assert_eq!(
+        variants,
+        vec!["q4", "q8", "bf16"],
+        "kolors ships the q4/q8/bf16 tier matrix"
+    );
+    // Packed q4 default + memory-eligibility lever, matching flux1/sana (ChatGLM3 TE is packed).
+    let mlx = entry.get("mlx").expect("kolors mlx block");
+    assert_eq!(
+        mlx.get("quantize").and_then(Value::as_u64),
+        Some(4),
+        "kolors defaults to the packed q4 tier"
+    );
+    assert_eq!(
+        mlx.get("repo").and_then(Value::as_str),
+        Some("SceneWorks/kolors-mlx"),
+        "kolors mlx.repo points at the re-host"
+    );
+    assert!(
+        mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
+        "kolors mlx.minMemoryGb present"
+    );
+    // kolors LoRA family reserved (empty list would match every LoRA, sc-1927).
+    let lora_families: Vec<&str> = entry
+        .get("loraCompatibility")
+        .and_then(|c| c.get("families"))
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert_eq!(lora_families, vec!["kolors"], "kolors loraCompatibility.families");
+}
+
 /// sc-9942 (epic 8506): the Wan2.2 T2V-A14B builtin entry ships the macOS quant matrix as per-tier
 /// installable artifacts — `q4` (default) + `q8` + `bf16`, each a self-contained SceneWorks HF
 /// download tagged with a `variant` and carrying an `estimatedSizeBytes` + `footprint` (sc-8508). The

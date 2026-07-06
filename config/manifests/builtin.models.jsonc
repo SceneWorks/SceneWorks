@@ -3375,16 +3375,38 @@
       "capabilities": ["text_to_image", "edit_image", "character_image", "style_variations"],
       "downloads": [
         {
-          // Self-contained diffusers checkpoint: bundles the ChatGLM3-6B text
-          // encoder + SDXL-style UNet + VAE. Whole-repo download (~16.5 GiB, approx).
+          // Pre-quantized MLX turnkey tiers (sc-9946, epic 8506): SDXL-style UNet + ChatGLM3-6B
+          // encoder packed (group-64 affine, weight-only), dense SDXL VAE, baked derived fast
+          // tokenizer. Loads packed via mlx-gen-kolors packed-detect — no install-time convert peak.
+          // q4 is the default tier. Tiers are all-platform (mirroring z-image/flux1); the candle
+          // bf16-only cross-cutting caveat is tracked separately across Group-B.
           "provider": "huggingface",
-          "repo": "Kwai-Kolors/Kolors-diffusers",
-          "files": [],
-          "estimatedSizeBytes": 17716740096
+          "repo": "SceneWorks/kolors-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 6401626112,
+          "footprint": { "diskSizeBytes": 6401626112, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/kolors-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 10363817984,
+          "footprint": { "diskSizeBytes": 10363817984, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/kolors-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 17821597696,
+          "footprint": { "diskSizeBytes": 17821597696, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Kwai-Kolors/Kolors-diffusers"
+        "model": "${HF_CACHE}/SceneWorks/kolors-mlx"
       },
       "defaults": {
         // Model card: DPMSolverMultistep (Karras) / Euler; guidance ~5.0, ~25 steps.
@@ -3407,6 +3429,14 @@
         // until generation-side Kolors LoRA support lands.
         "families": ["kolors"],
         "types": ["style", "enhance", "character"]
+      },
+      "mlx": {
+        // Standard q4/q8/bf16 turnkey tiers (sc-9946, epic 8506). q4 default; the ChatGLM3-6B TE is
+        // packed (not dense) like flux1/sana, so the load-time quant is a harmless no-op on the
+        // already-packed weights and bf16 resolves to Quant::None — no DENSE_TE_TIER_MODELS guard.
+        "minMemoryGb": 24,
+        "quantize": 4,
+        "repo": "SceneWorks/kolors-mlx"
       },
       "ui": {
         "label": "Kolors",
