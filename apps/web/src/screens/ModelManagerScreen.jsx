@@ -14,7 +14,7 @@ import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../macGating.js";
 import { apiFetch } from "../api.js";
 import { isDesktop, tauriInvoke } from "../runtime.js";
 import { tierLabel } from "../quantTier.js";
-import { suggestTier } from "../tierSuggestion.js";
+import { suggestTier, tierFits } from "../tierSuggestion.js";
 import { safeExternalUrl } from "../urls.js";
 
 // Wan A14B is a two-expert mixture; its LoRAs come as a high/low-noise pair. These
@@ -417,9 +417,19 @@ function ModelTierDownloadPanel({
           const activeJob = activeJobByTier.get(tier);
           const isSuggested = tier === suggested;
           const checked = selected.has(tier);
+          // Per-tier RAM guidance (sc-10042): whether THIS tier's peak footprint fits the host with
+          // headroom, from the same `tierFits` the suggestion uses (measured `footprint.peakMemoryBytes`
+          // when present — e.g. Wan q4 ~24 GiB — else the disk-based estimate). Replaces the blanket
+          // model-level warning: q4/q8 that actually fit show nothing; only a genuinely over-budget tier
+          // (e.g. bf16 on a small Mac) is flagged. Advisory only — SUGGEST-NEVER-WITHHOLD (epic 8506
+          // decision 1) keeps every tier's checkbox enabled regardless.
+          const overBudget = !tierFits(variant, unifiedMemoryGb);
           const rowClasses = ["model-tier-row"];
           if (isSuggested) {
             rowClasses.push("suggested");
+          }
+          if (overBudget) {
+            rowClasses.push("over-budget");
           }
           return (
             <li className={rowClasses.join(" ")} key={tier}>
@@ -433,6 +443,14 @@ function ModelTierDownloadPanel({
                 <span className="model-tier-label">
                   {tierLabel(tier)}
                   {isSuggested ? <span className="model-tier-suggested-badge">Suggested</span> : null}
+                  {overBudget ? (
+                    <span
+                      className="status-badge warning"
+                      title={`This tier's peak memory is estimated above this machine's ~${Math.round(unifiedMemoryGb)} GB. It can still install, but may run out of memory during generation.`}
+                    >
+                      may exceed memory
+                    </span>
+                  ) : null}
                 </span>
               </label>
               <span className="model-tier-size">
@@ -991,12 +1009,19 @@ export function ModelManagerScreen() {
           <div className="mlx-status">
             <div className="mlx-status-badges">
               <span className="status-badge">MLX</span>
-              {mlxMinGb != null ? (
+              {/* The model-level `mlx.minMemoryGb` is a single blanket floor = the HEAVIEST tier's
+                  worst case (e.g. Wan A14B bf16, both MoE experts dense = 133 GB). Showing it
+                  tier-agnostically over-warns quant-matrix models whose default/installed tier is q4
+                  (measured ~24 GiB, one MoE expert resident at a time) — it reads "won't run" on Macs
+                  that run q4/q8 fine. For a matrix model the per-tier download panel below drives the
+                  per-tier RAM guidance instead (sc-10042); keep the blanket badge/warning only for
+                  single-variant MLX models, which have one legitimate footprint. */}
+              {mlxMinGb != null && !hasTierMatrix ? (
                 <span className={mlxEnoughMemory ? "status-badge" : "status-badge warning"}>needs ≥ {mlxMinGb} GB</span>
               ) : null}
             </div>
             <p>{mlxStatusText(model)}</p>
-            {!mlxEnoughMemory ? (
+            {!mlxEnoughMemory && !hasTierMatrix ? (
               <p className="inline-warning">
                 Needs ≥ {mlxMinGb} GB unified memory; this Mac has ~{Math.round(unifiedMemoryGb)} GB. It may run out of memory.
               </p>

@@ -5234,7 +5234,12 @@
           "files": ["q4/*"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 28644241134,
-          "footprint": { "diskSizeBytes": 28644241134, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          // peakMemoryBytes MEASURED on-device (sc-10049 / epic 10043, 128 GB Apple-Silicon Mac, via
+          // get_peak_memory reset per gen): 18.73 GiB (Lightning off) → 24.48 GiB (Lightning + user LoRA).
+          // Recorded at the 24.5 GiB worst case so the RAM suggestion budgets the realistic ceiling. It is
+          // FAR below diskSizeBytes because A14B is MoE — only ONE 14B expert is resident at a time, not
+          // both — which is exactly why the old model-level minMemoryGb 133 (both experts dense) over-warned.
+          "footprint": { "diskSizeBytes": 28644241134, "residentMemoryBytes": null, "peakMemoryBytes": 26306674688 }
         },
         {
           "provider": "huggingface",
@@ -5402,7 +5407,11 @@
           "files": ["q4/*"],
           "platforms": ["macos"],
           "estimatedSizeBytes": 28645879665,
-          "footprint": { "diskSizeBytes": 28645879665, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          // peakMemoryBytes MEASURED on-device (sc-10049 / epic 10043): q4 I2V Lightning-on 4-step peaked
+          // 22.71 GiB (get_peak_memory). Recorded at the 24.5 GiB shared-with-T2V worst case (identical
+          // packed-additive MoE path, headroom for a user LoRA). Far below diskSizeBytes: A14B is MoE, one
+          // 14B expert resident at a time — the reason the model-level minMemoryGb 133 over-warned.
+          "footprint": { "diskSizeBytes": 28645879665, "residentMemoryBytes": null, "peakMemoryBytes": 26306674688 }
         },
         {
           "provider": "huggingface",
