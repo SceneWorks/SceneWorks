@@ -1,7 +1,15 @@
 /// The SceneWorks model id for native InstantID (production = InstantID on RealVisXL_V5.0).
 const INSTANTID_MODEL: &str = "instantid_realvisxl";
-/// SDXL base for InstantID when the manifest omits `repo` (the photoreal production base).
-const INSTANTID_SDXL_REPO: &str = "SG161222/RealVisXL_V5.0";
+/// SDXL base for InstantID when the manifest omits `repo`: the SceneWorks quant-matrix turnkey
+/// re-host (sc-9965, epic 8506) — the SAME `SceneWorks/realvisxl-mlx` the plain `realvisxl` model
+/// loads, with self-contained `bf16/` (default — the validated fp16 identity envelope) + packed
+/// `q8/` / `q4/` tier subdirs. Was upstream `SG161222/RealVisXL_V5.0` (dense diffusers root, never
+/// tier-aware); `resolve_instantid_sdxl_base` now resolves the selected tier via
+/// [`instantid_tier_subdir`]. The mlx-gen SDXL loaders packed-detect the UNet + both CLIP tiers
+/// (sc-8746), so Q4/Q8 load packed with no install-time convert; the candle lane runs dense f16 and
+/// always loads `bf16/`. The InstantID adapter weights (IdentityNet / ip-adapter / face stack) are
+/// separate on-demand dense loads and stay dense.
+const INSTANTID_SDXL_REPO: &str = "SceneWorks/realvisxl-mlx";
 /// Stock InstantID checkpoint repo — the IdentityNet `ControlNetModel/` lives here.
 const INSTANTID_CONTROLNET_REPO: &str = "InstantX/InstantID";
 /// Pinned revision for the stock InstantX IdentityNet repo (sc-9879, F-077 follow-up).
@@ -111,9 +119,11 @@ fn pose_to_body_points(keypoints: &[crate::openpose_skeleton::Keypoint]) -> Vec<
 }
 
 /// Resolve the RealVisXL (SDXL) base snapshot for InstantID: an explicit `modelPath` dir
-/// (advanced or manifest) wins, else the HF cache snapshot for the manifest `repo` (default
-/// RealVisXL_V5.0). The big base is staged by the normal model-download flow; `None` here
-/// means it is not present, so the job is not MLX-runnable (falls through to torch).
+/// (advanced or manifest) wins, else the selected quant tier subdir of the HF cache snapshot for the
+/// manifest `repo` (default `SceneWorks/realvisxl-mlx`). The big base is staged by the normal
+/// model-download flow; `None` here means it is not present, so the job is not native-runnable
+/// (falls through to torch). An explicit `modelPath` override loads verbatim (no tier resolution) —
+/// it is a fully-assembled diffusers dir the caller vouches for.
 fn resolve_instantid_sdxl_base(
     request: &ImageRequest,
     settings: &Settings,
@@ -137,7 +147,58 @@ fn resolve_instantid_sdxl_base(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(INSTANTID_SDXL_REPO);
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
+    Ok(huggingface_snapshot_dir(&settings.data_dir, repo)
+        .map(|root| instantid_tier_subdir(&root, request)))
+}
+
+/// Pick the engine-complete tier subdir of the `SceneWorks/realvisxl-mlx` turnkey `root` for the
+/// InstantID SDXL backbone (sc-9965, epic 8506). The turnkey ships self-contained `bf16/` (dense —
+/// the default, the validated fp16 identity envelope: ArcFace-cosine ~0.82 @1024²) + packed `q8/` /
+/// `q4/` subdirs, each a complete diffusers tree (`unet/` + `text_encoder{,_2}/` + `vae/` +
+/// tokenizer(s) + scheduler + model_index.json).
+///
+/// Tier selection mirrors [`instantid_quant`]'s bit mapping so the resolved tier and the applied
+/// load-quant agree (the load-time `.quantize()` no-ops on an already-packed base): `Some(4)` →
+/// `q4/`, `Some(8)` → `q8/`, `None` (the default, `mlxQuantize` unset / `<=0`) → `bf16/`. The candle
+/// InstantID lane runs dense f16 with no packed path (`candle-gen-sdxl::load_instantid_unet` reads
+/// the dense `unet/diffusion_pytorch_model.fp16.safetensors`, no `.scales` detect) and the worker
+/// already forces `recipe_bits -> None` there, so it always loads `bf16/`.
+///
+/// Falls back preferred → `bf16` → `q4` → `q8` → `root` so a partially-downloaded turnkey surfaces
+/// as a load error rather than a silent half-load — the same philosophy as
+/// [`standard_tier_subdir`]. Tier presence is filename-agnostic (a `unet/` `*.safetensors`, packed
+/// single-file or dense), so it holds for every tier regardless of the packed backbone filename.
+fn instantid_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
+    // Which tier the request wants. Only the MLX lane honors the packed Q4/Q8 tiers; candle (and the
+    // no-face build) is dense-only, so `preferred` is `bf16` there.
+    #[cfg(target_os = "macos")]
+    let preferred = match instantid_quant(request).0 {
+        Some(4) => "q4",
+        Some(8) => "q8",
+        _ => "bf16",
+    };
+    #[cfg(not(target_os = "macos"))]
+    let preferred = {
+        let _ = request;
+        "bf16"
+    };
+    // A tier is "present" when its `unet/` backbone holds any `*.safetensors` (packed single-file OR
+    // a dense `*.fp16.safetensors`). InstantID is always an SDXL turnkey — the backbone lives under
+    // `unet/`, never `transformer/` — so this one-component probe covers every tier.
+    let present = |name: &str| -> Option<PathBuf> {
+        let unet = root.join(name).join("unet");
+        let has_backbone = std::fs::read_dir(&unet)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".safetensors"));
+        has_backbone.then(|| root.join(name))
+    };
+    present(preferred)
+        .or_else(|| present("bf16"))
+        .or_else(|| present("q4"))
+        .or_else(|| present("q8"))
+        .unwrap_or_else(|| root.to_path_buf())
 }
 
 /// True when this is a native-MLX-eligible InstantID job: the production model in
@@ -1068,3 +1129,97 @@ async fn generate_instantid_stream(
 // pipeline, the engine requires width/height ∈ [512, 2048] and multiples of 8, so a
 // tile is run at the nearest valid size and the result resized back before blending.
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod instantid_tier_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(advanced: serde_json::Value) -> ImageRequest {
+        ImageRequest::from_payload(
+            json!({ "model": "instantid_realvisxl", "advanced": advanced })
+                .as_object()
+                .unwrap(),
+        )
+    }
+
+    /// Seed a present `<tier>/unet/<file>` so [`instantid_tier_subdir`]'s probe sees it downloaded
+    /// (InstantID's backbone always lives under `unet/`).
+    fn seed_unet(root: &Path, tier: &str, file: &str) {
+        let dir = root.join(tier).join("unet");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(file), b"x").unwrap();
+    }
+
+    /// The InstantID backbone defaults to the DENSE `bf16/` tier (the validated fp16 identity
+    /// envelope), NOT the standard-tier `q4/` default — quant degrades ArcFace identity, so it is
+    /// opt-in. On MLX, `mlxQuantize` 4/8 select the packed `q4/`/`q8/` tiers (mirroring
+    /// [`instantid_quant`]); off-Mac (candle / no-face) the backbone is dense-only, so every request
+    /// resolves `bf16/` regardless of the knob.
+    #[test]
+    fn defaults_to_bf16_and_selects_packed_tiers_only_on_mlx() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        seed_unet(root, "q4", "diffusion_pytorch_model.safetensors");
+        seed_unet(root, "q8", "diffusion_pytorch_model.safetensors");
+        seed_unet(root, "bf16", "diffusion_pytorch_model.fp16.safetensors");
+
+        // Unset / opt-out → bf16 on every backend.
+        assert_eq!(
+            instantid_tier_subdir(root, &request(json!({}))),
+            root.join("bf16")
+        );
+        assert_eq!(
+            instantid_tier_subdir(root, &request(json!({ "mlxQuantize": 0 }))),
+            root.join("bf16")
+        );
+
+        // Q4/Q8 opt-in resolves the packed tier ONLY on the MLX lane; the candle lane is dense-only.
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                instantid_tier_subdir(root, &request(json!({ "mlxQuantize": 4 }))),
+                root.join("q4")
+            );
+            assert_eq!(
+                instantid_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
+                root.join("q8")
+            );
+            assert_eq!(
+                instantid_tier_subdir(root, &request(json!({ "mlxQuantize": "8" }))),
+                root.join("q8")
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(
+                instantid_tier_subdir(root, &request(json!({ "mlxQuantize": 4 }))),
+                root.join("bf16")
+            );
+            assert_eq!(
+                instantid_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
+                root.join("bf16")
+            );
+        }
+    }
+
+    /// A partial turnkey falls back to a present tier rather than a half-empty subdir (so the engine
+    /// surfaces a clear missing-weights error), and an absent turnkey resolves to the repo root.
+    #[test]
+    fn falls_back_when_preferred_tier_absent() {
+        // Only q8 downloaded: an unset (bf16-preferred) request falls through bf16 → q4 → q8.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        seed_unet(root, "q8", "diffusion_pytorch_model.safetensors");
+        assert_eq!(
+            instantid_tier_subdir(root, &request(json!({}))),
+            root.join("q8")
+        );
+        // Nothing present → the repo root (engine surfaces the missing-weights error).
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            instantid_tier_subdir(empty.path(), &request(json!({}))),
+            empty.path().to_path_buf()
+        );
+    }
+}

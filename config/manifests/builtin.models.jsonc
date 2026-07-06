@@ -4404,21 +4404,49 @@
       // character" picker (a clear reference image is required).
       "capabilities": ["character_image"],
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-9965, epic 8506): the SAME
+        // `SceneWorks/realvisxl-mlx` re-host the plain `realvisxl` model loads (was upstream dense
+        // `SG161222/RealVisXL_V5.0`). Public/ungated (openrail++), per-tier self-contained subdirs
+        // (UNet + both CLIP text encoders + VAE + tokenizer(s) + scheduler + model_index.json):
+        // bf16/ (DEFAULT — the validated fp16 identity envelope, ArcFace-cosine ~0.82 @1024²), q8/,
+        // q4/. `resolve_instantid_sdxl_base` loads the chosen tier's subdir (instantid_tier_subdir);
+        // the mlx-gen SDXL loaders packed-detect the UNet + both CLIP tiers (sc-8746) so q4/q8 load
+        // packed with no install-time convert. Unlike the `realvisxl` t2i model, the InstantID
+        // DEFAULT stays bf16 (dense) because Q4/Q8 measurably drop ArcFace identity — quant is
+        // opt-in via advanced.mlxQuantize; the candle InstantID lane runs dense f16 and always loads
+        // bf16/. The InstantID IdentityNet ControlNet + ip-adapter (~4 GiB) + antelopev2 face pack
+        // stay DENSE (small, precision-sensitive) and are fetched on demand by the adapter, so they
+        // are not listed here. Sizes measured on-disk (shared with the `realvisxl` turnkey).
         {
-          // Photoreal SDXL finetune (UNet + dual CLIP + VAE); the worker loads the
-          // fp16 variant. openrail++ (commercial use OK, ungated). The InstantID
-          // IdentityNet ControlNet + ip-adapter.bin (~4 GiB) and the antelopev2
-          // face pack are fetched on demand by the adapter (mirrors Kolors
-          // IP-Adapter), so they are not listed here.
           "provider": "huggingface",
-          "repo": "SG161222/RealVisXL_V5.0",
-          "files": [],
-          "estimatedSizeBytes": 7105348096
+          "repo": "SceneWorks/realvisxl-mlx",
+          "variant": "bf16",
+          "default": true,
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 7108692804,
+          "footprint": { "diskSizeBytes": 7108692804, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/realvisxl-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 5385840183,
+          "footprint": { "diskSizeBytes": 5385840183, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/realvisxl-mlx",
+          "variant": "q4",
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 3911656467,
+          "footprint": { "diskSizeBytes": 3911656467, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/SG161222/RealVisXL_V5.0"
+        "model": "${HF_CACHE}/SceneWorks/realvisxl-mlx"
       },
+      "gated": false,
       "defaults": {
         // ~30 steps; guidance 3.0 (lowered from 5.0 per sc-3857 render tuning —
         // RealVisXL is CFG-sensitive and 3.0 holds identity with much less of the
