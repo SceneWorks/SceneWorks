@@ -125,6 +125,12 @@ describe("BatchPromptPanel (sc-9955)", () => {
     expect(document.body.querySelector(".batch-preview-text").textContent).toBe("Alice portrait");
   });
 
+  it("strips a leading [WxH] from the preview and shows it as a size badge", () => {
+    mount({ initialPrompts: "[832x1216] a full-body portrait" });
+    expect(document.body.querySelector(".batch-preview-text").textContent).toBe("a full-body portrait");
+    expect(document.body.querySelector(".batch-preview-res").textContent).toBe("832×1216");
+  });
+
   it("lists saved batches", () => {
     mount({
       batches: [
