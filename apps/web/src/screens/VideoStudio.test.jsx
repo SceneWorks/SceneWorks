@@ -836,3 +836,174 @@ describe("VideoStudio Mac mode gating (sc-5716)", () => {
     );
   });
 });
+
+// Lightning fast-4-step toggle for Wan2.2 A14B MoE (T2V + I2V) — epic 10043, sc-10048.
+// Renders default-on for the two A14B engines only; maps to advanced.lightning; when on it
+// governs (disables) the manual steps/guidance controls.
+describe("VideoStudio Lightning toggle (sc-10048)", () => {
+  let container;
+  let root;
+
+  // The two A14B MoE engines that honor advanced.lightning (constants.js WAN_A14B_LIGHTNING_MODEL_IDS).
+  const WAN_T2V_14B = {
+    id: "wan_2_2_t2v_14b",
+    name: "Wan2.2 14B (T2V)",
+    type: "video",
+    family: "wan-video",
+    capabilities: ["text_to_video"],
+    defaults: { duration: 5, resolution: "832x480", fps: 16 },
+    limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480", "480x832"] },
+    quantization: {},
+    loraCompatibility: {},
+    ui: {},
+  };
+  const WAN_I2V_14B = {
+    ...WAN_T2V_14B,
+    id: "wan_2_2_i2v_14b",
+    name: "Wan2.2 14B (I2V)",
+    capabilities: ["image_to_video", "text_to_video"],
+  };
+  // Dense 5B (single-expert) — ignores advanced.lightning, so no toggle.
+  const WAN_5B = {
+    ...WAN_T2V_14B,
+    id: "wan_2_2",
+    name: "Wan 2.2 (5B)",
+    capabilities: ["text_to_video"],
+  };
+  // A non-Wan engine (LTX) — no toggle.
+  const NON_WAN = {
+    id: "ltx_2_3",
+    name: "LTX 2.3",
+    type: "video",
+    family: "ltx-video",
+    capabilities: ["text_to_video"],
+    defaults: { duration: 6, resolution: "768x512", fps: 25 },
+    limits: {},
+    quantization: {},
+    loraCompatibility: {},
+    ui: {},
+  };
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  // Open the Advanced panel where the toggle + steps/guidance live.
+  const openAdvanced = async () => {
+    await click(buttonWithText(container, "Advanced"));
+  };
+  const lightningLabel = () =>
+    [...container.querySelectorAll(".lightning-toggle label")].find((el) =>
+      el.textContent.includes("Lightning"),
+    );
+  const lightningCheckbox = () => lightningLabel()?.querySelector('input[type="checkbox"]');
+  const labeledInput = (label) =>
+    [...container.querySelectorAll("label")]
+      .find((el) => el.textContent.trim().startsWith(label))
+      ?.querySelector("input");
+
+  it("renders default-on for Wan A14B T2V", async () => {
+    const context = baseContext({ videoModels: [WAN_T2V_14B] });
+    await render(context);
+    await openAdvanced();
+
+    const box = lightningCheckbox();
+    expect(box).toBeTruthy();
+    expect(box.checked).toBe(true);
+  });
+
+  it("renders default-on for Wan A14B I2V", async () => {
+    const context = baseContext({ videoModels: [WAN_I2V_14B] });
+    await render(context);
+    await openAdvanced();
+
+    const box = lightningCheckbox();
+    expect(box).toBeTruthy();
+    expect(box.checked).toBe(true);
+  });
+
+  it("is not rendered for the dense Wan 5B", async () => {
+    const context = baseContext({ videoModels: [WAN_5B] });
+    await render(context);
+    await openAdvanced();
+
+    expect(lightningCheckbox()).toBeFalsy();
+  });
+
+  it("is not rendered for a non-Wan engine", async () => {
+    const context = baseContext({ videoModels: [NON_WAN] });
+    await render(context);
+    await openAdvanced();
+
+    expect(lightningCheckbox()).toBeFalsy();
+  });
+
+  it("sends advanced.lightning = true by default for Wan A14B T2V", async () => {
+    const context = baseContext({ videoModels: [WAN_T2V_14B] });
+    await render(context);
+
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob).toHaveBeenCalledTimes(1);
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.model).toBe("wan_2_2_t2v_14b");
+    expect(payload.advanced.lightning).toBe(true);
+    // On → the worker governs steps/guidance, so the UI suppresses the overrides.
+    expect(payload.advanced.steps).toBeUndefined();
+    expect(payload.advanced.guidanceScale).toBeUndefined();
+  });
+
+  it("sends advanced.lightning = false when the toggle is turned off", async () => {
+    const context = baseContext({ videoModels: [WAN_T2V_14B] });
+    await render(context);
+    await openAdvanced();
+
+    await act(async () => lightningCheckbox().click());
+    expect(lightningCheckbox().checked).toBe(false);
+
+    await click(buttonWithText(container, "Render clip"));
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.advanced.lightning).toBe(false);
+  });
+
+  it("disables the manual steps/guidance controls while Lightning is on and re-enables them off", async () => {
+    const context = baseContext({ videoModels: [WAN_T2V_14B] });
+    await render(context);
+    await openAdvanced();
+
+    // On (default): governed by the recipe.
+    expect(labeledInput("Steps").disabled).toBe(true);
+    expect(labeledInput("Guidance").disabled).toBe(true);
+
+    // Off: the user's steps/guidance controls become active.
+    await act(async () => lightningCheckbox().click());
+    expect(labeledInput("Steps").disabled).toBe(false);
+    expect(labeledInput("Guidance").disabled).toBe(false);
+  });
+
+  it("does not emit advanced.lightning for a non-Wan engine", async () => {
+    const context = baseContext({ videoModels: [NON_WAN] });
+    await render(context);
+
+    await click(buttonWithText(container, "Render clip"));
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.advanced.lightning).toBeUndefined();
+  });
+});
