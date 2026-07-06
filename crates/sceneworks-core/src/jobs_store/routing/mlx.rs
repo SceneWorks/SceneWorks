@@ -72,7 +72,7 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "bernini_image" => bernini_image_mlx_eligible(payload),
         "ideogram_4" | "ideogram_4_turbo" => ideogram_mlx_eligible(payload),
         "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => boogu_mlx_eligible(payload),
-        "krea_2_turbo" => krea_mlx_eligible(payload),
+        "krea_2_turbo" | "krea_2_raw" => krea_mlx_eligible(payload),
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => sd3_5_mlx_eligible(payload),
         "sana_1600m" | "sana_sprint_1600m" => sana_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm.
@@ -423,9 +423,10 @@ pub(crate) fn boogu_mlx_eligible(payload: &Map<String, Value>) -> bool {
     true
 }
 
-/// Krea 2 Turbo (epic 7565 / sc-7572) MLX-eligibility. The native `mlx-gen-krea`
-/// engine serves the Turbo text-to-image surface only; `edit_image` has no source/reference
-/// path, so reject that defensive shape the same way Lens does.
+/// Krea 2 Turbo (epic 7565 / sc-7572) + Krea 2 Raw (epic 9992) MLX-eligibility. The native
+/// `mlx-gen-krea` engine serves the text-to-image surface only for both variants (distilled Turbo +
+/// full-CFG Raw); `edit_image` has no source/reference path, so reject that defensive shape the same way
+/// Lens does.
 pub(crate) fn krea_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }

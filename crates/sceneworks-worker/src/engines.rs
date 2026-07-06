@@ -493,6 +493,19 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 0.0,
         adapter_label: "mlx_krea",
     },
+    // Krea 2 Raw (epic 9992) — native MLX, the undistilled 12B DiT run with TRUE classifier-free guidance
+    // (the `krea_2_raw` descriptor advertises supports_guidance + supports_negative_prompt, unlike the
+    // CFG-free Turbo). 52 steps / guidance 3.5. Loads the packed bf16 / Q8 (default) / Q4 turnkey subdir
+    // (`SceneWorks/krea-2-raw-mlx`, the same `krea_model_subdir` resolver as Turbo). Shares the Krea
+    // pipeline with Turbo (arch-identical); the `krea_2_raw` id is also the LoRA-training base (Path 1).
+    ModelRow {
+        sceneworks_id: "krea_2_raw",
+        engine_id: "krea_2_raw",
+        default_repo: "SceneWorks/krea-2-raw-mlx",
+        default_steps: 52,
+        default_guidance: 3.5,
+        adapter_label: "mlx_krea",
+    },
     // Stable Diffusion 3.5 Large (epic 7841 / sc-7871) — native MLX, gated. 8B MMDiT + triple text
     // encoder (CLIP-L + CLIP-G + T5-XXL) + 16-ch VAE. True-CFG flagship: 28 steps / guidance 3.5 +
     // negative prompt (the `sd3_5_large` descriptor advertises supports_guidance + supports_negative
