@@ -2513,6 +2513,26 @@ label {
 }
 
 .control-panel-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+
+.control-panel-caret {
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+
+.control-panel-headings {
   display: grid;
   gap: 2px;
 }
