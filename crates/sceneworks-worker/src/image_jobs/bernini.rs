@@ -166,13 +166,24 @@ async fn generate_bernini_image_stream(
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
     let engine_id = model.engine_id();
-    let weights_dir = crate::video_jobs::resolve_bernini_model_dir(settings)?;
     let backend = if model.backend().is_empty() {
         backend
     } else {
         model.backend()
     };
     let (quant, quant_bits) = resolve_bernini_image_quant(request);
+    // sc-9945: raw `mlxQuantize` bits for the quant-matrix tier selector (distinct from `quant_bits`,
+    // which is `None` for BOTH bf16 and the q4 default — the tier order must tell `<= 0` bf16 apart).
+    // Fetch the requested tier subdir (q8/bf16) if not the shipped q4 default, then descend into it: a
+    // pre-packed tier loads with `quant = None` (config sidecars authoritative); a legacy flat snapshot
+    // keeps load-time quant (`quant` above).
+    let tier_bits = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    crate::video_jobs::ensure_bernini_tier_present(api, settings, job, tier_bits).await?;
+    let (weights_dir, quant) =
+        crate::video_jobs::resolve_bernini_tier_dir_and_quant(settings, tier_bits, quant)?;
     let steps = resolve_steps(request, &model);
     // Standard guidance family: `guidance` carries the CFG scale (engine `omega_txt`); the negative
     // prompt is forwarded (descriptor advertises both). No true-CFG.

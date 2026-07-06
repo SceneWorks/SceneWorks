@@ -291,6 +291,13 @@ mod wan_i2v_14b_tier_build;
 // for `SceneWorks/wan2.2-ti2v-5b-mlx`; not exercised in CI (needs the native checkpoint).
 #[cfg(all(test, target_os = "macos"))]
 mod wan_ti2v_5b_tier_build;
+// On-device build helper for the Bernini quant matrix (sc-9945, epic 8506). Composite model: derives
+// all three tiers (bf16/q8/q4) worker-side from the already-hosted lean bf16 snapshot — copy the dense
+// remainder, quantize the planner backbone (`mlx_gen_bernini::convert::quantize_qwen_planner_backbone`)
+// + both renderer experts (`mlx_gen_wan::convert::quantize_wan_transformer`), patch the two config
+// sidecars. Run one-off to build the artifacts for `SceneWorks/bernini-mlx`; not exercised in CI.
+#[cfg(all(test, target_os = "macos"))]
+mod bernini_tier_build;
 // The DWPose skeleton rasterizer is consumed only by the macOS Z-Image strict-pose
 // control path; on Mac AND the off-Mac candle DWPose lane (sc-5496) it backs the
 // `pose_jobs` skeleton render; on a candle-disabled box off Mac it still builds +

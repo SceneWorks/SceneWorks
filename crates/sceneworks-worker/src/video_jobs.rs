@@ -5260,6 +5260,165 @@ fn resolve_bernini_quant(request: &VideoRequest) -> Option<Quant> {
     resolve_mlx_dense_quant(request)
 }
 
+// --- Bernini quant-matrix tiers (sc-9945, epic 8506) ---------------------------------------------
+// The composite sibling of the Wan quant-matrix tiers. `SceneWorks/bernini-mlx` hosts self-contained
+// `q4/` (default) + `q8/` + `bf16/` tier subdirs, each a COMPLETE composite snapshot (the Qwen2.5-VL
+// planner components + both Wan renderer experts + the shared dense T5/VAE/tokenizer + config
+// sidecars). The legacy flat dense-bf16 layout quantized at LOAD, staging the ~56 GB experts + ~14 GB
+// planner backbone as bf16 first; a pre-packed tier loads with no dense-staging peak. Both the video
+// (`bernini`) and image (`bernini_image`) load paths resolve through the same tier machinery. The flat
+// root files stay for already-shipped workers; a new worker resolves the tier subdirs. Mirrors the
+// `wan_tier_*` helpers, but keyed on raw `mlxQuantize` bits so it serves the image lane too.
+
+/// The turnkey SceneWorks Bernini MLX repo (sc-9945). Hosts the `q4/`/`q8/`/`bf16/` tier subdirs.
+#[cfg(target_os = "macos")]
+const BERNINI_REPO: &str = "SceneWorks/bernini-mlx";
+
+/// Pinned revision for [`BERNINI_REPO`] — the commit that adds the `q4/`/`q8/`/`bf16/` tier subdirs
+/// (sc-9945). Pinning the exact commit (not the mutable `main`) stops an upstream re-push from silently
+/// swapping a checkpoint the on-demand `q8/*` + `bf16/*` fetch loads (the `hf` CLI still verifies each
+/// file's own hash on download). This is the commit that added the `q4/`/`q8/`/`bf16/` tier subdirs
+/// (sc-9945), with the exact hosted sizes: q4 37,815,703,819 / q8 55,129,270,617 / bf16 87,591,990,679.
+#[cfg(target_os = "macos")]
+const BERNINI_REVISION: &str = "533d688f16c8f33dc832890c1e16c11921a2019a";
+
+/// The runtime files that make a Bernini tier subdir COMPLETE for the load path: the planner
+/// components + both renderer experts + the shared dense T5/VAE + tokenizer + config sidecars + the
+/// planner's `mllm/tokenizer.json` (mirrors `bernini_tier_build::TIER_FILES`). The three packable
+/// weights (`qwen2_5_vl.safetensors`, `high/low_noise_model.safetensors`) are present in every tier;
+/// only their contents differ (packed vs dense).
+#[cfg(target_os = "macos")]
+const BERNINI_TIER_FILES: &[&str] = &[
+    "qwen2_5_vl.safetensors",
+    "qwen2_5_vl_config.json",
+    "connector.safetensors",
+    "vit_decoder.safetensors",
+    "mask_tokens.safetensors",
+    "bernini_planner.json",
+    "high_noise_model.safetensors",
+    "low_noise_model.safetensors",
+    "t5_encoder.safetensors",
+    "vae.safetensors",
+    "tokenizer.json",
+    "config.json",
+    "bernini_renderer.json",
+    "mllm/tokenizer.json",
+];
+
+/// The Bernini quant-matrix tier search order for a request — preferred tier first, then the
+/// always-smaller fallback tiers so a repo missing the preferred subdir still loads (mirrors
+/// [`wan_tier_order`]): `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, else the `q4` default. `bf16` is
+/// only ever tried when explicitly requested, so a default job never pulls the huge dense tier.
+#[cfg(target_os = "macos")]
+fn bernini_tier_order(bits: Option<i64>) -> &'static [&'static str] {
+    match bits {
+        Some(b) if b <= 0 => &["bf16", "q8", "q4"],
+        Some(b) if b >= 8 => &["q8", "q4"],
+        _ => &["q4", "q8"],
+    }
+}
+
+/// Whether `dir` is a COMPLETE self-contained Bernini tier snapshot (all [`BERNINI_TIER_FILES`]). A
+/// partially-downloaded tier fails this so [`bernini_tier_subdir`] falls through to a smaller complete
+/// tier rather than half-loading.
+#[cfg(target_os = "macos")]
+fn bernini_tier_is_complete(dir: &Path) -> bool {
+    BERNINI_TIER_FILES
+        .iter()
+        .all(|file| dir.join(file).is_file())
+}
+
+/// Descend a resolved Bernini repo `root` into the requested quant tier subdir (sc-9945), mirroring
+/// [`wan_tier_subdir`]. Returns the first COMPLETE tier in [`bernini_tier_order`], or `None` when the
+/// repo has no complete tier subdir — a legacy flat snapshot, where the caller keeps the root +
+/// load-time quant.
+#[cfg(target_os = "macos")]
+fn bernini_tier_subdir(root: &Path, bits: Option<i64>) -> Option<PathBuf> {
+    bernini_tier_order(bits)
+        .iter()
+        .map(|tier| root.join(tier))
+        .find(|dir| bernini_tier_is_complete(dir))
+}
+
+/// Resolve the Bernini `(model_dir, load-time quant)` for a generation, descending into the
+/// quant-matrix tier subdir when the turnkey ships them (sc-9945). A pre-packed tier's config sidecars
+/// are authoritative — the planner (`Qwen25VlText::from_weights`, via the `quantization` block) and
+/// both renderer experts (`WanTransformer::from_weights`) build packed — so a resolved tier loads with
+/// `quant = None`: `mlxQuantize` selects WHICH tier, never a load-time requant (the `bf16/` tier is
+/// dense, so `None` ⇒ dense too). A legacy flat snapshot (no tier subdirs) keeps today's behavior: load
+/// the root and quantize at load per `legacy_quant`. Shared by the video + image lanes (each passes its
+/// own parsed `bits` + `legacy_quant`).
+#[cfg(target_os = "macos")]
+pub(crate) fn resolve_bernini_tier_dir_and_quant(
+    settings: &Settings,
+    bits: Option<i64>,
+    legacy_quant: Option<Quant>,
+) -> WorkerResult<(PathBuf, Option<Quant>)> {
+    let root = resolve_bernini_model_dir(settings)?;
+    match bernini_tier_subdir(&root, bits) {
+        Some(tier) => Ok((tier, None)),
+        None => Ok((root, legacy_quant)),
+    }
+}
+
+/// Parse `advanced.mlxQuantize` (int or numeric string) for the Bernini tier selector — the raw bits
+/// the tier order keys on (the video lane's twin of the image lane's `resolve_bernini_image_quant`
+/// bits). `resolve_bernini_quant` maps the same value to a `Quant`; this keeps the tier selection and
+/// the legacy load-time quant in sync off one source.
+#[cfg(target_os = "macos")]
+fn bernini_quant_bits(request: &VideoRequest) -> Option<i64> {
+    request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+}
+
+/// On-demand fetch of a non-default Bernini quant-matrix tier subdir (sc-9945, mirrors
+/// [`ensure_wan_tier_present`]). The macOS default download is the lean `q4/` tier; a job that opts into
+/// a heavier tier (`mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`) pulls just that subdir from the FIXED
+/// [`BERNINI_REVISION`] the first time it is requested so [`bernini_tier_subdir`] can resolve it. No-op
+/// for a `q4` (default) job, when the repo snapshot isn't downloaded yet (resolve surfaces the clear
+/// error), or when the tier is already complete. Fails loud on a real download error — fast, before any
+/// compute; a missing `hf` CLI leaves the tier absent so resolve falls back to a smaller complete tier.
+#[cfg(target_os = "macos")]
+pub(crate) async fn ensure_bernini_tier_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    bits: Option<i64>,
+) -> WorkerResult<()> {
+    let tier = match bits {
+        Some(b) if b <= 0 => "bf16",
+        Some(b) if b >= 8 => "q8",
+        // q4 default — ships with the base install, nothing to fetch on demand.
+        _ => return Ok(()),
+    };
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, BERNINI_REPO) else {
+        return Ok(());
+    };
+    if bernini_tier_is_complete(&root.join(tier)) {
+        return Ok(());
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".bernini-tier-{tier}-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec![format!("{tier}/*")];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api,
+        settings,
+        job,
+        BERNINI_REPO,
+        BERNINI_REVISION,
+        &files,
+        &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
+}
+
 /// Raw-settings recorded on a real MLX Bernini asset (mirrors `wan_raw_settings`).
 #[cfg(target_os = "macos")]
 fn bernini_raw_settings(request: &VideoRequest) -> Value {
@@ -5417,12 +5576,19 @@ async fn generate_bernini(
     let negative_prompt = non_empty_negative_prompt(request);
     let conditioning =
         resolve_bernini_conditioning(api, settings, job, request, project_path).await?;
+    // sc-9945: fetch the requested quant tier subdir (q8/bf16) if it isn't the shipped q4 default, then
+    // descend into it — a pre-packed tier loads with `quant = None` (config sidecars authoritative); a
+    // legacy flat snapshot keeps load-time quant.
+    let bits = bernini_quant_bits(request);
+    ensure_bernini_tier_present(api, settings, job, bits).await?;
+    let (model_dir, quant) =
+        resolve_bernini_tier_dir_and_quant(settings, bits, resolve_bernini_quant(request))?;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
-        model_dir: resolve_bernini_model_dir(settings)?,
-        quant: resolve_bernini_quant(request),
+        model_dir,
+        quant,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
@@ -9703,6 +9869,62 @@ mod tests {
             Some((WAN_I2V_14B_REPO, WAN_I2V_14B_REVISION))
         );
         assert_eq!(wan_tier_repo("bernini"), None);
+    }
+
+    /// sc-9945: the Bernini quant-matrix repo must pin an exact commit (not the mutable `main`) so an
+    /// upstream re-push can't swap a checkpoint the on-demand tier fetch loads. INTENTIONALLY red until
+    /// the tiers are hosted and `BERNINI_REVISION` is pinned to the real commit (mirrors sc-9941's flow).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bernini_tier_revision_is_pinned_commit_not_main() {
+        assert_ne!(
+            BERNINI_REVISION, "main",
+            "the Bernini tier repo must pin a fixed revision before release"
+        );
+        assert_eq!(
+            BERNINI_REVISION.len(),
+            40,
+            "a pinned HF revision is a 40-char commit sha"
+        );
+        assert!(
+            BERNINI_REVISION
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "the pinned Bernini revision must be lowercase hex"
+        );
+    }
+
+    /// sc-9945: a COMPLETE Bernini tier (all [`BERNINI_TIER_FILES`], incl. the planner's nested
+    /// `mllm/tokenizer.json`) resolves for the requested quant, and a missing preferred tier falls
+    /// through to the next smaller complete tier — never silently to the wrong one. Composite: the three
+    /// packable weights live in the SAME tier subdir as the dense remainder, so one resolution covers
+    /// both the planner and the renderer.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bernini_tier_subdir_resolves_complete_tier() {
+        let root = std::env::temp_dir().join(format!("bernini-tier-test-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let make_tier = |tier: &str| {
+            for file in BERNINI_TIER_FILES {
+                let path = root.join(tier).join(file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, b"x").unwrap();
+            }
+        };
+        make_tier("q4");
+        make_tier("q8");
+
+        // Default (no bits) → q4.
+        assert_eq!(bernini_tier_subdir(&root, None), Some(root.join("q4")));
+        // Q8 (bits >= 8) → q8.
+        assert_eq!(bernini_tier_subdir(&root, Some(8)), Some(root.join("q8")));
+        // bf16 (bits <= 0) with no bf16 tier falls back to q8 (never silently to a default).
+        assert_eq!(bernini_tier_subdir(&root, Some(0)), Some(root.join("q8")));
+        // An incomplete tier (missing the nested planner tokenizer) is not resolved.
+        std::fs::remove_file(root.join("q8").join("mllm/tokenizer.json")).unwrap();
+        assert_eq!(bernini_tier_subdir(&root, Some(8)), Some(root.join("q4")));
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// The single-expert TI2V-5B tier (sc-9941) is COMPLETE with one `model.safetensors` (not the
