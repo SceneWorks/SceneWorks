@@ -6350,8 +6350,11 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/pid-flux",
+          // Whole-repo download (empty `files`): fetches BOTH the 4K-tuned `2kto4k` student AND the
+          // 2K-tuned `res2k` student (`pid_flux_2k.safetensors`, sc-10056) the 2K output tier prefers.
+          // Size ≈ 2× the single 2.72 GB student.
           "files": [],
-          "estimatedSizeBytes": 2724745532
+          "estimatedSizeBytes": 5449491064
         },
         {
           "provider": "huggingface",
@@ -6424,8 +6427,11 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/pid-flux2",
+          // Whole-repo download (empty `files`): fetches BOTH the 4K-tuned `2kto4k` student AND the
+          // 2K-tuned `res2k` student (`pid_flux2_2k.safetensors`, sc-10056) the 2K output tier prefers.
+          // Size ≈ 2× the single 2.73 GB student.
           "files": [],
-          "estimatedSizeBytes": 2725777732
+          "estimatedSizeBytes": 5451555464
         },
         {
           "provider": "huggingface",
