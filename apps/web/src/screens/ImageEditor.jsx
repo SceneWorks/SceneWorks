@@ -10,6 +10,7 @@ import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { useLoraSelection } from "../components/LoraPickerField.jsx";
 import { MAX_JOB_LORAS_TOTAL } from "../presetUtils.js";
+import { guidanceDefaultFromModel } from "../samplerOptions.js";
 import {
   BLEND_MODES,
   activeLayerOf,
@@ -713,6 +714,9 @@ export function ImageEditor() {
   const [editModel, setEditModel] = useState("");
   const [editPrompt, setEditPrompt] = useState("");
   const [editSeed, setEditSeed] = useState("");
+  // Guidance override (sc-10275): "" = use the edit model's default (shown as the
+  // input placeholder); a finite value rides advanced.guidanceScale.
+  const [editGuidance, setEditGuidance] = useState("");
   // Canvas-extend / outpaint (sc-2556): target output aspect (default "match" = the
   // working size) and how to fill it (crop trims, pad bars, outpaint generates).
   const [editAspect, setEditAspect] = useState("match");
@@ -2092,6 +2096,7 @@ export function ImageEditor() {
           height: outHeight,
           fitMode,
           loras: editLoraSelection.serializedLoras,
+          guidanceScale: editGuidance,
         }),
     });
   }
@@ -3100,19 +3105,36 @@ export function ImageEditor() {
         ) : null}
 
         <div className="ie-section">
-          <div className="ie-field">
-            <span className="ie-field-label" style={{ marginBottom: "2px" }}>
-              Seed
-            </span>
-            <input
-              className="ie-input"
-              min={0}
-              onChange={(event) => setEditSeed(event.target.value)}
-              placeholder="Random"
-              style={{ fontFamily: "var(--ie-mono)" }}
-              type="number"
-              value={editSeed}
-            />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+            <div className="ie-field">
+              <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+                Seed
+              </span>
+              <input
+                className="ie-input"
+                min={0}
+                onChange={(event) => setEditSeed(event.target.value)}
+                placeholder="Random"
+                style={{ fontFamily: "var(--ie-mono)" }}
+                type="number"
+                value={editSeed}
+              />
+            </div>
+            <div className="ie-field">
+              <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+                Guidance
+              </span>
+              <input
+                className="ie-input"
+                min={0}
+                onChange={(event) => setEditGuidance(event.target.value)}
+                placeholder={guidanceDefaultFromModel(selectedEditModel)?.toString() ?? "Default"}
+                step={0.1}
+                style={{ fontFamily: "var(--ie-mono)" }}
+                type="number"
+                value={editGuidance}
+              />
+            </div>
           </div>
           <button className="ie-btn block primary" disabled={!editPrompt.trim() || !!aiOp} onClick={runEdit} type="button">
             {maskActive ? "Inpaint region" : "Generate edit"}
