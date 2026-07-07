@@ -32,8 +32,8 @@ use crate::models::ModelSizeCache;
 use crate::tickets::TicketStore;
 use crate::{
     create_app, env_path_or, env_string, open_bind_override_enabled, parent_death,
-    parent_pid_to_watch, should_warn_open_bind, shutdown_signal, spawn_inprocess_utility_worker,
-    DEFAULT_API_HOST, DEFAULT_CORS_ORIGINS,
+    parent_pid_to_watch, seed_mode_for_config_dir, should_warn_open_bind, shutdown_signal,
+    spawn_inprocess_utility_worker, DEFAULT_API_HOST, DEFAULT_CORS_ORIGINS,
 };
 
 #[derive(Debug, Clone)]
@@ -185,12 +185,21 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // it. The desktop wrapper and the Compose bind mount normally provide it; seed
     // any missing manifests here so launching the API binary directly works too,
     // and fail loudly rather than serving an empty catalog if seeding can't finish.
-    // Seed-if-missing (not overwrite) keeps an explicit config dir — a repo
-    // checkout or a Compose bind mount — authoritative; see `builtin_manifests`.
-    if let Err(error) = sceneworks_core::builtin_manifests::seed_builtin_manifests(
-        &settings.config_dir,
-        sceneworks_core::builtin_manifests::SeedMode::IfMissing,
-    ) {
+    //
+    // Seed mode by config-dir origin (sc-10212): an EXPLICIT `SCENEWORKS_CONFIG_DIR`
+    // marks an operator-owned dir — a repo checkout or a Compose bind mount — that must
+    // stay authoritative, so keep `IfMissing` there (fill gaps, never clobber an edited
+    // copy or dirty a checked-out `config/`). When unset, `config_dir` is the platform
+    // default app-owned dir (the same one the desktop seeds `Overwrite`), so refresh it
+    // on launch — otherwise a directly-launched API binary keeps serving a STALE seeded
+    // catalog after an upgrade (the sc-10193 img2img flag stayed invisible because the
+    // months-old seed was never rewritten). Builtin manifests are app-managed; operator
+    // customizations live in the separate `user.*.jsonc` files, which seeding never touches.
+    let seed_mode =
+        seed_mode_for_config_dir(std::env::var("SCENEWORKS_CONFIG_DIR").ok().as_deref());
+    if let Err(error) =
+        sceneworks_core::builtin_manifests::seed_builtin_manifests(&settings.config_dir, seed_mode)
+    {
         return Err(format!(
             "failed to seed builtin manifests into {}: {error}",
             settings.config_dir.join("manifests").display()

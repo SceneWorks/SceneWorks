@@ -7,11 +7,11 @@ use super::workers::person_readiness_from_workers;
 use super::{
     create_app, create_app_with_state, huggingface_repo_cache_path, inject_converted_model_path,
     inprocess_worker_gpu_id, lora_artifact_paths, merge_model_manifest_entry, mlx_catalog_status,
-    open_bind_override_enabled, safe_download_dir, serialize_job_lora, should_warn_open_bind,
-    strip_jsonc_comments, sweep_stale_asset_uploads_before, sweep_stale_lora_uploads_before,
-    sweep_stale_uploads, Settings, WorkerCapability, WorkerSnapshot, WorkerStatus,
-    API_MANAGED_MANIFEST_HEADER, DEFAULT_API_HOST, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA,
-    HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
+    open_bind_override_enabled, safe_download_dir, seed_mode_for_config_dir, serialize_job_lora,
+    should_warn_open_bind, strip_jsonc_comments, sweep_stale_asset_uploads_before,
+    sweep_stale_lora_uploads_before, sweep_stale_uploads, Settings, WorkerCapability,
+    WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, DEFAULT_API_HOST, EVENT_BUFFER_SIZE,
+    HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
 };
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -74,6 +74,26 @@ fn open_bind_override_only_for_explicit_optin() {
             "{value:?} must not opt in"
         );
     }
+}
+
+#[test]
+fn seed_mode_refreshes_the_app_owned_default_but_not_an_explicit_config_dir() {
+    use sceneworks_core::builtin_manifests::SeedMode;
+    // sc-10212: an explicit, non-empty SCENEWORKS_CONFIG_DIR marks an operator-owned dir (repo
+    // checkout / Compose bind mount) → stay authoritative (IfMissing), never dirty a checkout.
+    assert_eq!(
+        seed_mode_for_config_dir(Some("/srv/sceneworks/config")),
+        SeedMode::IfMissing
+    );
+    assert_eq!(
+        seed_mode_for_config_dir(Some("./config")),
+        SeedMode::IfMissing
+    );
+    // Unset, or blank/whitespace (env_path_or treats those as unset) → the platform-default
+    // app-owned dir → Overwrite so a directly-launched API refreshes its builtin catalog on launch.
+    assert_eq!(seed_mode_for_config_dir(None), SeedMode::Overwrite);
+    assert_eq!(seed_mode_for_config_dir(Some("")), SeedMode::Overwrite);
+    assert_eq!(seed_mode_for_config_dir(Some("   ")), SeedMode::Overwrite);
 }
 
 #[test]

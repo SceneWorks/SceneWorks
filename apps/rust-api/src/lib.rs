@@ -367,6 +367,28 @@ fn open_bind_override_enabled(value: &str) -> bool {
     matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES")
 }
 
+/// Choose the builtin-manifest seed mode from the raw `SCENEWORKS_CONFIG_DIR` value (sc-10212).
+///
+/// An explicit, non-empty override marks an operator-owned config dir — a repo checkout or a Compose
+/// bind mount — which must stay authoritative, so seed `IfMissing` (fill gaps, never clobber an edited
+/// copy or dirty a checked-out `config/`). Unset or blank means `config_dir` fell back to the
+/// platform-default app-owned dir (the same one the desktop seeds `Overwrite`), so `Overwrite` there
+/// refreshes the builtin catalog on launch instead of serving a stale seed after an upgrade — the
+/// sc-10193 img2img flag was invisible on a directly-launched API because the months-old seed was
+/// never rewritten. Pure so the choice is unit-tested without touching process env or the filesystem.
+///
+/// The trim/non-empty rule mirrors [`env_path_or`] exactly, so the seed mode and the resolved
+/// `config_dir` always agree on whether the override was actually applied.
+fn seed_mode_for_config_dir(
+    config_dir_env: Option<&str>,
+) -> sceneworks_core::builtin_manifests::SeedMode {
+    use sceneworks_core::builtin_manifests::SeedMode;
+    match config_dir_env.map(str::trim) {
+        Some(value) if !value.is_empty() => SeedMode::IfMissing,
+        _ => SeedMode::Overwrite,
+    }
+}
+
 fn json_rejection_response(rejection: JsonRejection) -> Response {
     // sc-8812 (F-010): a body over the route's `DefaultBodyLimit` surfaces here as a
     // `BytesRejection` whose own status is 413. Preserve the rejection's status code
