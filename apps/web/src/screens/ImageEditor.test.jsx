@@ -941,18 +941,22 @@ describe("AI prompt edit", () => {
   });
 
   it("computes output dims for the canvas-extend control (match / extend / crop)", () => {
-    // Match canvas → working size unchanged, fit mode irrelevant.
+    // Match canvas → working size unchanged (already 16-aligned), fit mode irrelevant.
     expect(editOutputDims(1024, 1024, "match", "outpaint")).toEqual({ width: 1024, height: 1024 });
     // 16:9 outpaint on a square → extend width, keep height at native (add side border).
-    expect(editOutputDims(1024, 1024, "16:9", "outpaint")).toEqual({ width: 1820, height: 1024 });
+    // 1820 (1024·16/9) is snapped up to the nearest multiple of 16 → 1824.
+    expect(editOutputDims(1024, 1024, "16:9", "outpaint")).toEqual({ width: 1824, height: 1024 });
     // 16:9 pad behaves the same geometry as outpaint (extend, then bars vs generate).
-    expect(editOutputDims(1024, 1024, "16:9", "pad")).toEqual({ width: 1820, height: 1024 });
-    // 16:9 crop on a square → shrink to the aspect inside the image (trim height).
+    expect(editOutputDims(1024, 1024, "16:9", "pad")).toEqual({ width: 1824, height: 1024 });
+    // 16:9 crop on a square → shrink to the aspect inside the image (trim height); 576 = 36·16.
     expect(editOutputDims(1024, 1024, "16:9", "crop")).toEqual({ width: 1024, height: 576 });
     // Portrait target on a square extends height.
-    expect(editOutputDims(1024, 1024, "9:16", "outpaint")).toEqual({ width: 1024, height: 1820 });
-    // Unknown aspect / zero dims fall back to the working size.
-    expect(editOutputDims(800, 600, "bogus", "pad")).toEqual({ width: 800, height: 600 });
+    expect(editOutputDims(1024, 1024, "9:16", "outpaint")).toEqual({ width: 1024, height: 1824 });
+    // Unknown aspect / zero dims fall back to the working size — snapped to a multiple of 16
+    // (600 → 608), so the engine's size guard accepts an arbitrary imported/cropped source.
+    expect(editOutputDims(800, 600, "bogus", "pad")).toEqual({ width: 800, height: 608 });
+    // A cropped source at arbitrary dims (the z-image failure: 832×1165) snaps to 832×1168.
+    expect(editOutputDims(832, 1165, "match", "crop")).toEqual({ width: 832, height: 1168 });
     expect(editOutputAspectRatio("1:1")).toBe(1);
     expect(editOutputAspectRatio("match")).toBeNull();
   });
