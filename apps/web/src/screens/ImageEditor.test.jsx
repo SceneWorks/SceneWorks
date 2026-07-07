@@ -1029,6 +1029,25 @@ describe("AI prompt edit", () => {
     expect(body.loras).toEqual(loras);
     expect(body.advanced).toEqual({});
   });
+
+  it("sends advanced.guidanceScale only for a finite override (sc-10275)", () => {
+    const base = {
+      project: { id: "p", name: "P" },
+      requestedGpu: "auto",
+      sourceAssetId: "a",
+      model: "flux2_dev",
+      prompt: "x",
+      width: 10,
+      height: 10,
+    };
+    // Empty / null / non-numeric → omitted, so the model's per-family default stands.
+    expect(buildEditJobBody(base).advanced).toEqual({});
+    expect(buildEditJobBody({ ...base, guidanceScale: "" }).advanced).toEqual({});
+    expect(buildEditJobBody({ ...base, guidanceScale: null }).advanced).toEqual({});
+    // A finite value (number or numeric string) rides advanced.guidanceScale.
+    expect(buildEditJobBody({ ...base, guidanceScale: 3.5 }).advanced).toEqual({ guidanceScale: 3.5 });
+    expect(buildEditJobBody({ ...base, guidanceScale: "4" }).advanced).toEqual({ guidanceScale: 4 });
+  });
 });
 
 describe("reference conditioning (sc-6107)", () => {
