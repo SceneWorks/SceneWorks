@@ -4740,6 +4740,96 @@ async fn image_describe_refine_job_requires_source_asset_and_project() {
 }
 
 #[tokio::test]
+async fn mood_board_refine_job_resolves_multiple_assets_to_image_paths() {
+    // epic 8588 / sc-8595: a "mood board" describe POSTs `sourceAssetIds` (plural). The handler resolves
+    // EACH id to a confined on-disk path, in order, and forwards them as the worker's `imagePaths` array
+    // (no scalar `imagePath`), so the vision model synthesizes ONE prompt from the shared aesthetic.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Mood Board Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
+
+    let mut asset_ids = Vec::new();
+    let mut rel_paths = Vec::new();
+    for name in ["First.png", "Second.png"] {
+        let (status, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            name,
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        asset_ids.push(asset["id"].as_str().expect("asset id").to_owned());
+        rel_paths.push(
+            asset["file"]["path"]
+                .as_str()
+                .expect("file path")
+                .to_owned(),
+        );
+    }
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "image_describe",
+            "sourceAssetIds": asset_ids,
+            "projectId": project_id,
+            "model": "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["payload"]["task"], "image_describe");
+    // The plural array is emitted; the scalar single-image key is NOT.
+    assert!(job["payload"].get("imagePath").is_none());
+    let paths = job["payload"]["imagePaths"]
+        .as_array()
+        .expect("imagePaths array");
+    assert_eq!(paths.len(), 2, "both references resolved");
+    for (path, rel) in paths.iter().zip(rel_paths.iter()) {
+        // Path (not string) comparison: separator-agnostic on Windows (sc-8967).
+        let expected = project_path.join(rel);
+        assert_eq!(std::path::Path::new(path.as_str().unwrap()), expected);
+    }
+}
+
+#[tokio::test]
+async fn mood_board_refine_job_rejects_more_than_the_cap() {
+    // sc-8595: the server-side ceiling (MAX_MOOD_BOARD_IMAGES) is authoritative — a board over the cap is
+    // rejected with 400 before any asset resolution, so a runaway list cannot exhaust the vision runtime.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let too_many: Vec<String> = (0..(crate::prompts::MAX_MOOD_BOARD_IMAGES + 1))
+        .map(|i| format!("asset-{i}"))
+        .collect();
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "image_describe",
+            "sourceAssetIds": too_many,
+            "projectId": "project-1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn image_and_video_job_routes_normalize_payloads() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");

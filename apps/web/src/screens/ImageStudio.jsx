@@ -1299,15 +1299,20 @@ export function ImageStudio() {
   // surfaces the error and lets the user retry, mirroring the magic-prompt error UX. C1: the image is
   // captioning-only — it is consumed here to produce JSON and never passed to generation.
   const onImageCaption = useCallback(
-    async (sourceAssetId) => {
+    // Single id (string) for one reference, or an ARRAY of ids for a mood board (sc-8595): >1 synthesizes
+    // ONE Ideogram JSON caption from the shared style, exactly one keeps the scalar single-image path.
+    async (source) => {
       if (typeof imageCaption !== "function") {
         throw new Error("Image captioning is unavailable.");
       }
       if (!activeProject?.id) {
         throw new Error("Open a project first.");
       }
+      const ids = Array.isArray(source) ? source.filter(Boolean) : [source].filter(Boolean);
+      const multi = ids.length > 1;
       const raw = await imageCaption({
-        sourceAssetId,
+        sourceAssetId: multi ? undefined : ids[0],
+        sourceAssetIds: multi ? ids : undefined,
         projectId: activeProject.id,
         model: VISION_CAPTION_MODEL_REPO,
       });
@@ -1329,15 +1334,21 @@ export function ImageStudio() {
   // never passed to generation.
   const describeCaptionStyle = selectedModel?.captionStyle;
   const onImageDescribe = useCallback(
-    async (sourceAssetId) => {
+    // The shared picker passes a single asset id (string) for one reference, or an ARRAY of ids for a
+    // mood board (sc-8595). Normalize: >1 rides `sourceAssetIds` (worker synthesizes one prompt from the
+    // shared style), exactly one collapses to the scalar `sourceAssetId` (the unchanged single path).
+    async (source) => {
       if (typeof imageDescribe !== "function") {
         throw new Error("Image description is unavailable.");
       }
       if (!activeProject?.id) {
         throw new Error("Open a project first.");
       }
+      const ids = Array.isArray(source) ? source.filter(Boolean) : [source].filter(Boolean);
+      const multi = ids.length > 1;
       const text = await imageDescribe({
-        sourceAssetId,
+        sourceAssetId: multi ? undefined : ids[0],
+        sourceAssetIds: multi ? ids : undefined,
         projectId: activeProject.id,
         model: VISION_CAPTION_MODEL_REPO,
         captionStyle: describeCaptionStyle,
@@ -2185,6 +2196,7 @@ export function ImageStudio() {
                       }
                       buttonLabel="✨ Describe image"
                       busyLabel="Describing…"
+                      showMoodBoard={visionCaptionReady}
                       emptyMessage="The image did not produce a usable description. Try another reference."
                       errorFallback="Could not describe the image."
                       gateDescription="Download the vision captioner to turn a reference image into a prompt. It runs locally on the native worker; the image is only used to write the prompt."

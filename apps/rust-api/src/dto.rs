@@ -35,6 +35,12 @@ pub(crate) struct PromptRefineRequest {
     /// Reference image for the vision tasks (`image_caption` / `image_describe`): a project
     /// asset id resolved to a confined on-disk path before the job is enqueued (epic 8102/8203).
     pub(crate) source_asset_id: Option<String>,
+    /// Multiple reference images for a "mood board" synthesis (epic 8588, sc-8595): the vision task
+    /// examines them together and emits ONE prompt/caption capturing the aesthetic they share. When
+    /// non-empty this takes precedence over `source_asset_id`; each id is resolved to a confined path
+    /// and forwarded as the worker's `imagePaths` array. Empty/absent → the single-image path above.
+    #[serde(default)]
+    pub(crate) source_asset_ids: Vec<String>,
     /// Project owning `source_asset_id` (required for the vision tasks so the
     /// asset's relative `file.path` can be resolved to an absolute path).
     pub(crate) project_id: Option<String>,

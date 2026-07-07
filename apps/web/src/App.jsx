@@ -1377,10 +1377,12 @@ export function App() {
   // the returned JSON with `parseVisionCaption` (aspect_ratio stripped, bboxes KEPT). C1: the image is
   // consumed only to produce the caption — it is NEVER passed to generation as img2img conditioning.
   const imageCaption = useCallback(
-    ({ sourceAssetId, projectId, model, signal }) =>
+    ({ sourceAssetId, sourceAssetIds, projectId, model, signal }) =>
       pollJobToCompletion({
         createPath: "/api/v1/prompts/refine",
-        body: { task: "image_caption", sourceAssetId, projectId, model },
+        // A mood board (epic 8588, sc-8595) sends `sourceAssetIds` (plural); the API synthesizes ONE
+        // caption from the shared aesthetic. A single reference keeps the scalar `sourceAssetId`.
+        body: { task: "image_caption", sourceAssetId, sourceAssetIds, projectId, model },
         deadlineMs: 180000,
         resolveResult: (job) => {
           const caption = job.result?.refinedPrompt;
@@ -1405,10 +1407,12 @@ export function App() {
   // text the caller drops into the prompt box. C1: the image is consumed only to produce the prompt — it
   // is NEVER passed to generation as img2img conditioning.
   const imageDescribe = useCallback(
-    ({ sourceAssetId, projectId, model, captionStyle, signal }) =>
+    ({ sourceAssetId, sourceAssetIds, projectId, model, captionStyle, signal }) =>
       pollJobToCompletion({
         createPath: "/api/v1/prompts/refine",
-        body: { task: "image_describe", sourceAssetId, projectId, model, captionStyle },
+        // A mood board (epic 8588, sc-8595) sends `sourceAssetIds` (plural); the API synthesizes ONE
+        // prompt from the aesthetic they share. A single reference keeps the scalar `sourceAssetId`.
+        body: { task: "image_describe", sourceAssetId, sourceAssetIds, projectId, model, captionStyle },
         deadlineMs: 180000,
         resolveResult: (job) => {
           const description = job.result?.refinedPrompt;
