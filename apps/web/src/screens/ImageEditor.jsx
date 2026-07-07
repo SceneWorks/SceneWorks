@@ -9,6 +9,7 @@ import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import {
+  BLEND_MODES,
   activeLayerOf,
   addLayer,
   compositeLayersToCanvas,
@@ -25,7 +26,6 @@ import {
   singleLayerWorking,
   snapshotLayers,
 } from "../imageLayers.js";
-import { LayersPanel } from "../components/LayersPanel.jsx";
 import { CurveEditor } from "../components/CurveEditor.jsx";
 // Pure job builders + model/engine helpers (sc-6112) — extracted to a konva-free module
 // so the Library batch flow can reuse them; imported for internal use and re-exported
@@ -144,6 +144,89 @@ const MIN_SCALE = 0.05;
 const MAX_SCALE = 16;
 const ZOOM_STEP = 1.2;
 const MIN_CROP_PX = 8;
+
+// Redesign panel layout (epic 10243): accordion (default) / right / left / bottom,
+// persisted across sessions. Invalid/absent → accordion.
+export const EDITOR_LAYOUTS = ["accordion", "right", "left", "bottom"];
+const EDITOR_LAYOUT_KEY = "sceneworks-ie-layout";
+export function readStoredEditorLayout() {
+  try {
+    const saved = window.localStorage.getItem(EDITOR_LAYOUT_KEY);
+    if (EDITOR_LAYOUTS.includes(saved)) return saved;
+  } catch {
+    /* ignore (private mode etc.) */
+  }
+  return "accordion";
+}
+
+// Tool identity for the rail / accordion headers / inspector header (epic 10243).
+export const EDITOR_TOOL_ORDER = ["move", "transform", "crop", "upscale", "detail", "color", "edit", "boxes"];
+export const EDITOR_TOOL_META = {
+  move: { label: "Move", desc: "Pan and inspect the canvas" },
+  transform: { label: "Transform", desc: "Move, scale & rotate the layer" },
+  crop: { label: "Crop", desc: "Trim to a size or ratio" },
+  upscale: { label: "Upscale", desc: "Increase resolution with AI" },
+  detail: { label: "Detail", desc: "Refine texture with tile ControlNet" },
+  color: { label: "Color grade", desc: "Adjust tone, levels & curves" },
+  edit: { label: "AI Edit", desc: "Prompt-driven edit & inpaint" },
+  boxes: { label: "Boxes", desc: "Region layout & color-keyed edit" },
+};
+
+// Inline stroke icons ported from the design handoff `ICONS` map (epic 10243).
+const strokeSvg = (props, children) => (
+  <svg fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.9} viewBox="0 0 24 24" {...props}>
+    {children}
+  </svg>
+);
+export const EDITOR_TOOL_ICONS = {
+  move: strokeSvg({ key: "move" }, [
+    <polyline key="a" points="5 9 2 12 5 15" />, <polyline key="b" points="9 5 12 2 15 5" />,
+    <polyline key="c" points="15 19 12 22 9 19" />, <polyline key="d" points="19 9 22 12 19 15" />,
+    <line key="e" x1="2" x2="22" y1="12" y2="12" />, <line key="f" x1="12" x2="12" y1="2" y2="22" />,
+  ]),
+  transform: strokeSvg({ key: "transform" }, [
+    <rect key="a" height="16" rx="1" width="16" x="4" y="4" />,
+    <circle key="b" cx="4" cy="4" fill="currentColor" r="2" />, <circle key="c" cx="20" cy="4" fill="currentColor" r="2" />,
+    <circle key="d" cx="4" cy="20" fill="currentColor" r="2" />, <circle key="e" cx="20" cy="20" fill="currentColor" r="2" />,
+  ]),
+  crop: strokeSvg({ key: "crop" }, [
+    <path key="a" d="M6 2v14a2 2 0 0 0 2 2h14" />, <path key="b" d="M18 22V8a2 2 0 0 0-2-2H2" />,
+  ]),
+  upscale: strokeSvg({ key: "upscale" }, [
+    <polyline key="a" points="15 3 21 3 21 9" />, <polyline key="b" points="9 21 3 21 3 15" />,
+    <line key="c" x1="21" x2="14" y1="3" y2="10" />, <line key="d" x1="3" x2="10" y1="21" y2="14" />,
+  ]),
+  detail: strokeSvg({ key: "detail" }, [
+    <path key="a" d="M12 3l1.9 4.8L19 9.5l-4.1 2.9L16 18l-4-2.7L8 18l1.1-5.6L5 9.5l5.1-1.7z" />,
+  ]),
+  color: strokeSvg({ key: "color" }, [
+    <circle key="a" cx="12" cy="12" r="9" />, <path key="b" d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none" />,
+  ]),
+  edit: strokeSvg({ key: "edit" }, [
+    <path key="a" d="M15 4l5 5" />, <path key="b" d="M4 20l4-1 10-10-3-3L5 16z" />,
+    <path key="c" d="M14 5l1.5-1.5a2 2 0 0 1 3 3L17 8" />,
+  ]),
+  boxes: strokeSvg({ key: "boxes" }, [
+    <rect key="a" height="7" rx="1" width="8" x="3" y="4" />, <rect key="b" height="12" rx="1" width="8" x="13" y="4" />,
+    <rect key="c" height="6" rx="1" width="8" x="3" y="14" />,
+  ]),
+};
+const IeChevron = () => (
+  <svg fill="none" height="15" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} viewBox="0 0 24 24" width="15">
+    <path d="M6 9l6 6 6-6" />
+  </svg>
+);
+const IeEyeOpen = () => (
+  <svg fill="none" height="15" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" width="15">
+    <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z" />
+    <circle cx="12" cy="12" r="3" />
+  </svg>
+);
+const IeEyeOff = () => (
+  <svg className="ie-vis-off" fill="none" height="15" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" width="15">
+    <path d="M17.9 17.9A10.4 10.4 0 0 1 12 19C5 19 1 12 1 12a19 19 0 0 1 5.1-5.9M9.9 4.2A10.9 10.9 0 0 1 12 4c7 0 11 7 11 7a19 19 0 0 1-2.2 3.2M1 1l22 22" />
+  </svg>
+);
 
 // Modifier glyph for the shortcut reference (the handler accepts both ⌘ and Ctrl).
 const IS_MAC =
@@ -524,6 +607,10 @@ export function ImageEditor() {
     editorLaunch = null,
     clearEditorLaunch,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
+    // Global theme (sc-10244): the redesign top-bar ☾/☀ toggle drives the app-wide
+    // data-theme, not a screen-local override — consistent with the rest of the app.
+    theme = "light",
+    changeTheme,
   } = useAppContext();
   // Mac UI gating (sc-3486): the upscale tool itself runs in-process on Rust (Real-ESRGAN,
   // sc-3489), so it is available on a gated Mac — this block is a defensive guard that stays
@@ -545,6 +632,24 @@ export function ImageEditor() {
   const [status, setStatus] = useState({ loading: false, error: "" });
   const [pickerOpen, setPickerOpen] = useState(false);
   const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
+
+  // Redesign shell UI state (epic 10243). `layout` picks one of four panel
+  // arrangements (accordion default) and persists to localStorage; `accCollapsed`
+  // collapses the open accordion tool; `layersOpen` collapses the Layers block.
+  const [layout, setLayoutState] = useState(readStoredEditorLayout);
+  const setLayout = useCallback((next) => {
+    setLayoutState(next);
+    try {
+      window.localStorage.setItem(EDITOR_LAYOUT_KEY, next);
+    } catch {
+      /* ignore (private mode etc.) */
+    }
+  }, []);
+  const [accCollapsed, setAccCollapsed] = useState(false);
+  const [layersOpen, setLayersOpen] = useState(true);
+  // One undo checkpoint per opacity DRAG (mirrors LayersPanel): the first change of
+  // a gesture snapshots; subsequent ticks coalesce until pointer-up resets it.
+  const layerOpacityGestureRef = useRef(false);
 
   // Crop tool (sc-2430): client-side, rasterized into a new working image on Apply.
   const [tool, setTool] = useState("move");
@@ -2087,83 +2192,1231 @@ export function ImageEditor() {
   // pre-fill the prompt field on demand; "" when no box is describable yet.
   const composedPrompt = composeColorPrompt(boxes);
 
-  return (
-    <section className="main-surface image-editor-surface">
-      <div className="image-editor-bar">
-        <span className="image-editor-title" title={working ? working.source.name : undefined}>
-          {working ? working.source.name : "No image open"}
-        </span>
-        <div className="image-editor-bar-actions">
-          <button className={working ? "" : "primary"} onClick={() => setPickerOpen(true)} type="button">
-            Open
-          </button>
-          <button onClick={() => setNewLayoutOpen(true)} title="Start a blank canvas for box layout" type="button">
-            New layout
-          </button>
-          <button
-            aria-pressed={shortcutsOpen}
-            className={shortcutsOpen ? "image-editor-help active" : "image-editor-help"}
-            onClick={() => setShortcutsOpen((on) => !on)}
-            title="Keyboard shortcuts (?)"
-            type="button"
-          >
-            ⌨
-          </button>
-          {working && working.source.assetId ? (
-            <button
-              onClick={() => setPreviewAsset?.(imageAssets.find((item) => item.id === working.source.assetId))}
-              title="Preview the source asset"
-              type="button"
-            >
-              Source
-            </button>
-          ) : null}
-          {working ? (
-            <>
+  // ── Redesign shell derived values / dispatch (epic 10243) ──────────────────
+  const activeMeta = EDITOR_TOOL_META[tool];
+  const zoomPct = Math.round(view.scale * 100);
+  const layerCount = working ? working.layers.length : 0;
+  const docName = working ? working.source.name : "No image open";
+  const docFormat = working ? (working.source.name?.split(".").pop() || "png").toUpperCase() : "";
+  const docSub = working ? `${working.width} × ${working.height} · ${docFormat}` : "No document";
+  // Accordion open only when the tool's panel isn't collapsed (accordion mode only).
+  const panelOpen = !(layout === "accordion" && accCollapsed);
+  const maskActive = canMask && (maskHasContent(maskLines) || Boolean(maskBaseImage));
+
+  function toolIsDisabled(key) {
+    if (key === "move") return false;
+    if (aiOp) return true;
+    if (key === "upscale") return Boolean(macUpscaleBlock);
+    if (key === "detail") return detailModels.length === 0;
+    return false;
+  }
+  // Route each tool through its existing entry handler (some prime state, e.g. crop
+  // rect / transform target / color preview) — mirrors the pre-redesign toolbar.
+  function selectTool(key) {
+    if (toolIsDisabled(key)) return;
+    if (key === "move") cancelCrop();
+    else if (key === "transform") startTransform();
+    else if (key === "crop") startCrop();
+    else if (key === "color") startColorGrade();
+    else if (key === "boxes") selectBoxTool();
+    else setTool(key);
+  }
+  // Accordion header: clicking the open tool collapses it; any other selects + expands.
+  function onAccordionHead(key) {
+    if (tool === key) setAccCollapsed((v) => !v);
+    else {
+      setAccCollapsed(false);
+      selectTool(key);
+    }
+  }
+  const toolHint = {
+    move: "Drag to pan · scroll to zoom",
+    transform: "Drag the handles on the canvas to move, scale or rotate",
+    crop: "Drag the crop handles, or set an exact size on the right",
+    upscale: "Pick an engine and factor, then run",
+    detail: "Tune detail & structure, then enhance",
+    color: "Grade with adjust, levels or curves",
+    edit: maskMode ? "Paint or box-select the region to edit" : "Describe the edit on the right",
+    boxes: "Drag to draw a region, then describe it",
+  }[tool];
+
+  // Short engine blurbs for the upscale radio cards (design copy). Keyed by the
+  // platform engine list (`availableUpscaleEngines`); unknown keys get no blurb.
+  const UPSCALE_ENGINE_DESC = {
+    "real-esrgan": "Fast, faithful general-purpose upscaler. Great default.",
+    seedvr2: "Detail-restoring diffusion upscaler for degraded sources.",
+    "aura-sr": "Sharpest output, best for print. Slower.",
+  };
+  const setCropDim = (dim, raw) => {
+    const value = Number(raw);
+    if (!cropRect || !working || !Number.isFinite(value)) return;
+    setCropRect(clampCropToImage({ ...cropRect, [dim]: value }));
+  };
+
+  const renderToolPanel = (key) => {
+    switch (key) {
+      case "move":
+        return (
+          <>
+            <div className="ie-section">
+              <div className="ie-sec-title">Document</div>
+              <div className="ie-readout">
+                <span className="ie-readout-k">Dimensions</span>
+                <span className="ie-readout-v">
+                  {working.width} × {working.height}
+                </span>
+              </div>
+              <div className="ie-readout">
+                <span className="ie-readout-k">Layers</span>
+                <span className="ie-readout-v">{layerCount}</span>
+              </div>
+              <p className="ie-note">
+                Drag on the canvas to pan. Scroll to zoom. Pick a tool to start editing — each tool&apos;s controls appear
+                here.
+              </p>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">Quick actions</div>
+              <button className="ie-btn block" onClick={fitToView} type="button">
+                Fit to view
+              </button>
+              <button className="ie-btn block" onClick={actualSize} type="button">
+                Actual size (100%)
+              </button>
+            </div>
+          </>
+        );
+      case "transform":
+        return (
+          <>
+            <div className="ie-section">
+              <div className="ie-sec-title">Transform</div>
+              <p className="ie-note">
+                Drag, scale or rotate <b>{activeLayerOf(working)?.name}</b> directly on the canvas using the handles.
+              </p>
+            </div>
+            <div className="ie-section">
+              <button className="ie-btn block" onClick={resetActiveLayerTransform} type="button">
+                Reset transform
+              </button>
+              <button className="ie-btn block primary" onClick={() => setTool("move")} type="button">
+                Done
+              </button>
+            </div>
+          </>
+        );
+      case "crop":
+        return (
+          <>
+            <div className="ie-section">
+              <div className="ie-sec-title">Aspect ratio</div>
+              <div className="ie-seg wrap" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
+                {CROP_RATIOS.map((entry) => (
+                  <button
+                    className="ie-seg-btn"
+                    data-active={ratioKey === entry.key}
+                    key={entry.key}
+                    onClick={() => chooseRatio(entry.key)}
+                    type="button"
+                  >
+                    {entry.label}
+                  </button>
+                ))}
+              </div>
               <button
-                className="image-editor-undo"
-                disabled={!historyFlags.canUndo || Boolean(aiOp)}
-                onClick={undo}
-                title="Undo (⌘Z)"
+                className="ie-btn block"
+                data-active={rotated}
+                disabled={ratioKey === "free" || ratioKey === "1:1"}
+                onClick={toggleRotate}
                 type="button"
               >
-                Undo
+                ⟲ Swap orientation
+              </button>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">Size</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: "8px", alignItems: "end" }}>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Width</span>
+                  </div>
+                  <input
+                    className="ie-input ie-numfield"
+                    onChange={(event) => setCropDim("width", event.target.value)}
+                    type="number"
+                    value={cropRect ? Math.round(cropRect.width) : ""}
+                  />
+                </div>
+                <span style={{ paddingBottom: "10px", color: "var(--ie-faint)" }}>×</span>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Height</span>
+                  </div>
+                  <input
+                    className="ie-input ie-numfield"
+                    onChange={(event) => setCropDim("height", event.target.value)}
+                    type="number"
+                    value={cropRect ? Math.round(cropRect.height) : ""}
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="ie-section">
+              <button className="ie-btn block primary" onClick={applyCrop} type="button">
+                Apply crop
+              </button>
+              <button className="ie-btn block" onClick={cancelCrop} type="button">
+                Cancel
+              </button>
+            </div>
+          </>
+        );
+      case "upscale":
+        return (
+          <>
+            <div className="ie-section">
+              <div className="ie-sec-title">Engine</div>
+              <div className="ie-cards">
+                {availableUpscaleEngines.map((entry) => (
+                  <button
+                    className="ie-card"
+                    data-active={upscaleEngine === entry.key}
+                    key={entry.key}
+                    onClick={() => {
+                      setUpscaleEngine(entry.key);
+                      if (!entry.factors.includes(upscaleFactor)) setUpscaleFactor(entry.factors[0]);
+                    }}
+                    type="button"
+                  >
+                    <span className="ie-radio" />
+                    <span>
+                      <span className="ie-card-name">{entry.label}</span>
+                      {UPSCALE_ENGINE_DESC[entry.key] ? (
+                        <span className="ie-card-desc">{UPSCALE_ENGINE_DESC[entry.key]}</span>
+                      ) : null}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">Scale factor</div>
+              <div className="ie-seg wrap two">
+                {upscaleFactorsForEngine(upscaleEngine).map((value) => (
+                  <button
+                    className="ie-seg-btn"
+                    data-active={upscaleFactor === value}
+                    key={value}
+                    onClick={() => setUpscaleFactor(value)}
+                    type="button"
+                  >
+                    {value}×
+                  </button>
+                ))}
+              </div>
+              {upscaleEngineHasSoftness(upscaleEngine) ? (
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Detail recovery</span>
+                    <span className="ie-field-val">{upscaleSoftness.toFixed(2)}</span>
+                  </div>
+                  <input
+                    className="ie-range"
+                    max={1}
+                    min={0}
+                    onChange={(event) => setUpscaleSoftness(Number(event.target.value))}
+                    step={0.05}
+                    type="range"
+                    value={upscaleSoftness}
+                  />
+                  <p className="ie-note">Higher restores more texture from a degraded source; 0 stays faithful to the original.</p>
+                </div>
+              ) : null}
+              <div className="ie-readout">
+                <span className="ie-readout-k">Output size</span>
+                <span className="ie-readout-v">
+                  {working.width * upscaleFactor} × {working.height * upscaleFactor}
+                </span>
+              </div>
+            </div>
+            <div className="ie-section">
+              <button className="ie-btn block primary" disabled={!!aiOp} onClick={runUpscale} type="button">
+                Upscale image
+              </button>
+              <button className="ie-btn block" onClick={() => setTool("move")} type="button">
+                Cancel
+              </button>
+            </div>
+          </>
+        );
+      case "detail":
+        return detailModels.length === 0 ? (
+          <div className="ie-section">
+            <p className="ie-note">No detail-capable models installed.</p>
+          </div>
+        ) : (
+          <>
+            <div className="ie-section">
+              <div className="ie-sec-title">Backbone</div>
+              <select className="ie-select" onChange={(event) => setDetailModel(event.target.value)} value={detailModel}>
+                {detailModels.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label ?? model.id}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">Refinement</div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Detail amount</span>
+                  <span className="ie-field-val">{Math.round(detailStrength * 100)}%</span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={0.8}
+                  min={0.3}
+                  onChange={(event) => setDetailStrength(Number(event.target.value))}
+                  step={0.05}
+                  type="range"
+                  value={detailStrength}
+                />
+                <p className="ie-note">Higher invents more fine texture.</p>
+              </div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Structure lock</span>
+                  <span className="ie-field-val">{Math.round(detailCnScale * 100)}%</span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={1}
+                  min={0.4}
+                  onChange={(event) => setDetailCnScale(Number(event.target.value))}
+                  step={0.05}
+                  type="range"
+                  value={detailCnScale}
+                />
+                <p className="ie-note">Higher keeps the result closer to the source composition.</p>
+              </div>
+            </div>
+            <div className="ie-section">
+              <button className="ie-btn block primary" disabled={!!aiOp || !detailModel} onClick={runDetail} type="button">
+                Enhance detail
+              </button>
+              <button className="ie-btn block" onClick={() => setTool("move")} type="button">
+                Cancel
+              </button>
+            </div>
+          </>
+        );
+      case "color":
+        return (
+          <>
+            <div className="ie-section">
+              <div className="ie-seg wrap" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
+                {[
+                  ["adjust", "Adjust"],
+                  ["levels", "Levels"],
+                  ["curves", "Curves"],
+                ].map(([mode, label]) => (
+                  <button
+                    className="ie-seg-btn"
+                    data-active={colorMode === mode}
+                    key={mode}
+                    onClick={() => setColorMode(mode)}
+                    type="button"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {colorMode === "adjust" ? (
+              <div className="ie-section">
+                <div className="ie-sec-title">Tone &amp; color</div>
+                {COLOR_ADJUSTMENTS.map(({ key: adjKey, label }) => (
+                  <div className="ie-field" key={adjKey}>
+                    <div className="ie-field-top">
+                      <span className="ie-field-label">{label}</span>
+                      <span className="ie-field-val">
+                        {colorAdjust[adjKey] > 0 ? "+" : ""}
+                        {Math.round(colorAdjust[adjKey] * 100)}
+                      </span>
+                    </div>
+                    <input
+                      className="ie-range"
+                      max={1}
+                      min={-1}
+                      onChange={(event) => setAdjustValue(adjKey, Number(event.target.value))}
+                      onDoubleClick={() => resetAdjust(adjKey)}
+                      step={0.01}
+                      type="range"
+                      value={colorAdjust[adjKey]}
+                    />
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {colorMode === "levels" ? (
+              <div className="ie-section">
+                <div className="ie-sec-title">Channel</div>
+                <select className="ie-select" onChange={(event) => setColorChannel(event.target.value)} value={colorChannel}>
+                  <option value="master">Master (RGB)</option>
+                  <option value="r">Red</option>
+                  <option value="g">Green</option>
+                  <option value="b">Blue</option>
+                </select>
+                <canvas className="ie-histo" height={56} ref={histogramRef} width={280} />
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Black point</span>
+                    <span className="ie-field-val">{levels[colorChannel].black}</span>
+                  </div>
+                  <input
+                    className="ie-range"
+                    max={254}
+                    min={0}
+                    onChange={(event) => setLevelsValue("black", Number(event.target.value))}
+                    step={1}
+                    type="range"
+                    value={levels[colorChannel].black}
+                  />
+                </div>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Gamma</span>
+                    <span className="ie-field-val">{levels[colorChannel].gamma.toFixed(2)}</span>
+                  </div>
+                  <input
+                    className="ie-range"
+                    max={2.5}
+                    min={0.1}
+                    onChange={(event) => setLevelsValue("gamma", Number(event.target.value))}
+                    step={0.01}
+                    type="range"
+                    value={levels[colorChannel].gamma}
+                  />
+                </div>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">White point</span>
+                    <span className="ie-field-val">{levels[colorChannel].white}</span>
+                  </div>
+                  <input
+                    className="ie-range"
+                    max={255}
+                    min={1}
+                    onChange={(event) => setLevelsValue("white", Number(event.target.value))}
+                    step={1}
+                    type="range"
+                    value={levels[colorChannel].white}
+                  />
+                </div>
+              </div>
+            ) : null}
+            {colorMode === "curves" ? (
+              <div className="ie-section">
+                <div className="ie-sec-title">Tone curve</div>
+                <select className="ie-select" onChange={(event) => setColorChannel(event.target.value)} value={colorChannel}>
+                  <option value="master">Master (RGB)</option>
+                  <option value="r">Red</option>
+                  <option value="g">Green</option>
+                  <option value="b">Blue</option>
+                </select>
+                <div className="ie-curvewrap">
+                  <CurveEditor
+                    onChange={(points) => setCurves((prev) => ({ ...prev, [colorChannel]: points }))}
+                    points={curves[colorChannel]}
+                    stroke={channelStroke}
+                  />
+                </div>
+                <p className="ie-note">Drag points to reshape the curve. Double-click to add a point.</p>
+              </div>
+            ) : null}
+            <div className="ie-section">
+              <button className="ie-btn block" disabled={activeGradeIsIdentity()} onClick={resetActiveColorMode} type="button">
+                Reset
               </button>
               <button
-                className="image-editor-redo"
-                disabled={!historyFlags.canRedo || Boolean(aiOp)}
-                onClick={redo}
-                title="Redo (⇧⌘Z / Ctrl+Y)"
+                className="ie-btn block primary"
+                disabled={activeGradeIsIdentity()}
+                onClick={applyColorGrade}
                 type="button"
               >
-                Redo
+                Apply grade
               </button>
-              <button onClick={runDownload} title="Download a PNG to your computer" type="button">
-                Download
-              </button>
-              {savedAssetId && !dirty ? <span className="image-editor-saved">Saved ✓</span> : null}
-              <button
-                className="primary"
-                disabled={!dirty || saving}
-                onClick={runSave}
-                title="Save a new image to the project Library"
-                type="button"
-              >
-                {saving ? "Saving…" : "Save"}
-              </button>
-            </>
+            </div>
+          </>
+        );
+      case "edit":
+        return renderEditPanel();
+      case "boxes":
+        return renderBoxesPanel();
+      default:
+        return null;
+    }
+  };
+
+  const renderEditPanel = () => {
+    if (editModels.length === 0) {
+      return (
+        <div className="ie-section">
+          <p className="ie-note">No edit-capable models installed.</p>
+        </div>
+      );
+    }
+    return (
+      <>
+        <div className="ie-section">
+          <div className="ie-sec-title">Model</div>
+          <select className="ie-select" onChange={(event) => setEditModel(event.target.value)} value={editModel}>
+            {editModels.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.label ?? model.id}
+              </option>
+            ))}
+          </select>
+          <div className="ie-field">
+            <div className="ie-field-top">
+              <span className="ie-field-label">Instruction</span>
+            </div>
+            <textarea
+              className="ie-textarea"
+              onChange={(event) => setEditPrompt(event.target.value)}
+              placeholder="Describe the edit — e.g. “replace the background with a foggy pine forest at dawn”"
+              value={editPrompt}
+            />
+          </div>
+        </div>
+
+        <div className="ie-section">
+          <div className="ie-sec-title">Output</div>
+          <div className="ie-field">
+            <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+              Aspect
+            </span>
+            <div className="ie-seg wrap four">
+              {EDIT_OUTPUT_ASPECTS.map((aspect) => (
+                <button
+                  className="ie-seg-btn"
+                  data-active={editAspect === aspect.key}
+                  key={aspect.key}
+                  onClick={() => setEditAspect(aspect.key)}
+                  type="button"
+                >
+                  {aspect.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {editAspect !== "match" ? (
+            <FitModeControl
+              inpaintCapable={canMask}
+              label="Fill new area"
+              onChange={setEditFitMode}
+              value={effectiveFitMode(editFitMode, canMask)}
+            />
           ) : null}
         </div>
+
+        {canMask ? (
+          <div className="ie-section">
+            <div className="ie-sec-title">
+              Mask
+              <button
+                className="ie-btn sm ghost"
+                data-active={maskMode}
+                onClick={() => setMaskMode((on) => !on)}
+                style={{ height: "24px" }}
+                type="button"
+              >
+                {maskMode ? "On" : "Off"}
+              </button>
+            </div>
+            {maskMode ? (
+              <>
+                {smartSelectSupported ? (
+                  <div className="ie-seg two" style={{ width: "100%" }}>
+                    <button
+                      className="ie-seg-btn"
+                      data-active={maskSubTool === "brush"}
+                      onClick={() => setMaskSubTool("brush")}
+                      type="button"
+                    >
+                      Brush
+                    </button>
+                    <button
+                      className="ie-seg-btn"
+                      data-active={maskSubTool === "select"}
+                      disabled={aiOp?.label === "smart select"}
+                      onClick={() => {
+                        setMaskSubTool("select");
+                        setMaskErase(false);
+                      }}
+                      type="button"
+                    >
+                      {aiOp?.label === "smart select" ? "Segmenting…" : "Smart select"}
+                    </button>
+                  </div>
+                ) : null}
+                {!smartSelectSupported || maskSubTool === "brush" ? (
+                  <>
+                    <div className="ie-field">
+                      <div className="ie-field-top">
+                        <span className="ie-field-label">Brush size</span>
+                        <span className="ie-field-val">{maskBrush} px</span>
+                      </div>
+                      <input
+                        className="ie-range"
+                        max={300}
+                        min={5}
+                        onChange={(event) => setMaskBrush(Number(event.target.value))}
+                        step={1}
+                        type="range"
+                        value={maskBrush}
+                      />
+                    </div>
+                    <button className="ie-btn block" data-active={maskErase} onClick={() => setMaskErase((on) => !on)} type="button">
+                      Eraser
+                    </button>
+                  </>
+                ) : (
+                  <p className="ie-note">Drag a box around an object on the canvas — SAM3 auto-masks it.</p>
+                )}
+                <div>
+                  <span className="ie-field-label" style={{ display: "block", marginBottom: "7px" }}>
+                    Refine selection
+                  </span>
+                  <div className="ie-field" style={{ marginBottom: "8px" }}>
+                    <div className="ie-field-top">
+                      <span className="ie-field-label" style={{ fontSize: "11.5px", color: "var(--ie-muted)" }}>
+                        Radius
+                      </span>
+                      <span className="ie-field-val">{maskRefineRadius}px</span>
+                    </div>
+                    <input
+                      className="ie-range"
+                      max={40}
+                      min={1}
+                      onChange={(event) => setMaskRefineRadius(Number(event.target.value))}
+                      step={1}
+                      type="range"
+                      value={maskRefineRadius}
+                    />
+                  </div>
+                  <div className="ie-chip-row">
+                    <button
+                      className="ie-chip"
+                      disabled={!maskHasContent(maskLines) && !maskBaseImage}
+                      onClick={() => refineMask("feather")}
+                      type="button"
+                    >
+                      Feather
+                    </button>
+                    <button
+                      className="ie-chip"
+                      disabled={!maskHasContent(maskLines) && !maskBaseImage}
+                      onClick={() => refineMask("grow")}
+                      type="button"
+                    >
+                      Grow
+                    </button>
+                    <button
+                      className="ie-chip"
+                      disabled={!maskHasContent(maskLines) && !maskBaseImage}
+                      onClick={() => refineMask("shrink")}
+                      type="button"
+                    >
+                      Shrink
+                    </button>
+                    <button className="ie-chip" onClick={() => refineMask("invert")} type="button">
+                      Invert
+                    </button>
+                    <button
+                      className="ie-chip"
+                      disabled={!maskLines.length && !maskBaseImage}
+                      onClick={clearMask}
+                      type="button"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <p className="ie-note">Turn on a mask to confine the edit to a painted or selected region (inpaint).</p>
+            )}
+          </div>
+        ) : null}
+
+        {multiRefCapable ? (
+          <div className="ie-section">
+            <div className="ie-sec-title">Reference images</div>
+            <div className="ie-refs">
+              {refAssetIds.map((id) => {
+                const asset = imageAssets.find((item) => item.id === id);
+                return (
+                  <div className="ie-ref" key={id}>
+                    {asset ? <img alt="" src={assetUrl(asset)} /> : <span>?</span>}
+                    <button
+                      aria-label="Remove reference"
+                      className="ie-ref-remove"
+                      onClick={() => setRefAssetIds((prev) => prev.filter((other) => other !== id))}
+                      type="button"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                );
+              })}
+              <button
+                className="ie-ref-add"
+                disabled={refAssetIds.length >= MAX_EDIT_REFERENCES - 1}
+                onClick={() => setRefPickerOpen(true)}
+                title="Condition the edit on reference image(s)"
+                type="button"
+              >
+                +
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="ie-section">
+          <div className="ie-field">
+            <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+              Seed
+            </span>
+            <input
+              className="ie-input"
+              min={0}
+              onChange={(event) => setEditSeed(event.target.value)}
+              placeholder="Random"
+              style={{ fontFamily: "var(--ie-mono)" }}
+              type="number"
+              value={editSeed}
+            />
+          </div>
+          <button className="ie-btn block primary" disabled={!editPrompt.trim() || !!aiOp} onClick={runEdit} type="button">
+            {maskActive ? "Inpaint region" : "Generate edit"}
+          </button>
+        </div>
+      </>
+    );
+  };
+
+  const renderBoxesPanel = () => (
+    <>
+      <div className="ie-section">
+        <div className="ie-sec-title">Box color</div>
+        <div className="ie-swatches">
+          {BOX_PALETTE.map((entry) => (
+            <button
+              aria-label={entry.name}
+              className="ie-swatch"
+              data-active={boxColor === entry.value}
+              key={entry.value}
+              onClick={() => chooseBoxColor(entry.value)}
+              style={{ background: entry.value }}
+              title={entry.name}
+              type="button"
+            />
+          ))}
+          <label className="ie-swatch ie-swatch-custom" title="Custom color">
+            <input aria-label="Custom box color" onChange={(event) => chooseBoxColor(event.target.value)} type="color" value={boxColor.toLowerCase()} />
+          </label>
+        </div>
+        <p className="ie-note">Drag on the canvas to draw a colored region, then describe what belongs there.</p>
       </div>
 
-      {status.error ? <div className="notice notice-error image-editor-notice">{status.error}</div> : null}
+      <div className="ie-section">
+        <div className="ie-sec-title">Regions ({boxes.length})</div>
+        {boxes.length ? (
+          <div className="ie-chip-row">
+            {boxes.map((box, index) => {
+              const incomplete = boxMetadataGaps(box).length > 0;
+              return (
+                <button
+                  className="ie-chip"
+                  data-active={selectedBoxId === box.id}
+                  key={box.id}
+                  onClick={() => setSelectedBoxId(box.id)}
+                  title={box.desc ? `${index + 1}: ${box.desc}` : `Box ${index + 1} — needs a description`}
+                  type="button"
+                >
+                  <span className="ie-dot" style={{ background: box.color }} />
+                  {index + 1}
+                  {incomplete ? <span className="warn">!</span> : null}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="ie-note">Drag on the image to draw a box.</p>
+        )}
+        {boxes.length ? (
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button className="ie-btn sm" disabled={!selectedBoxId} onClick={() => deleteBox(selectedBoxId)} type="button">
+              Delete
+            </button>
+            <button className="ie-btn sm" disabled={!boxes.length} onClick={clearBoxes} type="button">
+              Clear all
+            </button>
+          </div>
+        ) : null}
+      </div>
 
-      <div
-        className="image-editor-canvas-wrap"
-        onDragOver={(event) => event.preventDefault()}
-        onDrop={handleDrop}
-        ref={containerRef}
-      >
+      {selectedBox ? (
+        <div className="ie-section">
+          <div className="ie-sec-title">
+            Region details
+            <span className="ie-field-val">Box {boxes.indexOf(selectedBox) + 1}</span>
+          </div>
+          <div className="ie-seg two" style={{ width: "100%" }}>
+            <button
+              className="ie-seg-btn"
+              data-active={selectedBox.type === "obj"}
+              onClick={() => updateBox(selectedBox.id, { type: "obj" })}
+              type="button"
+            >
+              Object
+            </button>
+            <button
+              className="ie-seg-btn"
+              data-active={selectedBox.type === "text"}
+              onClick={() => updateBox(selectedBox.id, { type: "text" })}
+              type="button"
+            >
+              Text
+            </button>
+          </div>
+          <div className="ie-field">
+            <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+              Description
+            </span>
+            <input
+              className="ie-input"
+              onChange={(event) => updateBox(selectedBox.id, { desc: event.target.value })}
+              placeholder="What is in this region?"
+              value={selectedBox.desc ?? ""}
+            />
+          </div>
+          {selectedBox.type === "text" ? (
+            <div className="ie-field">
+              <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+                Literal text
+              </span>
+              <input
+                className="ie-input"
+                onChange={(event) => updateBox(selectedBox.id, { text: event.target.value })}
+                placeholder="Text to render"
+                value={selectedBox.text ?? ""}
+              />
+            </div>
+          ) : null}
+          <div className="ie-field">
+            <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+              Element colors ({(selectedBox.colorPalette ?? []).length}/{MAX_BOX_PALETTE})
+            </span>
+            <div className="ie-swatches">
+              {(selectedBox.colorPalette ?? []).map((color) => (
+                <button
+                  aria-label={`Remove ${color}`}
+                  className="ie-swatch"
+                  key={color}
+                  onClick={() => updateBox(selectedBox.id, { colorPalette: removePaletteColor(selectedBox.colorPalette, color) })}
+                  style={{ background: color }}
+                  title={`Remove ${color}`}
+                  type="button"
+                />
+              ))}
+              {(selectedBox.colorPalette ?? []).length < MAX_BOX_PALETTE ? (
+                <label className="ie-swatch ie-swatch-custom" title="Add color">
+                  <input
+                    aria-label="Add element color"
+                    onChange={(event) => updateBox(selectedBox.id, { colorPalette: addPaletteColor(selectedBox.colorPalette, event.target.value) })}
+                    type="color"
+                  />
+                </label>
+              ) : null}
+            </div>
+          </div>
+          {selectedBoxGaps.length ? (
+            <p className="ie-note">For Ideogram layout this box still needs {selectedBoxGaps.join(", ")}. The color-keyed edit path only needs a color + description.</p>
+          ) : (
+            <p className="ie-note" style={{ color: "var(--ie-accent)" }}>
+              Ready for Ideogram layout ✓
+            </p>
+          )}
+        </div>
+      ) : null}
+
+      {boxes.length ? (
+        <div className="ie-section">
+          <div className="ie-sec-title">Generate</div>
+          {editModels.length ? (
+            <>
+              <select className="ie-select" onChange={(event) => setEditModel(event.target.value)} value={editModel}>
+                {editModels.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label ?? model.id}
+                  </option>
+                ))}
+              </select>
+              <input
+                className="ie-input"
+                onChange={(event) => setEditPrompt(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !aiOp && editModel) runBoxEdit();
+                }}
+                placeholder="Prompt (or use Auto-prompt)"
+                value={editPrompt}
+              />
+              <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "8px" }}>
+                <button className="ie-btn" disabled={!composedPrompt} onClick={() => setEditPrompt(composedPrompt)} type="button">
+                  Auto-prompt
+                </button>
+                <button className="ie-btn primary" disabled={!!aiOp || !editModel} onClick={runBoxEdit} type="button">
+                  Generate
+                </button>
+              </div>
+            </>
+          ) : (
+            <p className="ie-note">No edit-capable models installed.</p>
+          )}
+        </div>
+      ) : null}
+    </>
+  );
+
+  const handleLayerOpacityInput = (id, raw) => {
+    const start = !layerOpacityGestureRef.current;
+    layerOpacityGestureRef.current = true;
+    changeLayerOpacity(id, Math.max(0, Math.min(100, Number(raw) || 0)) / 100, start);
+  };
+  const endLayerOpacityGesture = () => {
+    layerOpacityGestureRef.current = false;
+  };
+
+  const renderLayers = () => (
+    <aside className="ie-layers" aria-label="Layers">
+      <div className="ie-layers-head">
+        <button className="ie-layers-title" onClick={() => setLayersOpen((v) => !v)} title="Collapse layers" type="button">
+          <span className="ie-acc-chev" data-open={layersOpen}>
+            <IeChevron />
+          </span>
+          <svg fill="none" height="15" stroke="currentColor" strokeLinejoin="round" strokeWidth={2} viewBox="0 0 24 24" width="15">
+            <polygon points="12 2 2 7 12 12 22 7 12 2" />
+            <polyline points="2 17 12 22 22 17" />
+            <polyline points="2 12 12 17 22 12" />
+          </svg>
+          Layers
+          <span className="ie-layers-count">{layerCount}</span>
+        </button>
+        <button className="ie-btn icon sm ghost" disabled={Boolean(aiOp)} onClick={addBlankLayer} title="Add layer" type="button">
+          +
+        </button>
+      </div>
+      {layersOpen ? (
+        <div className="ie-layers-list">
+          {working.layers
+            .map((layer, index) => ({ layer, index }))
+            .reverse()
+            .map(({ layer, index }) => {
+              const isActive = layer.id === working.activeLayerId;
+              const pct = Math.round(layer.opacity * 100);
+              return (
+                <div className="ie-layer" data-active={isActive} key={layer.id} onClick={() => selectLayer(layer.id)}>
+                  <div className="ie-layer-row">
+                    <button
+                      className="ie-layer-vis"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleLayerVisible(layer.id);
+                      }}
+                      title="Toggle visibility"
+                      type="button"
+                    >
+                      {layer.visible ? <IeEyeOpen /> : <IeEyeOff />}
+                    </button>
+                    {layer.objectUrl ? (
+                      <img
+                        alt=""
+                        className="ie-layer-thumb"
+                        src={layer.objectUrl}
+                        style={layer.visible ? undefined : { opacity: 0.35, filter: "grayscale(1)" }}
+                      />
+                    ) : (
+                      <span className="ie-layer-thumb" />
+                    )}
+                    <span
+                      className="ie-layer-name"
+                      onDoubleClick={() => {
+                        const name = window.prompt("Rename layer", layer.name)?.trim();
+                        if (name) renameLayer(layer.id, name);
+                      }}
+                      title="Double-click to rename"
+                    >
+                      {layer.name}
+                    </span>
+                    {layer.blendMode && layer.blendMode !== "source-over" ? (
+                      <span className="ie-layer-blend">
+                        {(BLEND_MODES.find((mode) => mode.value === layer.blendMode)?.label ?? layer.blendMode).slice(0, 4)}
+                      </span>
+                    ) : null}
+                  </div>
+                  {isActive ? (
+                    <>
+                      <div className="ie-layer-op" onClick={(event) => event.stopPropagation()}>
+                        <input
+                          className="ie-range"
+                          max={100}
+                          min={0}
+                          onBlur={endLayerOpacityGesture}
+                          onChange={(event) => handleLayerOpacityInput(layer.id, event.target.value)}
+                          onMouseUp={endLayerOpacityGesture}
+                          onTouchEnd={endLayerOpacityGesture}
+                          type="range"
+                          value={pct}
+                        />
+                        <div className="ie-layer-opnum">
+                          <input
+                            aria-label={`${layer.name} opacity`}
+                            className="ie-input"
+                            max={100}
+                            min={0}
+                            onBlur={endLayerOpacityGesture}
+                            onChange={(event) => handleLayerOpacityInput(layer.id, event.target.value)}
+                            type="number"
+                            value={pct}
+                          />
+                        </div>
+                      </div>
+                      <div className="ie-layer-blendsel" onClick={(event) => event.stopPropagation()}>
+                        <select
+                          aria-label={`${layer.name} blend mode`}
+                          className="ie-select"
+                          onChange={(event) => setLayerBlend(layer.id, event.target.value)}
+                          value={layer.blendMode || "source-over"}
+                        >
+                          {BLEND_MODES.map((mode) => (
+                            <option key={mode.value} value={mode.value}>
+                              {mode.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="ie-chip-row" onClick={(event) => event.stopPropagation()} style={{ marginTop: "8px" }}>
+                        <button className="ie-btn sm ghost" disabled={index >= working.layers.length - 1} onClick={() => reorderLayer(layer.id, index + 1)} title="Move up" type="button">
+                          ↑
+                        </button>
+                        <button className="ie-btn sm ghost" disabled={index <= 0} onClick={() => reorderLayer(layer.id, index - 1)} title="Move down" type="button">
+                          ↓
+                        </button>
+                        <button className="ie-btn sm ghost" onClick={() => duplicateLayerById(layer.id)} title="Duplicate" type="button">
+                          ⧉
+                        </button>
+                        <button className="ie-btn sm ghost danger" disabled={working.layers.length <= 1} onClick={() => deleteLayer(layer.id)} title="Delete" type="button">
+                          ✕
+                        </button>
+                      </div>
+                    </>
+                  ) : null}
+                </div>
+              );
+            })}
+        </div>
+      ) : null}
+    </aside>
+  );
+
+  const renderInspectorBody = () => (
+    <div className="ie-insp-body">
+      {EDITOR_TOOL_ORDER.map((key) => {
+        const open = tool === key && panelOpen;
+        return (
+          <React.Fragment key={key}>
+            <button
+              className="ie-acc-head"
+              data-active={tool === key}
+              disabled={toolIsDisabled(key)}
+              onClick={() => onAccordionHead(key)}
+              type="button"
+            >
+              <span className="ie-acc-ic">{EDITOR_TOOL_ICONS[key]}</span>
+              <span className="ie-acc-label">{EDITOR_TOOL_META[key].label}</span>
+              <span className="ie-acc-chev" data-open={open}>
+                <IeChevron />
+              </span>
+            </button>
+            {open ? renderToolPanel(key) : null}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+
+  return (
+    <section className="main-surface image-editor-surface ie-shell" data-ie-layout={layout}>
+      <header className="ie-topbar">
+        <div className="ie-brand">
+          <div className="ie-brand-mark">
+            <svg fill="none" height="15" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} viewBox="0 0 24 24" width="15">
+              <path d="M7 2v15a1 1 0 001 1h15M2 7h15a1 1 0 011 1v15" />
+            </svg>
+          </div>
+          <div className="ie-doc">
+            <div className="ie-doc-name" title={docName}>
+              {docName}
+            </div>
+            <div className="ie-doc-sub">{docSub}</div>
+          </div>
+        </div>
+
+        <button className="ie-btn sm" onClick={() => setPickerOpen(true)} type="button">
+          Open
+        </button>
+        <button
+          className="ie-btn sm"
+          onClick={() => setNewLayoutOpen(true)}
+          title="Start a blank canvas for box layout"
+          type="button"
+        >
+          New layout
+        </button>
+        {working && working.source.assetId ? (
+          <button
+            className="ie-btn sm ghost"
+            onClick={() => setPreviewAsset?.(imageAssets.find((item) => item.id === working.source.assetId))}
+            title="Preview the source asset"
+            type="button"
+          >
+            Source
+          </button>
+        ) : null}
+        <button
+          aria-pressed={shortcutsOpen}
+          className="ie-btn icon sm ghost"
+          onClick={() => setShortcutsOpen((on) => !on)}
+          title="Keyboard shortcuts (?)"
+          type="button"
+        >
+          ⌨
+        </button>
+
+        <div className="ie-spacer" />
+
+        {working ? (
+          <div className="ie-topgroup">
+            <button className="ie-btn icon sm" disabled={!historyFlags.canUndo || Boolean(aiOp)} onClick={undo} title="Undo (⌘Z)" type="button">
+              <svg fill="none" height="15" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} viewBox="0 0 24 24" width="15">
+                <path d="M9 14L4 9l5-5" />
+                <path d="M4 9h11a5 5 0 015 5v0a5 5 0 01-5 5H9" />
+              </svg>
+            </button>
+            <button className="ie-btn icon sm" disabled={!historyFlags.canRedo || Boolean(aiOp)} onClick={redo} title="Redo (⇧⌘Z / Ctrl+Y)" type="button">
+              <svg fill="none" height="15" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} viewBox="0 0 24 24" width="15">
+                <path d="M15 14l5-5-5-5" />
+                <path d="M20 9H9a5 5 0 00-5 5v0a5 5 0 005 5h6" />
+              </svg>
+            </button>
+          </div>
+        ) : null}
+
+        <div className="ie-divider" />
+
+        <div className="ie-seg" title="Panel layout">
+          {[
+            ["accordion", "Stacked panels", <React.Fragment key="g"><rect height="16" rx="2" width="18" x="3" y="4" /><line x1="3" x2="21" y1="9" y2="9" /><line x1="3" x2="21" y1="14" y2="14" /></React.Fragment>],
+            ["right", "Inspector right", <React.Fragment key="g"><rect height="16" rx="2" width="18" x="3" y="4" /><line x1="15" x2="15" y1="4" y2="20" /></React.Fragment>],
+            ["left", "Inspector left", <React.Fragment key="g"><rect height="16" rx="2" width="18" x="3" y="4" /><line x1="9" x2="9" y1="4" y2="20" /></React.Fragment>],
+            ["bottom", "Dock bottom", <React.Fragment key="g"><rect height="16" rx="2" width="18" x="3" y="4" /><line x1="3" x2="21" y1="14" y2="14" /></React.Fragment>],
+          ].map(([mode, label, glyph]) => (
+            <button
+              className="ie-seg-btn ie-seg-icon"
+              data-active={layout === mode}
+              key={mode}
+              onClick={() => setLayout(mode)}
+              title={label}
+              type="button"
+            >
+              <svg fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                {glyph}
+              </svg>
+            </button>
+          ))}
+        </div>
+
+        <button
+          className="ie-btn icon sm ghost"
+          onClick={() => changeTheme?.(theme === "dark" ? "light" : "dark")}
+          title="Toggle theme"
+          type="button"
+        >
+          {theme === "dark" ? "☀" : "☾"}
+        </button>
+
+        {working ? (
+          <>
+            <div className="ie-divider" />
+            <button className="ie-btn sm" onClick={runDownload} title="Download a PNG to your computer" type="button">
+              Download
+            </button>
+            {savedAssetId && !dirty ? (
+              <span className="ie-doc-sub" style={{ color: "var(--ie-accent)" }}>
+                Saved ✓
+              </span>
+            ) : null}
+            <button
+              className="ie-btn sm primary"
+              disabled={!dirty || saving}
+              onClick={runSave}
+              title="Save a new image to the project Library"
+              type="button"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </>
+        ) : null}
+      </header>
+
+      {working ? (
+        <nav className="ie-rail" aria-label="Tools">
+          <div className="ie-rail-cap">Tools</div>
+          {EDITOR_TOOL_ORDER.map((key) => (
+            <button
+              className="ie-tool"
+              data-active={tool === key}
+              disabled={toolIsDisabled(key)}
+              key={key}
+              onClick={() => selectTool(key)}
+              title={EDITOR_TOOL_META[key].desc}
+              type="button"
+            >
+              {EDITOR_TOOL_ICONS[key]}
+              <span>{EDITOR_TOOL_META[key].label}</span>
+            </button>
+          ))}
+        </nav>
+      ) : null}
+
+      <main className="ie-canvas" onDragOver={(event) => event.preventDefault()} onDrop={handleDrop} ref={containerRef}>
+        {status.error ? (
+          <div
+            className="ie-hint"
+            role="alert"
+            style={{ borderColor: "color-mix(in srgb, var(--ie-danger) 55%, var(--ie-border))", color: "var(--ie-danger)" }}
+          >
+            {status.error}
+          </div>
+        ) : working ? (
+          <div className="ie-hint">
+            {EDITOR_TOOL_ICONS[tool]}
+            <span>{toolHint}</span>
+          </div>
+        ) : null}
         {working && stageSize.width > 0 && stageSize.height > 0 ? (
           <Stage
             draggable={tool !== "crop" && tool !== "boxes" && tool !== "transform" && !maskMode}
@@ -2420,830 +3673,86 @@ export function ImageEditor() {
           </div>
         ) : null}
 
-        {working ? (
-          <LayersPanel
-            layers={working.layers}
-            activeLayerId={working.activeLayerId}
-            busy={Boolean(aiOp)}
-            onSelect={selectLayer}
-            onToggleVisible={toggleLayerVisible}
-            onSetOpacity={changeLayerOpacity}
-            onSetBlend={setLayerBlend}
-            onRename={renameLayer}
-            onReorder={reorderLayer}
-            onAdd={addBlankLayer}
-            onDelete={deleteLayer}
-            onDuplicate={duplicateLayerById}
-          />
-        ) : null}
-
-        {working ? (
-          <aside className="image-editor-toolbar" aria-label="Editor tools">
-            <button
-              className={tool === "move" ? "image-editor-tool active" : "image-editor-tool"}
-              onClick={cancelCrop}
-              title="Move / pan (M)"
-              type="button"
-            >
-              Move
-            </button>
-            <button
-              className={tool === "transform" ? "image-editor-tool active" : "image-editor-tool"}
-              disabled={!!aiOp}
-              onClick={startTransform}
-              title="Transform the active layer — move / scale / rotate (T)"
-              type="button"
-            >
-              Transform
-            </button>
-            <button
-              className={tool === "crop" ? "image-editor-tool active" : "image-editor-tool"}
-              disabled={!!aiOp}
-              onClick={startCrop}
-              title="Crop (C)"
-              type="button"
-            >
-              Crop
-            </button>
-            <button
-              className={tool === "upscale" ? "image-editor-tool active" : "image-editor-tool"}
-              disabled={!!aiOp || Boolean(macUpscaleBlock)}
-              onClick={() => setTool("upscale")}
-              title={macUpscaleBlock ? macUpscaleBlock.text : "Upscale (U)"}
-              type="button"
-            >
-              Upscale
-            </button>
-            <button
-              className={tool === "detail" ? "image-editor-tool active" : "image-editor-tool"}
-              disabled={!!aiOp || detailModels.length === 0}
-              onClick={() => setTool("detail")}
-              title="Detail enhance — tile-ControlNet refine (D)"
-              type="button"
-            >
-              Detail
-            </button>
-            <button
-              className={tool === "color" ? "image-editor-tool active" : "image-editor-tool"}
-              disabled={!!aiOp}
-              onClick={startColorGrade}
-              title="Color grade (G)"
-              type="button"
-            >
-              Color
-            </button>
-            <button
-              className={tool === "edit" ? "image-editor-tool active" : "image-editor-tool"}
-              disabled={!!aiOp}
-              onClick={() => setTool("edit")}
-              title="AI prompt edit (E)"
-              type="button"
-            >
-              AI Edit
-            </button>
-            <button
-              className={tool === "boxes" ? "image-editor-tool active" : "image-editor-tool"}
-              disabled={!!aiOp}
-              onClick={selectBoxTool}
-              title="Box layout — draw colored regions, color-keyed edit / Ideogram bbox (B)"
-              type="button"
-            >
-              Boxes
-            </button>
-          </aside>
-        ) : null}
-
-        {tool === "crop" && cropRect ? (
-          <div className="image-editor-cropbar">
-            <div className="image-editor-ratios" role="group" aria-label="Crop ratio">
-              {CROP_RATIOS.map((entry) => (
-                <button
-                  className={ratioKey === entry.key ? "active" : ""}
-                  key={entry.key}
-                  onClick={() => chooseRatio(entry.key)}
-                  type="button"
-                >
-                  {entry.label}
-                </button>
-              ))}
-            </div>
-            <button
-              className={rotated ? "active" : ""}
-              disabled={ratioKey === "free" || ratioKey === "1:1"}
-              onClick={toggleRotate}
-              title="Rotate ratio (swap orientation)"
-              type="button"
-            >
-              ⟲ Rotate
-            </button>
-            <span className="image-editor-cropdims">
-              {Math.round(cropRect.width)} × {Math.round(cropRect.height)}
-            </span>
-            <button className="primary" onClick={applyCrop} type="button">
-              Apply
-            </button>
-            <button onClick={cancelCrop} type="button">
-              Cancel
-            </button>
-          </div>
-        ) : null}
-
-        {tool === "transform" && working ? (
-          <div className="image-editor-cropbar">
-            <span className="image-editor-cropdims">
-              Drag, scale or rotate <strong>{activeLayerOf(working)?.name}</strong> on the canvas
-            </span>
-            <button onClick={resetActiveLayerTransform} type="button">
-              Reset transform
-            </button>
-            <button onClick={() => setTool("move")} type="button">
-              Done
-            </button>
-          </div>
-        ) : null}
-
-        {tool === "upscale" && working ? (
-          <div className="image-editor-cropbar">
-            <div className="image-editor-ratios" role="group" aria-label="Upscale engine">
-              {availableUpscaleEngines.map((entry) => (
-                <button
-                  className={upscaleEngine === entry.key ? "active" : ""}
-                  key={entry.key}
-                  onClick={() => {
-                    setUpscaleEngine(entry.key);
-                    if (!entry.factors.includes(upscaleFactor)) setUpscaleFactor(entry.factors[0]);
-                  }}
-                  type="button"
-                >
-                  {entry.label}
-                </button>
-              ))}
-            </div>
-            <div className="image-editor-ratios" role="group" aria-label="Upscale factor">
-              {upscaleFactorsForEngine(upscaleEngine).map((value) => (
-                <button
-                  className={upscaleFactor === value ? "active" : ""}
-                  key={value}
-                  onClick={() => setUpscaleFactor(value)}
-                  type="button"
-                >
-                  {value}×
-                </button>
-              ))}
-            </div>
-            {upscaleEngineHasSoftness(upscaleEngine) ? (
-              <label className="image-editor-upscale-softness" title="Higher restores more detail from a degraded source; 0 keeps it faithful.">
-                Detail
-                <input
-                  aria-label="SeedVR2 detail (softness)"
-                  max="1"
-                  min="0"
-                  onChange={(event) => setUpscaleSoftness(Number(event.target.value))}
-                  step="0.05"
-                  type="range"
-                  value={upscaleSoftness}
-                />
-                <span>{upscaleSoftness.toFixed(2)}</span>
-              </label>
-            ) : null}
-            <span className="image-editor-cropdims">
-              {working.width * upscaleFactor} × {working.height * upscaleFactor}
-            </span>
-            <button className="primary" disabled={!!aiOp} onClick={runUpscale} type="button">
-              Upscale
-            </button>
-            <button onClick={() => setTool("move")} type="button">
-              Cancel
-            </button>
-          </div>
-        ) : null}
-
-        {tool === "detail" && working ? (
-          <div className="image-editor-cropbar image-editor-detailbar">
-            {detailModels.length === 0 ? (
-              <span className="image-editor-cropdims">No detail-capable models installed</span>
-            ) : (
-              <>
-                <select
-                  aria-label="Detail backbone"
-                  className="image-editor-editmodel"
-                  onChange={(event) => setDetailModel(event.target.value)}
-                  value={detailModel}
-                >
-                  {detailModels.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.label ?? model.id}
-                    </option>
-                  ))}
-                </select>
-                <label className="image-editor-slider" title="Detail amount — higher invents more texture">
-                  <span className="image-editor-slider-label">Detail</span>
-                  <input
-                    aria-label="Detail strength"
-                    max={0.8}
-                    min={0.3}
-                    onChange={(event) => setDetailStrength(Number(event.target.value))}
-                    step={0.05}
-                    type="range"
-                    value={detailStrength}
-                  />
-                  <span className="image-editor-slider-value">{Math.round(detailStrength * 100)}</span>
-                </label>
-                <label className="image-editor-slider" title="Structure lock — higher keeps the result closer to the source">
-                  <span className="image-editor-slider-label">Structure</span>
-                  <input
-                    aria-label="Structure lock"
-                    max={1}
-                    min={0.4}
-                    onChange={(event) => setDetailCnScale(Number(event.target.value))}
-                    step={0.05}
-                    type="range"
-                    value={detailCnScale}
-                  />
-                  <span className="image-editor-slider-value">{Math.round(detailCnScale * 100)}</span>
-                </label>
-                <button className="primary" disabled={!!aiOp || !detailModel} onClick={runDetail} type="button">
-                  Enhance
-                </button>
-              </>
-            )}
-            <button onClick={() => setTool("move")} type="button">
-              Cancel
-            </button>
-          </div>
-        ) : null}
-
-        {tool === "color" && working ? (
-          <div className="image-editor-cropbar image-editor-colorbar">
-            <div className="image-editor-color-modes" role="group" aria-label="Color mode">
-              {[
-                ["adjust", "Adjust"],
-                ["levels", "Levels"],
-                ["curves", "Curves"],
-              ].map(([mode, label]) => (
-                <button
-                  key={mode}
-                  className={colorMode === mode ? "active" : ""}
-                  onClick={() => setColorMode(mode)}
-                  type="button"
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            {colorMode === "adjust"
-              ? COLOR_ADJUSTMENTS.map(({ key, label }) => (
-                  <label className="image-editor-slider" key={key} title="Double-click the slider to reset">
-                    <span className="image-editor-slider-label">{label}</span>
-                    <input
-                      aria-label={label}
-                      max={1}
-                      min={-1}
-                      onChange={(event) => setAdjustValue(key, Number(event.target.value))}
-                      onDoubleClick={() => resetAdjust(key)}
-                      step={0.01}
-                      type="range"
-                      value={colorAdjust[key]}
-                    />
-                    <span className="image-editor-slider-value">{Math.round(colorAdjust[key] * 100)}</span>
-                  </label>
-                ))
-              : null}
-
-            {colorMode === "levels" || colorMode === "curves" ? (
-              <select
-                aria-label="Channel"
-                className="image-editor-editmodel"
-                onChange={(event) => setColorChannel(event.target.value)}
-                value={colorChannel}
-              >
-                <option value="master">Master</option>
-                <option value="r">Red</option>
-                <option value="g">Green</option>
-                <option value="b">Blue</option>
-              </select>
-            ) : null}
-
-            {colorMode === "levels" ? (
-              <>
-                <canvas className="image-editor-histogram" height={56} ref={histogramRef} width={200} />
-                <label className="image-editor-slider" title="Black point">
-                  <span className="image-editor-slider-label">Black</span>
-                  <input
-                    aria-label="Black point"
-                    max={254}
-                    min={0}
-                    onChange={(event) => setLevelsValue("black", Number(event.target.value))}
-                    step={1}
-                    type="range"
-                    value={levels[colorChannel].black}
-                  />
-                  <span className="image-editor-slider-value">{levels[colorChannel].black}</span>
-                </label>
-                <label className="image-editor-slider" title="Gamma (midtones)">
-                  <span className="image-editor-slider-label">Gamma</span>
-                  <input
-                    aria-label="Gamma"
-                    max={2.5}
-                    min={0.1}
-                    onChange={(event) => setLevelsValue("gamma", Number(event.target.value))}
-                    step={0.01}
-                    type="range"
-                    value={levels[colorChannel].gamma}
-                  />
-                  <span className="image-editor-slider-value">{levels[colorChannel].gamma.toFixed(2)}</span>
-                </label>
-                <label className="image-editor-slider" title="White point">
-                  <span className="image-editor-slider-label">White</span>
-                  <input
-                    aria-label="White point"
-                    max={255}
-                    min={1}
-                    onChange={(event) => setLevelsValue("white", Number(event.target.value))}
-                    step={1}
-                    type="range"
-                    value={levels[colorChannel].white}
-                  />
-                  <span className="image-editor-slider-value">{levels[colorChannel].white}</span>
-                </label>
-              </>
-            ) : null}
-
-            {colorMode === "curves" ? (
-              <CurveEditor
-                points={curves[colorChannel]}
-                stroke={channelStroke}
-                onChange={(points) => setCurves((prev) => ({ ...prev, [colorChannel]: points }))}
-              />
-            ) : null}
-
-            <button disabled={activeGradeIsIdentity()} onClick={resetActiveColorMode} type="button">
-              Reset
-            </button>
-            <button className="primary" disabled={activeGradeIsIdentity()} onClick={applyColorGrade} type="button">
-              Apply
-            </button>
-            <button onClick={cancelCrop} type="button">
-              Cancel
-            </button>
-          </div>
-        ) : null}
-
-        {tool === "edit" && working ? (
-          <div className="image-editor-cropbar image-editor-editbar">
-            {editModels.length === 0 ? (
-              <span className="image-editor-cropdims">No edit-capable models installed</span>
-            ) : (
-              <>
-                <select
-                  aria-label="Edit model"
-                  className="image-editor-editmodel"
-                  onChange={(event) => setEditModel(event.target.value)}
-                  value={editModel}
-                >
-                  {editModels.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.label ?? model.id}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  aria-label="Edit prompt"
-                  className="image-editor-editprompt"
-                  onChange={(event) => setEditPrompt(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && editPrompt.trim() && !aiOp) runEdit();
-                  }}
-                  placeholder="Describe the edit…"
-                  type="text"
-                  value={editPrompt}
-                />
-                <input
-                  aria-label="Seed (optional)"
-                  className="image-editor-editseed"
-                  min={0}
-                  onChange={(event) => setEditSeed(event.target.value)}
-                  placeholder="Seed"
-                  type="number"
-                  value={editSeed}
-                />
-                <select
-                  aria-label="Output aspect"
-                  className="image-editor-editmodel"
-                  onChange={(event) => setEditAspect(event.target.value)}
-                  title="Output aspect — extend the canvas and fill the new area"
-                  value={editAspect}
-                >
-                  {EDIT_OUTPUT_ASPECTS.map((aspect) => (
-                    <option key={aspect.key} value={aspect.key}>
-                      {aspect.label}
-                    </option>
-                  ))}
-                </select>
-                {editAspect !== "match" ? (
-                  <FitModeControl
-                    value={effectiveFitMode(editFitMode, canMask)}
-                    onChange={setEditFitMode}
-                    inpaintCapable={canMask}
-                    label="Fill"
-                  />
-                ) : null}
-                {canMask ? (
-                  <>
-                    <button
-                      className={maskMode ? "active" : ""}
-                      onClick={() => setMaskMode((on) => !on)}
-                      title="Mask a region to confine the edit (inpaint): paint it, or smart-select with a box"
-                      type="button"
-                    >
-                      {maskHasContent(maskLines) || maskBaseImage ? "Mask ✓" : "Mask"}
-                    </button>
-                    {maskMode ? (
-                      <>
-                        {smartSelectSupported ? (
-                          <>
-                            <button
-                              className={maskSubTool === "brush" ? "active" : ""}
-                              onClick={() => setMaskSubTool("brush")}
-                              title="Paint the mask by hand"
-                              type="button"
-                            >
-                              Brush
-                            </button>
-                            <button
-                              className={maskSubTool === "select" ? "active" : ""}
-                              disabled={aiOp?.label === "smart select"}
-                              onClick={() => {
-                                setMaskSubTool("select");
-                                setMaskErase(false);
-                              }}
-                              title="Smart-select: drag a box around an object to auto-mask it (SAM3)"
-                              type="button"
-                            >
-                              {aiOp?.label === "smart select" ? "Segmenting…" : "Smart select"}
-                            </button>
-                          </>
-                        ) : null}
-                        {!smartSelectSupported || maskSubTool === "brush" ? (
-                          <>
-                            <label className="image-editor-slider" title="Brush size">
-                              <span className="image-editor-slider-label">Brush</span>
-                              <input
-                                aria-label="Brush size"
-                                max={300}
-                                min={5}
-                                onChange={(event) => setMaskBrush(Number(event.target.value))}
-                                step={1}
-                                type="range"
-                                value={maskBrush}
-                              />
-                            </label>
-                            <button
-                              className={maskErase ? "active" : ""}
-                              onClick={() => setMaskErase((on) => !on)}
-                              title="Eraser"
-                              type="button"
-                            >
-                              Eraser
-                            </button>
-                          </>
-                        ) : (
-                          <span className="image-editor-hint">Drag a box around an object</span>
-                        )}
-                        <button
-                          disabled={!maskLines.length && !maskBaseImage}
-                          onClick={clearMask}
-                          type="button"
-                        >
-                          Clear
-                        </button>
-                        {/* Mask refinement (sc-6110): post-process the current mask. */}
-                        <label className="image-editor-slider" title="Feather / grow / shrink radius (px)">
-                          <span className="image-editor-slider-label">Refine</span>
-                          <input
-                            aria-label="Mask refine radius"
-                            max={40}
-                            min={1}
-                            onChange={(event) => setMaskRefineRadius(Number(event.target.value))}
-                            step={1}
-                            type="range"
-                            value={maskRefineRadius}
-                          />
-                          <span className="image-editor-slider-value">{maskRefineRadius}</span>
-                        </label>
-                        <button
-                          disabled={!maskHasContent(maskLines) && !maskBaseImage}
-                          onClick={() => refineMask("feather")}
-                          title="Feather (soften) the mask edges"
-                          type="button"
-                        >
-                          Feather
-                        </button>
-                        <button
-                          disabled={!maskHasContent(maskLines) && !maskBaseImage}
-                          onClick={() => refineMask("grow")}
-                          title="Grow the selection (dilate)"
-                          type="button"
-                        >
-                          Grow
-                        </button>
-                        <button
-                          disabled={!maskHasContent(maskLines) && !maskBaseImage}
-                          onClick={() => refineMask("shrink")}
-                          title="Shrink the selection (erode)"
-                          type="button"
-                        >
-                          Shrink
-                        </button>
-                        <button onClick={() => refineMask("invert")} title="Invert the selection" type="button">
-                          Invert
-                        </button>
-                      </>
-                    ) : null}
-                  </>
-                ) : null}
-                {multiRefCapable ? (
-                  <span className="image-editor-refs" aria-label="Reference images">
-                    <span className="image-editor-slider-label">Reference</span>
-                    {refAssetIds.map((id) => {
-                      const asset = imageAssets.find((item) => item.id === id);
-                      return (
-                        <span className="image-editor-ref-chip" key={id}>
-                          {asset ? <img alt="" src={assetUrl(asset)} /> : <span>?</span>}
-                          <button
-                            aria-label="Remove reference"
-                            onClick={() => setRefAssetIds((prev) => prev.filter((other) => other !== id))}
-                            title="Remove reference"
-                            type="button"
-                          >
-                            ×
-                          </button>
-                        </span>
-                      );
-                    })}
-                    <button
-                      disabled={refAssetIds.length >= MAX_EDIT_REFERENCES - 1}
-                      onClick={() => setRefPickerOpen(true)}
-                      title="Condition the edit on reference image(s) — identity/style alongside the working image"
-                      type="button"
-                    >
-                      + Reference
-                    </button>
-                  </span>
-                ) : null}
-                <button className="primary" disabled={!editPrompt.trim() || !!aiOp} onClick={runEdit} type="button">
-                  {canMask && (maskHasContent(maskLines) || maskBaseImage) ? "Inpaint" : "Edit"}
-                </button>
-              </>
-            )}
-            <button
-              onClick={() => {
-                setTool("move");
-                setMaskMode(false);
-              }}
-              type="button"
-            >
-              Cancel
-            </button>
-          </div>
-        ) : null}
-
-        {tool === "boxes" && working ? (
-          <div className="image-editor-cropbar image-editor-boxbar">
-            <div className="image-editor-box-palette" role="group" aria-label="Box color">
-              {BOX_PALETTE.map((entry) => (
-                <button
-                  aria-label={entry.name}
-                  aria-pressed={boxColor === entry.value}
-                  className={boxColor === entry.value ? "image-editor-swatch active" : "image-editor-swatch"}
-                  key={entry.value}
-                  onClick={() => chooseBoxColor(entry.value)}
-                  style={{ background: entry.value }}
-                  title={entry.name}
-                  type="button"
-                />
-              ))}
-              <label className="image-editor-swatch image-editor-swatch-custom" title="Custom color">
-                <input
-                  aria-label="Custom box color"
-                  onChange={(event) => chooseBoxColor(event.target.value)}
-                  type="color"
-                  value={boxColor.toLowerCase()}
-                />
-              </label>
-            </div>
-            {boxes.length ? (
-              <div className="image-editor-box-list" role="group" aria-label="Boxes">
-                {boxes.map((box, index) => {
-                  const incomplete = boxMetadataGaps(box).length > 0;
-                  return (
-                    <button
-                      className={`image-editor-box-chip${selectedBoxId === box.id ? " active" : ""}${incomplete ? " incomplete" : ""}`}
-                      key={box.id}
-                      onClick={() => setSelectedBoxId(box.id)}
-                      title={box.desc ? `${index + 1}: ${box.desc}` : `Box ${index + 1} — needs a description`}
-                      type="button"
-                    >
-                      <span className="image-editor-box-dot" style={{ background: box.color }} />
-                      {index + 1}
-                      {incomplete ? <span className="image-editor-box-chip-flag" aria-hidden="true">!</span> : null}
-                    </button>
-                  );
-                })}
-              </div>
-            ) : (
-              <span className="image-editor-cropdims">Drag on the image to draw a box</span>
-            )}
-            {boxes.length ? (
-              editModels.length ? (
-                <>
-                  <select
-                    aria-label="Box edit model"
-                    className="image-editor-editmodel"
-                    onChange={(event) => setEditModel(event.target.value)}
-                    value={editModel}
-                  >
-                    {editModels.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.label ?? model.id}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    disabled={!composedPrompt}
-                    onClick={() => setEditPrompt(composedPrompt)}
-                    title="Compose a prompt from the boxes' colors + descriptions (editable)"
-                    type="button"
-                  >
-                    Auto prompt
-                  </button>
-                  <input
-                    aria-label="Box edit prompt"
-                    className="image-editor-editprompt"
-                    onChange={(event) => setEditPrompt(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && !aiOp && editModel) runBoxEdit();
-                    }}
-                    placeholder="Describe the edit (e.g. replace the red region with…)"
-                    type="text"
-                    value={editPrompt}
-                  />
-                  <button className="primary" disabled={!!aiOp || !editModel} onClick={runBoxEdit} type="button">
-                    Generate
-                  </button>
-                </>
-              ) : (
-                <span className="image-editor-cropdims">No edit-capable models installed</span>
-              )
-            ) : null}
-            <button disabled={!selectedBoxId} onClick={() => deleteBox(selectedBoxId)} type="button">
-              Delete
-            </button>
-            <button disabled={!boxes.length} onClick={clearBoxes} type="button">
-              Clear
-            </button>
-            <button onClick={() => setTool("move")} type="button">
-              Cancel
-            </button>
-          </div>
-        ) : null}
-
-        {tool === "boxes" && selectedBox ? (
-          <div className="image-editor-boxmeta" aria-label="Box details">
-            <div className="image-editor-boxmeta-title">
-              <span className="image-editor-box-dot" style={{ background: selectedBox.color }} />
-              Box {boxes.indexOf(selectedBox) + 1}
-            </div>
-            <div className="image-editor-boxmeta-types" role="group" aria-label="Element type">
-              <button
-                className={selectedBox.type === "obj" ? "active" : ""}
-                onClick={() => updateBox(selectedBox.id, { type: "obj" })}
-                type="button"
-              >
-                Object
-              </button>
-              <button
-                className={selectedBox.type === "text" ? "active" : ""}
-                onClick={() => updateBox(selectedBox.id, { type: "text" })}
-                type="button"
-              >
-                Text
-              </button>
-            </div>
-            <label className="image-editor-boxmeta-field">
-              <span>Description</span>
-              <input
-                aria-label="Box description"
-                onChange={(event) => updateBox(selectedBox.id, { desc: event.target.value })}
-                placeholder="What is in this region?"
-                type="text"
-                value={selectedBox.desc ?? ""}
-              />
-            </label>
-            {selectedBox.type === "text" ? (
-              <label className="image-editor-boxmeta-field">
-                <span>Text</span>
-                <input
-                  aria-label="Literal text"
-                  onChange={(event) => updateBox(selectedBox.id, { text: event.target.value })}
-                  placeholder="Literal text to render"
-                  type="text"
-                  value={selectedBox.text ?? ""}
-                />
-              </label>
-            ) : null}
-            <div className="image-editor-boxmeta-field">
-              <span>
-                Element colors ({(selectedBox.colorPalette ?? []).length}/{MAX_BOX_PALETTE})
-              </span>
-              <div className="image-editor-box-palette">
-                {(selectedBox.colorPalette ?? []).map((color) => (
-                  <button
-                    aria-label={`Remove ${color}`}
-                    className="image-editor-swatch"
-                    key={color}
-                    onClick={() =>
-                      updateBox(selectedBox.id, { colorPalette: removePaletteColor(selectedBox.colorPalette, color) })
-                    }
-                    style={{ background: color }}
-                    title={`Remove ${color}`}
-                    type="button"
-                  />
-                ))}
-                {(selectedBox.colorPalette ?? []).length < MAX_BOX_PALETTE ? (
-                  <label className="image-editor-swatch image-editor-swatch-custom" title="Add color">
-                    <input
-                      aria-label="Add element color"
-                      onChange={(event) =>
-                        updateBox(selectedBox.id, {
-                          colorPalette: addPaletteColor(selectedBox.colorPalette, event.target.value),
-                        })
-                      }
-                      type="color"
-                    />
-                  </label>
-                ) : null}
-              </div>
-            </div>
-            {selectedBoxGaps.length ? (
-              <p className="image-editor-boxmeta-hint">
-                For Ideogram layout this box still needs {selectedBoxGaps.join(", ")}. The color-keyed edit path only
-                needs a color + description.
-              </p>
-            ) : (
-              <p className="image-editor-boxmeta-ready">Ready for Ideogram layout ✓</p>
-            )}
-          </div>
-        ) : null}
-
         {aiOp ? (
-          <div className="image-editor-busy">
-            <div className="image-editor-busy-card">
-              <p className="image-editor-busy-title">
+          <div className="ie-busy">
+            <div className="ie-busy-card">
+              <p className="ie-busy-title">
                 {aiOp.label === "upscale"
                   ? "Upscaling…"
                   : aiOp.label === "edit"
-                    ? "Editing…"
+                    ? "Running AI edit…"
                     : aiOp.label === "detail"
                       ? "Enhancing detail…"
-                      : "Working…"}
+                      : aiOp.label === "smart select"
+                        ? "Segmenting…"
+                        : "Working…"}
               </p>
-              <p className="image-editor-busy-msg">
+              <p className="ie-busy-msg">
                 {activeAiJob?.message ||
-                  (activeAiJob?.status === "queued" ? "Queued — waiting for a worker." : "Processing…")}
+                  (activeAiJob?.status === "queued" ? "Queued — waiting for a worker." : "Processing on GPU worker…")}
               </p>
-              {typeof activeAiJob?.progress === "number" ? (
-                <div className="image-editor-busy-bar">
-                  <span style={{ width: `${Math.round(activeAiJob.progress * 100)}%` }} />
-                </div>
-              ) : null}
+              <div className="ie-busy-track">
+                {typeof activeAiJob?.progress === "number" ? (
+                  <div className="ie-busy-fill determinate" style={{ width: `${Math.round(activeAiJob.progress * 100)}%` }} />
+                ) : (
+                  <div className="ie-busy-fill" />
+                )}
+              </div>
             </div>
           </div>
         ) : null}
 
         {working ? (
-          <div className="image-editor-viewbar">
-            <button onClick={() => zoomAtCenter(1 / ZOOM_STEP)} title="Zoom out (−)" type="button">
+          <div className="ie-viewbar">
+            <button className="ie-btn icon sm ghost" onClick={() => zoomAtCenter(1 / ZOOM_STEP)} title="Zoom out (−)" type="button">
               −
             </button>
-            <span className="image-editor-zoom">{Math.round(view.scale * 100)}%</span>
-            <button onClick={() => zoomAtCenter(ZOOM_STEP)} title="Zoom in (+)" type="button">
+            <span className="ie-zoom">{zoomPct}%</span>
+            <button className="ie-btn icon sm ghost" onClick={() => zoomAtCenter(ZOOM_STEP)} title="Zoom in (+)" type="button">
               +
             </button>
-            <button onClick={fitToView} title="Fit to view (0)" type="button">
+            <div className="ie-divider" style={{ height: "18px" }} />
+            <button className="ie-btn sm ghost" onClick={fitToView} title="Fit to view (0)" type="button">
               Fit
             </button>
-            <button onClick={actualSize} title="Actual size (1)" type="button">
+            <button className="ie-btn sm ghost" onClick={actualSize} title="Actual size (1)" type="button">
               100%
             </button>
-            <span className="image-editor-dims">
-              {working.width} × {working.height}
-            </span>
           </div>
         ) : null}
-      </div>
+      </main>
 
+      {working ? (
+        <aside className="ie-inspector" aria-label="Properties">
+          <div className="ie-insp-head">
+            <div className="ie-insp-icon">{EDITOR_TOOL_ICONS[tool]}</div>
+            <div>
+              <div className="ie-insp-title">{activeMeta.label}</div>
+              <div className="ie-insp-desc">{activeMeta.desc}</div>
+            </div>
+          </div>
+          {renderInspectorBody()}
+        </aside>
+      ) : null}
+
+      {working ? renderLayers() : null}
+
+      <footer className="ie-statusbar">
+        <span className="ie-status-dot" />
+        <span>{activeMeta.label}</span>
+        <span className="ie-mono">·&nbsp; {zoomPct}%</span>
+        {working ? (
+          <span className="ie-mono">
+            ·&nbsp; {working.width} × {working.height}
+          </span>
+        ) : null}
+        <div className="ie-spacer" />
+        <span className="ie-mono">{layerCount} layers</span>
+        <span>·</span>
+        <span>RGB / 8-bit</span>
+        <span>·</span>
+        <span>sRGB</span>
+      </footer>
       {pickerOpen ? (
         <DatasetAddDialog
           assets={assets ?? []}

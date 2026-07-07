@@ -464,10 +464,16 @@ pub(crate) fn resolve_weights_dir(
     ) {
         return Ok(snapshot.map(|root| boogu_model_subdir(&root, request)));
     }
-    // Krea 2 Turbo (epic 7565) ships a turnkey with packed `q8/` (default) + `q4/` self-contained subdirs;
-    // point the engine at the chosen quant's subdir rather than the repo root. The packed weights
-    // auto-detect their quant on load, so the resolved `spec.quantize` is a no-op on them.
-    if request.model == "krea_2_turbo" {
+    // Krea 2 Turbo (epic 7565) + Krea 2 Raw (epic 9992) ship a turnkey with self-contained quant subdirs
+    // (Turbo: packed `q8/` default + `q4/`; Raw: packed `q8/` default + `q4/` + dense `bf16/`); point the
+    // engine at the chosen quant's subdir rather than the repo root. The packed weights auto-detect their
+    // quant on load, so the resolved `spec.quantize` is a no-op on them. `krea_model_subdir` also falls
+    // back to any downloaded tier when the preferred one is absent — so Raw generates off the `bf16/`
+    // training-base tier when only that is present, instead of failing at the repo root (no `tokenizer/`
+    // there). Without this branch Raw fell through to `Ok(snapshot)` (the repo root) and load errored
+    // with "tokenizer: No such file or directory" (epic 9992 P5/P6 wiring gap — the `krea_2_raw` engine
+    // row already documents this resolver, but the branch was never added).
+    if request.model == "krea_2_turbo" || request.model == "krea_2_raw" {
         return Ok(snapshot.map(|root| krea_model_subdir(&root, request)));
     }
     // Catalog-wide quant-matrix models (sc-8513, epic 8506) ship as SceneWorks pre-quantized
@@ -3408,7 +3414,7 @@ fn candle_adapter_label(model: &str) -> &'static str {
         | "sensenova_u1_8b_infographic_v2_fast" => "candle_sensenova",
         "ideogram_4" | "ideogram_4_turbo" => "candle_ideogram",
         "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => "candle_boogu",
-        "krea_2_turbo" => "candle_krea",
+        "krea_2_turbo" | "krea_2_raw" => "candle_krea",
         // Stable Diffusion 3.5 (sc-7880): Large / Large Turbo / Medium share the candle SD3.5 engine.
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => "candle_sd3",
         // sdxl / realvisxl share the candle "sdxl" engine.
@@ -4263,6 +4269,48 @@ mod standard_tier_tests {
         assert!(!zimage_uses_generic_img2img(&no_flag, true));
     }
 
+    /// A4.4 (sc-10192): Ideogram opts into the generic `ui.img2img` surface (the Image Studio "Image
+    /// reference" tile, `text_to_image` mode) while ALSO owning the bespoke Remix/inpaint edit arm
+    /// (`edit_image` mode, [`resolve_ideogram_edit`], sc-6303). The two arms in
+    /// [`resolve_generic_lane_conditioning`] are mutually exclusive by mode — the edit arm is checked
+    /// first and gates on `mode == "edit_image"`, the generic img2img arm on `mode != "edit_image"` — so a
+    /// plain-t2i reference routes to the generic init (a single `Conditioning::Reference`, no mask, which
+    /// the native engine's edit path denoises as plain img2img) while an Edit-tab job keeps the
+    /// mask-capable path. No engine change was needed: mlx-gen `resolve_edit` already treats a Reference
+    /// with no Mask as img2img. This tripwire locks the flag + mode-split; the disk-backed resolve
+    /// (asset decode) is validated on-device.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ideogram_img2img_routes_by_mode() {
+        let req = |model: &str, mode: &str| {
+            ImageRequest::from_payload(
+                json!({
+                    "model": model,
+                    "mode": mode,
+                    "modelManifestEntry": { "ui": { "img2img": true } },
+                    "referenceAssetId": "asset-1",
+                })
+                .as_object()
+                .unwrap(),
+            )
+        };
+        for model in ["ideogram_4", "ideogram_4_turbo"] {
+            let is_ideogram_edit = |r: &ImageRequest| {
+                matches!(r.model.as_str(), "ideogram_4" | "ideogram_4_turbo")
+                    && r.mode == "edit_image"
+            };
+            // Plain t2i + reference: the generic img2img arm's gate holds (flag on, non-edit mode) and the
+            // earlier Ideogram edit arm does not — so the reference takes the generic img2img init.
+            let t2i = req(model, "text_to_image");
+            assert!(model_supports_img2img(&t2i) && t2i.mode != "edit_image");
+            assert!(!is_ideogram_edit(&t2i));
+            // Edit tab: the Ideogram edit arm claims it first and the generic arm yields (edit mode).
+            let edit = req(model, "edit_image");
+            assert!(is_ideogram_edit(&edit));
+            assert!(!(model_supports_img2img(&edit) && edit.mode != "edit_image"));
+        }
+    }
+
     /// Write a minimal present `<tier>/transformer/<file>` so [`standard_tier_subdir`]'s
     /// filename-agnostic probe sees the tier as downloaded.
     fn seed_tier(root: &Path, tier: &str, file: &str) {
@@ -4498,6 +4546,52 @@ mod standard_tier_tests {
     /// MLX lane). This proves the shared tier resolver picks the requested q4/q8/bf16 subdir of a Lens
     /// turnkey snapshot off-Mac — the candle-lane sibling of the SD3.5 `standard_tier_subdir` tests
     /// above — so the retired resolver is fully replaced by the standard machinery.
+    #[test]
+    fn krea_model_subdir_selects_tier_and_falls_back_to_downloaded() {
+        let krea_request = |bits: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": "krea_2_raw", "advanced": { "mlxQuantize": bits } })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Krea turnkey: packed q4/q8 single-file transformer + dense sharded bf16 (index.json only).
+        seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
+
+        // q8-default (no selection) / q4 (bits<=4) / bf16 (bits<=0) each resolve to their tier subdir.
+        assert_eq!(
+            krea_model_subdir(root, &krea_request(json!(null))),
+            root.join("q8")
+        );
+        assert_eq!(
+            krea_model_subdir(root, &krea_request(json!(4))),
+            root.join("q4")
+        );
+        assert_eq!(
+            krea_model_subdir(root, &krea_request(json!(0))),
+            root.join("bf16")
+        );
+
+        // Regression guard (epic 9992): with ONLY the `bf16/` training-base tier downloaded (the Path-1
+        // unify scenario), a q8-default generation must fall back to the present bf16 tier — NOT the repo
+        // root (which has no `tokenizer/`, the reported "tokenizer: No such file or directory" load error).
+        let bf16_only = tempfile::tempdir().unwrap();
+        seed_tier(
+            bf16_only.path(),
+            "bf16",
+            "diffusion_pytorch_model.safetensors.index.json",
+        );
+        assert_eq!(
+            krea_model_subdir(bf16_only.path(), &krea_request(json!(null))),
+            bf16_only.path().join("bf16"),
+            "q8-default must fall back to the only downloaded tier (bf16), not the repo root"
+        );
+    }
+
     #[test]
     fn candle_lens_resolves_packed_turnkey_tier_subdir() {
         let lens_request = |bits: serde_json::Value| {

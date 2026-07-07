@@ -1474,6 +1474,39 @@ describe("ImageStudio Image-reference (img2img) tile (epic 8588, sc-8593/sc-1019
     // The describe tile stays hidden without a captioner, proving the two are independent now.
     expect(tileByText("Prompt from image")).toBeFalsy();
   });
+
+  // Ideogram-like structured-prompt img2img model (epic 8588 A4.4, sc-10192): the free-text prompt-tools
+  // strip is replaced by the JSON-caption builder, but the img2img "Image reference" tile must still
+  // surface — reference-guided latent-init is orthogonal to how the prompt is authored.
+  const IDEOGRAM_IMG2IMG = {
+    ...Z_IMAGE,
+    id: "ideogram_4",
+    name: "Ideogram 4",
+    family: "ideogram",
+    structuredPrompt: true,
+    ui: { img2img: true },
+  };
+
+  it("shows the 'Image reference' tile for a structured-prompt img2img model (Ideogram)", async () => {
+    await render(baseContext({ imageModels: [IDEOGRAM_IMG2IMG], models: [IDEOGRAM_IMG2IMG] }));
+    // The tile coexists with the structured caption builder…
+    expect(tileByText("Image reference")).toBeTruthy();
+    expect(document.body.querySelector(".structured-prompt-builder, .prompt-input-row.structured")).toBeTruthy();
+    // …but the free-text-only tiles ("Prompt from image" / "Refine my prompt") stay out of the strip —
+    // the caption builder owns image→caption + magic-expand, so this is the slim img2img-only strip.
+    expect(tileByText("Refine my prompt")).toBeFalsy();
+  });
+
+  it("activating the structured img2img tile reveals the reference-guidance panel", async () => {
+    await render(baseContext({ imageModels: [IDEOGRAM_IMG2IMG], models: [IDEOGRAM_IMG2IMG] }));
+    await click(tileByText("Image reference"));
+    // The img2img panel's hint distinguishes it from the caption builder's own reference→caption picker.
+    expect(
+      [...document.body.querySelectorAll(".prompt-tool-panel .structured-hint")].some((p) =>
+        p.textContent.includes("guide the render (image-to-image)"),
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {

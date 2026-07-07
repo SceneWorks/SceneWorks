@@ -844,7 +844,20 @@ pub(crate) fn create_app_with_state(
     let cors = cors_layer(&state.settings);
     let returned_state = state.clone();
 
+    // MCP server (epic 10231, sc-10233): the rmcp streamable-HTTP service is
+    // nested at `/mcp` INSIDE this router, so the `access_control` layer below
+    // gates it exactly like every `/api/v1` route (`requires_token` includes
+    // `/mcp`) — token header, loopback trust, and the brute-force throttle all
+    // apply unchanged. Its tools call back into this API over plain HTTP
+    // (`settings.mcp_api_url`, i.e. `SCENEWORKS_API_URL` or our own loopback
+    // port) carrying the access token, so there is no second engine/DB path.
+    let mcp_service = sceneworks_mcp::streamable_http_service(sceneworks_mcp::ApiClientConfig {
+        base_url: state.settings.mcp_api_url.clone(),
+        access_token: Some(state.settings.access_token.clone()),
+    });
+
     let router = Router::new()
+        .nest_service("/mcp", mcp_service)
         .route("/api/v1/health", get(health))
         .route("/api/v1/access", get(access))
         .route("/api/v1/auth/verify", post(verify_access))

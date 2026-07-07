@@ -102,8 +102,8 @@ function baseContext(overrides = {}) {
   };
 }
 
-const toolButtons = (container) => [...container.querySelectorAll(".image-editor-tool")];
-const barButtons = (container) => [...container.querySelectorAll(".image-editor-bar-actions button")];
+const toolButtons = (container) => [...container.querySelectorAll(".ie-tool")];
+const barButtons = (container) => [...container.querySelectorAll(".ie-topbar button")];
 const barButton = (container, label) => barButtons(container).find((b) => b.textContent.trim() === label);
 
 describe("ImageEditor scaffold", () => {
@@ -139,22 +139,24 @@ describe("ImageEditor scaffold", () => {
 
     expect(container.textContent).toContain("Open an image to start editing");
     // No working image → no Konva stage, view controls, or floating tool palette.
-    expect(container.querySelector(".image-editor-viewbar")).toBeNull();
+    expect(container.querySelector(".ie-viewbar")).toBeNull();
     expect(toolButtons(container)).toHaveLength(0);
   });
 
   it("offers always-enabled 'Open' + 'New layout' actions before an image loads", async () => {
     await render(baseContext());
     // Open (dialog picks the source) + New layout (blank canvas, sc-6092) + the
-    // keyboard-shortcuts help toggle (sc-6111). No separate "Open from project" /
-    // "Upload" buttons.
-    expect(barButtons(container).map((b) => b.textContent.trim())).toEqual(["Open", "New layout", "⌨"]);
+    // keyboard-shortcuts help toggle (sc-6111) are always present. The redesigned
+    // top bar (epic 10243) also carries a layout switcher + theme toggle, so assert
+    // the always-on actions by name rather than the exact button set.
+    const labels = () => barButtons(container).map((b) => b.textContent.trim());
+    expect(labels()).toEqual(expect.arrayContaining(["Open", "New layout", "⌨"]));
     expect(barButton(container, "Open").disabled).toBe(false);
     expect(barButton(container, "New layout").disabled).toBe(false);
 
     // Same with a project active.
     await render(baseContext({ activeProject: { id: "project_1", name: "My Project" } }));
-    expect(barButtons(container).map((b) => b.textContent.trim())).toEqual(["Open", "New layout", "⌨"]);
+    expect(labels()).toEqual(expect.arrayContaining(["Open", "New layout", "⌨"]));
     expect(barButton(container, "New layout").disabled).toBe(false);
   });
 

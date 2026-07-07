@@ -432,13 +432,16 @@ export function App() {
   // initial paint, but on the desktop shell the UI runs at the API's per-launch
   // http://127.0.0.1:<port> origin, where both localStorage and Tauri IPC are
   // unreliable across launches — so the durable copy lives server-side.
-  const changeTheme = (next) => {
+  // Stable across renders (sc-10244): it flows through the static app context to the
+  // Image Editor top-bar theme toggle, so a fresh identity each render would bust the
+  // static-context memo every tick.
+  const changeTheme = useCallback((next) => {
     setTheme(next);
     apiFetch("/api/v1/ui-preferences", "", {
       method: "PUT",
       body: JSON.stringify({ theme: next }),
     }).catch(() => {});
-  };
+  }, []);
   const [accent, setAccent] = useState(readStoredAccent);
   // Same persistence contract as theme: instant localStorage cache + durable
   // server copy. The PUT sends only the changed field, so the endpoint must
@@ -2057,6 +2060,10 @@ export function App() {
     sendCharacterToImage,
     sendCharacterToVideo,
     openDatasetInLibrary,
+    // Global theme (sc-10244): exposed so the Image Editor's top-bar toggle
+    // drives the app-wide data-theme rather than a screen-local override.
+    theme,
+    changeTheme,
   }), [
     activeProject, mediaAssets, openPreview, sendAssetToImage, sendAssetToVideo,
     activeTimeline, timelines, selectedTimelineId, setSelectedTimelineId, setActiveTimeline,
@@ -2084,7 +2091,7 @@ export function App() {
     addCharacterReference, updateCharacterReference,
     removeCharacterReference, createCharacterLook, updateCharacterLook, deleteCharacterLook,
     attachCharacterLora, updateCharacterLora, detachCharacterLora, createCharacterTestJob,
-    sendCharacterToImage, sendCharacterToVideo, openDatasetInLibrary,
+    sendCharacterToImage, sendCharacterToVideo, openDatasetInLibrary, theme, changeTheme,
   ]);
 
   return (

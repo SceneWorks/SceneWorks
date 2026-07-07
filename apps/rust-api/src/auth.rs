@@ -219,6 +219,13 @@ pub(crate) fn cors_layer(settings: &Settings) -> CorsLayer {
 /// authenticated). All other `PUBLIC_PATHS` entries expose a single route method,
 /// so a path-only exemption for them is already method-correct.
 pub(crate) fn requires_token(method: &Method, path: &str) -> bool {
+    // The MCP mount (sc-10233) is gated for every method, exactly like a gated
+    // `/api/v1` route: an unauthenticated LAN caller must not reach the MCP
+    // session layer at all. Loopback trust and the token header both work the
+    // same as for the API routes (this predicate only decides "gated or not").
+    if path == "/mcp" || path.starts_with("/mcp/") {
+        return true;
+    }
     if !path.starts_with("/api/") {
         return false;
     }
