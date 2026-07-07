@@ -438,6 +438,41 @@ const IMAGE_DESCRIBE_V1: &str = include_str!("image_describe_v1.txt");
 ))]
 const IMAGE_DESCRIBE_TAGS_V1: &str = include_str!("image_describe_tags_v1.txt");
 
+/// Multi-image "mood board" PROSE synthesis system prompt (epic 8588, sc-8595) — the N>1 sibling of
+/// [`IMAGE_DESCRIBE_V1`]. When a describe job carries MORE THAN ONE reference image, the model examines
+/// them together and synthesizes ONE prose prompt capturing the mood/style/composition they SHARE
+/// (rather than describing a single picture). Same `core_llm` vision path, same unconstrained-prose
+/// cleanup; only the instruction differs. Selected by [`build_image_describe_messages`] when `multi`.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const IMAGE_DESCRIBE_MOODBOARD_V1: &str = include_str!("image_describe_moodboard_v1.txt");
+
+/// Multi-image "mood board" TAG-STYLE synthesis system prompt (epic 8588, sc-8595) — the N>1, booru
+/// sibling of [`IMAGE_DESCRIBE_TAGS_V1`]. Synthesizes the SHARED style across several references into
+/// one comma-separated tag list for an anime/booru SDXL checkpoint. Selected by
+/// [`build_image_describe_messages`] when `multi` and the style is [`DescribeStyle::Tags`].
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const IMAGE_DESCRIBE_MOODBOARD_TAGS_V1: &str = include_str!("image_describe_moodboard_tags_v1.txt");
+
+/// Multi-image "mood board" Ideogram JSON synthesis system prompt (epic 8588, sc-8595) — the N>1
+/// sibling of [`IMAGE_CAPTION_V1`]. Grounds `style_description` in the look several references SHARE and
+/// composes a coherent NEW scene in that style (the composition is synthesized, like `magic_prompt` from
+/// a text idea — so the caption stays schema-valid without per-image grounded bboxes). Same JSON
+/// constraint + `is_caption` validation. Selected by [`build_image_caption_messages`] when `multi`.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const IMAGE_CAPTION_MOODBOARD_V1: &str = include_str!("ideogram_image_caption_moodboard_v1.txt");
+
 /// Body of a `[NAME]` section in the magic-prompt file (port of the reference `_load_sections`):
 /// section markers are a bracketed single word alone on a line. Returns the trimmed body, or empty.
 #[cfg(any(
@@ -528,13 +563,26 @@ pub(crate) fn build_magic_prompt_messages(prompt: &str, aspect_ratio: &str) -> (
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(crate) fn build_image_caption_messages() -> (String, String) {
-    let system = magic_section_from(IMAGE_CAPTION_V1, "SYSTEM");
-    let mut user = magic_section_from(IMAGE_CAPTION_V1, "USER");
+pub(crate) fn build_image_caption_messages(multi: bool) -> (String, String) {
+    // With more than one reference image the model synthesizes ONE caption for a new image in the
+    // aesthetic the board SHARES (mood board, sc-8595); the single-image asset is unchanged for N==1.
+    let asset = if multi {
+        IMAGE_CAPTION_MOODBOARD_V1
+    } else {
+        IMAGE_CAPTION_V1
+    };
+    let system = magic_section_from(asset, "SYSTEM");
+    let mut user = magic_section_from(asset, "USER");
     if user.is_empty() {
-        user = "Examine the reference image attached to this message and emit the single JSON \
-                caption object as specified. Describe only what is visible in the image."
-            .to_owned();
+        user = if multi {
+            "Examine the reference images attached to this message as a single mood board and emit \
+             the single JSON caption object as specified, grounding the style in the look they share \
+             and composing a coherent new scene in that style."
+        } else {
+            "Examine the reference image attached to this message and emit the single JSON \
+             caption object as specified. Describe only what is visible in the image."
+        }
+        .to_owned();
     }
     (system, user)
 }
@@ -579,23 +627,38 @@ impl DescribeStyle {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(crate) fn build_image_describe_messages(style: DescribeStyle) -> (String, String) {
-    let asset = match style {
-        DescribeStyle::Prose => IMAGE_DESCRIBE_V1,
-        DescribeStyle::Tags => IMAGE_DESCRIBE_TAGS_V1,
+pub(crate) fn build_image_describe_messages(style: DescribeStyle, multi: bool) -> (String, String) {
+    // With more than one reference image the model synthesizes ONE prompt from the mood/style the board
+    // SHARES (mood board, sc-8595) instead of describing a single picture; N==1 keeps the sc-8204/8205
+    // single-image assets byte-for-byte.
+    let asset = match (style, multi) {
+        (DescribeStyle::Prose, false) => IMAGE_DESCRIBE_V1,
+        (DescribeStyle::Prose, true) => IMAGE_DESCRIBE_MOODBOARD_V1,
+        (DescribeStyle::Tags, false) => IMAGE_DESCRIBE_TAGS_V1,
+        (DescribeStyle::Tags, true) => IMAGE_DESCRIBE_MOODBOARD_TAGS_V1,
     };
     let system = magic_section_from(asset, "SYSTEM");
     let mut user = magic_section_from(asset, "USER");
     if user.is_empty() {
-        user = match style {
-            DescribeStyle::Prose => {
+        user = match (style, multi) {
+            (DescribeStyle::Prose, false) => {
                 "Examine the reference image attached to this message and write the single detailed \
                  plain-text description as specified. Describe only what is visible in the image."
             }
-            DescribeStyle::Tags => {
+            (DescribeStyle::Prose, true) => {
+                "Examine the reference images attached to this message as a single mood board and \
+                 write ONE detailed plain-text prompt as specified, capturing the mood, style, \
+                 palette, lighting, and composition they share."
+            }
+            (DescribeStyle::Tags, false) => {
                 "Examine the reference image attached to this message and emit the single \
                  comma-separated booru-style tag list as specified. Tag only what is visible in the \
                  image."
+            }
+            (DescribeStyle::Tags, true) => {
+                "Examine the reference images attached to this message as a single mood board and \
+                 emit ONE comma-separated booru-style tag list as specified, capturing the style, \
+                 mood, palette, and composition they share."
             }
         }
         .to_owned();
@@ -737,24 +800,51 @@ pub(crate) async fn run_prompt_refine_job(
     // InstantID/captioner reference reads, the LoRA load path) — confine it to an app-managed root via
     // `normalize_app_managed_model_path` BEFORE opening it. That rejects `..` traversal and any absolute
     // path outside the app data dir / HF hub cache, closing the arbitrary-file-read gap.
-    let image_ref = if task.is_vision() {
-        let image_path = payload
-            .get("imagePath")
-            .or_else(|| payload.get("referencePath"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(
-                    "This task requires a non-empty `imagePath` reference image.".to_owned(),
-                )
-            })?;
-        let safe_path =
-            normalize_app_managed_model_path(settings, image_path, "Vision reference image")?;
-        Some(load_caption_image_ref(&safe_path)?)
+    // A vision task carries one OR MORE reference images. The plural `imagePaths` array (a mood board,
+    // sc-8595) takes precedence; otherwise the single `imagePath`/`referencePath` (unchanged single-image
+    // path). Every path is UNTRUSTED (it arrives on the job payload over the LAN-remote API boundary,
+    // epic 4484), so each is confined to an app-managed root via `normalize_app_managed_model_path`
+    // BEFORE opening it — rejecting `..` traversal and any absolute path outside the app data dir / HF
+    // hub cache. The order of `imagePaths` is preserved so the model reads the board in the order the
+    // user assembled it. N is bounded API-side (`MAX_MOOD_BOARD_IMAGES`).
+    let image_refs: Vec<gen_core::core_llm::ImageRef> = if task.is_vision() {
+        let paths: Vec<String> = match payload.get("imagePaths").and_then(Value::as_array) {
+            Some(items) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            None => payload
+                .get("imagePath")
+                .or_else(|| payload.get("referencePath"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+        };
+        if paths.is_empty() {
+            return Err(WorkerError::InvalidPayload(
+                "This task requires at least one non-empty `imagePath`/`imagePaths` reference image."
+                    .to_owned(),
+            ));
+        }
+        let mut refs = Vec::with_capacity(paths.len());
+        for path in &paths {
+            let safe_path =
+                normalize_app_managed_model_path(settings, path, "Vision reference image")?;
+            refs.push(load_caption_image_ref(&safe_path)?);
+        }
+        refs
     } else {
-        None
+        Vec::new()
     };
+    // More than one reference image switches the vision instruction to mood-board SYNTHESIS (one prompt
+    // capturing the shared aesthetic) rather than describing a single picture.
+    let multi_reference = image_refs.len() > 1;
     let model = payload
         .get("model")
         .and_then(Value::as_str)
@@ -775,13 +865,13 @@ pub(crate) async fn run_prompt_refine_job(
     // prompt in for the rewrite rules, describe supplies the prose/tags describe asset, and the default
     // rewrite assembles its guide/workflow system prompt with the user's prompt as the turn.
     let (system, user_message) = match task {
-        RefineTask::ImageCaption => build_image_caption_messages(),
+        RefineTask::ImageCaption => build_image_caption_messages(multi_reference),
         RefineTask::ImageDescribe => {
             // sc-8205: the describe style (prose vs booru tags) is selected per-model by the
             // `captionStyle` payload field the web forwards from the catalog; absent/unknown → prose.
             let style =
                 DescribeStyle::from_payload(payload.get("captionStyle").and_then(Value::as_str));
-            build_image_describe_messages(style)
+            build_image_describe_messages(style, multi_reference)
         }
         RefineTask::MagicPrompt => {
             let aspect_ratio = payload
@@ -901,18 +991,25 @@ pub(crate) async fn run_prompt_refine_job(
                 if !system.trim().is_empty() {
                     messages.push(Message::system(system));
                 }
-                // A vision task (image_caption / image_describe) user turn carries the reference image (a
-                // `Content::Image` block) alongside the instruction text, so the loaded provider examines the
-                // picture at generate time. Every other task is a plain text user turn.
-                let carries_image = image_ref.is_some();
-                match image_ref {
-                    Some(image) => messages.push(Message {
+                // A vision task (image_caption / image_describe) user turn carries the reference image(s)
+                // as `Content::Image` block(s) BEFORE the instruction text, so the loaded provider examines
+                // the picture(s) at generate time. The provider collects every `Content::Image` in the turn
+                // and expands per-image vision tokens (mlx-llama + candle-llama both loop over all images),
+                // so a mood board of N references (sc-8595) rides one generate call. Every other task is a
+                // plain text user turn.
+                let carries_image = !image_refs.is_empty();
+                if carries_image {
+                    let mut content: Vec<Content> =
+                        image_refs.into_iter().map(Content::Image).collect();
+                    content.push(Content::text(prompt));
+                    messages.push(Message {
                         role: Role::User,
-                        content: vec![Content::Image(image), Content::text(prompt)],
+                        content,
                         thinking: None,
                         tool_calls: Vec::new(),
-                    }),
-                    None => messages.push(Message::user(prompt)),
+                    });
+                } else {
+                    messages.push(Message::user(prompt));
                 }
                 let request = TextLlmRequest {
                     messages,
@@ -1609,7 +1706,7 @@ mod tests {
 
     #[test]
     fn build_image_caption_messages_returns_system_and_user() {
-        let (system, user) = build_image_caption_messages();
+        let (system, user) = build_image_caption_messages(false);
         assert!(!system.trim().is_empty(), "system block is non-empty");
         assert!(system.contains("compositional_deconstruction"));
         assert!(!user.trim().is_empty(), "user block is non-empty");
@@ -1655,7 +1752,7 @@ mod tests {
 
     #[test]
     fn build_image_describe_messages_returns_prose_system_and_user() {
-        let (system, user) = build_image_describe_messages(DescribeStyle::Prose);
+        let (system, user) = build_image_describe_messages(DescribeStyle::Prose, false);
         assert!(!system.trim().is_empty(), "system block is non-empty");
         assert!(
             !system.contains("compositional_deconstruction"),
@@ -1719,8 +1816,8 @@ mod tests {
 
     #[test]
     fn build_image_describe_messages_selects_the_style_asset() {
-        let (prose_sys, _) = build_image_describe_messages(DescribeStyle::Prose);
-        let (tags_sys, tags_user) = build_image_describe_messages(DescribeStyle::Tags);
+        let (prose_sys, _) = build_image_describe_messages(DescribeStyle::Prose, false);
+        let (tags_sys, tags_user) = build_image_describe_messages(DescribeStyle::Tags, false);
         assert_ne!(
             prose_sys, tags_sys,
             "prose and tags select DIFFERENT system prompts"
@@ -1733,6 +1830,75 @@ mod tests {
             tags_user.to_lowercase().contains("tag"),
             "tags user turn instructs tagging"
         );
+    }
+
+    // ── sc-8595 (epic 8588): multi-image "mood board" synthesis variants ──
+
+    #[test]
+    fn build_image_describe_messages_multi_selects_the_mood_board_asset() {
+        // N>1 swaps in the mood-board synthesis asset for BOTH styles; N==1 keeps the single-image asset.
+        let (prose_single, _) = build_image_describe_messages(DescribeStyle::Prose, false);
+        let (prose_multi, prose_multi_user) =
+            build_image_describe_messages(DescribeStyle::Prose, true);
+        assert_ne!(
+            prose_single, prose_multi,
+            "a mood board selects a DIFFERENT prose system prompt than single-image describe"
+        );
+        assert!(
+            prose_multi.to_lowercase().contains("mood board")
+                || prose_multi.to_lowercase().contains("mood-board"),
+            "the multi-image prose system prompt frames the task as a mood board"
+        );
+        assert!(
+            prose_multi.to_lowercase().contains("share")
+                || prose_multi.to_lowercase().contains("shared"),
+            "the mood-board prose prompt instructs synthesizing the SHARED aesthetic"
+        );
+        // Still prose — never the JSON caption schema.
+        assert!(!prose_multi.contains("compositional_deconstruction"));
+        assert!(prose_multi_user.to_lowercase().contains("mood board"));
+
+        let (tags_single, _) = build_image_describe_messages(DescribeStyle::Tags, false);
+        let (tags_multi, _) = build_image_describe_messages(DescribeStyle::Tags, true);
+        assert_ne!(
+            tags_single, tags_multi,
+            "a mood board selects a DIFFERENT tags system prompt than single-image tagging"
+        );
+        assert!(
+            tags_multi.contains("comma-separated"),
+            "the multi-image tags prompt still pins a comma-separated tag list"
+        );
+        assert!(
+            tags_multi.to_lowercase().contains("mood board")
+                || tags_multi.to_lowercase().contains("mood-board"),
+            "the multi-image tags system prompt frames the task as a mood board"
+        );
+    }
+
+    #[test]
+    fn build_image_caption_messages_multi_selects_the_mood_board_json_asset() {
+        // N>1 swaps in the mood-board JSON asset; it STILL carries the Ideogram caption schema so the
+        // reply validates as a caption, but grounds the style in the shared look + synthesizes the scene.
+        let (single_sys, _) = build_image_caption_messages(false);
+        let (multi_sys, multi_user) = build_image_caption_messages(true);
+        assert_ne!(
+            single_sys, multi_sys,
+            "a mood board selects a DIFFERENT caption system prompt than single-image caption"
+        );
+        assert!(
+            multi_sys.contains("compositional_deconstruction"),
+            "the mood-board caption prompt still emits the Ideogram JSON schema"
+        );
+        assert!(
+            multi_sys.contains("style_description"),
+            "the mood-board caption prompt still requires style_description"
+        );
+        assert!(
+            multi_sys.to_lowercase().contains("mood board")
+                || multi_sys.to_lowercase().contains("mood-board"),
+            "the mood-board caption prompt frames the task as a mood board"
+        );
+        assert!(!multi_user.contains("{{"), "no template placeholders");
     }
 
     #[test]
@@ -1877,7 +2043,7 @@ mod tests {
             TextLlmRequest,
         };
 
-        let (system, user) = build_image_caption_messages();
+        let (system, user) = build_image_caption_messages(false);
         let image = ImageRef::new(2, 2, vec![0u8; 12]).expect("image ref");
         let request = TextLlmRequest {
             messages: vec![
@@ -2261,7 +2427,7 @@ mod tests {
 
         let image =
             load_caption_image_ref(std::path::Path::new(&ref_path)).expect("decode ref image");
-        let (system, user) = build_image_caption_messages();
+        let (system, user) = build_image_caption_messages(false);
         let request = TextLlmRequest {
             messages: vec![
                 Message::system(system),
@@ -2337,7 +2503,7 @@ mod tests {
 
         let image =
             load_caption_image_ref(std::path::Path::new(&ref_path)).expect("decode ref image");
-        let (system, user) = build_image_caption_messages();
+        let (system, user) = build_image_caption_messages(false);
         let request = TextLlmRequest {
             messages: vec![
                 Message::system(system),
@@ -2411,7 +2577,7 @@ mod tests {
 
         let image =
             load_caption_image_ref(std::path::Path::new(&ref_path)).expect("decode ref image");
-        let (system, user) = build_image_describe_messages(DescribeStyle::Prose);
+        let (system, user) = build_image_describe_messages(DescribeStyle::Prose, false);
         let request = TextLlmRequest {
             messages: vec![
                 Message::system(system),

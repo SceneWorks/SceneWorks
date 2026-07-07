@@ -406,6 +406,7 @@ export default function StructuredPromptBuilder({
               hint="Or start from a reference image — the captioner reads it into a grounded JSON caption you can edit. The image is only used to write the caption; it isn’t sent to generation."
               buttonLabel="✨ Generate JSON from image"
               busyLabel="Captioning…"
+              showMoodBoard={visionCaptionReady}
               emptyMessage="The image did not produce a usable caption. Try another reference."
               errorFallback="Could not caption the image."
               gateDescription="Download the vision captioner to turn a reference image into an editable JSON caption. It runs locally on the native worker; the image is only used to write the caption."

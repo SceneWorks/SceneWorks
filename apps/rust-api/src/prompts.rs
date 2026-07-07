@@ -1,5 +1,11 @@
 use super::*;
 
+/// Maximum reference images in one "mood board" describe/caption request (epic 8588, sc-8595). Each
+/// reference is downscaled to ~1 MP before the dense Qwen-VL ViT, so the cost scales with N; this bounds
+/// the vision attention + context a single request can demand. The Image Studio picker enforces the same
+/// ceiling client-side — this is the authoritative server-side guard.
+pub(crate) const MAX_MOOD_BOARD_IMAGES: usize = 6;
+
 /// Enqueue a `prompt_refine` job: a lightweight, non-GPU job that asks an
 /// OpenAI-compatible LLM to rewrite the user's prompt to follow the selected
 /// model's prompt guide. The job runs in the Python worker (which reuses the
@@ -31,14 +37,42 @@ pub(crate) async fn create_prompt_refine_job(
     }
 
     if is_vision_task {
-        let asset_id = payload
-            .source_asset_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                ApiError::bad_request("sourceAssetId is required for a reference-image task")
-            })?;
+        // A "mood board" (epic 8588, sc-8595) sends several references in `sourceAssetIds`; the worker
+        // synthesizes ONE prompt/caption from the aesthetic they share. When that plural list is non-empty
+        // it takes precedence over the single `sourceAssetId`; otherwise the single id is the sole
+        // reference (the unchanged single-image path). Every id is resolved to a confined on-disk path.
+        let asset_ids: Vec<&str> = {
+            let plural: Vec<&str> = payload
+                .source_asset_ids
+                .iter()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .collect();
+            if plural.is_empty() {
+                payload
+                    .source_asset_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .into_iter()
+                    .collect()
+            } else {
+                plural
+            }
+        };
+        if asset_ids.is_empty() {
+            return Err(ApiError::bad_request(
+                "sourceAssetId (or sourceAssetIds) is required for a reference-image task",
+            ));
+        }
+        // Bound the board: each reference is downscaled to ~1 MP before the dense Qwen-VL ViT, so N
+        // references cost ~N MP of vision attention + context. Cap it so a runaway list cannot exhaust
+        // memory. The UI enforces the same ceiling; this is the server-side guard.
+        if asset_ids.len() > MAX_MOOD_BOARD_IMAGES {
+            return Err(ApiError::bad_request(format!(
+                "A mood board accepts at most {MAX_MOOD_BOARD_IMAGES} reference images"
+            )));
+        }
         let project_id = payload
             .project_id
             .as_deref()
@@ -47,8 +81,24 @@ pub(crate) async fn create_prompt_refine_job(
             .ok_or_else(|| {
                 ApiError::bad_request("projectId is required for a reference-image task")
             })?;
-        let image_path = resolve_image_caption_path(state.clone(), project_id, asset_id).await?;
-        job_payload.insert("imagePath".to_owned(), Value::String(image_path));
+        let mut image_paths = Vec::with_capacity(asset_ids.len());
+        for asset_id in &asset_ids {
+            image_paths
+                .push(resolve_image_caption_path(state.clone(), project_id, asset_id).await?);
+        }
+        // A single reference keeps the scalar `imagePath` (byte-identical to the pre-mood-board path);
+        // multiple references ride the `imagePaths` array the worker prefers.
+        if image_paths.len() == 1 {
+            job_payload.insert(
+                "imagePath".to_owned(),
+                Value::String(image_paths.into_iter().next().unwrap()),
+            );
+        } else {
+            job_payload.insert(
+                "imagePaths".to_owned(),
+                Value::Array(image_paths.into_iter().map(Value::String).collect()),
+            );
+        }
         // The vision model is named by its HF repo string; the worker resolves it by repo (like the
         // refiner), so it must be carried verbatim rather than as a catalog id.
         if let Some(model) = payload

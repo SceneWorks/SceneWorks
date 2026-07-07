@@ -13,7 +13,7 @@
 // the result to its own state). C1: the image is captioning-only — never sent to generation.
 
 import React, { useEffect, useState } from "react";
-import { ImageEditSourcePickerField } from "./AssetPicker.jsx";
+import { AssetPickerField, ImageEditSourcePickerField } from "./AssetPicker.jsx";
 import { assetUrl } from "./assetMedia.jsx";
 import { ModelAvailabilityGate } from "./ModelAvailabilityGate.jsx";
 
@@ -58,10 +58,25 @@ export default function ReferenceCaptionPicker({
   img2imgStrength = 0.5,
   onImg2imgStrengthChange,
   img2imgStrengthConfig,
+  // Multi-image "mood board" (epic 8588, sc-8595): when true, an additional multi-select gallery lets the
+  // user add MORE reference images beyond the primary. `onCaption` is then called with the FULL array of
+  // ids ([primary, ...extras]) and the worker synthesizes ONE prompt/caption from the shared aesthetic. A
+  // single reference (no extras) still calls `onCaption` with the plain id string — so describe/Ideogram
+  // consumers that don't opt in are byte-unaffected. `moodBoardMax` bounds the board (server also caps).
+  showMoodBoard = false,
+  moodBoardMax = 6,
 }) {
   const [referenceAssetId, setReferenceAssetId] = useState("");
+  const [moodBoardIds, setMoodBoardIds] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  // The extra mood-board picks, minus the primary (it is already the first image) and capped. This is
+  // what actually augments the describe call; `referenceAssetId` stays the primary / img2img seed.
+  const moodBoardExtras = moodBoardIds
+    .filter((id) => id && id !== referenceAssetId)
+    .slice(0, Math.max(0, moodBoardMax - 1));
+  const moodBoardActive = showMoodBoard && moodBoardExtras.length > 0;
 
   // Feed the uploaded image's natural dimensions to the sc-8109 auto-preset seam.
   function reportReferenceDimensions(asset) {
@@ -100,7 +115,12 @@ export default function ReferenceCaptionPicker({
     setBusy(true);
     setError("");
     try {
-      const result = await onCaption(referenceAssetId);
+      // A mood board sends the FULL ordered list ([primary, ...extras]); a lone reference keeps the
+      // scalar id so consumers that never opted into `showMoodBoard` see the unchanged string contract.
+      const arg = moodBoardActive
+        ? [referenceAssetId, ...moodBoardExtras]
+        : referenceAssetId;
+      const result = await onCaption(arg);
       if (result) {
         onApply(result);
       } else {
@@ -139,6 +159,22 @@ export default function ReferenceCaptionPicker({
           projectId={projectId}
           value={referenceAssetId}
         />
+        {/* Mood board (epic 8588, sc-8595): add MORE reference images beyond the primary; the model
+            synthesizes ONE prompt/caption from the aesthetic they share. Only once a primary is chosen
+            (it is the first image). The extras come from the project library (the primary picker keeps
+            import/characters). Capped at moodBoardMax − 1 extras; the server enforces the same ceiling. */}
+        {showMoodBoard && referenceAssetId ? (
+          <AssetPickerField
+            assets={referenceAssets.filter((asset) => asset.id !== referenceAssetId)}
+            buttonLabel="Add mood-board images"
+            changeLabel="Edit mood board"
+            emptyLabel="Add more images to blend their style (optional)"
+            label="Mood board (optional)"
+            multiple
+            onChange={setMoodBoardIds}
+            values={moodBoardExtras}
+          />
+        ) : null}
         {/* Describe → prompt (epic 8203): only when the vision captioner is present. An img2img-only
             model (no captioner) still gets the picker + strength slider below via `showImg2imgStrength`. */}
         {visionCaptionReady ? (
@@ -152,9 +188,10 @@ export default function ReferenceCaptionPicker({
           </button>
         ) : null}
         {/* img2img strength (epic 8588 slice A, sc-8593): the SAME picked reference guides generation
-            (reference-guided / latent-init) at this strength. Shown only for img2img-capable models
-            once a reference is chosen. */}
-        {showImg2imgStrength && referenceAssetId ? (
+            (reference-guided / latent-init) at this strength. Shown for img2img-capable models once a
+            SINGLE reference is chosen — hidden when a mood board is active, since img2img seeds from one
+            image, not a blend. */}
+        {showImg2imgStrength && referenceAssetId && !moodBoardActive ? (
           <label className="reference-strength img2img-strength">
             {img2imgStrengthConfig?.label ?? "Reference strength"}
             <input
