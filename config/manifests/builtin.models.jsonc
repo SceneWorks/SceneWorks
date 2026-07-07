@@ -2045,6 +2045,13 @@
       },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Base",
       "ui": {
+        // img2img reference-guided t2i (epic 8588 A4.3, sc-10191): the `ui.img2img` flag drives the
+        // Image Studio "Image reference" tile + strength slider (referenceAssetId + advanced.strength),
+        // routed through the generic img2img arm to Boogu Base's true-CFG img2img entrypoint (mlx-gen
+        // #669). Distinct from `boogu_image_edit`'s Qwen3-VL semantic MultiReference edit. Full 0–1
+        // slider (default 0.5), unclamped — usable band is model-specific.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Boogu Image",
         // Exposes the Image Studio "Full precision (bf16)" toggle (sc-6568): off = the packed Q8
         // default (the downloaded `base/` subfolder); on sends advanced `mlxQuantize: 0` and the
@@ -2141,6 +2148,11 @@
       },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Turbo",
       "ui": {
+        // img2img reference-guided t2i (epic 8588 A4.3, sc-10191): same `ui.img2img` surface as
+        // boogu_image, routed to Boogu Turbo's distilled (DMD, CFG-free) img2img entrypoint (mlx-gen
+        // #669). Full 0–1 slider (default 0.5), unclamped.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Boogu Image Turbo",
         // Full-precision bf16 opt-in (sc-6568): on sends `mlxQuantize: 0`; the worker fetches the
         // `turbo-bf16/` subfolder on demand. Off = the packed Q8 `turbo/` default.
@@ -2572,6 +2584,16 @@
       },
       "licenseUrl": "https://www.krea.ai/krea-2-licensing",
       "ui": {
+        // img2img reference-guided generation (epic 8588 slice A, sc-10225): the `ui.img2img` toggle (NOT
+        // a capabilities value) drives the "Image reference" prompt-tool + strength slider. Unlike Turbo,
+        // Raw seeds the TRUE-CFG denoise — the picked image + `img2imgStrength` route through the worker's
+        // generic arm (resolve_img2img_init_generic → Conditioning::Reference) to the engine's Raw CFG
+        // entrypoint `generate_base_img2img_with_progress` (mlx-gen #670 / sc-10224), so guidance + the
+        // negative prompt are honored. Full 0–1 slider (default 0.5), NOT clamped — usable band is
+        // model-specific. macOS/MLX only for now (the worker generic img2img arm is Mac-gated); the
+        // candle/Windows-Linux twin is sc-10226.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Krea 2 Raw",
         "description": "Krea 2 Raw — Krea AI's undistilled 12B single-stream rectified-flow DiT with a Qwen3-VL-4B text encoder, native MLX (Apple Silicon). The full-fidelity, TRUE classifier-free-guidance counterpart to the fast CFG-free Krea 2 Turbo: run ~52 steps with a real guidance scale (~3.5) and an optional negative prompt for the highest quality and the most control. Pre-quantized Q8 (~20.5 GB download, default); the dense bf16 tier doubles as the Krea 2 LoRA training base. Krea 2 Community License (non-commercial). Runs on Apple Silicon (MLX) and Windows/Linux NVIDIA GPUs (candle/CUDA, sc-9994); needs a 48 GB-class Mac or a ~32 GB-class CUDA GPU.",
         "recommendedFor": ["text_to_image"],
