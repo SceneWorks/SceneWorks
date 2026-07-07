@@ -17,7 +17,7 @@
   - Build the binaries (VS2022 v143 BuildTools / CUDA 12.9; sm_120 native PTX shown):
       cmd /c 'call "<vcvars64.bat>" && set CUDA_COMPUTE_CAP=120 && cargo build --release ^
         -p sceneworks-rust-api -p sceneworks-rust-worker --features sceneworks-worker/backend-candle'
-  - microsoft/Lens + microsoft/Lens-Turbo snapshots in the HF cache (~/.cache/huggingface/hub).
+  - SceneWorks/lens-mlx + SceneWorks/lens-turbo-mlx snapshots in the HF cache (~/.cache/huggingface/hub).
 
 .EXAMPLE
   pwsh scripts/smoke-lens.ps1

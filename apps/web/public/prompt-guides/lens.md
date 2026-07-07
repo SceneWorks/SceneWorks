@@ -75,5 +75,5 @@ Use short negatives for unwanted artifacts: `blurry text, malformed hands, disto
 
 ## Sources
 
-- [Microsoft Lens model card](https://huggingface.co/microsoft/Lens)
-- [Microsoft Lens-Turbo model card](https://huggingface.co/microsoft/Lens-Turbo)
+- [Lens — SceneWorks MLX rehost](https://huggingface.co/SceneWorks/lens-mlx)
+- [Lens-Turbo — SceneWorks MLX rehost](https://huggingface.co/SceneWorks/lens-turbo-mlx)

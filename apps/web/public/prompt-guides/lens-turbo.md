@@ -66,5 +66,5 @@ Use concise negatives: `blurred lettering, extra objects, low contrast, warped l
 
 ## Sources
 
-- [Microsoft Lens-Turbo model card](https://huggingface.co/microsoft/Lens-Turbo)
-- [Microsoft Lens model card](https://huggingface.co/microsoft/Lens)
+- [Lens-Turbo — SceneWorks MLX rehost](https://huggingface.co/SceneWorks/lens-turbo-mlx)
+- [Lens — SceneWorks MLX rehost](https://huggingface.co/SceneWorks/lens-mlx)
