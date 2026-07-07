@@ -76,6 +76,16 @@ const buttonWithText = (root, text) =>
 const saveButton = (container) =>
   [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Save as Preset"));
 const nameInput = (container) => container.querySelector('input[aria-label="Preset name"]');
+// Save-as-Preset folds into the Advanced panel (collapsed by default), matching Image
+// Studio's single-column layout — open it before touching the preset controls.
+const openAdvanced = async (container) => {
+  const toggle = [...container.querySelectorAll("button.advanced-toggle")].find((b) =>
+    b.textContent.includes("Advanced"),
+  );
+  if (toggle) {
+    await click(toggle);
+  }
+};
 
 describe("VideoStudio Save as Preset", () => {
   let container;
@@ -106,6 +116,7 @@ describe("VideoStudio Save as Preset", () => {
   it("snapshots the video config into a text_to_video preset without the seed", async () => {
     const context = baseContext();
     await render(context);
+    await openAdvanced(container);
 
     const input = nameInput(container);
     expect(input).toBeTruthy();
@@ -141,6 +152,7 @@ describe("VideoStudio Save as Preset", () => {
       ],
     });
     await render(context);
+    await openAdvanced(container);
 
     await act(async () => setInput(nameInput(container), "Push In"));
     await click(saveButton(container));
@@ -765,10 +777,7 @@ describe("VideoStudio Mac mode gating (sc-5716)", () => {
   }
 
   const modeButton = (label) => buttonWithText(container.querySelector(".mode-control"), label);
-  const modelSelect = () =>
-    [...container.querySelectorAll(".render-rail label")]
-      .find((el) => el.textContent.trim().startsWith("Model"))
-      ?.querySelector("select");
+  const modelSelect = () => container.querySelector(".settings-field-model select");
 
   it("does not trap the user after switching to a model-specific mode", async () => {
     const context = baseContext({
