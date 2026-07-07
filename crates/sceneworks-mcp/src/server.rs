@@ -1,12 +1,11 @@
 //! The SceneWorks MCP tool surface (epic 10231, sc-10233 catalog + sc-10234
-//! generate_image).
+//! generate_image + sc-10235 video submit/poll).
 //!
 //! `SceneWorksMcp` is the rmcp server/service struct: a `#[tool_router]` impl
 //! holds one method per MCP tool, and `#[tool_handler]` wires that router into
 //! the `ServerHandler` the streamable-HTTP transport serves. Every tool is a
 //! thin wrapper over an existing `/api/v1/*` route via [`ApiClient`] — later
-//! stories (video tools …) add methods to the `#[tool_router]` block, nothing
-//! else.
+//! stories add methods to the `#[tool_router]` block, nothing else.
 //!
 //! The catalog endpoints return large manifest-derived objects (multi-KB per
 //! model: downloads, footprints, platform notes …). Tools re-shape them into
@@ -18,6 +17,13 @@
 //! status (relaying JobSnapshot progress as MCP progress notifications), then
 //! fetches the produced media through the project files route and returns it
 //! inline as base64 image content.
+//!
+//! Video generation runs minutes and outlives a single blocking call, so
+//! sc-10235 adds a NON-blocking submit/poll trio instead: `submit_video_job`
+//! (`POST /api/v1/video/jobs` → job id + initial snapshot), `get_job_status`
+//! (a generic `GET /api/v1/jobs/:id` view usable for image jobs too), and
+//! `get_job_result` (ticketed download links via `POST /api/v1/files/ticket`
+//! — media bytes are never inlined for these).
 
 use std::time::Duration;
 
@@ -25,7 +31,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, Meta, ProgressNotificationParam, ProgressToken,
+        CallToolResult, ContentBlock, Meta, ProgressNotificationParam, ProgressToken, Resource,
         ServerCapabilities, ServerInfo,
     },
     schemars,
@@ -147,6 +153,77 @@ pub struct GenerateImageArgs {
     pub mask_asset_id: Option<String>,
 }
 
+/// Arguments for `submit_video_job`, mapped onto the API's `VideoJobRequest`
+/// (`apps/rust-api/src/dto.rs`). The tool exposes four task-level modes and maps
+/// them to the API's wire modes in [`video_job_body`]; only provided fields are
+/// sent so the API's serde defaults (duration 6s, 25fps, 768x512, ltx_2_3 …)
+/// stay authoritative.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitVideoJobArgs {
+    #[schemars(description = "Project to generate into (from list_projects).")]
+    pub project_id: String,
+    #[schemars(description = "The video prompt (1-4000 characters).")]
+    pub prompt: String,
+    #[schemars(
+        description = "\"generate\" (default: text-to-video, or image-to-video when sourceAssetId is set, or first/last-frame when lastFrameAssetId is also set), \"extend\" (continue a clip; needs sourceClipAssetId), \"bridge\" (fill between two clips; needs sourceClipAssetId + bridgeRightClipAssetId), or \"person_replace\" (swap a tracked person; needs sourceClipAssetId + personTrackId + characterId)."
+    )]
+    pub mode: Option<String>,
+    #[schemars(description = "Things to avoid in the video.")]
+    pub negative_prompt: Option<String>,
+    #[schemars(
+        description = "Video model id from list_models (type \"video\"). Omit for the server default."
+    )]
+    pub model: Option<String>,
+    #[schemars(description = "Clip length in seconds (1-30, default 6).")]
+    pub duration: Option<f64>,
+    #[schemars(description = "Frames per second (1-60, default 25).")]
+    pub fps: Option<u32>,
+    #[schemars(description = "Output width in pixels (256-1920, default 768).")]
+    pub width: Option<u32>,
+    #[schemars(description = "Output height in pixels (256-1920, default 512).")]
+    pub height: Option<u32>,
+    #[schemars(description = "Quality preset (\"draft\", \"balanced\" (default) or \"high\").")]
+    pub quality: Option<String>,
+    #[schemars(description = "Seed for reproducible output. Omit for a random seed.")]
+    pub seed: Option<i64>,
+    #[schemars(
+        description = "LoRA adapters to apply: [{\"id\": <from list_loras>, \"weight\": 0.0-2.0}]."
+    )]
+    pub loras: Option<Vec<Value>>,
+    #[schemars(
+        description = "Character to condition on (character id; required for person_replace)."
+    )]
+    pub character_id: Option<String>,
+    #[schemars(description = "Starting image asset id (generate mode: makes it image-to-video).")]
+    pub source_asset_id: Option<String>,
+    #[schemars(
+        description = "Ending image asset id (generate mode: with sourceAssetId, makes it a first/last-frame generation)."
+    )]
+    pub last_frame_asset_id: Option<String>,
+    #[schemars(
+        description = "Source video clip asset id (extend: the clip to continue; bridge: the LEFT clip; person_replace: the clip to edit)."
+    )]
+    pub source_clip_asset_id: Option<String>,
+    #[schemars(description = "RIGHT video clip asset id for bridge mode.")]
+    pub bridge_right_clip_asset_id: Option<String>,
+    #[schemars(description = "Person track id to replace (person_replace mode).")]
+    pub person_track_id: Option<String>,
+    #[schemars(description = "person_replace scope: \"face_only\" (default) or \"full_body\".")]
+    pub replacement_mode: Option<String>,
+}
+
+/// Arguments for the generic job-polling tools (`get_job_status` /
+/// `get_job_result`) — they work for any job type (video AND image).
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct JobIdArgs {
+    #[schemars(
+        description = "The job id returned by submit_video_job (or any other job-submitting call)."
+    )]
+    pub job_id: String,
+}
+
 #[tool_router]
 impl SceneWorksMcp {
     #[tool(
@@ -237,11 +314,7 @@ impl SceneWorksMcp {
             match status {
                 "completed" => break job,
                 "failed" => {
-                    let detail = job
-                        .get("error")
-                        .and_then(Value::as_str)
-                        .filter(|error| !error.is_empty())
-                        .unwrap_or("the worker reported no error detail");
+                    let detail = job_error_detail(&job);
                     return tool_error(format!("Image job {job_id} failed: {detail}"));
                 }
                 "canceled" => {
@@ -324,6 +397,200 @@ impl SceneWorksMcp {
         }))?);
         Ok(CallToolResult::success(blocks))
     }
+
+    #[tool(
+        description = "Submit a video generation job WITHOUT waiting for it (video renders for minutes). Modes: \"generate\" (text-to-video; add sourceAssetId for image-to-video, plus lastFrameAssetId for first/last-frame), \"extend\" (continue a clip), \"bridge\" (fill between two clips), \"person_replace\" (swap a tracked person for a Character). Returns the job id + initial snapshot; poll get_job_status, then fetch links with get_job_result once completed."
+    )]
+    async fn submit_video_job(
+        &self,
+        Parameters(args): Parameters<SubmitVideoJobArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let body =
+            video_job_body(&args).map_err(|message| ErrorData::invalid_params(message, None))?;
+        let job = self
+            .api
+            .post_json("/api/v1/video/jobs", &body)
+            .await
+            .map_err(api_error)?;
+        if job.get("id").and_then(Value::as_str).is_none() {
+            return Err(ErrorData::internal_error(
+                "video job submission returned no job id",
+                None,
+            ));
+        }
+        let mut snapshot = compact_job_status(&job);
+        if let Some(out) = snapshot.as_object_mut() {
+            out.insert(
+                "next".to_owned(),
+                json!(
+                    "Video jobs run for minutes. Poll get_job_status with this jobId; \
+                     once status is \"completed\", call get_job_result for download links."
+                ),
+            );
+        }
+        json_result(snapshot)
+    }
+
+    #[tool(
+        description = "Get the current status of a submitted job (works for video AND image jobs): status (queued/running/completed/failed/canceled/interrupted), stage, progressPercent, etaSeconds, and the error message when the job failed."
+    )]
+    async fn get_job_status(
+        &self,
+        Parameters(args): Parameters<JobIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let job_id = valid_job_id(&args.job_id)
+            .map_err(|message| ErrorData::invalid_params(message, None))?;
+        let job = self
+            .api
+            .get_json(&format!("/api/v1/jobs/{job_id}"), &[])
+            .await
+            .map_err(api_error)?;
+        json_result(compact_job_status(&job))
+    }
+
+    #[tool(
+        description = "Fetch the result of a COMPLETED job (video or image) as downloadable links. Mints a short-lived media ticket and returns one resource link per result asset — the URL works from any machine that can reach the SceneWorks API (no auth header needed while the ticket is valid). Video/image bytes are never inlined by this tool. If the job is still running it reports ready=false; if it failed, the job error."
+    )]
+    async fn get_job_result(
+        &self,
+        Parameters(args): Parameters<JobIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let job_id = valid_job_id(&args.job_id)
+            .map_err(|message| ErrorData::invalid_params(message, None))?;
+        let job = self
+            .api
+            .get_json(&format!("/api/v1/jobs/{job_id}"), &[])
+            .await
+            .map_err(api_error)?;
+        match job.get("status").and_then(Value::as_str).unwrap_or("") {
+            "completed" => {}
+            "failed" => {
+                let detail = job_error_detail(&job);
+                return tool_error(format!("Job {job_id} failed: {detail}"));
+            }
+            "canceled" => {
+                return tool_error(format!("Job {job_id} was canceled before it finished."));
+            }
+            "interrupted" => {
+                return tool_error(format!(
+                    "Job {job_id} was interrupted (worker restarted mid-run); resubmit it."
+                ));
+            }
+            // Not terminal yet: a clear ready=false answer, NOT an error — the
+            // caller simply keeps polling get_job_status.
+            _ => {
+                let mut snapshot = compact_job_status(&job);
+                if let Some(out) = snapshot.as_object_mut() {
+                    out.insert("ready".to_owned(), json!(false));
+                    out.insert(
+                        "note".to_owned(),
+                        json!(
+                            "The job has not completed yet — keep polling get_job_status \
+                             and call get_job_result again once status is \"completed\"."
+                        ),
+                    );
+                }
+                return json_result(snapshot);
+            }
+        }
+
+        let Some(project_id) = job
+            .get("projectId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            return tool_error(format!(
+                "Job {job_id} completed but carries no project id, so its files \
+                 cannot be located."
+            ));
+        };
+        let assets: Vec<(&Value, String)> = job
+            .pointer("/result/assets")
+            .and_then(Value::as_array)
+            .map(|assets| {
+                assets
+                    .iter()
+                    .filter_map(|asset| asset_media_path(asset).map(|path| (asset, path)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if assets.is_empty() {
+            return tool_error(format!(
+                "Job {job_id} completed but reported no downloadable result assets."
+            ));
+        }
+
+        // One sliding multi-use media ticket covers every link (sc-8810 flavor):
+        // it authorizes GET /api/v1/projects/:id/files/* via `?ticket=` with no
+        // auth header, so the URL is fetchable from any machine that can reach
+        // the API — exactly what a remote MCP client needs.
+        let ticket_response = self
+            .api
+            .post_json("/api/v1/files/ticket", &json!({}))
+            .await
+            .map_err(api_error)?;
+        let Some(ticket) = ticket_response
+            .get("ticket")
+            .and_then(Value::as_str)
+            .filter(|ticket| !ticket.is_empty())
+        else {
+            return Err(ErrorData::internal_error(
+                "the media ticket endpoint returned no ticket",
+                None,
+            ));
+        };
+        let expires_in_seconds = ticket_response.get("expiresInSeconds").cloned();
+
+        let mut blocks = Vec::with_capacity(assets.len() + 1);
+        let mut summary_assets = Vec::with_capacity(assets.len());
+        for (asset, media_path) in assets {
+            let relative_url =
+                format!("/api/v1/projects/{project_id}/files/{media_path}?ticket={ticket}");
+            let url = format!("{}{relative_url}", self.api.base_url());
+            let mime_type = media_mime_type(
+                &media_path,
+                asset.pointer("/file/mimeType").and_then(Value::as_str),
+            );
+            let name = media_path
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&media_path)
+                .to_owned();
+            let mut link = Resource::new(&url, name).with_description(format!(
+                "SceneWorks {} asset {} from job {job_id}",
+                asset.get("type").and_then(Value::as_str).unwrap_or("media"),
+                asset.get("id").and_then(Value::as_str).unwrap_or("?"),
+            ));
+            if let Some(mime) = &mime_type {
+                link = link.with_mime_type(mime);
+            }
+            blocks.push(ContentBlock::resource_link(link));
+            summary_assets.push(json!({
+                "id": asset.get("id").cloned().unwrap_or(Value::Null),
+                "type": asset.get("type").cloned().unwrap_or(Value::Null),
+                "mimeType": mime_type,
+                "url": url,
+                "relativeUrl": relative_url,
+            }));
+        }
+        blocks.push(ContentBlock::json(json!({
+            "jobId": job_id,
+            "projectId": project_id,
+            "status": "completed",
+            "assets": summary_assets,
+            "ticketExpiresInSeconds": expires_in_seconds,
+            "note": format!(
+                "Each url embeds a short-lived media ticket — download promptly \
+                 (call get_job_result again for fresh links). The urls use the \
+                 SceneWorks API base \"{}\"; if that host is not reachable from \
+                 your machine, apply relativeUrl to the base you use to reach \
+                 this MCP server (everything before /mcp).",
+                self.api.base_url()
+            ),
+        }))?);
+        Ok(CallToolResult::success(blocks))
+    }
 }
 
 /// Sends MCP progress notifications for JobSnapshot polls, deduplicated on
@@ -372,7 +639,10 @@ impl ServerHandler for SceneWorksMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "SceneWorks local generation studio. Use list_projects for project ids, \
              list_models for the generation model catalog (model ids + job defaults), and \
-             list_loras for LoRA adapters compatible with a model family.",
+             list_loras for LoRA adapters compatible with a model family. generate_image \
+             blocks until the images are ready; video runs minutes, so use \
+             submit_video_job, poll get_job_status, then get_job_result for ticketed \
+             download links (get_job_status/get_job_result work for image jobs too).",
         )
     }
 }
@@ -460,6 +730,213 @@ pub(crate) fn image_job_body(args: &GenerateImageArgs) -> Result<Value, String> 
         }
     }
     Ok(Value::Object(body))
+}
+
+/// Map `submit_video_job` args onto the `VideoJobRequest` wire shape
+/// (camelCase). The tool's four task-level modes map to the API's wire modes —
+/// `generate` picks `text_to_video` / `image_to_video` / `first_last_frame`
+/// from the provided image assets — and the mode-specific required assets are
+/// checked here so a bad call fails fast with a precise message instead of a
+/// submitted-then-rejected job. Only provided optional fields are emitted so
+/// the API's serde defaults stay authoritative.
+pub(crate) fn video_job_body(args: &SubmitVideoJobArgs) -> Result<Value, String> {
+    let mode = match args.mode.as_deref().map(str::trim).unwrap_or("generate") {
+        "" | "generate" => {
+            if args.last_frame_asset_id.is_some() {
+                if args.source_asset_id.is_none() {
+                    return Err(
+                        "generate mode with a lastFrameAssetId also needs a sourceAssetId \
+                         (the first frame)"
+                            .to_owned(),
+                    );
+                }
+                "first_last_frame"
+            } else if args.source_asset_id.is_some() {
+                "image_to_video"
+            } else {
+                "text_to_video"
+            }
+        }
+        "extend" => {
+            if args.source_clip_asset_id.is_none() {
+                return Err(
+                    "extend mode requires a sourceClipAssetId (the clip to continue)".to_owned(),
+                );
+            }
+            "extend_clip"
+        }
+        "bridge" => {
+            if args.source_clip_asset_id.is_none() || args.bridge_right_clip_asset_id.is_none() {
+                return Err(
+                    "bridge mode requires a sourceClipAssetId (left clip) and a \
+                     bridgeRightClipAssetId (right clip)"
+                        .to_owned(),
+                );
+            }
+            "video_bridge"
+        }
+        "person_replace" => {
+            if args.source_clip_asset_id.is_none() {
+                return Err(
+                    "person_replace mode requires a sourceClipAssetId (the clip to edit)"
+                        .to_owned(),
+                );
+            }
+            if args.person_track_id.is_none() {
+                return Err(
+                    "person_replace mode requires a personTrackId (the person to replace)"
+                        .to_owned(),
+                );
+            }
+            if args.character_id.is_none() {
+                return Err(
+                    "person_replace mode requires a characterId (the replacement Character)"
+                        .to_owned(),
+                );
+            }
+            "replace_person"
+        }
+        other => {
+            return Err(format!(
+                "unsupported mode \"{other}\": use \"generate\", \"extend\", \"bridge\" or \
+                 \"person_replace\""
+            ))
+        }
+    };
+    let mut body = Map::new();
+    body.insert("projectId".to_owned(), json!(args.project_id));
+    body.insert("mode".to_owned(), json!(mode));
+    body.insert("prompt".to_owned(), json!(args.prompt));
+    let optional = [
+        (
+            "negativePrompt",
+            args.negative_prompt.as_ref().map(|v| json!(v)),
+        ),
+        ("model", args.model.as_ref().map(|v| json!(v))),
+        ("duration", args.duration.map(|v| json!(v))),
+        ("fps", args.fps.map(|v| json!(v))),
+        ("width", args.width.map(|v| json!(v))),
+        ("height", args.height.map(|v| json!(v))),
+        ("quality", args.quality.as_ref().map(|v| json!(v))),
+        ("seed", args.seed.map(|v| json!(v))),
+        ("loras", args.loras.as_ref().map(|v| json!(v))),
+        ("characterId", args.character_id.as_ref().map(|v| json!(v))),
+        (
+            "sourceAssetId",
+            args.source_asset_id.as_ref().map(|v| json!(v)),
+        ),
+        (
+            "lastFrameAssetId",
+            args.last_frame_asset_id.as_ref().map(|v| json!(v)),
+        ),
+        (
+            "sourceClipAssetId",
+            args.source_clip_asset_id.as_ref().map(|v| json!(v)),
+        ),
+        (
+            "bridgeRightClipAssetId",
+            args.bridge_right_clip_asset_id.as_ref().map(|v| json!(v)),
+        ),
+        (
+            "personTrackId",
+            args.person_track_id.as_ref().map(|v| json!(v)),
+        ),
+        (
+            "replacementMode",
+            args.replacement_mode.as_ref().map(|v| json!(v)),
+        ),
+    ];
+    for (key, value) in optional {
+        if let Some(value) = value {
+            body.insert(key.to_owned(), value);
+        }
+    }
+    Ok(Value::Object(body))
+}
+
+/// The compact, job-type-agnostic status view of a JobSnapshot the polling
+/// tools return: identity + status/stage/progress/eta plus the error when the
+/// job failed. Works identically for video and image jobs.
+pub(crate) fn compact_job_status(job: &Value) -> Value {
+    let mut out = Map::new();
+    if let Some(id) = job.get("id").filter(|id| !id.is_null()) {
+        out.insert("jobId".to_owned(), id.clone());
+    }
+    copy_keys(
+        job,
+        &[
+            "type",
+            "status",
+            "projectId",
+            "stage",
+            "message",
+            "etaSeconds",
+            "elapsedSeconds",
+            "error",
+            "createdAt",
+            "completedAt",
+        ],
+        &mut out,
+    );
+    // Drop empty message/stage strings — they carry no information for an LLM.
+    for key in ["message", "stage"] {
+        if out.get(key).and_then(Value::as_str) == Some("") {
+            out.remove(key);
+        }
+    }
+    let (percent, _) = job_progress(job);
+    out.insert("progressPercent".to_owned(), json!(percent));
+    Value::Object(out)
+}
+
+/// A job's failure detail for error surfaces (failed status), with a stable
+/// fallback when the worker recorded nothing.
+pub(crate) fn job_error_detail(job: &Value) -> &str {
+    job.get("error")
+        .and_then(Value::as_str)
+        .filter(|error| !error.is_empty())
+        .unwrap_or("the worker reported no error detail")
+}
+
+/// Validate a caller-supplied job id before splicing it into a `/api/v1/jobs/…`
+/// path: SceneWorks ids are `job_<hex uuid>`-shaped, so anything outside
+/// `[A-Za-z0-9_-]` (path separators, query metacharacters …) is rejected.
+pub(crate) fn valid_job_id(job_id: &str) -> Result<&str, String> {
+    let job_id = job_id.trim();
+    if job_id.is_empty()
+        || !job_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        return Err(format!(
+            "\"{job_id}\" is not a valid job id (expected letters, digits, '-' or '_')"
+        ));
+    }
+    Ok(job_id)
+}
+
+/// Best-effort mime type for a result download link: the asset sidecar's
+/// recorded `file.mimeType` wins, then the file extension; `None` (omit the
+/// field) when neither identifies the media — a link stays useful without one.
+pub(crate) fn media_mime_type(path: &str, sidecar_mime: Option<&str>) -> Option<String> {
+    if let Some(mime) = sidecar_mime.map(str::trim).filter(|mime| !mime.is_empty()) {
+        return Some(mime.to_owned());
+    }
+    let extension = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    let mime = match extension.as_str() {
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        _ => return None,
+    };
+    Some(mime.to_owned())
 }
 
 /// Keep an asset for the inline result: image-typed (or untyped legacy) records.
@@ -866,6 +1343,282 @@ mod tests {
             image_mime_type("assets/x.bin", None, Some("text/html")),
             "image/png"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // submit_video_job (sc-10235): args → VideoJobRequest mapping, all four
+    // tool modes + their mode-specific required fields.
+    // -----------------------------------------------------------------------
+
+    fn video_args_from(value: Value) -> SubmitVideoJobArgs {
+        serde_json::from_value(value).expect("video args deserialize")
+    }
+
+    #[test]
+    fn video_job_body_minimal_generate_is_text_to_video() {
+        // Absent optionals must be OMITTED — the API's serde defaults
+        // (duration 6, fps 25, 768x512, ltx_2_3 …) are authoritative.
+        let args = video_args_from(json!({ "projectId": "p1", "prompt": "a storm" }));
+        assert_eq!(
+            video_job_body(&args).expect("body builds"),
+            json!({ "projectId": "p1", "mode": "text_to_video", "prompt": "a storm" })
+        );
+    }
+
+    #[test]
+    fn video_job_body_generate_with_source_image_is_image_to_video() {
+        let args = video_args_from(json!({
+            "projectId": "p1",
+            "prompt": "a storm",
+            "mode": "generate",
+            "sourceAssetId": "img_1"
+        }));
+        let body = video_job_body(&args).expect("body builds");
+        assert_eq!(body["mode"], "image_to_video");
+        assert_eq!(body["sourceAssetId"], "img_1");
+    }
+
+    #[test]
+    fn video_job_body_generate_with_both_frames_is_first_last_frame() {
+        let args = video_args_from(json!({
+            "projectId": "p1",
+            "prompt": "a storm",
+            "sourceAssetId": "img_first",
+            "lastFrameAssetId": "img_last"
+        }));
+        let body = video_job_body(&args).expect("body builds");
+        assert_eq!(body["mode"], "first_last_frame");
+        assert_eq!(body["sourceAssetId"], "img_first");
+        assert_eq!(body["lastFrameAssetId"], "img_last");
+
+        // A last frame without a first frame is ambiguous → rejected.
+        let args = video_args_from(json!({
+            "projectId": "p1",
+            "prompt": "a storm",
+            "lastFrameAssetId": "img_last"
+        }));
+        let error = video_job_body(&args).expect_err("last frame alone rejected");
+        assert!(error.contains("sourceAssetId"), "{error}");
+    }
+
+    #[test]
+    fn video_job_body_extend_requires_and_threads_the_source_clip() {
+        let args =
+            video_args_from(json!({ "projectId": "p1", "prompt": "keep going", "mode": "extend" }));
+        let error = video_job_body(&args).expect_err("clipless extend rejected");
+        assert!(error.contains("sourceClipAssetId"), "{error}");
+
+        let args = video_args_from(json!({
+            "projectId": "p1",
+            "prompt": "keep going",
+            "mode": "extend",
+            "sourceClipAssetId": "clip_1"
+        }));
+        let body = video_job_body(&args).expect("body builds");
+        assert_eq!(body["mode"], "extend_clip");
+        assert_eq!(body["sourceClipAssetId"], "clip_1");
+    }
+
+    #[test]
+    fn video_job_body_bridge_requires_both_clips() {
+        let args = video_args_from(json!({
+            "projectId": "p1",
+            "prompt": "bridge",
+            "mode": "bridge",
+            "sourceClipAssetId": "clip_left"
+        }));
+        let error = video_job_body(&args).expect_err("one-sided bridge rejected");
+        assert!(error.contains("bridgeRightClipAssetId"), "{error}");
+
+        let args = video_args_from(json!({
+            "projectId": "p1",
+            "prompt": "bridge",
+            "mode": "bridge",
+            "sourceClipAssetId": "clip_left",
+            "bridgeRightClipAssetId": "clip_right"
+        }));
+        let body = video_job_body(&args).expect("body builds");
+        assert_eq!(body["mode"], "video_bridge");
+        assert_eq!(body["sourceClipAssetId"], "clip_left");
+        assert_eq!(body["bridgeRightClipAssetId"], "clip_right");
+    }
+
+    #[test]
+    fn video_job_body_person_replace_requires_clip_track_and_character() {
+        let base = json!({ "projectId": "p1", "prompt": "swap", "mode": "person_replace" });
+
+        let error = video_job_body(&video_args_from(base.clone()))
+            .expect_err("clipless person_replace rejected");
+        assert!(error.contains("sourceClipAssetId"), "{error}");
+
+        let mut with_clip = base.clone();
+        with_clip["sourceClipAssetId"] = json!("clip_1");
+        let error = video_job_body(&video_args_from(with_clip.clone()))
+            .expect_err("trackless person_replace rejected");
+        assert!(error.contains("personTrackId"), "{error}");
+
+        with_clip["personTrackId"] = json!("track_1");
+        let error = video_job_body(&video_args_from(with_clip.clone()))
+            .expect_err("characterless person_replace rejected");
+        assert!(error.contains("characterId"), "{error}");
+
+        with_clip["characterId"] = json!("char_1");
+        with_clip["replacementMode"] = json!("full_body");
+        let body = video_job_body(&video_args_from(with_clip)).expect("body builds");
+        assert_eq!(body["mode"], "replace_person");
+        assert_eq!(body["sourceClipAssetId"], "clip_1");
+        assert_eq!(body["personTrackId"], "track_1");
+        assert_eq!(body["characterId"], "char_1");
+        assert_eq!(body["replacementMode"], "full_body");
+    }
+
+    #[test]
+    fn video_job_body_rejects_unknown_mode() {
+        let args =
+            video_args_from(json!({ "projectId": "p1", "prompt": "x", "mode": "style_remix" }));
+        let error = video_job_body(&args).expect_err("unknown mode rejected");
+        assert!(error.contains("style_remix"), "{error}");
+        assert!(error.contains("person_replace"), "{error}");
+    }
+
+    #[test]
+    fn video_job_body_maps_every_optional_field() {
+        let args = video_args_from(json!({
+            "projectId": "p1",
+            "prompt": "a storm",
+            "negativePrompt": "static",
+            "model": "ltx_2_3",
+            "duration": 8.5,
+            "fps": 24,
+            "width": 1280,
+            "height": 720,
+            "quality": "high",
+            "seed": 42,
+            "loras": [{ "id": "lora1", "weight": 0.8 }],
+            "characterId": "char_1"
+        }));
+        assert_eq!(
+            video_job_body(&args).expect("body builds"),
+            json!({
+                "projectId": "p1",
+                "mode": "text_to_video",
+                "prompt": "a storm",
+                "negativePrompt": "static",
+                "model": "ltx_2_3",
+                "duration": 8.5,
+                "fps": 24,
+                "width": 1280,
+                "height": 720,
+                "quality": "high",
+                "seed": 42,
+                "loras": [{ "id": "lora1", "weight": 0.8 }],
+                "characterId": "char_1"
+            })
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // get_job_status / get_job_result (sc-10235): snapshot + result mapping.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compact_job_status_keeps_the_generic_polling_fields() {
+        let job = json!({
+            "id": "job_abc",
+            "type": "video_generate",
+            "status": "running",
+            "projectId": "p1",
+            "stage": "generating",
+            "message": "step 12/40",
+            "progress": 0.3,
+            "etaSeconds": 95,
+            "elapsedSeconds": 41,
+            "error": null,
+            "createdAt": "2026-07-07T00:00:00Z",
+            "completedAt": null,
+            // Verbose snapshot fields that must be dropped:
+            "payload": { "prompt": "x" },
+            "result": {},
+            "workerId": "w1",
+            "attempts": 1
+        });
+        assert_eq!(
+            compact_job_status(&job),
+            json!({
+                "jobId": "job_abc",
+                "type": "video_generate",
+                "status": "running",
+                "projectId": "p1",
+                "stage": "generating",
+                "message": "step 12/40",
+                "etaSeconds": 95,
+                "elapsedSeconds": 41,
+                "createdAt": "2026-07-07T00:00:00Z",
+                "progressPercent": 30
+            })
+        );
+    }
+
+    #[test]
+    fn compact_job_status_surfaces_the_failure_error_and_drops_empty_strings() {
+        let job = json!({
+            "id": "job_abc",
+            "status": "failed",
+            "stage": "",
+            "message": "",
+            "progress": 0.2,
+            "error": "CUDA out of memory on gpu0"
+        });
+        assert_eq!(
+            compact_job_status(&job),
+            json!({
+                "jobId": "job_abc",
+                "status": "failed",
+                "error": "CUDA out of memory on gpu0",
+                "progressPercent": 20
+            })
+        );
+    }
+
+    #[test]
+    fn job_error_detail_falls_back_when_the_worker_recorded_nothing() {
+        assert_eq!(job_error_detail(&json!({ "error": "boom" })), "boom");
+        assert_eq!(
+            job_error_detail(&json!({ "error": "" })),
+            "the worker reported no error detail"
+        );
+        assert_eq!(
+            job_error_detail(&json!({})),
+            "the worker reported no error detail"
+        );
+    }
+
+    #[test]
+    fn valid_job_id_rejects_path_and_query_metacharacters() {
+        assert_eq!(valid_job_id("job_ab12cd34"), Ok("job_ab12cd34"));
+        assert_eq!(valid_job_id("  job-1  "), Ok("job-1"));
+        assert!(valid_job_id("").is_err());
+        assert!(valid_job_id("../secrets").is_err());
+        assert!(valid_job_id("job_1?x=1").is_err());
+        assert!(valid_job_id("job 1").is_err());
+    }
+
+    #[test]
+    fn media_mime_type_prefers_sidecar_then_extension() {
+        assert_eq!(
+            media_mime_type("clips/c.mp4", Some("video/webm")).as_deref(),
+            Some("video/webm")
+        );
+        assert_eq!(
+            media_mime_type("clips/c.MP4", None).as_deref(),
+            Some("video/mp4")
+        );
+        assert_eq!(
+            media_mime_type("images/i.png", None).as_deref(),
+            Some("image/png")
+        );
+        // Unknown extension + no sidecar → omit rather than guess.
+        assert_eq!(media_mime_type("clips/c.bin", Some("")), None);
     }
 
     #[test]

@@ -75,6 +75,12 @@ impl ApiClient {
         }
     }
 
+    /// The normalized (no trailing slash) API base URL. `get_job_result` uses it
+    /// to hand back absolute ticketed media URLs a remote client can fetch.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     /// GET `path` (an absolute `/api/v1/...` path) with optional query pairs and
     /// decode the JSON body. Empty query values are skipped so optional tool
     /// arguments don't turn into `?modelFamily=` noise.
