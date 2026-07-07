@@ -1427,7 +1427,7 @@ describe("ImageStudio PiD decoder toggle (sc-7851)", () => {
   });
 });
 
-describe("ImageStudio img2img reference tile (epic 8588 slice A, sc-8593)", () => {
+describe("ImageStudio Image-reference (img2img) tile (epic 8588, sc-8593/sc-10195)", () => {
   let container;
   let root;
 
@@ -1456,19 +1456,23 @@ describe("ImageStudio img2img reference tile (epic 8588 slice A, sc-8593)", () =
   // Krea-like img2img model: a `ui.img2img` toggle, plain text-to-image capability, no vision
   // captioner in context (baseContext leaves `imageDescribe` undefined → describe flow unavailable).
   const KREA_IMG2IMG = { ...Z_IMAGE, id: "krea_2_turbo", name: "Krea 2 Turbo", ui: { img2img: true } };
-  const startFromImageTile = () =>
-    [...document.body.querySelectorAll("button")].find((b) =>
-      b.textContent.includes("Start from an image"),
-    );
+  const tileByText = (text) =>
+    [...document.body.querySelectorAll("button")].find((b) => b.textContent.includes(text));
 
-  it("hides the 'Start from an image' tile for a plain t2i model with no captioner", async () => {
+  it("hides the 'Image reference' tile for a plain t2i model without ui.img2img", async () => {
+    // sc-10195: img2img is its own tile, gated purely on `ui.img2img`. A plain model with no captioner
+    // shows neither the img2img nor the describe tile.
     await render(baseContext({ imageModels: [Z_IMAGE], models: [Z_IMAGE] }));
-    expect(startFromImageTile()).toBeFalsy();
+    expect(tileByText("Image reference")).toBeFalsy();
+    expect(tileByText("Prompt from image")).toBeFalsy();
   });
 
-  it("shows the tile for a ui.img2img model even without the vision captioner (sc-8593)", async () => {
+  it("shows the 'Image reference' tile for a ui.img2img model even without the vision captioner", async () => {
+    // img2img needs no captioner — the tile appears on the flag alone, decoupled from describe (sc-10195).
     await render(baseContext({ imageModels: [KREA_IMG2IMG], models: [KREA_IMG2IMG] }));
-    expect(startFromImageTile()).toBeTruthy();
+    expect(tileByText("Image reference")).toBeTruthy();
+    // The describe tile stays hidden without a captioner, proving the two are independent now.
+    expect(tileByText("Prompt from image")).toBeFalsy();
   });
 });
 

@@ -170,18 +170,17 @@ describe("ReferenceCaptionPicker", () => {
     expect(onCaption).toHaveBeenCalledWith("ref-1");
   });
 
-  it("hides the img2img strength slider once a mood board is active", async () => {
+  it("never renders an img2img strength slider — that lives in a separate tile now (sc-10195)", async () => {
+    // The picker is describe + mood board only; img2img reference-guidance moved to its own prompt-tool
+    // tile, so this component no longer carries the strength slider regardless of props.
     await mount({
       onCaption: vi.fn(async () => "x"),
       showMoodBoard: true,
-      showImg2imgStrength: true,
       referenceAssets: [refAsset, refAsset2],
     });
     await selectReference();
-    // A single reference is a valid img2img seed → the strength slider shows.
-    expect(document.body.querySelector(".img2img-strength")).toBeTruthy();
+    expect(document.body.querySelector(".img2img-strength")).toBeFalsy();
     await addMoodBoardExtra();
-    // A blend has no single seed → the slider is hidden.
     expect(document.body.querySelector(".img2img-strength")).toBeFalsy();
   });
 

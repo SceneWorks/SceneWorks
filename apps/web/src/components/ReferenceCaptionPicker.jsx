@@ -47,17 +47,6 @@ export default function ReferenceCaptionPicker({
   onOpenModels,
   onOpenQueue,
   onCancelJob,
-  // img2img double-duty (epic 8588 slice A, sc-8593): when the selected model supports img2img,
-  // the SAME picked reference can drive generation (reference-guided / latent-init) via a strength
-  // slider — in addition to (or instead of) the describe → prompt flow above. All additive + default
-  // off, so the Ideogram-JSON + all-t2i describe consumers are byte-unaffected. `onReferenceAssetChange`
-  // lifts the picked asset id so the parent can send it as `referenceAssetId`. `showImg2imgStrength`
-  // also un-gates the picker without the vision captioner (img2img needs no captioner).
-  onReferenceAssetChange,
-  showImg2imgStrength = false,
-  img2imgStrength = 0.5,
-  onImg2imgStrengthChange,
-  img2imgStrengthConfig,
   // Multi-image "mood board" (epic 8588, sc-8595): when true, an additional multi-select gallery lets the
   // user add MORE reference images beyond the primary. `onCaption` is then called with the FULL array of
   // ids ([primary, ...extras]) and the worker synthesizes ONE prompt/caption from the shared aesthetic. A
@@ -72,11 +61,10 @@ export default function ReferenceCaptionPicker({
   const [error, setError] = useState("");
 
   // The extra mood-board picks, minus the primary (it is already the first image) and capped. This is
-  // what actually augments the describe call; `referenceAssetId` stays the primary / img2img seed.
+  // what actually augments the describe call; `referenceAssetId` stays the primary reference.
   const moodBoardExtras = moodBoardIds
     .filter((id) => id && id !== referenceAssetId)
     .slice(0, Math.max(0, moodBoardMax - 1));
-  const moodBoardActive = showMoodBoard && moodBoardExtras.length > 0;
 
   // Feed the uploaded image's natural dimensions to the sc-8109 auto-preset seam.
   function reportReferenceDimensions(asset) {
@@ -95,7 +83,6 @@ export default function ReferenceCaptionPicker({
   function handleReferenceChange(assetId) {
     setReferenceAssetId(assetId);
     setError("");
-    onReferenceAssetChange?.(assetId);
   }
 
   // Run the auto-preset from an effect on the SELECTED id rather than the picker's onChange: a freshly
@@ -117,7 +104,7 @@ export default function ReferenceCaptionPicker({
     try {
       // A mood board sends the FULL ordered list ([primary, ...extras]); a lone reference keeps the
       // scalar id so consumers that never opted into `showMoodBoard` see the unchanged string contract.
-      const arg = moodBoardActive
+      const arg = moodBoardExtras.length > 0
         ? [referenceAssetId, ...moodBoardExtras]
         : referenceAssetId;
       const result = await onCaption(arg);
@@ -136,7 +123,7 @@ export default function ReferenceCaptionPicker({
   return (
     <div className="structured-reference">
       <ModelAvailabilityGate
-        ready={visionCaptionReady || showImg2imgStrength}
+        ready={visionCaptionReady}
         title={gateTitle}
         description={gateDescription}
         offers={visionCaptionOffers}
@@ -175,8 +162,9 @@ export default function ReferenceCaptionPicker({
             values={moodBoardExtras}
           />
         ) : null}
-        {/* Describe → prompt (epic 8203): only when the vision captioner is present. An img2img-only
-            model (no captioner) still gets the picker + strength slider below via `showImg2imgStrength`. */}
+        {/* Describe → prompt (epic 8203): the vision captioner turns the picked reference (or the whole
+            mood board) into prompt text. img2img reference-guidance is a SEPARATE prompt-tool tile now
+            (sc-10195), so this component is purely describe + mood board. */}
         {visionCaptionReady ? (
           <button
             type="button"
@@ -186,24 +174,6 @@ export default function ReferenceCaptionPicker({
           >
             {busy ? busyLabel : buttonLabel}
           </button>
-        ) : null}
-        {/* img2img strength (epic 8588 slice A, sc-8593): the SAME picked reference guides generation
-            (reference-guided / latent-init) at this strength. Shown for img2img-capable models once a
-            SINGLE reference is chosen — hidden when a mood board is active, since img2img seeds from one
-            image, not a blend. */}
-        {showImg2imgStrength && referenceAssetId && !moodBoardActive ? (
-          <label className="reference-strength img2img-strength">
-            {img2imgStrengthConfig?.label ?? "Reference strength"}
-            <input
-              max={img2imgStrengthConfig?.max ?? 1}
-              min={img2imgStrengthConfig?.min ?? 0}
-              onChange={(event) => onImg2imgStrengthChange?.(Number(event.target.value))}
-              step={img2imgStrengthConfig?.step ?? 0.05}
-              type="range"
-              value={img2imgStrength}
-            />
-            <span>{Number(img2imgStrength).toFixed(2)}</span>
-          </label>
         ) : null}
         {error ? (
           <p className="structured-error" role="alert">
