@@ -4319,6 +4319,65 @@ fn candle_video_snapshot_dir(settings: &Settings, repo: &str) -> WorkerResult<Pa
     })
 }
 
+/// (sc-10027) The `advanced.mlxQuantize` bits for a candle wan tier-select — a number or numeric string;
+/// `None` when unset.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_wan_quant_bits(request: &VideoRequest) -> Option<i64> {
+    request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+}
+
+/// (sc-10027) Whether `dir` is a complete candle wan tier — a diffusers-layout snapshot with the DiT
+/// transformer(s), the T5 encoder, the VAE and the tokenizer. The A14B MoE carries a second expert
+/// (`transformer_2/`); the TI2V-5B is a single transformer.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_wan_tier_complete(dir: &Path, a14b: bool) -> bool {
+    let has = |sub: &str| dir.join(sub).is_dir();
+    has("transformer")
+        && has("text_encoder")
+        && has("vae")
+        && has("tokenizer")
+        && (!a14b || has("transformer_2"))
+}
+
+/// (sc-10027) Resolve the candle wan quant tier subdir (`q4`/`q8`/`bf16`) + its quant marker under a
+/// `SceneWorks/wan2.2-*-candle` snapshot `root`, per `advanced.mlxQuantize` (default q4, falling back
+/// through the tier order), or `None` for a non-wan engine or a flat repo with no tier subdirs (e.g. the
+/// dense `Wan-AI/*-Diffusers` fallback, which loads as-is). A resolved subdir **is** the diffusers-layout
+/// snapshot the sc-10025 packed-detect seam loads — the quant is baked into the tier, so the `Quant`
+/// returned is a tier-select marker (`spec.quantize` is a no-op on the candle wan load). Candle analog of
+/// the macOS `wan_tier_subdir` / `resolve_wan_tier_dir_and_quant` (sc-9079).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_wan_tier_subdir(
+    root: &Path,
+    engine_id: &str,
+    request: &VideoRequest,
+) -> Option<(PathBuf, Option<Quant>)> {
+    if !engine_id.starts_with("wan2_2") {
+        return None;
+    }
+    // Tier preference by requested bits (mirrors the macOS `wan_tier_order`): default / ≤4 → q4.
+    let order: &[&str] = match candle_wan_quant_bits(request) {
+        Some(b) if b <= 0 => &["bf16", "q8", "q4"],
+        Some(b) if b >= 8 => &["q8", "q4"],
+        _ => &["q4", "q8"],
+    };
+    let a14b = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
+    order.iter().find_map(|&tier| {
+        let dir = root.join(tier);
+        candle_wan_tier_complete(&dir, a14b).then(|| {
+            let quant = match tier {
+                "q4" => Some(Quant::Q4),
+                "q8" => Some(Quant::Q8),
+                _ => None, // bf16
+            };
+            (dir, quant)
+        })
+    })
+}
+
 /// Resolve the Gemma-3-12B encoder snapshot dir for the candle LTX provider (sc-8827). Returns the
 /// HF-cache snapshot path so the caller can thread it onto `LoadSpec::text_encoder` — no more mutating
 /// the process-global `$LTX_GEMMA_DIR` at job time on the multithreaded runtime (the old `set_var`
@@ -4664,7 +4723,15 @@ async fn generate_candle_video(
     })?;
     let adapter = candle_video_adapter_label(engine_id);
     let repo = candle_video_repo(request, engine_id);
-    let model_dir = candle_video_snapshot_dir(settings, &repo)?;
+    let snapshot_dir = candle_video_snapshot_dir(settings, &repo)?;
+    // Wan quant-matrix tier-select (sc-10027): a candle wan tier repo (`SceneWorks/wan2.2-*-candle`) ships
+    // q4/q8/bf16 subdirs — resolve the one matching `advanced.mlxQuantize` (default q4) and load from it
+    // (the packed-detect seam reads the baked-in quant). A flat/dense repo (no subdirs, e.g. the
+    // `Wan-AI/*-Diffusers` fallback) stays as-is with no quant marker.
+    let (model_dir, wan_quant) = match candle_wan_tier_subdir(&snapshot_dir, engine_id, request) {
+        Some((tier_dir, quant)) => (tier_dir, quant),
+        None => (snapshot_dir, None),
+    };
     // ltx needs the separate Gemma-3-12B encoder (its only conditioning input). Resolve its snapshot
     // dir here and thread it onto the LoadSpec below (sc-8827) instead of mutating `$LTX_GEMMA_DIR`.
     let is_ltx = engine_id == "ltx_2_3_distilled";
@@ -4755,6 +4822,10 @@ async fn generate_candle_video(
         scheduler: None,
         engine_id,
         model_dir,
+        // Wan quant-matrix tier marker (sc-10027): `Some(Q4/Q8)` when a packed candle tier subdir was
+        // resolved, else `None` (bf16 tier / dense repo / ltx). A no-op on the candle wan load (the
+        // packed-detect seam reads the tier's baked-in quant), carried for the LoadSpec + asset record.
+        quant: wan_quant,
         adapters,
         conditioning,
         prompt: request.prompt.clone(),
@@ -13252,5 +13323,54 @@ mod candle_video_label_tests {
             candle_wan_sampling("wan2_2_ti2v_5b", &req(json!({ "steps": 12 }))).0,
             Some(12)
         );
+    }
+
+    /// (sc-10027) `candle_wan_tier_subdir` picks the q4/q8 subdir per `advanced.mlxQuantize` (default q4),
+    /// falls back through the tier order, requires a complete tier, and returns `None` for a non-wan
+    /// engine or a flat/dense repo with no tier subdirs.
+    #[test]
+    fn candle_wan_tier_subdir_resolves_by_mlx_quantize() {
+        let root = std::env::temp_dir().join(format!("sc10027_wan_tier_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // Complete q4 + q8 A14B tiers (transformer + transformer_2 + text_encoder + vae + tokenizer).
+        for tier in ["q4", "q8"] {
+            for sub in [
+                "transformer",
+                "transformer_2",
+                "text_encoder",
+                "vae",
+                "tokenizer",
+            ] {
+                std::fs::create_dir_all(root.join(tier).join(sub)).unwrap();
+            }
+        }
+        let req = |adv: Value| {
+            VideoRequest::from_payload(json!({ "advanced": adv }).as_object().unwrap())
+        };
+
+        // Default (no mlxQuantize) → q4.
+        let (d, q) = candle_wan_tier_subdir(&root, "wan2_2_t2v_14b", &req(json!({}))).unwrap();
+        assert!(d.ends_with("q4"));
+        assert_eq!(q, Some(Quant::Q4));
+        // mlxQuantize = 8 → q8.
+        let (d, q) =
+            candle_wan_tier_subdir(&root, "wan2_2_t2v_14b", &req(json!({ "mlxQuantize": 8 })))
+                .unwrap();
+        assert!(d.ends_with("q8"));
+        assert_eq!(q, Some(Quant::Q8));
+        // bf16 requested but no bf16 tier present → falls back through q8/q4 (never a missing dir).
+        let (d, _) =
+            candle_wan_tier_subdir(&root, "wan2_2_t2v_14b", &req(json!({ "mlxQuantize": 0 })))
+                .unwrap();
+        assert!(d.ends_with("q8") || d.ends_with("q4"));
+        // Non-wan engine → None (ltx loads its flat snapshot).
+        assert!(candle_wan_tier_subdir(&root, "ltx_2_3_distilled", &req(json!({}))).is_none());
+        // A flat repo (the dense Wan-AI/*-Diffusers fallback — no tier subdirs) → None.
+        let flat = std::env::temp_dir().join(format!("sc10027_flat_{}", std::process::id()));
+        std::fs::create_dir_all(&flat).unwrap();
+        assert!(candle_wan_tier_subdir(&flat, "wan2_2_t2v_14b", &req(json!({}))).is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&flat).ok();
     }
 }
