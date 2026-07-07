@@ -3812,6 +3812,50 @@ async fn timeline_routes_persist_and_create_worker_jobs() {
 }
 
 #[tokio::test]
+async fn real_builtin_catalog_exposes_krea_img2img_ui_flag() {
+    // Regression (Michael, on-device): the "Image reference" img2img tile reads `selectedModel.ui.img2img`.
+    // This runs the ACTUAL shipped repo manifest (not a fixture) through the real /api/v1/models catalog
+    // path, proving the `ui.img2img` flag on krea_2_turbo survives merge → serialize to the response — so a
+    // correct build DOES expose it (any on-device miss is a stale binary/config, not a code defect).
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    // The canonical repo builtin manifest — the same bytes `sceneworks-core` embeds via include_str!.
+    let real_manifest = include_str!("../../../config/manifests/builtin.models.jsonc");
+    std::fs::write(config_dir.join("builtin.models.jsonc"), real_manifest)
+        .expect("builtin models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let krea = models
+        .as_array()
+        .expect("catalog is an array")
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some("krea_2_turbo"))
+        .expect("krea_2_turbo present in the catalog");
+    assert_eq!(
+        krea["ui"]["img2img"],
+        Value::Bool(true),
+        "krea_2_turbo must expose ui.img2img in the /models response (the img2img tile's gate)"
+    );
+    // And SD3.5 (A4.1) — the flag just added — must be exposed the same way.
+    for id in ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
+        let m = models
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
+            .unwrap_or_else(|| panic!("{id} present"));
+        assert_eq!(
+            m["ui"]["img2img"],
+            Value::Bool(true),
+            "{id} ui.img2img exposed"
+        );
+    }
+}
+
+#[tokio::test]
 async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
     // sc-3486: the catalog stamps per-model `macSupport`, and the capabilities endpoint
     // carries the master switch (`macGatingActive` = mlx_required) + infra gating.

@@ -2275,7 +2275,7 @@ fn resolve_identity_init(
 /// the output W×H — so, like Z-Image's [`resolve_identity_init`], the reference is fed raw (the
 /// `edit_image`-only [`should_fit_edit_source`] crop/pad-fit never applies to Krea's t2i-only surface).
 #[cfg(target_os = "macos")]
-fn resolve_krea_img2img_init(
+fn resolve_img2img_init_generic(
     request: &ImageRequest,
     settings: &Settings,
     project_path: &Path,
@@ -2296,6 +2296,26 @@ fn resolve_krea_img2img_init(
     )?;
     let strength = advanced::f32_clamped(&request.advanced, "strength", 0.5, 0.0..=1.0);
     Ok(Some((image, strength)))
+}
+
+/// Whether the model opts into plain-t2i img2img (reference-guided latent-init) via the catalog —
+/// the SAME `ui.img2img` manifest flag the web reads to show the "Image reference" tile (epic 8588
+/// A4, sc-10195/sc-10189). Manifest-flag-driven rather than an ever-growing model-string match, so a
+/// new text-only model gains img2img by flipping its manifest flag + landing its mlx-gen entrypoint —
+/// no worker change. Mirrors the existing `uses_standard_tier_layout`/`is_dense_te_tier` pattern.
+///
+/// This gates the GENERIC img2img arm in [`resolve_generic_lane_conditioning`], which sits AFTER the
+/// model-specific reference arms (z-image identity-init, FLUX IP-Adapter, Kolors, Ideogram edit) so
+/// those bespoke surfaces keep precedence; the generic arm then catches Krea + SD3.5 + any future
+/// `ui.img2img` model uniformly.
+#[cfg(target_os = "macos")]
+fn model_supports_img2img(request: &ImageRequest) -> bool {
+    request
+        .model_manifest_entry
+        .get("ui")
+        .and_then(|ui| ui.get("img2img"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// The source identity reference (decoded image + its asset id) a strict-control pose set scores its
@@ -2889,14 +2909,16 @@ fn resolve_generic_lane_conditioning(
             }),
             None => Ok(LaneConditioning::default()),
         }
-    } else if request.model == "krea_2_turbo" && has_reference {
-        // Krea 2 Turbo reference-guided generation = img2img latent-init (epic 8588 slice A, sc-8591):
-        // a `referenceAssetId` + `advanced.strength` seeds the CFG-free Turbo denoise from the
-        // VAE-encoded reference. Text-only model (no `edit_image` mode), so the reference is optional
-        // within plain t2i; the engine routes the single `Conditioning::Reference` to
-        // `generate_turbo_img2img` (sc-10135). Candle parity is sc-10134.
+    } else if model_supports_img2img(request) && has_reference && request.mode != "edit_image" {
+        // Generic plain-t2i img2img latent-init for any `ui.img2img` model (epic 8588 A4, sc-10189):
+        // a `referenceAssetId` + `advanced.strength` seeds the denoise from the VAE-encoded reference,
+        // which the engine routes to that model's img2img entrypoint via the single
+        // `Conditioning::Reference`. Krea 2 Turbo (sc-8591 #666) + SD3.5 large/turbo/medium (sc-10189
+        // #667) opt in today; a new text-only model joins by flipping `ui.img2img` + landing its
+        // mlx-gen entrypoint. Sits after the model-specific reference arms (z-image/flux/kolors/ideogram)
+        // so their bespoke surfaces keep precedence. Candle parity per model is a deferred follow-up.
         Ok(LaneConditioning {
-            identity_init: resolve_krea_img2img_init(request, settings, project_path)?,
+            identity_init: resolve_img2img_init_generic(request, settings, project_path)?,
             ..Default::default()
         })
     } else {
@@ -4142,6 +4164,31 @@ mod standard_tier_tests {
                 .as_object()
                 .unwrap(),
         )
+    }
+
+    /// A4 (sc-10189): the generic img2img arm keys off the `ui.img2img` manifest flag the catalog
+    /// forwards as `modelManifestEntry`, NOT a hardcoded model string — so Krea + SD3.5 + any future
+    /// `ui.img2img` model route uniformly, and a model without the flag stays plain txt2img.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn model_supports_img2img_reads_the_ui_manifest_flag() {
+        let entry = |manifest: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": "m", "modelManifestEntry": manifest })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        // ui.img2img: true → opted in (SD3.5 + Krea shape).
+        assert!(model_supports_img2img(&entry(
+            json!({ "ui": { "img2img": true } })
+        )));
+        // Flag explicitly false, or no `ui`, or no flag → plain txt2img.
+        assert!(!model_supports_img2img(&entry(
+            json!({ "ui": { "img2img": false } })
+        )));
+        assert!(!model_supports_img2img(&entry(json!({ "family": "sd3" }))));
+        assert!(!model_supports_img2img(&entry(json!({ "ui": {} }))));
     }
 
     /// Write a minimal present `<tier>/transformer/<file>` so [`standard_tier_subdir`]'s
