@@ -1523,6 +1523,24 @@ pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// The adapter filename a LoRA record's manifest `files` list declares (its first
+/// entry), if any (sc-10221). When `lora_path` resolves to a record *directory*, this
+/// is the specific adapter to load — e.g. a trained LoRA's final `<stem>.safetensors`
+/// rather than a `<stem>-stepNNN` checkpoint sharing the folder. Untrusted (rides the
+/// job payload); `resolve_adapter_in_dir` re-validates it as a plain in-dir filename.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn declared_adapter_file(lora: &Value) -> Option<&str> {
+    lora.get("files")
+        .and_then(Value::as_array)
+        .and_then(|files| files.first())
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 /// Classify a LoRA file into the mlx-gen adapter `kind`. SceneWorks peft-LoKr (stamped
 /// `networkType: lokr`) → `Lokr` (the engine's metadata-gated `apply_lokr` peft path). Everything
 /// else → `Lora`, INCLUDING third-party LyCORIS (LoHa / kohya non-peft LoKr): since epic 3641
@@ -1574,7 +1592,9 @@ fn resolve_adapters(request: &ImageRequest, settings: &Settings) -> WorkerResult
         // root before any on-disk use (sc-5723 / WKA-002).
         let path = crate::normalize_app_managed_lora_path(settings, &raw)?;
         let file = if path.is_dir() {
-            first_safetensors_path(&path).ok_or_else(|| {
+            // Prefer the manifest-declared adapter over an arbitrary directory scan so a
+            // trained LoRA loads its final adapter, not a step checkpoint (sc-10221).
+            crate::resolve_adapter_in_dir(&path, declared_adapter_file(lora)).ok_or_else(|| {
                 WorkerError::InvalidPayload(format!(
                     "LoRA has no .safetensors under {}",
                     path.display()
