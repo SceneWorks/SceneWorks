@@ -4000,6 +4000,13 @@
       "licenseUrl": "https://huggingface.co/Efficient-Large-Model/Sana_1600M_1024px",
       "ui": {
         "label": "SANA 1600M",
+        // img2img (sc-10190, epic 8588): SANA's DC-AE encoder was ported (mirror of the decoder,
+        // numerically golden vs diffusers), so a reference image seeds the flow-match denoise from the
+        // encoded init latent. This flag drives BOTH the web "Image reference" tile
+        // (`ui.img2img`) and the worker's model-agnostic generic img2img arm
+        // (`model_supports_img2img` reads `ui.img2img`) — no per-model worker routing. Strength 0.5.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "description": "NVIDIA SANA 1600M — an efficient Linear-DiT text-to-image model, ported natively to MLX (Apple Silicon only). A 1.6B linear-attention transformer (deep compression 32× DC-AE autoencoder + a gemma-2 instruction text encoder) for fast 1024×1024 generation with true classifier-free guidance and negative prompts. Runs ~20 steps at guidance 4.5 (flow-match Euler, shift 3.0). Ships q4 (default) / q8 / bf16 quant tiers — pick per available RAM; each loads pre-packed with no conversion peak. Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice. Runs comfortably on a 24 GB-class Mac.",
         "recommendedFor": ["text_to_image"],
         "promptGuide": {
@@ -4122,6 +4129,11 @@
       "licenseUrl": "https://huggingface.co/Efficient-Large-Model/Sana_Sprint_1.6B_1024px",
       "ui": {
         "label": "SANA-Sprint 1.6B",
+        // img2img (sc-10190): same ported DC-AE encoder as base SANA; Sprint seeds the SCM/TrigFlow
+        // few-step loop by renoising the encoded init to the strength-derived start angle. Distilled/
+        // few-step, so the strength window is narrower than base SANA — validate the band on-device.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "description": "NVIDIA SANA-Sprint 1.6B — the few-step distillation of SANA, ported natively to MLX (Apple Silicon only). The same 1.6B linear-attention transformer (deep compression 32× DC-AE autoencoder + a gemma-2 instruction text encoder) as base SANA, distilled for ~2-step CFG-free generation via a continuous-time consistency (SCM) sampler and a guidance-embedding trunk — so it generates a 1024×1024 image in a couple of steps with no negative prompt. Ships q4 (default) / q8 / bf16 quant tiers — pick per available RAM; each loads pre-packed with no conversion peak. Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice. Runs comfortably on a 24 GB-class Mac.",
         "recommendedFor": ["text_to_image"],
         "promptGuide": {
