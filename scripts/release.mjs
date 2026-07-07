@@ -1,32 +1,36 @@
 #!/usr/bin/env node
-// One command to cut a desktop release. Wraps the two steps that are easy to
-// forget (see .github/workflows/release.yml + scripts/sync-version.mjs):
+// Cut a desktop release in the two steps this repo actually uses. `main` is
+// branch-protected (direct pushes are rejected — see the GH013 rule), so the
+// version bump can't be pushed straight to main; it has to land through a PR
+// first, then the tag is applied to the merged commit. That's how every prior
+// release tag landed (v0.4.0 = "chore(release): 0.4.0 (#984)" on main, then
+// tagged). This script wraps both phases:
 //
-//   1. `npm version <bump>` at the repo root — bumps root package.json, the
-//      `version` lifecycle hook runs sync-version.mjs (tauri.conf.json +
-//      apps/desktop + apps/web move in lockstep), and npm makes ONE commit +
-//      an annotated tag `v<version>`.
-//   2. `git push` the branch AND the tag — the `v*` tag push triggers
-//      release.yml, which builds/signs/notarizes/staples and creates the
-//      DRAFT GitHub Release (macOS DMG + Windows installers + updater
-//      latest.json). Nothing is published until you review the draft and hit
-//      "Publish" in the GitHub UI.
+//   Phase 1 — bump (open a release PR):
+//     npm run release -- minor            # 0.5.1 -> 0.6.0 on a release/ branch + PR
+//     npm run release -- patch|major|prerelease | <x.y.z>
+//   ...review + merge that PR to main...
 //
-// Usage:
-//   npm run release -- patch            # 0.5.1 -> 0.5.2
-//   npm run release -- minor            # 0.5.1 -> 0.6.0
-//   npm run release -- major            # 0.5.1 -> 1.0.0
-//   npm run release -- 0.6.0-rc.1       # explicit version; `-` => CI marks it prerelease
-//   npm run release -- prerelease       # 0.5.1 -> 0.5.2-0
+//   Phase 2 — tag (draft the release):
+//     git switch main && git pull         # get the merged bump commit
+//     npm run release -- tag              # tag main -> pushes v<x> -> release.yml
+//
+// Phase 1 runs `npm version <bump> --no-git-tag-version` (bumps root
+// package.json + the `version` hook syncs tauri.conf.json + apps/desktop +
+// apps/web), moves the change onto a `release/v<x>` branch, commits, pushes,
+// and opens the PR. NO tag yet — the tag must point at the *merged* commit,
+// whose SHA doesn't exist until the PR lands.
+//
+// Phase 2 reads the version from the (now merged) package.json, tags main
+// `v<x>`, and pushes just the tag. The tag push triggers release.yml, which
+// signs/notarizes and creates the DRAFT GitHub Release. Nothing is published
+// until you review the draft and hit Publish.
 //
 // Flags:
-//   --yes         skip the confirmation prompt before pushing
-//   --no-push     bump + commit + tag locally, then STOP (push yourself later)
-//   --any-branch  allow releasing from a branch other than main
-//   --watch       after pushing, stream the release workflow run via `gh`
-//
-// Pushing the tag kicks off a real signed/notarized build and drafts a public
-// release, so the script pauses for confirmation before the push unless --yes.
+//   --yes         skip the confirmation prompt (tag phase / push)
+//   --any-branch  bump from / tag a branch other than main
+//   --no-pr       phase 1: create the branch + commit + push, but don't open the PR
+//   --watch       phase 2: stream the release workflow run via `gh`
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -39,17 +43,10 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const argv = process.argv.slice(2);
 const flags = new Set(argv.filter((a) => a.startsWith("--")));
 const positional = argv.filter((a) => !a.startsWith("--"));
-const bump = positional[0];
+const subject = positional[0];
 
-const KNOWN_FLAGS = new Set([
-  "--yes",
-  "--no-push",
-  "--any-branch",
-  "--watch",
-]);
-for (const f of flags) {
-  if (!KNOWN_FLAGS.has(f)) fail(`unknown flag: ${f}`);
-}
+const KNOWN_FLAGS = new Set(["--yes", "--any-branch", "--no-pr", "--watch"]);
+for (const f of flags) if (!KNOWN_FLAGS.has(f)) fail(`unknown flag: ${f}`);
 
 const VALID_KEYWORDS = new Set([
   "major",
@@ -60,133 +57,189 @@ const VALID_KEYWORDS = new Set([
   "prepatch",
   "prerelease",
 ]);
-if (!bump) {
+const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+if (!subject) {
   fail(
-    "missing version bump.\n" +
-      "  npm run release -- patch|minor|major|prerelease   (or an explicit x.y.z)",
-  );
-}
-// Accept an npm keyword or an explicit semver (with optional -prerelease / +build).
-const isKeyword = VALID_KEYWORDS.has(bump);
-const isExplicit = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(
-  bump,
-);
-if (!isKeyword && !isExplicit) {
-  fail(
-    `"${bump}" is not a valid bump.\n` +
-      `  keywords: ${[...VALID_KEYWORDS].join(", ")}\n` +
-      "  or an explicit semver like 0.6.0 / 0.6.0-rc.1",
+    "usage:\n" +
+      "  npm run release -- minor|patch|major|prerelease | <x.y.z>   (phase 1: open release PR)\n" +
+      "  npm run release -- tag                                       (phase 2: tag main -> draft release)",
   );
 }
 
-// ---- preconditions --------------------------------------------------------
-const branch = git("rev-parse", "--abbrev-ref", "HEAD");
-if (branch === "HEAD") {
-  fail("detached HEAD — check out a branch before releasing.");
-}
-if (branch !== "main" && !flags.has("--any-branch")) {
+if (subject === "tag") {
+  await tagPhase();
+} else if (VALID_KEYWORDS.has(subject) || SEMVER.test(subject)) {
+  await bumpPhase(subject);
+} else {
   fail(
-    `on branch "${branch}", not main. Releases are normally cut from main.\n` +
-      "  Re-run with --any-branch to override.",
+    `"${subject}" is not a valid bump or the "tag" subcommand.\n` +
+      `  bump: ${[...VALID_KEYWORDS].join(", ")} or an explicit semver (0.6.0 / 0.6.0-rc.1)\n` +
+      "  tag:  run `npm run release -- tag` after the release PR merges",
   );
 }
 
-// npm version refuses on a dirty tree, but fail early with a clearer message.
-const dirty = git("status", "--porcelain");
-if (dirty) {
-  fail(
-    "working tree is not clean — commit or stash first:\n" +
-      dirty
-        .split("\n")
-        .map((l) => "  " + l)
-        .join("\n"),
-  );
-}
+// ---- phase 1: bump on a release branch + open a PR ------------------------
+async function bumpPhase(bump) {
+  const branch = requireCleanBranch();
+  ensureUpToDate(branch);
 
-// Make sure we're not tagging a stale HEAD behind the remote.
-try {
-  git("fetch", "--quiet", "origin", branch);
-  const behind = git("rev-list", "--count", `HEAD..origin/${branch}`);
-  if (behind !== "0") {
-    fail(
-      `local ${branch} is ${behind} commit(s) behind origin/${branch}. ` +
-        "Pull first so the tag points at the latest commit.",
-    );
+  const currentVersion = readRootVersion();
+  console.log(`release: current version ${currentVersion}, bumping "${bump}"…`);
+
+  // Bump + sync every version-bearing file, but do NOT commit or tag: the tag
+  // has to wait for the merged commit (phase 2).
+  run("npm", ["version", bump, "--no-git-tag-version"], repoRoot);
+  const newVersion = readRootVersion();
+  if (newVersion === currentVersion) {
+    // Restore and bail rather than leave the tree dirty.
+    run("git", ["checkout", "--", "."], repoRoot);
+    run("git", ["reset", "--quiet"], repoRoot);
+    fail(`version did not change (still ${currentVersion}); nothing to do.`);
   }
-} catch {
-  // No upstream / offline — sync-check is best-effort, keep going.
-  console.warn(
-    `release: couldn't compare against origin/${branch} (offline or no upstream?) — skipping behind-check.`,
-  );
-}
 
-const currentVersion = readRootVersion();
+  const relBranch = `release/v${newVersion}`;
+  const tag = `v${newVersion}`;
+  if (tagExists(tag)) {
+    run("git", ["checkout", "--", "."], repoRoot);
+    run("git", ["reset", "--quiet"], repoRoot);
+    fail(`tag ${tag} already exists — is ${newVersion} already released?`);
+  }
 
-// ---- bump: npm version does the commit + tag ------------------------------
-console.log(`release: current version ${currentVersion}, bumping "${bump}"…`);
-// `npm version` prints the new tag (e.g. "v0.5.2") and creates the commit + tag.
-run("npm", ["version", bump], repoRoot);
+  // Carry the staged bump onto a fresh release branch and commit it there,
+  // leaving the base branch clean.
+  run("git", ["switch", "-c", relBranch], repoRoot);
+  run("git", ["commit", "-a", "-m", `chore(release): ${newVersion}`], repoRoot);
+  console.log(`release: committed bump on ${relBranch}.`);
 
-const newVersion = readRootVersion();
-const tag = `v${newVersion}`;
-if (newVersion === currentVersion) {
-  fail(
-    `version did not change (still ${currentVersion}); nothing tagged. Aborting before push.`,
-  );
-}
-console.log(`release: committed + tagged ${tag}.`);
-
-// ---- push (the part that actually drafts the release) ---------------------
-if (flags.has("--no-push")) {
-  console.log(
-    "\nrelease: --no-push set. When ready, run:\n" +
-      `  git push origin ${branch} && git push origin ${tag}\n` +
-      "The tag push triggers .github/workflows/release.yml (creates the DRAFT release).",
-  );
-  process.exit(0);
-}
-
-if (!flags.has("--yes")) {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const answer = (
-    await rl.question(
-      `\nPush ${branch} + ${tag} to origin? This starts a signed build and drafts a public release. [y/N] `,
-    )
-  )
-    .trim()
-    .toLowerCase();
-  rl.close();
-  if (answer !== "y" && answer !== "yes") {
+  if (flags.has("--no-pr")) {
     console.log(
-      "release: not pushed. The bump commit + tag exist locally. To undo:\n" +
-        `  git tag -d ${tag} && git reset --hard HEAD~1\n` +
-        "Or push later:\n" +
-        `  git push origin ${branch} && git push origin ${tag}`,
+      "\nrelease: --no-pr set. Push + open the PR yourself:\n" +
+        `  git push -u origin ${relBranch}\n` +
+        `  gh pr create --base main --head ${relBranch} --title "chore(release): ${newVersion}"\n` +
+        `Then after it merges: git switch main && git pull && npm run release -- tag`,
     );
-    process.exit(0);
+    return;
+  }
+
+  run("git", ["push", "-u", "origin", relBranch], repoRoot);
+  const body =
+    `Version bump to \`${newVersion}\` (root + tauri.conf.json + apps/desktop + apps/web via sync-version.mjs).\n\n` +
+    "After this merges, cut the release:\n" +
+    "```\ngit switch main && git pull\nnpm run release -- tag\n```\n" +
+    "The tag push triggers `.github/workflows/release.yml`, which drafts the GitHub Release.";
+  run(
+    "gh",
+    [
+      "pr",
+      "create",
+      "--base",
+      "main",
+      "--head",
+      relBranch,
+      "--title",
+      `chore(release): ${newVersion}`,
+      "--body",
+      body,
+    ],
+    repoRoot,
+  );
+
+  console.log(
+    `\nrelease: opened the ${newVersion} bump PR. Review + merge it, then:\n` +
+      "  git switch main && git pull\n" +
+      "  npm run release -- tag",
+  );
+}
+
+// ---- phase 2: tag the merged commit -> draft the release ------------------
+async function tagPhase() {
+  const branch = requireCleanBranch();
+  ensureUpToDate(branch);
+
+  const version = readRootVersion();
+  const tag = `v${version}`;
+  if (tagExists(tag)) {
+    fail(
+      `tag ${tag} already exists. If ${version} is already released, bump again first; ` +
+        "otherwise delete the stale tag before retrying.",
+    );
+  }
+
+  // Sanity: the version-bump commit should already be on main. If HEAD's
+  // package.json version equals the latest release tag's version, the bump PR
+  // probably hasn't merged yet.
+  const latest = latestReleaseVersion();
+  if (latest && latest === version) {
+    fail(
+      `package.json is still ${version}, which matches the latest tag v${latest}. ` +
+        "Has the release bump PR merged into main yet?",
+    );
+  }
+
+  console.log(`release: about to tag ${branch} @ ${shortHead()} as ${tag}.`);
+  if (!(await confirm(`Tag + push ${tag}? This drafts a public release. [y/N] `))) {
+    console.log("release: not tagged.");
+    return;
+  }
+
+  run("git", ["tag", "-a", tag, "-m", tag], repoRoot);
+  run("git", ["push", "origin", tag], repoRoot);
+
+  const [owner, repo] = originSlug();
+  console.log(
+    `\nrelease: ${tag} pushed. CI is drafting the release now:\n` +
+      `  https://github.com/${owner}/${repo}/actions/workflows/release.yml\n` +
+      "When it finishes, review the draft and hit Publish:\n" +
+      `  https://github.com/${owner}/${repo}/releases`,
+  );
+
+  if (flags.has("--watch")) {
+    try {
+      run(
+        "gh",
+        ["run", "watch", "--exit-status", "--workflow", "release.yml"],
+        repoRoot,
+      );
+    } catch {
+      console.warn("release: `gh run watch` failed — watch it in the browser.");
+    }
   }
 }
 
-console.log(`release: pushing ${branch}…`);
-run("git", ["push", "origin", branch], repoRoot);
-console.log(`release: pushing ${tag}…`);
-run("git", ["push", "origin", tag], repoRoot);
+// ---- shared preconditions -------------------------------------------------
+function requireCleanBranch() {
+  const branch = git("rev-parse", "--abbrev-ref", "HEAD");
+  if (branch === "HEAD") fail("detached HEAD — check out a branch first.");
+  if (branch !== "main" && !flags.has("--any-branch")) {
+    fail(
+      `on branch "${branch}", not main. Releases are cut from main. ` +
+        "Re-run with --any-branch to override.",
+    );
+  }
+  const dirty = git("status", "--porcelain");
+  if (dirty) {
+    fail(
+      "working tree is not clean — commit or stash first:\n" +
+        dirty.split("\n").map((l) => "  " + l).join("\n"),
+    );
+  }
+  return branch;
+}
 
-const [owner, repo] = originSlug();
-const actionsUrl = `https://github.com/${owner}/${repo}/actions/workflows/release.yml`;
-console.log(
-  `\nrelease: ${tag} pushed. CI is building the DRAFT release now:\n  ${actionsUrl}\n` +
-    "When it finishes, review the draft and hit Publish:\n" +
-    `  https://github.com/${owner}/${repo}/releases`,
-);
-
-if (flags.has("--watch")) {
+function ensureUpToDate(branch) {
   try {
-    // Give the tag-push event a moment to register the run, then stream it.
-    run("gh", ["run", "watch", "--exit-status", "--workflow", "release.yml"], repoRoot);
+    git("fetch", "--quiet", "origin", branch);
+    const behind = git("rev-list", "--count", `HEAD..origin/${branch}`);
+    if (behind !== "0") {
+      fail(
+        `local ${branch} is ${behind} commit(s) behind origin/${branch}. ` +
+          "Pull first so the release points at the latest commit.",
+      );
+    }
   } catch {
     console.warn(
-      "release: `gh run watch` unavailable or failed — watch it in the browser instead.",
+      `release: couldn't compare against origin/${branch} (offline or no upstream?) — skipping behind-check.`,
     );
   }
 }
@@ -198,6 +251,21 @@ function git(...args) {
 
 function run(cmd, args, cwd) {
   execFileSync(cmd, args, { cwd, stdio: "inherit" });
+}
+
+function tagExists(tag) {
+  return git("tag", "--list", tag) === tag;
+}
+
+function shortHead() {
+  return git("rev-parse", "--short", "HEAD");
+}
+
+function latestReleaseVersion() {
+  // Newest v* tag by creation date, minus the leading "v". Empty if none.
+  const out = git("tag", "--list", "v*", "--sort=-creatordate");
+  const first = out.split("\n")[0]?.trim();
+  return first ? first.replace(/^v/, "") : "";
 }
 
 function readRootVersion() {
@@ -212,6 +280,14 @@ function originSlug() {
   const url = git("remote", "get-url", "origin");
   const m = url.match(/github\.com[:/]([^/]+)\/(.+?)(?:\.git)?$/);
   return m ? [m[1], m[2]] : ["SceneWorks", "SceneWorks"];
+}
+
+async function confirm(prompt) {
+  if (flags.has("--yes")) return true;
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = (await rl.question(`\n${prompt}`)).trim().toLowerCase();
+  rl.close();
+  return answer === "y" || answer === "yes";
 }
 
 function fail(msg) {
