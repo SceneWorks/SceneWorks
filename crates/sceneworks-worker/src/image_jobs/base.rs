@@ -2318,6 +2318,23 @@ fn model_supports_img2img(request: &ImageRequest) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether a Z-Image t2i request should take the generic `ui.img2img` reference-guided latent-init
+/// rather than the Character Studio identity-init (sc-3619). Z-Image already owns a bespoke reference
+/// arm in [`resolve_generic_lane_conditioning`] (keyed on `referenceStrength`), so it never reaches the
+/// generic img2img arm below — this predicate re-introduces the generic path INSIDE that arm.
+///
+/// Identity-init keeps precedence (it also drives face-likeness scoring), so the generic img2img fires
+/// ONLY when identity-init doesn't engage (no `referenceStrength`) yet the model opts into `ui.img2img`
+/// and a reference is present — i.e. the Image Studio "Image reference" tile (`referenceAssetId` +
+/// `advanced.strength`). The two surfaces are mutually exclusive by mode (character_image vs
+/// text_to_image); encoding the precedence purely keeps it unit-testable without image I/O (epic 8588
+/// A4.5, sc-10193). Base `z_image` is NOT in the z-image arm, so it reaches the generic arm directly and
+/// never consults this predicate.
+#[cfg(target_os = "macos")]
+fn zimage_uses_generic_img2img(request: &ImageRequest, has_reference: bool) -> bool {
+    identity_strength(request).is_none() && has_reference && model_supports_img2img(request)
+}
+
 /// The source identity reference (decoded image + its asset id) a strict-control pose set scores its
 /// finished poses against (epic 4406, sc-4410), or `None` when the job carries no identity reference.
 ///
@@ -2828,8 +2845,17 @@ fn resolve_generic_lane_conditioning(
         // otherwise the identity-init reference (referenceAssetId + referenceStrength, sc-3619).
         // Both feed the engine's single `Reference` conditioning; only the source + strength
         // keying differs. The strict-pose ControlNet tier diverts earlier (zimage_control_available).
+        // Character Studio identity-init (referenceStrength, sc-3619) is the primary reference surface
+        // and keeps precedence — it also drives face-likeness scoring. When it doesn't engage (the Image
+        // Studio "Image reference" tile sends referenceAssetId + advanced.strength with NO
+        // referenceStrength), the generic `ui.img2img` reference-guided latent-init (epic 8588 A4.5,
+        // sc-10193) takes over so the slider actually reaches the engine. The two surfaces are mutually
+        // exclusive by mode (character_image vs text_to_image), so this never double-drives; both produce
+        // the same single `Conditioning::Reference`.
         let init = if request.mode == "edit_image" {
             resolve_zimage_edit_init(request, settings, project_path)?
+        } else if zimage_uses_generic_img2img(request, has_reference) {
+            resolve_img2img_init_generic(request, settings, project_path)?
         } else {
             resolve_identity_init(request, settings, project_path)?
         };
@@ -4189,6 +4215,52 @@ mod standard_tier_tests {
         )));
         assert!(!model_supports_img2img(&entry(json!({ "family": "sd3" }))));
         assert!(!model_supports_img2img(&entry(json!({ "ui": {} }))));
+    }
+
+    /// A4.5 (sc-10193): on Z-Image t2i the Character Studio identity-init (`referenceStrength`, sc-3619)
+    /// keeps precedence; the generic `ui.img2img` reference-guided init (Image Studio "Image reference"
+    /// tile: `advanced.strength`, no `referenceStrength`) fires only when identity-init doesn't engage,
+    /// the model opts into `ui.img2img`, AND a reference is present. Otherwise plain txt2img.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn zimage_generic_img2img_yields_to_identity_reference() {
+        let req = |advanced: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({
+                    "model": "z_image_turbo",
+                    "modelManifestEntry": { "ui": { "img2img": true } },
+                    // Both surfaces carry a reference asset; `identity_strength` reads it too.
+                    "referenceAssetId": "asset-1",
+                    "advanced": advanced,
+                })
+                .as_object()
+                .unwrap(),
+            )
+        };
+        // Image Studio "Image reference": strength only, no referenceStrength, a reference present →
+        // generic img2img takes over.
+        assert!(zimage_uses_generic_img2img(
+            &req(json!({ "strength": 0.6 })),
+            true
+        ));
+        // Character Studio identity: referenceStrength set → identity-init keeps precedence, generic
+        // img2img yields (even though ui.img2img is on and a reference is present).
+        assert!(!zimage_uses_generic_img2img(
+            &req(json!({ "referenceStrength": 0.7 })),
+            true
+        ));
+        // No reference asset present → neither surface engages (plain txt2img).
+        assert!(!zimage_uses_generic_img2img(
+            &req(json!({ "strength": 0.6 })),
+            false
+        ));
+        // Model without the ui.img2img flag → never the generic path.
+        let no_flag = ImageRequest::from_payload(
+            json!({ "model": "z_image_turbo", "modelManifestEntry": { "ui": {} }, "advanced": {} })
+                .as_object()
+                .unwrap(),
+        );
+        assert!(!zimage_uses_generic_img2img(&no_flag, true));
     }
 
     /// Write a minimal present `<tier>/transformer/<file>` so [`standard_tier_subdir`]'s

@@ -3839,8 +3839,15 @@ async fn real_builtin_catalog_exposes_krea_img2img_ui_flag() {
         Value::Bool(true),
         "krea_2_turbo must expose ui.img2img in the /models response (the img2img tile's gate)"
     );
-    // And SD3.5 (A4.1) — the flag just added — must be exposed the same way.
-    for id in ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
+    // And SD3.5 (A4.1) + Z-Image (A4.5, sc-10193) — the img2img flags added since — must be exposed the
+    // same way (a duplicate-`ui`-key drop would silently strip the flag while still parsing, sc-10198).
+    for id in [
+        "sd3_5_large",
+        "sd3_5_large_turbo",
+        "sd3_5_medium",
+        "z_image",
+        "z_image_turbo",
+    ] {
         let m = models
             .as_array()
             .unwrap()
