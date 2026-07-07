@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AssetPickerField, ImageEditSourcePickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
-import { AssetMedia } from "../components/assetMedia.jsx";
+import { AssetMedia, assetUrl } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
@@ -1005,6 +1005,24 @@ export function ImageStudio() {
     },
     [resolutionOptions],
   );
+  // Auto-preset the Aspect from the picked img2img reference (sc-10195): matching the reference's
+  // aspect keeps the latent-init composition valid (a 4:5 reference rendered at 16:9 comes out
+  // wrong-shaped). Mirrors the describe picker's probe (sc-8109/8220) — keyed on the id AND the asset
+  // list so a freshly imported reference re-runs once it resolves. User Aspect override still wins.
+  useEffect(() => {
+    if (!img2imgReferenceAssetId) return;
+    const asset = editImageAssets.find((item) => item.id === img2imgReferenceAssetId);
+    const src = asset && assetUrl(asset);
+    if (!src || typeof Image === "undefined") return;
+    const probe = new Image();
+    probe.onload = () => {
+      if (probe.naturalWidth && probe.naturalHeight) {
+        onReferenceImageLoaded(probe.naturalWidth, probe.naturalHeight);
+      }
+    };
+    probe.src = src;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [img2imgReferenceAssetId, editImageAssets]);
   // Sampler / scheduler menus declared by the model, gated to the ACTIVE backend
   // (epic 7114 P5): `macGatingActive` is the worker `mlx_required` master switch, so
   // it picks the manifest's `mlx.limits` override on Mac/MLX and the `candle.limits`
@@ -2119,24 +2137,26 @@ export function ImageStudio() {
             </div>
           )}
 
-          {/* Prompt tools (UI-refinement 1b): one framed strip of two equally-weighted toggle
-              tiles that replace the disjointed ReferenceCaptionPicker card + lone Refine link.
-              Tile A wraps the reference-image → plain-text describe flow (epic 8203, sc-8208):
-              gated to text-to-image and hidden unless the macOS-first captioner is platform-
-              eligible (ready, or an install offer exists — both false off-Mac). C1: captioning-
-              only, never sent to generation. Tile B wraps RefinePromptControl (sc-2041). Only
-              one panel opens at a time; both are free-text only (structured models excluded). */}
+          {/* Prompt tools (UI-refinement 1b; restructured sc-10195): a framed strip of up to THREE
+              distinct tiles, one panel open at a time (all free-text only — structured models excluded).
+              1) "Image reference" — img2img reference-guided generation (a picked image + strength slider
+                 VISUALLY guides the render). Shown only for img2img-capable models (`supportsImg2img`).
+              2) "Prompt from image" — the reference→text describe flow + mood board (epic 8203/8595): the
+                 vision captioner writes prompt TEXT (captioning-only, never sent to generation). Gated on
+                 the macOS-first captioner being platform-eligible.
+              3) "Refine my prompt" — RefinePromptControl (sc-2041).
+              img2img and describe used to share ONE overloaded tile (sc-8593); splitting them makes the
+              "guide the render vs. write a prompt" choice explicit (Michael, on-device). */}
           {structuredPromptModel ? null : (() => {
             const describeAvailable =
               mode === "text_to_image" &&
               typeof imageDescribe === "function" &&
               (visionCaptionReady || visionCaptionOffers.length > 0);
-            // The "Start from an image" tile serves BOTH the describe→prompt flow AND img2img
-            // reference-guided generation (sc-8593). img2img needs no vision captioner, so it can open
-            // the panel on its own — the picked reference then rides generation via the strength slider.
+            // img2img reference-guidance is its own tile now — a picked image + strength that SEED the
+            // render (latent-init). Needs no vision captioner; shown whenever the model advertises img2img.
             const img2imgAvailable = supportsImg2img && mode === "text_to_image";
-            const referenceToolAvailable = describeAvailable || img2imgAvailable;
-            const describeActive = referenceToolAvailable && promptTool === "describe";
+            const imageRefActive = img2imgAvailable && promptTool === "imageReference";
+            const describeActive = describeAvailable && promptTool === "describe";
             const refineActive = promptTool === "refine";
             return (
               <div className="prompt-tools">
@@ -2145,7 +2165,20 @@ export function ImageStudio() {
                   <span className="hairline" />
                 </div>
                 <div className="prompt-tools-tiles">
-                  {referenceToolAvailable ? (
+                  {img2imgAvailable ? (
+                    <button
+                      type="button"
+                      className={imageRefActive ? "prompt-tool active" : "prompt-tool"}
+                      aria-pressed={imageRefActive}
+                      onClick={() => togglePromptTool("imageReference")}
+                    >
+                      <span className="prompt-tool-title">
+                        <Icon.Image size={15} /> Image reference
+                      </span>
+                      <span className="prompt-tool-desc">Guide the render with an image (image-to-image)</span>
+                    </button>
+                  ) : null}
+                  {describeAvailable ? (
                     <button
                       type="button"
                       className={describeActive ? "prompt-tool active" : "prompt-tool"}
@@ -2153,13 +2186,9 @@ export function ImageStudio() {
                       onClick={() => togglePromptTool("describe")}
                     >
                       <span className="prompt-tool-title">
-                        <Icon.Image size={15} /> Start from an image
+                        <Icon.Image size={15} /> Prompt from image
                       </span>
-                      <span className="prompt-tool-desc">
-                        {img2imgAvailable
-                          ? "Describe it into a prompt, or guide the render with it"
-                          : "Caption a reference into an editable prompt"}
-                      </span>
+                      <span className="prompt-tool-desc">Caption a reference (or mood board) into an editable prompt</span>
                     </button>
                   ) : null}
                   <button
@@ -2174,26 +2203,53 @@ export function ImageStudio() {
                     <span className="prompt-tool-desc">Rewrite what you typed for clarity &amp; detail</span>
                   </button>
                 </div>
+                {imageRefActive ? (
+                  <div className="prompt-tool-panel">
+                    <div className="structured-reference">
+                      <p className="structured-hint">
+                        Pick an image to guide the render (image-to-image). A higher reference strength
+                        stays closer to it; lower lets the prompt take over.
+                      </p>
+                      <ImageEditSourcePickerField
+                        assets={editImageAssets}
+                        buttonLabel="Select reference image"
+                        changeLabel="Change reference"
+                        characters={characters}
+                        emptyLabel="No reference image selected"
+                        importAsset={importAsset}
+                        label="Reference image"
+                        onChange={setImg2imgReferenceAssetId}
+                        projectId={activeProject?.id}
+                        value={img2imgReferenceAssetId}
+                      />
+                      {img2imgReferenceAssetId ? (
+                        <label className="reference-strength img2img-strength">
+                          {img2imgStrengthConfig?.label ?? "Reference strength"}
+                          <input
+                            max={img2imgStrengthConfig?.max ?? 1}
+                            min={img2imgStrengthConfig?.min ?? 0}
+                            onChange={(event) => setImg2imgStrength(Number(event.target.value))}
+                            step={img2imgStrengthConfig?.step ?? 0.05}
+                            type="range"
+                            value={img2imgStrength}
+                          />
+                          <span>{Number(img2imgStrength).toFixed(2)}</span>
+                        </label>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
                 {describeActive ? (
                   <div className="prompt-tool-panel">
                     <ReferenceCaptionPicker
                       onCaption={onImageDescribe}
                       onApply={(text) => setPromptFromUser(text)}
                       onReferenceImageLoaded={onReferenceImageLoaded}
-                      onReferenceAssetChange={setImg2imgReferenceAssetId}
-                      showImg2imgStrength={img2imgAvailable}
-                      img2imgStrength={img2imgStrength}
-                      onImg2imgStrengthChange={setImg2imgStrength}
-                      img2imgStrengthConfig={img2imgStrengthConfig}
                       referenceAssets={editImageAssets}
                       referenceCharacters={characters}
                       importAsset={importAsset}
                       projectId={activeProject?.id ?? ""}
-                      hint={
-                        img2imgAvailable
-                          ? "Describe it into a prompt, or set a reference strength below to guide the render."
-                          : "The image is only used to write the prompt — it isn’t sent to generation."
-                      }
+                      hint="The image is only used to write the prompt — it isn’t sent to generation."
                       buttonLabel="✨ Describe image"
                       busyLabel="Describing…"
                       showMoodBoard={visionCaptionReady}
