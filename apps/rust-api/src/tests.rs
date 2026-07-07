@@ -3876,6 +3876,8 @@ async fn real_builtin_catalog_exposes_krea_img2img_ui_flag() {
         "boogu_image_turbo",
         "ideogram_4",
         "ideogram_4_turbo",
+        "sana_1600m",
+        "sana_sprint_1600m",
     ] {
         let m = models
             .as_array()
