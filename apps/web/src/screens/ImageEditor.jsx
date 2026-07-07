@@ -231,13 +231,26 @@ export function editOutputAspectRatio(key) {
   return EDIT_OUTPUT_ASPECTS.find((aspect) => aspect.key === key)?.ratio ?? null;
 }
 
+// Snap an edit-output pixel dimension to a multiple of 16 (min 16). Every image engine
+// requires dims divisible by 16 (VAE ×8 · patch ×2 — e.g. mlx-gen z-image's SIZE_MULTIPLE
+// guard); an imported/cropped source at arbitrary dims (e.g. 832×1165) would otherwise be
+// forwarded verbatim and hard-fail at generation. Mirrors snapCanvasDim's rounding, without
+// its blank-canvas [256, 2048] clamp — an edit must not force-grow a small source to 256.
+function alignEditDim(px) {
+  return Math.max(16, Math.round(px / 16) * 16);
+}
+
 // Output W×H for an editor edit given the target aspect + fit mode, keeping the working
 // image at native scale (never upscales). "match"/unknown aspect → working size. crop =
 // largest target-aspect rect INSIDE the image (trim the overflow); pad/outpaint =
-// smallest target-aspect canvas CONTAINING the image (extend → border to fill). Pure.
+// smallest target-aspect canvas CONTAINING the image (extend → border to fill). Result dims
+// are always snapped to a multiple of 16 so the engine's size guard accepts them; the worker
+// crop/pad-fits the source to these dims (never stretches). Pure.
 export function editOutputDims(workingW, workingH, aspectKey, fitMode) {
   const ratio = editOutputAspectRatio(aspectKey);
-  if (!ratio || !workingW || !workingH) return { width: workingW, height: workingH };
+  if (!ratio || !workingW || !workingH) {
+    return { width: alignEditDim(workingW), height: alignEditDim(workingH) };
+  }
   const imageRatio = workingW / workingH;
   let width;
   let height;
@@ -260,7 +273,7 @@ export function editOutputDims(workingW, workingH, aspectKey, fitMode) {
       height = Math.round(workingW / ratio);
     }
   }
-  return { width: Math.max(1, width), height: Math.max(1, height) };
+  return { width: alignEditDim(width), height: alignEditDim(height) };
 }
 
 // Whether a model accepts an inpaint mask — the manifest tags it `image_inpaint`
