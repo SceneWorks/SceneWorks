@@ -89,6 +89,42 @@ impl ApiClient {
                 request = request.query(&[(*key, value)]);
             }
         }
+        let response = self.send_checked(request).await?;
+        Ok(response.json::<Value>().await?)
+    }
+
+    /// POST a JSON `body` to `path` and decode the JSON response. Used by the
+    /// job-submitting tools (`POST /api/v1/image/jobs` → `JobSnapshot`).
+    pub async fn post_json(&self, path: &str, body: &Value) -> Result<Value, ApiClientError> {
+        let request = self
+            .client
+            .post(format!("{}{}", self.base_url, path))
+            .json(body);
+        let response = self.send_checked(request).await?;
+        Ok(response.json::<Value>().await?)
+    }
+
+    /// GET raw bytes from `path` (project media via
+    /// `GET /api/v1/projects/:id/files/*rel`). Returns the body plus the
+    /// response `Content-Type` (parameters stripped) when the server sent one.
+    pub async fn get_bytes(&self, path: &str) -> Result<(Vec<u8>, Option<String>), ApiClientError> {
+        let request = self.client.get(format!("{}{}", self.base_url, path));
+        let response = self.send_checked(request).await?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.split(';').next().unwrap_or("").trim().to_owned())
+            .filter(|value| !value.is_empty());
+        Ok((response.bytes().await?.to_vec(), content_type))
+    }
+
+    /// Attach the auth header, send, and turn any non-2xx into
+    /// [`ApiClientError::Api`] carrying the body text (never the token).
+    async fn send_checked(
+        &self,
+        mut request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, ApiClientError> {
         if let Some(token) = &self.access_token {
             request = request.header("X-SceneWorks-Token", token);
         }
@@ -101,6 +137,6 @@ impl ApiClient {
                 .unwrap_or_else(|_| "request failed".to_owned());
             return Err(ApiClientError::Api { status, detail });
         }
-        Ok(response.json::<Value>().await?)
+        Ok(response)
     }
 }
