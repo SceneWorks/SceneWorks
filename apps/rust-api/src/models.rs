@@ -1298,6 +1298,10 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
                 .map(|path| Value::String(path.display().to_string()))
                 .unwrap_or(Value::Null),
         );
+        object.insert(
+            "updateAvailable".to_owned(),
+            Value::Bool(status.update_available),
+        );
     }
 }
 
@@ -2064,6 +2068,22 @@ pub(crate) struct MlxCatalogStatus {
     pub(crate) install_state: &'static str,
     pub(crate) conversion_state: &'static str,
     pub(crate) converted_path: Option<PathBuf>,
+    /// A newer source checkpoint is available than the one this install was converted from.
+    /// True only for a converted `requiresConversion` model whose manifest `convertSourceFile`
+    /// is NOT present in the `convertSourceRepo` cache (the installed converted dir carries no
+    /// version stamp, so the source cache is the proxy — see `convert_source_file_cached`).
+    pub(crate) update_available: bool,
+}
+
+/// Whether the named source `file` is present in any cached snapshot of `repo` — the proxy for
+/// "the current manifest source has been downloaded." Keys off the manifest fields alone, so it
+/// works for every convert-at-install model with no per-model logic.
+fn convert_source_file_cached(data_dir: &FsPath, repo: &str, file: &str) -> bool {
+    huggingface_repo_cache_path(data_dir, repo)
+        .map(|root| crate::huggingface_snapshot_dirs(&root))
+        .unwrap_or_default()
+        .iter()
+        .any(|snapshot| snapshot.join(file).is_file())
 }
 
 /// macOS Model Manager status for a model's `mlx` variant. Returns `None` when the
@@ -2099,10 +2119,24 @@ pub(crate) fn mlx_catalog_status(
         if converted_dir.join("config.json").is_file()
             || converted_dir.join("model_index.json").is_file()
         {
+            // The converted artifact records no source version, so use the source cache as the
+            // proxy: if the manifest's current `convertSourceFile` is NOT cached, this install was
+            // built from an older source → an update is available. A dir-based converter with no
+            // `convertSourceFile` simply never reports an update (no false positives).
+            let update_available = match (
+                mlx.get("convertSourceRepo").and_then(Value::as_str),
+                mlx.get("convertSourceFile").and_then(Value::as_str),
+            ) {
+                (Some(repo), Some(file)) if !file.trim().is_empty() => {
+                    !convert_source_file_cached(data_dir, repo, file)
+                }
+                _ => false,
+            };
             return Some(MlxCatalogStatus {
                 install_state: "installed",
                 conversion_state: "converted",
                 converted_path: Some(converted_dir),
+                update_available,
             });
         }
         let source_present = mlx
@@ -2117,6 +2151,7 @@ pub(crate) fn mlx_catalog_status(
                 "needs_source"
             },
             converted_path: None,
+            update_available: false,
         })
     } else {
         let repo_installed = mlx
@@ -2139,6 +2174,8 @@ pub(crate) fn mlx_catalog_status(
             },
             conversion_state: "ready",
             converted_path: local_installed.then_some(local_dir),
+            // Turnkey models have no local conversion to go stale (they track their repo directly).
+            update_available: false,
         })
     }
 }
@@ -2439,6 +2476,85 @@ mod variant_install_tests {
         let states = model_variant_states(&model, data_dir);
         assert!(states[0].installed);
         assert!(states[0].installed_path.is_some());
+    }
+
+    /// Mark a convert-at-install model "converted" by writing its local MLX `config.json`.
+    fn seed_converted(data_dir: &FsPath, model_id: &str) {
+        let dir = data_dir.join("models").join("mlx").join(model_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+    }
+
+    /// A converted convert-at-install model reports `updateAvailable` iff the manifest's current
+    /// `convertSourceFile` is NOT in the source cache (the converted dir carries no version stamp,
+    /// so the cache is the proxy). Generic: keys only off the manifest fields.
+    #[test]
+    fn mlx_update_available_tracks_source_file_in_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo = "TenStrip/LTX2.3-10Eros";
+        let model = json!({
+            "id": "ltx_2_3_eros",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "ltx_video",
+                "convertSourceRepo": repo,
+                "convertSourceFile": "10Eros_v1.3_bf16.safetensors"
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        // Not converted + nothing cached → not installed, no update signal.
+        let status = mlx_catalog_status(&model, data_dir).expect("status");
+        assert_eq!(status.install_state, "missing");
+        assert!(!status.update_available);
+
+        // Converted, but only the OLDER source is cached (manifest now points at v1.3) → stale.
+        seed_converted(data_dir, "ltx_2_3_eros");
+        seed_cache(data_dir, repo, &["10Eros_v1_bf16.safetensors"]);
+        let status = mlx_catalog_status(&model, data_dir).expect("status");
+        assert_eq!(status.install_state, "installed");
+        assert_eq!(status.conversion_state, "converted");
+        assert!(
+            status.update_available,
+            "current source not cached → update available"
+        );
+
+        // The manifest's current source file is now cached → up to date.
+        seed_cache(data_dir, repo, &["10Eros_v1.3_bf16.safetensors"]);
+        let status = mlx_catalog_status(&model, data_dir).expect("status");
+        assert!(
+            !status.update_available,
+            "current source cached → no update"
+        );
+    }
+
+    /// A dir-based converter (no `convertSourceFile`) never reports an update — the mechanism
+    /// degrades to a no-op rather than misfiring, so it's safe to leave enabled for all models.
+    #[test]
+    fn mlx_update_unavailable_without_convert_source_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let model = json!({
+            "id": "flux2_dev",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "flux2_dev_quant",
+                "convertSourceRepo": "black-forest-labs/FLUX.2-dev"
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        seed_converted(data_dir, "flux2_dev");
+        let status = mlx_catalog_status(&model, data_dir).expect("status");
+        assert_eq!(status.conversion_state, "converted");
+        assert!(
+            !status.update_available,
+            "no convertSourceFile → never reports an update"
+        );
     }
 
     #[test]
