@@ -13,6 +13,7 @@ import {
   joyCaptionModel,
 } from "../training/joyCaptionPrompts.js";
 import { asText, boundedNumber, integerFromDraft } from "../training/drafts.js";
+import { trainingBaseState, trainingBaseTier } from "../trainingBase.js";
 import {
   captionDraftsFromDataset,
   datasetHealth,
@@ -507,19 +508,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // install reads the true state). Only gated when targets exist but every trainable base is
   // missing — a target-registry error keeps its own "registry unavailable" message.
   const usableTrainingTargets = trainingTargets.filter((target) => !macTargetBlocked(target));
-  // A training base that is a quant-matrix re-host (epic 9992 Krea 2 Raw) is trained on its DENSE `bf16`
-  // tier — generation may have installed only the q8 default, but LoRA training needs the full-precision
-  // weights. Readiness + the install offer therefore track the `bf16` variant when present; a non-matrix
-  // base (z-image / sdxl / lens) has no such variant and uses its default tier.
-  const trainingBaseTier = (base) =>
-    base?.variants?.some((variant) => variant.variant === "bf16") ? "bf16" : undefined;
-  const trainingBaseState = (base) => {
-    const tier = trainingBaseTier(base);
-    if (tier) {
-      return base.variants.find((variant) => variant.variant === tier)?.installState ?? "missing";
-    }
-    return base.installState;
-  };
+  // Readiness + the install offer track the tier LoRA training actually needs — a dedicated `training`
+  // variant (lens, sc-8797) or else the DENSE `bf16` tier (Krea 2 Raw quant-matrix re-host, epic 9992) —
+  // not the default (q4) inference tier a user may have installed for generation. Resolution lives in the
+  // pure, unit-tested `trainingBase.js` (sc-8966). A non-matrix base (z-image / sdxl) uses its default tier.
   const trainingBaseMissing = (target) => {
     const base = models.find((item) => item.id === target?.baseModel);
     return Boolean(base) && trainingBaseState(base) === "missing";
