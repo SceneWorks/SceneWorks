@@ -87,6 +87,14 @@ pub struct Settings {
     /// (other source IPs) stay gated. The desktop sets `SCENEWORKS_TRUST_LOOPBACK`;
     /// Docker/server never does, so a reverse-proxied deployment stays fail-closed.
     pub trust_loopback: bool,
+    /// Epic 10231 (sc-10233) — base URL the embedded MCP server's thin API client
+    /// uses to call back into this API's `/api/v1/*` routes (the MCP tools are a
+    /// thin HTTP client over the existing surface, mirroring the Rust worker — no
+    /// direct engine/DB path). Read from `SCENEWORKS_API_URL` (the same variable
+    /// the worker uses); defaults to loopback on this API's own port. The client
+    /// sends `access_token` as `X-SceneWorks-Token`, so the self-calls pass the
+    /// access-control gate whether or not loopback trust is enabled.
+    pub mcp_api_url: String,
 }
 
 impl Settings {
@@ -98,13 +106,14 @@ impl Settings {
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("cache").join("jobs.db"));
+        let port: u16 = std::env::var("SCENEWORKS_API_PORT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(8000);
         Self {
             app_version: env_string("SCENEWORKS_APP_VERSION", "0.2.0"),
             host: env_string("SCENEWORKS_API_HOST", DEFAULT_API_HOST),
-            port: std::env::var("SCENEWORKS_API_PORT")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(8000),
+            port,
             data_dir,
             config_dir: env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir),
             access_token: std::env::var("SCENEWORKS_ACCESS_TOKEN")
@@ -140,6 +149,9 @@ impl Settings {
             trust_loopback: std::env::var("SCENEWORKS_TRUST_LOOPBACK")
                 .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
                 .unwrap_or(false),
+            // Loopback (not `host`, which may be 0.0.0.0) — the MCP self-calls
+            // originate on this machine by definition.
+            mcp_api_url: env_string("SCENEWORKS_API_URL", &format!("http://127.0.0.1:{port}")),
         }
     }
 

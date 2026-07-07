@@ -1,0 +1,39 @@
+# SceneWorks MCP server (epic 10231, sc-10233). A Model Context Protocol server
+# built on the official `rmcp` SDK, exposed over the Streamable-HTTP transport and
+# mounted INTO the existing API's axum router at `/mcp` (apps/rust-api), so it sits
+# behind the same `access_control` middleware as every `/api/v1` route. The tool
+# handlers are a THIN CLIENT over the existing `/api/v1/*` HTTP surface (mirroring
+# crates/sceneworks-worker/src/api_client.rs) — no new direct path into the
+# engine/DB. Base URL comes from `SCENEWORKS_API_URL`; auth rides the
+# `X-SceneWorks-Token` header.
+[package]
+name = "sceneworks-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Pinned exact (sc-10233): the official MCP Rust SDK moves fast and its
+# streamable-HTTP server surface (StreamableHttpService / tool_router macros) has
+# broken across minor bumps before — bump deliberately, with the round-trip tests.
+# `transport-streamable-http-server` adds the tower service the API mounts at
+# `/mcp`; default features keep `server` + `macros` (tool router derive).
+rmcp = { version = "=2.1.0", features = ["transport-streamable-http-server"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Minimal stub `/api/v1` server on an ephemeral port for the client round-trip
+# tests; matches the axum the API app itself uses.
+axum = "0.7"
+# The round-trip test drives the mounted service through a REAL MCP client
+# (initialize → tools/list → tools/call over streamable HTTP), not hand-rolled
+# JSON-RPC — client features are additive on the same pinned version.
+rmcp = { version = "=2.1.0", features = ["client", "transport-streamable-http-client-reqwest"] }
+tokio = { version = "1.40", features = ["macros", "net", "rt-multi-thread"] }
+
+[lints]
+workspace = true
