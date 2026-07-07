@@ -1069,3 +1069,96 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
     expect(secondArg).toBeUndefined();
   });
 });
+
+// epic 10285: a convert-at-install model whose source checkpoint has been bumped surfaces an
+// "Update" affordance that re-downloads the new source (the effect then chains the re-convert).
+describe("ModelManagerScreen convert-at-install Update button", () => {
+  let container;
+  let root;
+  let createModelDownloadJob;
+  let createModelConvertJob;
+  let ModelManagerScreen;
+  let AppContext;
+
+  const convertModel = (overrides) => ({
+    id: "ltx_2_3_eros",
+    name: "LTX-2.3 10Eros",
+    type: "video",
+    family: "ltx-video",
+    installState: "installed",
+    mlxInstallState: "installed",
+    mlxConversionState: "converted",
+    downloadable: true,
+    ui: { description: "Convert-at-install video model." },
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    createModelDownloadJob = vi.fn(async () => ({ id: "dl-job-1" }));
+    createModelConvertJob = vi.fn(async () => ({ id: "cv-job-1" }));
+    window.__TAURI__ = {
+      core: { invoke: vi.fn(async () => ({ platform: "windows", devices: [] })) },
+    };
+    vi.resetModules();
+    ({ AppContext } = await import("../context/AppContext.js"));
+    ({ ModelManagerScreen } = await import("./ModelManagerScreen.jsx"));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    delete window.__TAURI__;
+    vi.restoreAllMocks();
+  });
+
+  async function render(models) {
+    const value = {
+      activeProject: null,
+      jobs: [],
+      loras: [],
+      models,
+      presets: [],
+      jobAction: () => {},
+      setActiveView: vi.fn(),
+      deleteLora: () => {},
+      deleteModel: () => {},
+      createModelDownloadJob,
+      createModelConvertJob,
+      createLoraImportJob: () => {},
+      createModelImportJob: () => {},
+    };
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={value}>
+          <ModelManagerScreen />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const mlxButtons = () => [...container.querySelectorAll(".mlx-status button")];
+
+  it("shows an Update button when updateAvailable, and clicking it re-downloads the source", async () => {
+    await render([convertModel({ updateAvailable: true })]);
+    const updateButton = mlxButtons().find((button) => button.textContent === "Update");
+    expect(updateButton).toBeTruthy();
+    // The stale converted state does NOT also render the disabled "MLX ready" button.
+    expect(mlxButtons().some((button) => button.textContent === "MLX ready")).toBe(false);
+    await click(updateButton);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "ltx_2_3_eros" }));
+  });
+
+  it("shows the normal MLX-ready state (no Update button) when up to date", async () => {
+    await render([convertModel({ updateAvailable: false })]);
+    expect(mlxButtons().some((button) => button.textContent === "Update")).toBe(false);
+    expect(mlxButtons().some((button) => button.textContent === "MLX ready")).toBe(true);
+    expect(createModelDownloadJob).not.toHaveBeenCalled();
+  });
+});
