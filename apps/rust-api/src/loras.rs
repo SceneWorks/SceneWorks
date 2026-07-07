@@ -490,69 +490,97 @@ pub(crate) async fn queue_lora_import_job(
             })
         })
         .unwrap_or_else(|| "Imported LoRA".to_owned());
-    let lora_id = payload
-        .lora_id
-        .clone()
-        .unwrap_or_else(|| slugify_lora_id(&name));
-    let target_name = safe_download_dir(&lora_id);
-    let (target_dir, manifest_path, source_path, project_id, project_name, allowed_source_roots) =
-        if payload.scope == "project" {
-            let Some(project_id) = payload.project_id.clone() else {
-                return Err(ApiError::bad_request(
-                    "Project LoRA imports require projectId",
-                ));
-            };
-            let project_path = project_path_for_id(state.clone(), &project_id).await?;
-            (
-                project_path
-                    .join("loras")
-                    .join("imports")
-                    .join(&target_name),
-                project_path.join("loras").join("manifest.jsonc"),
-                format!("loras/imports/{target_name}"),
-                Some(project_id),
-                None,
-                vec![
-                    state.settings.data_dir.join("loras"),
-                    project_path.join("loras"),
-                ],
-            )
-        } else {
-            (
-                state.settings.data_dir.join("loras").join(&target_name),
-                state
-                    .settings
-                    .config_dir
-                    .join("manifests")
-                    .join("user.loras.jsonc"),
-                format!("loras/{target_name}"),
-                None,
-                None,
-                vec![state.settings.data_dir.join("loras")],
-            )
+    // Scope-derived roots and the manifest path do not depend on the LoRA id, so
+    // resolve them first. The id is minted *after* family resolution (below) so the
+    // target folder can carry the canonical family token (sc-10214): a krea_2 and a
+    // flux2 LoRA that share a display name (e.g. two "Realism Engine" variants) then
+    // land in separate `<family>_<slug>` folders instead of co-mingling their
+    // safetensors in one dir, where the header inspector picks a file non-deterministically.
+    let (
+        loras_base_dir,
+        manifest_path,
+        path_prefix,
+        project_id,
+        project_name,
+        allowed_source_roots,
+    ) = if payload.scope == "project" {
+        let Some(project_id) = payload.project_id.clone() else {
+            return Err(ApiError::bad_request(
+                "Project LoRA imports require projectId",
+            ));
         };
-    if let Some(source_path) = payload.source_path.as_deref() {
-        let allowed_source_roots = if payload.uploaded_source_path {
-            vec![state.settings.data_dir.join("cache").join("lora-uploads")]
-        } else {
-            allowed_source_roots
-        };
-        validate_lora_import_source_path(source_path, &allowed_source_roots)?;
-        // A paired Wan A14B MoE upload (sc-1991) carries a second low-noise file.
-        // Validate it against the same upload root and record both halves under the
-        // high/low_noise convention so the worker resolves the high half as primary
-        // (transformer) and the low half as the transformer_2 sibling.
+        let project_path = project_path_for_id(state.clone(), &project_id).await?;
+        (
+            project_path.join("loras").join("imports"),
+            project_path.join("loras").join("manifest.jsonc"),
+            "loras/imports".to_owned(),
+            Some(project_id),
+            None,
+            vec![
+                state.settings.data_dir.join("loras"),
+                project_path.join("loras"),
+            ],
+        )
+    } else {
+        (
+            state.settings.data_dir.join("loras"),
+            state
+                .settings
+                .config_dir
+                .join("manifests")
+                .join("user.loras.jsonc"),
+            "loras".to_owned(),
+            None,
+            None,
+            vec![state.settings.data_dir.join("loras")],
+        )
+    };
+    // Resolve the family before the id: a local file's architecture is detected from
+    // its safetensors header and reconciled against any user-declared family so the id
+    // below can carry the canonical family token (sc-10214).
+    let source_roots = if payload.uploaded_source_path {
+        vec![state.settings.data_dir.join("cache").join("lora-uploads")]
+    } else {
+        allowed_source_roots
+    };
+    if let Some(local_source) = payload.source_path.as_deref() {
+        validate_lora_import_source_path(local_source, &source_roots)?;
+        // A paired Wan A14B MoE upload (sc-1991) carries a second low-noise file;
+        // validate it against the same upload root here. The high/low_noise filenames
+        // are assigned once the family-scoped target name is known, below.
         if let Some(secondary_source_path) = payload.secondary_source_path.as_deref() {
-            validate_lora_import_source_path(secondary_source_path, &allowed_source_roots)?;
-            let (high_name, low_name) = wan_moe_pair_filenames(&target_name);
-            payload.files = vec![high_name, low_name];
+            validate_lora_import_source_path(secondary_source_path, &source_roots)?;
         }
-        let detected = detect_family_from_local_path(source_path)?;
+        let detected = detect_family_from_local_path(local_source)?;
         payload.family = reconcile_lora_family(
             payload.family.take(),
             detected,
-            &format!("source_path={source_path}"),
+            &format!("source_path={local_source}"),
         )?;
+    }
+    // Mint the id (see `derive_lora_id`): explicit caller id wins, else a
+    // family-scoped `<family>_<slug>` so folders never collide across families.
+    let lora_id = derive_lora_id(payload.lora_id.as_deref(), &name, payload.family.as_deref());
+    let target_name = safe_download_dir(&lora_id);
+    let target_dir = loras_base_dir.join(&target_name);
+    let source_path = format!("{path_prefix}/{target_name}");
+    // Record the paired Wan MoE halves now that the family-scoped target name exists.
+    if payload.source_path.is_some() && payload.secondary_source_path.is_some() {
+        let (high_name, low_name) = wan_moe_pair_filenames(&target_name);
+        payload.files = vec![high_name, low_name];
+    }
+    // Belt-and-suspenders against co-mingling different families in one record folder
+    // (sc-10214): reject when the resolved folder already holds a safetensors of a
+    // *different* family, with an honest message instead of stacking two adapters the
+    // header inspector would arbitrate non-deterministically. Same-family re-imports
+    // (the folder's existing file matches) are still allowed.
+    if let Some(family) = payload.family.as_deref() {
+        if let Some(existing) = conflicting_folder_family(&target_dir, family)? {
+            return Err(ApiError::bad_request(format!(
+                "The folder for LoRA '{lora_id}' already contains a {existing} LoRA. \
+                 Import this {family} LoRA under a different name so each family keeps its own folder."
+            )));
+        }
     }
     let timestamp = now_rfc3339();
     let mut manifest_entry = json!({
@@ -1097,6 +1125,56 @@ pub(crate) fn reconcile_lora_family(
     })
 }
 
+/// Derives the stored LoRA id (which also names its on-disk folder via
+/// `safe_download_dir`) for an import (sc-10214).
+///
+/// An explicit caller-supplied id wins — programmatic callers own their id. Otherwise
+/// the display name is slugified and, when the family is known, prefixed with the
+/// canonical family token (itself slugified so a hyphenated/dotted token like `z-image`
+/// or `sd1.5` yields a clean all-underscore id) so `<family>_<slug>` folders never
+/// collide across families: a krea_2 and a flux2 LoRA that share a display name (e.g.
+/// two "Realism Engine" variants) resolve to `krea_2_realism_engine` and
+/// `flux2_realism_engine` rather than one shared folder, and a z-image LoRA to
+/// `z_image_<slug>`. An unresolved family (HF/URL imports) falls back to the bare slug.
+pub(crate) fn derive_lora_id(
+    explicit_id: Option<&str>,
+    name: &str,
+    family: Option<&str>,
+) -> String {
+    if let Some(explicit) = explicit_id {
+        return explicit.to_owned();
+    }
+    let slug = slugify_lora_id(name);
+    match family {
+        Some(family) => format!(
+            "{}_{}",
+            slugify_lora_id(&canonical_lora_family(family)),
+            slug
+        ),
+        None => slug,
+    }
+}
+
+/// Returns the family already occupying `target_dir` when it differs from
+/// `incoming_family` (sc-10214), so the caller can reject the import instead of letting
+/// two families share one record folder — where the header inspector (`first_safetensors_path`)
+/// would pick a file non-deterministically. Returns `Ok(None)` for an empty folder or a
+/// same-family folder (a legitimate re-import/update).
+fn conflicting_folder_family(
+    target_dir: &FsPath,
+    incoming_family: &str,
+) -> Result<Option<String>, ApiError> {
+    let Some(existing) = detect_family_from_local_path(target_dir.to_string_lossy().as_ref())?
+    else {
+        return Ok(None);
+    };
+    if canonical_lora_family(&existing) != canonical_lora_family(incoming_family) {
+        Ok(Some(existing))
+    } else {
+        Ok(None)
+    }
+}
+
 pub(crate) fn lora_is_installed(path: &FsPath) -> bool {
     first_safetensors_path(path).is_some()
 }
@@ -1282,5 +1360,94 @@ mod base_model_gating_tests {
         });
         validate_lora_specs_for_model(&models, &[], "krea_2_turbo", &[lora], true, "LoRA")
             .expect("krea_2 detected family must pass against a krea_2 (→krea-2) model surface");
+    }
+
+    // sc-10214: the id (and thus the on-disk folder) is family-scoped so two variants of
+    // one LoRA that share a display name never resolve to the same folder.
+    #[test]
+    fn derive_lora_id_prefixes_canonical_family() {
+        assert_eq!(
+            derive_lora_id(None, "Realism Engine", Some("flux2")),
+            "flux2_realism_engine"
+        );
+        assert_eq!(
+            derive_lora_id(None, "Realism Engine", Some("krea_2")),
+            "krea_2_realism_engine"
+        );
+        // A hyphenated family token slugifies to a clean all-underscore id.
+        assert_eq!(
+            derive_lora_id(None, "Detail LoRA", Some("z-image")),
+            "z_image_detail_lora"
+        );
+        // A krea_2 and a flux2 variant of the same-named LoRA land in different folders —
+        // the exact collision that mis-detected a flux2 import as krea_2.
+        assert_ne!(
+            derive_lora_id(None, "Realism Engine", Some("flux2")),
+            derive_lora_id(None, "Realism Engine", Some("krea_2"))
+        );
+    }
+
+    #[test]
+    fn derive_lora_id_canonicalizes_family_spelling() {
+        // ai-toolkit's separator-less `krea2` and the hyphen form both canonicalize to
+        // the stored `krea_2` token, so the folder is stable regardless of source spelling.
+        assert_eq!(
+            derive_lora_id(None, "Realism Engine", Some("krea2")),
+            "krea_2_realism_engine"
+        );
+        assert_eq!(
+            derive_lora_id(None, "Realism Engine", Some("krea-2")),
+            "krea_2_realism_engine"
+        );
+    }
+
+    #[test]
+    fn derive_lora_id_falls_back_and_respects_explicit_id() {
+        // Unresolved family (HF/URL import) -> bare slug, unchanged from prior behaviour.
+        assert_eq!(
+            derive_lora_id(None, "Realism Engine", None),
+            "realism_engine"
+        );
+        // An explicit caller-supplied id is used verbatim (never re-prefixed).
+        assert_eq!(
+            derive_lora_id(Some("my_custom_id"), "Realism Engine", Some("flux2")),
+            "my_custom_id"
+        );
+    }
+
+    #[test]
+    fn conflicting_folder_family_flags_cross_family_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_krea_lora(tmp.path());
+        // A flux2 import targeting a folder that already holds a krea_2 adapter conflicts.
+        assert_eq!(
+            conflicting_folder_family(tmp.path(), "flux2")
+                .unwrap()
+                .as_deref(),
+            Some("krea_2")
+        );
+        // Same-family re-import is allowed (no conflict), incl. spelling variants.
+        assert_eq!(
+            conflicting_folder_family(tmp.path(), "krea_2").unwrap(),
+            None
+        );
+        assert_eq!(
+            conflicting_folder_family(tmp.path(), "krea2").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn conflicting_folder_family_ignores_empty_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A fresh (or never-created) folder never conflicts — the common new-import path.
+        assert_eq!(
+            conflicting_folder_family(tmp.path(), "flux2").unwrap(),
+            None
+        );
+        assert_eq!(
+            conflicting_folder_family(&tmp.path().join("does_not_exist"), "flux2").unwrap(),
+            None
+        );
     }
 }
