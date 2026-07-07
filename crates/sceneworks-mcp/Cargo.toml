@@ -14,6 +14,9 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+# Inline tool results: generated images come back as base64 `ImageContent` blocks
+# (sc-10234), so MCP clients can render them without another fetch.
+base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # Pinned exact (sc-10233): the official MCP Rust SDK moves fast and its
 # streamable-HTTP server surface (StreamableHttpService / tool_router macros) has
@@ -23,6 +26,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rmcp = { version = "=2.1.0", features = ["transport-streamable-http-server"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# `time` for the blocking generate_image submit→poll wait (sc-10234); the async
+# runtime itself is the API app's (this crate is a library mounted into it).
+tokio = { version = "1.40", features = ["time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]

@@ -22,7 +22,7 @@ use rmcp::transport::streamable_http_server::{
 };
 
 pub use api_client::{ApiClient, ApiClientConfig};
-pub use server::SceneWorksMcp;
+pub use server::{JobWaitConfig, SceneWorksMcp};
 
 /// The concrete tower service type the API mounts at `/mcp`.
 pub type McpHttpService = StreamableHttpService<SceneWorksMcp, LocalSessionManager>;
@@ -37,9 +37,19 @@ pub type McpHttpService = StreamableHttpService<SceneWorksMcp, LocalSessionManag
 /// for `/mcp` is the surrounding `access_control` middleware — identical to
 /// every `/api/v1` route (sc-10233 acceptance).
 pub fn streamable_http_service(config: ApiClientConfig) -> McpHttpService {
+    streamable_http_service_with(config, JobWaitConfig::default())
+}
+
+/// [`streamable_http_service`] with an explicit blocking-job wait policy
+/// (generate_image's poll interval + overall deadline). Tests shrink both so
+/// submit→poll round trips run in milliseconds.
+pub fn streamable_http_service_with(
+    config: ApiClientConfig,
+    job_wait: JobWaitConfig,
+) -> McpHttpService {
     let api = ApiClient::new(config);
     StreamableHttpService::new(
-        move || Ok(SceneWorksMcp::new(api.clone())),
+        move || Ok(SceneWorksMcp::new(api.clone()).with_job_wait(job_wait.clone())),
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default().disable_allowed_hosts(),
     )

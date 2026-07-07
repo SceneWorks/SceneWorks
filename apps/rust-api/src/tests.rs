@@ -12571,7 +12571,12 @@ async fn mcp_client_round_trips_catalog_tools_via_loopback_trust() {
     // Tool discovery.
     let tools = client.list_tools(None).await.expect("tools/list succeeds");
     let names: Vec<&str> = tools.tools.iter().map(|tool| tool.name.as_ref()).collect();
-    for expected in ["list_projects", "list_models", "list_loras"] {
+    for expected in [
+        "list_projects",
+        "list_models",
+        "list_loras",
+        "generate_image",
+    ] {
         assert!(
             names.contains(&expected),
             "missing tool {expected}: {names:?}"
