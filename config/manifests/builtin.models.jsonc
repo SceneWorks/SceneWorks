@@ -2045,6 +2045,13 @@
       },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Base",
       "ui": {
+        // img2img reference-guided t2i (epic 8588 A4.3, sc-10191): the `ui.img2img` flag drives the
+        // Image Studio "Image reference" tile + strength slider (referenceAssetId + advanced.strength),
+        // routed through the generic img2img arm to Boogu Base's true-CFG img2img entrypoint (mlx-gen
+        // #669). Distinct from `boogu_image_edit`'s Qwen3-VL semantic MultiReference edit. Full 0–1
+        // slider (default 0.5), unclamped — usable band is model-specific.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Boogu Image",
         // Exposes the Image Studio "Full precision (bf16)" toggle (sc-6568): off = the packed Q8
         // default (the downloaded `base/` subfolder); on sends advanced `mlxQuantize: 0` and the
@@ -2141,6 +2148,11 @@
       },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Turbo",
       "ui": {
+        // img2img reference-guided t2i (epic 8588 A4.3, sc-10191): same `ui.img2img` surface as
+        // boogu_image, routed to Boogu Turbo's distilled (DMD, CFG-free) img2img entrypoint (mlx-gen
+        // #669). Full 0–1 slider (default 0.5), unclamped.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Boogu Image Turbo",
         // Full-precision bf16 opt-in (sc-6568): on sends `mlxQuantize: 0`; the worker fetches the
         // `turbo-bf16/` subfolder on demand. Off = the packed Q8 `turbo/` default.
