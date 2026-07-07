@@ -464,10 +464,16 @@ pub(crate) fn resolve_weights_dir(
     ) {
         return Ok(snapshot.map(|root| boogu_model_subdir(&root, request)));
     }
-    // Krea 2 Turbo (epic 7565) ships a turnkey with packed `q8/` (default) + `q4/` self-contained subdirs;
-    // point the engine at the chosen quant's subdir rather than the repo root. The packed weights
-    // auto-detect their quant on load, so the resolved `spec.quantize` is a no-op on them.
-    if request.model == "krea_2_turbo" {
+    // Krea 2 Turbo (epic 7565) + Krea 2 Raw (epic 9992) ship a turnkey with self-contained quant subdirs
+    // (Turbo: packed `q8/` default + `q4/`; Raw: packed `q8/` default + `q4/` + dense `bf16/`); point the
+    // engine at the chosen quant's subdir rather than the repo root. The packed weights auto-detect their
+    // quant on load, so the resolved `spec.quantize` is a no-op on them. `krea_model_subdir` also falls
+    // back to any downloaded tier when the preferred one is absent — so Raw generates off the `bf16/`
+    // training-base tier when only that is present, instead of failing at the repo root (no `tokenizer/`
+    // there). Without this branch Raw fell through to `Ok(snapshot)` (the repo root) and load errored
+    // with "tokenizer: No such file or directory" (epic 9992 P5/P6 wiring gap — the `krea_2_raw` engine
+    // row already documents this resolver, but the branch was never added).
+    if request.model == "krea_2_turbo" || request.model == "krea_2_raw" {
         return Ok(snapshot.map(|root| krea_model_subdir(&root, request)));
     }
     // Catalog-wide quant-matrix models (sc-8513, epic 8506) ship as SceneWorks pre-quantized
@@ -1517,6 +1523,24 @@ pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// The adapter filename a LoRA record's manifest `files` list declares (its first
+/// entry), if any (sc-10221). When `lora_path` resolves to a record *directory*, this
+/// is the specific adapter to load — e.g. a trained LoRA's final `<stem>.safetensors`
+/// rather than a `<stem>-stepNNN` checkpoint sharing the folder. Untrusted (rides the
+/// job payload); `resolve_adapter_in_dir` re-validates it as a plain in-dir filename.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn declared_adapter_file(lora: &Value) -> Option<&str> {
+    lora.get("files")
+        .and_then(Value::as_array)
+        .and_then(|files| files.first())
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 /// Classify a LoRA file into the mlx-gen adapter `kind`. SceneWorks peft-LoKr (stamped
 /// `networkType: lokr`) → `Lokr` (the engine's metadata-gated `apply_lokr` peft path). Everything
 /// else → `Lora`, INCLUDING third-party LyCORIS (LoHa / kohya non-peft LoKr): since epic 3641
@@ -1568,7 +1592,9 @@ fn resolve_adapters(request: &ImageRequest, settings: &Settings) -> WorkerResult
         // root before any on-disk use (sc-5723 / WKA-002).
         let path = crate::normalize_app_managed_lora_path(settings, &raw)?;
         let file = if path.is_dir() {
-            first_safetensors_path(&path).ok_or_else(|| {
+            // Prefer the manifest-declared adapter over an arbitrary directory scan so a
+            // trained LoRA loads its final adapter, not a step checkpoint (sc-10221).
+            crate::resolve_adapter_in_dir(&path, declared_adapter_file(lora)).ok_or_else(|| {
                 WorkerError::InvalidPayload(format!(
                     "LoRA has no .safetensors under {}",
                     path.display()
@@ -3408,7 +3434,7 @@ fn candle_adapter_label(model: &str) -> &'static str {
         | "sensenova_u1_8b_infographic_v2_fast" => "candle_sensenova",
         "ideogram_4" | "ideogram_4_turbo" => "candle_ideogram",
         "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => "candle_boogu",
-        "krea_2_turbo" => "candle_krea",
+        "krea_2_turbo" | "krea_2_raw" => "candle_krea",
         // Stable Diffusion 3.5 (sc-7880): Large / Large Turbo / Medium share the candle SD3.5 engine.
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => "candle_sd3",
         // sdxl / realvisxl share the candle "sdxl" engine.
@@ -4540,6 +4566,52 @@ mod standard_tier_tests {
     /// MLX lane). This proves the shared tier resolver picks the requested q4/q8/bf16 subdir of a Lens
     /// turnkey snapshot off-Mac — the candle-lane sibling of the SD3.5 `standard_tier_subdir` tests
     /// above — so the retired resolver is fully replaced by the standard machinery.
+    #[test]
+    fn krea_model_subdir_selects_tier_and_falls_back_to_downloaded() {
+        let krea_request = |bits: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": "krea_2_raw", "advanced": { "mlxQuantize": bits } })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Krea turnkey: packed q4/q8 single-file transformer + dense sharded bf16 (index.json only).
+        seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
+
+        // q8-default (no selection) / q4 (bits<=4) / bf16 (bits<=0) each resolve to their tier subdir.
+        assert_eq!(
+            krea_model_subdir(root, &krea_request(json!(null))),
+            root.join("q8")
+        );
+        assert_eq!(
+            krea_model_subdir(root, &krea_request(json!(4))),
+            root.join("q4")
+        );
+        assert_eq!(
+            krea_model_subdir(root, &krea_request(json!(0))),
+            root.join("bf16")
+        );
+
+        // Regression guard (epic 9992): with ONLY the `bf16/` training-base tier downloaded (the Path-1
+        // unify scenario), a q8-default generation must fall back to the present bf16 tier — NOT the repo
+        // root (which has no `tokenizer/`, the reported "tokenizer: No such file or directory" load error).
+        let bf16_only = tempfile::tempdir().unwrap();
+        seed_tier(
+            bf16_only.path(),
+            "bf16",
+            "diffusion_pytorch_model.safetensors.index.json",
+        );
+        assert_eq!(
+            krea_model_subdir(bf16_only.path(), &krea_request(json!(null))),
+            bf16_only.path().join("bf16"),
+            "q8-default must fall back to the only downloaded tier (bf16), not the repo root"
+        );
+    }
+
     #[test]
     fn candle_lens_resolves_packed_turnkey_tier_subdir() {
         let lens_request = |bits: serde_json::Value| {

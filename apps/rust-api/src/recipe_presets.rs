@@ -987,6 +987,10 @@ pub(crate) fn serialize_preset_lora(lora: &Value, preset_lora: &Value, lora_id: 
         "icLora": lora.get("icLora").cloned().unwrap_or(Value::Bool(false)),
         "conditioningRole": lora.get("conditioningRole").cloned().unwrap_or(Value::Null),
         "installedPath": lora.get("installedPath").cloned().unwrap_or(Value::Null),
+        // Carry the declared adapter filename(s) so the worker loads the record's final
+        // adapter from its folder rather than an arbitrary sibling — e.g. a trained
+        // LoRA's `<stem>.safetensors` over a `<stem>-stepNNN` checkpoint (sc-10221).
+        "files": lora.get("files").cloned().unwrap_or(Value::Null),
         "source": lora.get("source").cloned().unwrap_or(Value::Null),
         "presetManaged": true
     })

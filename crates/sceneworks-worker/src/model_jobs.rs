@@ -934,6 +934,42 @@ async fn resolve_convert_plan(
 ///
 /// Real conversion is exercised on Mac hardware via the `#[ignore]` real-weight tests below; this
 /// wires the tracked job, progress, cancellation, and failure surfacing.
+/// Install-time provisioning of the eros Gemma-3 text encoder after a successful LTX conversion
+/// (macOS): surfaces a progress line, then pulls the bundle `gemma/` via the shared provisioner so a
+/// fresh eros install is self-contained. A no-op off macOS (the LTX engine + its gemma provisioning
+/// are mlx-only; the candle lane resolves its own `google/gemma-3-12b-it`).
+#[cfg(target_os = "macos")]
+async fn provision_ltx_eros_gemma(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Running,
+            ProgressStage::Running,
+            0.9,
+            "Fetching the Gemma-3 text encoder. This can take several minutes.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    crate::video_jobs::ensure_ltx_bundle_gemma_present(api, settings, job).await
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn provision_ltx_eros_gemma(
+    _api: &ApiClient,
+    _settings: &Settings,
+    _job: &JobSnapshot,
+) -> WorkerResult<()> {
+    Ok(())
+}
+
 pub(crate) async fn run_model_convert_job(
     api: &ApiClient,
     settings: &Settings,
@@ -1078,6 +1114,10 @@ pub(crate) async fn run_model_convert_job(
     )
     .await?;
     let temp = temp_dir.clone();
+    // An LTX conversion is always the eros fine-tune (the base model installs as a pre-converted
+    // turnkey bundle and never hits this path), and its bare checkpoint ships no bundled Gemma-3 text
+    // encoder — provision the bundle `gemma/` after promotion so the install is self-contained.
+    let plan_is_ltx = matches!(plan, ConvertPlan::Ltx { .. });
     let outcome = match plan {
         ConvertPlan::Flux2 {
             source_file,
@@ -1142,6 +1182,15 @@ pub(crate) async fn run_model_convert_job(
     if let Err(error) = finalize_converted_dir(&temp_dir, &final_dir).await {
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
         return Err(error);
+    }
+
+    // The eros checkpoint (the only model that reaches the LTX convert path) ships no bundled Gemma-3
+    // text encoder, so fetch the bundle `gemma/` now — before the job reports completion — so the
+    // install is self-contained and the first generation needs no on-the-fly ~24 GB download. Runs
+    // after promotion; a failure here fails the job loud (the checkpoint stays promoted and the
+    // generation path re-attempts the fetch as a backstop).
+    if plan_is_ltx {
+        provision_ltx_eros_gemma(api, settings, job).await?;
     }
 
     let mut result = JsonObject::new();

@@ -8,6 +8,8 @@ import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
+import { useLoraSelection } from "../components/LoraPickerField.jsx";
+import { MAX_JOB_LORAS_TOTAL } from "../presetUtils.js";
 import {
   BLEND_MODES,
   activeLayerOf,
@@ -607,6 +609,9 @@ export function ImageEditor() {
     editorLaunch = null,
     clearEditorLaunch,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
+    // Project LoRA catalog (sc-10254): fed to the AI Edit LoRA picker, gated to the
+    // edit model's compatible families.
+    loras = [],
     // Global theme (sc-10244): the redesign top-bar ☾/☀ toggle drives the app-wide
     // data-theme, not a screen-local override — consistent with the rest of the app.
     theme = "light",
@@ -656,6 +661,11 @@ export function ImageEditor() {
   const [ratioKey, setRatioKey] = useState("free");
   const [rotated, setRotated] = useState(false);
   const [cropRect, setCropRect] = useState(null); // image-pixel coords, or null
+  // Straighten (sc-10255): degrees the image is rotated before the axis-aligned crop
+  // is rasterized on Apply (−15..15). 0 = no rotation (identical to the plain crop).
+  const [straighten, setStraighten] = useState(0);
+  // One undo checkpoint per Transform slider DRAG (mirrors the opacity gesture).
+  const transformGestureRef = useRef(false);
 
   // Upscale tool (sc-2433): engine + factor for the in-flight request.
   const [upscaleEngine, setUpscaleEngine] = useState("real-esrgan");
@@ -747,6 +757,10 @@ export function ImageEditor() {
   // The chosen edit model + whether it accepts an inpaint mask (gates the mask tool).
   const selectedEditModel = editModels.find((model) => model.id === editModel) ?? null;
   const canMask = modelIsInpaintCapable(selectedEditModel);
+  // Style/subject LoRAs for the AI Edit tool (sc-10254). Same family-gated selection +
+  // serialization the studios use (useLoraSelection → serializeLora), threaded top-level
+  // into buildEditJobBody; the worker's edit streams apply them via resolve_adapters.
+  const editLoraSelection = useLoraSelection(loras, selectedEditModel);
   // Whether the edit model conditions on extra reference images (FLUX.2 multi-reference edit, sc-6107):
   // the manifest tags it `ui.multiReference`. Gates the reference picker; off-models hide it entirely.
   const multiRefCapable = Boolean(selectedEditModel?.ui?.multiReference);
@@ -1409,12 +1423,14 @@ export function ImageEditor() {
   function startCrop() {
     if (!working) return;
     setTool("crop");
+    setStraighten(0);
     setCropRect(centeredCropRect(working.width, working.height, cropRatioForKey(ratioKey, rotated)));
   }
 
   function cancelCrop() {
     setTool("move");
     setCropRect(null);
+    setStraighten(0);
     // Discard any unbaked color preview (adjust / levels / curves). Owned by the color
     // hook now (sc-9752), which resets exactly those three values and leaves mode/channel.
     discardColorPreview();
@@ -1558,7 +1574,19 @@ export function ImageEditor() {
           const canvas = document.createElement("canvas");
           canvas.width = sw;
           canvas.height = sh;
-          canvas.getContext("2d").drawImage(layer.image, sx, sy, sw, sh, 0, 0, sw, sh);
+          const ctx = canvas.getContext("2d");
+          if (straighten) {
+            // Straighten (sc-10255): rotate the layer by `straighten°` about the crop-rect
+            // centre, then take the axis-aligned sw×sh window — a rotate-then-crop. Corners
+            // that rotate past the source edge come through transparent (inset your crop).
+            const cx = sx + sw / 2;
+            const cy = sy + sh / 2;
+            ctx.translate(sw / 2, sh / 2);
+            ctx.rotate((straighten * Math.PI) / 180);
+            ctx.drawImage(layer.image, -cx, -cy);
+          } else {
+            ctx.drawImage(layer.image, sx, sy, sw, sh, 0, 0, sw, sh);
+          }
           const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
           if (!blob) throw new Error("Could not encode the crop.");
           const { image, objectUrl } = await blobToImage(blob);
@@ -1585,9 +1613,10 @@ export function ImageEditor() {
       }),
     }));
     oldLayers.forEach((layer) => layer.objectUrl && URL.revokeObjectURL(layer.objectUrl));
-    setEdits((prev) => [...prev, { op: "crop", width: sw, height: sh }]);
+    setEdits((prev) => [...prev, { op: "crop", width: sw, height: sh, ...(straighten ? { straighten } : {}) }]);
+    setStraighten(0);
     setDirty(true);
-  }, [working, cropRect, checkpoint, resetEditorOverlays]);
+  }, [working, cropRect, straighten, checkpoint, resetEditorOverlays]);
 
   // Bind the transformer to the crop rect whenever crop mode is active.
   useEffect(() => {
@@ -1740,6 +1769,38 @@ export function ImageEditor() {
     checkpoint();
     setWorking((prev) => setLayerProps(prev, layer.id, { transform: identityTransform() }));
     setDirty(true);
+  }
+
+  // Numeric Transform controls (sc-10255): merge a patch into the active layer's
+  // transform. Bound two-way to the same {x,y,scaleX,scaleY,rotation} the canvas
+  // handles drive, so typing/sliding moves the layer and dragging updates the fields.
+  // `gestureStart` gates the undo checkpoint so a slider drag is one step, not many.
+  function setActiveTransform(patch, { gestureStart = true } = {}) {
+    const layer = activeLayerOf(workingRef.current);
+    if (!layer) return;
+    if (gestureStart) checkpoint();
+    setWorking((prev) => setLayerProps(prev, layer.id, { transform: { ...layer.transform, ...patch } }));
+    setDirty(true);
+  }
+  const onTransformSlider = (patch) => {
+    const start = !transformGestureRef.current;
+    transformGestureRef.current = true;
+    setActiveTransform(patch, { gestureStart: start });
+  };
+  const endTransformGesture = () => {
+    transformGestureRef.current = false;
+  };
+  function flipActiveLayer(axis) {
+    const layer = activeLayerOf(workingRef.current);
+    if (!layer) return;
+    const t = layer.transform;
+    // Flip in place: negate the axis scale AND shift the origin by the scaled extent so
+    // the layer keeps its local bounding box instead of mirroring off its top-left pivot.
+    const patch =
+      axis === "h"
+        ? { scaleX: -t.scaleX, x: t.x + (layer.image?.naturalWidth ?? 0) * t.scaleX }
+        : { scaleY: -t.scaleY, y: t.y + (layer.image?.naturalHeight ?? 0) * t.scaleY };
+    setActiveTransform(patch);
   }
 
   // Flatten the visible layer stack onto a fresh canvas at the document size
@@ -2030,6 +2091,7 @@ export function ImageEditor() {
           width: outWidth,
           height: outHeight,
           fitMode,
+          loras: editLoraSelection.serializedLoras,
         }),
     });
   }
@@ -2286,16 +2348,91 @@ export function ImageEditor() {
             </div>
           </>
         );
-      case "transform":
+      case "transform": {
+        const tLayer = activeLayerOf(working);
+        const t = tLayer?.transform ?? identityTransform();
+        const scalePct = Math.round(Math.abs(t.scaleX) * 100);
+        const signX = t.scaleX < 0 ? -1 : 1;
+        const signY = t.scaleY < 0 ? -1 : 1;
         return (
           <>
             <div className="ie-section">
-              <div className="ie-sec-title">Transform</div>
-              <p className="ie-note">
-                Drag, scale or rotate <b>{activeLayerOf(working)?.name}</b> directly on the canvas using the handles.
-              </p>
+              <div className="ie-sec-title">Position</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">X</span>
+                  </div>
+                  <input
+                    className="ie-input ie-numfield"
+                    onChange={(event) => setActiveTransform({ x: Number(event.target.value) || 0 })}
+                    type="number"
+                    value={Math.round(t.x)}
+                  />
+                </div>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Y</span>
+                  </div>
+                  <input
+                    className="ie-input ie-numfield"
+                    onChange={(event) => setActiveTransform({ y: Number(event.target.value) || 0 })}
+                    type="number"
+                    value={Math.round(t.y)}
+                  />
+                </div>
+              </div>
             </div>
             <div className="ie-section">
+              <div className="ie-sec-title">Scale &amp; rotation</div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Scale</span>
+                  <span className="ie-field-val">{scalePct}%</span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={300}
+                  min={10}
+                  onBlur={endTransformGesture}
+                  onChange={(event) => {
+                    const pct = Number(event.target.value) / 100;
+                    onTransformSlider({ scaleX: signX * pct, scaleY: signY * pct });
+                  }}
+                  onMouseUp={endTransformGesture}
+                  onTouchEnd={endTransformGesture}
+                  type="range"
+                  value={scalePct}
+                />
+              </div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Rotation</span>
+                  <span className="ie-field-val">{Math.round(t.rotation)}°</span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={180}
+                  min={-180}
+                  onBlur={endTransformGesture}
+                  onChange={(event) => onTransformSlider({ rotation: Number(event.target.value) })}
+                  onMouseUp={endTransformGesture}
+                  onTouchEnd={endTransformGesture}
+                  type="range"
+                  value={Math.round(t.rotation)}
+                />
+              </div>
+              <div className="ie-seg two" style={{ width: "100%" }}>
+                <button className="ie-seg-btn" onClick={() => flipActiveLayer("h")} type="button">
+                  Flip horizontal
+                </button>
+                <button className="ie-seg-btn" onClick={() => flipActiveLayer("v")} type="button">
+                  Flip vertical
+                </button>
+              </div>
+            </div>
+            <div className="ie-section">
+              <p className="ie-note">You can also drag the handles on the canvas to move, scale or rotate the layer.</p>
               <button className="ie-btn block" onClick={resetActiveLayerTransform} type="button">
                 Reset transform
               </button>
@@ -2305,6 +2442,7 @@ export function ImageEditor() {
             </div>
           </>
         );
+      }
       case "crop":
         return (
           <>
@@ -2359,6 +2497,24 @@ export function ImageEditor() {
                     value={cropRect ? Math.round(cropRect.height) : ""}
                   />
                 </div>
+              </div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Straighten</span>
+                  <span className="ie-field-val">
+                    {straighten > 0 ? "+" : ""}
+                    {straighten}°
+                  </span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={15}
+                  min={-15}
+                  onChange={(event) => setStraighten(Number(event.target.value))}
+                  type="range"
+                  value={straighten}
+                />
+                <p className="ie-note">Rotates the image within the crop; applied on Apply. Inset the crop so the corners stay filled.</p>
               </div>
             </div>
             <div className="ie-section">
@@ -2659,6 +2815,63 @@ export function ImageEditor() {
     }
   };
 
+  const renderLoraSection = () => {
+    const { compatibleLoras, selectedLoraIds, toggleLora, weightFor, setWeight } = editLoraSelection;
+    const nextLora = compatibleLoras.find((lora) => !selectedLoraIds.includes(lora.id));
+    const addDisabled = !nextLora || selectedLoraIds.length >= MAX_JOB_LORAS_TOTAL;
+    return (
+      <div className="ie-section">
+        <div className="ie-sec-title">
+          LoRAs
+          <button
+            className="ie-btn sm ghost"
+            disabled={addDisabled}
+            onClick={() => nextLora && toggleLora(nextLora)}
+            style={{ height: "24px" }}
+            type="button"
+          >
+            + Add
+          </button>
+        </div>
+        {selectedLoraIds.length ? (
+          selectedLoraIds
+            .map((id) => compatibleLoras.find((lora) => lora.id === id))
+            .filter(Boolean)
+            .map((lora) => (
+              <div className="ie-lora" key={lora.id}>
+                <div className="ie-lora-top">
+                  <span className="ie-lora-name">{lora.name ?? lora.id}</span>
+                  <button className="ie-btn icon sm ghost" onClick={() => toggleLora(lora)} title="Remove" type="button">
+                    ✕
+                  </button>
+                </div>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label" style={{ fontSize: "11.5px", color: "var(--ie-muted)" }}>
+                      Weight
+                    </span>
+                    <span className="ie-field-val">{weightFor(lora).toFixed(2)}</span>
+                  </div>
+                  <input
+                    aria-label={`${lora.name ?? lora.id} weight`}
+                    className="ie-range"
+                    max={2}
+                    min={0}
+                    onChange={(event) => setWeight(lora.id, Number(event.target.value))}
+                    step={0.05}
+                    type="range"
+                    value={weightFor(lora)}
+                  />
+                </div>
+              </div>
+            ))
+        ) : (
+          <p className="ie-note">No LoRAs applied. Add a style or subject LoRA to steer the edit.</p>
+        )}
+      </div>
+    );
+  };
+
   const renderEditPanel = () => {
     if (editModels.length === 0) {
       return (
@@ -2690,6 +2903,8 @@ export function ImageEditor() {
             />
           </div>
         </div>
+
+        {editLoraSelection.compatibleLoras.length ? renderLoraSection() : null}
 
         <div className="ie-section">
           <div className="ie-sec-title">Output</div>
@@ -3626,16 +3841,16 @@ export function ImageEditor() {
             ) : null}
           </Stage>
         ) : (
-          <div className="image-editor-empty">
+          <div className="ie-canvas-empty">
             {status.loading ? (
               <p>Loading image…</p>
             ) : (
               <>
-                <p className="image-editor-empty-title">Open an image to start editing</p>
-                <p className="image-editor-empty-hint">Drag &amp; drop an image here, or click Open.</p>
-                <p className="image-editor-empty-hint">
+                <p className="ie-canvas-empty-title">Open an image to start editing</p>
+                <p className="ie-note">Drag &amp; drop an image here, or click Open.</p>
+                <p className="ie-note">
                   Or{" "}
-                  <button className="image-editor-linkbtn" onClick={() => setNewLayoutOpen(true)} type="button">
+                  <button className="ie-linkbtn" onClick={() => setNewLayoutOpen(true)} type="button">
                     start a blank layout
                   </button>{" "}
                   to compose with boxes.

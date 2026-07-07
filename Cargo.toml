@@ -6,6 +6,7 @@ members = [
     "apps/rust-worker",
     "crates/sceneworks-core",
     "crates/sceneworks-image-quality",
+    "crates/sceneworks-mcp",
     "crates/sceneworks-worker",
 ]
 # apps/desktop (Tauri) needs platform GUI libs (WebKit/GTK on Linux) and is built
@@ -17,6 +18,7 @@ default-members = [
     "apps/rust-worker",
     "crates/sceneworks-core",
     "crates/sceneworks-image-quality",
+    "crates/sceneworks-mcp",
     "crates/sceneworks-worker",
 ]
 

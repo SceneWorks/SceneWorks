@@ -35,6 +35,7 @@ export function buildEditJobBody({
   width,
   height,
   fitMode = "crop",
+  loras = null,
 }) {
   const body = {
     projectId: project.id,
@@ -54,6 +55,9 @@ export function buildEditJobBody({
     count: 1,
     advanced: {},
   };
+  // Style/subject LoRAs (sc-10254): serialized top-level, same shape + resolver the
+  // generation path uses (serializeLora → worker resolve_adapters). Omitted when empty.
+  if (loras && loras.length) body.loras = loras;
   // Inpaint mask (sc-2436): only sent for inpaint-capable models with a painted
   // region; the worker confines the edit to it. Omitted entirely otherwise.
   if (maskAssetId) body.maskAssetId = maskAssetId;
