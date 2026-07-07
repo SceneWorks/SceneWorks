@@ -6636,6 +6636,34 @@ fn ltx_dir_is_complete(dir: &Path) -> bool {
     .all(|file| dir.join(file).is_file())
 }
 
+/// Whether `dir` is a complete Gemma-3 text-encoder snapshot the LTX engine can load: its
+/// `config.json`, the sharded `model.safetensors.index.json`, and every shard that index maps (or a
+/// lone `model.safetensors` for a single-file checkpoint). Used so the eros gemma fetch
+/// ([`ensure_ltx_gemma_present`]) no-ops only when gemma is genuinely present and a half-downloaded
+/// dir never shadows a re-fetch ([`resolve_ltx_eros_gemma_dir`]).
+#[cfg(target_os = "macos")]
+fn ltx_gemma_dir_is_complete(dir: &Path) -> bool {
+    if !dir.join("config.json").is_file() {
+        return false;
+    }
+    let Ok(index_raw) = std::fs::read_to_string(dir.join("model.safetensors.index.json")) else {
+        // No shard index ⇒ a single-file checkpoint is complete once its lone weights file exists.
+        return dir.join("model.safetensors").is_file();
+    };
+    let Ok(index) = serde_json::from_str::<Value>(&index_raw) else {
+        return false;
+    };
+    let Some(weight_map) = index.get("weight_map").and_then(Value::as_object) else {
+        return false;
+    };
+    let shards: std::collections::BTreeSet<String> = weight_map
+        .values()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    shards.iter().all(|shard| dir.join(shard).is_file())
+}
+
 /// Parse `advanced.mlxQuantize` (int or numeric string) → the requested bit width, if present.
 #[cfg(target_os = "macos")]
 fn ltx_quant_bits(request: &VideoRequest) -> Option<i64> {
@@ -6778,6 +6806,28 @@ pub(crate) fn resolve_bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf>
     bundled_ltx_gemma_dir(model_dir)
 }
 
+/// Resolve the Gemma-3 text encoder for an **eros** generation. Unlike the base model — whose turnkey
+/// bundle ships `gemma/` beside its checkpoint ([`resolve_bundled_ltx_gemma_dir`]) — the eros install
+/// is a bare local conversion under `models/mlx/ltx_2_3_eros/` with no bundled TE, so gemma is
+/// provisioned separately ([`ensure_ltx_gemma_present`]) and resolved here: a `models/mlx/gemma`
+/// sibling of the checkpoint (the `<parent>/gemma` convention [`bundled_ltx_gemma_dir`] already uses)
+/// first, then the fetched [`LTX_BUNDLE_REPO`] snapshot's `gemma/`. Returns `None` when an operator
+/// `$LTX_GEMMA_DIR` is set (the provider reads the env var) or nothing complete is on disk (the
+/// provider surfaces the clear "set LTX_GEMMA_DIR" error) — a partial dir never wins.
+#[cfg(target_os = "macos")]
+fn resolve_ltx_eros_gemma_dir(settings: &Settings, model_dir: &Path) -> Option<PathBuf> {
+    if std::env::var_os("LTX_GEMMA_DIR").is_some() {
+        return None; // honor an explicit operator override (the provider reads the env var).
+    }
+    if let Some(sibling) = bundled_ltx_gemma_dir(model_dir) {
+        if ltx_gemma_dir_is_complete(&sibling) {
+            return Some(sibling);
+        }
+    }
+    let bundle_gemma = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO)?.join("gemma");
+    ltx_gemma_dir_is_complete(&bundle_gemma).then_some(bundle_gemma)
+}
+
 /// On-demand fetch of the bundle's `q8/` subdir (sc-5679). The macOS default download is lean
 /// (`q4/` + `gemma/`); when a job opts into Q8 ([`ltx_wants_q8`]) and the bundle's `q8/` isn't already
 /// complete, pull just `q8/*` from [`LTX_BUNDLE_REPO`] into the HF cache so [`resolve_ltx_model_dir`]
@@ -6848,6 +6898,56 @@ async fn ensure_ltx_bf16_present(
         .join(format!(".ltx-bf16-fetch-{}", job.id));
     tokio::fs::create_dir_all(&scratch).await?;
     let files = vec!["bf16/*".to_owned()];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api,
+        settings,
+        job,
+        LTX_BUNDLE_REPO,
+        LTX_BUNDLE_REVISION,
+        &files,
+        &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
+}
+
+/// Ensure the Gemma-3 text encoder an **eros** job needs is on disk, fetching the bundle's `gemma/`
+/// on demand the first time. The eros install produces a bare converted checkpoint under
+/// `models/mlx/ltx_2_3_eros/` with no bundled TE (unlike the base turnkey bundle, which ships
+/// `gemma/` beside its `q4/`), so without this an eros generation dead-ends on "gemma snapshot not
+/// found". Pulls just `gemma/*` (~24 GB) from the FIXED [`LTX_BUNDLE_REVISION`] — the same SceneWorks
+/// re-host the base model uses, so no separate `mlx-community/gemma-3-12b-it-bf16` download. No-op for
+/// the base model, when an operator `$LTX_GEMMA_DIR` is set, when a local `models/mlx/gemma` sibling
+/// is already complete, or when the bundle snapshot's `gemma/` is already complete. Self-heals a
+/// worker that installed eros before this provisioning existed. Mirrors [`ensure_ltx_q8_present`].
+#[cfg(target_os = "macos")]
+async fn ensure_ltx_gemma_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+) -> WorkerResult<()> {
+    if request.model != "ltx_2_3_eros" || std::env::var_os("LTX_GEMMA_DIR").is_some() {
+        return Ok(());
+    }
+    // A complete `<data>/models/mlx/gemma` sibling already satisfies the eros resolver — nothing to
+    // fetch (also short-circuits an operator who provisioned gemma there by hand).
+    let local_sibling = settings.data_dir.join("models").join("mlx").join("gemma");
+    if ltx_gemma_dir_is_complete(&local_sibling) {
+        return Ok(());
+    }
+    if let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) {
+        if ltx_gemma_dir_is_complete(&root.join("gemma")) {
+            return Ok(());
+        }
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".ltx-gemma-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec!["gemma/*".to_owned()];
     let result = crate::model_jobs::download_model_with_hf_cli(
         api,
         settings,
@@ -7372,11 +7472,19 @@ async fn generate_ltx(
     // its subdir is absent.
     ensure_ltx_q8_present(api, settings, job, request).await?;
     ensure_ltx_bf16_present(api, settings, job, request).await?;
+    // The eros install ships no bundled TE, so provision the bundle's `gemma/` on demand (no-op for
+    // the base model, which bundles gemma with its checkpoint). Self-heals installs that predate this.
+    ensure_ltx_gemma_present(api, settings, job, request).await?;
     let model_dir = resolve_ltx_model_dir(settings, request)?;
-    // When the resolved dir is the SceneWorks bundle subdir, its sibling `gemma/` is the text
-    // encoder — thread it onto the LoadSpec (sc-8827, was `$LTX_GEMMA_DIR`). `None` for legacy/local
-    // conversions (no bundled sibling) ⇒ the engine falls back to the HF-cache gemma snapshot.
-    let text_encoder_dir = resolve_bundled_ltx_gemma_dir(&model_dir);
+    // Thread the Gemma-3 text encoder onto the LoadSpec (sc-8827, was `$LTX_GEMMA_DIR`). Base: the
+    // SceneWorks bundle subdir's sibling `gemma/`. Eros: the separately-provisioned gemma
+    // ([`ensure_ltx_gemma_present`]) — a `models/mlx/gemma` sibling or the bundle snapshot's `gemma/`.
+    // `None` ⇒ the engine falls back to the HF-cache gemma snapshot.
+    let text_encoder_dir = if request.model == "ltx_2_3_eros" {
+        resolve_ltx_eros_gemma_dir(settings, &model_dir)
+    } else {
+        resolve_bundled_ltx_gemma_dir(&model_dir)
+    };
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -12106,6 +12214,89 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    /// Lay down a complete Gemma-3 text-encoder snapshot at `dir`: `config.json`, a two-shard
+    /// `model.safetensors.index.json`, and the shards it maps. Mirrors the real bundle `gemma/` so the
+    /// completeness + eros-resolution tests are hermetic.
+    #[cfg(target_os = "macos")]
+    fn write_complete_gemma_dir(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        std::fs::write(
+            dir.join("model.safetensors.index.json"),
+            br#"{"weight_map":{"a":"model-00001-of-00002.safetensors","b":"model-00002-of-00002.safetensors"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("model-00001-of-00002.safetensors"), b"x").unwrap();
+        std::fs::write(dir.join("model-00002-of-00002.safetensors"), b"x").unwrap();
+    }
+
+    /// `ltx_gemma_dir_is_complete`: needs `config.json` + every shard the index maps (or a lone
+    /// single-file checkpoint); a missing shard, missing config, or bad index all fail.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_gemma_completeness_requires_config_and_all_shards() {
+        let root = std::env::temp_dir().join(format!("sw_gemma_ok_{}", Uuid::new_v4().simple()));
+        write_complete_gemma_dir(&root);
+        assert!(ltx_gemma_dir_is_complete(&root));
+
+        // A missing shard the index references → incomplete (a partial download must not pass).
+        std::fs::remove_file(root.join("model-00002-of-00002.safetensors")).unwrap();
+        assert!(!ltx_gemma_dir_is_complete(&root));
+
+        // Missing config.json → incomplete even with weights present.
+        std::fs::write(root.join("model-00002-of-00002.safetensors"), b"x").unwrap();
+        std::fs::remove_file(root.join("config.json")).unwrap();
+        assert!(!ltx_gemma_dir_is_complete(&root));
+
+        // Single-file checkpoint (no index) is complete once config + the lone weights file exist.
+        let single = std::env::temp_dir().join(format!("sw_gemma_1f_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&single).unwrap();
+        std::fs::write(single.join("config.json"), b"{}").unwrap();
+        assert!(!ltx_gemma_dir_is_complete(&single));
+        std::fs::write(single.join("model.safetensors"), b"x").unwrap();
+        assert!(ltx_gemma_dir_is_complete(&single));
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&single);
+    }
+
+    /// `resolve_ltx_eros_gemma_dir`: a complete `models/mlx/gemma` sibling of the eros checkpoint wins;
+    /// an incomplete/absent sibling with no bundle snapshot → `None` (provider surfaces the clear
+    /// "set LTX_GEMMA_DIR" error). Skipped when an operator `$LTX_GEMMA_DIR` is set (the override path
+    /// returns `None` by design, exercised by [`resolve_bundled_ltx_gemma_dir`]'s own coverage).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolve_ltx_eros_gemma_prefers_local_sibling() {
+        if std::env::var_os("LTX_GEMMA_DIR").is_some() {
+            return;
+        }
+        let data = std::env::temp_dir().join(format!("sw_eros_gemma_{}", Uuid::new_v4().simple()));
+        let mlx = data.join("models").join("mlx");
+        let eros = mlx.join("ltx_2_3_eros");
+        std::fs::create_dir_all(&eros).unwrap();
+        let settings = Settings {
+            data_dir: data.clone(),
+            ..Settings::from_env()
+        };
+
+        // No sibling gemma and no bundle snapshot in this fresh data dir → None.
+        assert!(resolve_ltx_eros_gemma_dir(&settings, &eros).is_none());
+
+        // A complete `models/mlx/gemma` sibling is resolved as the eros TE.
+        let gemma = mlx.join("gemma");
+        write_complete_gemma_dir(&gemma);
+        assert_eq!(
+            resolve_ltx_eros_gemma_dir(&settings, &eros).as_deref(),
+            Some(gemma.as_path())
+        );
+
+        // An incomplete sibling does not win (falls through to the absent bundle → None).
+        std::fs::remove_file(gemma.join("model-00001-of-00002.safetensors")).unwrap();
+        assert!(resolve_ltx_eros_gemma_dir(&settings, &eros).is_none());
+
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     /// sc-8827 (F-025): the LTX Gemma-encoder dir rides `LoadSpec::text_encoder` (via
