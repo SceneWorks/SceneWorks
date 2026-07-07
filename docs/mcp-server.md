@@ -10,8 +10,10 @@ exposing it beyond loopback.
 
 ## What is served where
 
-The MCP endpoint is `POST /mcp` (MCP **streamable-HTTP** transport, via the
-official `rmcp` SDK), mounted inside the same axum app as `/api/v1/*`
+The MCP endpoint is `/mcp` (MCP **streamable-HTTP** transport, via the
+official `rmcp` SDK — primarily `POST`, but the transport also uses `GET` for
+the SSE stream and `DELETE` for session teardown, which is why the auth gate
+below covers every method). It is mounted inside the same axum app as `/api/v1/*`
 (`apps/rust-api`). There is no separate process, port, or feature flag: if the
 SceneWorks API is running, `/mcp` is running. It is served by:
 
@@ -148,13 +150,41 @@ $env:SCENEWORKS_API_URL    = "http://192.168.4.97:8000"   # this machine's LAN a
 cargo run --release -p sceneworks-rust-api
 ```
 
+- **Host firewall**: binding `0.0.0.0` makes the API *listen* on the LAN, but
+  Windows Defender Firewall (and Linux equivalents) typically still blocks
+  inbound connections from **other** hosts to a fresh `cargo run` binary on a
+  new port — and you won't notice from the server itself, because same-box
+  traffic to the machine's own LAN IP never traverses the inbound firewall.
+  Answer "Allow access" on the first-run firewall prompt, or open the port
+  explicitly, e.g. (admin PowerShell):
+
+  ```powershell
+  New-NetFirewallRule -DisplayName "SceneWorks API" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow
+  ```
+
+  If a remote client times out while a local `curl` to the LAN IP works, the
+  firewall is the first suspect.
 - Generation needs at least one worker running against the same API
   (`SCENEWORKS_WORKER_ONLY=1` + `SCENEWORKS_API_URL` +
   `SCENEWORKS_ACCESS_TOKEN`, or just use the desktop app / Docker Compose,
   which manage workers for you).
 - Docker Compose: set `SCENEWORKS_API_PUBLISH_HOST=0.0.0.0` and
   `SCENEWORKS_ACCESS_TOKEN` in `.env` (see `.env.example`), and point clients
-  at port `8010`.
+  at port `8010`. **Caveat**: `docker-compose.yml` does not pass
+  `SCENEWORKS_API_URL` into the `api` service's environment (it is only set
+  for the worker services, as `http://api:<port>`), so putting it in `.env`
+  has no effect on the API container — the MCP self-calls still work (loopback
+  inside the container), but `get_job_result`'s absolute download URLs stay
+  `http://127.0.0.1:8010/...`. Until that's plumbed, either lean on the
+  `relativeUrl` re-base fallback described above, or add the variable via a
+  `docker-compose.override.yml` (picked up automatically by compose):
+
+  ```yaml
+  services:
+    api:
+      environment:
+        SCENEWORKS_API_URL: http://192.168.4.97:8010
+  ```
 - The desktop app's LAN remote-access mode already binds `0.0.0.0`, uses the
   pairing password as the token, and sets `SCENEWORKS_TRUST_LOOPBACK` for its
   own local processes.
@@ -277,7 +307,12 @@ candle/CUDA worker built `--features backend-candle` sm_120): API bound
 `0.0.0.0:8000` with a test token, `SCENEWORKS_TRUST_LOOPBACK=1` and
 `SCENEWORKS_API_URL=http://192.168.4.97:8000`; all "LAN" calls were made
 against the machine's LAN address (`192.168.4.97` — a non-loopback peer, the
-same auth path a second machine exercises):
+same auth path a second machine exercises). **Scope**: these same-box LAN-IP
+calls exercise the non-loopback auth/throttle/ticket paths, but not true
+NIC-to-NIC reachability from separate hardware — notably the Windows Defender
+Firewall inbound rules above, which same-box own-IP traffic never traverses.
+A run from a physically second machine on the LAN is tracked as follow-up
+story sc-10301 (filed, needs hands on a second box):
 
 - Open-bind guard: `SCENEWORKS_API_HOST=0.0.0.0` with no token → the process
   refused to start with the documented `Refusing to bind …` error (exit 1).
