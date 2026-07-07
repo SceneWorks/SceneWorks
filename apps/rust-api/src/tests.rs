@@ -6270,7 +6270,8 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         url_job["payload"]["sourceUrl"],
         "https://example.com/loras/detail.safetensors"
     );
-    assert_eq!(url_job["payload"]["loraId"], "detail_lora");
+    // sc-10214: a declared family scopes the id/folder (`z-image` → `z_image_` prefix).
+    assert_eq!(url_job["payload"]["loraId"], "z_image_detail_lora");
     assert_eq!(
         url_job["payload"]["manifestEntry"]["source"]["provider"],
         "url"
@@ -6296,7 +6297,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(upload_job["type"], "lora_import");
-    assert_eq!(upload_job["payload"]["loraId"], "uploaded_detail");
+    assert_eq!(upload_job["payload"]["loraId"], "z_image_uploaded_detail");
     assert_eq!(upload_job["payload"]["uploadedSourcePath"], true);
     assert_eq!(
         upload_job["payload"]["manifestEntry"]["source"]["provider"],
