@@ -1009,6 +1009,26 @@ describe("AI prompt edit", () => {
       buildEditJobBody({ ...base, referenceAssetIds: ["work_scratch", "ref_a"] }).referenceAssetIds,
     ).toEqual(["work_scratch", "ref_a"]);
   });
+
+  it("includes loras only when a non-empty list is supplied (sc-10254)", () => {
+    const base = {
+      project: { id: "p", name: "P" },
+      requestedGpu: "auto",
+      sourceAssetId: "a",
+      model: "flux2_dev",
+      prompt: "x",
+      width: 10,
+      height: 10,
+    };
+    // Omitted entirely by default and for an empty list (worker sees no loras key).
+    expect("loras" in buildEditJobBody(base)).toBe(false);
+    expect("loras" in buildEditJobBody({ ...base, loras: [] })).toBe(false);
+    // Passed through top-level (sibling of advanced), verbatim, when present.
+    const loras = [{ id: "l1", name: "Film Grain", weight: 0.8 }];
+    const body = buildEditJobBody({ ...base, loras });
+    expect(body.loras).toEqual(loras);
+    expect(body.advanced).toEqual({});
+  });
 });
 
 describe("reference conditioning (sc-6107)", () => {
