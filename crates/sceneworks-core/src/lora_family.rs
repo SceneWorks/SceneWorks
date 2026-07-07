@@ -146,6 +146,37 @@ fn has_safetensors_extension(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
 }
 
+/// Resolves the adapter file to load from a LoRA record `dir`, preferring `declared`
+/// (the plain filename the record's manifest `files` list names) when it exists,
+/// otherwise falling back to [`first_safetensors_path`] (sc-10221).
+///
+/// A trainer leaves periodic step checkpoints (`<stem>-stepNNN.safetensors`, `save_every`
+/// default 250) in the same folder as the final `<stem>.safetensors`; a bare directory
+/// scan (`first_safetensors_path`, unordered `read_dir`) can therefore load an
+/// under-trained checkpoint — and since `-stepNNN` sorts before `.safetensors`, a
+/// checkpoint is even the likely pick. Honoring the declared final name loads the
+/// intended adapter deterministically.
+///
+/// `declared` is treated as untrusted (it rides the job payload): only a plain in-`dir`
+/// filename — no path separators, not `.`/`..` — is accepted, so a crafted `files` value
+/// cannot redirect the load outside `dir`. Anything else falls through to the scan.
+pub fn resolve_adapter_in_dir(dir: &Path, declared: Option<&str>) -> Option<PathBuf> {
+    if let Some(name) = declared.map(str::trim).filter(|name| !name.is_empty()) {
+        let is_plain = name != "."
+            && name != ".."
+            && !name.contains('/')
+            && !name.contains('\\')
+            && Path::new(name).file_name().and_then(|value| value.to_str()) == Some(name);
+        if is_plain {
+            let candidate = dir.join(name);
+            if candidate.is_file() && has_safetensors_extension(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    first_safetensors_path(dir)
+}
+
 /// Returns the detected family for a base model directory or file.
 ///
 /// Detection strategy, in priority order:
@@ -2705,5 +2736,66 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("sdxllora"), "got: {err}");
+    }
+
+    // sc-10221: resolve_adapter_in_dir prefers the manifest-declared adapter over an
+    // arbitrary directory scan, so a trained LoRA loads its final adapter rather than a
+    // step checkpoint sharing the folder.
+    fn touch(path: &Path) {
+        std::fs::File::create(path).expect("create fixture file");
+    }
+
+    #[test]
+    fn resolve_adapter_in_dir_prefers_declared_over_checkpoint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A trainer folder: the final adapter plus a step checkpoint that sorts BEFORE it
+        // (`-` 0x2D < `.` 0x2E), so an ordered scan would grab the checkpoint.
+        let final_adapter = dir.path().join("my_style.safetensors");
+        touch(&dir.path().join("my_style-step250.safetensors"));
+        touch(&final_adapter);
+        assert_eq!(
+            resolve_adapter_in_dir(dir.path(), Some("my_style.safetensors")),
+            Some(final_adapter)
+        );
+    }
+
+    #[test]
+    fn resolve_adapter_in_dir_falls_back_when_no_or_missing_declared() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let only = dir.path().join("adapter.safetensors");
+        touch(&only);
+        // No declared name → first_safetensors_path fallback.
+        assert_eq!(resolve_adapter_in_dir(dir.path(), None), Some(only.clone()));
+        // Declared name that doesn't exist on disk → fallback (not an error).
+        assert_eq!(
+            resolve_adapter_in_dir(dir.path(), Some("does_not_exist.safetensors")),
+            Some(only)
+        );
+    }
+
+    #[test]
+    fn resolve_adapter_in_dir_rejects_traversal_and_non_safetensors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let final_adapter = dir.path().join("final.safetensors");
+        touch(&final_adapter);
+        // Outside the dir: a real sibling the crafted name tries to reach via `..`.
+        let outside = dir.path().parent().unwrap().join("evil.safetensors");
+        touch(&outside);
+        // Path-separated / traversing declared names are ignored (fall back to the scan),
+        // so a crafted `files` value can't redirect the load outside the record dir.
+        for crafted in ["../evil.safetensors", "sub/final.safetensors", "..", "."] {
+            assert_eq!(
+                resolve_adapter_in_dir(dir.path(), Some(crafted)),
+                Some(final_adapter.clone()),
+                "crafted name {crafted:?} must not escape the dir"
+            );
+        }
+        // A declared non-.safetensors file is not accepted; fall back to the scan.
+        touch(&dir.path().join("notes.txt"));
+        assert_eq!(
+            resolve_adapter_in_dir(dir.path(), Some("notes.txt")),
+            Some(final_adapter)
+        );
+        let _ = std::fs::remove_file(&outside);
     }
 }

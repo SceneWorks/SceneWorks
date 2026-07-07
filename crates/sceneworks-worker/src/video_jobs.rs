@@ -2442,10 +2442,16 @@ fn lora_scale(lora: &Value) -> f32 {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn resolve_lora_file(settings: &Settings, path: PathBuf) -> WorkerResult<PathBuf> {
+fn resolve_lora_file(
+    settings: &Settings,
+    path: PathBuf,
+    declared: Option<&str>,
+) -> WorkerResult<PathBuf> {
     let path = crate::normalize_app_managed_lora_path(settings, &path)?;
     let file = if path.is_dir() {
-        first_safetensors_path(&path).ok_or_else(|| {
+        // Prefer the manifest-declared adapter over an arbitrary directory scan so a
+        // trained LoRA loads its final adapter, not a step checkpoint (sc-10221).
+        crate::resolve_adapter_in_dir(&path, declared).ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
                 "LoRA has no .safetensors under {}",
                 path.display()
@@ -2488,7 +2494,11 @@ fn resolve_dense_adapters(
         let path = crate::image_jobs::lora_path(lora).ok_or_else(|| {
             WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
         })?;
-        let file = resolve_lora_file(settings, path)?;
+        let file = resolve_lora_file(
+            settings,
+            path,
+            crate::image_jobs::declared_adapter_file(lora),
+        )?;
         let kind = crate::image_jobs::classify_adapter(&file)?;
         specs.push(AdapterSpec {
             path: file,
@@ -3143,7 +3153,11 @@ fn resolve_wan_adapters(
         let path = lora_path(lora).ok_or_else(|| {
             WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
         })?;
-        let file = resolve_lora_file(settings, path)?;
+        let file = resolve_lora_file(
+            settings,
+            path,
+            crate::image_jobs::declared_adapter_file(lora),
+        )?;
         let kind = classify_adapter(&file)?;
         let scale = lora_scale(lora);
         match (is_moe, wan_moe_low_noise_sibling(&file)) {
@@ -4672,7 +4686,11 @@ fn candle_resolve_wan_adapters(
         let path = crate::image_jobs::lora_path(lora).ok_or_else(|| {
             WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
         })?;
-        let file = resolve_lora_file(settings, path)?;
+        let file = resolve_lora_file(
+            settings,
+            path,
+            crate::image_jobs::declared_adapter_file(lora),
+        )?;
         let kind = crate::image_jobs::classify_adapter(&file)?;
         let scale = lora_scale(lora);
         match (is_moe, candle_wan_moe_low_noise_sibling(&file)) {
@@ -6881,7 +6899,11 @@ fn resolve_ltx_adapters(
         let path = lora_path(lora).ok_or_else(|| {
             WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
         })?;
-        let file = resolve_lora_file(settings, path)?;
+        let file = resolve_lora_file(
+            settings,
+            path,
+            crate::image_jobs::declared_adapter_file(lora),
+        )?;
         let kind = classify_adapter(&file)?;
         specs.push(AdapterSpec::new(file, lora_scale(lora), kind));
     }
@@ -10928,9 +10950,32 @@ mod tests {
             ..Settings::from_env()
         };
         // Point the resolver at the LoRA dir (not the file); it must recurse into `adapter/`.
-        let resolved =
-            resolve_lora_file(&settings, dir.clone()).expect("nested .safetensors must resolve");
+        // No declared file → falls back to the recursive scan.
+        let resolved = resolve_lora_file(&settings, dir.clone(), None)
+            .expect("nested .safetensors must resolve");
         assert_eq!(resolved, weight.canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// sc-10221: a trained LoRA's folder holds step checkpoints alongside the final
+    /// adapter; the video resolver must load the manifest-declared final file, not an
+    /// arbitrary sibling the directory scan might pick.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolve_lora_file_prefers_declared_over_checkpoint() {
+        let dir = std::env::temp_dir().join(format!("sw_lora_ckpt_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let final_adapter = dir.join("my_style.safetensors");
+        write_lora_fixture(&dir.join("my_style-step250.safetensors"), None);
+        write_lora_fixture(&final_adapter, None);
+
+        let settings = Settings {
+            data_dir: dir.clone(),
+            ..Settings::from_env()
+        };
+        let resolved = resolve_lora_file(&settings, dir.clone(), Some("my_style.safetensors"))
+            .expect("declared adapter must resolve");
+        assert_eq!(resolved, final_adapter.canonicalize().unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

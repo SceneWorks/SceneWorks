@@ -1785,6 +1785,10 @@ fn serialize_job_lora(lora: &Value, selected_lora: &Value, lora_id: &str) -> Val
         "conditioningRole": preferred_lora_value(selected_lora, lora, "conditioningRole"),
         "installedPath": preferred_lora_value(selected_lora, lora, "installedPath"),
         "sourcePath": preferred_lora_value(selected_lora, lora, "sourcePath"),
+        // Declared adapter filename(s): lets the worker load the record's final adapter
+        // from its folder instead of an arbitrary sibling — e.g. a trained LoRA's final
+        // `<stem>.safetensors` over a `<stem>-stepNNN` checkpoint (sc-10221).
+        "files": preferred_lora_value(selected_lora, lora, "files"),
         "source": preferred_lora_value(selected_lora, lora, "source"),
         "presetManaged": selected_lora.get("presetManaged").and_then(Value::as_bool).unwrap_or(false)
     })

@@ -16,7 +16,8 @@ use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache
 use sceneworks_core::jsonc::strip_jsonc_comments;
 use sceneworks_core::lora_family::{
     apply_model_manifest_defaults, detect_lora_family, detect_model_family, first_safetensors_path,
-    read_safetensors_header, reconcile_detected_family, FamilyMismatch, SafetensorsHeaderError,
+    read_safetensors_header, reconcile_detected_family, resolve_adapter_in_dir, FamilyMismatch,
+    SafetensorsHeaderError,
 };
 use sceneworks_core::lora_url::{
     lora_source_url_file_name, lora_source_url_file_stem, parse_lora_source_url_with_private,
