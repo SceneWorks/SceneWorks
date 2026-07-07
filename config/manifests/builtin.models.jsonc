@@ -1796,6 +1796,16 @@
       // license and access are intentionally two different pages for this model. Leave as upstream.
       "licenseUrl": "https://huggingface.co/ideogram-ai/ideogram-4-fp8",
       "ui": {
+        // img2img reference-guided t2i (epic 8588 A4.4, sc-10192): the `ui.img2img` flag drives the
+        // Image Studio "Image reference" tile + strength slider (referenceAssetId + advanced.strength).
+        // No engine change was needed — a `Conditioning::Reference` with NO `Mask` already IS a plain
+        // img2img denoise (start step from strength, tail of schedule) in the native edit path (sc-6303);
+        // this just exposes it as a plain-t2i surface. Distinct from the Remix/inpaint `edit_image`
+        // surface (which adds a `Mask`); the worker routes the two by mode (edit_image →
+        // resolve_ideogram_edit, text_to_image → the generic img2img arm). Ideogram is a
+        // `structuredPrompt` model, so the tile renders alongside the JSON-caption builder.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Ideogram 4",
         "description": "Ideogram 4 — 9.3B flow-matching text-to-image with structured JSON-caption prompting (bounding-box layout + color palettes). Runs on Apple Silicon (MLX) and Windows/Linux (candle/CUDA). Pre-quantized Q4 (~15 GB, default) + Q8 (~29 GB) tiers. Distributed under the Ideogram Non-Commercial Model Agreement (gated): accept the license at huggingface.co/ideogram-ai/ideogram-4-fp8, then use Request access on the model page and add a Hugging Face token under Settings → Service credentials before downloading. Trained on JSON captions — SceneWorks builds the caption from your prompt.",
         "recommendedFor": ["text_to_image"],
@@ -1935,6 +1945,11 @@
       // access" button (`gatedRepoUrl` → SceneWorks/ideogram-4-mlx, sc-5999). Leave as upstream.
       "licenseUrl": "https://huggingface.co/ideogram-ai/ideogram-4-fp8",
       "ui": {
+        // img2img reference-guided t2i (epic 8588 A4.4, sc-10192): same plain-t2i "Image reference"
+        // surface as the base `ideogram_4` (a `Conditioning::Reference` with no `Mask` = plain img2img in
+        // the CFG-free turbo denoise; only the initial latent + start step differ). See `ideogram_4` ui.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Ideogram 4 Turbo",
         "description": "Ideogram 4 Turbo — the few-step (~8) fast variant of Ideogram 4: same 9.3B flow-matching model and structured JSON-caption prompting, distilled to a CFG-free single-DiT path (the ostris TurboTime LoRA) for ~2x faster renders. Runs on Apple Silicon (MLX) and Windows/Linux (candle/CUDA). Shares the gated Ideogram 4 turnkey (Q4 default + Q8 selectable) — accept the license at huggingface.co/ideogram-ai/ideogram-4-fp8, then use Request access on the model page and add a Hugging Face token under Settings → Service credentials before downloading.",
         "recommendedFor": ["text_to_image"],

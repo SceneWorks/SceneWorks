@@ -4263,6 +4263,48 @@ mod standard_tier_tests {
         assert!(!zimage_uses_generic_img2img(&no_flag, true));
     }
 
+    /// A4.4 (sc-10192): Ideogram opts into the generic `ui.img2img` surface (the Image Studio "Image
+    /// reference" tile, `text_to_image` mode) while ALSO owning the bespoke Remix/inpaint edit arm
+    /// (`edit_image` mode, [`resolve_ideogram_edit`], sc-6303). The two arms in
+    /// [`resolve_generic_lane_conditioning`] are mutually exclusive by mode — the edit arm is checked
+    /// first and gates on `mode == "edit_image"`, the generic img2img arm on `mode != "edit_image"` — so a
+    /// plain-t2i reference routes to the generic init (a single `Conditioning::Reference`, no mask, which
+    /// the native engine's edit path denoises as plain img2img) while an Edit-tab job keeps the
+    /// mask-capable path. No engine change was needed: mlx-gen `resolve_edit` already treats a Reference
+    /// with no Mask as img2img. This tripwire locks the flag + mode-split; the disk-backed resolve
+    /// (asset decode) is validated on-device.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ideogram_img2img_routes_by_mode() {
+        let req = |model: &str, mode: &str| {
+            ImageRequest::from_payload(
+                json!({
+                    "model": model,
+                    "mode": mode,
+                    "modelManifestEntry": { "ui": { "img2img": true } },
+                    "referenceAssetId": "asset-1",
+                })
+                .as_object()
+                .unwrap(),
+            )
+        };
+        for model in ["ideogram_4", "ideogram_4_turbo"] {
+            let is_ideogram_edit = |r: &ImageRequest| {
+                matches!(r.model.as_str(), "ideogram_4" | "ideogram_4_turbo")
+                    && r.mode == "edit_image"
+            };
+            // Plain t2i + reference: the generic img2img arm's gate holds (flag on, non-edit mode) and the
+            // earlier Ideogram edit arm does not — so the reference takes the generic img2img init.
+            let t2i = req(model, "text_to_image");
+            assert!(model_supports_img2img(&t2i) && t2i.mode != "edit_image");
+            assert!(!is_ideogram_edit(&t2i));
+            // Edit tab: the Ideogram edit arm claims it first and the generic arm yields (edit mode).
+            let edit = req(model, "edit_image");
+            assert!(is_ideogram_edit(&edit));
+            assert!(!(model_supports_img2img(&edit) && edit.mode != "edit_image"));
+        }
+    }
+
     /// Write a minimal present `<tier>/transformer/<file>` so [`standard_tier_subdir`]'s
     /// filename-agnostic probe sees the tier as downloaded.
     fn seed_tier(root: &Path, tier: &str, file: &str) {

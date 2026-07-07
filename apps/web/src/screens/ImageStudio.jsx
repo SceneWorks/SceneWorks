@@ -2147,15 +2147,85 @@ export function ImageStudio() {
               3) "Refine my prompt" — RefinePromptControl (sc-2041).
               img2img and describe used to share ONE overloaded tile (sc-8593); splitting them makes the
               "guide the render vs. write a prompt" choice explicit (Michael, on-device). */}
-          {structuredPromptModel ? null : (() => {
+          {(() => {
+            // img2img "Image reference" tile — a picked image + strength that SEED the render
+            // (latent-init). Available for every `ui.img2img` model in text-to-image mode, INCLUDING
+            // structured-prompt models (Ideogram, epic 8588 A4.4 sc-10192): the caption builder replaces
+            // the free-text prompt tools, but reference-guided generation is orthogonal to how the prompt
+            // is authored, so the tile coexists with the JSON-caption builder. Needs no vision captioner.
+            const img2imgAvailable = supportsImg2img && mode === "text_to_image";
+            const imageRefActive = img2imgAvailable && promptTool === "imageReference";
+            const img2imgTile = img2imgAvailable ? (
+              <button
+                type="button"
+                className={imageRefActive ? "prompt-tool active" : "prompt-tool"}
+                aria-pressed={imageRefActive}
+                onClick={() => togglePromptTool("imageReference")}
+              >
+                <span className="prompt-tool-title">
+                  <Icon.Image size={15} /> Image reference
+                </span>
+                <span className="prompt-tool-desc">Guide the render with an image (image-to-image)</span>
+              </button>
+            ) : null;
+            const img2imgPanel = imageRefActive ? (
+              <div className="prompt-tool-panel">
+                <div className="structured-reference">
+                  <p className="structured-hint">
+                    Pick an image to guide the render (image-to-image). A higher reference strength
+                    stays closer to it; lower lets the prompt take over.
+                  </p>
+                  <ImageEditSourcePickerField
+                    assets={editImageAssets}
+                    buttonLabel="Select reference image"
+                    changeLabel="Change reference"
+                    characters={characters}
+                    emptyLabel="No reference image selected"
+                    importAsset={importAsset}
+                    label="Reference image"
+                    onChange={setImg2imgReferenceAssetId}
+                    projectId={activeProject?.id}
+                    value={img2imgReferenceAssetId}
+                  />
+                  {img2imgReferenceAssetId ? (
+                    <label className="reference-strength img2img-strength">
+                      {img2imgStrengthConfig?.label ?? "Reference strength"}
+                      <input
+                        max={img2imgStrengthConfig?.max ?? 1}
+                        min={img2imgStrengthConfig?.min ?? 0}
+                        onChange={(event) => setImg2imgStrength(Number(event.target.value))}
+                        step={img2imgStrengthConfig?.step ?? 0.05}
+                        type="range"
+                        value={img2imgStrength}
+                      />
+                      <span>{Number(img2imgStrength).toFixed(2)}</span>
+                    </label>
+                  ) : null}
+                </div>
+              </div>
+            ) : null;
+
+            // Structured-prompt models (Ideogram) get ONLY the img2img tile in this strip: "Prompt from
+            // image" is served by the caption builder's own image→caption picker (epic 8102) and "Refine
+            // my prompt" by its magic-expand, so rendering them here would duplicate those. Nothing to
+            // show when the model doesn't advertise img2img.
+            if (structuredPromptModel) {
+              return img2imgAvailable ? (
+                <div className="prompt-tools">
+                  <div className="prompt-tools-head">
+                    <span className="prompt-tools-title">Prompt tools</span>
+                    <span className="hairline" />
+                  </div>
+                  <div className="prompt-tools-tiles">{img2imgTile}</div>
+                  {img2imgPanel}
+                </div>
+              ) : null;
+            }
+
             const describeAvailable =
               mode === "text_to_image" &&
               typeof imageDescribe === "function" &&
               (visionCaptionReady || visionCaptionOffers.length > 0);
-            // img2img reference-guidance is its own tile now — a picked image + strength that SEED the
-            // render (latent-init). Needs no vision captioner; shown whenever the model advertises img2img.
-            const img2imgAvailable = supportsImg2img && mode === "text_to_image";
-            const imageRefActive = img2imgAvailable && promptTool === "imageReference";
             const describeActive = describeAvailable && promptTool === "describe";
             const refineActive = promptTool === "refine";
             return (
@@ -2165,19 +2235,7 @@ export function ImageStudio() {
                   <span className="hairline" />
                 </div>
                 <div className="prompt-tools-tiles">
-                  {img2imgAvailable ? (
-                    <button
-                      type="button"
-                      className={imageRefActive ? "prompt-tool active" : "prompt-tool"}
-                      aria-pressed={imageRefActive}
-                      onClick={() => togglePromptTool("imageReference")}
-                    >
-                      <span className="prompt-tool-title">
-                        <Icon.Image size={15} /> Image reference
-                      </span>
-                      <span className="prompt-tool-desc">Guide the render with an image (image-to-image)</span>
-                    </button>
-                  ) : null}
+                  {img2imgTile}
                   {describeAvailable ? (
                     <button
                       type="button"
@@ -2203,42 +2261,7 @@ export function ImageStudio() {
                     <span className="prompt-tool-desc">Rewrite what you typed for clarity &amp; detail</span>
                   </button>
                 </div>
-                {imageRefActive ? (
-                  <div className="prompt-tool-panel">
-                    <div className="structured-reference">
-                      <p className="structured-hint">
-                        Pick an image to guide the render (image-to-image). A higher reference strength
-                        stays closer to it; lower lets the prompt take over.
-                      </p>
-                      <ImageEditSourcePickerField
-                        assets={editImageAssets}
-                        buttonLabel="Select reference image"
-                        changeLabel="Change reference"
-                        characters={characters}
-                        emptyLabel="No reference image selected"
-                        importAsset={importAsset}
-                        label="Reference image"
-                        onChange={setImg2imgReferenceAssetId}
-                        projectId={activeProject?.id}
-                        value={img2imgReferenceAssetId}
-                      />
-                      {img2imgReferenceAssetId ? (
-                        <label className="reference-strength img2img-strength">
-                          {img2imgStrengthConfig?.label ?? "Reference strength"}
-                          <input
-                            max={img2imgStrengthConfig?.max ?? 1}
-                            min={img2imgStrengthConfig?.min ?? 0}
-                            onChange={(event) => setImg2imgStrength(Number(event.target.value))}
-                            step={img2imgStrengthConfig?.step ?? 0.05}
-                            type="range"
-                            value={img2imgStrength}
-                          />
-                          <span>{Number(img2imgStrength).toFixed(2)}</span>
-                        </label>
-                      ) : null}
-                    </div>
-                  </div>
-                ) : null}
+                {img2imgPanel}
                 {describeActive ? (
                   <div className="prompt-tool-panel">
                     <ReferenceCaptionPicker

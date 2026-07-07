@@ -3859,9 +3859,10 @@ async fn real_builtin_catalog_exposes_krea_img2img_ui_flag() {
         Value::Bool(true),
         "krea_2_turbo must expose ui.img2img in the /models response (the img2img tile's gate)"
     );
-    // And SD3.5 (A4.1) + Z-Image (A4.5, sc-10193) + Boogu (A4.3, sc-10191) — the img2img flags added
-    // since — must be exposed the same way (a duplicate-`ui`-key drop would silently strip the flag
-    // while still parsing, sc-10198).
+    // And SD3.5 (A4.1) + Z-Image (A4.5, sc-10193) + Boogu (A4.3, sc-10191) + Ideogram (A4.4, sc-10192) —
+    // the img2img flags added since — must be exposed the same way (a duplicate-`ui`-key drop would
+    // silently strip the flag while still parsing, sc-10198). Ideogram is a `structuredPrompt` model, so
+    // its flag additionally drives the img2img tile INSIDE the JSON-caption builder surface.
     for id in [
         "sd3_5_large",
         "sd3_5_large_turbo",
@@ -3870,6 +3871,8 @@ async fn real_builtin_catalog_exposes_krea_img2img_ui_flag() {
         "z_image_turbo",
         "boogu_image",
         "boogu_image_turbo",
+        "ideogram_4",
+        "ideogram_4_turbo",
     ] {
         let m = models
             .as_array()
