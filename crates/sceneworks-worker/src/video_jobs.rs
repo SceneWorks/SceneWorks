@@ -4220,7 +4220,9 @@ const CANDLE_WAN_I2V_14B_REPO: &str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_LTX_REPO: &str = "Lightricks/LTX-2.3";
 // The `ltx_2_3_eros` weights repo (sc-5495): a full dense LTX-2.3 fine-tune (the candle provider
-// loads its `10Eros_v1_bf16.safetensors` like the base; same architecture, same Gemma encoder).
+// loads its bf16 single-file checkpoint like the base; same architecture, same Gemma encoder).
+// The pinned checkpoint version is manifest-driven (`downloads[].files` / `mlx.convertSourceFile`),
+// so only that one file is fetched even though the repo also ships older + fp8 variants.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_LTX_EROS_REPO: &str = "TenStrip/LTX2.3-10Eros";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -6862,10 +6864,12 @@ async fn ensure_ltx_bf16_present(
     result.map(|_| ())
 }
 
-/// User LoRAs for an LTX generation (sc-3035): each at a uniform per-pass strength
-/// (`pass_scales` left `None` → the engine applies `scale` on every distilled stage; a
-/// per-stage schedule is parity-plus). No distill/Lightning prepend — the 2-stage distill
-/// is baked into the checkpoint. peft LoKr allowed (engine residual), LyCORIS rejected.
+/// LoRAs for an LTX generation: the manifest-declared auto distill LoRA (when present) followed by
+/// the user LoRAs (sc-3035). A model that declares `mlx.autoDistillLora` (10Eros) is NOT
+/// pre-distilled, so its distill LoRA must be injected at runtime with per-pass strengths or its
+/// video degrades to noise — see [`resolve_ltx_distill_adapter`]. Every user LoRA applies at a
+/// uniform per-pass strength (`pass_scales` left `None` → the engine uses `scale` on every distilled
+/// stage). peft LoKr allowed (engine residual), LyCORIS rejected.
 #[cfg(target_os = "macos")]
 fn resolve_ltx_adapters(
     settings: &Settings,
@@ -6876,7 +6880,11 @@ fn resolve_ltx_adapters(
             "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
         )));
     }
-    let mut specs = Vec::with_capacity(request.loras.len());
+    let mut specs = Vec::with_capacity(request.loras.len() + 1);
+    // The auto distill LoRA is the model's base recipe (per-pass 1.0/0.4); user LoRAs stack on top.
+    if let Some(distill) = resolve_ltx_distill_adapter(settings, request)? {
+        specs.push(distill);
+    }
     for lora in &request.loras {
         let path = lora_path(lora).ok_or_else(|| {
             WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
@@ -6886,6 +6894,95 @@ fn resolve_ltx_adapters(
         specs.push(AdapterSpec::new(file, lora_scale(lora), kind));
     }
     Ok(specs)
+}
+
+/// The auto-injected per-pass distill LoRA for an LTX model that declares `mlx.autoDistillLora`
+/// (`ltx_2_3_eros` today), or `None` when the model declares none or the user opted out via
+/// `advanced.useDistillLora = false`. 10Eros's base checkpoint is not pre-distilled, so without this
+/// LoRA its MLX video collapses to noise a few frames in (the manifest documents that exact symptom).
+///
+/// The LoRA is the `coRequisite` `resources.distilledLora` (the cond_safe variant, sc-9696), so it
+/// installs alongside the checkpoint and is resolved from the HF cache here. Strengths come from
+/// `mlx.autoDistillLora` (`stage1Strength` full first pass / `stage2Strength` reduced spatial-upscale
+/// pass — TenStrip's guidance for rank<=72 cond_safe LoRAs), overridable via
+/// `advanced.distillStage1Strength` / `distillStage2Strength`, and applied as
+/// `pass_scales = [stage1, stage2]` (the engine's LTX per-pass feature, sc-2687). Declared-but-missing
+/// fails with an actionable error rather than silently producing noise.
+///
+/// Ported from the deleted Python `MlxVideoAdapter` (b821d74e): the injection was lost when video
+/// generation moved to the Rust worker in the sc-3037 cutover, which is why 10Eros regressed to noise.
+#[cfg(target_os = "macos")]
+fn resolve_ltx_distill_adapter(
+    settings: &Settings,
+    request: &VideoRequest,
+) -> WorkerResult<Option<AdapterSpec>> {
+    let Some(auto) = request
+        .model_manifest_entry
+        .get("mlx")
+        .and_then(Value::as_object)
+        .and_then(|mlx| mlx.get("autoDistillLora"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(None);
+    };
+    // Opt-out knob (default on): the distill LoRA is a required runtime component for these models.
+    let enabled = request
+        .advanced
+        .get("useDistillLora")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if !enabled {
+        return Ok(None);
+    }
+    let stage1 = advanced::f32(
+        &request.advanced,
+        "distillStage1Strength",
+        auto.get("stage1Strength")
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0) as f32,
+    );
+    let stage2 = advanced::f32(
+        &request.advanced,
+        "distillStage2Strength",
+        auto.get("stage2Strength")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.4) as f32,
+    );
+    // The distill LoRA repo/file live in `resources.distilledLora` (the recommended cond_safe variant).
+    let (repo, file) = request
+        .model_manifest_entry
+        .get("resources")
+        .and_then(Value::as_object)
+        .and_then(|res| res.get("distilledLora"))
+        .and_then(Value::as_object)
+        .and_then(|d| {
+            Some((
+                d.get("repo").and_then(Value::as_str)?,
+                d.get("file").and_then(Value::as_str)?,
+            ))
+        })
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "This model declares mlx.autoDistillLora but resources.distilledLora is missing its \
+                 repo/file, so the distill LoRA cannot be resolved."
+                    .to_owned(),
+            )
+        })?;
+    // The LoRA is a download co-requisite (sc-9696), so it is expected in the HF cache. Fail with an
+    // actionable message if it is absent rather than silently degrading the output to noise.
+    let path = huggingface_snapshot_dir(&settings.data_dir, repo)
+        .map(|dir| dir.join(file))
+        .filter(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "The required distill LoRA for this model is not installed ({repo}/{file}). \
+                 Re-download the model to fetch its co-requisite distill LoRA."
+            ))
+        })?;
+    let kind = classify_adapter(&path)?;
+    Ok(Some(
+        AdapterSpec::new(path, stage1, kind).with_pass_scales(vec![stage1, stage2]),
+    ))
 }
 
 /// Optional I2V conditioning for LTX: a `source_asset_id` → a single `Reference` image
@@ -12684,6 +12781,151 @@ mod tests {
         let settings = Settings::from_env();
         let none = resolve_ltx_adapters(&settings, &req).unwrap();
         assert!(none.is_empty());
+    }
+
+    /// Lay down a fake HF snapshot file under `data_dir`
+    /// (`cache/huggingface/hub/models--<org>--<name>/snapshots/<rev>/<file>`) and return its path, so
+    /// [`resolve_ltx_distill_adapter`] resolves hermetically (mirrors `write_fake_wan_lightning`).
+    #[cfg(target_os = "macos")]
+    fn write_fake_hf_lora(data_dir: &Path, repo: &str, file: &str) -> PathBuf {
+        let snapshot = data_dir
+            .join("cache")
+            .join("huggingface")
+            .join("hub")
+            .join(format!("models--{}", repo.replace('/', "--")))
+            .join("snapshots")
+            .join("deadbeef");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        let path = snapshot.join(file);
+        write_lora_fixture(&path, None);
+        path
+    }
+
+    /// The `ltx_2_3_eros` manifest shape [`resolve_ltx_distill_adapter`] reads: `mlx.autoDistillLora`
+    /// per-pass strengths plus the `resources.distilledLora` repo/file.
+    #[cfg(target_os = "macos")]
+    fn eros_manifest_entry(repo: &str, file: &str) -> Value {
+        json!({
+            "mlx": { "autoDistillLora": { "stage1Strength": 1.0, "stage2Strength": 0.4 } },
+            "resources": { "distilledLora": { "repo": repo, "file": file } },
+        })
+    }
+
+    /// Regression (10Eros noise): `ltx_2_3_eros` is not pre-distilled, so `resolve_ltx_adapters` must
+    /// auto-inject its cond_safe distill LoRA at per-pass strengths (1.0 first pass / 0.4 upscale) ahead
+    /// of any user LoRAs — the injection was lost in the sc-3037 Python→Rust video cutover, leaving the
+    /// undistilled base to collapse to noise. Strengths honor `advanced.distillStage*Strength`;
+    /// `advanced.useDistillLora = false` opts out.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_eros_auto_injects_distill_lora_per_pass() {
+        // The fake HF snapshot only resolves when the cache-dir env overrides are unset (else the real
+        // cache is consulted). Skip rather than assert-false in that unusual local config.
+        if std::env::var_os("HF_HUB_CACHE").is_some()
+            || std::env::var_os("HUGGINGFACE_HUB_CACHE").is_some()
+            || std::env::var_os("HF_HOME").is_some()
+        {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sw_eros_distill_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let repo = "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments";
+        let file = "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors";
+        let distill = write_fake_hf_lora(&dir, repo, file);
+        let settings = Settings {
+            data_dir: dir.clone(),
+            ..Settings::from_env()
+        };
+
+        // Default: the distill LoRA is injected alone, at per-pass 1.0/0.4.
+        let req = request(json!({
+            "projectId": "p", "model": "ltx_2_3_eros", "prompt": "a fox",
+            "modelManifestEntry": eros_manifest_entry(repo, file),
+        }));
+        let specs = resolve_ltx_adapters(&settings, &req).expect("resolve eros adapters");
+        assert_eq!(specs.len(), 1, "the distill LoRA must be injected");
+        assert_eq!(specs[0].path, distill);
+        assert_eq!(specs[0].kind, AdapterKind::Lora);
+        assert_eq!(specs[0].pass_scales, Some(vec![1.0, 0.4]));
+
+        // A user LoRA stacks AFTER the distill (the distill is the model's base recipe).
+        let user = dir.join("style.safetensors");
+        write_lora_fixture(&user, None);
+        let req_user = request(json!({
+            "projectId": "p", "model": "ltx_2_3_eros", "prompt": "a fox",
+            "modelManifestEntry": eros_manifest_entry(repo, file),
+            "loras": [ { "path": user.to_string_lossy(), "weight": 0.5 } ],
+        }));
+        let specs = resolve_ltx_adapters(&settings, &req_user).expect("resolve eros + user");
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].pass_scales, Some(vec![1.0, 0.4]), "distill first");
+        assert!(
+            specs[1].pass_scales.is_none(),
+            "user LoRA is uniform per-pass"
+        );
+        assert!((specs[1].scale - 0.5).abs() < 1e-6);
+
+        // `advanced` overrides the per-pass strengths.
+        let req_override = request(json!({
+            "projectId": "p", "model": "ltx_2_3_eros", "prompt": "a fox",
+            "modelManifestEntry": eros_manifest_entry(repo, file),
+            "advanced": { "distillStage1Strength": 0.8, "distillStage2Strength": 0.2 },
+        }));
+        let specs = resolve_ltx_adapters(&settings, &req_override).expect("override strengths");
+        assert_eq!(specs[0].pass_scales, Some(vec![0.8, 0.2]));
+
+        // Opt-out disables the injection entirely (no user LoRAs → empty).
+        let req_off = request(json!({
+            "projectId": "p", "model": "ltx_2_3_eros", "prompt": "a fox",
+            "modelManifestEntry": eros_manifest_entry(repo, file),
+            "advanced": { "useDistillLora": false },
+        }));
+        assert!(resolve_ltx_adapters(&settings, &req_off)
+            .unwrap()
+            .is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A model that declares `mlx.autoDistillLora` but whose co-requisite distill LoRA is not installed
+    /// fails with an actionable payload error rather than silently degrading to noise; a model that
+    /// declares no `autoDistillLora` (base `ltx_2_3`) injects nothing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_distill_lora_missing_errors_and_base_model_is_noop() {
+        if std::env::var_os("HF_HUB_CACHE").is_some()
+            || std::env::var_os("HUGGINGFACE_HUB_CACHE").is_some()
+            || std::env::var_os("HF_HOME").is_some()
+        {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sw_eros_missing_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = Settings {
+            data_dir: dir.clone(),
+            ..Settings::from_env()
+        };
+
+        // Declared distill LoRA, but nothing on disk → actionable error (not silent noise).
+        let repo = "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments";
+        let file = "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors";
+        let req = request(json!({
+            "projectId": "p", "model": "ltx_2_3_eros", "prompt": "a fox",
+            "modelManifestEntry": eros_manifest_entry(repo, file),
+        }));
+        assert!(matches!(
+            resolve_ltx_adapters(&settings, &req),
+            Err(WorkerError::InvalidPayload(_))
+        ));
+
+        // Base `ltx_2_3` declares no `autoDistillLora` → no injection.
+        let base = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
+            "modelManifestEntry": { "family": "ltx-video" },
+        }));
+        assert!(resolve_ltx_adapters(&settings, &base).unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The FLF keyframe knobs (sc-3055) parse from JSON numbers + numeric strings and fall back
