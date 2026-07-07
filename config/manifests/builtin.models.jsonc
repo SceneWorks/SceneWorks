@@ -865,8 +865,8 @@
           "title": "Lens Prompt Guide",
           "path": "/prompt-guides/lens.md",
           "sources": [
-            { "label": "Microsoft Lens model card", "url": "https://huggingface.co/microsoft/Lens" },
-            { "label": "Microsoft Lens-Turbo model card", "url": "https://huggingface.co/microsoft/Lens-Turbo" }
+            { "label": "Lens — SceneWorks MLX rehost", "url": "https://huggingface.co/SceneWorks/lens-mlx" },
+            { "label": "Lens-Turbo — SceneWorks MLX rehost", "url": "https://huggingface.co/SceneWorks/lens-turbo-mlx" }
           ]
         }
       }
@@ -992,8 +992,8 @@
           "title": "Lens-Turbo Prompt Guide",
           "path": "/prompt-guides/lens-turbo.md",
           "sources": [
-            { "label": "Microsoft Lens-Turbo model card", "url": "https://huggingface.co/microsoft/Lens-Turbo" },
-            { "label": "Microsoft Lens model card", "url": "https://huggingface.co/microsoft/Lens" }
+            { "label": "Lens-Turbo — SceneWorks MLX rehost", "url": "https://huggingface.co/SceneWorks/lens-turbo-mlx" },
+            { "label": "Lens — SceneWorks MLX rehost", "url": "https://huggingface.co/SceneWorks/lens-mlx" }
           ]
         }
       }

@@ -1481,16 +1481,17 @@ fn lens_real_weights_generates_one_image() {
 }
 
 /// Real-weights smoke: Lens-Turbo (the distilled 4-step / guidance 1.0 variant, ≈ no CFG) — same
-/// architecture/weights tree as base Lens, different defaults. Loads the `microsoft/Lens-Turbo`
-/// snapshot at the Q8 default. Needs the HF cache + a Metal device; run on demand:
+/// architecture/weights tree as base Lens, different defaults. Loads the `SceneWorks/lens-turbo-mlx`
+/// `bf16/` tier subdir (mirrors the base `lens` smoke; the dead flat `microsoft/Lens-Turbo` repo was
+/// retired, sc-8797/sc-8965). Needs the HF cache + a Metal device; run on demand:
 /// `cargo test -p sceneworks-worker --lib -- --ignored lens_turbo_real_weights`.
 #[cfg(target_os = "macos")]
 #[test]
-#[ignore = "needs real microsoft/Lens-Turbo weights + Metal device"]
+#[ignore = "needs real SceneWorks/lens-turbo-mlx weights + Metal device"]
 fn lens_turbo_real_weights_generates_one_image() {
     smoke_generate_one(
         "lens_turbo",
-        hf_snapshot("models--microsoft--Lens-Turbo"),
+        hf_snapshot("models--SceneWorks--lens-turbo-mlx").join("bf16"),
         Some(1.0),
         None,
     );
@@ -1503,12 +1504,12 @@ fn lens_turbo_real_weights_generates_one_image() {
 /// `cargo test -p sceneworks-worker --lib -- --ignored lens_turbo_real_weights_bucket`.
 #[cfg(target_os = "macos")]
 #[test]
-#[ignore = "needs real microsoft/Lens-Turbo weights + Metal device"]
+#[ignore = "needs real SceneWorks/lens-turbo-mlx weights + Metal device"]
 fn lens_turbo_real_weights_bucket_resolution() {
     let model = mlx_model("lens_turbo").unwrap();
     let generator = load_engine(
         model.engine_id(),
-        hf_snapshot("models--microsoft--Lens-Turbo"),
+        hf_snapshot("models--SceneWorks--lens-turbo-mlx").join("bf16"),
         Some(gen_core::Quant::Q8),
         Vec::new(),
         None,
