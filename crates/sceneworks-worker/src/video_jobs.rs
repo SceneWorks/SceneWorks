@@ -4475,14 +4475,16 @@ fn candle_resolve_lightning_loras(
     settings: &Settings,
     engine_id: &str,
 ) -> WorkerResult<(PathBuf, PathBuf)> {
-    let snapshot =
-        crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "lightx2v/Wan2.2-Lightning")
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(format!(
-                    "{engine_id}: the Lightning distill LoRA (lightx2v/Wan2.2-Lightning) is not \
+    let snapshot = crate::model_jobs::huggingface_snapshot_dir(
+        &settings.data_dir,
+        "lightx2v/Wan2.2-Lightning",
+    )
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "{engine_id}: the Lightning distill LoRA (lightx2v/Wan2.2-Lightning) is not \
                      downloaded — fetch it via the model manager"
-                ))
-            })?;
+        ))
+    })?;
     let base = match engine_id {
         "wan2_2_t2v_14b" => "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
         "wan2_2_i2v_14b" => "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1",
@@ -4617,8 +4619,18 @@ fn candle_resolve_wan_adapters(
         match (is_moe, candle_wan_moe_low_noise_sibling(&file)) {
             (true, Some(low)) => {
                 let low_kind = crate::image_jobs::classify_adapter(&low)?;
-                specs.push(candle_moe_adapter(file, scale, kind, gen_core::MoeExpert::High));
-                specs.push(candle_moe_adapter(low, scale, low_kind, gen_core::MoeExpert::Low));
+                specs.push(candle_moe_adapter(
+                    file,
+                    scale,
+                    kind,
+                    gen_core::MoeExpert::High,
+                ));
+                specs.push(candle_moe_adapter(
+                    low,
+                    scale,
+                    low_kind,
+                    gen_core::MoeExpert::Low,
+                ));
             }
             _ => {
                 specs.push(AdapterSpec {
@@ -13198,8 +13210,9 @@ mod candle_video_label_tests {
     /// user override); the dense 5B has no toggle and applies the interim step default.
     #[test]
     fn candle_wan_lightning_toggle_drives_sampling() {
-        let req =
-            |advanced: Value| VideoRequest::from_payload(json!({ "advanced": advanced }).as_object().unwrap());
+        let req = |advanced: Value| {
+            VideoRequest::from_payload(json!({ "advanced": advanced }).as_object().unwrap())
+        };
 
         for moe in ["wan2_2_t2v_14b", "wan2_2_i2v_14b"] {
             // Default-on (absent flag): the 4-step / CFG-off Lightning recipe.
@@ -13215,9 +13228,17 @@ mod candle_video_label_tests {
             // config defaults stand; a user override is honored verbatim.
             let off = req(json!({ "lightning": false }));
             assert!(!candle_wan_lightning_on(moe, &off), "{moe} opt-out");
-            assert_eq!(candle_wan_sampling(moe, &off), (None, None), "{moe} native defaults");
-            let off_override = req(json!({ "lightning": false, "steps": 30, "guidanceScale": 3.5 }));
-            assert_eq!(candle_wan_sampling(moe, &off_override), (Some(30), Some(3.5)));
+            assert_eq!(
+                candle_wan_sampling(moe, &off),
+                (None, None),
+                "{moe} native defaults"
+            );
+            let off_override =
+                req(json!({ "lightning": false, "steps": 30, "guidanceScale": 3.5 }));
+            assert_eq!(
+                candle_wan_sampling(moe, &off_override),
+                (Some(30), Some(3.5))
+            );
         }
 
         // Dense TI2V-5B: no Lightning toggle (always off), interim step default, user override wins.
