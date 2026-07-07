@@ -3626,16 +3626,16 @@ export function ImageEditor() {
             ) : null}
           </Stage>
         ) : (
-          <div className="image-editor-empty">
+          <div className="ie-canvas-empty">
             {status.loading ? (
               <p>Loading image…</p>
             ) : (
               <>
-                <p className="image-editor-empty-title">Open an image to start editing</p>
-                <p className="image-editor-empty-hint">Drag &amp; drop an image here, or click Open.</p>
-                <p className="image-editor-empty-hint">
+                <p className="ie-canvas-empty-title">Open an image to start editing</p>
+                <p className="ie-note">Drag &amp; drop an image here, or click Open.</p>
+                <p className="ie-note">
                   Or{" "}
-                  <button className="image-editor-linkbtn" onClick={() => setNewLayoutOpen(true)} type="button">
+                  <button className="ie-linkbtn" onClick={() => setNewLayoutOpen(true)} type="button">
                     start a blank layout
                   </button>{" "}
                   to compose with boxes.
