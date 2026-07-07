@@ -529,13 +529,25 @@ fn mlx_model_table_maps_known_families() {
         mlx_model("flux2_klein_9b_true_v2").unwrap().default_steps(),
         24
     );
+    // The two distilled turnkeys resolve their weights from the SceneWorks q4/q8/bf16 re-host
+    // (sc-8711) — `default_repo` MUST match the manifest `downloads[].repo`, else `model_repo`
+    // probes a stale gated BFL cache dir and the MLX/candle load fails "weights not found".
+    // true_v2 is the convert-at-install variant and legitimately keeps its `wikeeyang` source.
+    assert_eq!(
+        mlx_model("flux2_klein_9b").unwrap().default_repo(),
+        "SceneWorks/flux2-klein-9b-mlx"
+    );
+    assert_eq!(
+        mlx_model("flux2_klein_9b_kv").unwrap().default_repo(),
+        "SceneWorks/flux2-klein-9b-kv-mlx"
+    );
     // FLUX.2-dev (epic 5914): its OWN engine model (not a klein weight variant), embedded
     // distilled guidance (guidance scalar, no negative prompt — like klein but ~28 steps /
     // guidance 4.0). Shares the `mlx_flux2` adapter.
     let dev = mlx_model("flux2_dev").unwrap();
     assert_eq!(dev.engine_id(), "flux2_dev");
     assert_eq!(dev.adapter_label(), "mlx_flux2");
-    assert_eq!(dev.default_repo(), "black-forest-labs/FLUX.2-dev");
+    assert_eq!(dev.default_repo(), "SceneWorks/flux2-dev-mlx");
     assert_eq!(dev.default_steps(), 28);
     assert_eq!(dev.default_guidance(), 4.0);
     assert!(dev.supports_guidance() && !dev.supports_negative_prompt());
