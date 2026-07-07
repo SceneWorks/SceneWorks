@@ -187,20 +187,29 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // are the separate `*_edit`/`*_kv_edit` engine models, story sc-3029); the variants
     // differ only in their weights. Distilled klein runs guidance 1.0 (CFG-free) with no
     // negative prompt; the engine accepts guidance but rejects a negative prompt.
+    // `default_repo` is the SceneWorks pre-quantized q4/q8/bf16 turnkey re-host (sc-8711,
+    // epic 8506) — the model is registered in `STANDARD_TIER_MODELS`, so both the MLX and the
+    // candle txt2img lanes resolve the packed subdir through the shared `resolve_weights_dir`
+    // → `standard_tier_subdir` (base.rs). It must match the manifest `downloads[].repo`; the
+    // stale gated `black-forest-labs/FLUX.2-klein-9B` default made `model_repo` probe the wrong
+    // HF-cache dir and fail with "MLX weights not found or incomplete".
     ModelRow {
         sceneworks_id: "flux2_klein_9b",
         engine_id: "flux2_klein_9b",
-        default_repo: "black-forest-labs/FLUX.2-klein-9B",
+        default_repo: "SceneWorks/flux2-klein-9b-mlx",
         default_steps: 4,
         default_guidance: 1.0,
         adapter_label: "mlx_flux2",
     },
     ModelRow {
-        // Separately-distilled checkpoint, same architecture — its snapshot carries the
-        // full diffusers tree, so txt2img loads through the base `flux2_klein_9b` loader.
+        // Separately-distilled checkpoint, same architecture — txt2img loads through the base
+        // `flux2_klein_9b` loader. `default_repo` is the SceneWorks q4/q8/bf16 turnkey re-host
+        // (sc-8711); like the base 9B it is a `STANDARD_TIER_MODELS` member resolved via
+        // `standard_tier_subdir`, so it must match the manifest `downloads[].repo` rather than
+        // the pre-rehost gated `black-forest-labs/FLUX.2-klein-9b-kv`.
         sceneworks_id: "flux2_klein_9b_kv",
         engine_id: "flux2_klein_9b",
-        default_repo: "black-forest-labs/FLUX.2-klein-9b-kv",
+        default_repo: "SceneWorks/flux2-klein-9b-kv-mlx",
         default_steps: 4,
         default_guidance: 1.0,
         adapter_label: "mlx_flux2",
@@ -222,17 +231,21 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // model `flux2_dev` (Mistral3 TE + 48/48/15360 DiT), NOT a klein weight variant, so it
     // maps to its own engine id. Embedded distilled guidance (FLUX.1-dev pattern, NOT
     // true-CFG): the descriptor advertises `supports_guidance` but not negative prompt, so
-    // the engine takes the guidance scalar (default 4.0) over ~28 steps. On MLX it loads
-    // from a pre-quantized Q4 dir assembled by the install-time `flux2_dev_quant` convert
-    // job (sc-5917 / sc-5921). On the **candle** off-Mac lane (sc-7458) there is no packed
-    // convert: it loads the dense `black-forest-labs/FLUX.2-dev` diffusers snapshot and
-    // Q4-quantizes it at load — the 32B dense never lands on the GPU (CPU-staged in system
-    // RAM, then `quantize_onto` the GPU; candle-gen-flux2 sc-7457). `resolve_quant` reads
-    // the manifest `mlx.quantize: 4` so the candle descriptor's Q4 support drives it.
+    // the engine takes the guidance scalar (default 4.0) over ~28 steps. `default_repo` is the
+    // SceneWorks pre-quantized q4/q8/bf16 turnkey re-host (sc-8513, epic 8506) — a
+    // `STANDARD_TIER_MODELS` member, so both the MLX and the candle txt2img lanes packed-load
+    // the chosen tier's subdir via the shared `resolve_weights_dir` → `standard_tier_subdir`
+    // (sc-9092 retired the old candle dense-BFL load for the generic lane). It must match the
+    // manifest `downloads[].repo`; the pre-rehost gated `black-forest-labs/FLUX.2-dev` default
+    // made `model_repo` probe the wrong HF-cache dir. NOTE: the bespoke off-Mac candle *edit*
+    // lane in `flux2_edit_candle.rs` still keys its own dense-BFL default for both flux2 klein
+    // and dev, which no longer matches the re-hosted packed turnkey the catalog downloads — a
+    // separate off-Mac gap that needs candle-hardware verification, tracked as sc-10222 (epic
+    // 9083 gap #3), not touched here.
     ModelRow {
         sceneworks_id: "flux2_dev",
         engine_id: "flux2_dev",
-        default_repo: "black-forest-labs/FLUX.2-dev",
+        default_repo: "SceneWorks/flux2-dev-mlx",
         default_steps: 28,
         default_guidance: 4.0,
         adapter_label: "mlx_flux2",
