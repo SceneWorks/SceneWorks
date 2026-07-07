@@ -310,7 +310,7 @@ async fn generate_candle_qwen_edit_stream(
     let repo = qwen_edit_candle_repo(request);
     // The lightx2v distill LoRA, lazily fetched into the HF cache — `QwenEdit` folds it into the MMDiT at
     // load (sc-6220). Empty for the production (multi-step true-CFG) variants.
-    let adapters: Vec<AdapterSpec> = if lightning {
+    let mut adapters: Vec<AdapterSpec> = if lightning {
         let lora = ensure_qwen_lightning_lora_cached(
             api,
             settings,
@@ -323,6 +323,11 @@ async fn generate_candle_qwen_edit_stream(
     } else {
         Vec::new()
     };
+    // User style/subject LoRAs (sc-10271): folded in alongside any built-in distill LoRA,
+    // mirroring the MLX twin (qwen.rs) — `QwenEdit` applies the whole adapter list at load.
+    // This closes the candle edit-LoRA gap for the Qwen-Image-Edit family; the SDXL / FLUX.2 /
+    // Z-Image candle edit engines still need an `adapters` field in candle-gen (tracked).
+    adapters.extend(resolve_adapters(request, settings)?);
     let mut raw_settings = qwen_edit_candle_raw_settings(request, &repo, steps, guidance);
     // Record the Lightning recipe for telemetry / A-B parity (matches the MLX `distillLora` key format).
     if lightning {

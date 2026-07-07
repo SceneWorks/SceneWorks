@@ -3725,6 +3725,12 @@ label {
   transform: rotate(180deg);
 }
 
+/* The video upscale sub-panel folds into Advanced; span the full 2-column grid so its
+   own fields aren't squeezed into a single cell. */
+.advanced-panel .upscale-card {
+  grid-column: 1 / -1;
+}
+
 /* ---------- Video Studio hero variants ---------- */
 /* Hero contains: mode tabs row, prompt + render CTA row, motion chips row. */
 .prompt-source-thumb {

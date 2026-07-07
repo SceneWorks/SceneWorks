@@ -571,6 +571,11 @@ export function ModelManagerScreen() {
   // auth-protected REST signal (epic 4484 story 9). `isDesktop`/`tauriInvoke` come
   // from the unified runtime helper (story 6).
   const [unifiedMemoryGb, setUnifiedMemoryGb] = useState(null);
+  // "Update" orchestration for convert-at-install models (epic 10285): re-download the newer
+  // source checkpoint, then auto-fire the re-convert once that download completes. Maps a model id
+  // to the specific download job id we're waiting on — a specific id (not "any completed download")
+  // so a stale prior-version download can't trigger the convert before the new source is in.
+  const [pendingUpdate, setPendingUpdate] = useState({});
   // Gated-model credential presence (sc-1898): only fetched when the catalog has a
   // gated model, so non-gated deployments make no extra credential request.
   const [credentials, setCredentials] = useState([]);
@@ -695,6 +700,53 @@ export function ModelManagerScreen() {
       cancelled = true;
     };
   }, [hasGatedModel]);
+
+  // Second half of the "Update" flow: when the tracked source re-download completes, kick the
+  // re-convert (the convert reads the now-current `convertSourceFile` from the cache). We watch the
+  // SPECIFIC download job id, so a previously-completed old-version download never fires this early.
+  useEffect(() => {
+    const entries = Object.entries(pendingUpdate);
+    if (entries.length === 0) {
+      return;
+    }
+    let changed = false;
+    const next = { ...pendingUpdate };
+    for (const [modelId, downloadJobId] of entries) {
+      const download = jobs.find((job) => job.id === downloadJobId);
+      if (!download) {
+        continue; // job not visible yet — keep waiting
+      }
+      if (download.status === "completed") {
+        const activeConvert = jobs.find(
+          (job) =>
+            job.type === "model_convert" &&
+            job.payload?.modelId === modelId &&
+            !terminalStatuses.has(job.status),
+        );
+        if (!activeConvert) {
+          createModelConvertJob({ id: modelId });
+        }
+        delete next[modelId];
+        changed = true;
+      } else if (terminalStatuses.has(download.status)) {
+        // Download failed/canceled/interrupted — abandon the chain; the download error is surfaced.
+        delete next[modelId];
+        changed = true;
+      }
+    }
+    if (changed) {
+      setPendingUpdate(next);
+    }
+  }, [jobs, pendingUpdate, createModelConvertJob]);
+
+  // First half of the "Update" flow: re-download the newer source, then track its job so the effect
+  // above can auto-convert once it lands. Reuses the existing download + convert endpoints.
+  async function handleUpdateModel(model) {
+    const job = await onDownloadModel(model);
+    if (job?.id) {
+      setPendingUpdate((prev) => ({ ...prev, [model.id]: job.id }));
+    }
+  }
 
   function downloadJobsFor(model) {
     return jobs.filter((job) => job.type === "model_download" && job.payload?.modelId === model.id);
@@ -1029,7 +1081,29 @@ export function ModelManagerScreen() {
               </p>
             ) : null}
             {convertJob ? <WorkerProgressCard job={convertJob} onCancel={onCancelJob} onOpenQueue={onOpenQueue} /> : null}
-            {showConvertButton ? (
+            {model.updateAvailable ? (
+              <>
+                <p className="inline-warning">
+                  A newer checkpoint is available. Update re-downloads it and re-converts to MLX.
+                </p>
+                <button
+                  disabled={
+                    Boolean(downloadJob) ||
+                    Boolean(convertJob) ||
+                    Boolean(pendingUpdate[model.id]) ||
+                    !mlxEnoughMemory
+                  }
+                  onClick={() => handleUpdateModel(model)}
+                  type="button"
+                >
+                  {convertJob
+                    ? convertJob.status
+                    : downloadJob || pendingUpdate[model.id]
+                      ? "Updating…"
+                      : "Update"}
+                </button>
+              </>
+            ) : showConvertButton ? (
               <button
                 disabled={mlxState === "converted" || Boolean(convertJob) || !mlxEnoughMemory}
                 onClick={() => onConvertModel?.(model)}

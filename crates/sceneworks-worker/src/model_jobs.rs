@@ -2434,7 +2434,7 @@ mod tests {
     #[ignore]
     fn ltx_eros_rust_convert_real_weights() {
         let source =
-            hf_snapshot("models--TenStrip--LTX2.3-10Eros").join("10Eros_v1_bf16.safetensors");
+            hf_snapshot("models--TenStrip--LTX2.3-10Eros").join("10Eros_v1.3_bf16.safetensors");
         let upscaler_dir = hf_snapshot("models--Lightricks--LTX-2.3");
         assert!(
             source.is_file(),

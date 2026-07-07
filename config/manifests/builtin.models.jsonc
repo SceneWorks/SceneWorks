@@ -4939,9 +4939,9 @@
           // fp8 and fp8-transformer variants; we only need the bf16 all-in-one, which
           // shares the official ltx-2.3-22b-distilled key layout (model.diffusion_model.*
           // transformer + bundled vae/audio_vae/vocoder), so it is a drop-in checkpoint.
-          "files": ["10Eros_v1_bf16.safetensors"],
+          "files": ["10Eros_v1.3_bf16.safetensors"],
           "default": true,
-          "estimatedSizeBytes": 46139885510
+          "estimatedSizeBytes": 46139885750
         },
         {
           // Recommended cond_safe distill LoRA. Required runtime component on the MLX
@@ -4963,11 +4963,11 @@
       "resources": {
         "checkpoint": {
           "repo": "TenStrip/LTX2.3-10Eros",
-          "file": "10Eros_v1_bf16.safetensors"
+          "file": "10Eros_v1.3_bf16.safetensors"
         },
         "distilledCheckpoint": {
           "repo": "TenStrip/LTX2.3-10Eros",
-          "file": "10Eros_v1_bf16.safetensors"
+          "file": "10Eros_v1.3_bf16.safetensors"
         },
         "spatialUpscaler": {
           "repo": "Lightricks/LTX-2.3",
@@ -4975,8 +4975,9 @@
         },
         "distilledLora": {
           // TenStrip's recommended cond_safe distill LoRA for 10Eros (the model card
-          // warns that larger distill LoRAs harm the fine-tune). Only consumed by the
-          // CUDA ti2vid_two_stages torch path; the MLX path runs the converted dir.
+          // warns that larger distill LoRAs harm the fine-tune). The MLX path auto-injects
+          // this per-pass at runtime (see mlx.autoDistillLora; resolve_ltx_distill_adapter);
+          // the CUDA ti2vid_two_stages torch path consumes it directly.
           "repo": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
           "file": "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"
         },
@@ -5019,7 +5020,7 @@
         "requiresConversion": true,
         "converter": "ltx_video",
         "convertSourceRepo": "TenStrip/LTX2.3-10Eros",
-        "convertSourceFile": "10Eros_v1_bf16.safetensors",
+        "convertSourceFile": "10Eros_v1.3_bf16.safetensors",
         "convertBaseRepo": "Lightricks/LTX-2.3",
         "textEncoderRepo": "mlx-community/gemma-3-12b-it-bf16",
         // 10Eros's base is not pre-distilled, so the MLX adapter auto-injects the
