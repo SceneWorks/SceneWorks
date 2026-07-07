@@ -41,10 +41,13 @@ pub enum SeedMode {
     /// so the builtin catalog tracks the app version; user customizations live in
     /// the separate `user.*.jsonc` files, which seeding never touches.
     Overwrite,
-    /// Only write a manifest that is missing. The API seeds this way so an
-    /// explicit config dir — a repo checkout or a Compose bind mount — stays
-    /// authoritative: it fills gaps but never clobbers a copy the operator is
-    /// editing (and never dirties a checked-out `config/`).
+    /// Only write a manifest that is missing. The API seeds this way when its config
+    /// dir is EXPLICIT (`SCENEWORKS_CONFIG_DIR` set — a repo checkout or a Compose bind
+    /// mount) so that dir stays authoritative: it fills gaps but never clobbers a copy
+    /// the operator is editing (and never dirties a checked-out `config/`). When the API
+    /// falls back to the platform-default app-owned dir it seeds `Overwrite` instead, so a
+    /// directly-launched binary refreshes its builtin catalog on launch rather than serving
+    /// a stale seed after an upgrade (sc-10212; see `seed_mode_for_config_dir` in rust-api).
     IfMissing,
 }
 
