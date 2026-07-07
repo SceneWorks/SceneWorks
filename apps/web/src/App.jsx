@@ -1694,15 +1694,25 @@ export function App() {
     [token],
   );
 
+  // A move endpoint returns the whole moved upscale-fold group (sc-10205) as an
+  // array, requested asset first — merge every member into state or the hidden
+  // fold-mate lingers with a stale origin until the next full refresh.
+  const mergeMovedAssets = useCallback((moved) => {
+    const list = Array.isArray(moved) ? moved : [moved];
+    const byId = new Map(list.map((item) => [item.id, item]));
+    setAssets((items) => items.map((item) => byId.get(item.id) ?? item));
+    return list[0];
+  }, []);
+
   // Promote a character asset into the Main Asset Library (sc-8341): a true move —
   // the backend flips origin + detaches the character, so refresh characters too.
   const moveAssetToLibrary = useCallback(
     async (asset) => {
       try {
-        const updated = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/move-to-library`, token, {
+        const moved = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/move-to-library`, token, {
           method: "POST",
         });
-        setAssets((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+        const updated = mergeMovedAssets(moved);
         refreshCharactersRef.current?.(asset.projectId);
         setError("");
         return updated;
@@ -1711,7 +1721,7 @@ export function App() {
         throw err;
       }
     },
-    [token],
+    [token, mergeMovedAssets],
   );
 
   // Move an asset into a character's assets (sc-10200): the true-move twin of
@@ -1722,11 +1732,11 @@ export function App() {
   const moveAssetToCharacter = useCallback(
     async (asset, characterId) => {
       try {
-        const updated = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/move-to-character`, token, {
+        const moved = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/move-to-character`, token, {
           method: "POST",
           body: JSON.stringify({ characterId }),
         });
-        setAssets((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+        const updated = mergeMovedAssets(moved);
         refreshCharactersRef.current?.(asset.projectId);
         setError("");
         return updated;
@@ -1735,7 +1745,7 @@ export function App() {
         throw err;
       }
     },
-    [token],
+    [token, mergeMovedAssets],
   );
 
   const deleteAsset = useCallback(

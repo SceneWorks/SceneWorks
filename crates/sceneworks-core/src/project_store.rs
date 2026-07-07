@@ -2147,49 +2147,57 @@ impl ProjectStore {
     /// `metadata.characterReferences`, all three must change: flip `origin` to a
     /// library-visible studio value, drop the recipe's `characterId`, and strip the
     /// asset's `characterReferences`, then unlink it from every character sidecar.
+    ///
+    /// The move carries the asset's whole upscale-fold group (sc-10205), so a
+    /// folded original/upscaled pair never gets split across collections. Returns
+    /// the array of updated normalized assets, the requested one first.
     pub fn move_asset_to_library(
         &self,
         project_id: &str,
         asset_id: &str,
     ) -> ProjectStoreResult<Value> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
-        let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
-        let mut asset = read_json(&sidecar_path)?;
-        {
-            let object = asset.as_object_mut().ok_or_else(|| {
-                ProjectStoreError::BadRequest("Asset sidecar must be an object".to_owned())
-            })?;
-            // Promote to a library-visible origin by media type so the
-            // `character_studio` exclusion (LibraryScreen) no longer applies.
-            let asset_type = object
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let origin = match asset_type {
-                "video" => "video_studio",
-                "document" => "document_studio",
-                _ => "image_studio",
-            };
-            object.insert("origin".to_owned(), Value::String(origin.to_owned()));
-            // Detach the character association the grid filters on.
-            if let Some(settings) = object
-                .get_mut("recipe")
-                .and_then(Value::as_object_mut)
-                .and_then(|recipe| recipe.get_mut("normalizedSettings"))
-                .and_then(Value::as_object_mut)
+        let character_store = CharacterStore::new(&self.data_dir, project_path.clone());
+        let mut moved = Vec::new();
+        for member_id in upscale_lineage_group(&project_path, asset_id) {
+            let sidecar_path = self.find_asset_sidecar(&project_path, &member_id)?;
+            let mut asset = read_json(&sidecar_path)?;
             {
-                settings.remove("characterId");
+                let object = asset.as_object_mut().ok_or_else(|| {
+                    ProjectStoreError::BadRequest("Asset sidecar must be an object".to_owned())
+                })?;
+                // Promote to a library-visible origin by media type so the
+                // `character_studio` exclusion (LibraryScreen) no longer applies.
+                let asset_type = object
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let origin = match asset_type {
+                    "video" => "video_studio",
+                    "document" => "document_studio",
+                    _ => "image_studio",
+                };
+                object.insert("origin".to_owned(), Value::String(origin.to_owned()));
+                // Detach the character association the grid filters on.
+                if let Some(settings) = object
+                    .get_mut("recipe")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|recipe| recipe.get_mut("normalizedSettings"))
+                    .and_then(Value::as_object_mut)
+                {
+                    settings.remove("characterId");
+                }
+                if let Some(metadata) = object.get_mut("metadata").and_then(Value::as_object_mut) {
+                    metadata.remove("characterReferences");
+                }
             }
-            if let Some(metadata) = object.get_mut("metadata").and_then(Value::as_object_mut) {
-                metadata.remove("characterReferences");
-            }
+            write_json(&sidecar_path, &asset)?;
+            index_asset(&project_path, &asset, Some(&sidecar_path))?;
+            // Drop the asset from every character's references[] (character sidecars + index).
+            character_store.remove_asset_references(&member_id)?;
+            moved.push(normalize_asset(project_id, &project_path, &sidecar_path)?);
         }
-        write_json(&sidecar_path, &asset)?;
-        index_asset(&project_path, &asset, Some(&sidecar_path))?;
-        // Drop the asset from every character's references[] (character sidecars + index).
-        CharacterStore::new(&self.data_dir, project_path.clone())
-            .remove_asset_references(asset_id)?;
-        normalize_asset(project_id, &project_path, &sidecar_path)
+        Ok(Value::Array(moved))
     }
 
     /// Move a library asset into a character's assets (sc-10200): the true-move
@@ -2203,6 +2211,12 @@ impl ProjectStore {
     /// `?character=` scope both match on it), and detach the asset from everything
     /// else — the recipe's `characterId` and every character's curated
     /// `references[]` — without adding a curated reference to the target.
+    ///
+    /// The move carries the asset's whole upscale-fold group (sc-10205): the
+    /// Library renders a linked original/upscaled pair as ONE folded tile, so a
+    /// move of the visible tile must take the hidden fold-mate along or it stays
+    /// stranded in the Library. Returns the array of updated normalized assets,
+    /// the requested one first.
     pub fn move_asset_to_character(
         &self,
         project_id: &str,
@@ -2213,54 +2227,58 @@ impl ProjectStore {
         let character_store = CharacterStore::new(&self.data_dir, project_path.clone());
         // Reject an unknown/deleted target before mutating anything.
         character_store.get_character(project_id, character_id)?;
-        let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
-        let mut asset = read_json(&sidecar_path)?;
-        {
-            let object = asset.as_object_mut().ok_or_else(|| {
-                ProjectStoreError::BadRequest("Asset sidecar must be an object".to_owned())
-            })?;
-            object.insert(
-                "origin".to_owned(),
-                Value::String("character_studio".to_owned()),
-            );
-            // The recipe's characterId is a competing association vector (it would
-            // keep the asset in the previous character's grid), so clear it and let
-            // the metadata anchor own the membership.
-            if let Some(settings) = object
-                .get_mut("recipe")
-                .and_then(Value::as_object_mut)
-                .and_then(|recipe| recipe.get_mut("normalizedSettings"))
-                .and_then(Value::as_object_mut)
+        let mut moved = Vec::new();
+        for member_id in upscale_lineage_group(&project_path, asset_id) {
+            let sidecar_path = self.find_asset_sidecar(&project_path, &member_id)?;
+            let mut asset = read_json(&sidecar_path)?;
             {
-                settings.remove("characterId");
+                let object = asset.as_object_mut().ok_or_else(|| {
+                    ProjectStoreError::BadRequest("Asset sidecar must be an object".to_owned())
+                })?;
+                object.insert(
+                    "origin".to_owned(),
+                    Value::String("character_studio".to_owned()),
+                );
+                // The recipe's characterId is a competing association vector (it would
+                // keep the asset in the previous character's grid), so clear it and let
+                // the metadata anchor own the membership.
+                if let Some(settings) = object
+                    .get_mut("recipe")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|recipe| recipe.get_mut("normalizedSettings"))
+                    .and_then(Value::as_object_mut)
+                {
+                    settings.remove("characterId");
+                }
+                let metadata = object
+                    .entry("metadata".to_owned())
+                    .or_insert_with(|| json!({}));
+                let metadata = metadata.as_object_mut().ok_or_else(|| {
+                    ProjectStoreError::BadRequest("Asset metadata must be an object".to_owned())
+                })?;
+                // `source` distinguishes this move anchor from the "character-sidecar"
+                // mirror entries `update_asset_character_link` manages — that rebuild
+                // must not drop the anchor when a curated reference is added/removed.
+                metadata.insert(
+                    "characterReferences".to_owned(),
+                    json!([{
+                        "characterId": character_id,
+                        "source": "library-move",
+                        "approved": false,
+                        "role": "asset",
+                        "linkedAt": utc_now(),
+                    }]),
+                );
             }
-            let metadata = object
-                .entry("metadata".to_owned())
-                .or_insert_with(|| json!({}));
-            let metadata = metadata.as_object_mut().ok_or_else(|| {
-                ProjectStoreError::BadRequest("Asset metadata must be an object".to_owned())
-            })?;
-            // `source` distinguishes this move anchor from the "character-sidecar"
-            // mirror entries `update_asset_character_link` manages — that rebuild
-            // must not drop the anchor when a curated reference is added/removed.
-            metadata.insert(
-                "characterReferences".to_owned(),
-                json!([{
-                    "characterId": character_id,
-                    "source": "library-move",
-                    "approved": false,
-                    "role": "asset",
-                    "linkedAt": utc_now(),
-                }]),
-            );
+            write_json(&sidecar_path, &asset)?;
+            index_asset(&project_path, &asset, Some(&sidecar_path))?;
+            // Leave no curated membership behind: the move detaches the asset from every
+            // character's references[] (including the target's — the Approved set is
+            // hand-curated and a bulk move must not populate it).
+            character_store.remove_asset_references(&member_id)?;
+            moved.push(normalize_asset(project_id, &project_path, &sidecar_path)?);
         }
-        write_json(&sidecar_path, &asset)?;
-        index_asset(&project_path, &asset, Some(&sidecar_path))?;
-        // Leave no curated membership behind: the move detaches the asset from every
-        // character's references[] (including the target's — the Approved set is
-        // hand-curated and a bulk move must not populate it).
-        character_store.remove_asset_references(asset_id)?;
-        normalize_asset(project_id, &project_path, &sidecar_path)
+        Ok(Value::Array(moved))
     }
 
     pub fn get_asset(&self, project_id: &str, asset_id: &str) -> ProjectStoreResult<Value> {
@@ -2734,6 +2752,67 @@ fn apply_upscale_variant_link(asset: &mut Value, base_id: &str, factor: u8, engi
             extra.insert("engine".to_owned(), json!(engine));
         }
     }
+}
+
+/// Collect the upscale-fold lineage group around `asset_id` (sc-10205): the asset
+/// itself, the original it was upscaled from, and transitively every upscaled
+/// variant pointing back into the group. Mirrors the web's fold keys
+/// (`extra.upscaledFromAssetId`, falling back to `lineage.sourceAssetId` when
+/// `extra.isUpscaled` — assetVariants.js): the Library renders such a pair as ONE
+/// tile, so a move of the visible asset must carry the whole group. The requested
+/// id is always first. Unreadable sidecars are skipped — worst case the group
+/// degrades to the single asset, never to an error.
+fn upscale_lineage_group(project_path: &Path, asset_id: &str) -> Vec<String> {
+    let mut group = vec![asset_id.to_owned()];
+    let Ok(sidecars) = asset_sidecars(project_path) else {
+        return group;
+    };
+    // Every asset's fold parent (the original it was upscaled from), if any.
+    let mut parent_of: Vec<(String, String)> = Vec::new();
+    for sidecar_path in sidecars {
+        let Ok(asset) = read_json(&sidecar_path) else {
+            continue;
+        };
+        let Some(id) = asset.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let parent = asset
+            .pointer("/extra/upscaledFromAssetId")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                asset
+                    .pointer("/extra/isUpscaled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    .then(|| {
+                        asset
+                            .pointer("/lineage/sourceAssetId")
+                            .and_then(Value::as_str)
+                    })
+                    .flatten()
+            });
+        if let Some(parent) = parent {
+            parent_of.push((id.to_owned(), parent.to_owned()));
+        }
+    }
+    // Fixed-point closure over the parent links in both directions (covers
+    // upscale-of-upscale chains and multiple variants of one original).
+    loop {
+        let before = group.len();
+        for (child, parent) in &parent_of {
+            let child_in = group.iter().any(|id| id == child);
+            let parent_in = group.iter().any(|id| id == parent);
+            if child_in && !parent_in {
+                group.push(parent.clone());
+            } else if parent_in && !child_in {
+                group.push(child.clone());
+            }
+        }
+        if group.len() == before {
+            break;
+        }
+    }
+    group
 }
 
 fn reindex_project_path(project_path: &Path) -> ProjectStoreResult<ReindexCounts> {
@@ -4857,9 +4936,11 @@ mod tests {
             .expect("get before");
         assert_eq!(before["origin"], json!("character_studio"));
 
-        let moved = store
+        // sc-10205: the endpoint returns the moved group (requested asset first).
+        let moved_group = store
             .move_asset_to_library(&project.id, "char_shot")
             .expect("move to library");
+        let moved = &moved_group[0];
 
         // Origin promoted (image media -> image_studio), so the Library no longer excludes it.
         assert_eq!(moved["origin"], json!("image_studio"));
@@ -4956,9 +5037,11 @@ mod tests {
             .move_asset_to_character(&project.id, "lib_shot", "char_missing")
             .is_err());
 
-        let moved = store
+        // sc-10205: the endpoint returns the moved group (requested asset first).
+        let moved_group = store
             .move_asset_to_character(&project.id, "lib_shot", &dax_id)
             .expect("move to Dax");
+        let moved = &moved_group[0];
 
         // Origin flipped, so the Library allow-list now excludes the asset.
         assert_eq!(moved["origin"], json!("character_studio"));
@@ -5007,11 +5090,102 @@ mod tests {
         assert_eq!(cycled_links[0]["source"], json!("library-move"));
 
         // Reversible: move-to-library restores a library origin and drops the anchor.
-        let back = store
+        let back_group = store
             .move_asset_to_library(&project.id, "lib_shot")
             .expect("move back");
+        let back = &back_group[0];
         assert_eq!(back["origin"], json!("image_studio"));
         assert!(back["metadata"]["characterReferences"].is_null());
+    }
+
+    /// sc-10205: a linked original/upscaled pair renders as ONE folded Library
+    /// tile (the upscaled child is the visible asset), so moving the visible
+    /// asset must carry the whole fold group — in both directions. Splitting the
+    /// pair strands the hidden mate in the source collection.
+    #[test]
+    fn move_asset_carries_the_upscale_fold_group_both_directions() {
+        use crate::store_util::{read_json, write_json};
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Gallery").expect("project creates");
+
+        for (asset_id, path) in [
+            ("base_shot", "assets/images/genset_pair/base_shot.png"),
+            ("up_shot", "assets/images/genset_pair/base_shot_up2x.png"),
+        ] {
+            let fact = json!({
+                "assetId": asset_id,
+                "mediaPath": path,
+                "mimeType": "image/png",
+                "displayName": asset_id,
+                "createdAt": "2026-05-25T00:00:00Z",
+                "mode": "text_to_image",
+                "model": "z_image_turbo",
+                "adapter": "z_image_diffusers",
+                "prompt": "plate",
+            });
+            store
+                .persist_generated_asset(&project.id, "job-1", "genset_pair", &fact)
+                .expect("asset persists");
+        }
+
+        // Stamp the fold lineage the Library reads (sc-10117 keys) on the child.
+        let project_path = store.find_project_path(&project.id).expect("project path");
+        let child_sidecar =
+            project_path.join("assets/images/genset_pair/base_shot_up2x.sceneworks.json");
+        {
+            let mut asset = read_json(&child_sidecar).expect("read child");
+            super::apply_upscale_variant_link(&mut asset, "base_shot", 2, "seedvr2");
+            write_json(&child_sidecar, &asset).expect("write child");
+        }
+        store
+            .index_asset_sidecar(&project.id, &child_sidecar)
+            .expect("reindex child");
+
+        let character = store
+            .create_character(
+                &project.id,
+                CharacterCreateInput {
+                    name: "Mira".to_owned(),
+                    character_type: "person".to_owned(),
+                    description: String::new(),
+                },
+            )
+            .expect("character creates");
+        let character_id = character["id"].as_str().expect("character id").to_owned();
+
+        // Move the VISIBLE folded asset (the upscaled child): both must move.
+        let moved = store
+            .move_asset_to_character(&project.id, "up_shot", &character_id)
+            .expect("move pair to character");
+        let moved = moved.as_array().expect("moved group");
+        assert_eq!(moved.len(), 2, "the whole fold group moves");
+        assert_eq!(moved[0]["id"], json!("up_shot"), "requested asset first");
+        for asset in moved {
+            assert_eq!(asset["origin"], json!("character_studio"));
+            assert_eq!(
+                asset["metadata"]["characterReferences"][0]["characterId"],
+                json!(character_id)
+            );
+        }
+        let base_after = store
+            .get_asset(&project.id, "base_shot")
+            .expect("base after");
+        assert_eq!(
+            base_after["origin"],
+            json!("character_studio"),
+            "the hidden fold-mate left the Library too"
+        );
+
+        // And back: moving the child to the Library brings the original along.
+        let back = store
+            .move_asset_to_library(&project.id, "up_shot")
+            .expect("move pair back");
+        let back = back.as_array().expect("back group");
+        assert_eq!(back.len(), 2);
+        for asset in back {
+            assert_eq!(asset["origin"], json!("image_studio"));
+        }
     }
 
     /// V-4: a pre-migration project surfaces an EMPTY `assets` table even though
