@@ -6912,15 +6912,10 @@ async fn ensure_ltx_bf16_present(
     result.map(|_| ())
 }
 
-/// Ensure the Gemma-3 text encoder an **eros** job needs is on disk, fetching the bundle's `gemma/`
-/// on demand the first time. The eros install produces a bare converted checkpoint under
-/// `models/mlx/ltx_2_3_eros/` with no bundled TE (unlike the base turnkey bundle, which ships
-/// `gemma/` beside its `q4/`), so without this an eros generation dead-ends on "gemma snapshot not
-/// found". Pulls just `gemma/*` (~24 GB) from the FIXED [`LTX_BUNDLE_REVISION`] — the same SceneWorks
-/// re-host the base model uses, so no separate `mlx-community/gemma-3-12b-it-bf16` download. No-op for
-/// the base model, when an operator `$LTX_GEMMA_DIR` is set, when a local `models/mlx/gemma` sibling
-/// is already complete, or when the bundle snapshot's `gemma/` is already complete. Self-heals a
-/// worker that installed eros before this provisioning existed. Mirrors [`ensure_ltx_q8_present`].
+/// Ensure the Gemma-3 text encoder an **eros** generation needs is on disk (the eros gate over
+/// [`ensure_ltx_bundle_gemma_present`]). No-op for the base model, which bundles gemma with its
+/// turnkey checkpoint. Called just before resolving the LTX text encoder so an eros job that was
+/// installed before install-time provisioning existed still self-heals on first generation.
 #[cfg(target_os = "macos")]
 async fn ensure_ltx_gemma_present(
     api: &ApiClient,
@@ -6928,7 +6923,29 @@ async fn ensure_ltx_gemma_present(
     job: &JobSnapshot,
     request: &VideoRequest,
 ) -> WorkerResult<()> {
-    if request.model != "ltx_2_3_eros" || std::env::var_os("LTX_GEMMA_DIR").is_some() {
+    if request.model != "ltx_2_3_eros" {
+        return Ok(());
+    }
+    ensure_ltx_bundle_gemma_present(api, settings, job).await
+}
+
+/// Ensure the eros Gemma-3 text encoder is on disk, fetching the bundle's `gemma/` on demand. The
+/// eros install produces a bare converted checkpoint under `models/mlx/ltx_2_3_eros/` with no bundled
+/// TE (unlike the base turnkey bundle, which ships `gemma/` beside its `q4/`), so without this an
+/// eros generation dead-ends on "gemma snapshot not found". Pulls just `gemma/*` (~24 GB) from the
+/// FIXED [`LTX_BUNDLE_REVISION`] — the same SceneWorks re-host the base model uses, so no separate
+/// `mlx-community/gemma-3-12b-it-bf16` download. No-op when an operator `$LTX_GEMMA_DIR` is set, when
+/// a local `models/mlx/gemma` sibling is already complete, or when the bundle snapshot's `gemma/` is
+/// already complete. `pub(crate)` so the eros convert job provisions gemma at install time
+/// ([`crate::model_jobs::run_model_convert_job`]) — the generation path is the self-healing backstop.
+/// Mirrors [`ensure_ltx_q8_present`].
+#[cfg(target_os = "macos")]
+pub(crate) async fn ensure_ltx_bundle_gemma_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    if std::env::var_os("LTX_GEMMA_DIR").is_some() {
         return Ok(());
     }
     // A complete `<data>/models/mlx/gemma` sibling already satisfies the eros resolver — nothing to
