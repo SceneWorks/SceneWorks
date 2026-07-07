@@ -656,6 +656,11 @@ export function ImageEditor() {
   const [ratioKey, setRatioKey] = useState("free");
   const [rotated, setRotated] = useState(false);
   const [cropRect, setCropRect] = useState(null); // image-pixel coords, or null
+  // Straighten (sc-10255): degrees the image is rotated before the axis-aligned crop
+  // is rasterized on Apply (−15..15). 0 = no rotation (identical to the plain crop).
+  const [straighten, setStraighten] = useState(0);
+  // One undo checkpoint per Transform slider DRAG (mirrors the opacity gesture).
+  const transformGestureRef = useRef(false);
 
   // Upscale tool (sc-2433): engine + factor for the in-flight request.
   const [upscaleEngine, setUpscaleEngine] = useState("real-esrgan");
@@ -1409,12 +1414,14 @@ export function ImageEditor() {
   function startCrop() {
     if (!working) return;
     setTool("crop");
+    setStraighten(0);
     setCropRect(centeredCropRect(working.width, working.height, cropRatioForKey(ratioKey, rotated)));
   }
 
   function cancelCrop() {
     setTool("move");
     setCropRect(null);
+    setStraighten(0);
     // Discard any unbaked color preview (adjust / levels / curves). Owned by the color
     // hook now (sc-9752), which resets exactly those three values and leaves mode/channel.
     discardColorPreview();
@@ -1558,7 +1565,19 @@ export function ImageEditor() {
           const canvas = document.createElement("canvas");
           canvas.width = sw;
           canvas.height = sh;
-          canvas.getContext("2d").drawImage(layer.image, sx, sy, sw, sh, 0, 0, sw, sh);
+          const ctx = canvas.getContext("2d");
+          if (straighten) {
+            // Straighten (sc-10255): rotate the layer by `straighten°` about the crop-rect
+            // centre, then take the axis-aligned sw×sh window — a rotate-then-crop. Corners
+            // that rotate past the source edge come through transparent (inset your crop).
+            const cx = sx + sw / 2;
+            const cy = sy + sh / 2;
+            ctx.translate(sw / 2, sh / 2);
+            ctx.rotate((straighten * Math.PI) / 180);
+            ctx.drawImage(layer.image, -cx, -cy);
+          } else {
+            ctx.drawImage(layer.image, sx, sy, sw, sh, 0, 0, sw, sh);
+          }
           const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
           if (!blob) throw new Error("Could not encode the crop.");
           const { image, objectUrl } = await blobToImage(blob);
@@ -1585,9 +1604,10 @@ export function ImageEditor() {
       }),
     }));
     oldLayers.forEach((layer) => layer.objectUrl && URL.revokeObjectURL(layer.objectUrl));
-    setEdits((prev) => [...prev, { op: "crop", width: sw, height: sh }]);
+    setEdits((prev) => [...prev, { op: "crop", width: sw, height: sh, ...(straighten ? { straighten } : {}) }]);
+    setStraighten(0);
     setDirty(true);
-  }, [working, cropRect, checkpoint, resetEditorOverlays]);
+  }, [working, cropRect, straighten, checkpoint, resetEditorOverlays]);
 
   // Bind the transformer to the crop rect whenever crop mode is active.
   useEffect(() => {
@@ -1740,6 +1760,38 @@ export function ImageEditor() {
     checkpoint();
     setWorking((prev) => setLayerProps(prev, layer.id, { transform: identityTransform() }));
     setDirty(true);
+  }
+
+  // Numeric Transform controls (sc-10255): merge a patch into the active layer's
+  // transform. Bound two-way to the same {x,y,scaleX,scaleY,rotation} the canvas
+  // handles drive, so typing/sliding moves the layer and dragging updates the fields.
+  // `gestureStart` gates the undo checkpoint so a slider drag is one step, not many.
+  function setActiveTransform(patch, { gestureStart = true } = {}) {
+    const layer = activeLayerOf(workingRef.current);
+    if (!layer) return;
+    if (gestureStart) checkpoint();
+    setWorking((prev) => setLayerProps(prev, layer.id, { transform: { ...layer.transform, ...patch } }));
+    setDirty(true);
+  }
+  const onTransformSlider = (patch) => {
+    const start = !transformGestureRef.current;
+    transformGestureRef.current = true;
+    setActiveTransform(patch, { gestureStart: start });
+  };
+  const endTransformGesture = () => {
+    transformGestureRef.current = false;
+  };
+  function flipActiveLayer(axis) {
+    const layer = activeLayerOf(workingRef.current);
+    if (!layer) return;
+    const t = layer.transform;
+    // Flip in place: negate the axis scale AND shift the origin by the scaled extent so
+    // the layer keeps its local bounding box instead of mirroring off its top-left pivot.
+    const patch =
+      axis === "h"
+        ? { scaleX: -t.scaleX, x: t.x + (layer.image?.naturalWidth ?? 0) * t.scaleX }
+        : { scaleY: -t.scaleY, y: t.y + (layer.image?.naturalHeight ?? 0) * t.scaleY };
+    setActiveTransform(patch);
   }
 
   // Flatten the visible layer stack onto a fresh canvas at the document size
@@ -2286,16 +2338,91 @@ export function ImageEditor() {
             </div>
           </>
         );
-      case "transform":
+      case "transform": {
+        const tLayer = activeLayerOf(working);
+        const t = tLayer?.transform ?? identityTransform();
+        const scalePct = Math.round(Math.abs(t.scaleX) * 100);
+        const signX = t.scaleX < 0 ? -1 : 1;
+        const signY = t.scaleY < 0 ? -1 : 1;
         return (
           <>
             <div className="ie-section">
-              <div className="ie-sec-title">Transform</div>
-              <p className="ie-note">
-                Drag, scale or rotate <b>{activeLayerOf(working)?.name}</b> directly on the canvas using the handles.
-              </p>
+              <div className="ie-sec-title">Position</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">X</span>
+                  </div>
+                  <input
+                    className="ie-input ie-numfield"
+                    onChange={(event) => setActiveTransform({ x: Number(event.target.value) || 0 })}
+                    type="number"
+                    value={Math.round(t.x)}
+                  />
+                </div>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Y</span>
+                  </div>
+                  <input
+                    className="ie-input ie-numfield"
+                    onChange={(event) => setActiveTransform({ y: Number(event.target.value) || 0 })}
+                    type="number"
+                    value={Math.round(t.y)}
+                  />
+                </div>
+              </div>
             </div>
             <div className="ie-section">
+              <div className="ie-sec-title">Scale &amp; rotation</div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Scale</span>
+                  <span className="ie-field-val">{scalePct}%</span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={300}
+                  min={10}
+                  onBlur={endTransformGesture}
+                  onChange={(event) => {
+                    const pct = Number(event.target.value) / 100;
+                    onTransformSlider({ scaleX: signX * pct, scaleY: signY * pct });
+                  }}
+                  onMouseUp={endTransformGesture}
+                  onTouchEnd={endTransformGesture}
+                  type="range"
+                  value={scalePct}
+                />
+              </div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Rotation</span>
+                  <span className="ie-field-val">{Math.round(t.rotation)}°</span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={180}
+                  min={-180}
+                  onBlur={endTransformGesture}
+                  onChange={(event) => onTransformSlider({ rotation: Number(event.target.value) })}
+                  onMouseUp={endTransformGesture}
+                  onTouchEnd={endTransformGesture}
+                  type="range"
+                  value={Math.round(t.rotation)}
+                />
+              </div>
+              <div className="ie-seg two" style={{ width: "100%" }}>
+                <button className="ie-seg-btn" onClick={() => flipActiveLayer("h")} type="button">
+                  Flip horizontal
+                </button>
+                <button className="ie-seg-btn" onClick={() => flipActiveLayer("v")} type="button">
+                  Flip vertical
+                </button>
+              </div>
+            </div>
+            <div className="ie-section">
+              <p className="ie-note">You can also drag the handles on the canvas to move, scale or rotate the layer.</p>
               <button className="ie-btn block" onClick={resetActiveLayerTransform} type="button">
                 Reset transform
               </button>
@@ -2305,6 +2432,7 @@ export function ImageEditor() {
             </div>
           </>
         );
+      }
       case "crop":
         return (
           <>
@@ -2359,6 +2487,24 @@ export function ImageEditor() {
                     value={cropRect ? Math.round(cropRect.height) : ""}
                   />
                 </div>
+              </div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Straighten</span>
+                  <span className="ie-field-val">
+                    {straighten > 0 ? "+" : ""}
+                    {straighten}°
+                  </span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={15}
+                  min={-15}
+                  onChange={(event) => setStraighten(Number(event.target.value))}
+                  type="range"
+                  value={straighten}
+                />
+                <p className="ie-note">Rotates the image within the crop; applied on Apply. Inset the crop so the corners stay filled.</p>
               </div>
             </div>
             <div className="ie-section">
