@@ -2192,6 +2192,77 @@ impl ProjectStore {
         normalize_asset(project_id, &project_path, &sidecar_path)
     }
 
+    /// Move a library asset into a character's assets (sc-10200): the true-move
+    /// twin of [`Self::move_asset_to_library`]. A character-sidecar `references[]`
+    /// entry is NOT the right vehicle for a move — it leaves the asset in the Main
+    /// Asset Library (its `origin` stays library-visible) and surfaces it in the
+    /// curated "Approved set" panel (which renders every `references[]` entry). So
+    /// a move must: flip `origin` to `character_studio` (the Library's allow-list
+    /// then excludes it), anchor the target association in
+    /// `metadata.characterReferences` only (the Character assets grid and the
+    /// `?character=` scope both match on it), and detach the asset from everything
+    /// else — the recipe's `characterId` and every character's curated
+    /// `references[]` — without adding a curated reference to the target.
+    pub fn move_asset_to_character(
+        &self,
+        project_id: &str,
+        asset_id: &str,
+        character_id: &str,
+    ) -> ProjectStoreResult<Value> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        let character_store = CharacterStore::new(&self.data_dir, project_path.clone());
+        // Reject an unknown/deleted target before mutating anything.
+        character_store.get_character(project_id, character_id)?;
+        let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
+        let mut asset = read_json(&sidecar_path)?;
+        {
+            let object = asset.as_object_mut().ok_or_else(|| {
+                ProjectStoreError::BadRequest("Asset sidecar must be an object".to_owned())
+            })?;
+            object.insert(
+                "origin".to_owned(),
+                Value::String("character_studio".to_owned()),
+            );
+            // The recipe's characterId is a competing association vector (it would
+            // keep the asset in the previous character's grid), so clear it and let
+            // the metadata anchor own the membership.
+            if let Some(settings) = object
+                .get_mut("recipe")
+                .and_then(Value::as_object_mut)
+                .and_then(|recipe| recipe.get_mut("normalizedSettings"))
+                .and_then(Value::as_object_mut)
+            {
+                settings.remove("characterId");
+            }
+            let metadata = object
+                .entry("metadata".to_owned())
+                .or_insert_with(|| json!({}));
+            let metadata = metadata.as_object_mut().ok_or_else(|| {
+                ProjectStoreError::BadRequest("Asset metadata must be an object".to_owned())
+            })?;
+            // `source` distinguishes this move anchor from the "character-sidecar"
+            // mirror entries `update_asset_character_link` manages — that rebuild
+            // must not drop the anchor when a curated reference is added/removed.
+            metadata.insert(
+                "characterReferences".to_owned(),
+                json!([{
+                    "characterId": character_id,
+                    "source": "library-move",
+                    "approved": false,
+                    "role": "asset",
+                    "linkedAt": utc_now(),
+                }]),
+            );
+        }
+        write_json(&sidecar_path, &asset)?;
+        index_asset(&project_path, &asset, Some(&sidecar_path))?;
+        // Leave no curated membership behind: the move detaches the asset from every
+        // character's references[] (including the target's — the Approved set is
+        // hand-curated and a bulk move must not populate it).
+        character_store.remove_asset_references(asset_id)?;
+        normalize_asset(project_id, &project_path, &sidecar_path)
+    }
+
     pub fn get_asset(&self, project_id: &str, asset_id: &str) -> ProjectStoreResult<Value> {
         let project_path = self.find_project_path(project_id)?;
         let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
@@ -4086,8 +4157,9 @@ mod tests {
         connect_project_db, find_timeline_file, guess_mime_from_filename, index_timeline,
         is_safe_relative_path, is_safe_upload_extension, normalize_asset_tags, read_json,
         sniff_image_format, upload_extension, AssetScope, CharacterCreateInput, CharacterLookInput,
-        ProjectStore, ProjectStoreError, UploadAsset, GLOBAL_KEYPOINTS_PROJECT_ID,
-        GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
+        CharacterReferenceInput, ProjectStore, ProjectStoreError, UploadAsset,
+        GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS,
+        PROJECT_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
     };
     use rusqlite::Connection;
     use serde_json::{json, Value};
@@ -4812,6 +4884,134 @@ mod tests {
             .get_asset(&project.id, "char_shot")
             .expect("get after");
         assert_eq!(after["origin"], json!("image_studio"));
+    }
+
+    /// sc-10200: the true-move twin of `move_asset_to_library`. A Library asset
+    /// moved into a character must leave the Library (origin flip), anchor on the
+    /// target via `metadata.characterReferences` ONLY (no curated `references[]`
+    /// entry — the "Approved set" is hand-curated), detach from every other
+    /// character, and survive a curated reference add/remove cycle on the target.
+    #[test]
+    fn move_asset_to_character_flips_origin_and_anchors_without_curated_reference() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Gallery").expect("project creates");
+
+        // A plain Image Studio output: origin image_studio, library-visible.
+        let fact = json!({
+            "assetId": "lib_shot",
+            "mediaPath": "assets/images/genset_lib/lib_shot.png",
+            "mimeType": "image/png",
+            "displayName": "Plate #1",
+            "createdAt": "2026-05-25T00:00:00Z",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "adapter": "z_image_diffusers",
+            "prompt": "plate",
+        });
+        store
+            .persist_generated_asset(&project.id, "job-1", "genset_lib", &fact)
+            .expect("asset persists");
+
+        let mira = store
+            .create_character(
+                &project.id,
+                CharacterCreateInput {
+                    name: "Mira".to_owned(),
+                    character_type: "person".to_owned(),
+                    description: String::new(),
+                },
+            )
+            .expect("Mira creates");
+        let dax = store
+            .create_character(
+                &project.id,
+                CharacterCreateInput {
+                    name: "Dax".to_owned(),
+                    character_type: "person".to_owned(),
+                    description: String::new(),
+                },
+            )
+            .expect("Dax creates");
+        let mira_id = mira["id"].as_str().expect("Mira id").to_owned();
+        let dax_id = dax["id"].as_str().expect("Dax id").to_owned();
+
+        // Pre-existing curated link on Mira (the legacy "Move" behavior): the move
+        // must clean this up rather than leave a dual membership behind.
+        store
+            .add_character_reference(
+                &project.id,
+                &mira_id,
+                CharacterReferenceInput {
+                    asset_id: "lib_shot".to_owned(),
+                    approved: false,
+                    role: "asset".to_owned(),
+                    notes: String::new(),
+                },
+            )
+            .expect("Mira link");
+
+        // An unknown target must reject before mutating anything.
+        assert!(store
+            .move_asset_to_character(&project.id, "lib_shot", "char_missing")
+            .is_err());
+
+        let moved = store
+            .move_asset_to_character(&project.id, "lib_shot", &dax_id)
+            .expect("move to Dax");
+
+        // Origin flipped, so the Library allow-list now excludes the asset.
+        assert_eq!(moved["origin"], json!("character_studio"));
+        // Anchored on Dax via metadata only, tagged as a move (not a sidecar mirror).
+        let links = moved["metadata"]["characterReferences"]
+            .as_array()
+            .expect("anchor links");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0]["characterId"], json!(dax_id));
+        assert_eq!(links[0]["source"], json!("library-move"));
+        // Neither character carries a curated references[] entry: Mira's stale link
+        // is gone and Dax's Approved set stays hand-curated.
+        let mira_after = store
+            .get_character(&project.id, &mira_id)
+            .expect("Mira after");
+        assert_eq!(mira_after["references"].as_array().map(Vec::len), Some(0));
+        let dax_after = store
+            .get_character(&project.id, &dax_id)
+            .expect("Dax after");
+        assert_eq!(dax_after["references"].as_array().map(Vec::len), Some(0));
+
+        // A curated reference add/remove cycle on the target must not orphan the
+        // asset: the sidecar mirror rebuild only manages its own entries.
+        store
+            .add_character_reference(
+                &project.id,
+                &dax_id,
+                CharacterReferenceInput {
+                    asset_id: "lib_shot".to_owned(),
+                    approved: true,
+                    role: "reference".to_owned(),
+                    notes: String::new(),
+                },
+            )
+            .expect("Dax curated link");
+        store
+            .remove_character_reference(&project.id, &dax_id, "lib_shot")
+            .expect("Dax curated unlink");
+        let cycled = store
+            .get_asset(&project.id, "lib_shot")
+            .expect("get cycled");
+        let cycled_links = cycled["metadata"]["characterReferences"]
+            .as_array()
+            .expect("anchor survives");
+        assert_eq!(cycled_links.len(), 1);
+        assert_eq!(cycled_links[0]["source"], json!("library-move"));
+
+        // Reversible: move-to-library restores a library origin and drops the anchor.
+        let back = store
+            .move_asset_to_library(&project.id, "lib_shot")
+            .expect("move back");
+        assert_eq!(back["origin"], json!("image_studio"));
+        assert!(back["metadata"]["characterReferences"].is_null());
     }
 
     /// V-4: a pre-migration project surfaces an EMPTY `assets` table even though

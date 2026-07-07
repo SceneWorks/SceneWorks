@@ -1714,6 +1714,30 @@ export function App() {
     [token],
   );
 
+  // Move an asset into a character's assets (sc-10200): the true-move twin of
+  // moveAssetToLibrary, NOT a link — the backend flips origin to character_studio
+  // (so the asset leaves the Library) and re-anchors the character association
+  // without touching the curated references[] ("Approved set"). Refresh characters
+  // so any curated reference the move detached drops out of their panels too.
+  const moveAssetToCharacter = useCallback(
+    async (asset, characterId) => {
+      try {
+        const updated = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/move-to-character`, token, {
+          method: "POST",
+          body: JSON.stringify({ characterId }),
+        });
+        setAssets((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+        refreshCharactersRef.current?.(asset.projectId);
+        setError("");
+        return updated;
+      } catch (err) {
+        setError(err.message);
+        throw err;
+      }
+    },
+    [token],
+  );
+
   const deleteAsset = useCallback(
     async (asset) => {
       try {
@@ -1896,6 +1920,7 @@ export function App() {
     deleteAsset,
     purgeAsset,
     moveAssetToLibrary,
+    moveAssetToCharacter,
     importAsset,
     updateAssetStatus,
     updateAssetTags,
@@ -2026,7 +2051,7 @@ export function App() {
     activeProject, mediaAssets, openPreview, sendAssetToImage, sendAssetToVideo,
     activeTimeline, timelines, selectedTimelineId, setSelectedTimelineId, setActiveTimeline,
     createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
-    assets, selectedAsset, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, importAsset,
+    assets, selectedAsset, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobAction, createVqaJob, createInterleaveJob, createPlaceholderJob,
     jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects,

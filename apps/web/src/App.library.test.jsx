@@ -270,7 +270,9 @@ describe("SceneWorks app shell", () => {
   });
 
   it("moves a Library asset into a selected character's assets", async () => {
-    const addCharacterReference = vi.fn(async () => ({ id: "char-2", references: [] }));
+    // sc-10200: a TRUE move — the context action hits the move-to-character
+    // endpoint; no character reference (Approved set entry) is created.
+    const moveAssetToCharacter = vi.fn(async (asset) => ({ ...asset, origin: "character_studio" }));
     const asset = {
       id: "asset-portrait",
       projectId: "project-1",
@@ -290,7 +292,7 @@ describe("SceneWorks app shell", () => {
               { id: "char-1", name: "Mira", type: "person", references: [], approvedReferences: [], looks: [], loras: [] },
               { id: "char-2", name: "Dax", type: "person", references: [], approvedReferences: [], looks: [], loras: [] },
             ],
-            addCharacterReference,
+            moveAssetToCharacter,
             jobs: [],
             imageModels: [],
             createVqaJob: vi.fn(),
@@ -318,13 +320,8 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(addCharacterReference).toHaveBeenCalledWith("char-2", {
-      assetId: "asset-portrait",
-      approved: false,
-      role: "asset",
-      notes: "Added from Asset Library.",
-    });
-    expect(container.textContent).toContain("Added to Dax's assets.");
+    expect(moveAssetToCharacter).toHaveBeenCalledWith(asset, "char-2");
+    expect(container.textContent).toContain("Moved to Dax's assets.");
   });
 
   it("bulk-discards every selected Library asset to the Trash", async () => {
@@ -394,7 +391,8 @@ describe("SceneWorks app shell", () => {
   });
 
   it("bulk-moves selected Library assets into a chosen character's assets", async () => {
-    const addCharacterReference = vi.fn(async () => ({ id: "char-2", references: [] }));
+    // sc-10200: the batch Move is a TRUE move per asset — no Approved-set links.
+    const moveAssetToCharacter = vi.fn(async (asset) => ({ ...asset, origin: "character_studio" }));
     const assetA = {
       id: "asset-a",
       projectId: "project-1",
@@ -420,7 +418,7 @@ describe("SceneWorks app shell", () => {
               { id: "char-1", name: "Mira", type: "person", references: [], approvedReferences: [], looks: [], loras: [] },
               { id: "char-2", name: "Dax", type: "person", references: [], approvedReferences: [], looks: [], loras: [] },
             ],
-            addCharacterReference,
+            moveAssetToCharacter,
             jobs: [],
             imageModels: [],
             createVqaJob: vi.fn(),
@@ -461,24 +459,14 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(addCharacterReference).toHaveBeenCalledTimes(2);
-    expect(addCharacterReference).toHaveBeenCalledWith("char-2", {
-      assetId: "asset-a",
-      approved: false,
-      role: "asset",
-      notes: "Added from Asset Library.",
-    });
-    expect(addCharacterReference).toHaveBeenCalledWith("char-2", {
-      assetId: "asset-b",
-      approved: false,
-      role: "asset",
-      notes: "Added from Asset Library.",
-    });
+    expect(moveAssetToCharacter).toHaveBeenCalledTimes(2);
+    expect(moveAssetToCharacter).toHaveBeenCalledWith(assetA, "char-2");
+    expect(moveAssetToCharacter).toHaveBeenCalledWith(assetB, "char-2");
     expect(document.body.querySelector(".batch-selection-bar")).toBeNull();
   });
 
   it("disables the Library move action for a character that already owns the asset", async () => {
-    const addCharacterReference = vi.fn();
+    const moveAssetToCharacter = vi.fn();
     const asset = {
       id: "asset-portrait",
       projectId: "project-1",
@@ -505,7 +493,7 @@ describe("SceneWorks app shell", () => {
                 loras: [],
               },
             ],
-            addCharacterReference,
+            moveAssetToCharacter,
             jobs: [],
             imageModels: [],
             createVqaJob: vi.fn(),
@@ -533,7 +521,7 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       button.click();
     });
-    expect(addCharacterReference).not.toHaveBeenCalled();
+    expect(moveAssetToCharacter).not.toHaveBeenCalled();
   });
 
   it("excludes Character Studio outputs from the Asset Library (sc-2024)", async () => {
