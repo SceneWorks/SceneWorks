@@ -8,6 +8,8 @@ import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
+import { useLoraSelection } from "../components/LoraPickerField.jsx";
+import { MAX_JOB_LORAS_TOTAL } from "../presetUtils.js";
 import {
   BLEND_MODES,
   activeLayerOf,
@@ -607,6 +609,9 @@ export function ImageEditor() {
     editorLaunch = null,
     clearEditorLaunch,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
+    // Project LoRA catalog (sc-10254): fed to the AI Edit LoRA picker, gated to the
+    // edit model's compatible families.
+    loras = [],
     // Global theme (sc-10244): the redesign top-bar ☾/☀ toggle drives the app-wide
     // data-theme, not a screen-local override — consistent with the rest of the app.
     theme = "light",
@@ -747,6 +752,10 @@ export function ImageEditor() {
   // The chosen edit model + whether it accepts an inpaint mask (gates the mask tool).
   const selectedEditModel = editModels.find((model) => model.id === editModel) ?? null;
   const canMask = modelIsInpaintCapable(selectedEditModel);
+  // Style/subject LoRAs for the AI Edit tool (sc-10254). Same family-gated selection +
+  // serialization the studios use (useLoraSelection → serializeLora), threaded top-level
+  // into buildEditJobBody; the worker's edit streams apply them via resolve_adapters.
+  const editLoraSelection = useLoraSelection(loras, selectedEditModel);
   // Whether the edit model conditions on extra reference images (FLUX.2 multi-reference edit, sc-6107):
   // the manifest tags it `ui.multiReference`. Gates the reference picker; off-models hide it entirely.
   const multiRefCapable = Boolean(selectedEditModel?.ui?.multiReference);
@@ -2030,6 +2039,7 @@ export function ImageEditor() {
           width: outWidth,
           height: outHeight,
           fitMode,
+          loras: editLoraSelection.serializedLoras,
         }),
     });
   }
@@ -2659,6 +2669,63 @@ export function ImageEditor() {
     }
   };
 
+  const renderLoraSection = () => {
+    const { compatibleLoras, selectedLoraIds, toggleLora, weightFor, setWeight } = editLoraSelection;
+    const nextLora = compatibleLoras.find((lora) => !selectedLoraIds.includes(lora.id));
+    const addDisabled = !nextLora || selectedLoraIds.length >= MAX_JOB_LORAS_TOTAL;
+    return (
+      <div className="ie-section">
+        <div className="ie-sec-title">
+          LoRAs
+          <button
+            className="ie-btn sm ghost"
+            disabled={addDisabled}
+            onClick={() => nextLora && toggleLora(nextLora)}
+            style={{ height: "24px" }}
+            type="button"
+          >
+            + Add
+          </button>
+        </div>
+        {selectedLoraIds.length ? (
+          selectedLoraIds
+            .map((id) => compatibleLoras.find((lora) => lora.id === id))
+            .filter(Boolean)
+            .map((lora) => (
+              <div className="ie-lora" key={lora.id}>
+                <div className="ie-lora-top">
+                  <span className="ie-lora-name">{lora.name ?? lora.id}</span>
+                  <button className="ie-btn icon sm ghost" onClick={() => toggleLora(lora)} title="Remove" type="button">
+                    ✕
+                  </button>
+                </div>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label" style={{ fontSize: "11.5px", color: "var(--ie-muted)" }}>
+                      Weight
+                    </span>
+                    <span className="ie-field-val">{weightFor(lora).toFixed(2)}</span>
+                  </div>
+                  <input
+                    aria-label={`${lora.name ?? lora.id} weight`}
+                    className="ie-range"
+                    max={2}
+                    min={0}
+                    onChange={(event) => setWeight(lora.id, Number(event.target.value))}
+                    step={0.05}
+                    type="range"
+                    value={weightFor(lora)}
+                  />
+                </div>
+              </div>
+            ))
+        ) : (
+          <p className="ie-note">No LoRAs applied. Add a style or subject LoRA to steer the edit.</p>
+        )}
+      </div>
+    );
+  };
+
   const renderEditPanel = () => {
     if (editModels.length === 0) {
       return (
@@ -2690,6 +2757,8 @@ export function ImageEditor() {
             />
           </div>
         </div>
+
+        {editLoraSelection.compatibleLoras.length ? renderLoraSection() : null}
 
         <div className="ie-section">
           <div className="ie-sec-title">Output</div>
