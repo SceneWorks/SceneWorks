@@ -5107,11 +5107,35 @@
           "estimatedSizeBytes": 24197122980,
           "footprint": { "diskSizeBytes": 24197122980, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
+        // Windows/Linux candle quant matrix (sc-10027, epic 10043): the candle-native packed tiers
+        // (sc-10026) at SceneWorks/wan2.2-ti2v-5b-candle — q4 (default) / q8 subdirs the sc-10025
+        // packed-detect seam loads unchanged; bf16 stays the dense Wan-AI diffusers snapshot.
+        // estimatedSizeBytes/footprint are the built local subdir sizes (backfilled with exact hosted
+        // sizes if they differ).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-ti2v-5b-candle",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 17338835457,
+          "footprint": { "diskSizeBytes": 17338835457, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-ti2v-5b-candle",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 19837231673,
+          "footprint": { "diskSizeBytes": 19837231673, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
         {
           "provider": "huggingface",
           "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+          "variant": "bf16",
           "files": [],
-          "default": true,
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 34203021834
         }
@@ -5280,11 +5304,32 @@
           "estimatedSizeBytes": 69040469649,
           "footprint": { "diskSizeBytes": 69040469649, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
+        // Windows/Linux candle quant matrix (sc-10027, epic 10043): SceneWorks/wan2.2-t2v-a14b-candle
+        // (sc-10026) — q4 (default) / q8 packed dual-expert tiers; bf16 stays the dense Wan-AI snapshot.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-t2v-a14b-candle",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 29788704888,
+          "footprint": { "diskSizeBytes": 29788704888, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-t2v-a14b-candle",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 44071949832,
+          "footprint": { "diskSizeBytes": 44071949832, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
         {
           "provider": "huggingface",
           "repo": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+          "variant": "bf16",
           "files": [],
-          "default": true,
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 72000000000
         }
@@ -5452,11 +5497,32 @@
           "estimatedSizeBytes": 69042107982,
           "footprint": { "diskSizeBytes": 69042107982, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
+        // Windows/Linux candle quant matrix (sc-10027, epic 10043): SceneWorks/wan2.2-i2v-a14b-candle
+        // (sc-10026) — q4 (default) / q8 packed dual-expert tiers; bf16 stays the dense Wan-AI snapshot.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-i2v-a14b-candle",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 29792232225,
+          "footprint": { "diskSizeBytes": 29792232225, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-i2v-a14b-candle",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 44075477169,
+          "footprint": { "diskSizeBytes": 44075477169, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
         {
           "provider": "huggingface",
           "repo": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+          "variant": "bf16",
           "files": [],
-          "default": true,
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 72000000000
         }
