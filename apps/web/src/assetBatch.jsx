@@ -32,7 +32,7 @@ export function useAssetBatch() {
     imageModels = [],
     characters = [],
     deleteAsset,
-    addCharacterReference,
+    moveAssetToCharacter,
     moveAssetToLibrary,
     token = "",
     requestedGpu = "auto",
@@ -56,8 +56,8 @@ export function useAssetBatch() {
   const availableUpscaleEngines = UPSCALE_ENGINES.filter((engine) => !macUpscaleEngineBlocked(macCapabilities, engine.key));
   const editModels = editCapableModels(imageModels);
   const detailModels = detailCapableModels(imageModels);
-  // Move targets the same "Character Assets" link the per-asset panel uses (role "asset",
-  // unapproved) — NOT the character's reference images — so only link-capable media counts.
+  // Move targets a character's assets (true move, sc-10200) — NOT the character's
+  // curated reference set — so only move-capable media counts.
   const availableCharacters = characters.filter((character) => !character?.archived);
   const movableSelected = selectedAssetList.filter(assetSupportsCharacterLink);
 
@@ -140,13 +140,14 @@ export function useAssetBatch() {
     }
   }
 
-  // Fan out the move across every movable selection. The target is either the Main Asset
-  // Library (a true move — sc-8341) or a character (the per-asset link AssetDetail uses:
-  // role "asset", unapproved, library-member note).
+  // Fan out the move across every movable selection. Both targets are TRUE moves:
+  // the Main Asset Library (sc-8341) or a character's assets (sc-10200 — the asset
+  // leaves the Library and every other character; it is NOT added to the target's
+  // curated "Approved set").
   async function moveSelectedToCharacter() {
     if (!moveCharacterId || !movableSelected.length || bulkAction) return;
     const toLibrary = moveCharacterId === LIBRARY_MOVE_TARGET;
-    if (toLibrary ? !moveAssetToLibrary : !addCharacterReference) return;
+    if (toLibrary ? !moveAssetToLibrary : !moveAssetToCharacter) return;
     setBulkAction("move");
     try {
       for (const asset of movableSelected) {
@@ -154,15 +155,10 @@ export function useAssetBatch() {
           if (toLibrary) {
             await moveAssetToLibrary(asset);
           } else {
-            await addCharacterReference(moveCharacterId, {
-              assetId: asset.id,
-              approved: false,
-              role: "asset",
-              notes: "Added from Asset Library.",
-            });
+            await moveAssetToCharacter(asset, moveCharacterId);
           }
         } catch {
-          // One asset failing (e.g. already linked) shouldn't abort the rest.
+          // One asset failing (e.g. already moved) shouldn't abort the rest.
         }
       }
       clearSelection();

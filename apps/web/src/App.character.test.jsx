@@ -1441,6 +1441,74 @@ describe("SceneWorks app shell", () => {
     expect(document.body.querySelector(".batch-selection-bar")).toBeNull();
   });
 
+  it("bulk-moves selected character media into another character as a true move (sc-10200)", async () => {
+    const moveAssetToCharacter = vi.fn(async (asset) => ({ ...asset, origin: "character_studio" }));
+    const selectedCharacter = { id: "char-1", name: "Mira" };
+    const otherCharacter = { id: "char-2", name: "Dax" };
+    const assets = [
+      {
+        id: "ca-1",
+        type: "image",
+        projectId: "project-1",
+        displayName: "Shot A",
+        recipe: { normalizedSettings: { characterId: "char-1" } },
+        status: { trashed: false },
+      },
+    ];
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets,
+            characters: [selectedCharacter, otherCharacter],
+            deleteAsset: () => {},
+            moveAssetToCharacter,
+            moveAssetToLibrary: vi.fn(),
+            purgeAsset: () => {},
+            updateAssetStatus: () => {},
+            importAsset: () => {},
+            setPreviewAsset: () => {},
+            jobs: [],
+            imageModels: [],
+          },
+          <CharacterAssets
+            assets={assets}
+            deleteAsset={() => {}}
+            onPreview={vi.fn()}
+            projectId="project-1"
+            purgeAsset={() => {}}
+            selectedCharacter={selectedCharacter}
+            updateAssetStatus={() => {}}
+          />,
+        ),
+      );
+    });
+    await settle();
+
+    await act(async () => {
+      document.body.querySelector('input[aria-label="Select Shot A"]').click();
+    });
+    await settle();
+
+    await act(async () => {
+      [...document.body.querySelectorAll(".batch-selection-bar button")].find((button) => button.textContent === "Move").click();
+    });
+    await settle();
+    await changeField(document.body.querySelector('select[aria-label="Move target"]'), "char-2");
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent?.startsWith("Move 1 to assets")).click();
+    });
+    await settle();
+
+    // The move endpoint is hit per asset; no character reference (Approved-set
+    // entry) is created for the target.
+    expect(moveAssetToCharacter).toHaveBeenCalledTimes(1);
+    expect(moveAssetToCharacter).toHaveBeenCalledWith(assets[0], "char-2");
+    expect(document.body.querySelector(".batch-selection-bar")).toBeNull();
+  });
+
   it("lists a character's associated datasets and opens one (sc-2022)", async () => {
     const onOpenDataset = vi.fn();
     const onCreateDataset = vi.fn();

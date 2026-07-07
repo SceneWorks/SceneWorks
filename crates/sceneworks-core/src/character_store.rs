@@ -1256,7 +1256,20 @@ fn update_asset_character_link(
         .and_then(|value| value.as_array().cloned())
         .unwrap_or_default()
         .into_iter()
-        .filter(|item| item.get("characterId").and_then(Value::as_str) != Some(character_id))
+        .filter(|item| {
+            if item.get("characterId").and_then(Value::as_str) != Some(character_id) {
+                return true;
+            }
+            // Only rebuild this function's own mirror entries. A "library-move"
+            // anchor (move_asset_to_character, sc-10200) must survive curated
+            // reference add/remove cycles — dropping it would orphan the moved
+            // asset (origin `character_studio`, no character association left).
+            // Entries without a `source` predate the distinction and were all
+            // written here, so they count as sidecar-managed.
+            item.get("source")
+                .and_then(Value::as_str)
+                .is_some_and(|source| source != "character-sidecar")
+        })
         .collect::<Vec<_>>();
     if !remove {
         links.push(json!({

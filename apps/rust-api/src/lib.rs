@@ -89,9 +89,9 @@ mod projects;
 use projects::{create_project, get_project, list_projects, reindex_project_endpoint};
 mod assets;
 use assets::{
-    delete_asset, get_asset, import_asset, list_assets, move_asset_to_library, purge_asset,
-    sweep_stale_asset_uploads, update_asset_status, update_asset_tags, write_upload_field_to_dir,
-    write_upload_field_to_temp_file,
+    delete_asset, get_asset, import_asset, list_assets, move_asset_to_character,
+    move_asset_to_library, purge_asset, sweep_stale_asset_uploads, update_asset_status,
+    update_asset_tags, write_upload_field_to_dir, write_upload_field_to_temp_file,
 };
 // Test-only crate-root imports: the `tests` module reaches these helpers via
 // `super::` (either `use super::{...}` or a fully-qualified `super::fn(...)` call).
@@ -854,6 +854,10 @@ pub(crate) fn create_app_with_state(
         .route(
             "/api/v1/projects/:project_id/assets/:asset_id/move-to-library",
             post(move_asset_to_library),
+        )
+        .route(
+            "/api/v1/projects/:project_id/assets/:asset_id/move-to-character",
+            post(move_asset_to_character),
         )
         .route(
             "/api/v1/projects/:project_id/assets/:asset_id/status",

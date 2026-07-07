@@ -254,9 +254,9 @@ function CharacterAssetLinker({ asset, characters = [], onMoveToCharacter }) {
     setMessage("");
     try {
       await onMoveToCharacter(asset, selectedCharacter.id);
-      setMessage(`Added to ${selectedCharacter.name}'s assets.`);
+      setMessage(`Moved to ${selectedCharacter.name}'s assets.`);
     } catch (err) {
-      setMessage(err?.message ?? "Could not add this asset to the character.");
+      setMessage(err?.message ?? "Could not move this asset to the character.");
     } finally {
       setMoving(false);
     }
