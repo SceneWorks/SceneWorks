@@ -31,8 +31,8 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, ProgressNotificationParam, ProgressToken, Resource,
-        ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, Extensions, ProgressNotificationParam, ProgressToken,
+        Resource, ServerCapabilities, ServerInfo,
     },
     schemars,
     service::{RequestContext, RoleServer},
@@ -524,6 +524,7 @@ impl SceneWorksMcp {
     async fn get_job_result(
         &self,
         Parameters(args): Parameters<JobIdArgs>,
+        extensions: Extensions,
     ) -> Result<CallToolResult, ErrorData> {
         let job_id = valid_job_id(&args.job_id)
             .map_err(|message| ErrorData::invalid_params(message, None))?;
@@ -611,6 +612,20 @@ impl SceneWorksMcp {
         };
         let expires_in_seconds = ticket_response.get("expiresInSeconds").cloned();
 
+        // Absolute URL base for the ticket links (sc-10290). `/mcp` and `/api/v1`
+        // are the SAME axum app, so the host the client used to reach `/mcp` is
+        // exactly the host that serves the media — derive it from the incoming
+        // request so the URL is reachable by THIS client regardless of how
+        // `SCENEWORKS_API_URL` is configured (e.g. a loopback-default desktop
+        // answering a LAN client). Falls back to the configured API base when the
+        // request parts / Host aren't available. The Host is only reflected back to
+        // the caller that supplied it (never stored / shown to other users), and
+        // `/mcp` is already gated by access_control, so reflecting it is safe.
+        let link_base = extensions
+            .get::<http::request::Parts>()
+            .and_then(|parts| request_base_url(&parts.headers, &parts.uri))
+            .unwrap_or_else(|| self.api.base_url().to_owned());
+
         let mut blocks = Vec::with_capacity(assets.len() + 1);
         let mut summary_assets = Vec::with_capacity(assets.len());
         for (asset, media_path) in assets {
@@ -618,7 +633,7 @@ impl SceneWorksMcp {
                 "/api/v1/projects/{project_id}/files/{}?ticket={ticket}",
                 encode_media_path(&media_path)
             );
-            let url = format!("{}{relative_url}", self.api.base_url());
+            let url = format!("{link_base}{relative_url}");
             let mime_type = media_mime_type(
                 &media_path,
                 asset.pointer("/file/mimeType").and_then(Value::as_str),
@@ -654,11 +669,11 @@ impl SceneWorksMcp {
             "ticketExpiresInSeconds": expires_in_seconds,
             "note": format!(
                 "Each url embeds a short-lived media ticket — download promptly \
-                 (call get_job_result again for fresh links). The urls use the \
-                 SceneWorks API base \"{}\"; if that host is not reachable from \
-                 your machine, apply relativeUrl to the base you use to reach \
-                 this MCP server (everything before /mcp).",
-                self.api.base_url()
+                 (call get_job_result again for fresh links). The urls use the base \
+                 \"{link_base}\" (derived from the host you used to reach this MCP \
+                 server, so they should be directly fetchable); if that base is not \
+                 reachable, apply relativeUrl to the base you use to reach /mcp \
+                 (everything before /mcp)."
             ),
         }))?);
         Ok(CallToolResult::success(blocks))
@@ -1009,6 +1024,43 @@ pub(crate) fn media_mime_type(path: &str, sidecar_mime: Option<&str>) -> Option<
         _ => return None,
     };
     Some(mime.to_owned())
+}
+
+/// The absolute base (`scheme://authority`) a returned ticket URL should use so
+/// the CALLING client can fetch it (sc-10290): prefer what the client actually
+/// used to reach `/mcp` — `X-Forwarded-Host` then `Host` for the authority (with
+/// the request-target authority as a last resort), and `X-Forwarded-Proto` then
+/// the request scheme (default `http`) for the scheme. Returns `None` when no
+/// authority is available, so the caller falls back to the configured API base.
+pub(crate) fn request_base_url(headers: &http::HeaderMap, uri: &http::Uri) -> Option<String> {
+    let raw_authority = header_str(headers, "x-forwarded-host")
+        .or_else(|| header_str(headers, "host"))
+        .or_else(|| uri.authority().map(http::uri::Authority::as_str))?;
+    let authority = first_csv(raw_authority);
+    if authority.is_empty() {
+        return None;
+    }
+    let scheme = header_str(headers, "x-forwarded-proto")
+        .or_else(|| uri.scheme_str())
+        .map(first_csv)
+        .filter(|scheme| !scheme.is_empty())
+        .unwrap_or("http");
+    Some(format!("{scheme}://{authority}"))
+}
+
+/// A request header as a trimmed, non-empty `&str` (ASCII values only).
+fn header_str<'a>(headers: &'a http::HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// The first entry of a possibly comma-separated forwarded header, trimmed — a
+/// proxy chain sets e.g. `X-Forwarded-Host: client-host, inner-host`.
+fn first_csv(value: &str) -> &str {
+    value.split(',').next().unwrap_or(value).trim()
 }
 
 /// Keep an asset for the inline result: image-typed (or untyped legacy) records.
@@ -1698,6 +1750,34 @@ mod tests {
         assert!(valid_job_id("../secrets").is_err());
         assert!(valid_job_id("job_1?x=1").is_err());
         assert!(valid_job_id("job 1").is_err());
+    }
+
+    #[test]
+    fn request_base_url_prefers_forwarded_then_host_then_none() {
+        use http::{HeaderMap, HeaderValue, Uri};
+        let uri: Uri = "/mcp".parse().unwrap();
+
+        // A plain Host header → http scheme by default.
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("192.168.4.97:8000"));
+        assert_eq!(
+            request_base_url(&headers, &uri).as_deref(),
+            Some("http://192.168.4.97:8000")
+        );
+
+        // Reverse-proxy headers win, and only the first CSV entry is used.
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("studio.example.com, inner:8000"),
+        );
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        assert_eq!(
+            request_base_url(&headers, &uri).as_deref(),
+            Some("https://studio.example.com")
+        );
+
+        // No authority anywhere → None so the caller keeps the configured base.
+        assert_eq!(request_base_url(&HeaderMap::new(), &uri), None);
     }
 
     #[test]

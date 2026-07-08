@@ -54,34 +54,33 @@ All knobs are on the API process (`Settings::from_env` in
 | `SCENEWORKS_API_HOST` | `127.0.0.1` | Bind address. Loopback by default — set `0.0.0.0` to serve the LAN. |
 | `SCENEWORKS_API_PORT` | `8000` | Bind port (Docker Compose publishes `8010` by default). |
 | `SCENEWORKS_ACCESS_TOKEN` | *(empty)* | The access token. Empty = auth off (loopback-only use). Required in practice for any non-loopback bind (see the open-bind guard). |
-| `SCENEWORKS_API_URL` | `http://127.0.0.1:<port>` | Base URL the MCP server uses to call back into its own API **and the base of the absolute ticketed URLs `get_job_result` returns**. LAN deployments must set this to the LAN-reachable base — see below. |
+| `SCENEWORKS_API_URL` | derived from bind host/port | Base URL the MCP server uses to call back into its own API, and the **fallback** base for `get_job_result`'s ticket URLs (which now default to the incoming request's `Host` — see below). Defaults to the bound interface (`sc-10260`); override for reverse-proxy/container setups. |
 | `SCENEWORKS_TRUST_LOOPBACK` | off | `1`/`true` = requests from `127.0.0.1`/`::1` bypass the token. The desktop sets it; never set it behind a reverse proxy or on a shared multi-user machine. |
 | `SCENEWORKS_ALLOW_OPEN_BIND` | off | `1`/`true`/`yes` = allow a non-loopback bind with **no** token (the API refuses to start otherwise). Only for fully trusted networks. |
 | `SCENEWORKS_MCP_JOB_POLL_INTERVAL` | `1` | Seconds between status polls for the blocking `generate_image` tool. A zero value falls back to the default. |
 | `SCENEWORKS_MCP_JOB_TIMEOUT` | `1800` | Seconds the blocking `generate_image` tool waits for a job before returning a timeout error (the job itself keeps running / is not canceled). Clamped to ≥ the poll interval. |
 
-### `SCENEWORKS_API_URL` on the LAN — read this
+### `SCENEWORKS_API_URL` on the LAN
 
-Two things derive from `SCENEWORKS_API_URL` (`Settings.mcp_api_url`):
-
-1. the MCP tools' outbound self-calls into `/api/v1/*`, and
-2. the **absolute URLs** in `get_job_result`'s download links.
-
-It defaults to `http://127.0.0.1:<port>`, which is correct for self-calls but
-useless to a remote client: without an override, `get_job_result` hands a LAN
-caller `http://127.0.0.1:8000/...` links that only resolve on the server
-itself. **When serving the LAN, set `SCENEWORKS_API_URL` to the base your
-clients can reach**, e.g.:
+`SCENEWORKS_API_URL` (`Settings.mcp_api_url`) is the base for the MCP tools'
+outbound self-calls into `/api/v1/*`. When unset it is derived from the bind
+host/port: a wildcard/loopback bind self-dials `127.0.0.1`, and a specific
+interface bind (e.g. `SCENEWORKS_API_HOST=192.168.4.97`) self-dials that
+interface (sc-10260). Override it only for reverse-proxy / container setups
+where the process cannot reach its own `/api/v1` at the bound address:
 
 ```text
 SCENEWORKS_API_URL=http://192.168.4.97:8000
 ```
 
-Each result asset also carries a `relativeUrl`, and the result's `note` says to
-re-base it onto whatever base you use to reach the MCP server (everything
-before `/mcp`) — so a mis-set base is recoverable client-side, just annoying.
-Deriving ticket URLs from the request's `Host` header instead is filed as
-sc-10290.
+**Ticket download URLs** (`get_job_result`) no longer depend on this variable:
+because `/mcp` and `/api/v1` are the same app, the absolute URL host is derived
+per-request from the `Host` (or `X-Forwarded-Host`/`-Proto`) the client used to
+reach `/mcp`, so it is reachable by that client regardless of `SCENEWORKS_API_URL`
+(sc-10290). `SCENEWORKS_API_URL` (or the loopback default) is only the fallback
+when the request carries no usable Host. Each asset also carries a `relativeUrl`,
+and the result `note` says to re-base it onto whatever host reaches `/mcp`, so an
+edge case is still recoverable client-side.
 
 ## Security posture for LAN exposure
 
@@ -289,18 +288,18 @@ Expected failure modes: no/wrong token → `401` with
    links). If the absolute URL host is not reachable from your machine, apply
    `relativeUrl` to the base you use to reach the MCP server.
 
-## Known limitations (filed follow-ups)
+## Known limitations
 
-- Absolute ticket URLs come from `SCENEWORKS_API_URL`, not the request's Host
-  header (sc-10290) — set the variable correctly on LAN deployments.
-- Cancelling the MCP call does not cancel the underlying SceneWorks job
-  (sc-10276): a cancelled `generate_image` keeps rendering server-side.
-- The blocking-wait poll interval/deadline are not operator-configurable yet
-  (sc-10277).
-- With `SCENEWORKS_API_HOST` set to a specific non-loopback interface IP and
-  no `SCENEWORKS_API_URL`, the MCP self-calls still default to loopback, which
-  works only when the listener also answers on loopback (sc-10260) — set
-  `SCENEWORKS_API_URL` explicitly in that configuration.
+- End-to-end validation from a physically separate second machine on the LAN
+  (true NIC-to-NIC + Windows Defender Firewall traversal) is still outstanding
+  (sc-10301); the validation record below was run against the host's own LAN IP,
+  which exercises the auth/throttle/ticket paths but not separate-hardware
+  reachability.
+
+Earlier follow-ups filed during epic execution are now resolved: ticket URLs
+derive from the request Host (sc-10290), MCP-call cancellation propagates to the
+job (sc-10276), the blocking-wait poll interval/deadline are operator-configurable
+(sc-10277), and the self-call base auto-derives from the bound interface (sc-10260).
 
 ## Validation record
 
