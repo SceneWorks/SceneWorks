@@ -37,6 +37,15 @@ use crate::setup::{app_support_dir, emit};
 /// marker already equals this string skips the download entirely.
 const REDIST_VERSION: &str = "cuda12.9-ort1.26.0-cudnn9.23-1";
 
+/// `SCENEWORKS_GPU_RUNTIME_DIR` — an optional pre-extracted redist dir to install from
+/// instead of downloading (sc-10354, offline install). It mirrors the provisioned
+/// root's layout: a `cuda\` + `onnxruntime\` pair of subdirs holding the extracted
+/// DLLs (e.g. a copy of another machine's `%APPDATA%\SceneWorks\gpu-runtime`, or a
+/// bundle staged per the offline-install guide). When set, `provision` copies it into
+/// place and skips the multi-GB PyPI download entirely, so a disconnected machine can
+/// complete first run. See `docs/offline-install.md`.
+const GPU_RUNTIME_DIR_ENV: &str = "SCENEWORKS_GPU_RUNTIME_DIR";
+
 /// Which provisioned subdir a component's DLLs land in. `Cuda` is the cudarc +
 /// onnxruntime CUDA-dep dir (cudart/cublas/curand/nvrtc + cuDNN/cuFFT/nvJitLink);
 /// `Onnxruntime` holds onnxruntime's own three DLLs.
@@ -192,6 +201,131 @@ fn already_provisioned(root: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// One sentinel per pinned CUDA component whose presence in the `cuda\` dir marks a
+/// complete CUDA redist. Matched case-insensitively by *prefix* so a CUDA point-release
+/// (`cudart64_12` → `cudart64_13`) still resolves — the version-agnostic match the
+/// sc-5560 bundling resolver used. `cublasLt` ships inside the cuBLAS wheel, so
+/// `cublas64_` covers it.
+const CUDA_DLL_SENTINELS: &[&str] = &[
+    "cudart64_", // CUDA runtime
+    "cublas64_", // cuBLAS (+ cublasLt)
+    "curand64_", // cuRAND
+    "nvrtc64_",  // NVRTC
+    "cudnn64_",  // cuDNN
+    "cufft64_",  // cuFFT
+    "nvjitlink", // nvJitLink (nvJitLink_120_0.dll)
+];
+
+/// The three onnxruntime DLLs the worker dlopens — exact names (no version suffix).
+const ORT_DLL_SENTINELS: &[&str] = &[
+    "onnxruntime.dll",
+    "onnxruntime_providers_cuda.dll",
+    "onnxruntime_providers_shared.dll",
+];
+
+/// True when `dir` holds a `*.dll` matching `needle`: an exact filename check when
+/// `needle` ends in `.dll`, else a case-insensitive prefix match (version-agnostic).
+fn dir_has_dll(dir: &Path, needle: &str) -> bool {
+    if needle.ends_with(".dll") {
+        return dir.join(needle).is_file();
+    }
+    let needle = needle.to_ascii_lowercase();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .map(|name| {
+                let name = name.to_ascii_lowercase();
+                name.starts_with(&needle) && name.ends_with(".dll")
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// True when both provisioned dirs hold the full sentinel set — i.e. a pre-staged redist
+/// is complete enough to run without downloading. Deliberately stricter than the single-
+/// DLL `*_if_present` resolver probes (which only gate the candle lane): a partial stage
+/// that passed a one-DLL probe but was missing cuDNN/nvJitLink would hard-fail at load.
+fn is_staged_complete(cuda: &Path, ort: &Path) -> bool {
+    CUDA_DLL_SENTINELS.iter().all(|dll| dir_has_dll(cuda, dll))
+        && ORT_DLL_SENTINELS.iter().all(|dll| dir_has_dll(ort, dll))
+}
+
+/// Copy every `*.dll` from `src` into `dst` (flat). Returns how many were copied. Used
+/// to install a pre-staged redist subdir into the provisioned location.
+fn copy_dlls(src: &Path, dst: &Path) -> Result<usize, String> {
+    fs::create_dir_all(dst).map_err(|error| format!("create {}: {error}", dst.display()))?;
+    let mut copied = 0usize;
+    for entry in fs::read_dir(src).map_err(|error| format!("read {}: {error}", src.display()))? {
+        let entry = entry.map_err(|error| format!("read {}: {error}", src.display()))?;
+        let path = entry.path();
+        let is_dll = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("dll"))
+            .unwrap_or(false);
+        if !is_dll || !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        fs::copy(&path, dst.join(name))
+            .map_err(|error| format!("copy {}: {error}", name.to_string_lossy()))?;
+        copied += 1;
+    }
+    Ok(copied)
+}
+
+/// Install a pre-extracted redist from `source` (a `cuda\` + `onnxruntime\` pair) into
+/// the provisioned dirs by copying every DLL across, then verify the full sentinel set
+/// landed. Errors clearly if the expected subdirs/DLLs are missing so a mis-staged
+/// override doesn't masquerade as success (and silently leave the candle lane broken).
+fn install_from_staged(source: &Path, cuda: &Path, ort: &Path) -> Result<(), String> {
+    if !source.is_dir() {
+        return Err(format!(
+            "{GPU_RUNTIME_DIR_ENV} points at a missing directory: {}",
+            source.display()
+        ));
+    }
+    let src_cuda = source.join("cuda");
+    let src_ort = source.join("onnxruntime");
+    if !src_cuda.is_dir() || !src_ort.is_dir() {
+        return Err(format!(
+            "{GPU_RUNTIME_DIR_ENV} ({}) must contain `cuda` and `onnxruntime` subdirectories of \
+             extracted DLLs — see docs/offline-install.md",
+            source.display()
+        ));
+    }
+    let copied_cuda = copy_dlls(&src_cuda, cuda)?;
+    let copied_ort = copy_dlls(&src_ort, ort)?;
+    if copied_cuda == 0 || copied_ort == 0 {
+        return Err(format!(
+            "{GPU_RUNTIME_DIR_ENV} ({}) had no DLLs to install (cuda: {copied_cuda}, \
+             onnxruntime: {copied_ort})",
+            source.display()
+        ));
+    }
+    if !is_staged_complete(cuda, ort) {
+        return Err(format!(
+            "pre-staged GPU runtime from {} is incomplete — one or more required CUDA/onnxruntime \
+             DLLs are missing; see docs/offline-install.md for the full redist set",
+            source.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Write the success marker so a fully provisioned root short-circuits `already_provisioned`
+/// on later launches.
+fn write_marker(root: &Path) -> Result<(), String> {
+    fs::write(root.join(".redist-marker"), REDIST_VERSION)
+        .map_err(|error| format!("write marker: {error}"))
+}
+
 /// Hex-encode a sha256 digest for comparison against the pinned value.
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -326,6 +460,48 @@ pub(crate) async fn provision(app: &AppHandle) -> Result<(), String> {
     for dir in [&cuda, &ort] {
         fs::create_dir_all(dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
     }
+
+    // Offline install (sc-10354): if the redist is pre-staged, skip the multi-GB PyPI
+    // download entirely so a disconnected machine can complete first run.
+    //
+    // 1. Explicit override — `SCENEWORKS_GPU_RUNTIME_DIR` points at a pre-extracted
+    //    redist (a `cuda\` + `onnxruntime\` pair). Honor it or fail clearly: a typo'd
+    //    path silently downloading 2.7 GB — or failing offline with a generic error —
+    //    would be baffling on an air-gapped box, so `install_from_staged` errors on a
+    //    missing/incomplete source rather than falling through to the network.
+    if let Ok(value) = std::env::var(GPU_RUNTIME_DIR_ENV) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            let source = PathBuf::from(trimmed);
+            emit(
+                app,
+                "provision",
+                format!(
+                    "Installing pre-staged GPU runtime from {}…",
+                    source.display()
+                ),
+                false,
+            );
+            install_from_staged(&source, &cuda, &ort)?;
+            write_marker(&root)?;
+            emit(app, "provision", "GPU runtime ready (pre-staged).", false);
+            return Ok(());
+        }
+    }
+
+    // 2. Implicit — a user (or a prior install) already populated the target dirs with
+    //    the full DLL set. Adopt them as-is; no network.
+    if is_staged_complete(&cuda, &ort) {
+        write_marker(&root)?;
+        emit(
+            app,
+            "provision",
+            "Found a pre-staged GPU runtime; skipping download.",
+            false,
+        );
+        return Ok(());
+    }
+
     let tmp_dir = root.join(".download-tmp");
     fs::create_dir_all(&tmp_dir).map_err(|error| format!("create temp dir: {error}"))?;
 
@@ -383,8 +559,7 @@ pub(crate) async fn provision(app: &AppHandle) -> Result<(), String> {
     outcome?;
 
     // Mark success last so a partial/aborted run re-provisions next launch.
-    fs::write(root.join(".redist-marker"), REDIST_VERSION)
-        .map_err(|error| format!("write marker: {error}"))?;
+    write_marker(&root)?;
     emit(app, "provision", "GPU runtime ready.", false);
     Ok(())
 }
@@ -423,6 +598,135 @@ mod tests {
                 "{}: sha256 must be lowercase hex",
                 component.label
             );
+        }
+    }
+
+    /// A fresh, unique temp dir for a test (offline; cleaned by the caller).
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sw-offline-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create scratch");
+        dir
+    }
+
+    /// Drop empty files named `names` into `dir` (stand-ins for the real DLLs).
+    fn touch(dir: &Path, names: &[&str]) {
+        fs::create_dir_all(dir).expect("create dir");
+        for name in names {
+            fs::write(dir.join(name), b"").expect("touch dll");
+        }
+    }
+
+    /// The DLL basenames a complete stage carries (mirrors what the wheels extract):
+    /// versioned CUDA libs + the three exact-named onnxruntime DLLs.
+    const STAGED_CUDA_DLLS: &[&str] = &[
+        "cudart64_12.dll",
+        "cublas64_12.dll",
+        "cublasLt64_12.dll",
+        "curand64_10.dll",
+        "nvrtc64_120_0.dll",
+        "cudnn64_9.dll",
+        "cufft64_11.dll",
+        "nvJitLink_120_0.dll",
+    ];
+    const STAGED_ORT_DLLS: &[&str] = &[
+        "onnxruntime.dll",
+        "onnxruntime_providers_cuda.dll",
+        "onnxruntime_providers_shared.dll",
+    ];
+
+    /// `dir_has_dll` matches exact `.dll` names directly and everything else by
+    /// case-insensitive prefix (so a CUDA point-release still resolves).
+    #[test]
+    fn dir_has_dll_exact_and_prefix() {
+        let dir = scratch("has-dll");
+        touch(&dir, &["cudart64_13.dll", "onnxruntime.dll", "notes.txt"]);
+
+        // Exact name (ends in .dll).
+        assert!(dir_has_dll(&dir, "onnxruntime.dll"));
+        assert!(!dir_has_dll(&dir, "onnxruntime_providers_cuda.dll"));
+        // Version-agnostic prefix: a 13.x cudart still satisfies the `cudart64_` sentinel.
+        assert!(dir_has_dll(&dir, "cudart64_"));
+        // Case-insensitive.
+        assert!(dir_has_dll(&dir, "CUDART64_"));
+        // Absent component.
+        assert!(!dir_has_dll(&dir, "cudnn64_"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `is_staged_complete` requires the FULL sentinel set in both dirs — a stage
+    /// missing even one component (here cuDNN) is rejected, unlike the one-DLL probes.
+    #[test]
+    fn is_staged_complete_requires_full_set() {
+        let root = scratch("complete");
+        let cuda = root.join("cuda");
+        let ort = root.join("onnxruntime");
+        touch(&cuda, STAGED_CUDA_DLLS);
+        touch(&ort, STAGED_ORT_DLLS);
+        assert!(is_staged_complete(&cuda, &ort));
+
+        // Remove cuDNN — a one-DLL `cudart64_12` probe would still pass, but the full
+        // completeness check must not.
+        fs::remove_file(cuda.join("cudnn64_9.dll")).expect("rm cudnn");
+        assert!(cuda.join("cudart64_12.dll").is_file());
+        assert!(!is_staged_complete(&cuda, &ort));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `install_from_staged` copies a well-formed `cuda\` + `onnxruntime\` source into
+    /// the provisioned dirs and reports complete.
+    #[test]
+    fn install_from_staged_copies_full_set() {
+        let src = scratch("stage-src");
+        touch(&src.join("cuda"), STAGED_CUDA_DLLS);
+        touch(&src.join("onnxruntime"), STAGED_ORT_DLLS);
+
+        let dest = scratch("stage-dest");
+        let cuda = dest.join("cuda");
+        let ort = dest.join("onnxruntime");
+
+        install_from_staged(&src, &cuda, &ort).expect("install succeeds");
+        assert!(cuda.join("cudart64_12.dll").is_file());
+        assert!(ort.join("onnxruntime_providers_cuda.dll").is_file());
+        assert!(is_staged_complete(&cuda, &ort));
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// A source missing the `cuda\`/`onnxruntime\` subdirs, or missing a component, is
+    /// rejected with an actionable error rather than a silent partial install.
+    #[test]
+    fn install_from_staged_rejects_bad_source() {
+        // No cuda/onnxruntime subdirs at all.
+        let flat = scratch("stage-flat");
+        touch(&flat, STAGED_CUDA_DLLS);
+        let dest = scratch("stage-flat-dest");
+        let error = install_from_staged(&flat, &dest.join("cuda"), &dest.join("onnxruntime"))
+            .expect_err("must reject a source without cuda/onnxruntime subdirs");
+        assert!(
+            error.contains("subdirectories"),
+            "unexpected error: {error}"
+        );
+
+        // Subdirs present but incomplete (cuDNN missing).
+        let partial = scratch("stage-partial");
+        let incomplete: Vec<&str> = STAGED_CUDA_DLLS
+            .iter()
+            .copied()
+            .filter(|dll| *dll != "cudnn64_9.dll")
+            .collect();
+        touch(&partial.join("cuda"), &incomplete);
+        touch(&partial.join("onnxruntime"), STAGED_ORT_DLLS);
+        let dest2 = scratch("stage-partial-dest");
+        let error = install_from_staged(&partial, &dest2.join("cuda"), &dest2.join("onnxruntime"))
+            .expect_err("must reject an incomplete source");
+        assert!(error.contains("incomplete"), "unexpected error: {error}");
+
+        for dir in [&flat, &dest, &partial, &dest2] {
+            let _ = fs::remove_dir_all(dir);
         }
     }
 

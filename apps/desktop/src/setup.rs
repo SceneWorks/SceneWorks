@@ -1611,7 +1611,11 @@ async fn run_startup(app: AppHandle) {
         emit(
             &app,
             "error",
-            format!("GPU runtime download failed: {error}"),
+            format!(
+                "GPU runtime setup failed: {error}. To install on a disconnected machine, \
+                 pre-stage the runtime and set SCENEWORKS_GPU_RUNTIME_DIR — see \
+                 docs/offline-install.md."
+            ),
             true,
         );
         return;
