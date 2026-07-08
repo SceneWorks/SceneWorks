@@ -1,9 +1,11 @@
 import React, { useState } from "react";
 import { apiFetch } from "./api.js";
 import { batchEligibleAssets, batchItemStatus, buildBatchJob, summarizeBatchProgress } from "./batchOps.js";
+import { upscaledFromAssetId } from "./assetVariants.js";
 import { assetSupportsCharacterLink } from "./components/assetPanels.jsx";
 import { assetUrl } from "./components/assetMedia.jsx";
 import { BatchOperationsPanel } from "./components/BatchOperationsPanel.jsx";
+import { Modal } from "./components/Modal.jsx";
 import { useAppContextOptional } from "./context/AppContext.js";
 import { detailCapableModels, editCapableModels, UPSCALE_ENGINES } from "./imageJobs.js";
 import { DEFAULT_MAC_CAPABILITIES, macUpscaleEngineBlocked } from "./macGating.js";
@@ -46,6 +48,10 @@ export function useAssetBatch() {
   // Bulk Discard / Move-to-character on the current selection. `bulkAction` gates the
   // buttons while a fan-out is in flight; `moveOpen` reveals the inline character picker.
   const [bulkAction, setBulkAction] = useState(null);
+  // When a discard selection contains folded upscales, hold the pending choice here:
+  // { targets: Asset[] (the selection snapshot), sources: Asset[] (their source originals) }.
+  // Non-null drives the DiscardUpscaledDialog; the user picks both / upscaled-only / cancel.
+  const [discardPrompt, setDiscardPrompt] = useState(null);
   const [moveOpen, setMoveOpen] = useState(false);
   const [moveCharacterId, setMoveCharacterId] = useState("");
 
@@ -126,18 +132,66 @@ export function useAssetBatch() {
     }
   }
 
-  // Send every selected asset to the Trash (reversible — the backend just flags `trashed`).
+  // Send the current selection to the Trash (reversible — the backend just flags `trashed`).
+  // Selected tiles are the folded upscale representatives (foldUpscaledAssetVariants keeps the
+  // upscaled asset as the tile and hides its source original), so trashing the selection alone
+  // leaves each source behind — the user then has to re-select everything. When any selected
+  // tile is an upscale whose source original is still present, confirm first whether to also
+  // discard those originals; a selection with no such tiles trashes immediately as before (sc-10340).
   async function discardSelected() {
     if (!selectedAssetList.length || bulkAction) return;
+    const byId = new Map(assets.map((asset) => [asset.id, asset]));
+    const sources = [];
+    const seenSourceIds = new Set();
+    for (const asset of selectedAssetList) {
+      const sourceId = upscaledFromAssetId(asset);
+      const source = sourceId ? byId.get(sourceId) : null;
+      // deleteAsset only flags `trashed` (the asset stays in `assets`), so a source that was
+      // already discarded on its own still resolves here — skip those (and missing ones):
+      // there's nothing new to trash, and offering it would fire a redundant delete.
+      if (source && !source.status?.trashed && !seenSourceIds.has(sourceId)) {
+        seenSourceIds.add(sourceId);
+        sources.push(source);
+      }
+    }
+    if (sources.length) {
+      // Snapshot the selection + resolved originals; DiscardUpscaledDialog drives the choice.
+      setDiscardPrompt({ targets: selectedAssetList, sources });
+      return;
+    }
+    await performDiscard(selectedAssetList, []);
+  }
+
+  // Trash `targets` plus any `sources`, de-duped by id (a source that is also directly
+  // selected must not be deleted twice), then clear the selection.
+  async function performDiscard(targets, sources) {
+    if (bulkAction) return;
     setBulkAction("discard");
     try {
-      for (const asset of selectedAssetList) {
+      const toDelete = new Map();
+      for (const asset of targets) toDelete.set(asset.id, asset);
+      for (const asset of sources) toDelete.set(asset.id, asset);
+      for (const asset of toDelete.values()) {
         await deleteAsset?.(asset);
       }
       clearSelection();
     } finally {
       setBulkAction(null);
     }
+  }
+
+  // Resolve an open discard prompt: `includeSources` trashes the source originals too;
+  // otherwise only the selected (upscaled) tiles are trashed.
+  function resolveDiscardPrompt(includeSources) {
+    const pending = discardPrompt;
+    setDiscardPrompt(null);
+    if (pending) {
+      performDiscard(pending.targets, includeSources ? pending.sources : []);
+    }
+  }
+
+  function cancelDiscard() {
+    setDiscardPrompt(null);
   }
 
   // Fan out the move across every movable selection. Both targets are TRUE moves:
@@ -184,6 +238,9 @@ export function useAssetBatch() {
     closeBatch,
     bulkAction,
     discardSelected,
+    discardPrompt,
+    resolveDiscardPrompt,
+    cancelDiscard,
     moveSelectedToCharacter,
     moveOpen,
     setMoveOpen,
@@ -208,6 +265,9 @@ export function AssetSelectionBar({ batch, showDiscard = true, allowLibraryTarge
     setBatchOpen,
     bulkAction,
     discardSelected,
+    discardPrompt,
+    resolveDiscardPrompt,
+    cancelDiscard,
     moveOpen,
     setMoveOpen,
     moveCharacterId,
@@ -216,7 +276,19 @@ export function AssetSelectionBar({ batch, showDiscard = true, allowLibraryTarge
     clearSelection,
   } = batch;
 
-  if (selectedAssetIds.size === 0) return null;
+  // Rendered independently of the toolbar's own visibility gate: the confirmation snapshots
+  // its targets, so it must survive even if the selection state momentarily empties.
+  const discardDialog = discardPrompt ? (
+    <DiscardUpscaledDialog
+      sourceCount={discardPrompt.sources.length}
+      busy={bulkAction === "discard"}
+      onDiscardBoth={() => resolveDiscardPrompt(true)}
+      onDiscardUpscaledOnly={() => resolveDiscardPrompt(false)}
+      onCancel={cancelDiscard}
+    />
+  ) : null;
+
+  if (selectedAssetIds.size === 0) return discardDialog;
 
   // Move destinations: the Main Library (optional) followed by every non-archived character.
   const moveTargets = [
@@ -290,7 +362,40 @@ export function AssetSelectionBar({ batch, showDiscard = true, allowLibraryTarge
           </button>
         </div>
       ) : null}
+      {discardDialog}
     </div>
+  );
+}
+
+// Confirmation shown when a bulk Discard selection contains folded upscales: an upscaled
+// tile hides its source original, so this asks whether to trash those originals too. Escape
+// or a backdrop click (via the shared Modal) cancels and discards nothing. The three explicit
+// outcomes — both / upscaled-only / cancel — avoid the OK/Cancel ambiguity of window.confirm
+// (here "cancel" still leaves the upscaled undeleted, which OK/Cancel could not convey).
+function DiscardUpscaledDialog({ sourceCount, busy, onDiscardBoth, onDiscardUpscaledOnly, onCancel }) {
+  const plural = sourceCount === 1 ? "" : "s";
+  return (
+    <Modal className="discard-confirm-modal" labelledBy="discard-confirm-title" onClose={onCancel}>
+      <h2 className="discard-confirm-title" id="discard-confirm-title">
+        Discard source image{plural} too?
+      </h2>
+      <p className="discard-confirm-body">
+        Your selection includes upscaled image{plural} with{" "}
+        {sourceCount === 1 ? "a source original" : `${sourceCount} source originals`} still in your library.
+        Discard the source original{plural} as well, or only the upscaled image{plural}?
+      </p>
+      <div className="discard-confirm-actions">
+        <button disabled={busy} onClick={onCancel} type="button">
+          Cancel
+        </button>
+        <button disabled={busy} onClick={onDiscardUpscaledOnly} type="button">
+          Only the upscaled
+        </button>
+        <button className="danger-action" disabled={busy} onClick={onDiscardBoth} type="button">
+          Discard both
+        </button>
+      </div>
+    </Modal>
   );
 }
 
