@@ -9,6 +9,9 @@ import {
   chmodSync,
   writeFileSync,
   readFileSync,
+  existsSync,
+  readdirSync,
+  statSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,6 +46,30 @@ function run(cmd, args, extraEnv = {}) {
     return;
   }
   execFileSync(cmd, args, opts);
+}
+
+// Locate the mlx.metallib produced by the api build's pmetal-mlx-sys compile
+// (sc-10349). Prefer the build tree — the exact, freshly-built artifact matching
+// the api binary we just staged. There can be several pmetal-mlx-sys-<hash> build
+// dirs (feature/profile variants), so pick the newest that actually holds the file.
+// Fall back to ~/.cache/pmetal/lib/mlx.metallib, which mlx-sys build.rs refreshes
+// (newest-wins) after every build. Returns null if neither exists (caller errors).
+function findBuiltMetallib() {
+  const buildRoot = join(repoRoot, "target", "release", "build");
+  const candidates = [];
+  if (existsSync(buildRoot)) {
+    for (const entry of readdirSync(buildRoot)) {
+      if (!entry.startsWith("pmetal-mlx-sys-")) continue;
+      const lib = join(buildRoot, entry, "out", "build", "lib", "mlx.metallib");
+      if (existsSync(lib)) candidates.push([lib, statSync(lib).mtimeMs]);
+    }
+  }
+  if (candidates.length) {
+    candidates.sort((a, b) => b[1] - a[1]);
+    return candidates[0][0];
+  }
+  const cached = join(os.homedir(), ".cache", "pmetal", "lib", "mlx.metallib");
+  return existsSync(cached) ? cached : null;
 }
 
 // Host target triple, e.g. aarch64-apple-darwin or x86_64-pc-windows-msvc.
@@ -244,6 +271,45 @@ if (triple.includes("apple-darwin")) {
     "Static ffmpeg is bundled on macOS only (sc-3767); Windows/Linux use PATH ffmpeg.\n",
   );
   console.log(`build-sidecar: ${ffmpegDir} placeholder (non-macOS, PATH ffmpeg)`);
+}
+
+// The in-process MLX worker (macOS) loads MLX's compiled Metal shader library
+// (mlx.metallib, ~158 MB) at runtime — it is NOT embedded in the api binary. The
+// pmetal-mlx-rs fork's resolver (sc-7898) looks for it via PMETAL_METALLIB_PATH,
+// then a path into the *build machine's* target dir baked into the binary, then
+// ~/.cache/pmetal — NONE of which exist on a clean end-user Mac (the cache is only
+// populated as a side effect of a local `cargo build`). A packaged app that doesn't
+// ship the file therefore fails on first MLX use with "Failed to load the default
+// metallib. library not found" (sc-10349). Bundle it as a Tauri resource; setup.rs
+// points the worker at it via PMETAL_METALLIB_PATH (mirrors the ffmpeg/onnxruntime
+// staging above). A .metallib is NOT a Mach-O — it's sealed by the .app signature
+// as a plain resource, so unlike the ffmpeg/onnxruntime binaries it needs no
+// separate codesign. macOS-only; other platforms use candle and ship no metallib
+// (placeholder so the `mlx/**/*` resource glob still matches — Tauri errors on an
+// empty glob).
+const mlxDir = join(desktopDir, "mlx");
+mkdirSync(mlxDir, { recursive: true });
+if (triple.includes("apple-darwin")) {
+  const metallibSrc = findBuiltMetallib();
+  if (!metallibSrc) {
+    console.error(
+      "build-sidecar: could not locate mlx.metallib under " +
+        `${join(repoRoot, "target", "release", "build")}/pmetal-mlx-sys-*/out/build/lib/ ` +
+        "or ~/.cache/pmetal/lib/ — a macOS build without it ships an app that fails on " +
+        "first MLX use (sc-10349). The api build above compiles pmetal-mlx-sys, which " +
+        "produces it, so this usually means that build did not run or was redirected.",
+    );
+    process.exit(1);
+  }
+  const metallibDest = join(mlxDir, "mlx.metallib");
+  copyFileSync(metallibSrc, metallibDest);
+  console.log(`build-sidecar: staged ${metallibDest} (from ${metallibSrc})`);
+} else {
+  writeFileSync(
+    join(mlxDir, "README.txt"),
+    "mlx.metallib is bundled on macOS only (the in-process MLX worker). Windows/Linux use the candle backend and ship no MLX shader library (sc-10349).\n",
+  );
+  console.log(`build-sidecar: ${mlxDir} placeholder (non-macOS, no MLX metallib)`);
 }
 
 // The candle (Windows/CUDA) worker links cudarc with dynamic-linking, which
