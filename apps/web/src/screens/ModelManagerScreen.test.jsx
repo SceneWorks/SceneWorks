@@ -3,6 +3,16 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click } from "../testUtils/dom.js";
 
+// The screen is a tabbed interface (epic 10309): Image / Video / Utility / LoRAs tabs,
+// each showing only its own models, plus a transient Search Results tab. A model card
+// or the LoRA import form is only in the DOM while its tab is active, so tests select
+// the relevant tab first. The tab button's text also carries a trailing count badge, so
+// match by substring.
+async function selectTab(container, label) {
+  const tab = [...container.querySelectorAll('[role="tab"]')].find((button) => button.textContent.includes(label));
+  await click(tab);
+}
+
 // ModelManagerScreen reads `window.__TAURI__` at module load (via ../credentials.js)
 // to pick the keychain transport, so we set the Tauri bridge and re-import the
 // module fresh in each test. Credentials are served by the mocked `list_credentials`
@@ -208,7 +218,7 @@ describe("ModelManagerScreen gated-model notice", () => {
   // SD3.5). The download button is disabled until then.
   it("blocks the gated download until the license is acknowledged (sc-7872)", async () => {
     await render([SD3_5_MODEL]);
-    const downloadButton = [...container.querySelectorAll(".model-card-actions button")].find(
+    const downloadButton = [...container.querySelectorAll(".model-card-footer-actions button")].find(
       (button) => button.textContent.startsWith("Download"),
     );
     expect(downloadButton).toBeTruthy();
@@ -244,7 +254,7 @@ describe("ModelManagerScreen gated-model notice", () => {
     await render([SD3_5_MODEL]);
     const ackCheckbox = container.querySelector(".model-license-ack input");
     expect(ackCheckbox.checked).toBe(true);
-    const downloadButton = [...container.querySelectorAll(".model-card-actions button")].find(
+    const downloadButton = [...container.querySelectorAll(".model-card-footer-actions button")].find(
       (button) => button.textContent.startsWith("Download"),
     );
     expect(downloadButton.disabled).toBe(false);
@@ -264,7 +274,7 @@ describe("ModelManagerScreen gated-model notice", () => {
     const ackCheckbox = container.querySelector(".model-license-ack input");
     expect(ackCheckbox).toBeTruthy();
     expect(ackCheckbox.checked).toBe(true);
-    const downloadButton = [...container.querySelectorAll(".model-card-actions button")].find(
+    const downloadButton = [...container.querySelectorAll(".model-card-footer-actions button")].find(
       (button) => button.textContent.startsWith("Download"),
     );
     expect(downloadButton.disabled).toBe(false);
@@ -274,7 +284,7 @@ describe("ModelManagerScreen gated-model notice", () => {
   it("does not gate a non-gated model's download on any acknowledgment (sc-7872)", async () => {
     await render([PLAIN_MODEL]);
     expect(container.querySelector(".model-license-ack")).toBeNull();
-    const downloadButton = [...container.querySelectorAll(".model-card-actions button")].find(
+    const downloadButton = [...container.querySelectorAll(".model-card-footer-actions button")].find(
       (button) => button.textContent.startsWith("Download"),
     );
     expect(downloadButton.disabled).toBe(false);
@@ -347,6 +357,8 @@ describe("ModelManagerScreen Wan A14B MoE LoRA import (sc-1991)", () => {
       );
     });
     await act(async () => {});
+    // The Import LoRA form lives on the LoRAs tab.
+    await selectTab(container, "LoRAs");
   }
 
   // Both the model and LoRA import forms share the .lora-import-panel class, so
@@ -455,6 +467,7 @@ describe("ModelManagerScreen Wan A14B MoE LoRA import (sc-1991)", () => {
       );
     });
     await act(async () => {});
+    await selectTab(container, "LoRAs");
     const familyOptions = [...labelStartingWith("Family").querySelectorAll("option")].map((option) => option.value);
     expect(familyOptions).toContain("flux2");
     expect(familyOptions).not.toContain("flux2-klein");
@@ -528,53 +541,63 @@ describe("ModelManagerScreen type-grouped layout", () => {
     { id: "real_esrgan", name: "Real-ESRGAN", type: "utility", family: "real-esrgan", capabilities: [], installState: "missing" },
   ];
 
-  function groupHeadings() {
-    return [...container.querySelectorAll(".model-type-group-heading h3")].map((h) => h.textContent);
+  function tabLabels() {
+    return [...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent);
   }
 
-  it("renders one section per populated model type, in fixed order", async () => {
+  it("renders a tab per model type in fixed order, each scoped to its own type", async () => {
     await render({ models: MODELS });
-    expect(groupHeadings()).toEqual(["Image Models", "Video Models", "Utility Models"]);
-    // Each group holds exactly its own type's card.
-    const groups = container.querySelectorAll(".model-type-group");
-    expect(groups.length).toBe(3);
-    expect(groups[0].querySelectorAll(".model-row").length).toBe(1);
-    expect(groups[0].textContent).toContain("Z-Image-Turbo");
-    expect(groups[1].textContent).toContain("Wan T2V");
-    expect(groups[2].textContent).toContain("Real-ESRGAN");
+    // Four fixed tabs; the model tabs carry a total-count badge (LoRAs has 0 here).
+    expect(tabLabels()).toEqual(["Image Models1", "Video Models1", "Utility Models1", "LoRAs0"]);
+    // The default (Image) tab shows only its own type's card.
+    expect(container.querySelectorAll(".model-card").length).toBe(1);
+    expect(container.textContent).toContain("Z-Image-Turbo");
+    expect(container.textContent).not.toContain("Wan T2V");
+    // Switching tabs scopes the cards to that type.
+    await selectTab(container, "Video Models");
+    expect(container.textContent).toContain("Wan T2V");
+    expect(container.textContent).not.toContain("Z-Image-Turbo");
+    await selectTab(container, "Utility Models");
+    expect(container.textContent).toContain("Real-ESRGAN");
   });
 
-  it("omits a type section when no model has that type", async () => {
+  it("always shows all four tabs, with a zero count and empty state for an unpopulated type", async () => {
     await render({ models: [MODELS[0]] });
-    expect(groupHeadings()).toEqual(["Image Models"]);
+    expect(tabLabels()).toEqual(["Image Models1", "Video Models0", "Utility Models0", "LoRAs0"]);
+    await selectTab(container, "Video Models");
+    expect(container.querySelector(".models-empty")).toBeTruthy();
+    expect(container.textContent).toContain("No models match your search.");
   });
 
-  it("splits a type into Recommended and a collapsed Additional Supported when both exist", async () => {
+  it("shows a Recommended band over an 'All {type} models' section when a recommended model exists", async () => {
     await render({
       models: [
         { id: "z_image_turbo", name: "Z-Image-Turbo", type: "image", family: "z-image", capabilities: ["text_to_image"], installState: "missing", recommended: true },
         { id: "flux_dev", name: "FLUX.1 [dev]", type: "image", family: "flux", capabilities: ["text_to_image"], installState: "missing" },
       ],
     });
-    const imageGroup = container.querySelector(".model-type-group");
-    const recommendedGrid = imageGroup.querySelector(".model-subgroup .model-grid");
-    expect(imageGroup.textContent).toContain("Recommended Models");
-    expect(recommendedGrid.querySelectorAll(".model-row").length).toBe(1);
-    expect(recommendedGrid.textContent).toContain("Z-Image-Turbo");
-    const additional = imageGroup.querySelector(".model-subgroup-additional");
-    expect(additional.tagName).toBe("DETAILS");
-    expect(additional.open).toBe(false); // collapsed by default to cut clutter
-    expect(additional.textContent).toContain("Additional Supported Models");
-    expect(additional.querySelectorAll(".model-row").length).toBe(1);
-    expect(additional.textContent).toContain("FLUX.1 [dev]");
+    const band = container.querySelector(".models-accent-band");
+    expect(band).toBeTruthy();
+    expect(band.textContent).toContain("Recommended");
+    expect(band.querySelectorAll(".model-card").length).toBe(1);
+    expect(band.textContent).toContain("Z-Image-Turbo");
+    // The recommended card carries the ★ chip.
+    expect(band.querySelector(".model-card-rec-chip")).toBeTruthy();
+    // The non-recommended model sits under an "All image models" section.
+    const section = [...container.querySelectorAll(".models-section")].find((s) => s.textContent.includes("All image models"));
+    expect(section).toBeTruthy();
+    expect(section.querySelectorAll(".model-card").length).toBe(1);
+    expect(section.textContent).toContain("FLUX.1 [dev]");
+    // No collapsible <details> — every model is an always-open card.
+    expect(container.querySelector("details")).toBeNull();
   });
 
-  it("shows a single grid (no Recommended/Additional split) when a type has no recommended model", async () => {
+  it("shows a single '{Type} models' section (no Recommended band) when nothing is recommended", async () => {
     await render({ models: [MODELS[0]] }); // fixture has no recommended flag
-    const imageGroup = container.querySelector(".model-type-group");
-    expect(imageGroup.textContent).not.toContain("Recommended Models");
-    expect(imageGroup.querySelector(".model-subgroup-additional")).toBeNull();
-    expect(imageGroup.querySelectorAll(".model-row").length).toBe(1);
+    expect(container.querySelector(".models-accent-band")).toBeNull();
+    const section = container.querySelector(".models-section");
+    expect(section.textContent).toContain("Image models");
+    expect(section.querySelectorAll(".model-card").length).toBe(1);
   });
 
   it("describes each model's capabilities as chips on the card", async () => {
@@ -599,7 +622,7 @@ describe("ModelManagerScreen type-grouped layout", () => {
     });
     expect(container.textContent).toContain("incomplete");
     expect(container.textContent).toContain("vae/config.json");
-    const fixButton = [...container.querySelectorAll(".model-card-actions button")].find(
+    const fixButton = [...container.querySelectorAll(".model-card-footer-actions button")].find(
       (button) => button.textContent === "Fix",
     );
     expect(fixButton).toBeTruthy();
@@ -624,7 +647,7 @@ describe("ModelManagerScreen type-grouped layout", () => {
         },
       ],
     });
-    const fixButton = [...container.querySelectorAll(".model-card-actions button")].find(
+    const fixButton = [...container.querySelectorAll(".model-card-footer-actions button")].find(
       (button) => button.textContent === "Fix",
     );
     expect(fixButton).toBeTruthy();
@@ -635,7 +658,21 @@ describe("ModelManagerScreen type-grouped layout", () => {
     );
   });
 
-  it("groups LoRAs by family with a heading per family", async () => {
+  // On the LoRAs tab, User LoRAs are grouped by family into `.models-subsection`s
+  // (h4 heading); the Built-In / User scope sections are `.models-section`s (h3).
+  function userFamilyHeadings() {
+    return [...container.querySelectorAll(".models-subsection .models-section-heading h4")].map((h) => h.textContent);
+  }
+  function scopeHeadings() {
+    return [...container.querySelectorAll(".models-section > .models-section-heading h3")].map((h) => h.textContent);
+  }
+  function builtinSection() {
+    return [...container.querySelectorAll(".models-section")].find(
+      (group) => group.querySelector("h3")?.textContent === "Built-In LoRAs",
+    );
+  }
+
+  it("groups user LoRAs by family with a heading per family", async () => {
     await render({
       models: MODELS,
       loras: [
@@ -644,14 +681,14 @@ describe("ModelManagerScreen type-grouped layout", () => {
         { id: "c", name: "Wan C", family: "wan-video", installState: "installed" },
       ],
     });
-    const families = [...container.querySelectorAll(".lora-family-group-heading h3")].map((h) => h.textContent);
-    expect(families).toEqual(["flux", "wan-video"]);
-    const groups = container.querySelectorAll(".lora-family-group");
+    await selectTab(container, "LoRAs");
+    expect(userFamilyHeadings()).toEqual(["flux", "wan-video"]);
+    const groups = container.querySelectorAll(".models-subsection");
     expect(groups[0].querySelectorAll(".lora-row").length).toBe(2);
     expect(groups[1].querySelectorAll(".lora-row").length).toBe(1);
   });
 
-  it("buckets family-less LoRAs under a trailing 'Other / compatible' group", async () => {
+  it("buckets family-less user LoRAs under a trailing 'Other / compatible' group", async () => {
     await render({
       models: MODELS,
       loras: [
@@ -659,8 +696,8 @@ describe("ModelManagerScreen type-grouped layout", () => {
         { id: "x", name: "Loose", scope: "global", installState: "installed" },
       ],
     });
-    const families = [...container.querySelectorAll(".lora-family-group-heading h3")].map((h) => h.textContent);
-    expect(families).toEqual(["flux", "Other / compatible"]);
+    await selectTab(container, "LoRAs");
+    expect(userFamilyHeadings()).toEqual(["flux", "Other / compatible"]);
   });
 
   it("separates built-in LoRAs from user LoRAs into their own sections", async () => {
@@ -671,24 +708,15 @@ describe("ModelManagerScreen type-grouped layout", () => {
         { id: "u1", name: "My LoRA", family: "flux", scope: "global", installState: "installed" },
       ],
     });
-    const scopeHeadings = [...container.querySelectorAll(".lora-scope-group-heading h3")].map((h) => h.textContent);
-    expect(scopeHeadings).toEqual(["Built-In LoRAs", "User LoRAs"]);
-    const builtin = [...container.querySelectorAll(".lora-scope-group")].find((group) =>
-      group.querySelector("h3")?.textContent === "Built-In LoRAs",
-    );
+    await selectTab(container, "LoRAs");
+    expect(scopeHeadings()).toEqual(["Built-In LoRAs", "User LoRAs"]);
+    const builtin = builtinSection();
     expect(builtin.querySelectorAll(".lora-row").length).toBe(1);
     expect(builtin.textContent).toContain("LTX IC");
     expect(builtin.textContent).not.toContain("My LoRA");
     // The user LoRA is family-grouped inside the User section only.
-    const families = [...container.querySelectorAll(".lora-family-group-heading h3")].map((h) => h.textContent);
-    expect(families).toEqual(["flux"]);
+    expect(userFamilyHeadings()).toEqual(["flux"]);
   });
-
-  function builtinSection() {
-    return [...container.querySelectorAll(".lora-scope-group")].find(
-      (group) => group.querySelector("h3")?.textContent === "Built-In LoRAs",
-    );
-  }
 
   it("offers a Download button on a built-in HF LoRA and queues a download", async () => {
     const createLoraDownloadJob = vi.fn();
@@ -706,6 +734,7 @@ describe("ModelManagerScreen type-grouped layout", () => {
         },
       ],
     });
+    await selectTab(container, "LoRAs");
     const downloadButton = [...builtinSection().querySelectorAll(".lora-row-actions button")].find(
       (button) => button.textContent === "Download",
     );
@@ -729,6 +758,7 @@ describe("ModelManagerScreen type-grouped layout", () => {
       ],
       jobs: [{ id: "j1", type: "lora_download", status: "downloading", progress: 0.4, payload: { loraId: "ltx_ic" } }],
     });
+    await selectTab(container, "LoRAs");
     const actionButton = builtinSection().querySelector(".lora-row-actions button");
     expect(actionButton.disabled).toBe(true);
     expect(actionButton.textContent).toBe("downloading");
@@ -750,6 +780,7 @@ describe("ModelManagerScreen type-grouped layout", () => {
         },
       ],
     });
+    await selectTab(container, "LoRAs");
     const downloadButton = [...builtinSection().querySelectorAll(".lora-row-actions button")].find(
       (button) => button.textContent === "Download",
     );
@@ -1057,8 +1088,9 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
 
   it("leaves a single-variant model's download UX unchanged (no tier panel)", async () => {
     await render([SINGLE_MODEL]);
+    await selectTab(container, "Utility Models"); // SINGLE_MODEL is a utility model
     expect(container.querySelector(".model-tier-panel")).toBeNull();
-    const downloadButton = [...container.querySelectorAll(".model-card-actions button")].find((button) =>
+    const downloadButton = [...container.querySelectorAll(".model-card-footer-actions button")].find((button) =>
       button.textContent.startsWith("Download"),
     );
     expect(downloadButton).toBeTruthy();
@@ -1147,6 +1179,7 @@ describe("ModelManagerScreen convert-at-install Update button", () => {
 
   it("shows an Update button when updateAvailable, and clicking it re-downloads the source", async () => {
     await render([convertModel({ updateAvailable: true })]);
+    await selectTab(container, "Video Models"); // convertModel is a video model
     const updateButton = mlxButtons().find((button) => button.textContent === "Update");
     expect(updateButton).toBeTruthy();
     // The stale converted state does NOT also render the disabled "MLX ready" button.
@@ -1157,6 +1190,7 @@ describe("ModelManagerScreen convert-at-install Update button", () => {
 
   it("shows the normal MLX-ready state (no Update button) when up to date", async () => {
     await render([convertModel({ updateAvailable: false })]);
+    await selectTab(container, "Video Models"); // convertModel is a video model
     expect(mlxButtons().some((button) => button.textContent === "Update")).toBe(false);
     expect(mlxButtons().some((button) => button.textContent === "MLX ready")).toBe(true);
     expect(createModelDownloadJob).not.toHaveBeenCalled();

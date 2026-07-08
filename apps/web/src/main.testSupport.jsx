@@ -212,6 +212,23 @@ export function loraPanel(container) {
   return container.querySelector("form[aria-label='Import LoRA']");
 }
 
+// The Model Manager is a tabbed interface (epic 10309): Image / Video / Utility / LoRAs.
+// A model card or the LoRA import form is only mounted while its tab is active, so tests
+// switch tabs after opening the Models page. The tab button text carries a trailing count
+// badge, so match by substring.
+export async function selectModelTab(label) {
+  await act(async () => {
+    [...document.body.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent.includes(label))?.click();
+  });
+  await settle();
+}
+
+// The family filter moved onto the tab bar (aria-label "Filter by family"), no longer a
+// labelled control, so `field(container, "LoRA family")` no longer resolves it.
+export function familyFilter(container) {
+  return container.querySelector(".models-family-select");
+}
+
 export function modelImportPanel(container) {
   return container.querySelector("form[aria-label='Import model']");
 }

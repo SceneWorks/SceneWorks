@@ -5191,6 +5191,368 @@ details[open] > summary.lora-scope-group-heading::before,
   background: var(--warm-soft);
 }
 
+/* User LoRA that's registered but has no local files (installState "missing"): a
+   danger-tinted border marks it as broken/unavailable, distinct from a built-in that
+   is simply "not installed" (neutral). Design: LoraRow handoff (epic 10309). */
+.lora-row.unavailable {
+  border-color: color-mix(in oklch, var(--danger) 30%, var(--border));
+}
+
+/* ============================================================================
+   Model Manager — tabbed interface (epic 10309)
+   Replaces the single scrolling page of collapsible <details> groups + collapsed
+   model rows with four flat-underline tabs (Image / Video / Utility / LoRAs), a
+   persistent search + family filter on the tab bar, a transient Search Results
+   tab, a Recommended band per tab, and always-open model cards. Reuses .mode-tabs
+   / .mode-tab, .status-badge, .chip / .model-capabilities, .model-tier-panel,
+   .model-gated-notice, .lora-row, .segmented-control, .models-import-grid,
+   .danger-action — this block adds only the genuinely new primitives.
+   ============================================================================ */
+
+/* Tab-bar row: the .mode-tabs tablist on the left, search + family on the right,
+   sharing one baseline. The row owns the 1px underline; the nested .mode-tabs
+   drops its own border so the two don't double up. */
+.models-tabbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+}
+
+.models-tabbar .mode-tabs {
+  border-bottom: 0;
+}
+
+/* Count badge trailing each tab label. Active tab = accent pill; inactive = muted. */
+.models-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  padding: 1px 7px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  background: var(--surface-2);
+  color: var(--text-faint);
+}
+
+.mode-tab.active .models-tab-count {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+[data-theme="dark"] .mode-tab.active .models-tab-count {
+  color: var(--accent);
+}
+
+/* Search + family controls, nudged up so they sit above the shared baseline. */
+.models-tabbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 9px;
+  flex-wrap: wrap;
+}
+
+.models-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.models-search-glyph {
+  position: absolute;
+  left: 11px;
+  font-size: 14px;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+/* Explicit width: the global `input { width: 100% }` reset would otherwise blow the
+   search box out to fill the flex row. */
+.models-search input {
+  width: 220px;
+  max-width: 100%;
+  height: 34px;
+  padding: 0 12px 0 31px;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+}
+
+.models-family-select {
+  width: auto;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* One tab's panel: a vertical stack of bands/sections. */
+.models-tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+/* Card grid shared by every model section (recommended band, all-models, search groups). */
+.models-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(302px, 1fr));
+  gap: 14px;
+}
+
+/* Accent band: the Recommended header container + the Import-LoRA form banner. */
+.models-accent-band {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 16px;
+  border-radius: 14px;
+  background: color-mix(in oklch, var(--accent) 5%, var(--surface));
+  border: 1px solid color-mix(in oklch, var(--accent) 22%, var(--border));
+}
+
+.models-accent-band-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.models-accent-band-head .eyebrow {
+  color: var(--accent-strong);
+}
+
+/* Accent dot with a soft ring, marking a band header. */
+.models-accent-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 22%, transparent);
+  flex: 0 0 auto;
+}
+
+.models-accent-band-count {
+  font-size: 12px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.models-accent-band-caption {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+/* The Import-LoRA form adopts .models-accent-band (flex column); keep its URL/Upload
+   segmented control compact rather than stretched to the band width. */
+.models-accent-band > .segmented-control {
+  align-self: flex-start;
+}
+
+/* Plain section (All {type} models, Built-In LoRAs, a User family group, a Search group). */
+.models-section {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+
+.models-subgroups {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.models-subsection {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.models-section-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.models-section-heading h3,
+.models-section-heading h4 {
+  margin: 0;
+  color: var(--text);
+}
+
+.models-section-heading h3 {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.models-section-heading h4 {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.models-section-heading > span {
+  font-size: 12px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Always-open model card (replaces the collapsed .model-row summary/body). */
+.model-card {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.model-card.recommended {
+  border-color: color-mix(in oklch, var(--accent) 45%, var(--border));
+}
+
+.model-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+/* Header right column: the install-status badge plus any attention badges
+   (needs family / not on Mac), wrapping right-aligned. */
+.model-card-status {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+}
+
+.model-card-title {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.model-card-title strong {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.model-card-title small {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* ★ Recommended chip. */
+.model-card-rec-chip {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+[data-theme="dark"] .model-card-rec-chip {
+  color: var(--accent);
+}
+
+.model-card-description {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* Footer: download size (mono) left, primary + delete right. */
+.model-card-footer {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.model-card-size {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.model-card-footer-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Card primary action: accent-filled when actionable, muted when disabled. Uses
+   --accent-fg for the label so it reads on the (light-in-dark-mode) accent fill. */
+.model-card-primary {
+  min-height: 34px;
+  padding: 0 15px;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--accent-strong);
+  color: var(--accent-fg);
+  border: 1px solid var(--accent-strong);
+}
+
+.model-card-primary:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.model-card-primary:disabled {
+  background: var(--surface-2);
+  color: var(--text-faint);
+  border-color: var(--border);
+}
+
+/* Empty-state dashed box shared by the model + search panels. */
+.models-empty {
+  padding: 44px;
+  text-align: center;
+  color: var(--text-muted);
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
+  font-size: 14px;
+}
+
+/* Incomplete / attention status badge — warn tones. No such rule existed before;
+   the design's incomplete state and the pre-existing `needs family` / `not on Mac`
+   badges (which used `status-badge warning` with no matching rule) both adopt it. */
+.status-badge.warning {
+  border-color: color-mix(in oklch, var(--warn) 45%, transparent);
+  background: var(--warn-soft);
+  color: color-mix(in oklch, var(--warn) 80%, var(--text));
+}
+
+/* Danger status badge — an unavailable (broken) user LoRA. */
+.status-badge.danger {
+  border-color: color-mix(in oklch, var(--danger) 45%, transparent);
+  background: var(--danger-soft);
+  color: color-mix(in oklch, var(--danger) 85%, var(--text));
+}
+
 /* ---------- Characters / presets ---------- */
 .character-layout {
   display: grid;
