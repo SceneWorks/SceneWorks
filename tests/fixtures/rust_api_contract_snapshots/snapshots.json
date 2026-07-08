@@ -2004,13 +2004,15 @@
           "provider": "huggingface",
           "repo": "owner/style-lora"
         },
+        "triggerWords": [],
         "updatedAt": "<timestamp>"
       },
       "manifestPath": "<runtime-root>/config/manifests/user.loras.jsonc",
       "name": "Imported LoRA",
       "repo": "owner/style-lora",
       "scope": "global",
-      "targetDir": "<runtime-root>/data/loras/imported_lora"
+      "targetDir": "<runtime-root>/data/loras/imported_lora",
+      "triggerWords": []
     },
     "progress": 0.0,
     "projectId": null,
