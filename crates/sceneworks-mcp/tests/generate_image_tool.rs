@@ -11,15 +11,16 @@ use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{
-    CallToolRequestParams, ClientInfo, Meta, NumberOrString, ProgressNotificationParam,
-    ProgressToken,
+    CallToolRequestParams, ClientInfo, ClientRequest, Meta, NumberOrString,
+    ProgressNotificationParam, ProgressToken, Request,
 };
-use rmcp::service::{NotificationContext, RoleClient};
+use rmcp::service::{NotificationContext, PeerRequestOptions, RoleClient};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::ServiceExt;
@@ -39,6 +40,8 @@ struct StubState {
     submitted: Arc<Mutex<Vec<Value>>>,
     polls: Arc<Mutex<usize>>,
     snapshots: Arc<Vec<Value>>,
+    /// Job ids the tool asked to cancel via `POST /jobs/:id/cancel` (sc-10276).
+    cancels: Arc<Mutex<Vec<String>>>,
 }
 
 fn snapshot(status: &str, progress: f64, stage: &str, extra: Value) -> Value {
@@ -101,6 +104,15 @@ fn stub_api_router(state: StubState) -> Router {
             ),
         )
         .route(
+            "/api/v1/jobs/:job_id/cancel",
+            post(
+                |State(state): State<StubState>, Path(job_id): Path<String>| async move {
+                    state.cancels.lock().unwrap().push(job_id);
+                    Json(json!({ "status": "canceled" }))
+                },
+            ),
+        )
+        .route(
             "/api/v1/projects/:project_id/files/*relative_path",
             get(
                 |Path((_project_id, relative_path)): Path<(String, String)>| async move {
@@ -156,6 +168,7 @@ struct Harness {
     submitted: Arc<Mutex<Vec<Value>>>,
     polls: Arc<Mutex<usize>>,
     progress: Arc<Mutex<Vec<ProgressNotificationParam>>>,
+    cancels: Arc<Mutex<Vec<String>>>,
 }
 
 /// Stub API + mounted MCP service (fast 10ms polls) + connected recording client.
@@ -164,9 +177,11 @@ async fn harness(snapshots: Vec<Value>) -> Harness {
         submitted: Arc::new(Mutex::new(Vec::new())),
         polls: Arc::new(Mutex::new(0)),
         snapshots: Arc::new(snapshots),
+        cancels: Arc::new(Mutex::new(Vec::new())),
     };
     let submitted = state.submitted.clone();
     let polls = state.polls.clone();
+    let cancels = state.cancels.clone();
     let api_base = spawn(stub_api_router(state)).await;
     let mcp_service = sceneworks_mcp::streamable_http_service_with(
         ApiClientConfig {
@@ -194,6 +209,7 @@ async fn harness(snapshots: Vec<Value>) -> Harness {
         submitted,
         polls,
         progress,
+        cancels,
     }
 }
 
@@ -223,6 +239,18 @@ fn error_text(result: &rmcp::model::CallToolResult) -> String {
         .map(|text| text.text.clone())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Poll `condition` until it holds, failing (never hanging) if it never does.
+async fn wait_until(mut condition: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !condition() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "condition was not met within 5s"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 #[tokio::test]
@@ -421,6 +449,166 @@ async fn canceled_job_surfaces_clearly_not_as_a_hang() {
 }
 
 #[tokio::test]
+async fn client_cancellation_propagates_to_the_job_cancel_route() {
+    // The script never leaves "running", so the job would run forever on its own;
+    // the ONLY way the tool returns is the client canceling the in-flight request
+    // (sc-10276). That cancellation must reach POST /api/v1/jobs/:id/cancel.
+    let harness = harness(vec![snapshot("running", 0.4, "generating", json!({}))]).await;
+
+    let handle = harness
+        .client
+        .send_cancellable_request(
+            ClientRequest::CallToolRequest(Request::new(
+                CallToolRequestParams::new("generate_image")
+                    .with_arguments(generate_args(json!({}))),
+            )),
+            PeerRequestOptions::no_options(),
+        )
+        .await
+        .expect("cancellable generate_image request is sent");
+
+    // Let the tool get past submit and into its poll loop, so the cancellation
+    // lands mid-wait (the case the story is about), not before the job exists.
+    wait_until(|| {
+        !harness.submitted.lock().unwrap().is_empty() && *harness.polls.lock().unwrap() >= 1
+    })
+    .await;
+    assert!(
+        harness.cancels.lock().unwrap().is_empty(),
+        "no cancel before the client asks for one"
+    );
+
+    // Client cancels the in-flight request (MCP notifications/cancelled).
+    handle
+        .cancel(Some("user canceled".to_owned()))
+        .await
+        .expect("cancel notification is sent");
+
+    // The tool forwards it to the job cancel route, freeing the worker/GPU.
+    wait_until(|| {
+        harness
+            .cancels
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|id| id == "job-1")
+    })
+    .await;
+
+    let _ = harness.client.cancel().await;
+}
+
+#[tokio::test]
+async fn transient_poll_failures_are_tolerated_until_the_job_completes() {
+    // The first two `GET /jobs/:id` polls fail (500) — a transient blip — before
+    // the job reports completed. The tool must ride through, not abort the render
+    // (sc-10279).
+    #[derive(Clone)]
+    struct FlakyState {
+        polls: Arc<Mutex<usize>>,
+    }
+    let state = FlakyState {
+        polls: Arc::new(Mutex::new(0)),
+    };
+    let polls = state.polls.clone();
+    let router = Router::new()
+        .route(
+            "/api/v1/image/jobs",
+            post(|| async {
+                (
+                    StatusCode::CREATED,
+                    Json(json!({
+                        "id": "job-1", "status": "queued", "projectId": "p1",
+                        "progress": 0.0, "stage": "queued"
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/api/v1/jobs/:job_id",
+            get(
+                |State(state): State<FlakyState>, Path(_job_id): Path<String>| async move {
+                    let n = {
+                        let mut polls = state.polls.lock().unwrap();
+                        let n = *polls;
+                        *polls += 1;
+                        n
+                    };
+                    if n < 2 {
+                        // Two consecutive transient failures (< the tolerance).
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({ "detail": "temporary glitch" })),
+                        )
+                            .into_response();
+                    }
+                    Json(json!({
+                        "id": "job-1", "status": "completed", "projectId": "p1",
+                        "progress": 1.0, "stage": "completed",
+                        "result": { "assets": [image_asset("asset_1", PNG_PATH, "image/png")] }
+                    }))
+                    .into_response()
+                },
+            ),
+        )
+        .route(
+            "/api/v1/projects/:project_id/files/*relative_path",
+            get(
+                |Path((_project_id, relative_path)): Path<(String, String)>| async move {
+                    if relative_path == PNG_PATH {
+                        let mut headers = HeaderMap::new();
+                        headers.insert(header::CONTENT_TYPE, "image/png".parse().unwrap());
+                        (headers, PNG_BYTES.to_vec()).into_response()
+                    } else {
+                        StatusCode::NOT_FOUND.into_response()
+                    }
+                },
+            ),
+        )
+        .with_state(state);
+    let api_base = spawn(router).await;
+    let mcp_service = sceneworks_mcp::streamable_http_service_with(
+        ApiClientConfig {
+            base_url: api_base,
+            access_token: None,
+        },
+        JobWaitConfig {
+            poll_interval: Duration::from_millis(10),
+            timeout: Duration::from_secs(10),
+        },
+    );
+    let mcp_base = spawn(Router::new().nest_service("/mcp", mcp_service)).await;
+    let transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(format!("{mcp_base}/mcp")),
+    );
+    let client = RecordingClient::default()
+        .serve(transport)
+        .await
+        .expect("MCP client initializes");
+
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("generate_image").with_arguments(generate_args(json!({}))),
+        )
+        .await
+        .expect("generate_image succeeds despite the transient poll failures");
+    assert_ne!(result.is_error, Some(true), "unexpected error: {result:?}");
+    let images: Vec<_> = result
+        .content
+        .iter()
+        .filter_map(|block| block.as_image())
+        .collect();
+    assert_eq!(images.len(), 1, "the render survived the blips: {result:?}");
+    // It really did fail twice and recover, not skip the failures.
+    assert!(
+        *polls.lock().unwrap() >= 3,
+        "expected 2 failed polls + a successful one"
+    );
+
+    let _ = client.cancel().await;
+}
+
+#[tokio::test]
 async fn stuck_job_times_out_with_a_clear_error_instead_of_hanging() {
     // The script never leaves `running`; the (test-shortened) overall deadline
     // must turn that into a clear tool error, not an endless poll.
@@ -428,7 +616,9 @@ async fn stuck_job_times_out_with_a_clear_error_instead_of_hanging() {
         submitted: Arc::new(Mutex::new(Vec::new())),
         polls: Arc::new(Mutex::new(0)),
         snapshots: Arc::new(vec![snapshot("running", 0.5, "generating", json!({}))]),
+        cancels: Arc::new(Mutex::new(Vec::new())),
     };
+    let cancels = state.cancels.clone();
     let api_base = spawn(stub_api_router(state)).await;
     let mcp_service = sceneworks_mcp::streamable_http_service_with(
         ApiClientConfig {
@@ -464,6 +654,11 @@ async fn stuck_job_times_out_with_a_clear_error_instead_of_hanging() {
     assert!(
         text.contains("did not reach a terminal state"),
         "timeout must be explicit: {text}"
+    );
+    // A timeout is NOT a cancellation — the job is left running (sc-10276).
+    assert!(
+        cancels.lock().unwrap().is_empty(),
+        "the timeout path must not cancel the job"
     );
 
     let _ = client.cancel().await;

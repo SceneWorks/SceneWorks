@@ -137,7 +137,11 @@ struct Harness {
     client: rmcp::service::RunningService<rmcp::service::RoleClient, TestClient>,
     submitted: Arc<Mutex<Vec<Value>>>,
     tickets_minted: Arc<Mutex<usize>>,
-    api_base: String,
+    /// The base the client uses to reach `/mcp`. get_job_result derives the
+    /// ticket URL host from the incoming request (sc-10290), so in this split
+    /// harness (stub API on a different port than the mounted /mcp) the returned
+    /// url is based on THIS, not the stub API base.
+    mcp_base: String,
 }
 
 /// Stub API + mounted MCP service + connected client.
@@ -153,7 +157,7 @@ async fn harness(snapshots: Vec<Value>) -> Harness {
     let api_base = spawn(stub_api_router(state)).await;
     let mcp_service = sceneworks_mcp::streamable_http_service_with(
         ApiClientConfig {
-            base_url: api_base.clone(),
+            base_url: api_base,
             access_token: None,
         },
         JobWaitConfig {
@@ -173,7 +177,7 @@ async fn harness(snapshots: Vec<Value>) -> Harness {
         client,
         submitted,
         tickets_minted,
-        api_base,
+        mcp_base,
     }
 }
 
@@ -386,10 +390,13 @@ async fn get_job_result_returns_ticketed_video_link_without_inline_bytes() {
     assert_ne!(result.is_error, Some(true), "unexpected error: {result:?}");
 
     // A resource link (never inline bytes) whose URL is the absolute ticketed
-    // media URL — fetchable from another machine that can reach the API.
+    // media URL. The host is derived from the incoming MCP request (sc-10290), so
+    // it is the base the client used to reach /mcp — in production /mcp and
+    // /api/v1 are the same app, but this split test harness proves the derivation
+    // by using `mcp_base` (a different port than the stub `api_base`).
     let expected_url = format!(
         "{}/api/v1/projects/p1/files/{VIDEO_PATH}?ticket={TICKET}",
-        harness.api_base
+        harness.mcp_base
     );
     let links: Vec<_> = result
         .content

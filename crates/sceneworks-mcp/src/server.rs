@@ -31,16 +31,22 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, Meta, ProgressNotificationParam, ProgressToken, Resource,
-        ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, Extensions, ProgressNotificationParam, ProgressToken,
+        Resource, ServerCapabilities, ServerInfo,
     },
     schemars,
-    service::RoleServer,
+    service::{RequestContext, RoleServer},
     tool, tool_handler, tool_router, ErrorData, Peer, ServerHandler,
 };
 use serde_json::{json, Map, Value};
 
 use crate::api_client::{ApiClient, ApiClientError};
+
+/// How many consecutive `GET /api/v1/jobs/:id` failures the blocking poll loop
+/// tolerates before giving up (sc-10279). A single network blip / brief API
+/// restart must not throw away a possibly-20-minute render that is still running
+/// server-side; only a sustained failure streak surfaces as an error.
+const MAX_CONSECUTIVE_POLL_ERRORS: u32 = 5;
 
 /// How the blocking job tools (generate_image) wait for a terminal JobSnapshot:
 /// poll `GET /api/v1/jobs/:id` every `poll_interval` until terminal, and give up
@@ -59,6 +65,25 @@ impl Default for JobWaitConfig {
             // Generous: a cold first run legitimately spends minutes in
             // `downloading`/`loading_model` before it ever renders.
             timeout: Duration::from_secs(30 * 60),
+        }
+    }
+}
+
+impl JobWaitConfig {
+    /// Build a config from deployment-supplied values (sc-10277), enforcing the
+    /// invariants the poll loop relies on: a zero/absent poll interval would spin
+    /// the CPU (or, as a `sleep(0)`, hammer the API), and a timeout below the
+    /// interval would fire before the first poll. A zero interval falls back to
+    /// the default cadence; the timeout is raised to at least one interval.
+    pub fn clamped(poll_interval: Duration, timeout: Duration) -> Self {
+        let poll_interval = if poll_interval.is_zero() {
+            Self::default().poll_interval
+        } else {
+            poll_interval
+        };
+        Self {
+            poll_interval,
+            timeout: timeout.max(poll_interval),
         }
     }
 }
@@ -277,8 +302,7 @@ impl SceneWorksMcp {
     async fn generate_image(
         &self,
         Parameters(args): Parameters<GenerateImageArgs>,
-        meta: Meta,
-        peer: Peer<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let body =
             image_job_body(&args).map_err(|message| ErrorData::invalid_params(message, None))?;
@@ -297,18 +321,61 @@ impl SceneWorksMcp {
 
         // Progress notifications ride the client-supplied progressToken; without
         // one we just poll silently (the spec forbids inventing a token).
-        let progress_token = meta.get_progress_token();
-        let mut reporter = ProgressReporter::new(peer, progress_token);
+        let progress_token = ctx.meta.get_progress_token();
+        let mut reporter = ProgressReporter::new(ctx.peer.clone(), progress_token);
         reporter.report(&submitted).await;
 
         let started = tokio::time::Instant::now();
+        let mut consecutive_poll_errors: u32 = 0;
         let job = loop {
-            tokio::time::sleep(self.job_wait.poll_interval).await;
-            let job = self
+            // Cooperative cancellation (sc-10276): rmcp cancels `ctx.ct` when the
+            // client sends `notifications/cancelled` (it does NOT abort the tool
+            // future, so a drop-guard would never fire). Catch it at the top of the
+            // wait and ask the job to stop, freeing the worker/GPU instead of
+            // letting a canceled render run to completion.
+            tokio::select! {
+                biased;
+                () = ctx.ct.cancelled() => {
+                    // Best-effort: the job may already be terminal, in which case the
+                    // cancel route is a harmless no-op.
+                    let _ = self
+                        .api
+                        .post_json(&format!("/api/v1/jobs/{job_id}/cancel"), &json!({}))
+                        .await;
+                    return tool_error(format!(
+                        "Image job {job_id} was canceled: the client canceled the \
+                         request, so the job was asked to stop."
+                    ));
+                }
+                () = tokio::time::sleep(self.job_wait.poll_interval) => {}
+            }
+            // Tolerate transient poll failures (sc-10279): the render keeps running
+            // server-side, so a single blip must not abort the whole tool call.
+            let job = match self
                 .api
                 .get_json(&format!("/api/v1/jobs/{job_id}"), &[])
                 .await
-                .map_err(api_error)?;
+            {
+                Ok(job) => {
+                    consecutive_poll_errors = 0;
+                    job
+                }
+                Err(error) => {
+                    consecutive_poll_errors += 1;
+                    if consecutive_poll_errors >= MAX_CONSECUTIVE_POLL_ERRORS {
+                        return Err(api_error(error));
+                    }
+                    if started.elapsed() >= self.job_wait.timeout {
+                        return tool_error(format!(
+                            "Image job {job_id} status polling kept failing (last error: \
+                             {error}) and the {}s deadline elapsed. The job may still be \
+                             running; it was not canceled.",
+                            self.job_wait.timeout.as_secs()
+                        ));
+                    }
+                    continue;
+                }
+            };
             reporter.report(&job).await;
             let status = job.get("status").and_then(Value::as_str).unwrap_or("");
             match status {
@@ -370,7 +437,10 @@ impl SceneWorksMcp {
             };
             let (bytes, header_mime) = self
                 .api
-                .get_bytes(&format!("/api/v1/projects/{project_id}/files/{media_path}"))
+                .get_bytes(&format!(
+                    "/api/v1/projects/{project_id}/files/{}",
+                    encode_media_path(&media_path)
+                ))
                 .await
                 .map_err(api_error)?;
             let mime_type = image_mime_type(
@@ -454,6 +524,7 @@ impl SceneWorksMcp {
     async fn get_job_result(
         &self,
         Parameters(args): Parameters<JobIdArgs>,
+        extensions: Extensions,
     ) -> Result<CallToolResult, ErrorData> {
         let job_id = valid_job_id(&args.job_id)
             .map_err(|message| ErrorData::invalid_params(message, None))?;
@@ -541,12 +612,28 @@ impl SceneWorksMcp {
         };
         let expires_in_seconds = ticket_response.get("expiresInSeconds").cloned();
 
+        // Absolute URL base for the ticket links (sc-10290). `/mcp` and `/api/v1`
+        // are the SAME axum app, so the host the client used to reach `/mcp` is
+        // exactly the host that serves the media — derive it from the incoming
+        // request so the URL is reachable by THIS client regardless of how
+        // `SCENEWORKS_API_URL` is configured (e.g. a loopback-default desktop
+        // answering a LAN client). Falls back to the configured API base when the
+        // request parts / Host aren't available. The Host is only reflected back to
+        // the caller that supplied it (never stored / shown to other users), and
+        // `/mcp` is already gated by access_control, so reflecting it is safe.
+        let link_base = extensions
+            .get::<http::request::Parts>()
+            .and_then(|parts| request_base_url(&parts.headers, &parts.uri))
+            .unwrap_or_else(|| self.api.base_url().to_owned());
+
         let mut blocks = Vec::with_capacity(assets.len() + 1);
         let mut summary_assets = Vec::with_capacity(assets.len());
         for (asset, media_path) in assets {
-            let relative_url =
-                format!("/api/v1/projects/{project_id}/files/{media_path}?ticket={ticket}");
-            let url = format!("{}{relative_url}", self.api.base_url());
+            let relative_url = format!(
+                "/api/v1/projects/{project_id}/files/{}?ticket={ticket}",
+                encode_media_path(&media_path)
+            );
+            let url = format!("{link_base}{relative_url}");
             let mime_type = media_mime_type(
                 &media_path,
                 asset.pointer("/file/mimeType").and_then(Value::as_str),
@@ -582,11 +669,11 @@ impl SceneWorksMcp {
             "ticketExpiresInSeconds": expires_in_seconds,
             "note": format!(
                 "Each url embeds a short-lived media ticket — download promptly \
-                 (call get_job_result again for fresh links). The urls use the \
-                 SceneWorks API base \"{}\"; if that host is not reachable from \
-                 your machine, apply relativeUrl to the base you use to reach \
-                 this MCP server (everything before /mcp).",
-                self.api.base_url()
+                 (call get_job_result again for fresh links). The urls use the base \
+                 \"{link_base}\" (derived from the host you used to reach this MCP \
+                 server, so they should be directly fetchable); if that base is not \
+                 reachable, apply relativeUrl to the base you use to reach /mcp \
+                 (everything before /mcp)."
             ),
         }))?);
         Ok(CallToolResult::success(blocks))
@@ -939,12 +1026,74 @@ pub(crate) fn media_mime_type(path: &str, sidecar_mime: Option<&str>) -> Option<
     Some(mime.to_owned())
 }
 
+/// The absolute base (`scheme://authority`) a returned ticket URL should use so
+/// the CALLING client can fetch it (sc-10290): prefer what the client actually
+/// used to reach `/mcp` — `X-Forwarded-Host` then `Host` for the authority (with
+/// the request-target authority as a last resort), and `X-Forwarded-Proto` then
+/// the request scheme (default `http`) for the scheme. Returns `None` when no
+/// authority is available, so the caller falls back to the configured API base.
+pub(crate) fn request_base_url(headers: &http::HeaderMap, uri: &http::Uri) -> Option<String> {
+    let raw_authority = header_str(headers, "x-forwarded-host")
+        .or_else(|| header_str(headers, "host"))
+        .or_else(|| uri.authority().map(http::uri::Authority::as_str))?;
+    let authority = first_csv(raw_authority);
+    if authority.is_empty() {
+        return None;
+    }
+    let scheme = header_str(headers, "x-forwarded-proto")
+        .or_else(|| uri.scheme_str())
+        .map(first_csv)
+        .filter(|scheme| !scheme.is_empty())
+        .unwrap_or("http");
+    Some(format!("{scheme}://{authority}"))
+}
+
+/// A request header as a trimmed, non-empty `&str` (ASCII values only).
+fn header_str<'a>(headers: &'a http::HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// The first entry of a possibly comma-separated forwarded header, trimmed — a
+/// proxy chain sets e.g. `X-Forwarded-Host: client-host, inner-host`.
+fn first_csv(value: &str) -> &str {
+    value.split(',').next().unwrap_or(value).trim()
+}
+
 /// Keep an asset for the inline result: image-typed (or untyped legacy) records.
 fn is_image_asset(asset: &Value) -> bool {
     match asset.get("type").and_then(Value::as_str) {
         Some(media_type) => media_type == "image",
         None => true,
     }
+}
+
+/// Percent-encode each segment of a project-relative media path for splicing into
+/// a `/files/*relative_path` URL, preserving the `/` separators (sc-10279).
+/// Generated media paths are slug-safe today, so this is byte-identical for them;
+/// it defends a future path segment containing a space, `%`, `#`, or `?` from
+/// silently mis-resolving. The set is the URL path percent-encode set plus `%`
+/// itself (the input is a raw filesystem path, not an already-escaped URL).
+pub(crate) fn encode_media_path(path: &str) -> String {
+    use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+    const SEGMENT: &AsciiSet = &CONTROLS
+        .add(b' ')
+        .add(b'"')
+        .add(b'#')
+        .add(b'%')
+        .add(b'<')
+        .add(b'>')
+        .add(b'?')
+        .add(b'`')
+        .add(b'{')
+        .add(b'}');
+    path.split('/')
+        .map(|segment| utf8_percent_encode(segment, SEGMENT).to_string())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// The project-relative media path of a result asset, normalized for the
@@ -1604,6 +1753,50 @@ mod tests {
     }
 
     #[test]
+    fn request_base_url_prefers_forwarded_then_host_then_none() {
+        use http::{HeaderMap, HeaderValue, Uri};
+        let uri: Uri = "/mcp".parse().unwrap();
+
+        // A plain Host header → http scheme by default.
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("192.168.4.97:8000"));
+        assert_eq!(
+            request_base_url(&headers, &uri).as_deref(),
+            Some("http://192.168.4.97:8000")
+        );
+
+        // Reverse-proxy headers win, and only the first CSV entry is used.
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("studio.example.com, inner:8000"),
+        );
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        assert_eq!(
+            request_base_url(&headers, &uri).as_deref(),
+            Some("https://studio.example.com")
+        );
+
+        // No authority anywhere → None so the caller keeps the configured base.
+        assert_eq!(request_base_url(&HeaderMap::new(), &uri), None);
+    }
+
+    #[test]
+    fn encode_media_path_encodes_unsafe_segments_but_keeps_separators() {
+        // The common case: slug-safe generated paths are byte-identical.
+        assert_eq!(
+            encode_media_path("assets/images/g1/img_0001.png"),
+            "assets/images/g1/img_0001.png"
+        );
+        // Separators survive; space/#/% inside a segment are encoded.
+        assert_eq!(
+            encode_media_path("assets/my folder/a#b%c.png"),
+            "assets/my%20folder/a%23b%25c.png"
+        );
+        // A '?' in a segment can't be mistaken for the query string.
+        assert_eq!(encode_media_path("a/b?c.png"), "a/b%3Fc.png");
+    }
+
+    #[test]
     fn media_mime_type_prefers_sidecar_then_extension() {
         assert_eq!(
             media_mime_type("clips/c.mp4", Some("video/webm")).as_deref(),
@@ -1619,6 +1812,24 @@ mod tests {
         );
         // Unknown extension + no sidecar → omit rather than guess.
         assert_eq!(media_mime_type("clips/c.bin", Some("")), None);
+    }
+
+    #[test]
+    fn job_wait_config_clamped_enforces_invariants() {
+        // Normal values pass through untouched.
+        let c = JobWaitConfig::clamped(Duration::from_secs(2), Duration::from_secs(600));
+        assert_eq!(c.poll_interval, Duration::from_secs(2));
+        assert_eq!(c.timeout, Duration::from_secs(600));
+
+        // A zero interval falls back to the default cadence (never sleep(0)).
+        let c = JobWaitConfig::clamped(Duration::ZERO, Duration::from_secs(600));
+        assert_eq!(c.poll_interval, JobWaitConfig::default().poll_interval);
+        assert_eq!(c.timeout, Duration::from_secs(600));
+
+        // A timeout below the interval is raised so the loop polls at least once.
+        let c = JobWaitConfig::clamped(Duration::from_secs(10), Duration::from_secs(3));
+        assert_eq!(c.poll_interval, Duration::from_secs(10));
+        assert_eq!(c.timeout, Duration::from_secs(10));
     }
 
     #[test]

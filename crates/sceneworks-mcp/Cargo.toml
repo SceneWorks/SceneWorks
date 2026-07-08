@@ -17,6 +17,14 @@ publish = false
 # Inline tool results: generated images come back as base64 `ImageContent` blocks
 # (sc-10234), so MCP clients can render them without another fetch.
 base64 = "0.22"
+# Read the incoming MCP request's Host header (via the `http::request::Parts` the
+# rmcp streamable-HTTP transport injects into the request extensions) so
+# get_job_result's ticket URLs point at the host the client actually used (sc-10290).
+# Pinned to rmcp's `http` major so the injected `Parts` type unifies.
+http = "1"
+# Per-segment percent-encoding of project-relative media paths before they are
+# spliced into `/files/*relative_path` URLs (sc-10279 defensive hardening).
+percent-encoding = "2.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # Pinned exact (sc-10233): the official MCP Rust SDK moves fast and its
 # streamable-HTTP server surface (StreamableHttpService / tool_router macros) has
