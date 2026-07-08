@@ -17,7 +17,7 @@
   - Build the binaries (VS2022 v143 BuildTools / CUDA 12.9; sm_120 native PTX shown):
       cmd /c 'call "<vcvars64.bat>" && set CUDA_COMPUTE_CAP=120 && cargo build --release ^
         -p sceneworks-rust-api -p sceneworks-rust-worker --features sceneworks-worker/backend-candle'
-  - microsoft/Lens + microsoft/Lens-Turbo snapshots in the HF cache (~/.cache/huggingface/hub).
+  - SceneWorks/lens-mlx + SceneWorks/lens-turbo-mlx snapshots in the HF cache (~/.cache/huggingface/hub).
 
 .EXAMPLE
   pwsh scripts/smoke-lens.ps1
@@ -78,15 +78,18 @@ Remove-Item (Join-Path $DataDir "recent-projects.json") -Force -ErrorAction Sile
 function Submit-Job($body) {
   Invoke-RestMethod -Method Post -Uri "$base/api/v1/image/jobs" -ContentType "application/json" -Body ($body | ConvertTo-Json -Depth 8)
 }
-function Get-Job($id) { Invoke-RestMethod -Method Get -Uri "$base/api/v1/jobs/$id" -TimeoutSec 10 }
-function Wait-Job($id, $timeoutSec) {
+# Named Get-SwJob / Wait-SwJob (not Get-Job / Wait-Job) so they don't shadow the
+# built-in PowerShell background-job cmdlets (F-131, sc-8933): a caller expecting the
+# real Get-Job/Wait-Job would otherwise silently get these HTTP pollers instead.
+function Get-SwJob($id) { Invoke-RestMethod -Method Get -Uri "$base/api/v1/jobs/$id" -TimeoutSec 10 }
+function Wait-SwJob($id, $timeoutSec) {
   $deadline = (Get-Date).AddSeconds($timeoutSec)
   while ((Get-Date) -lt $deadline) {
-    $j = Get-Job $id
+    $j = Get-SwJob $id
     if ($j.status -in @("completed","failed","canceled","interrupted")) { return $j }
     Start-Sleep -Seconds 3
   }
-  Get-Job $id
+  Get-SwJob $id
 }
 
 try {
@@ -152,7 +155,7 @@ try {
     Write-Host "`n=== $($c.name) ==="
     $job = Submit-Job $c.body
     Write-Host "submitted $($job.id)"
-    $j = Wait-Job $job.id $JobTimeoutSec
+    $j = Wait-SwJob $job.id $JobTimeoutSec
     $adapter = $null; $assetPath = $null
     if ($j.result -and $j.result.assets -and @($j.result.assets).Count -gt 0) {
       $a = @($j.result.assets)[0]

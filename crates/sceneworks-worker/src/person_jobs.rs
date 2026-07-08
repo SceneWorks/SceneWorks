@@ -1,8 +1,9 @@
 //! YOLO11 person detection on the Rust worker (epic 3482, sc-3488 slice 1 / sc-3633;
 //! off-Mac candle lane sc-5498, epic 5482).
 //!
-//! Ports the Python `scene_worker/person_adapters.py` `_UltralyticsDetector`
-//! (Ultralytics `yolo11m.pt`, COCO class 0) to Rust so the Replace-Person detection +
+//! Runs YOLO11 person detection natively in Rust — the Ultralytics `yolo11m.pt`
+//! (COCO class 0) detector, ported from the retired Python worker's
+//! `person_adapters.py` `_UltralyticsDetector` — so the Replace-Person detection +
 //! selected-person tracking steps run Python-free. The pure detector math (letterbox /
 //! decode / NMS / box normalization) is backend-neutral and unit-tested without weights;
 //! only the forward pass differs by platform:
@@ -103,6 +104,15 @@ const DET_REPO: &str = "SceneWorks/yolo11m-person-detect-mlx";
 const DET_FILE: &str = "yolo11m.onnx";
 #[cfg(not(target_os = "macos"))]
 const DET_REPO: &str = "SceneWorks/yolo11m-person-detect-onnx";
+/// Pinned detector-weights revision (sc-9682, F-077 follow-up). Even though `DET_REPO` is
+/// a first-party repo, fetching the mutable `main` branch means a re-push (or a compromised
+/// token) could silently swap the detector weights we load. Pin the exact commit per repo
+/// for defense-in-depth, mirroring the SeedVR2 pin (sc-8879). HF's tree API still reports
+/// each file's `lfs.oid`, which `ensure_hf_cached_file` verifies the content against.
+#[cfg(target_os = "macos")]
+const DET_REVISION: &str = "d7027d3a8812bdebbf7862fc1c7dcfdeebb0f777";
+#[cfg(not(target_os = "macos"))]
+const DET_REVISION: &str = "3cffbaccca4f239ae6301d8b66ba721401ecfa8d";
 // ---------------------------------------------------------------------------
 // pure detector math (unit-tested without weights)
 // ---------------------------------------------------------------------------
@@ -188,10 +198,38 @@ fn sample_rgb(img: &RgbImage, x: f32, y: f32, c: usize, border: f32) -> f32 {
     top * (1.0 - fy) + bot * fy
 }
 
-/// Build the (1,640,640,3) RGB `/255` letterboxed input in **NHWC** order (the layout
-/// `mlx_gen::nn::conv2d` expects) and return the geometry.
-#[cfg(target_os = "macos")]
-fn preprocess(img: &RgbImage) -> (Vec<f32>, Letterbox) {
+/// Destination layout for the shared letterbox preprocessor: NHWC (the layout
+/// `mlx_gen::nn::conv2d` expects, macOS) or NCHW (the `yolo11m.onnx` export expects,
+/// off-Mac). The two backends' letterbox + cv2 half-pixel sampling are byte-identical;
+/// only the destination index differs (sc-8906, F-104).
+#[derive(Clone, Copy)]
+enum InputLayout {
+    /// `hwc[(y * DET + x) * 3 + c]`.
+    #[cfg(target_os = "macos")]
+    Nhwc,
+    /// `chw[c * DET * DET + y * DET + x]`.
+    #[cfg(not(target_os = "macos"))]
+    Nchw,
+}
+
+impl InputLayout {
+    /// Flat destination index for pixel `(x, y)` channel `c` in the `3 * DET * DET` buffer.
+    #[inline]
+    fn index(self, x: usize, y: usize, c: usize) -> usize {
+        match self {
+            #[cfg(target_os = "macos")]
+            InputLayout::Nhwc => (y * DET + x) * 3 + c,
+            #[cfg(not(target_os = "macos"))]
+            InputLayout::Nchw => c * DET * DET + y * DET + x,
+        }
+    }
+}
+
+/// Build the (1,640,640,3) RGB `/255` letterboxed 640² input in `layout` order and return
+/// the geometry. The letterbox math + cv2 INTER_LINEAR half-pixel sampling are shared by
+/// both backends (macOS NHWC / off-Mac NCHW) — previously two byte-identical cfg-gated
+/// copies that could silently drift (sc-8906, F-104); only [`InputLayout::index`] differs.
+fn preprocess_letterbox(img: &RgbImage, layout: InputLayout) -> (Vec<f32>, Letterbox) {
     let lb = Letterbox::compute(img.width(), img.height());
     let (w, h) = (img.width() as f32, img.height() as f32);
     let new_w = (w * lb.ratio).round();
@@ -203,14 +241,13 @@ fn preprocess(img: &RgbImage) -> (Vec<f32>, Letterbox) {
     let pad_x = lb.pad_x as usize;
     let pad_y = lb.pad_y as usize;
 
-    // NHWC: hwc[(y * DET + x) * 3 + c].
-    let mut hwc = vec![PAD_VALUE / 255.0; DET * DET * 3];
+    let mut buf = vec![PAD_VALUE / 255.0; DET * DET * 3];
     for dy in 0..new_h {
         let src_y = (dy as f32 + 0.5) * sy - 0.5; // cv2 INTER_LINEAR half-pixel
-        let row = ((dy + pad_y) * DET + pad_x) * 3;
+        let y = dy + pad_y;
         for dx in 0..new_w {
             let src_x = (dx as f32 + 0.5) * sx - 0.5;
-            let base = row + dx * 3;
+            let x = dx + pad_x;
             for c in 0..3 {
                 let v = sample_rgb(
                     img,
@@ -219,15 +256,21 @@ fn preprocess(img: &RgbImage) -> (Vec<f32>, Letterbox) {
                     c,
                     0.0,
                 );
-                hwc[base + c] = v / 255.0;
+                buf[layout.index(x, y, c)] = v / 255.0;
             }
         }
     }
-    (hwc, lb)
+    (buf, lb)
 }
 
 /// Decode the (1,84,8400) channel-major output into person boxes (original px),
 /// pre-NMS. `data` is laid out as `data[channel * anchors + anchor]`.
+///
+/// The output shape/length are validated against the `(1, channels, anchors)` contract
+/// before any indexing (F-102): a user can pin an arbitrary ONNX export via
+/// `SCENEWORKS_PERSON_DETECTOR_WEIGHTS` whose output rank/length differs, and reading
+/// `shape[1]`/`shape[2]` or `data[channel*anchors + a]` on a shorter buffer would panic
+/// (OOB) and unwind the async task. Return an `Engine` error instead (sc-8904).
 fn decode(
     data: &[f32],
     shape: &[i64],
@@ -235,11 +278,25 @@ fn decode(
     conf: f32,
     frame_w: u32,
     frame_h: u32,
-) -> Vec<Detection> {
-    let channels = shape[1] as usize; // 84 = 4 box + 80 classes
-    let anchors = shape[2] as usize; // 8400
+) -> WorkerResult<Vec<Detection>> {
+    if shape.len() < 3 {
+        return Err(WorkerError::Engine(format!(
+            "yolo11m output rank {} < 3 (expected (1, channels, anchors))",
+            shape.len()
+        )));
+    }
+    let channels = shape[1].max(0) as usize; // 84 = 4 box + 80 classes
+    let anchors = shape[2].max(0) as usize; // 8400
     if channels < 5 {
-        return Vec::new();
+        return Ok(Vec::new());
+    }
+    if data.len() < channels.saturating_mul(anchors) {
+        return Err(WorkerError::Engine(format!(
+            "yolo11m output has {} values but the (channels={channels} × anchors={anchors}) \
+             contract needs {}",
+            data.len(),
+            channels.saturating_mul(anchors)
+        )));
     }
     let score_ch = 4 + PERSON_CLASS;
     let (fw, fh) = (frame_w as f32, frame_h as f32);
@@ -265,7 +322,7 @@ fn decode(
             score,
         });
     }
-    out
+    Ok(out)
 }
 
 fn iou(a: &Detection, b: &Detection) -> f32 {
@@ -676,8 +733,10 @@ impl Yolo {
         let x = self.c3k2(&x, 8, true)?; // 20,512
         let x = self.sppf(&x, 9)?; // 20,512
         let x = self.c2psa(&x, 10)?; // 20,512
+
+        // One saved copy of the C2PSA output, reused by the P5 neck concat (below) and returned in
+        // `YoloForward.block10` (sc-8952).
         let block10 = x.clone();
-        let b10 = x.clone();
         // neck (PANet)
         let x = upsample_nearest(&x, 2)?; // 40,512
         let x = concatenate_axis(&[&x, &b6], 3)?; // 40,1024
@@ -690,7 +749,7 @@ impl Yolo {
         let x = concatenate_axis(&[&x, &b13], 3)?; // 40,768
         let p4 = self.c3k2(&x, 19, true)?; // 40,512  → P4
         let x = self.conv(&p4, "model.20", 2, 1, true)?; // 20,512
-        let x = concatenate_axis(&[&x, &b10], 3)?; // 20,1024
+        let x = concatenate_axis(&[&x, &block10], 3)?; // 20,1024
         let p5 = self.c3k2(&x, 22, true)?; // 20,512  → P5
 
         let output = self.detect(&p3, &p4, &p5)?;
@@ -705,21 +764,24 @@ impl Yolo {
     }
 
     fn detect_people(&self, img: &RgbImage, conf: f32) -> WorkerResult<Vec<Detection>> {
-        let (input, lb) = preprocess(img);
+        let (input, lb) = preprocess_letterbox(img, InputLayout::Nhwc);
         let x = Array::from_slice(&input, &[1, DET as i32, DET as i32, 3]);
+        // A forward/reshape failure is an engine-execution fault, not a bad user payload —
+        // classify it as `Engine` like the `ort` sibling + the SAM2/SAM3 propagate paths
+        // (sc-8906, F-104); the old `InvalidPayload` mislabeled an MLX crash as user error.
         let out = self
             .run(&x)
-            .map_err(|e| WorkerError::InvalidPayload(format!("yolo11m forward: {e}")))?
+            .map_err(|e| WorkerError::Engine(format!("yolo11m forward: {e}")))?
             .output;
         // The head ends in a transpose, so `out` is a non-contiguous view; `as_slice`
         // would hand back the *physical* (pre-transpose) buffer. Flatten first to force a
         // logical-order copy → the `(1,84,8400)` channel-major layout `decode` indexes.
         let out = out
             .reshape(&[-1])
-            .map_err(|e| WorkerError::InvalidPayload(format!("yolo11m output reshape: {e}")))?;
+            .map_err(|e| WorkerError::Engine(format!("yolo11m output reshape: {e}")))?;
         let data = out.as_slice::<f32>();
         let shape = [1_i64, 84, ANCHORS as i64];
-        let raw = decode(data, &shape, &lb, conf, img.width(), img.height());
+        let raw = decode(data, &shape, &lb, conf, img.width(), img.height())?;
         Ok(nms(raw, NMS_IOU))
     }
 }
@@ -780,45 +842,6 @@ pub(crate) fn detect_people_blocking(
 // `decode`/`nms` math, exactly as the MLX path does.
 // ---------------------------------------------------------------------------
 
-/// Build the (1,3,640,640) RGB `/255` letterboxed input in **NCHW** order (the layout the
-/// `yolo11m.onnx` export expects) and return the geometry. Same letterbox + cv2 half-pixel
-/// sampling as the MLX `preprocess`, only the output channel order differs.
-#[cfg(not(target_os = "macos"))]
-fn preprocess_nchw(img: &RgbImage) -> (Vec<f32>, Letterbox) {
-    let lb = Letterbox::compute(img.width(), img.height());
-    let (w, h) = (img.width() as f32, img.height() as f32);
-    let new_w = (w * lb.ratio).round();
-    let new_h = (h * lb.ratio).round();
-    let sx = w / new_w.max(1.0);
-    let sy = h / new_h.max(1.0);
-    let new_w = new_w as usize;
-    let new_h = new_h as usize;
-    let pad_x = lb.pad_x as usize;
-    let pad_y = lb.pad_y as usize;
-
-    // NCHW: chw[c * DET * DET + y * DET + x].
-    let mut chw = vec![PAD_VALUE / 255.0; 3 * DET * DET];
-    for dy in 0..new_h {
-        let src_y = (dy as f32 + 0.5) * sy - 0.5; // cv2 INTER_LINEAR half-pixel
-        let y = dy + pad_y;
-        for dx in 0..new_w {
-            let src_x = (dx as f32 + 0.5) * sx - 0.5;
-            let x = dx + pad_x;
-            for c in 0..3 {
-                let v = sample_rgb(
-                    img,
-                    src_x.clamp(0.0, w - 1.0),
-                    src_y.clamp(0.0, h - 1.0),
-                    c,
-                    0.0,
-                );
-                chw[c * DET * DET + y * DET + x] = v / 255.0;
-            }
-        }
-    }
-    (chw, lb)
-}
-
 #[cfg(not(target_os = "macos"))]
 fn ort_err<R>(e: ort::Error<R>) -> WorkerError {
     WorkerError::Engine(format!("onnxruntime: {e}"))
@@ -864,16 +887,25 @@ impl OrtYolo {
                 session,
                 device: "cuda",
             }),
-            Err(_) => Ok(Self {
-                session: build_session(path, false)?,
-                device: "cpu",
-            }),
+            // Log WHY the CUDA session build failed before silently rebuilding on CPU
+            // (F-099): otherwise a cuDNN/CUDA mismatch or a genuinely GPU-less box both
+            // present as an unexplained "device = cpu" with no breadcrumb (sc-8901).
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "yolo11m CUDA session build failed; falling back to CPU"
+                );
+                Ok(Self {
+                    session: build_session(path, false)?,
+                    device: "cpu",
+                })
+            }
         }
     }
 
     /// Detect every person in one frame → NMS'd boxes in original px.
     fn detect_people(&mut self, img: &RgbImage, conf: f32) -> WorkerResult<Vec<Detection>> {
-        let (input, lb) = preprocess_nchw(img);
+        let (input, lb) = preprocess_letterbox(img, InputLayout::Nchw);
         let tensor = Tensor::from_array(([1_i64, 3, DET as i64, DET as i64].to_vec(), input))
             .map_err(ort_err)?;
         let outputs = self.session.run(ort::inputs![tensor]).map_err(ort_err)?;
@@ -882,7 +914,7 @@ impl OrtYolo {
         // so `decode` indexes it correctly regardless of the exact class count.
         let (shape, data) = outputs[0].try_extract_tensor::<f32>().map_err(ort_err)?;
         let shape: Vec<i64> = shape.to_vec();
-        let raw = decode(data, &shape, &lb, conf, img.width(), img.height());
+        let raw = decode(data, &shape, &lb, conf, img.width(), img.height())?;
         Ok(nms(raw, NMS_IOU))
     }
 }
@@ -966,7 +998,7 @@ pub(crate) async fn ensure_detector_weights(
         .join("cache")
         .join("person-detect")
         .join(DET_FILE);
-    ensure_hf_cached_file(context, DET_REPO, "main", DET_FILE, &target).await
+    ensure_hf_cached_file(context, DET_REPO, DET_REVISION, DET_FILE, &target).await
 }
 
 #[cfg(test)]

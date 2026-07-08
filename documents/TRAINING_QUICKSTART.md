@@ -5,10 +5,10 @@ machine. This guide walks through the first run: preparing a dataset, validating
 the plan with a dry run, training for real, and using the result in Image Studio.
 
 Native LoRA training is Rust-first: Rust owns the dataset store, training
-contracts, the target registry, queue routing, and LoRA registration. The Python
-worker is a narrow execution kernel that consumes a fully resolved plan and
-produces weights. See `crates/sceneworks-core/src/training.rs` and
-`apps/worker/scene_worker/training_adapters.py`.
+contracts, the target registry, queue routing, and LoRA registration. The native
+worker's execution kernel consumes a fully resolved plan and produces weights.
+See `crates/sceneworks-core/src/training.rs` and
+`crates/sceneworks-worker/src/training_jobs.rs`.
 
 ## Prerequisites
 
@@ -226,9 +226,10 @@ under-fit; use earlier checkpoints if a 3000-step balanced run starts overfittin
 > Manager before a real run. Another source is selectable via
 > `advanced.baseModelRepo`.
 >
-> Like the Lens inference path, training runs in the isolated **Lens sidecar venv**
-> (`/opt/lens-venv`: transformers 5.x + diffusers 0.38), not the main worker venv,
-> via `scene_worker/lens_train_runner.py`. The gpt-oss-20b text encoder + Flux.2
+> Lens LoRA training runs through the native Rust worker's `mlx-gen-lens` trainer
+> on macOS (routed via `MLX_ROUTED_TRAINING_KERNELS`, sc-5148/sc-5180); off-Mac it
+> uses the candle Lens trainer. (The retired Python `scene_worker/lens_train_runner.py`
+> sidecar was deleted in epic 8283.) The gpt-oss-20b text encoder + Flux.2
 > VAE encode the dataset once (latents + the 4 selected-layer text features are
 > cached), then the flow-matching loop trains a PEFT LoRA on the transformer's
 > **fused-QKV** projections (`img_qkv`/`txt_qkv`/`to_out`/`to_add_out` — Z-Image's
@@ -387,5 +388,10 @@ messages:
 | *"… required model files were not available."* (runtime) | Model files missing/incomplete | Re-install the base model; ensure the utility worker is running; set `HF_TOKEN` for gated repos. |
 | *"… disk ran out of space."* (runtime) | Volume filled mid-run | Free space and retry. |
 
-See `apps/worker/README.md` for the kernel's runtime dependencies and a local
-smoke check (`python -m scene_worker --check`).
+The training kernel now runs inside the native Rust worker
+(`apps/rust-worker/` + `crates/sceneworks-worker/`); the retired Python worker
+and its `python -m scene_worker --check` smoke were deleted in epic 8283. To
+sanity-check the worker locally, build it with
+`cargo build -p sceneworks-rust-worker` and confirm it claims jobs from the Rust
+API; see `crates/sceneworks-worker/ARCHITECTURE.md` for the capability matrix and
+runtime roles.

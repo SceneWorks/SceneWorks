@@ -147,6 +147,136 @@ struct AudioTrack {
     channels: u16,
 }
 
+/// The native (MLX) video engine a `run_video_generate_job` request routes to — the routing DECISION,
+/// separated from execution (sc-8828, F-026; mirrors the image lane's `ImageRoute`). `resolve_video_route`
+/// runs the predicate ladder ONCE and returns this; the caller `match`es to run the (non-uniformly-typed)
+/// generators. Preserves the historical predicate order + per-family engine exactly, so routing is
+/// byte-identical. `replace_person` (mode-gated, resolve-or-error) is three distinct variants — SCAIL-2,
+/// dual-expert Wan2.2 VACE-Fun, single-expert Wan-VACE — because each drives a different backend/checkpoint.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VideoRoute {
+    /// `replace_person` on a `scail2_*` model → SCAIL-2 cross-identity replacement (sc-5452). Carries the
+    /// resolved engine id.
+    ReplacePersonScail2(&'static str),
+    /// `replace_person` on `wan_2_2_vace_fun_14b` → the dual-expert Wan2.2 VACE-Fun engine (sc-3459).
+    ReplacePersonWanVaceFun,
+    /// `replace_person` on any other replace-capable model → single-expert Wan-VACE (sc-3521).
+    ReplacePersonWanVace,
+    /// `extend_clip` / `video_bridge` on `wan_2_2_ti2v_5b` (weights available) → native Wan-VACE
+    /// extend/bridge, falling back to the TI2V-5B keyframe path if the VACE snapshot is unprovisioned
+    /// (sc-3812). The fallback is an execution-time detail handled in the dispatch arm.
+    WanVaceExtendBridge,
+    /// Wan txt2video / i2v on a resolvable Wan model (sc-3034). Carries the resolved engine id.
+    Wan(&'static str),
+    /// LTX+audio (sc-3035). Carries the resolved engine id.
+    Ltx(&'static str),
+    /// Stable Video Diffusion. Carries the resolved engine id.
+    Svd(&'static str),
+    /// Bernini (epic 4699): Qwen2.5-VL planner + Wan2.2-T2V-A14B renderer. Carries the resolved engine id.
+    Bernini(&'static str),
+    /// SCAIL-2 standalone character animation (epic 5439). Carries the resolved engine id.
+    Scail2(&'static str),
+    /// No native engine matched (or weights unresolved) → the procedural stub, after
+    /// `ensure_video_engine_weights` fails a known-but-unprovisioned engine loudly (sc-4176).
+    Stub,
+}
+
+/// Run the native video dispatch predicate ladder ONCE and return the [`VideoRoute`]. Mirrors the
+/// historical inline ladder EXACTLY — same predicate order, same per-family engine — so routing is
+/// byte-identical (sc-8828). Pure decision: no I/O, no generation. `replace_person` is dispatched by
+/// mode first (resolve-or-error semantics live in the execution arms), then the engine-id/availability
+/// ladder for every other mode.
+#[cfg(target_os = "macos")]
+fn resolve_video_route(request: &VideoRequest, settings: &Settings) -> VideoRoute {
+    if request.mode == "replace_person" {
+        if let Some(engine_id) = scail2_engine_id(&request.model) {
+            VideoRoute::ReplacePersonScail2(engine_id)
+        } else if request.model == "wan_2_2_vace_fun_14b" {
+            VideoRoute::ReplacePersonWanVaceFun
+        } else {
+            VideoRoute::ReplacePersonWanVace
+        }
+    } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge")
+        && wan_engine_id(&request.model) == Some("wan2_2_ti2v_5b")
+        && wan_available(request, settings)
+    {
+        VideoRoute::WanVaceExtendBridge
+    } else if let Some(engine_id) =
+        wan_engine_id(&request.model).filter(|_| wan_available(request, settings))
+    {
+        VideoRoute::Wan(engine_id)
+    } else if let Some(engine_id) =
+        ltx_engine_id(&request.model).filter(|_| ltx_available(request, settings))
+    {
+        VideoRoute::Ltx(engine_id)
+    } else if let Some(engine_id) =
+        svd_engine_id(&request.model).filter(|_| svd_available(request, settings))
+    {
+        VideoRoute::Svd(engine_id)
+    } else if let Some(engine_id) =
+        bernini_engine_id(&request.model).filter(|_| bernini_available(request, settings))
+    {
+        VideoRoute::Bernini(engine_id)
+    } else if let Some(engine_id) =
+        scail2_engine_id(&request.model).filter(|_| scail2_available(request, settings))
+    {
+        VideoRoute::Scail2(engine_id)
+    } else {
+        VideoRoute::Stub
+    }
+}
+
+/// The candle (Windows/CUDA/Linux) video engine a `run_video_generate_job` request routes to — the
+/// candle-lane sibling of [`VideoRoute`] (sc-8828, F-026). Every arm is gated on
+/// `settings.backend_candle_enabled`; when that is off (default) the resolver returns
+/// [`CandleVideoRoute::Stub`] so routing is unchanged until parity is accepted. Conditioning shapes
+/// never reach the candle lane — the router's `video_job_is_candle_eligible` confines it — so this is
+/// a narrow replace/animate/extend/txt2video ladder.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandleVideoRoute {
+    /// `replace_person` on a `scail2_*` model → candle SCAIL-2 replacement (sc-6837). Carries the id.
+    ReplacePersonScail2(&'static str),
+    /// `replace_person` on any other candle-VACE model → candle Wan-VACE replacement (sc-5494).
+    ReplacePersonWanVace,
+    /// `animate_character` on a `scail2_*` model → candle SCAIL-2 animation (sc-6837). Carries the id.
+    AnimateScail2(&'static str),
+    /// `extend_clip` / `video_bridge` → candle Wan-VACE extend/bridge (sc-5494).
+    WanVaceExtendBridge,
+    /// A candle txt2video engine id → `generate_candle_video` (sc-5097).
+    CandleVideo,
+    /// Candle disabled, or no candle engine matched → the procedural stub.
+    Stub,
+}
+
+/// Run the candle video dispatch predicate ladder ONCE and return the [`CandleVideoRoute`]. Mirrors the
+/// historical inline ladder EXACTLY — same predicate order + `backend_candle_enabled` gating — so
+/// routing is byte-identical (sc-8828). Pure decision: no I/O, no generation.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> CandleVideoRoute {
+    if !settings.backend_candle_enabled {
+        return CandleVideoRoute::Stub;
+    }
+    if request.mode == "replace_person" {
+        match candle_scail2_engine_id(&request.model) {
+            Some(engine_id) => CandleVideoRoute::ReplacePersonScail2(engine_id),
+            None => CandleVideoRoute::ReplacePersonWanVace,
+        }
+    } else if request.mode == "animate_character"
+        && candle_scail2_engine_id(&request.model).is_some()
+    {
+        let engine_id = candle_scail2_engine_id(&request.model).expect("scail2 model");
+        CandleVideoRoute::AnimateScail2(engine_id)
+    } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge") {
+        CandleVideoRoute::WanVaceExtendBridge
+    } else if is_candle_video_engine(&request.model) {
+        CandleVideoRoute::CandleVideo
+    } else {
+        CandleVideoRoute::Stub
+    }
+}
+
 /// Dispatch handler for `JobType::VideoGenerate`: generate, encode, and stream a
 /// single video asset through the Rust GPU worker.
 pub(crate) async fn run_video_generate_job(
@@ -225,85 +355,155 @@ pub(crate) async fn run_video_generate_job(
     // procedural stub (a stubbed person-replace would be meaningless). It also reports the honest
     // `replacementStatus` the asset sidecar folds in (project_store::build_video_sidecar_parts).
     #[cfg(target_os = "macos")]
-    let (decoded, adapter, raw_settings, replacement_status) = if request.mode == "replace_person" {
-        // sc-5452: SCAIL-2 is a higher-quality cross-identity replacement backend behind the same
-        // YOLO11 → ByteTrack → SAM3 person-track pipeline. A `scail2_14b` person-replace job routes
-        // to SCAIL-2 (the tracked person's masks + the character reference → the engine's
-        // replacement conditioning, `replace_flag = true`); every other replace-capable model keeps
-        // native Wan-VACE (sc-3521). Routed by model id, not weight availability: like the Wan-VACE
-        // path, `generate_scail2_replace` resolves-or-errors loudly if the snapshot is unprovisioned
-        // (a person-replace must never silently degrade to a different backend or the stub). Both
-        // report the honest `replacementStatus` the asset sidecar folds in.
-        if let Some(engine_id) = scail2_engine_id(&request.model) {
-            let (decoded, status) = generate_scail2_replace(
-                api,
-                settings,
-                job,
-                &request,
-                &project_path,
-                engine_id,
-                backend,
-            )
-            .await?;
-            (
-                // The replace_person path doesn't resolve user LoRAs (sc-5452), so no lightning recipe.
-                decoded,
-                SCAIL2_ADAPTER,
-                scail2_raw_settings(&request, false),
-                Some(status),
-            )
-        } else if request.model == "wan_2_2_vace_fun_14b" {
-            // sc-3459: the native dual-expert Wan2.2 VACE-Fun engine (`wan2_2_vace_fun_14b`,
-            // mlx-gen sc-6604). Same replace_person conditioning as single-expert Wan-VACE, but the
-            // dual-expert snapshot + engine — `generate_wan_vace_fun` resolves-or-errors loudly,
-            // never falling back to the Wan2.1 `wan_vace` checkpoint.
-            let (decoded, status) =
-                generate_wan_vace_fun(api, settings, job, &request, &project_path, backend).await?;
-            (
-                decoded,
-                WAN_VACE_FUN_ADAPTER,
-                wan_vace_raw_settings(&request, "wan2_2_vace_fun_14b"),
-                Some(status),
-            )
-        } else {
-            let (decoded, status) =
-                generate_wan_vace(api, settings, job, &request, &project_path, backend).await?;
-            (
-                decoded,
-                WAN_VACE_ADAPTER,
-                wan_vace_raw_settings(&request, "wan_vace"),
-                Some(status),
-            )
-        }
-    } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge")
-        && wan_engine_id(&request.model) == Some("wan2_2_ti2v_5b")
-        && wan_available(&request, settings)
-    {
-        // sc-3812 (tier C): route Wan extend/bridge to native Wan-VACE for genuine motion
-        // continuity (the model attends to real source frames, not one boundary still). Falls
-        // back to the sc-3357 single-frame TI2V-5B keyframe path when the VACE snapshot is
-        // unprovisioned, so the mode keeps working on the weights the user already has. The
-        // engine substitution under the `wan_2_2` pick is recorded honestly in raw-settings.
-        match resolve_wan_vace_model_dir(settings) {
-            Ok(model_dir) => (
-                generate_wan_vace_extend_bridge(
+    let (decoded, adapter, raw_settings, replacement_status) =
+        match resolve_video_route(&request, settings) {
+            // sc-5452: SCAIL-2 is a higher-quality cross-identity replacement backend behind the same
+            // YOLO11 → ByteTrack → SAM3 person-track pipeline. A `scail2_14b` person-replace job routes
+            // to SCAIL-2 (the tracked person's masks + the character reference → the engine's
+            // replacement conditioning, `replace_flag = true`); every other replace-capable model keeps
+            // native Wan-VACE (sc-3521). Routed by model id, not weight availability: like the Wan-VACE
+            // path, `generate_scail2_replace` resolves-or-errors loudly if the snapshot is unprovisioned
+            // (a person-replace must never silently degrade to a different backend or the stub). Both
+            // report the honest `replacementStatus` the asset sidecar folds in.
+            VideoRoute::ReplacePersonScail2(engine_id) => {
+                let (decoded, status) = generate_scail2_replace(
                     api,
                     settings,
                     job,
                     &request,
                     &project_path,
+                    engine_id,
                     backend,
-                    model_dir,
+                )
+                .await?;
+                (
+                    // The replace_person path doesn't resolve user LoRAs (sc-5452), so no lightning recipe.
+                    decoded,
+                    SCAIL2_ADAPTER,
+                    scail2_raw_settings(&request, false),
+                    Some(status),
+                )
+            }
+            VideoRoute::ReplacePersonWanVaceFun => {
+                // sc-3459: the native dual-expert Wan2.2 VACE-Fun engine (`wan2_2_vace_fun_14b`,
+                // mlx-gen sc-6604). Same replace_person conditioning as single-expert Wan-VACE, but the
+                // dual-expert snapshot + engine — `generate_wan_vace_fun` resolves-or-errors loudly,
+                // never falling back to the Wan2.1 `wan_vace` checkpoint.
+                let (decoded, status) =
+                    generate_wan_vace_fun(api, settings, job, &request, &project_path, backend)
+                        .await?;
+                (
+                    decoded,
+                    WAN_VACE_FUN_ADAPTER,
+                    wan_vace_raw_settings(&request, "wan2_2_vace_fun_14b"),
+                    Some(status),
+                )
+            }
+            VideoRoute::ReplacePersonWanVace => {
+                let (decoded, status) =
+                    generate_wan_vace(api, settings, job, &request, &project_path, backend).await?;
+                (
+                    decoded,
+                    WAN_VACE_ADAPTER,
+                    wan_vace_raw_settings(&request, "wan_vace"),
+                    Some(status),
+                )
+            }
+            VideoRoute::WanVaceExtendBridge => {
+                // sc-3812 (tier C): route Wan extend/bridge to native Wan-VACE for genuine motion
+                // continuity (the model attends to real source frames, not one boundary still). Falls
+                // back to the sc-3357 single-frame TI2V-5B keyframe path when the VACE snapshot is
+                // unprovisioned, so the mode keeps working on the weights the user already has. The
+                // engine substitution under the `wan_2_2` pick is recorded honestly in raw-settings.
+                match resolve_wan_vace_model_dir(settings) {
+                    Ok(model_dir) => (
+                        generate_wan_vace_extend_bridge(
+                            api,
+                            settings,
+                            job,
+                            &request,
+                            &project_path,
+                            backend,
+                            model_dir,
+                        )
+                        .await?,
+                        WAN_VACE_ADAPTER,
+                        wan_vace_extend_raw_settings(&request),
+                        None,
+                    ),
+                    Err(_) => {
+                        let engine_id = "wan2_2_ti2v_5b";
+                        (
+                            generate_wan(
+                                api,
+                                settings,
+                                job,
+                                &request,
+                                &project_path,
+                                engine_id,
+                                backend,
+                            )
+                            .await?,
+                            WAN_ADAPTER,
+                            wan_raw_settings(&request, engine_id),
+                            None,
+                        )
+                    }
+                }
+            }
+            VideoRoute::Wan(engine_id) => (
+                generate_wan(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
                 )
                 .await?,
-                WAN_VACE_ADAPTER,
-                wan_vace_extend_raw_settings(&request),
+                WAN_ADAPTER,
+                wan_raw_settings(&request, engine_id),
                 None,
             ),
-            Err(_) => {
-                let engine_id = "wan2_2_ti2v_5b";
+            VideoRoute::Ltx(engine_id) => (
+                generate_ltx(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
+                )
+                .await?,
+                LTX_ADAPTER,
+                ltx_raw_settings(&request),
+                None,
+            ),
+            VideoRoute::Svd(engine_id) => (
+                generate_svd(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
+                )
+                .await?,
+                SVD_ADAPTER,
+                svd_raw_settings(&request),
+                None,
+            ),
+            VideoRoute::Bernini(engine_id) => {
+                // Bernini (epic 4699 / sc-4707 + sc-4703): the full Qwen2.5-VL planner + Wan2.2-T2V-A14B
+                // renderer. Serves text_to_video + the editing/reference video modes (video_to_video /
+                // reference_to_video / reference_video_to_video); `generate_bernini` maps the SceneWorks mode
+                // to the engine guidance task and resolves the source media into the planner conditioning.
+                // (t2i/i2i image companion = a separate image-typed catalog id, tracked under epic 4699.)
                 (
-                    generate_wan(
+                    generate_bernini(
                         api,
                         settings,
                         job,
@@ -313,133 +513,51 @@ pub(crate) async fn run_video_generate_job(
                         backend,
                     )
                     .await?,
-                    WAN_ADAPTER,
-                    wan_raw_settings(&request, engine_id),
+                    BERNINI_ADAPTER,
+                    bernini_raw_settings(&request),
                     None,
                 )
             }
-        }
-    } else if let Some(engine_id) =
-        wan_engine_id(&request.model).filter(|_| wan_available(&request, settings))
-    {
-        (
-            generate_wan(
-                api,
-                settings,
-                job,
-                &request,
-                &project_path,
-                engine_id,
-                backend,
-            )
-            .await?,
-            WAN_ADAPTER,
-            wan_raw_settings(&request, engine_id),
-            None,
-        )
-    } else if let Some(engine_id) =
-        ltx_engine_id(&request.model).filter(|_| ltx_available(&request, settings))
-    {
-        (
-            generate_ltx(
-                api,
-                settings,
-                job,
-                &request,
-                &project_path,
-                engine_id,
-                backend,
-            )
-            .await?,
-            LTX_ADAPTER,
-            ltx_raw_settings(&request),
-            None,
-        )
-    } else if let Some(engine_id) =
-        svd_engine_id(&request.model).filter(|_| svd_available(&request, settings))
-    {
-        (
-            generate_svd(
-                api,
-                settings,
-                job,
-                &request,
-                &project_path,
-                engine_id,
-                backend,
-            )
-            .await?,
-            SVD_ADAPTER,
-            svd_raw_settings(&request),
-            None,
-        )
-    } else if let Some(engine_id) =
-        bernini_engine_id(&request.model).filter(|_| bernini_available(&request, settings))
-    {
-        // Bernini (epic 4699 / sc-4707 + sc-4703): the full Qwen2.5-VL planner + Wan2.2-T2V-A14B
-        // renderer. Serves text_to_video + the editing/reference video modes (video_to_video /
-        // reference_to_video / reference_video_to_video); `generate_bernini` maps the SceneWorks mode
-        // to the engine guidance task and resolves the source media into the planner conditioning.
-        // (t2i/i2i image companion = a separate image-typed catalog id, tracked under epic 4699.)
-        (
-            generate_bernini(
-                api,
-                settings,
-                job,
-                &request,
-                &project_path,
-                engine_id,
-                backend,
-            )
-            .await?,
-            BERNINI_ADAPTER,
-            bernini_raw_settings(&request),
-            None,
-        )
-    } else if let Some(engine_id) =
-        scail2_engine_id(&request.model).filter(|_| scail2_available(&request, settings))
-    {
-        // SCAIL-2 (epic 5439 / sc-5448): Wan2.1-14B I2V character animation. `generate_scail2`
-        // segments the reference image + driving frames with native SAM3, paints the color-coded
-        // masks, and maps the SceneWorks mode to the engine task (animate_character → animation;
-        // replace_person → replacement is wired in sc-5452). No torch path (mac-only engine).
-        (
-            generate_scail2(
-                api,
-                settings,
-                job,
-                &request,
-                &project_path,
-                engine_id,
-                backend,
-            )
-            .await?,
-            SCAIL2_ADAPTER,
-            // Best-effort lightning detection for the asset's effective-recipe record (the adapter
-            // file is already resolved by generate_scail2 above; re-reading its header is cheap).
-            scail2_raw_settings(
-                &request,
-                scail2_adapters_have_lightning(
-                    &resolve_scail2_adapters(settings, &request).unwrap_or_default(),
-                ),
-            ),
-            None,
-        )
-    } else {
-        // An MLX-routed video model whose snapshot didn't resolve must fail
-        // loudly with the resolver's precise error instead of completing with
-        // procedural stub output (sc-4176, epic 3482 "unsupported jobs error
-        // loudly"). replace_person above already follows this rule; the stub
-        // remains only for ids outside the engine families (test models,
-        // not-yet-ported families).
-        ensure_video_engine_weights(&request, settings)?;
-        (
-            generate_stub_video(&request, seed),
-            STUB_ADAPTER,
-            stub_raw_settings(&request),
-            None,
-        )
-    };
+            VideoRoute::Scail2(engine_id) => {
+                // SCAIL-2 (epic 5439 / sc-5448): Wan2.1-14B I2V character animation. `generate_scail2`
+                // segments the reference image + driving frames with native SAM3, paints the color-coded
+                // masks, and maps the SceneWorks mode to the engine task (animate_character → animation;
+                // replace_person → replacement is wired in sc-5452). No torch path (mac-only engine).
+                // It returns the resolved `lightning` bool so the effective-recipe record uses the
+                // same resolution instead of a second `unwrap_or_default` pass (F-118).
+                let (decoded, lightning) = generate_scail2(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
+                )
+                .await?;
+                (
+                    decoded,
+                    SCAIL2_ADAPTER,
+                    scail2_raw_settings(&request, lightning),
+                    None,
+                )
+            }
+            VideoRoute::Stub => {
+                // An MLX-routed video model whose snapshot didn't resolve must fail
+                // loudly with the resolver's precise error instead of completing with
+                // procedural stub output (sc-4176, epic 3482 "unsupported jobs error
+                // loudly"). replace_person above already follows this rule; the stub
+                // remains only for ids outside the engine families (test models,
+                // not-yet-ported families).
+                ensure_video_engine_weights(&request, settings)?;
+                (
+                    generate_stub_video(&request, seed),
+                    STUB_ADAPTER,
+                    stub_raw_settings(&request),
+                    None,
+                )
+            }
+        };
     // Windows/CUDA candle video lane (sc-5097): a real wan/ltx txt2video job runs through
     // `generate_candle_video` (the same neutral encode/mux path as MLX + the stub); anything the
     // candle lane doesn't serve stubs exactly as before. Gated on `backend_candle_enabled` (default
@@ -447,14 +565,14 @@ pub(crate) async fn run_video_generate_job(
     // `video_job_is_candle_eligible` confines the candle worker to txt2video.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let (decoded, adapter, raw_settings, replacement_status) =
-        if settings.backend_candle_enabled && request.mode == "replace_person" {
+        match resolve_candle_video_route(&request, settings) {
             // sc-6837 (epic 6563): SCAIL-2 is a distinct cross-identity replacement backend (NOT Wan-VACE)
             // behind the same person-track pipeline. A `scail2_14b` replace_person job routes to the candle
             // SCAIL-2 engine (the character reference + the tracked person's color masks, `replace_flag`),
             // mirroring the macOS `generate_scail2_replace` dispatch; every other replace-capable model
             // keeps candle Wan-VACE. Routed by model id, not weight availability — `generate_candle_scail2_
             // replace` resolves-or-errors loudly (a person-replace must never silently degrade to a stub).
-            if let Some(engine_id) = candle_scail2_engine_id(&request.model) {
+            CandleVideoRoute::ReplacePersonScail2(engine_id) => {
                 let (decoded, status) = generate_candle_scail2_replace(
                     api,
                     settings,
@@ -472,7 +590,8 @@ pub(crate) async fn run_video_generate_job(
                     candle_scail2_raw_settings(&request, false),
                     Some(status),
                 )
-            } else {
+            }
+            CandleVideoRoute::ReplacePersonWanVace => {
                 // Candle Wan-VACE person replacement (sc-5494) — the candle equivalent of the MLX
                 // `wan_vace` path. The router (`video_request_candle_vace_eligible`) already confirmed the
                 // candle-VACE model + the source clip + person track before this job reached the candle
@@ -488,58 +607,55 @@ pub(crate) async fn run_video_generate_job(
                     Some(status),
                 )
             }
-        } else if settings.backend_candle_enabled
-            && request.mode == "animate_character"
-            && candle_scail2_engine_id(&request.model).is_some()
-        {
-            // sc-6837: SCAIL-2 standalone character animation — a reference character + a driving video →
-            // an animated clip. `generate_candle_scail2` segments the reference + driving frames with the
-            // candle SAM3 segmenter, paints the color-coded masks, and runs the `scail2_14b` engine
-            // (`animate_character` → engine task `animation`). The candle sibling of the macOS
-            // `generate_scail2`; resolves-or-errors loudly (no torch fallback — a distinct candle engine).
-            let engine_id = candle_scail2_engine_id(&request.model).expect("scail2 model");
-            let (decoded, adapter, raw_settings) = generate_candle_scail2(
-                api,
-                settings,
-                job,
-                &request,
-                &project_path,
-                engine_id,
-                backend,
-            )
-            .await?;
-            (decoded, adapter, raw_settings, None::<Value>)
-        } else if settings.backend_candle_enabled
-            && matches!(request.mode.as_str(), "extend_clip" | "video_bridge")
-        {
-            // Candle Wan-VACE extend/bridge (sc-5494): real source frames pinned at the kept positions +
-            // a generated span (the candle equivalent of the MLX `generate_wan_vace_extend_bridge`).
-            let decoded = generate_candle_wan_vace_extend_bridge(
-                api,
-                settings,
-                job,
-                &request,
-                &project_path,
-                backend,
-            )
-            .await?;
-            (
-                decoded,
-                CANDLE_WAN_VACE_ADAPTER,
-                wan_vace_extend_raw_settings(&request),
-                None::<Value>,
-            )
-        } else if settings.backend_candle_enabled && is_candle_video_engine(&request.model) {
-            let (decoded, adapter, raw_settings) =
-                generate_candle_video(api, settings, job, &request, &project_path, backend).await?;
-            (decoded, adapter, raw_settings, None::<Value>)
-        } else {
-            (
+            CandleVideoRoute::AnimateScail2(engine_id) => {
+                // sc-6837: SCAIL-2 standalone character animation — a reference character + a driving video →
+                // an animated clip. `generate_candle_scail2` segments the reference + driving frames with the
+                // candle SAM3 segmenter, paints the color-coded masks, and runs the `scail2_14b` engine
+                // (`animate_character` → engine task `animation`). The candle sibling of the macOS
+                // `generate_scail2`; resolves-or-errors loudly (no torch fallback — a distinct candle engine).
+                let (decoded, adapter, raw_settings) = generate_candle_scail2(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
+                )
+                .await?;
+                (decoded, adapter, raw_settings, None::<Value>)
+            }
+            CandleVideoRoute::WanVaceExtendBridge => {
+                // Candle Wan-VACE extend/bridge (sc-5494): real source frames pinned at the kept positions +
+                // a generated span (the candle equivalent of the MLX `generate_wan_vace_extend_bridge`).
+                let decoded = generate_candle_wan_vace_extend_bridge(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    backend,
+                )
+                .await?;
+                (
+                    decoded,
+                    CANDLE_WAN_VACE_ADAPTER,
+                    wan_vace_extend_raw_settings(&request),
+                    None::<Value>,
+                )
+            }
+            CandleVideoRoute::CandleVideo => {
+                let (decoded, adapter, raw_settings) =
+                    generate_candle_video(api, settings, job, &request, &project_path, backend)
+                        .await?;
+                (decoded, adapter, raw_settings, None::<Value>)
+            }
+            CandleVideoRoute::Stub => (
                 generate_stub_video(&request, seed),
                 STUB_ADAPTER,
                 stub_raw_settings(&request),
                 None::<Value>,
-            )
+            ),
         };
     #[cfg(not(any(
         target_os = "macos",
@@ -1124,6 +1240,16 @@ fn video_progress(
 // encode pipeline (`encode_media`) + the streaming engine driver (`generate_video`).
 // ---------------------------------------------------------------------------
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_seedvr2::video as seedvr2_video;
+/// The SeedVR2 provider's pure temporal-chunk planning/blend module (`video::plan_chunks`,
+/// `video::assemble_overlap`, `DEFAULT_OVERLAP`, `Chunk`), reused ONE LEVEL UP for worker-window
+/// streaming (sc-9595). Both provider crates expose an identical `video` module over `gen_core::Image`
+/// (byte-identical seam math), so the worker-window cross-fade is the engine's own — the worker never
+/// reimplements the blend. Aliased per platform: MLX on Mac, candle on the Windows/CUDA lane.
+#[cfg(target_os = "macos")]
+use mlx_gen_seedvr2::video as seedvr2_video;
+
 /// HF repo hosting the raw SeedVR2 checkpoint (`numz/SeedVR2_comfyUI`); the engine converts it
 /// in-memory at load (no Python). Override the staged dir with `SCENEWORKS_SEEDVR2_DIR`.
 // SeedVR2 video upscale runs on Mac (native MLX) AND the Windows/CUDA candle lane (sc-5928); these
@@ -1133,6 +1259,19 @@ fn video_progress(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const SEEDVR2_REPO: &str = "numz/SeedVR2_comfyUI";
+/// Pinned SeedVR2 checkpoint revision (sc-8879 / sc-9879). `numz/SeedVR2_comfyUI` is a
+/// third-party mirror with a fixed (non-overridable) repo here — fetching the mutable `main`
+/// branch would let an upstream re-push silently swap the 3B fp16 DiT + VAE weights we load.
+/// Pin the exact commit so downloads are reproducible; HF's tree API still reports each file's
+/// `lfs.oid`, which `ensure_hf_cached_file` verifies the content against. MUST equal the
+/// image-upscale lane's `upscale_jobs::SEEDVR2_REVISION` (same repo + files) — the
+/// `seedvr2_video_revision_matches_image_lane` agreement test locks them together so they
+/// can't drift.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const SEEDVR2_REVISION: &str = "09ced71023636e9bc8cdf9cdecfb2625d1e691e8";
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1171,6 +1310,273 @@ const SEEDVR2_CANCEL_MESSAGE: &str = "Video upscale canceled by user.";
 fn snap_seedvr2_dim(value: u32) -> u32 {
     let rounded = value.saturating_add(8) / 16 * 16;
     rounded.clamp(16, 4096)
+}
+
+// ---------------------------------------------------------------------------
+// Disk-space guard for the streaming SeedVR2 output (sc-9646, sc-9595 follow-up)
+// ---------------------------------------------------------------------------
+// sc-9595 removed the sc-8829 host-RAM cap by streaming the upscale in temporal windows, so peak host
+// RAM is now bounded to ~one window regardless of clip length. But the constraint MOVED from RAM to
+// DISK: the full upscaled PNG sequence is written to a worker scratch dir before the final encode, so
+// a multi-minute / 4K clip can now write many GB with NO guard (the RAM cap previously bounded the
+// whole operation). This mirrors the removed `check_seedvr2_host_ram`: a generous, machine-derived,
+// fail-loud-before-the-window-loop preflight that estimates the output PNG footprint and rejects a
+// clip that would fill the scratch volume, so the disk is not silently exhausted mid-run.
+
+/// Fraction of the scratch volume's CURRENTLY-AVAILABLE space the streamed output PNG sequence is
+/// allowed to occupy. Deliberately generous — the estimate itself uses raw RGB8 per frame (a real
+/// upper bound on PNG-compressed output), and we still leave headroom for the source frames already on
+/// disk, the eventual encoded MP4, and everything else sharing the volume.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const SEEDVR2_DISK_OUTPUT_FRACTION: f64 = 0.8;
+
+/// Estimated peak on-disk bytes for the streamed output: `frame_count` PNG frames at
+/// `out_w × out_h`, sized as raw RGB8 (`w·h·3`) per frame. PNG compression only ever makes the real
+/// footprint SMALLER, so this is a safe upper bound (matching the generous shape of the removed
+/// `seedvr2_estimated_host_bytes`). Pure so the estimate is unit-testable without a filesystem.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn seedvr2_estimated_output_bytes(frame_count: u64, out_w: u64, out_h: u64) -> u64 {
+    let per_frame = out_w.saturating_mul(out_h).saturating_mul(3);
+    frame_count.saturating_mul(per_frame)
+}
+
+/// Bytes currently AVAILABLE on the volume backing `path`, best-effort and portable with NO new crate
+/// dependency (mirrors the removed `total_physical_ram_bytes`, which likewise shelled out): macOS +
+/// Linux run POSIX `df -k -P <path>` and read the 4th column (available 1K blocks); Windows (candle
+/// lane) runs `fsutil volume diskfree <path>`. Returns `None` if the probe fails; the caller then
+/// skips the guard rather than falsely rejecting a job.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn available_disk_bytes(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        // `df -k -P` forces POSIX one-line-per-filesystem output in 1024-byte blocks, so the columns
+        // are stable regardless of locale/long device names:
+        //   Filesystem 1024-blocks Used Available Capacity Mounted on
+        let out = std::process::Command::new("df")
+            .args(["-k", "-P"])
+            .arg(path)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        // The data row is the 2nd line (after the header); `-P` guarantees it is a single line.
+        let row = text.lines().nth(1)?;
+        let available_kib = row.split_whitespace().nth(3)?.parse::<u64>().ok()?;
+        Some(available_kib.saturating_mul(1024))
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows (candle lane): `fsutil volume diskfree <path>` prints the free bytes; the
+        // "Total # of avail free bytes" line is the per-user available figure. Dependency-free.
+        let out = std::process::Command::new("fsutil")
+            .args(["volume", "diskfree"])
+            .arg(path)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("avail") && lower.contains("free bytes") {
+                // Grab the last whitespace-separated token, stripping thousands separators.
+                if let Some(token) = line.split_whitespace().next_back() {
+                    let digits: String = token.chars().filter(|c| c.is_ascii_digit()).collect();
+                    if let Ok(bytes) = digits.parse::<u64>() {
+                        return Some(bytes);
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Fail loud (before the window loop / before any GPU work) when the estimated streamed-output PNG
+/// footprint would exceed the generous fraction of the scratch volume's currently-available space.
+/// `Ok(())` when it fits, when the frame count / dimensions are unknown (0), or when the free-space
+/// probe is unavailable (we do not falsely reject a job on a probe failure). The error names the
+/// estimate AND the available space so the user knows exactly what to trim. Mirrors the shape of the
+/// removed `check_seedvr2_host_ram` (sc-9646).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn check_seedvr2_output_disk(
+    scratch_dir: &Path,
+    frame_count: u64,
+    out_w: u64,
+    out_h: u64,
+) -> WorkerResult<()> {
+    if frame_count == 0 || out_w == 0 || out_h == 0 {
+        return Ok(());
+    }
+    let Some(available) = available_disk_bytes(scratch_dir) else {
+        // Probe failed (unknown platform / error): skip the guard rather than block a valid job.
+        return Ok(());
+    };
+    let needed = seedvr2_estimated_output_bytes(frame_count, out_w, out_h);
+    let budget = ((available as f64) * SEEDVR2_DISK_OUTPUT_FRACTION) as u64;
+    if needed > budget {
+        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+        // Largest frame count that fits the budget, so the message is actionable.
+        let per_frame = seedvr2_estimated_output_bytes(1, out_w, out_h).max(1);
+        let max_frames = budget / per_frame;
+        return Err(WorkerError::InvalidPayload(format!(
+            "Not enough disk space to upscale this clip: {frame_count} output frames at \
+             {out_w}×{out_h} would write ~{needed:.1} GB of PNG frames to the scratch volume, over \
+             the ~{budget:.1} GB usable of ~{available:.1} GB free. Trim the clip to about \
+             {max_frames} frames (or fewer), lower the target resolution, or free up disk space.",
+            needed = needed as f64 / GIB,
+            budget = budget as f64 / GIB,
+            available = available as f64 / GIB,
+        )));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Streaming worker-window chunking for the SeedVR2 upscale (sc-9595, removes the sc-8829 host-RAM cap)
+// ---------------------------------------------------------------------------
+// sc-8829 (F-027) bounded host RGB8 RAM with a machine-derived frame cap that FAILED LOUD before decode:
+// `decode_seedvr2_source_frames` materialized EVERY source frame into a `Vec<Image>` up front, and the
+// up-to-4× output was likewise held whole before encode (the engine's whole-clip API returns the entire
+// `Vec<Image>`), so a few-minute 1080p clip meant tens of GB of RGB8 → OOM. The cap rejected such clips
+// — a capability narrowing.
+//
+// This story removes the cap by streaming the upscale in temporal WORKER WINDOWS: we plan windows over
+// the real frame count with the engine's own `video::plan_chunks` (a valid chunk length + the
+// `DEFAULT_OVERLAP=4` cross-fade), decode + upscale ONE window at a time through the shared
+// `generate_video` funnel, and cross-fade across worker-window boundaries with the engine's own
+// `video::assemble_overlap` (fed a local 2-window plan) so the seam handling is byte-identical to the
+// engine's internal chunking. Finalized frames stream straight to a numbered PNG sequence on disk and
+// are encoded once at the end (same ffmpeg args as the old whole-clip path), so peak host RAM is bounded
+// to ~one worker window's frames + a ≤4-frame overlap tail regardless of clip length.
+//
+// Seam identity: `plan_chunks`/`assemble_overlap` are the SAME pure functions the engine uses
+// internally, and each engine chunk's output is a deterministic function of its source pixel window +
+// seed (`pipeline::preprocess_chunk`). When a worker window is processed by the engine as a single
+// internal chunk (the common case — `SEEDVR2_WORKER_CHUNK_FRAMES` fits the engine's budget-sized chunk),
+// the streamed output is bit-identical to the whole-clip run. If the engine sub-chunks a worker window
+// under tight GPU budget, the cross-fade still closes every seam (identical blend math) but the
+// upscaled pixels near an internal boundary can differ slightly from a whole-clip run's internal
+// boundary — a real-weights fidelity nuance that only a GPU golden run can measure (see the PR notes).
+
+/// The worker-level temporal window size (pixel frames). A valid engine chunk length (mult of 4, ≥8),
+/// chosen at the engine's `MAX_CHUNK_FRAMES` ceiling so that on any machine whose budget-sized chunk is
+/// ≥ this, the engine processes a whole worker window as ONE internal chunk (`plan_chunks(64,64,4)` = a
+/// single chunk) → the streamed output is bit-identical to a whole-clip run. Larger windows mean fewer
+/// worker-window seams and a closer match to whole-clip chunking, traded against a larger per-window
+/// host footprint (≈ `64 · out_w · out_h · 3` bytes of RGB8, ~1.6 GB at 4×-of-1080p — bounded).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const SEEDVR2_WORKER_CHUNK_FRAMES: i32 = 64;
+
+/// Streaming cross-window assembler (sc-9595): feeds each upscaled worker window into the engine's own
+/// `video::assemble_overlap` and emits finalized frames in order, holding only a ≤`ov`-frame tail plus
+/// the current window in memory. The cross-fade at each worker-window boundary is byte-identical to the
+/// engine's internal chunk assembly — proven equivalent to a single whole-clip `assemble_overlap` over
+/// synthetic frames (see `seedvr2_stream_matches_whole_clip_assembly`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct Seedvr2StreamAssembler {
+    /// Cross-fade overlap (frames) between adjacent worker windows — the engine's `DEFAULT_OVERLAP`.
+    ov: i32,
+    /// Total real output frame count (== source frame count); trailing chunk padding past this is dropped.
+    n: i32,
+    /// The retained, blended-but-not-yet-final tail: the assembled frames from `retained_start` onward
+    /// that may still be cross-faded by the NEXT window. Its absolute start is `retained_start`.
+    retained: Vec<Image>,
+    /// Absolute frame index of `retained[0]`.
+    retained_start: i32,
+    /// Whether `push_window` has been called yet (the first window seeds `retained` with no blend).
+    seeded: bool,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl Seedvr2StreamAssembler {
+    fn new(n: i32, ov: i32) -> Self {
+        Self {
+            ov,
+            n,
+            retained: Vec::new(),
+            retained_start: 0,
+            seeded: false,
+        }
+    }
+
+    /// Feed the upscaled frames for the worker window at absolute `start`. Returns the newly finalized
+    /// frames (in order) that no later window can touch; the caller streams them to disk immediately.
+    /// Uses the engine's `video::assemble_overlap` over a local `[retained, window]` 2-window plan so
+    /// the blend is the engine's own.
+    fn push_window(&mut self, start: i32, mut frames: Vec<Image>) -> Vec<Image> {
+        // Clip trailing chunk padding past the real frame count.
+        let visible = (self.n - start).clamp(0, frames.len() as i32);
+        frames.truncate(visible.max(0) as usize);
+        if !self.seeded {
+            self.seeded = true;
+            self.retained_start = start;
+            self.retained = frames;
+        } else {
+            let off = start - self.retained_start;
+            let local_plan = [
+                seedvr2_video::Chunk {
+                    start: 0,
+                    len: self.retained.len() as i32,
+                },
+                seedvr2_video::Chunk {
+                    start: off,
+                    len: frames.len() as i32,
+                },
+            ];
+            let n_local = off + frames.len() as i32;
+            let inputs = [std::mem::take(&mut self.retained), frames];
+            // The engine's own cross-fade closes the worker-window seam (identical to its internal one).
+            self.retained = seedvr2_video::assemble_overlap(&local_plan, &inputs, n_local, self.ov);
+        }
+        // Finalize everything except the last `ov` frames (the next window may still blend them).
+        let keep = self.ov.max(0) as usize;
+        self.drain_prefix(keep)
+    }
+
+    /// Flush the remaining tail once every window has been pushed.
+    fn finish(&mut self) -> Vec<Image> {
+        self.drain_prefix(0)
+    }
+
+    /// Emit finalized frames from the front of `retained`, keeping `keep` frames retained (and never
+    /// emitting past the real frame count `n`).
+    fn drain_prefix(&mut self, keep: usize) -> Vec<Image> {
+        // How many front frames are finalized this call: everything past `keep`, but never emitting
+        // past the real frame count `n` (`n - retained_start` remaining slots). `Vec::drain` shifts
+        // the tail once, so this is O(n) rather than the O(n²) of a `remove(0)`-per-frame loop.
+        let by_keep = self.retained.len().saturating_sub(keep);
+        let by_count = (self.n - self.retained_start).max(0) as usize;
+        let boundary = by_keep.min(by_count);
+        let out: Vec<Image> = self.retained.drain(..boundary).collect();
+        self.retained_start += boundary as i32;
+        out
+    }
 }
 
 /// Resolve a project-relative asset path safely under `project_path` (reject `..` / absolute
@@ -1218,7 +1624,7 @@ async fn ensure_seedvr2_weights(
         crate::downloads::ensure_hf_cached_file(
             &context,
             SEEDVR2_REPO,
-            "main",
+            SEEDVR2_REVISION,
             file,
             &dir.join(file),
         )
@@ -1227,24 +1633,27 @@ async fn ensure_seedvr2_weights(
     Ok(dir)
 }
 
-/// Decode every frame of `source` to an engine [`Image`] sequence (native resolution — the engine
-/// bicubic-upscales internally to the target). Uses the bundled ffmpeg (`run_ffmpeg`) into PNGs in a
-/// temp dir, then loads them in order. `-fps_mode passthrough` keeps the exact source frame count.
+/// Decode every frame of `source` to a numbered PNG sequence ON DISK (native resolution — the engine
+/// bicubic-upscales internally to the target) and return the ordered PNG paths, WITHOUT loading any
+/// pixels into RAM (sc-9595). Uses the bundled ffmpeg (`run_ffmpeg`); `-fps_mode passthrough` keeps the
+/// exact source frame count. The caller loads each temporal WINDOW of these paths on demand via
+/// [`load_seedvr2_window`], so host RGB8 RAM is bounded to one window instead of the whole clip. The
+/// returned paths live under a job-scoped temp dir the caller is responsible for removing.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-async fn decode_seedvr2_source_frames(
+async fn decode_seedvr2_source_to_disk(
     api: &ApiClient,
     settings: &Settings,
     job_id: &str,
     source: &Path,
-) -> WorkerResult<Vec<Image>> {
-    let frames_dir = std::env::temp_dir().join(format!("sceneworks_seedvr2_src_{job_id}"));
-    let _ = tokio::fs::remove_dir_all(&frames_dir).await;
-    tokio::fs::create_dir_all(&frames_dir).await?;
+    frames_dir: &Path,
+) -> WorkerResult<Vec<PathBuf>> {
+    let _ = tokio::fs::remove_dir_all(frames_dir).await;
+    tokio::fs::create_dir_all(frames_dir).await?;
     let ctx = FfmpegContext::new(api, settings, job_id, SEEDVR2_CANCEL_MESSAGE);
-    let decode = run_ffmpeg(
+    run_ffmpeg(
         vec![
             "ffmpeg".to_owned(),
             "-nostdin".to_owned(),
@@ -1260,38 +1669,396 @@ async fn decode_seedvr2_source_frames(
         ],
         Some(ctx),
     )
-    .await;
-    let loaded = match decode {
-        Ok(()) => {
-            let dir = frames_dir.clone();
-            tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
-                let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)?
-                    .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-                    .filter(|path| path.extension().is_some_and(|ext| ext == "png"))
-                    .collect();
-                paths.sort();
-                let mut frames = Vec::with_capacity(paths.len());
-                for path in paths {
-                    let image = crate::image_decode::decode_image_any(&path)
-                        .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?
-                        .to_rgb8();
-                    frames.push(rgb_image_to_engine(image));
-                }
-                Ok(frames)
-            })
-            .await
-            .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?
-        }
-        Err(error) => Err(error),
-    };
-    let _ = tokio::fs::remove_dir_all(&frames_dir).await;
-    let frames = loaded?;
-    if frames.is_empty() {
+    .await?;
+    let dir = frames_dir.to_path_buf();
+    let paths = tokio::task::spawn_blocking(move || -> WorkerResult<Vec<PathBuf>> {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "png"))
+            .collect();
+        paths.sort();
+        Ok(paths)
+    })
+    .await
+    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+    if paths.is_empty() {
         return Err(WorkerError::InvalidPayload(
             "source video produced no frames to upscale".to_owned(),
         ));
     }
-    Ok(frames)
+    Ok(paths)
+}
+
+/// Load the temporal window `paths[start .. start+len]` (clamped to the sequence end) into engine
+/// [`Image`]s on demand (sc-9595). Real frames only — the engine's `preprocess_chunk` pads a partial
+/// trailing window with last-frame repeats internally, matching the whole-clip path. Runs the blocking
+/// PNG decode off the async runtime.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn load_seedvr2_window(
+    paths: &[PathBuf],
+    start: usize,
+    len: usize,
+) -> WorkerResult<Vec<Image>> {
+    let end = start.saturating_add(len).min(paths.len());
+    let window: Vec<PathBuf> = paths.get(start..end).unwrap_or(&[]).to_vec();
+    tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+        let mut frames = Vec::with_capacity(window.len());
+        for path in window {
+            let image = crate::image_decode::decode_image_any(&path)
+                .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?
+                .to_rgb8();
+            frames.push(rgb_image_to_engine(image));
+        }
+        Ok(frames)
+    })
+    .await
+    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?
+}
+
+/// Append RGB8 frames to a numbered PNG sequence on disk, starting at `next_index`, off the async
+/// runtime (sc-9595). Returns the next free index. The shared frames dir is later encoded once by
+/// [`encode_seedvr2_stream`] with the exact ffmpeg args the whole-clip `encode_media` used, so the
+/// output is byte-identical while peak host RAM stays bounded to one worker window.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn append_seedvr2_frames(
+    frames_dir: &Path,
+    next_index: usize,
+    frames: Vec<Image>,
+) -> WorkerResult<usize> {
+    if frames.is_empty() {
+        return Ok(next_index);
+    }
+    let dir = frames_dir.to_path_buf();
+    let count = frames.len();
+    tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+        for (offset, frame) in frames.into_iter().enumerate() {
+            let index = next_index + offset;
+            let img = image::RgbImage::from_raw(frame.width, frame.height, frame.pixels)
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload("video frame buffer size mismatch".to_owned())
+                })?;
+            let path = dir.join(format!("frame_{index:05}.png"));
+            img.save_with_format(&path, image::ImageFormat::Png)
+                .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+    Ok(next_index + count)
+}
+
+/// Encode a pre-written numbered PNG sequence (`frame_%05d.png`, `frame_count` frames from index 0) to
+/// the final mp4 (silent) + faststart + poster (sc-9595). The ffmpeg encode args are byte-identical to
+/// the whole-clip `encode_media` path (`libx264` / `yuv420p` / `-framerate fps` / `-r fps`), so the
+/// streamed output matches the old path frame-for-frame. Audio muxing stays the caller's source
+/// passthrough step (SeedVR2 emits no audio).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn encode_seedvr2_stream(
+    media_path: &Path,
+    frames_dir: &Path,
+    frame_count: usize,
+    fps: u32,
+    ctx: Option<FfmpegContext<'_>>,
+) -> WorkerResult<()> {
+    if frame_count == 0 {
+        return Err(WorkerError::InvalidPayload(
+            "video generation produced no frames".to_owned(),
+        ));
+    }
+    let fps = fps.max(1);
+    let enc_tmp = media_path.with_extension("enc.mp4");
+    let pattern = frames_dir.join("frame_%05d.png");
+    let result = run_ffmpeg(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-framerate".to_owned(),
+            fps.to_string(),
+            "-start_number".to_owned(),
+            "0".to_owned(),
+            "-i".to_owned(),
+            pattern.to_string_lossy().into_owned(),
+            "-c:v".to_owned(),
+            "libx264".to_owned(),
+            "-pix_fmt".to_owned(),
+            "yuv420p".to_owned(),
+            "-r".to_owned(),
+            fps.to_string(),
+            enc_tmp.to_string_lossy().into_owned(),
+        ],
+        ctx,
+    )
+    .await;
+    match result {
+        Ok(()) => {
+            // Publish atomically, then best-effort faststart + poster (mirrors `encode_media`).
+            tokio::fs::rename(&enc_tmp, media_path).await?;
+            faststart_mp4(media_path).await;
+            write_poster_frame(media_path).await;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&enc_tmp).await;
+            let _ = tokio::fs::remove_file(media_path).await;
+            Err(error)
+        }
+    }
+}
+
+/// Result of the streamed SeedVR2 upscale (sc-9595): the metadata the caller needs to build the asset
+/// fact + encode the pre-written PNG sequence. The upscaled frames themselves are already on disk
+/// (`out_frames_dir`), never held whole in RAM.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct Seedvr2Stream {
+    /// Real output frame count (== source frame count).
+    frame_count: usize,
+    fps: u32,
+    out_w: u32,
+    out_h: u32,
+    src_w: u32,
+    src_h: u32,
+    seed: u64,
+}
+
+/// RAII guard for a worker-owned scratch directory (sc-9595). The streamed 4× PNG sequence can be many
+/// GB, and it now outlives the stream call while the caller runs an `update_job` progress POST + an
+/// `ffmpeg` encode — a span where any `?` (a transient POST failure, a 409 stale-sweep reclaim, an
+/// encode error, or a between-step cancel) would otherwise leak the whole dir on disk. `Drop` removes
+/// it on EVERY exit path (success, encode/create_dir_all/update_job failure, cancel, panic) so cleanup
+/// can never be skipped. Call [`ScratchDir::disarm`] after the caller has already removed the dir to
+/// avoid a redundant (harmless) second removal. `Drop` must use the sync `std::fs` API.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct ScratchDir {
+    path: std::path::PathBuf,
+    armed: bool,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl ScratchDir {
+    /// Guard `path`. Does not create it — the caller populates it; the guard only guarantees removal.
+    fn new(path: std::path::PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    /// Stop guarding: the caller has already removed the dir (e.g. right after a successful encode, to
+    /// free disk before the mux step). A no-op `Drop` follows.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        if self.armed {
+            // Best-effort: a missing dir yields a benign NotFound we intentionally ignore.
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+/// Stream the SeedVR2 upscale in temporal worker windows (sc-9595). Decodes the source to disk, plans
+/// worker windows over the real frame count with the engine's `video::plan_chunks`
+/// (`SEEDVR2_WORKER_CHUNK_FRAMES` + `DEFAULT_OVERLAP`), upscales ONE window at a time through the shared
+/// `generate_video` funnel, cross-fades across worker-window boundaries with the engine's own
+/// `video::assemble_overlap`, and appends each finalized frame to a numbered PNG sequence on disk. Peak
+/// host RGB8 RAM is bounded to ~one worker window + a ≤`ov`-frame tail. Each per-window `generate_video`
+/// call is independently heartbeat-covered + cancellable (the funnel's watchdog), and cancel is polled
+/// between windows too — no long silent blocking span.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[allow(clippy::too_many_arguments)]
+async fn run_seedvr2_stream(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    backend: &str,
+    req: &sceneworks_core::contracts::VideoUpscaleRequest,
+    source_path: &Path,
+    src_frames_dir: &Path,
+    out_frames_dir: &Path,
+    factor: u32,
+    source_fps: u32,
+    weights_dir: PathBuf,
+) -> WorkerResult<Seedvr2Stream> {
+    let seed = req.seed.unwrap_or(0);
+    // Decode the whole source to numbered PNGs on disk (RAM-free), then peek the first frame's dims.
+    let paths =
+        decode_seedvr2_source_to_disk(api, settings, &job.id, source_path, src_frames_dir).await?;
+    let n = paths.len();
+    let first = load_seedvr2_window(&paths, 0, 1).await?;
+    let src_w = first[0].width;
+    let src_h = first[0].height;
+    drop(first);
+
+    // Resolve + snap the target output resolution (identical to the whole-clip path).
+    let (target_w, target_h) = match (req.target_width, req.target_height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
+        _ => (src_w.saturating_mul(factor), src_h.saturating_mul(factor)),
+    };
+    let target_w = snap_seedvr2_dim(target_w);
+    let target_h = snap_seedvr2_dim(target_h);
+
+    tokio::fs::create_dir_all(out_frames_dir).await?;
+
+    // Disk-space preflight (sc-9646): sc-9595 streams the whole upscaled PNG sequence to this scratch
+    // dir before the final encode, so a long / high-res clip can write many GB with no bound (the
+    // removed sc-8829 host-RAM cap previously bounded the whole operation). Fail loud HERE — before the
+    // first window's decode + GPU work — when the estimated output footprint would exceed a generous
+    // fraction of the scratch volume's free space, so we don't fill the disk mid-run. Probed on a
+    // blocking thread (it shells out) but cheap and one-shot.
+    {
+        let guard_dir = out_frames_dir.to_path_buf();
+        let (frames, gw, gh) = (n as u64, u64::from(target_w), u64::from(target_h));
+        tokio::task::spawn_blocking(move || check_seedvr2_output_disk(&guard_dir, frames, gw, gh))
+            .await
+            .map_err(|error| task_join_error("seedvr2 disk preflight", error))??;
+    }
+
+    // Plan the worker windows over the REAL frame count with the engine's own planner: a valid chunk
+    // length + `DEFAULT_OVERLAP` cross-fade, so the worker-window seam handling matches the engine's
+    // internal chunking exactly.
+    let ov = seedvr2_video::DEFAULT_OVERLAP;
+    let plan = seedvr2_video::plan_chunks(n as i32, SEEDVR2_WORKER_CHUNK_FRAMES, ov);
+    let mut assembler = Seedvr2StreamAssembler::new(n as i32, ov);
+    let mut next_index = 0usize;
+    let mut out_w = target_w;
+    let mut out_h = target_h;
+    let window_total = plan.len().max(1);
+
+    for (window_idx, chunk) in plan.iter().enumerate() {
+        check_cancel(api, &job.id, SEEDVR2_CANCEL_MESSAGE).await?;
+        // Real frames only for this window; the engine's preprocess_chunk pads a partial tail internally.
+        let start = chunk.start.max(0) as usize;
+        if start >= n {
+            break;
+        }
+        let len = chunk.len.max(0) as usize;
+        let window_frames = load_seedvr2_window(&paths, start, len).await?;
+        if window_frames.is_empty() {
+            continue;
+        }
+        let window_len = window_frames.len() as u32;
+
+        // Per-window progress spanning the Generating band (0.18 → 0.55) so the bar advances per window
+        // even though each window's own denoise progress is reported inside `generate_video`.
+        let frac = 0.18 + 0.37 * (window_idx as f64 / window_total as f64);
+        update_job(
+            api,
+            &job.id,
+            video_progress(
+                JobStatus::Running,
+                ProgressStage::Generating,
+                frac,
+                &format!("Upscaling window {}/{window_total}.", window_idx + 1),
+                None,
+                backend,
+            ),
+        )
+        .await?;
+
+        // Upscale this window through the shared streaming driver (generator cache + stall watchdog +
+        // cancel + per-step progress). Same seed for every window → deterministic per-chunk blend.
+        let input = VideoGenInput {
+            engine_id: SEEDVR2_ENGINE_ID,
+            model_dir: weights_dir.clone(),
+            conditioning: vec![Conditioning::VideoClip {
+                frames: window_frames,
+                frame_idx: 0,
+                strength: 1.0,
+            }],
+            width: target_w,
+            height: target_h,
+            frames: window_len,
+            fps: source_fps,
+            seed,
+            softness: Some(req.softness),
+            ..Default::default()
+        };
+        // SeedVR2 upscale is one-step with no per-generation sampler/scheduler knobs, so the
+        // advanced block generate_video reads for those is empty here (F-118).
+        let decoded =
+            generate_video(api, settings, job, backend, &JsonObject::new(), input).await?;
+        if let Some(frame) = decoded.frames.first() {
+            out_w = frame.width;
+            out_h = frame.height;
+        }
+        let upscaled: Vec<Image> = decoded
+            .frames
+            .into_iter()
+            .map(|frame| Image {
+                width: frame.width,
+                height: frame.height,
+                pixels: frame.pixels,
+            })
+            .collect();
+
+        // Cross-fade this window against the retained tail (the engine's own blend) and stream the
+        // now-finalized frames to disk.
+        let finalized = assembler.push_window(chunk.start, upscaled);
+        next_index = append_seedvr2_frames(out_frames_dir, next_index, finalized).await?;
+    }
+
+    // Flush the final tail.
+    let tail = assembler.finish();
+    next_index = append_seedvr2_frames(out_frames_dir, next_index, tail).await?;
+
+    if next_index == 0 {
+        return Err(WorkerError::InvalidPayload(
+            "source video produced no frames to upscale".to_owned(),
+        ));
+    }
+
+    Ok(Seedvr2Stream {
+        frame_count: next_index,
+        fps: source_fps,
+        out_w,
+        out_h,
+        src_w,
+        src_h,
+        seed,
+    })
+}
+
+/// Validate a requested video-upscale factor. SeedVR2 supports only 2x and 4x, so any other value
+/// (3x, 8x, 1x, 0) is rejected with a clear error rather than silently coerced (F-118). Returns the
+/// factor widened to `u32` for the downstream dimension math.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_video_upscale_factor(factor: u8) -> WorkerResult<u32> {
+    match factor {
+        2 | 4 => Ok(u32::from(factor)),
+        other => Err(WorkerError::InvalidPayload(format!(
+            "Video upscale supports only factor 2 or 4 (got {other})."
+        ))),
+    }
 }
 
 /// Dispatch handler for `JobType::VideoUpscale`: decode the source clip, run the SeedVR2 upscaler
@@ -1327,7 +2094,8 @@ pub(crate) async fn run_video_upscale_job(
         .or_else(|| job.project_id.clone())
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| WorkerError::InvalidPayload("Missing payload.projectId".to_owned()))?;
-    let factor: u32 = if req.factor == 4 { 4 } else { 2 };
+    // Reject an unsupported factor early rather than silently coercing it to 2 (F-118).
+    let factor = resolve_video_upscale_factor(req.factor)?;
     let backend = backend_label(&settings.gpu_id);
 
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -1374,6 +2142,10 @@ pub(crate) async fn run_video_upscale_job(
         .and_then(Value::as_str)
         .map(str::to_owned);
 
+    // sc-9595: no host-RAM cap. The upscale streams in temporal worker windows (decode → upscale →
+    // append-encode one window at a time), so peak host RGB8 RAM is bounded to ~one window regardless
+    // of clip length — the sc-8829 whole-clip frame cap that rejected long/high-res clips is gone.
+
     check_cancel(api, &job.id, SEEDVR2_CANCEL_MESSAGE).await?;
     update_job(
         api,
@@ -1403,45 +2175,47 @@ pub(crate) async fn run_video_upscale_job(
         ),
     )
     .await?;
-    let source_frames = decode_seedvr2_source_frames(api, settings, &job.id, &source_path).await?;
-    let src_w = source_frames[0].width;
-    let src_h = source_frames[0].height;
-    let frame_count = source_frames.len() as u32;
-    let (target_w, target_h) = match (req.target_width, req.target_height) {
-        (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
-        _ => (src_w.saturating_mul(factor), src_h.saturating_mul(factor)),
-    };
-    let target_w = snap_seedvr2_dim(target_w);
-    let target_h = snap_seedvr2_dim(target_h);
-    let seed = req.seed.unwrap_or(0);
-
-    // Run the SeedVR2 upscale through the shared streaming driver (generator cache + stall
-    // watchdog + cancel + Generating-stage progress). The VideoClip conditioning carries the LR
-    // source frame sequence; `width`/`height` are the target output size (÷16).
-    let input = VideoGenInput {
-        engine_id: SEEDVR2_ENGINE_ID,
-        model_dir: weights_dir,
-        conditioning: vec![Conditioning::VideoClip {
-            frames: source_frames,
-            frame_idx: 0,
-            strength: 1.0,
-        }],
-        width: target_w,
-        height: target_h,
-        frames: frame_count,
-        fps: source_fps,
+    // Decode the whole source to a numbered PNG sequence ON DISK (disk-bounded, no RAM), then load each
+    // temporal window on demand (sc-9595). `-fps_mode passthrough` preserves the exact source frame
+    // count / order; the output frame count/order/fps therefore stay identical to the whole-clip path.
+    // Sanitize the job id before it becomes a temp-dir path component (F-111): a hostile id would
+    // otherwise escape `temp_dir()`. Mirrors the person-track work dir sanitization.
+    let safe_job = safe_download_dir(&job.id);
+    let src_frames_dir = std::env::temp_dir().join(format!("sceneworks_seedvr2_src_{safe_job}"));
+    let out_frames_dir = std::env::temp_dir().join(format!("sceneworks_seedvr2_out_{safe_job}"));
+    let _ = tokio::fs::remove_dir_all(&out_frames_dir).await;
+    // RAII-guard the output PNG scratch so it is removed on EVERY exit after the stream: not just the
+    // stream error arm, but the create_dir_all / update_job progress POST / encode span below, any of
+    // which can `?`-return (transient POST failure, 409 stale-sweep reclaim, encode error, cancel).
+    // Without this the full multi-GB 4× sequence would leak on those paths (sc-9595 review).
+    let mut out_scratch = ScratchDir::new(out_frames_dir.clone());
+    let stream_result = run_seedvr2_stream(
+        api,
+        settings,
+        job,
+        backend,
+        &req,
+        &source_path,
+        &src_frames_dir,
+        &out_frames_dir,
+        factor,
+        source_fps,
+        weights_dir,
+    )
+    .await;
+    // Always drop the source PNG scratch (it's disk-only; the output dir is owned by `out_scratch`).
+    let _ = tokio::fs::remove_dir_all(&src_frames_dir).await;
+    // On stream failure, `out_scratch`'s Drop removes the output dir as the function returns.
+    let stream = stream_result?;
+    let Seedvr2Stream {
+        frame_count: out_count,
+        fps: out_fps,
+        out_w,
+        out_h,
+        src_w,
+        src_h,
         seed,
-        softness: Some(req.softness),
-        ..Default::default()
-    };
-    let decoded = generate_video(api, settings, job, backend, input).await?;
-    let out_fps = decoded.fps;
-    let out_count = decoded.frames.len();
-    let (out_w, out_h) = decoded
-        .frames
-        .first()
-        .map(|frame| (frame.width, frame.height))
-        .unwrap_or((target_w, target_h));
+    } = stream;
     let duration = out_count as f64 / out_fps.max(1) as f64;
 
     // Plan the output asset path (nested under the per-generation id, like VideoPlan).
@@ -1470,9 +2244,18 @@ pub(crate) async fn run_video_upscale_job(
         ),
     )
     .await?;
-    // Encode the upscaled frames to a (silent) mp4 + poster + faststart.
+    // Encode the streamed PNG sequence to a (silent) mp4 + poster + faststart (byte-identical ffmpeg
+    // args to the old whole-clip `encode_media` path), then drop the output scratch dir.
     let ctx = FfmpegContext::new(api, settings, &job.id, SEEDVR2_CANCEL_MESSAGE);
-    encode_media(&media_path, decoded, Some(ctx)).await?;
+    let encode_result =
+        encode_seedvr2_stream(&media_path, &out_frames_dir, out_count, out_fps, Some(ctx)).await;
+    // Free the multi-GB PNG scratch as soon as the encode returns (before the mux step), on BOTH the
+    // ok and err arms; then disarm the guard so its Drop doesn't redundantly re-remove. `encode_result`
+    // is propagated AFTER cleanup — an encode error still leaves no scratch behind (and if this early
+    // removal is itself skipped by an unwind, the still-armed guard's Drop is the backstop).
+    let _ = tokio::fs::remove_dir_all(&out_frames_dir).await;
+    out_scratch.disarm();
+    encode_result?;
 
     // Source-audio passthrough: remux the source's audio onto the upscaled video. `-map 1:a:0?`
     // makes audio optional, so a source with no audio yields a clean video-only file (no error);
@@ -1599,6 +2382,254 @@ pub(crate) async fn run_video_upscale_job(
 }
 
 // ---------------------------------------------------------------------------
+// Backend-neutral video helpers shared by the MLX (macOS) and candle
+// (Windows/CUDA) lanes (sc-8830, F-028). These collapse the byte-identical
+// twin pairs that had drifted apart between the two backends: the dense-adapter
+// resolver, the LoRA-file resolver (path-confined + core `first_safetensors_path`),
+// the LoRA strength reader, the MLX quant reader, and the negative-prompt idiom.
+// Backend-specific behavior (which SAM3 module, which driving-clip loader) is
+// injected by the callers, never re-branched at runtime.
+// ---------------------------------------------------------------------------
+
+/// At most 5 user LoRAs per job (mirrors the image path's `MAX_JOB_LORAS`). Shared by every
+/// dense (single-transformer) video family on both backends.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const MAX_JOB_LORAS: usize = 5;
+
+/// The trimmed `negative_prompt`, or `None` when empty/whitespace — the single source for the
+/// idiom the video dispatchers all repeated (sc-8830). Empty negatives must be `None`, not
+/// `Some("")`, so the engines treat them as "no negative" rather than conditioning on the empty
+/// string.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn non_empty_negative_prompt(request: &VideoRequest) -> Option<String> {
+    let trimmed = request.negative_prompt.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+/// A LoRA spec's strength (`weight`, default 0.8 — matches the image path). Shared by both
+/// backends (sc-8830; formerly the byte-identical `lora_scale` / `candle_scail2_lora_scale`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn lora_scale(lora: &Value) -> f32 {
+    lora.get("weight")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .unwrap_or(0.8) as f32
+}
+
+/// Resolve a LoRA spec's file (a directory → its first `.safetensors`, recursively via core's
+/// [`first_safetensors_path`]), verifying it exists. The `path` originates from
+/// attacker-controllable job payload, so it is first confined to an app-managed root
+/// (sc-5723 / WKA-002) via [`normalize_app_managed_lora_path`] before any on-disk use.
+///
+/// Shared by both backends (sc-8830). The old candle twin `candle_resolve_lora_file`
+/// re-implemented the directory scan with a shallow (non-recursive) case-sensitive `read_dir`,
+/// which missed nested `subdir/model.safetensors` snapshots and uppercase `.SAFETENSORS`
+/// extensions that the macOS path (core `first_safetensors_path`) resolved. Converging on the
+/// core helper fixes that latent candle-lane bug; path confinement is preserved identically.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_lora_file(
+    settings: &Settings,
+    path: PathBuf,
+    declared: Option<&str>,
+) -> WorkerResult<PathBuf> {
+    let path = crate::normalize_app_managed_lora_path(settings, &path)?;
+    let file = if path.is_dir() {
+        // Prefer the manifest-declared adapter over an arbitrary directory scan so a
+        // trained LoRA loads its final adapter, not a step checkpoint (sc-10221).
+        crate::resolve_adapter_in_dir(&path, declared).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "LoRA has no .safetensors under {}",
+                path.display()
+            ))
+        })?
+    } else {
+        path
+    };
+    if !file.exists() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "LoRA file is missing: {}",
+            file.display()
+        )));
+    }
+    Ok(file)
+}
+
+/// Build the adapter specs for a **dense** (single-transformer) video family — Wan-VACE and
+/// SCAIL-2 (both backends). Unlike the MoE Wan path there is no Lightning distill pair and no
+/// high/low experts, so every user LoRA/LoKr/LoHa is applied shared (`moe_expert: None`); the
+/// engine sniffs the format and merges it. `classify_adapter` tags SceneWorks peft LoKr as
+/// `Lokr` and everything else (incl. third-party LyCORIS) as `Lora`. Parameterized by the
+/// per-family max-LoRA cap so the confinement + count guard lives in one place (sc-8830).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_dense_adapters(
+    settings: &Settings,
+    request: &VideoRequest,
+    max_loras: usize,
+) -> WorkerResult<Vec<AdapterSpec>> {
+    if request.loras.len() > max_loras {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Generation supports at most {max_loras} LoRAs per job."
+        )));
+    }
+    let mut specs: Vec<AdapterSpec> = Vec::new();
+    for lora in &request.loras {
+        let path = crate::image_jobs::lora_path(lora).ok_or_else(|| {
+            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
+        })?;
+        let file = resolve_lora_file(
+            settings,
+            path,
+            crate::image_jobs::declared_adapter_file(lora),
+        )?;
+        let kind = crate::image_jobs::classify_adapter(&file)?;
+        specs.push(AdapterSpec {
+            path: file,
+            scale: lora_scale(lora),
+            kind,
+            pass_scales: None,
+            moe_expert: None,
+        });
+    }
+    Ok(specs)
+}
+
+/// MLX quantization for a dense video load (Bernini / SCAIL-2): Q4 default (the validated tier),
+/// Q8 opt-in via the advanced `mlxQuantize: 8` control, explicit `<= 0` ⇒ bf16 (power users with
+/// ample RAM). Never defaults to bf16 — the bf16 snapshots are far too large for the default box.
+/// Shared by both MLX dense families (sc-8830; formerly the byte-identical `resolve_bernini_quant`
+/// / `resolve_scail2_quant`).
+#[cfg(target_os = "macos")]
+fn resolve_mlx_dense_quant(request: &VideoRequest) -> Option<Quant> {
+    match request.advanced.get("mlxQuantize").and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    }) {
+        Some(bits) if bits <= 0 => None,
+        Some(bits) if bits <= 4 => Some(Quant::Q4),
+        Some(_) => Some(Quant::Q8),
+        None => Some(Quant::Q4),
+    }
+}
+
+/// Cancel message shared by every SCAIL-2 person-segmentation pass (both backends).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const SCAIL2_SEGMENT_CANCEL_MESSAGE: &str = "SCAIL-2 canceled during person segmentation.";
+
+/// Run a SCAIL-2 person-segmentation-and-paint pass on the blocking pool under the heartbeat
+/// keepalive (sc-8390 / sc-8807). The cold multi-GB SAM3 checkpoint parse + per-frame propagation
+/// can exceed the API's 90s stale-sweep, so the keepalive drives progress and its cancel poll trips
+/// the flag the engine's per-frame propagate contract observes between frames. Backend-neutral
+/// (sc-8830): the caller's `segment` closure captures whichever SAM3 module the build links (MLX
+/// `person_segment_sam3` vs candle `person_segment_sam3_candle`) plus the paint background, so the
+/// heartbeat orchestration lives in exactly one place instead of a per-backend twin.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn scail2_segment_blocking<R, F>(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    task_label: &'static str,
+    segment: F,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+    F: FnOnce(gen_core::CancelFlag) -> WorkerResult<R> + Send + 'static,
+{
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
+    run_blocking_with_heartbeat(
+        api,
+        settings,
+        job_id,
+        Some(cancel),
+        SCAIL2_SEGMENT_CANCEL_MESSAGE,
+        task_label,
+        crate::no_cancel_ack(),
+        tokio::task::spawn_blocking(move || segment(flag)),
+    )
+    .await
+}
+
+/// Assemble the SCAIL-2 `animate_character` conditioning (`Reference` + reference `Mask` +
+/// `ControlClip`) from an already-loaded reference image + driving frames. The two SAM3
+/// segmentation passes (reference → single painted mask, driving clip → per-frame painted masks)
+/// are supplied as closures so the backend-specific SAM3 module + paint background convention live
+/// at the call site while this orchestration (heartbeat, `ControlClip` shape) is shared (sc-8830 —
+/// collapses the ~100-line MLX/candle `resolve_scail2_conditioning` twin).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn assemble_scail2_animate_conditioning<FR, FD>(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    reference: Image,
+    driving: Vec<Image>,
+    segment_reference: FR,
+    segment_driving: FD,
+) -> WorkerResult<Vec<Conditioning>>
+where
+    FR: FnOnce(gen_core::CancelFlag) -> WorkerResult<Image> + Send + 'static,
+    FD: FnOnce(gen_core::CancelFlag) -> WorkerResult<Vec<Image>> + Send + 'static,
+{
+    let ref_mask = scail2_segment_blocking(
+        api,
+        settings,
+        job_id,
+        "scail2 reference segment task",
+        segment_reference,
+    )
+    .await?;
+    let driving_mask = scail2_segment_blocking(
+        api,
+        settings,
+        job_id,
+        "scail2 driving segment task",
+        segment_driving,
+    )
+    .await?;
+    Ok(vec![
+        Conditioning::Reference {
+            image: reference,
+            strength: None,
+        },
+        Conditioning::Mask { image: ref_mask },
+        Conditioning::ControlClip {
+            frames: driving,
+            mask: driving_mask,
+            masking_strength: 1.0,
+            start_frame: 0,
+            mode: ReplacementMode::default(),
+        },
+    ])
+}
+
+// ---------------------------------------------------------------------------
 // Real MLX Wan2.2 generation (macOS, via mlx-gen-wan, sc-3034): T2V/TI2V (5B
 // dense, z48 VAE), T2V/I2V (A14B dual-expert MoE) + MoE/Lightning LoRA. Decodes
 // the engine's `GenerationOutput::Video { frames, fps, audio: None }` into a
@@ -1609,10 +2640,6 @@ pub(crate) async fn run_video_upscale_job(
 /// Adapter id recorded on a real MLX Wan asset (mirrors the image `mlx_*` convention).
 #[cfg(target_os = "macos")]
 const WAN_ADAPTER: &str = "mlx_wan";
-
-/// At most 5 user LoRAs per job (mirrors the image path's `MAX_JOB_LORAS`).
-#[cfg(target_os = "macos")]
-const MAX_JOB_LORAS: usize = 5;
 
 /// Raw-settings recorded on a real MLX Wan asset: the request's `advanced` knobs plus
 /// the real-inference markers (mirrors the image `mlx_raw_settings`). Also records the
@@ -1762,6 +2789,280 @@ fn local_mlx_dir(settings: &Settings, env: &str, local_id: &str) -> Option<PathB
         .find(|dir| dir.join("config.json").is_file())
 }
 
+/// The turnkey SceneWorks Wan2.2 **T2V-A14B** MLX repo (sc-9942, epic 8506). Hosts the quant matrix
+/// as self-contained tier subdirs `q4/` (default) + `q8/` + `bf16/`, each a COMPLETE dual-expert
+/// snapshot (both MoE experts + UMT5 T5 encoder + z16 VAE + tokenizer + `config.json`). This replaces
+/// the flat dense-bf16 layout (which quantized at LOAD, staging the full bf16 experts first); the
+/// worker now descends into the chosen tier so a pre-packed snapshot loads with no install-time
+/// convert peak. The flat root files are kept for back-compat with already-shipped workers that
+/// resolve the repo root (a cleanup story drops them once those age out); a new worker only ever
+/// resolves the tier subdirs.
+#[cfg(target_os = "macos")]
+const WAN_T2V_14B_REPO: &str = "SceneWorks/wan2.2-t2v-a14b-mlx";
+
+/// Pinned revision for [`WAN_T2V_14B_REPO`] (mirrors [`LTX_BUNDLE_REVISION`], sc-9879). The repo is a
+/// hard-coded const — no manifest/payload override reaches the on-demand `q8/*` + `bf16/*` fetches —
+/// so pulling the mutable `main` branch would let an upstream re-push silently swap a checkpoint we
+/// load. Pin the exact commit that adds the `q4/`/`q8/`/`bf16/` tier subdirs for defense-in-depth
+/// (the `hf` CLI still verifies each file's own hash on download). This is the commit that added the
+/// `q4/`/`q8/`/`bf16/` tier subdirs (sc-9942).
+#[cfg(target_os = "macos")]
+const WAN_T2V_14B_REVISION: &str = "991eb255c544bbb2e1f1e07da4355c2f0a5337b7";
+
+/// The turnkey SceneWorks Wan2.2 **I2V-A14B** MLX repo (sc-9943, epic 8506). The image→video sibling
+/// of [`WAN_T2V_14B_REPO`]: same self-contained `q4/`/`q8/`/`bf16/` tier layout (both MoE experts +
+/// UMT5 T5 + z16 VAE + tokenizer + `config.json`), differing only in the experts' `in_dim` (36
+/// image-concat conditioning vs 16 text-only). The worker descends into the chosen tier so a
+/// pre-packed snapshot loads with no install-time convert peak; the legacy flat root files stay for
+/// already-shipped workers.
+#[cfg(target_os = "macos")]
+const WAN_I2V_14B_REPO: &str = "SceneWorks/wan2.2-i2v-a14b-mlx";
+
+/// Pinned revision for [`WAN_I2V_14B_REPO`] (mirrors [`WAN_T2V_14B_REVISION`]). The commit that adds
+/// the `q4/`/`q8/`/`bf16/` tier subdirs to the I2V-A14B repo (sc-9943); pinning the exact commit (not
+/// the mutable `main`) stops an upstream re-push from silently swapping a checkpoint the on-demand
+/// `q8/*` + `bf16/*` fetch loads (the `hf` CLI still verifies each file's own hash on download).
+#[cfg(target_os = "macos")]
+const WAN_I2V_14B_REVISION: &str = "c6c786170031eccc3a1fac0f98f1ad4ff988271e";
+
+/// The turnkey SceneWorks Wan2.2 **TI2V-5B** MLX repo (sc-9941, epic 8506). The single-expert sibling
+/// of the A14B repos: same self-contained `q4/`/`q8/`/`bf16/` tier layout, but ONE transformer
+/// (`model.safetensors`) rather than the dual `high/low_noise_model` MoE experts (still + UMT5 T5 +
+/// z16 VAE + tokenizer + `config.json`). The worker descends into the chosen tier so a pre-packed
+/// snapshot loads with no install-time convert peak; the legacy flat root files stay for
+/// already-shipped workers (cleanup sc-9977).
+#[cfg(target_os = "macos")]
+const WAN_TI2V_5B_REPO: &str = "SceneWorks/wan2.2-ti2v-5b-mlx";
+
+/// Pinned revision for [`WAN_TI2V_5B_REPO`] (mirrors [`WAN_T2V_14B_REVISION`]). The commit that adds
+/// the `q4/`/`q8/`/`bf16/` tier subdirs to the TI2V-5B repo (sc-9941); pinning the exact commit (not
+/// the mutable `main`) stops an upstream re-push from silently swapping a checkpoint the on-demand
+/// `q8/*` + `bf16/*` fetch loads (the `hf` CLI still verifies each file's own hash on download).
+#[cfg(target_os = "macos")]
+const WAN_TI2V_5B_REVISION: &str = "bb1b055249614cf9d7cf4373fbdbc184b77dee88";
+
+/// The files that make an **A14B** (dual-expert MoE) Wan tier subdir COMPLETE: both experts + the T5
+/// encoder + VAE + tokenizer + `config.json`.
+#[cfg(target_os = "macos")]
+const WAN_A14B_TIER_FILES: &[&str] = &[
+    "high_noise_model.safetensors",
+    "low_noise_model.safetensors",
+    "t5_encoder.safetensors",
+    "vae.safetensors",
+    "tokenizer.json",
+    "config.json",
+];
+
+/// The files that make a **TI2V-5B** (single-expert) Wan tier subdir COMPLETE: the one transformer
+/// (`model.safetensors`) + the T5 encoder + VAE + tokenizer + `config.json`.
+#[cfg(target_os = "macos")]
+const WAN_TI2V_5B_TIER_FILES: &[&str] = &[
+    "model.safetensors",
+    "t5_encoder.safetensors",
+    "vae.safetensors",
+    "tokenizer.json",
+    "config.json",
+];
+
+/// The tier-completeness file set for a Wan quant-matrix model: the single-expert TI2V-5B ships one
+/// `model.safetensors`, the A14B MoE models ship the two `high/low_noise_model.safetensors` experts.
+#[cfg(target_os = "macos")]
+fn wan_tier_files(model: &str) -> &'static [&'static str] {
+    if model == "wan_2_2" {
+        WAN_TI2V_5B_TIER_FILES
+    } else {
+        WAN_A14B_TIER_FILES
+    }
+}
+
+/// Map a Wan quant-matrix video model id to its `(quant-matrix repo, pinned revision)` for the
+/// on-demand tier fetch, or `None` for a model with no hosted tier matrix. The TI2V-5B (sc-9941),
+/// T2V-A14B (sc-9942) and I2V-A14B (sc-9943) turnkeys host the SAME self-contained
+/// `q4/`/`q8/`/`bf16/` tier layout (epic 8506); only the repo + pinned commit (and the single- vs
+/// dual-expert file set, see [`wan_tier_files`]) differ, so the whole tier-resolve/fetch path is
+/// shared and keyed only here. `request.model` is `"wan_2_2"` for the TI2V-5B engine.
+#[cfg(target_os = "macos")]
+fn wan_tier_repo(model: &str) -> Option<(&'static str, &'static str)> {
+    match model {
+        "wan_2_2" => Some((WAN_TI2V_5B_REPO, WAN_TI2V_5B_REVISION)),
+        "wan_2_2_t2v_14b" => Some((WAN_T2V_14B_REPO, WAN_T2V_14B_REVISION)),
+        "wan_2_2_i2v_14b" => Some((WAN_I2V_14B_REPO, WAN_I2V_14B_REVISION)),
+        _ => None,
+    }
+}
+
+/// Parse `advanced.mlxQuantize` (int or numeric string) for the Wan quant-matrix tier selector.
+#[cfg(target_os = "macos")]
+fn wan_quant_bits(request: &VideoRequest) -> Option<i64> {
+    request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+}
+
+/// The Wan2.2 quant-matrix tier search order for a request — preferred tier first, then the
+/// always-smaller fallback tiers so a repo missing the preferred subdir still loads (mirrors
+/// [`ltx_bundle_tier_order`]): `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, else the `q4` default.
+/// `bf16` is only ever tried when explicitly requested, so a default job never pulls the huge dense
+/// tier by accident.
+#[cfg(target_os = "macos")]
+fn wan_tier_order(request: &VideoRequest) -> &'static [&'static str] {
+    match wan_quant_bits(request) {
+        Some(b) if b <= 0 => &["bf16", "q8", "q4"],
+        Some(b) if b >= 8 => &["q8", "q4"],
+        _ => &["q4", "q8"],
+    }
+}
+
+/// Whether `dir` is a COMPLETE self-contained Wan2.2 tier snapshot, given the model's expected tier
+/// file set (`files`, from [`wan_tier_files`]): the transformer(s), the T5 encoder, VAE, tokenizer,
+/// and `config.json`. A partially-downloaded tier fails this so [`wan_tier_subdir`] falls through to
+/// a smaller complete tier rather than half-loading.
+#[cfg(target_os = "macos")]
+fn wan_tier_is_complete(dir: &Path, files: &[&str]) -> bool {
+    files.iter().all(|file| dir.join(file).is_file())
+}
+
+/// Descend a resolved Wan2.2 quant-matrix repo `root` into the requested quant tier subdir
+/// (sc-9941 TI2V-5B / sc-9942 T2V / sc-9943 I2V, epic 8506), mirroring [`ltx_bundle_subdir`]. Returns
+/// the first COMPLETE tier in [`wan_tier_order`] (all of a model's weights — one transformer for the
+/// 5B, both experts for the A14B — live in the SAME subdir, so one resolution covers the model), or
+/// `None` when the repo has no complete tier subdir — a legacy flat snapshot, where the caller keeps
+/// the root + load-time quant.
+#[cfg(target_os = "macos")]
+fn wan_tier_subdir(root: &Path, request: &VideoRequest) -> Option<PathBuf> {
+    let files = wan_tier_files(&request.model);
+    wan_tier_order(request)
+        .iter()
+        .map(|tier| root.join(tier))
+        .find(|dir| wan_tier_is_complete(dir, files))
+}
+
+/// Resolve the Wan2.2 `(model_dir, load-time quant)` for a generation, descending into the
+/// quant-matrix tier subdir when the turnkey ships them (sc-9941 TI2V-5B / sc-9942 T2V / sc-9943 I2V).
+/// A pre-packed
+/// tier's `config.json` is authoritative — [`WanTransformer::from_weights`] builds the experts at the
+/// stored bits and `resolve_load_time_quant` rejects a conflicting `spec.quantize` as a hard error —
+/// so a resolved tier loads with `quant = None`: `mlxQuantize` selects WHICH tier, never a load-time
+/// requant (the `bf16/` tier is dense, so `None` ⇒ dense too). A legacy flat snapshot (no tier
+/// subdirs) keeps today's behavior: load the root and quantize at load per [`resolve_wan_quant`].
+#[cfg(target_os = "macos")]
+fn resolve_wan_tier_dir_and_quant(
+    settings: &Settings,
+    request: &VideoRequest,
+    engine_id: &'static str,
+) -> WorkerResult<(PathBuf, Option<Quant>)> {
+    let root = resolve_wan_model_dir(settings, &request.model, engine_id)?;
+    match wan_tier_subdir(&root, request) {
+        Some(tier) => Ok((tier, None)),
+        None => Ok((root, resolve_wan_quant(request))),
+    }
+}
+
+/// On-demand fetch of a non-default Wan2.2 quant-matrix tier subdir (sc-9941 TI2V-5B / sc-9942 T2V /
+/// sc-9943 I2V, mirrors [`ensure_ltx_q8_present`] / [`ensure_ltx_bf16_present`]). The macOS default
+/// download is the lean `q4/` tier; a job that opts into a heavier tier (`mlxQuantize <= 0` ⇒ `bf16`,
+/// `>= 8` ⇒ `q8`) pulls just that subdir from that model's FIXED [`wan_tier_repo`] revision the first
+/// time it is requested so [`wan_tier_subdir`] can resolve it. No-op for a model with no hosted tier
+/// matrix, a `q4` (default)
+/// job, when the repo snapshot isn't downloaded yet (resolve surfaces the clear error), or when the
+/// tier is already complete. Fails loud on a real download error — fast, before any compute; a
+/// missing `hf` CLI leaves the tier absent so resolve gracefully falls back to a smaller complete
+/// tier.
+#[cfg(target_os = "macos")]
+async fn ensure_wan_tier_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+) -> WorkerResult<()> {
+    let Some((repo, revision)) = wan_tier_repo(&request.model) else {
+        return Ok(());
+    };
+    let tier = match wan_quant_bits(request) {
+        Some(b) if b <= 0 => "bf16",
+        Some(b) if b >= 8 => "q8",
+        // q4 default — ships with the base install, nothing to fetch on demand.
+        _ => return Ok(()),
+    };
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, repo) else {
+        return Ok(());
+    };
+    if wan_tier_is_complete(&root.join(tier), wan_tier_files(&request.model)) {
+        return Ok(());
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".wan-tier-{tier}-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec![format!("{tier}/*")];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api, settings, job, repo, revision, &files, &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
+}
+
+/// On-demand fetch of the 4-step Lightning distill LoRA pair (`lightx2v/Wan2.2-Lightning`) for the
+/// A14B MoE models (sc-10030). Normally the pair installs as a manifest `coRequisite` alongside the
+/// model (sc-9696), but a worker that installed the model BEFORE the coRequisite was added has the
+/// tiers without the LoRA — and [`resolve_wan_adapters`] then hard-errors when the toggle is on. This
+/// self-heals that case: it pulls just the per-architecture high/low pair the first time a gen needs
+/// it (twin of [`ensure_wan_tier_present`] / the candle `ensure_qwen_lightning_lora_cached`). No-op
+/// when the Lightning toggle is off (sc-10047 — the native multi-step recipe needs no LoRA), for a
+/// non-A14B engine, when the pair is already cached, or when the `hf` CLI is absent (resolve then
+/// surfaces the clear "fetch it via the model manager" error). Fails loud on a real download error —
+/// fast, before any compute.
+#[cfg(target_os = "macos")]
+async fn ensure_wan_lightning_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    engine_id: &str,
+) -> WorkerResult<()> {
+    // sc-10047: Lightning is a default-on toggle now. When the job opted out (`advanced.lightning`
+    // = false), the native multi-step CFG recipe runs with no Lightning adapter, so we need nothing
+    // here. Default-on (or explicitly on) still wants the pair present and self-heals if absent.
+    if !wan_lightning_on(engine_id, request) {
+        return Ok(());
+    }
+    // Per-architecture subdir (NOT cross-compatible, sc-4997); must match `resolve_lightning_loras`.
+    let subdir = match engine_id {
+        "wan2_2_t2v_14b" => "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
+        "wan2_2_i2v_14b" => "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1",
+        // Only the A14B MoE models bake Lightning — every other engine needs nothing here.
+        _ => return Ok(()),
+    };
+    const REPO: &str = "lightx2v/Wan2.2-Lightning";
+    // Fast path: both halves already materialized in the hub cache (the common case after install).
+    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, REPO) {
+        let base = snapshot.join(subdir);
+        if base.join("high_noise_model.safetensors").is_file()
+            && base.join("low_noise_model.safetensors").is_file()
+        {
+            return Ok(());
+        }
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".wan-lightning-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec![
+        format!("{subdir}/high_noise_model.safetensors"),
+        format!("{subdir}/low_noise_model.safetensors"),
+    ];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api, settings, job, REPO, "main", &files, &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
+}
+
 /// The 4-step Lightning distill LoRA pair (high/low) for an A14B MoE model
 /// (`lightx2v/Wan2.2-Lightning`, the rank-64 Seko distill). The subdir is architecture-specific:
 /// T2V-A14B (V1.1) and I2V-A14B (V1) ship distinct LoRAs that are NOT cross-compatible (sc-4997).
@@ -1815,43 +3116,6 @@ fn wan_moe_low_noise_sibling(primary: &Path) -> Option<PathBuf> {
     sibling.is_file().then_some(sibling)
 }
 
-/// Resolve a LoRA spec's file (a directory → its first `.safetensors`), verifying it exists.
-/// The `path` originates from attacker-controllable job payload, so it is first confined to an
-/// app-managed root (sc-5723 / WKA-002) before any on-disk use.
-#[cfg(target_os = "macos")]
-fn resolve_lora_file(settings: &Settings, path: PathBuf) -> WorkerResult<PathBuf> {
-    let path = crate::normalize_app_managed_lora_path(settings, &path)?;
-    let file = if path.is_dir() {
-        first_safetensors_path(&path).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "LoRA has no .safetensors under {}",
-                path.display()
-            ))
-        })?
-    } else {
-        path
-    };
-    if !file.exists() {
-        return Err(WorkerError::InvalidPayload(format!(
-            "LoRA file is missing: {}",
-            file.display()
-        )));
-    }
-    Ok(file)
-}
-
-/// A LoRA spec's strength (`weight`, default 0.8 — matches the image path).
-#[cfg(target_os = "macos")]
-fn lora_scale(lora: &Value) -> f32 {
-    lora.get("weight")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .unwrap_or(0.8) as f32
-}
-
 /// Build the adapter specs for a Wan generation (sc-3034): the Lightning distill pair
 /// (both A14B MoE models — T2V + I2V — tagged high/low, sc-4997) followed by the user LoRAs.
 /// On the MoE models a user
@@ -1873,9 +3137,13 @@ fn resolve_wan_adapters(
     let is_moe = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
     let mut specs: Vec<AdapterSpec> = Vec::new();
 
-    // Lightning distill (both A14B MoE models — T2V + I2V, sc-4997): 4-step, applied
-    // per-expert at strength 1.0. The subdir is resolved per architecture (not cross-compatible).
-    if is_moe {
+    // Lightning distill (both A14B MoE models — T2V + I2V, sc-4997): 4-step, applied per-expert at
+    // strength 1.0 through the standard adapter path. As of sc-10047 this is a **default-on toggle**
+    // (`advanced.lightning`) rather than mandatory — the mlx-gen additive path (epic 10043) applies
+    // it on the quantized tiers, so the pair is added only when the toggle is on. When off, the
+    // native multi-step CFG recipe runs ([`wan_sampling`]) with no Lightning adapter. User LoRAs
+    // below are honored in both states. The subdir is resolved per architecture (not cross-compatible).
+    if is_moe && wan_lightning_on(engine_id, request) {
         let (high, low) = resolve_lightning_loras(settings, engine_id)?;
         specs.push(moe_adapter(high, 1.0, AdapterKind::Lora, MoeExpert::High));
         specs.push(moe_adapter(low, 1.0, AdapterKind::Lora, MoeExpert::Low));
@@ -1885,7 +3153,11 @@ fn resolve_wan_adapters(
         let path = lora_path(lora).ok_or_else(|| {
             WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
         })?;
-        let file = resolve_lora_file(settings, path)?;
+        let file = resolve_lora_file(
+            settings,
+            path,
+            crate::image_jobs::declared_adapter_file(lora),
+        )?;
         let kind = classify_adapter(&file)?;
         let scale = lora_scale(lora);
         match (is_moe, wan_moe_low_noise_sibling(&file)) {
@@ -1926,33 +3198,14 @@ fn moe_adapter(path: PathBuf, scale: f32, kind: AdapterKind, expert: MoeExpert) 
 /// So every user LoRA/LoKr is applied shared with `moe_expert: None` — the engine `wan_vace` provider
 /// merges diffusers-named LoRA/LoKr (mlx-gen #184) and rejects `moe_expert` tags. `classify_adapter`
 /// tags SceneWorks peft LoKr as `Lokr` and everything else (incl. third-party LyCORIS LoHa / non-peft
-/// LoKr) as `Lora`, which the engine then detects + merges by key sniff (epic 3641).
+/// LoKr) as `Lora`, which the engine then detects + merges by key sniff (epic 3641). Delegates to
+/// the shared [`resolve_dense_adapters`] (sc-8830).
 #[cfg(target_os = "macos")]
 fn resolve_wan_vace_adapters(
     settings: &Settings,
     request: &VideoRequest,
 ) -> WorkerResult<Vec<AdapterSpec>> {
-    if request.loras.len() > MAX_JOB_LORAS {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
-        )));
-    }
-    let mut specs: Vec<AdapterSpec> = Vec::new();
-    for lora in &request.loras {
-        let path = lora_path(lora).ok_or_else(|| {
-            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
-        })?;
-        let file = resolve_lora_file(settings, path)?;
-        let kind = classify_adapter(&file)?;
-        specs.push(AdapterSpec {
-            path: file,
-            scale: lora_scale(lora),
-            kind,
-            pass_scales: None,
-            moe_expert: None,
-        });
-    }
-    Ok(specs)
+    resolve_dense_adapters(settings, request, MAX_JOB_LORAS)
 }
 
 /// Build the adapter specs for a SCAIL-2 generation (sc-5451 inference LoRA path, mlx-gen #462).
@@ -1963,33 +3216,14 @@ fn resolve_wan_vace_adapters(
 /// (incl. third-party LyCORIS) as `Lora`. This carries both a user-selected SCAIL-2 LoRA and the
 /// bundled Bias-Aware DPO quality LoRA (both surface through `request.loras`). A lightx2v diff-patch
 /// "lightning" LoRA installs via the engine's in-place diff-patch merge (sc-5684); selecting it makes
-/// the worker apply the step-distill recipe (`scail2_sampling`, sc-5700).
+/// the worker apply the step-distill recipe (`scail2_sampling`, sc-5700). Delegates to the shared
+/// [`resolve_dense_adapters`] (sc-8830) — the MLX Wan-VACE / SCAIL-2 twin.
 #[cfg(target_os = "macos")]
 fn resolve_scail2_adapters(
     settings: &Settings,
     request: &VideoRequest,
 ) -> WorkerResult<Vec<AdapterSpec>> {
-    if request.loras.len() > MAX_JOB_LORAS {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
-        )));
-    }
-    let mut specs: Vec<AdapterSpec> = Vec::new();
-    for lora in &request.loras {
-        let path = lora_path(lora).ok_or_else(|| {
-            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
-        })?;
-        let file = resolve_lora_file(settings, path)?;
-        let kind = classify_adapter(&file)?;
-        specs.push(AdapterSpec {
-            path: file,
-            scale: lora_scale(lora),
-            kind,
-            pass_scales: None,
-            moe_expert: None,
-        });
-    }
-    Ok(specs)
+    resolve_dense_adapters(settings, request, MAX_JOB_LORAS)
 }
 
 /// The first-frame conditioning for a Wan generation: required for I2V-14B, optional for
@@ -2308,15 +3542,51 @@ fn advanced_opt_f32(request: &VideoRequest, key: &str) -> Option<f32> {
     })
 }
 
-/// Per-model sampling for the base Wan path (sc-3034 / sc-4997). Both A14B MoE models (T2V + I2V)
-/// bake the 4-step Lightning distill → forced 4 steps / CFG-off (guide 1.0); the distill is
-/// mandatory, so a user `steps`/`guidanceScale` can't break it. The dense TI2V-5B has no distill
-/// LoRA yet (sc-4999): honor an explicit user `steps`/`guidanceScale`, else apply the interim
-/// default ([`WAN5B_INTERIM_STEPS`], CFG retained). `None` ⇒ the engine config default.
+/// `true` if the A14B MoE Lightning distill is engaged for this request (sc-10047). The Lightning
+/// 4-step distill is now a **default-on toggle** (`advanced.lightning`) rather than mandatory: the
+/// mlx-gen additive path (epic 10043) applies the high/low pair on the quantized tiers, so a job can
+/// opt out and run the native multi-step CFG recipe instead. Only the two A14B MoE models (T2V + I2V)
+/// bake Lightning — for every other engine (the dense 5B, non-Wan) this is irrelevant and returns
+/// `false`. Backward compatible: an absent flag on an A14B job defaults to `true` (the prior
+/// always-on behavior). A strict-bool `false` opts out; `true` (or absent) opts in.
+#[cfg(target_os = "macos")]
+fn wan_lightning_on(engine_id: &str, request: &VideoRequest) -> bool {
+    let is_moe = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
+    if !is_moe {
+        return false;
+    }
+    // Absent ⇒ default-on for A14B; only an explicit strict-bool `false` opts out.
+    request
+        .advanced
+        .get("lightning")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// Per-model sampling for the base Wan path (sc-3034 / sc-4997 / sc-10047). On the A14B MoE models
+/// (T2V + I2V) the recipe is now conditional on the Lightning toggle ([`wan_lightning_on`]):
+/// - toggle **on** (default) → the 4-step Lightning distill preset: forced 4 steps / CFG-off
+///   (guide 1.0), unchanged from before.
+/// - toggle **off** → the native Wan2.2 A14B multi-step + CFG recipe: honor an explicit user
+///   `steps`/`guidanceScale`, else `None` so the engine's own config.json A14B defaults (40 steps,
+///   dual CFG) stand exactly.
+///
+/// The dense TI2V-5B has no distill LoRA yet (sc-4999) and no toggle: honor an explicit user
+/// `steps`/`guidanceScale`, else apply the interim default ([`WAN5B_INTERIM_STEPS`], CFG retained).
+/// `None` ⇒ the engine config default.
 #[cfg(target_os = "macos")]
 fn wan_sampling(engine_id: &str, request: &VideoRequest) -> (Option<u32>, Option<f32>) {
     if engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b" {
-        return (Some(4), Some(1.0));
+        if wan_lightning_on(engine_id, request) {
+            // Lightning distill (default): 4 steps / CFG-off. The distill is applied as an
+            // adapter (resolve_wan_adapters), so a user `steps`/`guidanceScale` can't break it.
+            return (Some(4), Some(1.0));
+        }
+        // Toggle off: native multi-step CFG. Honor an explicit user override, else `None` so the
+        // engine's config.json A14B non-distill defaults (multi-step + CFG on) stand exactly.
+        let steps = advanced_opt_u32(request, "steps");
+        let guidance = advanced_opt_f32(request, "guidanceScale");
+        return (steps, guidance);
     }
     // wan2_2_ti2v_5b (dense): user override wins, else the interim default; CFG left to the
     // engine (guide 5.0) unless the user disables it via `guidanceScale`.
@@ -2417,6 +3687,11 @@ struct VideoGenInput {
     conditioning_fps: Option<u32>,
     // SeedVR2 input pre-blur (sc-4816); `None` on the other models.
     softness: Option<f32>,
+    // LTX-only external Gemma-3 text-encoder snapshot dir (sc-8827): rides `LoadSpec::text_encoder` so
+    // the LTX provider locates its Gemma encoder from the spec instead of the process-global
+    // `$LTX_GEMMA_DIR` env var (the old `set_var` seam was unsound on the multithreaded runtime,
+    // F-025). `None` on every other model (they bundle their TE) and when no override resolves.
+    text_encoder_dir: Option<PathBuf>,
 }
 
 #[cfg(any(
@@ -2454,6 +3729,7 @@ impl Default for VideoGenInput {
             decode_chunk_size: None,
             conditioning_fps: None,
             softness: None,
+            text_encoder_dir: None,
         }
     }
 }
@@ -2475,6 +3751,11 @@ fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
         // PiD super-resolving decode (epic 7840) is an image-only latent-space swap; video
         // providers have no PiD backbone, so never request it.
         pid: None,
+        // Video providers are not face-ID models — no identity sub-model weights.
+        identity: None,
+        // LTX's external Gemma-3 text encoder rides the spec (sc-8827); `None` ⇒ the provider's
+        // `$LTX_GEMMA_DIR` / `<root>/text_encoder` fallback.
+        text_encoder: input.text_encoder_dir.clone().map(WeightsSource::Dir),
     }
 }
 
@@ -2524,7 +3805,7 @@ fn run_loaded_video_generation(
     };
     let output = generator
         .generate(&req, on_progress)
-        .map_err(|error| WorkerError::Engine(format!("video generation failed: {error}")))?;
+        .map_err(|error| crate::classify_engine_error("video generation failed", error))?;
     match output {
         GenerationOutput::Video { frames, fps, audio } => Ok(DecodedVideo {
             frames: frames
@@ -2550,21 +3831,9 @@ fn run_loaded_video_generation(
 
 #[cfg(all(target_os = "macos", test))]
 fn load_video_generation_for_tests(input: &VideoGenInput) -> WorkerResult<Box<dyn Generator>> {
-    let spec = LoadSpec {
-        weights: WeightsSource::Dir(input.model_dir.clone()),
-        quantize: input.quant,
-        precision: Precision::Bf16,
-        control: None,
-        // MultiControlNet (sc-3378) is image-only; video providers ignore it.
-        extra_controls: Vec::new(),
-        ip_adapter: None,
-        adapters: input.adapters.clone(),
-        // PiD super-resolving decode (epic 7840) is an image-only latent-space swap; video
-        // providers have no PiD backbone, so never request it.
-        pid: None,
-    };
+    let spec = video_load_spec(input);
     gen_core::load(input.engine_id, &spec)
-        .map_err(|error| WorkerError::Engine(format!("video load failed: {error}")))
+        .map_err(|error| crate::classify_engine_error("video load failed", error))
 }
 
 #[cfg(all(target_os = "macos", test))]
@@ -2692,18 +3961,20 @@ async fn generate_video(
     settings: &Settings,
     job: &JobSnapshot,
     backend: &str,
+    advanced: &JsonObject,
     mut input: VideoGenInput,
 ) -> WorkerResult<DecodedVideo> {
     // Per-generation sampler / scheduler axis for video (epic 7114 P5, sc-7127). The handlers leave
-    // `input.sampler`/`scheduler` `None`; read them from the job's `advanced` block here — the single
-    // funnel every Wan / LTX / SVD path passes through — and N3-guard each against the resolved engine
-    // descriptor's advertised surface. A name the engine does not advertise (every video engine but the
-    // Wan fold-in + the SVD/LTX sampler-only outliers, until candle adoption) is dropped to the engine
-    // default + a `sampling_knob_unsupported` event, never a `validate_request` hard-fail.
+    // `input.sampler`/`scheduler` `None`; read them from the caller's already-parsed `advanced` block
+    // here — the single funnel every Wan / LTX / SVD path passes through — and N3-guard each against
+    // the resolved engine descriptor's advertised surface. A name the engine does not advertise (every
+    // video engine but the Wan fold-in + the SVD/LTX sampler-only outliers, until candle adoption) is
+    // dropped to the engine default + a `sampling_knob_unsupported` event, never a hard-fail. Taking
+    // `advanced` by reference avoids re-parsing the whole payload into a throwaway VideoRequest per
+    // generation (F-118).
     {
-        let advanced = VideoRequest::from_payload(&job.payload).advanced;
         let (raw_sampler, raw_scheduler, raw_shift) =
-            crate::image_jobs::read_advanced_sampling_knobs(&advanced);
+            crate::image_jobs::read_advanced_sampling_knobs(advanced);
         let (samplers, schedulers) = video_engine_sampling_surface(input.engine_id);
         input.sampler = crate::image_jobs::normalize_sampling_knob(
             raw_sampler,
@@ -2797,44 +4068,54 @@ async fn generate_video(
                     if canceled {
                         continue; // drain so the blocking sender never blocks.
                     }
-            if last_cancel.elapsed() >= Duration::from_secs(2) {
-                last_cancel = Instant::now();
-                if cancel_requested_peek(api, &job.id).await {
-                    begin_video_cancel(api, &job.id, &cancel, backend).await;
-                    canceled = true;
-                    continue;
-                }
-                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-            }
-            let (fraction, message) = match progress {
-                Progress::Step { current, total } => (
-                    0.25 + 0.30 * (current as f64 / total.max(1) as f64),
-                    format!("Generating frames — step {current}/{total}."),
-                ),
-                Progress::Decoding => (0.58, "Decoding frames.".to_owned()),
-            };
-            update_job(
-                api,
-                &job.id,
-                video_progress(
-                    JobStatus::Running,
-                    ProgressStage::Generating,
-                    fraction,
-                    &message,
-                    None,
-                    backend,
-                ),
-            )
-            .await?;
-                }
-                _ = interval.tick() => {
-                    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                    if !canceled && last_cancel.elapsed() >= Duration::from_secs(2) {
+                    // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
+                    // poll so a quit stops the gen at this frame step, matching a user cancel.
+                    if shutdown_requested() {
+                        begin_video_cancel(api, &job.id, &cancel, backend).await;
+                        canceled = true;
+                        continue;
+                    }
+                    if last_cancel.elapsed() >= Duration::from_secs(2) {
                         last_cancel = Instant::now();
                         if cancel_requested_peek(api, &job.id).await {
                             begin_video_cancel(api, &job.id, &cancel, backend).await;
                             canceled = true;
+                            continue;
                         }
+                        heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                    }
+                    let (fraction, message) = match progress {
+                        Progress::Step { current, total } => (
+                            0.25 + 0.30 * (current as f64 / total.max(1) as f64),
+                            format!("Generating frames — step {current}/{total}."),
+                        ),
+                        Progress::Decoding => (0.58, "Decoding frames.".to_owned()),
+                    };
+                    update_job(
+                        api,
+                        &job.id,
+                        video_progress(
+                            JobStatus::Running,
+                            ProgressStage::Generating,
+                            fraction,
+                            &message,
+                            None,
+                            backend,
+                        ),
+                    )
+                    .await?;
+                }
+                _ = interval.tick() => {
+                    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                    // sc-9618: honor a process shutdown on every tick (local flag read, unthrottled).
+                    if !canceled && (shutdown_requested()
+                        || (last_cancel.elapsed() >= Duration::from_secs(2) && {
+                            last_cancel = Instant::now();
+                            cancel_requested_peek(api, &job.id).await
+                        }))
+                    {
+                        begin_video_cancel(api, &job.id, &cancel, backend).await;
+                        canceled = true;
                     }
                     // Forward-progress watchdog: a wedged engine keeps this async loop heartbeating
                     // (the block runs on a separate thread), so the API sees a healthy job forever.
@@ -2953,7 +4234,9 @@ const CANDLE_WAN_I2V_14B_REPO: &str = "Wan-AI/Wan2.2-I2V-A14B-Diffusers";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_LTX_REPO: &str = "Lightricks/LTX-2.3";
 // The `ltx_2_3_eros` weights repo (sc-5495): a full dense LTX-2.3 fine-tune (the candle provider
-// loads its `10Eros_v1_bf16.safetensors` like the base; same architecture, same Gemma encoder).
+// loads its bf16 single-file checkpoint like the base; same architecture, same Gemma encoder).
+// The pinned checkpoint version is manifest-driven (`downloads[].files` / `mlx.convertSourceFile`),
+// so only that one file is fetched even though the repo also ships older + fp8 variants.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_LTX_EROS_REPO: &str = "TenStrip/LTX2.3-10Eros";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -3052,19 +4335,78 @@ fn candle_video_snapshot_dir(settings: &Settings, repo: &str) -> WorkerResult<Pa
     })
 }
 
-/// Point the candle LTX provider at the Gemma-3-12B encoder snapshot via `LTX_GEMMA_DIR` (the env var
-/// the provider reads; it otherwise falls back to `<checkpoint>/text_encoder`). Best-effort: if the
-/// Gemma snapshot isn't in the HF cache we leave `LTX_GEMMA_DIR` unset so the provider tries its
-/// `<root>/text_encoder` fallback and emits its own clear "set LTX_GEMMA_DIR …" error. The worker runs
-/// video jobs sequentially, so the process-global env set is race-free.
+/// (sc-10027) The `advanced.mlxQuantize` bits for a candle wan tier-select — a number or numeric string;
+/// `None` when unset.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn ensure_ltx_gemma_dir(settings: &Settings) {
+fn candle_wan_quant_bits(request: &VideoRequest) -> Option<i64> {
+    request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+}
+
+/// (sc-10027) Whether `dir` is a complete candle wan tier — a diffusers-layout snapshot with the DiT
+/// transformer(s), the T5 encoder, the VAE and the tokenizer. The A14B MoE carries a second expert
+/// (`transformer_2/`); the TI2V-5B is a single transformer.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_wan_tier_complete(dir: &Path, a14b: bool) -> bool {
+    let has = |sub: &str| dir.join(sub).is_dir();
+    has("transformer")
+        && has("text_encoder")
+        && has("vae")
+        && has("tokenizer")
+        && (!a14b || has("transformer_2"))
+}
+
+/// (sc-10027) Resolve the candle wan quant tier subdir (`q4`/`q8`/`bf16`) + its quant marker under a
+/// `SceneWorks/wan2.2-*-candle` snapshot `root`, per `advanced.mlxQuantize` (default q4, falling back
+/// through the tier order), or `None` for a non-wan engine or a flat repo with no tier subdirs (e.g. the
+/// dense `Wan-AI/*-Diffusers` fallback, which loads as-is). A resolved subdir **is** the diffusers-layout
+/// snapshot the sc-10025 packed-detect seam loads — the quant is baked into the tier, so the `Quant`
+/// returned is a tier-select marker (`spec.quantize` is a no-op on the candle wan load). Candle analog of
+/// the macOS `wan_tier_subdir` / `resolve_wan_tier_dir_and_quant` (sc-9079).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_wan_tier_subdir(
+    root: &Path,
+    engine_id: &str,
+    request: &VideoRequest,
+) -> Option<(PathBuf, Option<Quant>)> {
+    if !engine_id.starts_with("wan2_2") {
+        return None;
+    }
+    // Tier preference by requested bits (mirrors the macOS `wan_tier_order`): default / ≤4 → q4.
+    let order: &[&str] = match candle_wan_quant_bits(request) {
+        Some(b) if b <= 0 => &["bf16", "q8", "q4"],
+        Some(b) if b >= 8 => &["q8", "q4"],
+        _ => &["q4", "q8"],
+    };
+    let a14b = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
+    order.iter().find_map(|&tier| {
+        let dir = root.join(tier);
+        candle_wan_tier_complete(&dir, a14b).then(|| {
+            let quant = match tier {
+                "q4" => Some(Quant::Q4),
+                "q8" => Some(Quant::Q8),
+                _ => None, // bf16
+            };
+            (dir, quant)
+        })
+    })
+}
+
+/// Resolve the Gemma-3-12B encoder snapshot dir for the candle LTX provider (sc-8827). Returns the
+/// HF-cache snapshot path so the caller can thread it onto `LoadSpec::text_encoder` — no more mutating
+/// the process-global `$LTX_GEMMA_DIR` at job time on the multithreaded runtime (the old `set_var`
+/// seam was unsound, F-025). Honors an explicit operator `$LTX_GEMMA_DIR` (returns `None` so the
+/// provider reads the env override itself). Best-effort: if the Gemma snapshot isn't in the HF cache
+/// we return `None` so the provider tries its `<root>/text_encoder` fallback and emits its own clear
+/// "set LTX_GEMMA_DIR …" error.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_ltx_gemma_dir(settings: &Settings) -> Option<PathBuf> {
     if std::env::var_os("LTX_GEMMA_DIR").is_some() {
-        return; // honor an explicit operator override.
+        return None; // honor an explicit operator override (the provider reads the env var).
     }
-    if let Some(dir) = huggingface_snapshot_dir(&settings.data_dir, CANDLE_LTX_GEMMA_REPO) {
-        std::env::set_var("LTX_GEMMA_DIR", dir);
-    }
+    huggingface_snapshot_dir(&settings.data_dir, CANDLE_LTX_GEMMA_REPO)
 }
 
 /// Raw-settings recorded on a candle video asset (mirrors `wan_raw_settings`, trimmed to the
@@ -3131,6 +4473,258 @@ fn resolve_candle_video_conditioning(
     }])
 }
 
+// ---------------------------------------------------------------------------
+// Candle (Windows/CUDA) Wan Lightning toggle + adapter resolution (sc-10138) — the off-Mac analog of
+// the macOS `wan_lightning_on` / `wan_sampling` / `ensure_wan_lightning_present` / `resolve_wan_adapters`
+// (all `#[cfg(target_os = "macos")]`). The candle Wan engine now ACCEPTS adapters on a packed q4/q8 tier
+// via the additive branch (candle-gen sc-10094/10095, epic 10043), so off-Mac the A14B can get its 4-step
+// distill through the Lightning toggle and user LoRAs apply on the candle Wan video path. These are
+// candle-lane copies (the macOS lane keeps its own), reusing the backend-neutral helpers `lora_scale` /
+// `resolve_lora_file` / `crate::image_jobs::{lora_path, classify_adapter}` / `MAX_JOB_LORAS` /
+// `advanced_opt_*` / `huggingface_snapshot_dir` / `download_model_with_hf_cli`.
+// ---------------------------------------------------------------------------
+
+/// (sc-10138) The interim step default for the dense candle TI2V-5B (no distill LoRA exists yet) — the
+/// candle analog of the macOS `WAN5B_INTERIM_STEPS`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_WAN5B_INTERIM_STEPS: u32 = 20;
+
+/// (sc-10138) `true` if the A14B MoE 4-step Lightning distill is engaged for this candle request — the
+/// candle analog of `wan_lightning_on`. A **default-on toggle** (`advanced.lightning`): absent or `true`
+/// opts in, a strict-bool `false` opts out (native multi-step CFG). Only the two A14B MoE models bake
+/// Lightning; every other engine returns `false`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_wan_lightning_on(engine_id: &str, request: &VideoRequest) -> bool {
+    let is_moe = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
+    if !is_moe {
+        return false;
+    }
+    request
+        .advanced
+        .get("lightning")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// (sc-10138) Per-model sampling for the candle Wan path — the candle analog of `wan_sampling`. On the
+/// A14B MoE models the recipe is conditional on the Lightning toggle: on (default) → 4 steps / CFG-off
+/// (the distill rides an adapter, so a user override can't break it); off → native multi-step CFG
+/// (honor an explicit user `steps`/`guidanceScale`, else `None` so the engine's config defaults stand).
+/// The dense TI2V-5B has no distill: user override wins, else the interim default.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_wan_sampling(engine_id: &str, request: &VideoRequest) -> (Option<u32>, Option<f32>) {
+    if engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b" {
+        if candle_wan_lightning_on(engine_id, request) {
+            return (Some(4), Some(1.0));
+        }
+        return (
+            advanced_opt_u32(request, "steps"),
+            advanced_opt_f32(request, "guidanceScale"),
+        );
+    }
+    (
+        advanced_opt_u32(request, "steps").or(Some(CANDLE_WAN5B_INTERIM_STEPS)),
+        advanced_opt_f32(request, "guidanceScale"),
+    )
+}
+
+/// (sc-10138) The `.low_noise.safetensors` sibling of a Wan A14B MoE high-noise LoRA file, or `None`
+/// when the file is not the high-noise half of a pair — the candle analog of `wan_moe_low_noise_sibling`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_wan_moe_low_noise_sibling(primary: &Path) -> Option<PathBuf> {
+    const HIGH: &str = ".high_noise.safetensors";
+    let name = primary.file_name()?.to_str()?;
+    if !name.to_ascii_lowercase().ends_with(HIGH) {
+        return None;
+    }
+    let stem = &name[..name.len() - HIGH.len()];
+    let sibling = primary.with_file_name(format!("{stem}.low_noise.safetensors"));
+    sibling.is_file().then_some(sibling)
+}
+
+/// (sc-10138) The per-architecture 4-step Lightning distill LoRA pair (high/low) for an A14B MoE model
+/// (`lightx2v/Wan2.2-Lightning`, rank-64 Seko) — the candle analog of `resolve_lightning_loras`. T2V-A14B
+/// (V1.1) and I2V-A14B (V1) ship distinct, NOT cross-compatible LoRAs (sc-4997).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_resolve_lightning_loras(
+    settings: &Settings,
+    engine_id: &str,
+) -> WorkerResult<(PathBuf, PathBuf)> {
+    let snapshot = crate::model_jobs::huggingface_snapshot_dir(
+        &settings.data_dir,
+        "lightx2v/Wan2.2-Lightning",
+    )
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "{engine_id}: the Lightning distill LoRA (lightx2v/Wan2.2-Lightning) is not \
+                     downloaded — fetch it via the model manager"
+        ))
+    })?;
+    let base = match engine_id {
+        "wan2_2_t2v_14b" => "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
+        "wan2_2_i2v_14b" => "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1",
+        other => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{other}: no Lightning distill LoRA — only the A14B MoE models bake Lightning"
+            )))
+        }
+    };
+    let high = snapshot.join(base).join("high_noise_model.safetensors");
+    let low = snapshot.join(base).join("low_noise_model.safetensors");
+    for file in [&high, &low] {
+        if !file.is_file() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{engine_id}: Lightning LoRA file missing: {}",
+                file.display()
+            )));
+        }
+    }
+    Ok((high, low))
+}
+
+/// (sc-10138) On-demand fetch of the A14B Lightning distill pair for the candle lane — the analog of
+/// `ensure_wan_lightning_present`. Self-heals a worker that installed the tiers before the Lightning
+/// `coRequisite`. No-op when the toggle is off, for a non-A14B engine, when the pair is cached, or when
+/// `hf` is absent (resolve then surfaces the clear "fetch it via the model manager" error).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn candle_ensure_wan_lightning_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    engine_id: &str,
+) -> WorkerResult<()> {
+    if !candle_wan_lightning_on(engine_id, request) {
+        return Ok(());
+    }
+    let subdir = match engine_id {
+        "wan2_2_t2v_14b" => "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
+        "wan2_2_i2v_14b" => "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1",
+        _ => return Ok(()),
+    };
+    const REPO: &str = "lightx2v/Wan2.2-Lightning";
+    if let Some(snapshot) = crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, REPO) {
+        let base = snapshot.join(subdir);
+        if base.join("high_noise_model.safetensors").is_file()
+            && base.join("low_noise_model.safetensors").is_file()
+        {
+            return Ok(());
+        }
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".wan-lightning-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec![
+        format!("{subdir}/high_noise_model.safetensors"),
+        format!("{subdir}/low_noise_model.safetensors"),
+    ];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api, settings, job, REPO, "main", &files, &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
+}
+
+/// (sc-10138) Tag an A14B MoE Lightning/user LoRA to a specific expert — the candle analog of
+/// `moe_adapter`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_moe_adapter(
+    path: PathBuf,
+    scale: f32,
+    kind: gen_core::AdapterKind,
+    expert: gen_core::MoeExpert,
+) -> AdapterSpec {
+    AdapterSpec {
+        path,
+        scale,
+        kind,
+        pass_scales: None,
+        moe_expert: Some(expert),
+    }
+}
+
+/// (sc-10138) Build the adapter specs for a candle Wan generation — the candle analog of
+/// `resolve_wan_adapters`. The Lightning distill pair (both A14B MoE models, tagged high/low, only when
+/// the toggle is on) followed by the user LoRAs. On the MoE models a user `*.high_noise.safetensors` with
+/// a `.low_noise` sibling tags high→High / low→Low; a single-file LoRA is shared (both experts on MoE,
+/// the single model on the 5B). The candle Wan engine applies these additively on a packed q4/q8 tier
+/// (sc-10094/10095) or folds them on a dense tier.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_resolve_wan_adapters(
+    settings: &Settings,
+    request: &VideoRequest,
+    engine_id: &str,
+) -> WorkerResult<Vec<AdapterSpec>> {
+    if request.loras.len() > MAX_JOB_LORAS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
+        )));
+    }
+    let is_moe = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
+    let mut specs: Vec<AdapterSpec> = Vec::new();
+
+    // Lightning distill (both A14B MoE models): 4-step, per-expert at strength 1.0, added only when the
+    // toggle is on. When off, the native multi-step CFG recipe runs with no Lightning adapter.
+    if is_moe && candle_wan_lightning_on(engine_id, request) {
+        let (high, low) = candle_resolve_lightning_loras(settings, engine_id)?;
+        specs.push(candle_moe_adapter(
+            high,
+            1.0,
+            gen_core::AdapterKind::Lora,
+            gen_core::MoeExpert::High,
+        ));
+        specs.push(candle_moe_adapter(
+            low,
+            1.0,
+            gen_core::AdapterKind::Lora,
+            gen_core::MoeExpert::Low,
+        ));
+    }
+
+    for lora in &request.loras {
+        let path = crate::image_jobs::lora_path(lora).ok_or_else(|| {
+            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
+        })?;
+        let file = resolve_lora_file(
+            settings,
+            path,
+            crate::image_jobs::declared_adapter_file(lora),
+        )?;
+        let kind = crate::image_jobs::classify_adapter(&file)?;
+        let scale = lora_scale(lora);
+        match (is_moe, candle_wan_moe_low_noise_sibling(&file)) {
+            (true, Some(low)) => {
+                let low_kind = crate::image_jobs::classify_adapter(&low)?;
+                specs.push(candle_moe_adapter(
+                    file,
+                    scale,
+                    kind,
+                    gen_core::MoeExpert::High,
+                ));
+                specs.push(candle_moe_adapter(
+                    low,
+                    scale,
+                    low_kind,
+                    gen_core::MoeExpert::Low,
+                ));
+            }
+            _ => {
+                specs.push(AdapterSpec {
+                    path: file,
+                    scale,
+                    kind,
+                    pass_scales: None,
+                    moe_expert: None,
+                });
+            }
+        }
+    }
+    Ok(specs)
+}
+
 /// Windows/CUDA candle video path (sc-5097 txt2video; sc-5175 adds the Wan2.2 14B MoE T2V + I2V).
 /// Resolves the engine + weights, provisions the LTX Gemma encoder, resolves any i2v source-image
 /// conditioning, builds a `VideoGenInput`, and runs it through the shared [`generate_video`] streaming
@@ -3149,12 +4743,23 @@ async fn generate_candle_video(
     })?;
     let adapter = candle_video_adapter_label(engine_id);
     let repo = candle_video_repo(request, engine_id);
-    let model_dir = candle_video_snapshot_dir(settings, &repo)?;
-    // ltx needs the separate Gemma-3-12B encoder (its only conditioning input).
+    let snapshot_dir = candle_video_snapshot_dir(settings, &repo)?;
+    // Wan quant-matrix tier-select (sc-10027): a candle wan tier repo (`SceneWorks/wan2.2-*-candle`) ships
+    // q4/q8/bf16 subdirs — resolve the one matching `advanced.mlxQuantize` (default q4) and load from it
+    // (the packed-detect seam reads the baked-in quant). A flat/dense repo (no subdirs, e.g. the
+    // `Wan-AI/*-Diffusers` fallback) stays as-is with no quant marker.
+    let (model_dir, wan_quant) = match candle_wan_tier_subdir(&snapshot_dir, engine_id, request) {
+        Some((tier_dir, quant)) => (tier_dir, quant),
+        None => (snapshot_dir, None),
+    };
+    // ltx needs the separate Gemma-3-12B encoder (its only conditioning input). Resolve its snapshot
+    // dir here and thread it onto the LoadSpec below (sc-8827) instead of mutating `$LTX_GEMMA_DIR`.
     let is_ltx = engine_id == "ltx_2_3_distilled";
-    if is_ltx {
-        ensure_ltx_gemma_dir(settings);
-    }
+    let ltx_gemma_dir = if is_ltx {
+        resolve_ltx_gemma_dir(settings)
+    } else {
+        None
+    };
     // Wan 14B I2V conditions on a source image (`Conditioning::Reference`); every other candle video
     // engine is txt2video-only (empty conditioning).
     let conditioning =
@@ -3197,21 +4802,34 @@ async fn generate_candle_video(
         if let Value::Object(map) = &mut raw_settings {
             map.insert("repo".to_owned(), Value::String(repo.clone()));
         }
-        let decoded = generate_video(api, settings, job, backend, input).await?;
+        let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
         return Ok((decoded, adapter, raw_settings));
     }
 
-    // Descriptor-narrowed sampling surface: wan (5B + 14B) takes guidance + a negative prompt; the
-    // distilled ltx takes neither (single-stage, no CFG). Steps/guidance default to the provider's own
-    // constants when the request omits them.
-    let steps = advanced_opt_u32(request, "steps");
-    let (guidance, negative_prompt) = if is_ltx {
-        (None, None)
+    let is_wan = engine_id == "wan2_2_ti2v_5b"
+        || engine_id == "wan2_2_t2v_14b"
+        || engine_id == "wan2_2_i2v_14b";
+
+    // Wan Lightning toggle + adapters (sc-10138): self-heal the A14B Lightning distill pair when the
+    // toggle is on, then resolve the adapter specs (Lightning + user LoRAs, per-expert on the MoE). The
+    // candle Wan engine applies these additively on a packed q4/q8 tier (candle-gen sc-10094/10095) or
+    // folds them on a dense tier. `Vec::new()` for the non-Wan (ltx) engine.
+    let adapters = if is_wan {
+        candle_ensure_wan_lightning_present(api, settings, job, request, engine_id).await?;
+        candle_resolve_wan_adapters(settings, request, engine_id)?
     } else {
-        let guidance = advanced_opt_f32(request, "guidanceScale");
-        let trimmed = request.negative_prompt.trim();
-        let negative = (!trimmed.is_empty()).then(|| trimmed.to_owned());
-        (guidance, negative)
+        Vec::new()
+    };
+
+    // Descriptor-narrowed sampling surface: wan (5B + 14B) takes guidance + a negative prompt; the
+    // distilled ltx takes neither (single-stage, no CFG). Wan uses the Lightning-aware recipe
+    // ([`candle_wan_sampling`]: 4-step/CFG-off when the toggle is on, else native multi-step + CFG);
+    // ltx keeps its own step default and no CFG.
+    let (steps, guidance, negative_prompt) = if is_ltx {
+        (advanced_opt_u32(request, "steps"), None, None)
+    } else {
+        let (steps, guidance) = candle_wan_sampling(engine_id, request);
+        (steps, guidance, non_empty_negative_prompt(request))
     };
     // Coerce the requested frame count onto each engine's temporal stride (wan: ≡1 mod 4; ltx: 8k+1).
     let frames = if is_ltx {
@@ -3224,6 +4842,11 @@ async fn generate_candle_video(
         scheduler: None,
         engine_id,
         model_dir,
+        // Wan quant-matrix tier marker (sc-10027): `Some(Q4/Q8)` when a packed candle tier subdir was
+        // resolved, else `None` (bf16 tier / dense repo / ltx). A no-op on the candle wan load (the
+        // packed-detect seam reads the tier's baked-in quant), carried for the LoadSpec + asset record.
+        quant: wan_quant,
+        adapters,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
@@ -3234,10 +4857,12 @@ async fn generate_candle_video(
         steps,
         guidance,
         seed: resolve_video_seed(request) as u64,
+        // ltx's Gemma-3 encoder dir rides the LoadSpec (sc-8827); `None` for wan (bundled TE).
+        text_encoder_dir: ltx_gemma_dir,
         ..VideoGenInput::default()
     };
     let raw_settings = candle_video_raw_settings(request, &repo);
-    let decoded = generate_video(api, settings, job, backend, input).await?;
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
     Ok((decoded, adapter, raw_settings))
 }
 
@@ -3333,10 +4958,6 @@ fn candle_scail2_raw_settings(request: &VideoRequest, lightning: bool) -> Value 
     Value::Object(raw)
 }
 
-/// Max LoRAs per candle SCAIL-2 job (matches the macOS `MAX_JOB_LORAS`).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const CANDLE_SCAIL2_MAX_LORAS: usize = 5;
-
 /// The lightx2v lightning step-distill recipe (sc-6838, the candle sibling of the MLX sc-5684/5700
 /// recipe): 8 steps, CFG off, scheduler shift 1.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -3346,81 +4967,21 @@ const CANDLE_SCAIL2_LIGHTNING_GUIDANCE: f32 = 1.0;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_SCAIL2_LIGHTNING_SHIFT: f32 = 1.0;
 
-/// A LoRA spec's strength (`weight`, default 0.8 — matches the macОS `lora_scale`).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_scail2_lora_scale(lora: &Value) -> f32 {
-    lora.get("weight")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .unwrap_or(0.8) as f32
-}
-
-/// Resolve a LoRA spec's file (a directory → its first `.safetensors`), confined to an app-managed root
-/// (sc-5723 / WKA-002) before any on-disk use — the candle sibling of the macOS `resolve_lora_file`.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_resolve_lora_file(settings: &Settings, path: PathBuf) -> WorkerResult<PathBuf> {
-    let path = crate::normalize_app_managed_lora_path(settings, &path)?;
-    let file = if path.is_dir() {
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(&path)
-            .map_err(|e| WorkerError::InvalidPayload(format!("LoRA dir {}: {e}", path.display())))?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|x| x == "safetensors"))
-            .collect();
-        entries.sort();
-        entries.into_iter().next().ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "LoRA has no .safetensors under {}",
-                path.display()
-            ))
-        })?
-    } else {
-        path
-    };
-    if !file.exists() {
-        return Err(WorkerError::InvalidPayload(format!(
-            "LoRA file is missing: {}",
-            file.display()
-        )));
-    }
-    Ok(file)
-}
-
 /// Build the candle SCAIL-2 adapter specs from `request.loras` — the candle sibling of the macOS
 /// `resolve_scail2_adapters` (sc-5451). SCAIL-2 is a single dense Wan2.1-14B-I2V transformer (no MoE
 /// high/low), so every adapter is shared (`moe_expert: None`); the engine merges LoRA / LoKr / LoHa and
 /// the lightx2v lightning diff-patch into the dense DiT before build ([`candle_gen_scail2::merge_adapters`]).
 /// Carries both a user-selected SCAIL-2 LoRA and the bundled Bias-Aware DPO quality LoRA (both surface
 /// through `request.loras`); selecting a lightning diff-patch LoRA makes the worker apply the
-/// step-distill recipe ([`candle_scail2_sampling`]).
+/// step-distill recipe ([`candle_scail2_sampling`]). Delegates to the shared [`resolve_dense_adapters`]
+/// (sc-8830) — the byte-identical MLX/candle twin, now one implementation whose LoRA-file resolver is
+/// core's recursive [`first_safetensors_path`] (the old candle twin's shallow scan is gone).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_resolve_scail2_adapters(
     settings: &Settings,
     request: &VideoRequest,
 ) -> WorkerResult<Vec<AdapterSpec>> {
-    if request.loras.len() > CANDLE_SCAIL2_MAX_LORAS {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Generation supports at most {CANDLE_SCAIL2_MAX_LORAS} LoRAs per job."
-        )));
-    }
-    let mut specs: Vec<AdapterSpec> = Vec::new();
-    for lora in &request.loras {
-        let path = crate::image_jobs::lora_path(lora).ok_or_else(|| {
-            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
-        })?;
-        let file = candle_resolve_lora_file(settings, path)?;
-        let kind = crate::image_jobs::classify_adapter(&file)?;
-        specs.push(AdapterSpec {
-            path: file,
-            scale: candle_scail2_lora_scale(lora),
-            kind,
-            pass_scales: None,
-            moe_expert: None,
-        });
-    }
-    Ok(specs)
+    resolve_dense_adapters(settings, request, MAX_JOB_LORAS)
 }
 
 /// `true` if any resolved adapter is a lightx2v diff-patch ("lightning") LoRA — the engine's own
@@ -3538,73 +5099,41 @@ async fn resolve_candle_scail2_conditioning(
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| WorkerError::InvalidPayload("scail2 driving frame is malformed".into()))?;
 
-    // Segment + paint the reference mask (animation keeps the reference's world → white background).
-    // Both SAM3 passes run under `run_blocking_with_heartbeat` (sc-8390 / sc-8807) so the cold
-    // multi-GB checkpoint parse + per-frame propagation never trip the API's 90s stale-sweep. The
-    // pinned candle-gen-sam3 propagate takes no cancel/progress params yet (sc-8972), so the
-    // tripped flag stops at the coarse seams (cold parse / model build) only.
-    let scail2_cancel_message = "SCAIL-2 canceled during person segmentation.";
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
+    // Segment + paint via the shared orchestrator (sc-8830). Animation keeps the reference's world
+    // (ref bg white) and drops the driving world (driving bg black); the candle SAM3 module is the
+    // off-Mac twin, whose per-frame propagate contract (sc-8972) observes the tripped cancel flag
+    // between frames.
     let (rm, rt) = (sam_model.clone(), sam_tokenizer.clone());
-    let ref_mask = run_blocking_with_heartbeat(
+    assemble_scail2_animate_conditioning(
         api,
         settings,
         &job.id,
-        Some(cancel),
-        scail2_cancel_message,
-        "scail2 reference segment task",
-        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+        reference,
+        driving,
+        move |flag| {
             let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
                 &rm,
                 &rt,
                 std::slice::from_ref(&ref_rgb),
                 Some(flag),
+                None,
             )?;
             crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
-        }),
-    )
-    .await?;
-
-    // Segment + paint the per-frame driving masks (animation → black background).
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
-    let driving_mask = run_blocking_with_heartbeat(
-        api,
-        settings,
-        &job.id,
-        Some(cancel),
-        scail2_cancel_message,
-        "scail2 driving segment task",
-        tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+        },
+        move |flag| {
             let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
                 &sam_model,
                 &sam_tokenizer,
                 &driving_rgb,
                 Some(flag),
+                Some(Box::new(|frame, total| {
+                    tracing::debug!(event = "scail2_sam3_propagate_progress", frame, total);
+                })),
             )?;
-            Ok(crate::scail2_masks::paint_driving_masks(
-                &masks,
-                crate::scail2_masks::BG_BLACK,
-            ))
-        }),
+            crate::scail2_masks::paint_driving_masks(&masks, crate::scail2_masks::BG_BLACK)
+        },
     )
-    .await?;
-
-    Ok(vec![
-        Conditioning::Reference {
-            image: reference,
-            strength: None,
-        },
-        Conditioning::Mask { image: ref_mask },
-        Conditioning::ControlClip {
-            frames: driving,
-            mask: driving_mask,
-            masking_strength: 1.0,
-            start_frame: 0,
-            mode: ReplacementMode::default(),
-        },
-    ])
+    .await
 }
 
 /// Real candle SCAIL-2 character animation (sc-6837 + sc-6838): build the `VideoGenInput` and run the
@@ -3623,10 +5152,7 @@ async fn generate_candle_scail2(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, &'static str, Value)> {
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     let conditioning =
         resolve_candle_scail2_conditioning(api, settings, job, request, project_path).await?;
     // Inference adapters (DPO / lightning / user LoRA) + the lightning step-distill recipe.
@@ -3653,7 +5179,7 @@ async fn generate_candle_scail2(
         video_mode: Some(candle_scail2_engine_video_mode(&request.mode).to_owned()),
         ..VideoGenInput::default()
     };
-    let decoded = generate_video(api, settings, job, backend, input).await?;
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
     Ok((
         decoded,
         CANDLE_SCAIL2_ADAPTER,
@@ -3737,25 +5263,24 @@ async fn resolve_candle_scail2_replace_conditioning(
                 WorkerError::InvalidPayload("scail2 reference image is malformed".into())
             })?;
     // Heartbeat keepalive + user cancel across the cold SAM3 parse + single-frame propagate
-    // (sc-8390 / sc-8807); coarse cancel seams only until the candle-gen-sam3 API bump (sc-8972).
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
-    let ref_mask = run_blocking_with_heartbeat(
+    // (sc-8390 / sc-8807), via the shared blocking-segment helper (sc-8830); the engine's per-frame
+    // propagate contract (sc-8972) observes the tripped flag between frames, beyond the coarse seams
+    // (cold parse / model build).
+    let ref_mask = scail2_segment_blocking(
         api,
         settings,
         &job.id,
-        Some(cancel),
-        "SCAIL-2 canceled during person segmentation.",
         "scail2 reference segment task",
-        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+        move |flag| {
             let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
                 &sam_model,
                 &sam_tokenizer,
                 std::slice::from_ref(&ref_rgb),
                 Some(flag),
+                None,
             )?;
             crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_BLACK)
-        }),
+        },
     )
     .await?;
 
@@ -3799,10 +5324,7 @@ async fn generate_candle_scail2_replace(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, Value)> {
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     let (conditioning, status) =
         resolve_candle_scail2_replace_conditioning(api, settings, job, request, project_path)
             .await?;
@@ -3822,7 +5344,7 @@ async fn generate_candle_scail2_replace(
         video_mode: Some("replacement".to_owned()),
         ..VideoGenInput::default()
     };
-    let decoded = generate_video(api, settings, job, backend, input).await?;
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
     Ok((decoded, status))
 }
 
@@ -3889,10 +5411,7 @@ async fn generate_candle_wan_vace(
         masking_strength,
         replacement_mode_from(&request.replacement_mode),
     )?;
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -3911,7 +5430,7 @@ async fn generate_candle_wan_vace(
         control_scale: Some(advanced::f32(&request.advanced, "conditioningScale", 1.0)),
         ..VideoGenInput::default()
     };
-    let decoded = generate_video(api, settings, job, backend, input).await?;
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
     let status = replacement_status_value(
         &track,
         track_id,
@@ -3995,10 +5514,7 @@ async fn generate_candle_wan_vace_extend_bridge(
         left_anchor,
         right_anchor,
     )?;
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -4017,7 +5533,7 @@ async fn generate_candle_wan_vace_extend_bridge(
         control_scale: Some(advanced::f32(&request.advanced, "conditioningScale", 1.0)),
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, input).await
+    generate_video(api, settings, job, backend, &request.advanced, input).await
 }
 
 /// Resolve a Wan request into a [`VideoGenInput`] and run it (sc-3034).
@@ -4033,10 +5549,7 @@ async fn generate_wan(
     backend: &str,
 ) -> WorkerResult<DecodedVideo> {
     let (steps, guidance) = wan_sampling(engine_id, request);
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     // extend_clip / video_bridge build single-frame boundary `Keyframe` conditioning from the
     // source clip(s) (async ffmpeg frame extraction, sc-3357); every other mode resolves
     // keyframe/reference conditioning synchronously from images.
@@ -4047,12 +5560,32 @@ async fn generate_wan(
         }
         _ => resolve_wan_conditioning(settings, request, project_path, engine_id)?,
     };
+    // Wan quant matrix (sc-9941 TI2V-5B / sc-9942 T2V / sc-9943 I2V, epic 8506): the macOS default
+    // install is the lean q4 tier; a q8/bf16 job fetches that subdir on demand before resolving. No-op
+    // for a model with no hosted tier matrix, a q4 job, or an already-present tier.
+    ensure_wan_tier_present(api, settings, job, request).await?;
+    // The A14B MoE recipe uses the Lightning distill LoRA by default (sc-10030 / sc-10047 default-on
+    // toggle). It normally installs as a manifest coRequisite, but self-heal a worker that installed
+    // the model before the coRequisite existed so resolve_wan_adapters below doesn't dead-end. No-op
+    // for the 5B model (no Lightning), an already-cached pair, or a job that opted out of Lightning.
+    ensure_wan_lightning_present(api, settings, job, request, engine_id).await?;
+    // Descend into the chosen quant-matrix tier subdir when the turnkey ships them; a pre-packed tier
+    // loads with quant=None (config.json is authoritative). A legacy flat snapshot (or a model with no
+    // hosted matrix) keeps the root + load-time quant.
+    let (model_dir, quant) = if wan_tier_repo(&request.model).is_some() {
+        resolve_wan_tier_dir_and_quant(settings, request, engine_id)?
+    } else {
+        (
+            resolve_wan_model_dir(settings, &request.model, engine_id)?,
+            resolve_wan_quant(request),
+        )
+    };
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
-        model_dir: resolve_wan_model_dir(settings, &request.model, engine_id)?,
-        quant: resolve_wan_quant(request),
+        model_dir,
+        quant,
         adapters: resolve_wan_adapters(settings, request, engine_id)?,
         conditioning,
         prompt: request.prompt.clone(),
@@ -4066,7 +5599,7 @@ async fn generate_wan(
         seed: resolve_video_seed(request) as u64,
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, input).await
+    generate_video(api, settings, job, backend, &request.advanced, input).await
 }
 
 // ---------------------------------------------------------------------------
@@ -4122,19 +5655,170 @@ pub(crate) fn resolve_bernini_model_dir(settings: &Settings) -> WorkerResult<Pat
 
 /// MLX quantization for a Bernini load: Q4 default (the validated 128 GB-fitting tier, sc-4709 ~44 GB
 /// peak), Q8 opt-in via the advanced `mlxQuantize: 8` control, explicit `<= 0` ⇒ bf16 (power users
-/// with ample RAM). Never defaults to bf16 — the snapshot is ~93 GB at bf16.
+/// with ample RAM). Never defaults to bf16 — the snapshot is ~93 GB at bf16. Delegates to the shared
+/// [`resolve_mlx_dense_quant`] (sc-8830) — the byte-identical Bernini/SCAIL-2 twin.
 #[cfg(target_os = "macos")]
 fn resolve_bernini_quant(request: &VideoRequest) -> Option<Quant> {
-    match request.advanced.get("mlxQuantize").and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    }) {
-        Some(bits) if bits <= 0 => None,
-        Some(bits) if bits <= 4 => Some(Quant::Q4),
-        Some(_) => Some(Quant::Q8),
-        None => Some(Quant::Q4),
+    resolve_mlx_dense_quant(request)
+}
+
+// --- Bernini quant-matrix tiers (sc-9945, epic 8506) ---------------------------------------------
+// The composite sibling of the Wan quant-matrix tiers. `SceneWorks/bernini-mlx` hosts self-contained
+// `q4/` (default) + `q8/` + `bf16/` tier subdirs, each a COMPLETE composite snapshot (the Qwen2.5-VL
+// planner components + both Wan renderer experts + the shared dense T5/VAE/tokenizer + config
+// sidecars). The legacy flat dense-bf16 layout quantized at LOAD, staging the ~56 GB experts + ~14 GB
+// planner backbone as bf16 first; a pre-packed tier loads with no dense-staging peak. Both the video
+// (`bernini`) and image (`bernini_image`) load paths resolve through the same tier machinery. The flat
+// root files stay for already-shipped workers; a new worker resolves the tier subdirs. Mirrors the
+// `wan_tier_*` helpers, but keyed on raw `mlxQuantize` bits so it serves the image lane too.
+
+/// The turnkey SceneWorks Bernini MLX repo (sc-9945). Hosts the `q4/`/`q8/`/`bf16/` tier subdirs.
+#[cfg(target_os = "macos")]
+const BERNINI_REPO: &str = "SceneWorks/bernini-mlx";
+
+/// Pinned revision for [`BERNINI_REPO`] — the commit that adds the `q4/`/`q8/`/`bf16/` tier subdirs
+/// (sc-9945). Pinning the exact commit (not the mutable `main`) stops an upstream re-push from silently
+/// swapping a checkpoint the on-demand `q8/*` + `bf16/*` fetch loads (the `hf` CLI still verifies each
+/// file's own hash on download). This is the commit that added the `q4/`/`q8/`/`bf16/` tier subdirs
+/// (sc-9945), with the exact hosted sizes: q4 37,815,703,819 / q8 55,129,270,617 / bf16 87,591,990,679.
+#[cfg(target_os = "macos")]
+const BERNINI_REVISION: &str = "533d688f16c8f33dc832890c1e16c11921a2019a";
+
+/// The runtime files that make a Bernini tier subdir COMPLETE for the load path: the planner
+/// components + both renderer experts + the shared dense T5/VAE + tokenizer + config sidecars + the
+/// planner's `mllm/tokenizer.json` (mirrors `bernini_tier_build::TIER_FILES`). The three packable
+/// weights (`qwen2_5_vl.safetensors`, `high/low_noise_model.safetensors`) are present in every tier;
+/// only their contents differ (packed vs dense).
+#[cfg(target_os = "macos")]
+const BERNINI_TIER_FILES: &[&str] = &[
+    "qwen2_5_vl.safetensors",
+    "qwen2_5_vl_config.json",
+    "connector.safetensors",
+    "vit_decoder.safetensors",
+    "mask_tokens.safetensors",
+    "bernini_planner.json",
+    "high_noise_model.safetensors",
+    "low_noise_model.safetensors",
+    "t5_encoder.safetensors",
+    "vae.safetensors",
+    "tokenizer.json",
+    "config.json",
+    "bernini_renderer.json",
+    "mllm/tokenizer.json",
+];
+
+/// The Bernini quant-matrix tier search order for a request — preferred tier first, then the
+/// always-smaller fallback tiers so a repo missing the preferred subdir still loads (mirrors
+/// [`wan_tier_order`]): `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, else the `q4` default. `bf16` is
+/// only ever tried when explicitly requested, so a default job never pulls the huge dense tier.
+#[cfg(target_os = "macos")]
+fn bernini_tier_order(bits: Option<i64>) -> &'static [&'static str] {
+    match bits {
+        Some(b) if b <= 0 => &["bf16", "q8", "q4"],
+        Some(b) if b >= 8 => &["q8", "q4"],
+        _ => &["q4", "q8"],
     }
+}
+
+/// Whether `dir` is a COMPLETE self-contained Bernini tier snapshot (all [`BERNINI_TIER_FILES`]). A
+/// partially-downloaded tier fails this so [`bernini_tier_subdir`] falls through to a smaller complete
+/// tier rather than half-loading.
+#[cfg(target_os = "macos")]
+fn bernini_tier_is_complete(dir: &Path) -> bool {
+    BERNINI_TIER_FILES
+        .iter()
+        .all(|file| dir.join(file).is_file())
+}
+
+/// Descend a resolved Bernini repo `root` into the requested quant tier subdir (sc-9945), mirroring
+/// [`wan_tier_subdir`]. Returns the first COMPLETE tier in [`bernini_tier_order`], or `None` when the
+/// repo has no complete tier subdir — a legacy flat snapshot, where the caller keeps the root +
+/// load-time quant.
+#[cfg(target_os = "macos")]
+fn bernini_tier_subdir(root: &Path, bits: Option<i64>) -> Option<PathBuf> {
+    bernini_tier_order(bits)
+        .iter()
+        .map(|tier| root.join(tier))
+        .find(|dir| bernini_tier_is_complete(dir))
+}
+
+/// Resolve the Bernini `(model_dir, load-time quant)` for a generation, descending into the
+/// quant-matrix tier subdir when the turnkey ships them (sc-9945). A pre-packed tier's config sidecars
+/// are authoritative — the planner (`Qwen25VlText::from_weights`, via the `quantization` block) and
+/// both renderer experts (`WanTransformer::from_weights`) build packed — so a resolved tier loads with
+/// `quant = None`: `mlxQuantize` selects WHICH tier, never a load-time requant (the `bf16/` tier is
+/// dense, so `None` ⇒ dense too). A legacy flat snapshot (no tier subdirs) keeps today's behavior: load
+/// the root and quantize at load per `legacy_quant`. Shared by the video + image lanes (each passes its
+/// own parsed `bits` + `legacy_quant`).
+#[cfg(target_os = "macos")]
+pub(crate) fn resolve_bernini_tier_dir_and_quant(
+    settings: &Settings,
+    bits: Option<i64>,
+    legacy_quant: Option<Quant>,
+) -> WorkerResult<(PathBuf, Option<Quant>)> {
+    let root = resolve_bernini_model_dir(settings)?;
+    match bernini_tier_subdir(&root, bits) {
+        Some(tier) => Ok((tier, None)),
+        None => Ok((root, legacy_quant)),
+    }
+}
+
+/// Parse `advanced.mlxQuantize` (int or numeric string) for the Bernini tier selector — the raw bits
+/// the tier order keys on (the video lane's twin of the image lane's `resolve_bernini_image_quant`
+/// bits). `resolve_bernini_quant` maps the same value to a `Quant`; this keeps the tier selection and
+/// the legacy load-time quant in sync off one source.
+#[cfg(target_os = "macos")]
+fn bernini_quant_bits(request: &VideoRequest) -> Option<i64> {
+    request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+}
+
+/// On-demand fetch of a non-default Bernini quant-matrix tier subdir (sc-9945, mirrors
+/// [`ensure_wan_tier_present`]). The macOS default download is the lean `q4/` tier; a job that opts into
+/// a heavier tier (`mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`) pulls just that subdir from the FIXED
+/// [`BERNINI_REVISION`] the first time it is requested so [`bernini_tier_subdir`] can resolve it. No-op
+/// for a `q4` (default) job, when the repo snapshot isn't downloaded yet (resolve surfaces the clear
+/// error), or when the tier is already complete. Fails loud on a real download error — fast, before any
+/// compute; a missing `hf` CLI leaves the tier absent so resolve falls back to a smaller complete tier.
+#[cfg(target_os = "macos")]
+pub(crate) async fn ensure_bernini_tier_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    bits: Option<i64>,
+) -> WorkerResult<()> {
+    let tier = match bits {
+        Some(b) if b <= 0 => "bf16",
+        Some(b) if b >= 8 => "q8",
+        // q4 default — ships with the base install, nothing to fetch on demand.
+        _ => return Ok(()),
+    };
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, BERNINI_REPO) else {
+        return Ok(());
+    };
+    if bernini_tier_is_complete(&root.join(tier)) {
+        return Ok(());
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".bernini-tier-{tier}-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec![format!("{tier}/*")];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api,
+        settings,
+        job,
+        BERNINI_REPO,
+        BERNINI_REVISION,
+        &files,
+        &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
 }
 
 /// Raw-settings recorded on a real MLX Bernini asset (mirrors `wan_raw_settings`).
@@ -4291,18 +5975,22 @@ async fn generate_bernini(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<DecodedVideo> {
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     let conditioning =
         resolve_bernini_conditioning(api, settings, job, request, project_path).await?;
+    // sc-9945: fetch the requested quant tier subdir (q8/bf16) if it isn't the shipped q4 default, then
+    // descend into it — a pre-packed tier loads with `quant = None` (config sidecars authoritative); a
+    // legacy flat snapshot keeps load-time quant.
+    let bits = bernini_quant_bits(request);
+    ensure_bernini_tier_present(api, settings, job, bits).await?;
+    let (model_dir, quant) =
+        resolve_bernini_tier_dir_and_quant(settings, bits, resolve_bernini_quant(request))?;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
-        model_dir: resolve_bernini_model_dir(settings)?,
-        quant: resolve_bernini_quant(request),
+        model_dir,
+        quant,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
@@ -4314,7 +6002,7 @@ async fn generate_bernini(
         video_mode: Some(bernini_engine_video_mode(&request.mode).to_owned()),
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, input).await
+    generate_video(api, settings, job, backend, &request.advanced, input).await
 }
 
 // ---------------------------------------------------------------------------
@@ -4369,19 +6057,152 @@ fn resolve_scail2_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
 }
 
 /// MLX quantization for a SCAIL-2 load: Q4 default, Q8 opt-in via the advanced `mlxQuantize: 8`
-/// control, explicit `<= 0` ⇒ bf16 (power users with ample RAM). Mirrors `resolve_bernini_quant`.
+/// control, explicit `<= 0` ⇒ bf16 (power users with ample RAM). Delegates to the shared
+/// [`resolve_mlx_dense_quant`] (sc-8830) — the byte-identical `resolve_bernini_quant` twin.
 #[cfg(target_os = "macos")]
 fn resolve_scail2_quant(request: &VideoRequest) -> Option<Quant> {
-    match request.advanced.get("mlxQuantize").and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    }) {
-        Some(bits) if bits <= 0 => None,
-        Some(bits) if bits <= 4 => Some(Quant::Q4),
-        Some(_) => Some(Quant::Q8),
-        None => Some(Quant::Q4),
+    resolve_mlx_dense_quant(request)
+}
+
+/// The turnkey SceneWorks SCAIL-2 MLX repo (sc-9944, epic 8506). Hosts the quant matrix as
+/// self-contained tier subdirs `q4/` (default) + `q8/` + `bf16/`, each a COMPLETE snapshot (the DiT
+/// `dit.safetensors` at the tier's precision + the shared dense Wan2.1 z16 VAE + UMT5 T5 encoder +
+/// open-CLIP ViT-H/14 visual tower + tokenizer + `config.json` carrying the quant manifest). This
+/// augments the flat Q4 layout the repo shipped before (a single pre-quantized snapshot, sc-5445);
+/// the worker now descends into the chosen tier so a pre-packed snapshot loads with no install-time
+/// convert peak. The flat root files stay for back-compat with already-shipped workers that resolve
+/// the repo root; a new worker only ever resolves the tier subdirs.
+#[cfg(target_os = "macos")]
+const SCAIL2_REPO: &str = "SceneWorks/scail2-mlx";
+
+/// Pinned revision for [`SCAIL2_REPO`] (mirrors [`WAN_T2V_14B_REVISION`]). The repo is a hard-coded
+/// const — no manifest/payload override reaches the on-demand `q8/*` + `bf16/*` fetches — so pulling
+/// the mutable `main` branch would let an upstream re-push silently swap a checkpoint we load. This is
+/// the commit that added the `q4/`/`q8/`/`bf16/` tier subdirs (sc-9944); the `hf` CLI still verifies
+/// each file's own hash on download.
+#[cfg(target_os = "macos")]
+const SCAIL2_REVISION: &str = "ce88cfdb1008f395e9c820e525e6db7b6695f7b3";
+
+/// The files that make a SCAIL-2 tier subdir COMPLETE — the six files the snapshot loader opens
+/// (`mlx-gen-scail2` `generate.rs`): the DiT plus the shared dense Wan2.1 z16 VAE, UMT5 T5 encoder,
+/// open-CLIP ViT-H/14 visual tower, UMT5 tokenizer, and `config.json` (which carries the quant
+/// manifest for `q4`/`q8`, or none for the dense `bf16` tier). A partially-downloaded tier fails this
+/// so [`scail2_tier_subdir`] falls through to a smaller complete tier rather than half-loading.
+#[cfg(target_os = "macos")]
+const SCAIL2_TIER_FILES: &[&str] = &[
+    "dit.safetensors",
+    "vae.safetensors",
+    "t5_encoder.safetensors",
+    "clip.safetensors",
+    "tokenizer.json",
+    "config.json",
+];
+
+/// Map a SCAIL-2 model id to its `(quant-matrix repo, pinned revision)` for the on-demand tier fetch,
+/// or `None` for a non-SCAIL-2 id. Keyed here so the whole tier-resolve/fetch path (mirroring the Wan
+/// [`wan_tier_repo`] machinery) routes on `scail2_tier_repo(..).is_some()`.
+#[cfg(target_os = "macos")]
+fn scail2_tier_repo(model: &str) -> Option<(&'static str, &'static str)> {
+    (model == "scail2_14b").then_some((SCAIL2_REPO, SCAIL2_REVISION))
+}
+
+/// The SCAIL-2 quant-matrix tier search order for a request — preferred tier first, then the
+/// always-smaller fallback tiers so a repo missing the preferred subdir still loads (mirrors
+/// [`wan_tier_order`]): `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, else the `q4` default. `bf16` is
+/// only ever tried when explicitly requested, so a default job never pulls the huge dense tier by
+/// accident. Reuses [`resolve_scail2_quant`] (the shared `mlxQuantize` parse) as the selector.
+#[cfg(target_os = "macos")]
+fn scail2_tier_order(request: &VideoRequest) -> &'static [&'static str] {
+    match resolve_scail2_quant(request) {
+        None => &["bf16", "q8", "q4"],
+        Some(Quant::Q8) => &["q8", "q4"],
+        _ => &["q4", "q8"],
     }
+}
+
+/// Whether `dir` is a COMPLETE self-contained SCAIL-2 tier snapshot ([`SCAIL2_TIER_FILES`]). A
+/// partially-downloaded tier fails this so [`scail2_tier_subdir`] falls through to a smaller complete
+/// tier rather than half-loading.
+#[cfg(target_os = "macos")]
+fn scail2_tier_is_complete(dir: &Path) -> bool {
+    SCAIL2_TIER_FILES
+        .iter()
+        .all(|file| dir.join(file).is_file())
+}
+
+/// Descend a resolved SCAIL-2 quant-matrix repo `root` into the requested quant tier subdir (sc-9944,
+/// epic 8506), mirroring [`wan_tier_subdir`]. Returns the first COMPLETE tier in [`scail2_tier_order`],
+/// or `None` when the repo has no complete tier subdir — a legacy flat snapshot, where the caller
+/// keeps the root + load-time quant.
+#[cfg(target_os = "macos")]
+fn scail2_tier_subdir(root: &Path, request: &VideoRequest) -> Option<PathBuf> {
+    scail2_tier_order(request)
+        .iter()
+        .map(|tier| root.join(tier))
+        .find(|dir| scail2_tier_is_complete(dir))
+}
+
+/// Resolve the SCAIL-2 `(model_dir, load-time quant)` for a generation, descending into the
+/// quant-matrix tier subdir when the turnkey ships them (sc-9944). A pre-packed tier's `config.json`
+/// is authoritative — [`Scail2Config::from_model_dir`] reads its `quantization` block and the DiT
+/// loader builds each Linear from packed parts directly — so a resolved tier loads with `quant = None`
+/// (`mlxQuantize` selects WHICH tier, never a load-time requant; the `bf16/` tier is dense, so `None`
+/// ⇒ dense too). A legacy flat snapshot (no tier subdirs) keeps today's behavior: load the root and
+/// quantize at load per [`resolve_scail2_quant`].
+#[cfg(target_os = "macos")]
+fn resolve_scail2_tier_dir_and_quant(
+    settings: &Settings,
+    request: &VideoRequest,
+) -> WorkerResult<(PathBuf, Option<Quant>)> {
+    let root = resolve_scail2_model_dir(settings)?;
+    match scail2_tier_subdir(&root, request) {
+        Some(tier) => Ok((tier, None)),
+        None => Ok((root, resolve_scail2_quant(request))),
+    }
+}
+
+/// On-demand fetch of a non-default SCAIL-2 quant-matrix tier subdir (sc-9944, mirrors
+/// [`ensure_wan_tier_present`]). The macOS default download is the lean `q4/` tier; a job that opts
+/// into a heavier tier (`mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`) pulls just that subdir from the
+/// FIXED [`scail2_tier_repo`] revision the first time it is requested so [`scail2_tier_subdir`] can
+/// resolve it. No-op for a non-SCAIL-2 model, a `q4` (default) job, when the repo snapshot isn't
+/// downloaded yet (resolve surfaces the clear error), or when the tier is already complete. Fails loud
+/// on a real download error — fast, before any compute; a missing `hf` CLI leaves the tier absent so
+/// resolve gracefully falls back to a smaller complete tier.
+#[cfg(target_os = "macos")]
+async fn ensure_scail2_tier_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+) -> WorkerResult<()> {
+    let Some((repo, revision)) = scail2_tier_repo(&request.model) else {
+        return Ok(());
+    };
+    let tier = match resolve_scail2_quant(request) {
+        None => "bf16",
+        Some(Quant::Q8) => "q8",
+        // q4 default — ships with the base install, nothing to fetch on demand.
+        _ => return Ok(()),
+    };
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, repo) else {
+        return Ok(());
+    };
+    if scail2_tier_is_complete(&root.join(tier)) {
+        return Ok(());
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".scail2-tier-{tier}-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec![format!("{tier}/*")];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api, settings, job, repo, revision, &files, &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
 }
 
 /// Raw-settings recorded on a real MLX SCAIL-2 asset (mirrors `bernini_raw_settings`). When the
@@ -4504,23 +6325,17 @@ async fn resolve_scail2_conditioning(
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| WorkerError::InvalidPayload("scail2 driving frame is malformed".into()))?;
 
-    // Segment + paint the reference mask (animation keeps the reference's world → white background).
-    // Both SAM3 passes run under `run_blocking_with_heartbeat` (sc-8390 / sc-8807): the cold
-    // multi-GB checkpoint parse + per-frame 1008² propagation over a driving clip can exceed the
-    // API's 90s stale-sweep, and the keepalive's cancel poll trips `cancel`, which the engine's
-    // per-frame propagate contract (gen-core d8038beb) observes between frames.
-    let scail2_cancel_message = "SCAIL-2 canceled during person segmentation.";
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
+    // Segment + paint via the shared orchestrator (sc-8830). Animation keeps the reference's world
+    // (ref bg white) and drops the driving world (driving bg black); the native SAM3 module is the
+    // per-frame 1008² MLX twin.
     let (rm, rt) = (sam_model.clone(), sam_tokenizer.clone());
-    let ref_mask = run_blocking_with_heartbeat(
+    assemble_scail2_animate_conditioning(
         api,
         settings,
         &job.id,
-        Some(cancel),
-        scail2_cancel_message,
-        "scail2 reference segment task",
-        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+        reference,
+        driving,
+        move |flag| {
             let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
                 &rm,
                 &rt,
@@ -4529,21 +6344,8 @@ async fn resolve_scail2_conditioning(
                 None,
             )?;
             crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
-        }),
-    )
-    .await?;
-
-    // Segment + paint the per-frame driving masks (animation → black background).
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
-    let driving_mask = run_blocking_with_heartbeat(
-        api,
-        settings,
-        &job.id,
-        Some(cancel),
-        scail2_cancel_message,
-        "scail2 driving segment task",
-        tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+        },
+        move |flag| {
             let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
                 &sam_model,
                 &sam_tokenizer,
@@ -4553,28 +6355,10 @@ async fn resolve_scail2_conditioning(
                     tracing::debug!(event = "scail2_sam3_propagate_progress", frame, total);
                 })),
             )?;
-            Ok(crate::scail2_masks::paint_driving_masks(
-                &masks,
-                crate::scail2_masks::BG_BLACK,
-            ))
-        }),
+            crate::scail2_masks::paint_driving_masks(&masks, crate::scail2_masks::BG_BLACK)
+        },
     )
-    .await?;
-
-    Ok(vec![
-        Conditioning::Reference {
-            image: reference,
-            strength: None,
-        },
-        Conditioning::Mask { image: ref_mask },
-        Conditioning::ControlClip {
-            frames: driving,
-            mask: driving_mask,
-            masking_strength: 1.0,
-            start_frame: 0,
-            mode: ReplacementMode::default(),
-        },
-    ])
+    .await
 }
 
 /// Real MLX SCAIL-2 generation (epic 5439 / sc-5448): build the `VideoGenInput` and run the shared
@@ -4585,6 +6369,10 @@ async fn resolve_scail2_conditioning(
 /// sc-5451 / mlx-gen #462); steps/guidance stay at the engine defaults. Frame count uses the Wan
 /// 1-mod-4 stride coercion (the
 /// renderer is Wan2.1); the engine stitches > 81-frame clips into overlapping segments internally.
+///
+/// Returns the decoded clip plus the resolved `lightning` bool so the caller records the effective
+/// recipe on the asset without re-resolving the adapters (which discarded errors via
+/// `unwrap_or_default`, risking a lightning-flag inconsistency — F-118).
 #[cfg(target_os = "macos")]
 async fn generate_scail2(
     api: &ApiClient,
@@ -4594,25 +6382,29 @@ async fn generate_scail2(
     project_path: &Path,
     engine_id: &'static str,
     backend: &str,
-) -> WorkerResult<DecodedVideo> {
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+) -> WorkerResult<(DecodedVideo, bool)> {
+    let negative_prompt = non_empty_negative_prompt(request);
     let conditioning =
         resolve_scail2_conditioning(api, settings, job, request, project_path).await?;
     // Selecting a lightx2v diff-patch "lightning" LoRA flips the worker to the step-distill recipe
     // (8 steps, CFG off, shift 1.0) so the toggle yields the speedup; otherwise steps/guidance/shift
     // stay `None` and the engine's quality defaults stand (sc-5700).
     let adapters = resolve_scail2_adapters(settings, request)?;
-    let (steps, guidance, scheduler_shift) =
-        scail2_sampling(request, scail2_adapters_have_lightning(&adapters));
+    let lightning = scail2_adapters_have_lightning(&adapters);
+    let (steps, guidance, scheduler_shift) = scail2_sampling(request, lightning);
+    // SCAIL-2 quant matrix (sc-9944, epic 8506): the macOS default install is the lean q4 tier; a
+    // q8/bf16 job fetches that subdir on demand before resolving. No-op for a q4 job or an
+    // already-present tier. Then descend into the chosen tier subdir when the turnkey ships them (a
+    // pre-packed tier loads with quant=None, config.json authoritative); a legacy flat snapshot keeps
+    // the root + load-time quant.
+    ensure_scail2_tier_present(api, settings, job, request).await?;
+    let (model_dir, quant) = resolve_scail2_tier_dir_and_quant(settings, request)?;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
-        model_dir: resolve_scail2_model_dir(settings)?,
-        quant: resolve_scail2_quant(request),
+        model_dir,
+        quant,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
@@ -4628,7 +6420,8 @@ async fn generate_scail2(
         adapters,
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, input).await
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
+    Ok((decoded, lightning))
 }
 
 /// Resolve a `replace_person` request into SCAIL-2 cross-identity replacement conditioning (sc-5452,
@@ -4710,17 +6503,13 @@ async fn resolve_scail2_replace_conditioning(
                 WorkerError::InvalidPayload("scail2 reference image is malformed".into())
             })?;
     // Heartbeat keepalive + user cancel across the cold SAM3 parse + single-frame propagate
-    // (sc-8390 / sc-8807).
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
-    let ref_mask = run_blocking_with_heartbeat(
+    // (sc-8390 / sc-8807), via the shared blocking-segment helper (sc-8830).
+    let ref_mask = scail2_segment_blocking(
         api,
         settings,
         &job.id,
-        Some(cancel),
-        "SCAIL-2 canceled during person segmentation.",
         "scail2 reference segment task",
-        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+        move |flag| {
             let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
                 &sam_model,
                 &sam_tokenizer,
@@ -4729,7 +6518,7 @@ async fn resolve_scail2_replace_conditioning(
                 None,
             )?;
             crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_BLACK)
-        }),
+        },
     )
     .await?;
 
@@ -4779,18 +6568,20 @@ async fn generate_scail2_replace(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, Value)> {
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     let (conditioning, status) =
         resolve_scail2_replace_conditioning(api, settings, job, request, project_path).await?;
+    // Same quant-matrix tier resolution as the animate path (sc-9944): fetch a toggled q8/bf16 tier on
+    // demand, then descend into the chosen tier subdir (pre-packed ⇒ quant=None) or keep the flat root
+    // + load-time quant for a legacy snapshot.
+    ensure_scail2_tier_present(api, settings, job, request).await?;
+    let (model_dir, quant) = resolve_scail2_tier_dir_and_quant(settings, request)?;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
-        model_dir: resolve_scail2_model_dir(settings)?,
-        quant: resolve_scail2_quant(request),
+        model_dir,
+        quant,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
@@ -4802,7 +6593,7 @@ async fn generate_scail2_replace(
         video_mode: Some(scail2_engine_video_mode(&request.mode).to_owned()),
         ..VideoGenInput::default()
     };
-    let decoded = generate_video(api, settings, job, backend, input).await?;
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
     Ok((decoded, status))
 }
 
@@ -4837,6 +6628,14 @@ fn ltx_available(request: &VideoRequest, settings: &Settings) -> bool {
 /// set — plus the bundled `gemma/` text encoder the engine reads via `$LTX_GEMMA_DIR`.
 #[cfg(target_os = "macos")]
 const LTX_BUNDLE_REPO: &str = "SceneWorks/ltx-2.3-mlx";
+/// Pinned revision for the fixed [`LTX_BUNDLE_REPO`] (sc-9879, F-077 follow-up). The bundle repo is a
+/// hard-coded const (no manifest/payload override reaches the on-demand `q8/*` + `bf16/*` fetches), so
+/// pulling the mutable `main` branch would let an upstream re-push silently swap a checkpoint we load.
+/// Pin the exact commit for defense-in-depth (mirrors the SeedVR2/Real-ESRGAN pins, sc-8879/sc-9682).
+/// The `hf` CLI still verifies each file's own hash on download. Bumped to the commit that added the
+/// dense `bf16/` tier (sc-8513) — a superset of the prior commit, so the q8 fetch is unaffected.
+#[cfg(target_os = "macos")]
+const LTX_BUNDLE_REVISION: &str = "01df27d308466533aa09d251e3aebdcc627d07eb";
 
 /// Whether `dir` is a converted LTX snapshot **complete for the current engine** — it must
 /// carry the audio `vocoder` + I2V `vae_encoder` + single `upsampler`/`vae_decoder` the
@@ -4857,28 +6656,83 @@ fn ltx_dir_is_complete(dir: &Path) -> bool {
     .all(|file| dir.join(file).is_file())
 }
 
-/// Whether the request opts into the higher-quality Q8 LTX checkpoint (`advanced.mlxQuantize: 8`,
-/// accepted as int or string). The default is Q4 (sc-5608).
+/// Whether `dir` is a complete Gemma-3 text-encoder snapshot the LTX engine can load: its
+/// `config.json`, the sharded `model.safetensors.index.json`, and every shard that index maps (or a
+/// lone `model.safetensors` for a single-file checkpoint). Used so the eros gemma fetch
+/// ([`ensure_ltx_gemma_present`]) no-ops only when gemma is genuinely present and a half-downloaded
+/// dir never shadows a re-fetch ([`resolve_ltx_eros_gemma_dir`]).
 #[cfg(target_os = "macos")]
-fn ltx_wants_q8(request: &VideoRequest) -> bool {
+fn ltx_gemma_dir_is_complete(dir: &Path) -> bool {
+    if !dir.join("config.json").is_file() {
+        return false;
+    }
+    let Ok(index_raw) = std::fs::read_to_string(dir.join("model.safetensors.index.json")) else {
+        // No shard index ⇒ a single-file checkpoint is complete once its lone weights file exists.
+        return dir.join("model.safetensors").is_file();
+    };
+    let Ok(index) = serde_json::from_str::<Value>(&index_raw) else {
+        return false;
+    };
+    let Some(weight_map) = index.get("weight_map").and_then(Value::as_object) else {
+        return false;
+    };
+    let shards: std::collections::BTreeSet<String> = weight_map
+        .values()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    shards.iter().all(|shard| dir.join(shard).is_file())
+}
+
+/// Parse `advanced.mlxQuantize` (int or numeric string) → the requested bit width, if present.
+#[cfg(target_os = "macos")]
+fn ltx_quant_bits(request: &VideoRequest) -> Option<i64> {
     request
         .advanced
         .get("mlxQuantize")
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+}
+
+/// Whether the request opts into the higher-quality Q8 LTX checkpoint (`advanced.mlxQuantize: 8`,
+/// accepted as int or string). The default is Q4 (sc-5608).
+#[cfg(target_os = "macos")]
+fn ltx_wants_q8(request: &VideoRequest) -> bool {
+    ltx_quant_bits(request)
         .map(|bits| bits >= 8)
         .unwrap_or(false)
 }
 
-/// Pick the engine-complete `q4/`/`q8/` checkpoint subdir of a SceneWorks LTX bundle `root`,
-/// preferring the requested quant (sc-5608). Returns the first **complete** ([`ltx_dir_is_complete`])
-/// subdir — so a partially-downloaded bundle falls through rather than half-loading — or `None`.
+/// Whether the request opts into the dense **bf16** LTX checkpoint (`advanced.mlxQuantize <= 0`,
+/// int or string) — the ~47 GB power-user tier (sc-8513, epic 8506). Never the default: absent ⇒ Q4,
+/// so the big bf16 bundle is a deliberate opt-in (mirrors [`resolve_mlx_dense_quant`]'s `<= 0` rule).
 #[cfg(target_os = "macos")]
-fn ltx_bundle_subdir(root: &Path, wants_q8: bool) -> Option<PathBuf> {
-    let order: &[&str] = if wants_q8 {
+fn ltx_wants_bf16(request: &VideoRequest) -> bool {
+    ltx_quant_bits(request)
+        .map(|bits| bits <= 0)
+        .unwrap_or(false)
+}
+
+/// The SceneWorks LTX bundle tier search order for a request — preferred tier first, then the
+/// always-smaller fallback tiers so a bundle missing the preferred subdir still loads (sc-8513):
+/// `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, else the `q4` default. bf16 is only ever tried when
+/// explicitly requested, so a default job never loads the huge dense tier by accident.
+#[cfg(target_os = "macos")]
+fn ltx_bundle_tier_order(request: &VideoRequest) -> &'static [&'static str] {
+    if ltx_wants_bf16(request) {
+        &["bf16", "q8", "q4"]
+    } else if ltx_wants_q8(request) {
         &["q8", "q4"]
     } else {
         &["q4", "q8"]
-    };
+    }
+}
+
+/// Pick the engine-complete `bf16/`/`q8/`/`q4/` checkpoint subdir of a SceneWorks LTX bundle `root`,
+/// trying `order` (preferred tier first, sc-5608/sc-8513). Returns the first **complete**
+/// ([`ltx_dir_is_complete`]) subdir — so a partially-downloaded bundle falls through rather than
+/// half-loading — or `None`.
+#[cfg(target_os = "macos")]
+fn ltx_bundle_subdir(root: &Path, order: &[&str]) -> Option<PathBuf> {
     order
         .iter()
         .map(|sub| root.join(sub))
@@ -4905,9 +6759,15 @@ fn resolve_ltx_model_dir(settings: &Settings, request: &VideoRequest) -> WorkerR
             return Ok(path);
         }
     }
+    let wants_bf16 = ltx_wants_bf16(request);
     let wants_q8 = ltx_wants_q8(request);
     let candidates: &[&str] = if eros {
         &["ltx_2_3_eros"]
+    } else if wants_bf16 {
+        // No local bf16 conversion id exists (install-time convert only emits Q4/Q8), so don't let a
+        // local quantized dir shadow the dense turnkey tier — fall straight through to the bundle's
+        // bf16/ subdir below.
+        &[]
     } else if wants_q8 {
         &["ltx_2_3_base_q8", "ltx_2_3_base_q4", "ltx_2_3"]
     } else {
@@ -4919,12 +6779,13 @@ fn resolve_ltx_model_dir(settings: &Settings, request: &VideoRequest) -> WorkerR
             return Ok(dir);
         }
     }
-    // Turnkey SceneWorks bundle for the base model (sc-5608): one repo with `q4/` + `q8/` LTX
-    // subdirs (+ a bundled `gemma/` the engine reads via $LTX_GEMMA_DIR). Pick the quant subdir;
-    // the engine reads the actual bits from split_model.json, so this only selects which to load.
+    // Turnkey SceneWorks bundle for the base model (sc-5608): one repo with `bf16/` + `q8/` + `q4/`
+    // LTX subdirs (+ a bundled `gemma/` the engine reads via $LTX_GEMMA_DIR). Pick the preferred tier
+    // subdir; the engine reads the actual bits from split_model.json, so this only selects which to
+    // load.
     if !eros {
         if let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) {
-            if let Some(dir) = ltx_bundle_subdir(&root, wants_q8) {
+            if let Some(dir) = ltx_bundle_subdir(&root, ltx_bundle_tier_order(request)) {
                 return Ok(dir);
             }
         }
@@ -4947,20 +6808,44 @@ fn bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
     gemma.is_dir().then_some(gemma)
 }
 
-/// Point the engine at the Gemma-3 text encoder bundled beside the resolved LTX dir (sc-5608).
-/// Setting `$LTX_GEMMA_DIR` (the var [`mlx-gen-ltx`'s `resolve_gemma_dir`] honors on every OS) makes
-/// a fresh install self-contained — no separate `mlx-community/gemma` download. Best-effort +
-/// non-destructive: honors an explicit operator `$LTX_GEMMA_DIR`, and skips when no bundled `gemma/`
-/// sibling exists ([`bundled_ltx_gemma_dir`]). The worker runs video jobs sequentially, so the env
-/// set is race-free.
+/// Resolve the Gemma-3 text encoder bundled beside the resolved LTX dir (sc-5608), returning it so the
+/// caller can thread it onto `LoadSpec::text_encoder` (sc-8827) — a fresh install is self-contained (no
+/// separate `mlx-community/gemma` download) without mutating the process-global `$LTX_GEMMA_DIR` at job
+/// time on the multithreaded runtime (the old `set_var` seam was unsound, F-025). Best-effort +
+/// non-destructive: returns `None` when an explicit operator `$LTX_GEMMA_DIR` is set (the provider
+/// reads the env var itself), and `None` when no bundled `gemma/` sibling exists
+/// ([`bundled_ltx_gemma_dir`]) so the provider falls back to the HF-cache gemma snapshot.
+///
+/// `pub(crate)` so the LoRA trainer path reuses it (sc-9989): training resolves the TE identically to
+/// inference, so a self-contained install trains without a separate `mlx-community/gemma` download.
 #[cfg(target_os = "macos")]
-fn ensure_bundled_ltx_gemma_dir(model_dir: &Path) {
+pub(crate) fn resolve_bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
     if std::env::var_os("LTX_GEMMA_DIR").is_some() {
-        return; // honor an explicit operator override.
+        return None; // honor an explicit operator override (the provider reads the env var).
     }
-    if let Some(gemma) = bundled_ltx_gemma_dir(model_dir) {
-        std::env::set_var("LTX_GEMMA_DIR", gemma);
+    bundled_ltx_gemma_dir(model_dir)
+}
+
+/// Resolve the Gemma-3 text encoder for an **eros** generation. Unlike the base model — whose turnkey
+/// bundle ships `gemma/` beside its checkpoint ([`resolve_bundled_ltx_gemma_dir`]) — the eros install
+/// is a bare local conversion under `models/mlx/ltx_2_3_eros/` with no bundled TE, so gemma is
+/// provisioned separately ([`ensure_ltx_gemma_present`]) and resolved here: a `models/mlx/gemma`
+/// sibling of the checkpoint (the `<parent>/gemma` convention [`bundled_ltx_gemma_dir`] already uses)
+/// first, then the fetched [`LTX_BUNDLE_REPO`] snapshot's `gemma/`. Returns `None` when an operator
+/// `$LTX_GEMMA_DIR` is set (the provider reads the env var) or nothing complete is on disk (the
+/// provider surfaces the clear "set LTX_GEMMA_DIR" error) — a partial dir never wins.
+#[cfg(target_os = "macos")]
+fn resolve_ltx_eros_gemma_dir(settings: &Settings, model_dir: &Path) -> Option<PathBuf> {
+    if std::env::var_os("LTX_GEMMA_DIR").is_some() {
+        return None; // honor an explicit operator override (the provider reads the env var).
     }
+    if let Some(sibling) = bundled_ltx_gemma_dir(model_dir) {
+        if ltx_gemma_dir_is_complete(&sibling) {
+            return Some(sibling);
+        }
+    }
+    let bundle_gemma = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO)?.join("gemma");
+    ltx_gemma_dir_is_complete(&bundle_gemma).then_some(bundle_gemma)
 }
 
 /// On-demand fetch of the bundle's `q8/` subdir (sc-5679). The macOS default download is lean
@@ -4998,7 +6883,7 @@ async fn ensure_ltx_q8_present(
         settings,
         job,
         LTX_BUNDLE_REPO,
-        "main",
+        LTX_BUNDLE_REVISION,
         &files,
         &scratch,
     )
@@ -5007,10 +6892,119 @@ async fn ensure_ltx_q8_present(
     result.map(|_| ())
 }
 
-/// User LoRAs for an LTX generation (sc-3035): each at a uniform per-pass strength
-/// (`pass_scales` left `None` → the engine applies `scale` on every distilled stage; a
-/// per-stage schedule is parity-plus). No distill/Lightning prepend — the 2-stage distill
-/// is baked into the checkpoint. peft LoKr allowed (engine residual), LyCORIS rejected.
+/// Fetch the SceneWorks LTX bundle's dense `bf16/` subdir on demand (sc-8513, epic 8506). The macOS
+/// default download is lean (`q4/` + `gemma/`); a bf16 job ([`ltx_wants_bf16`]) pulls the ~47 GB
+/// `bf16/*` from the FIXED [`LTX_BUNDLE_REVISION`] the first time it is requested. No-op for eros, for
+/// non-bf16 jobs, or when `bf16/` is already complete. Mirrors [`ensure_ltx_q8_present`].
+#[cfg(target_os = "macos")]
+async fn ensure_ltx_bf16_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+) -> WorkerResult<()> {
+    if request.model == "ltx_2_3_eros" || !ltx_wants_bf16(request) {
+        return Ok(());
+    }
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) else {
+        return Ok(());
+    };
+    if ltx_dir_is_complete(&root.join("bf16")) {
+        return Ok(());
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".ltx-bf16-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec!["bf16/*".to_owned()];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api,
+        settings,
+        job,
+        LTX_BUNDLE_REPO,
+        LTX_BUNDLE_REVISION,
+        &files,
+        &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
+}
+
+/// Ensure the Gemma-3 text encoder an **eros** generation needs is on disk (the eros gate over
+/// [`ensure_ltx_bundle_gemma_present`]). No-op for the base model, which bundles gemma with its
+/// turnkey checkpoint. Called just before resolving the LTX text encoder so an eros job that was
+/// installed before install-time provisioning existed still self-heals on first generation.
+#[cfg(target_os = "macos")]
+async fn ensure_ltx_gemma_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+) -> WorkerResult<()> {
+    if request.model != "ltx_2_3_eros" {
+        return Ok(());
+    }
+    ensure_ltx_bundle_gemma_present(api, settings, job).await
+}
+
+/// Ensure the eros Gemma-3 text encoder is on disk, fetching the bundle's `gemma/` on demand. The
+/// eros install produces a bare converted checkpoint under `models/mlx/ltx_2_3_eros/` with no bundled
+/// TE (unlike the base turnkey bundle, which ships `gemma/` beside its `q4/`), so without this an
+/// eros generation dead-ends on "gemma snapshot not found". Pulls just `gemma/*` (~24 GB) from the
+/// FIXED [`LTX_BUNDLE_REVISION`] — the same SceneWorks re-host the base model uses, so no separate
+/// `mlx-community/gemma-3-12b-it-bf16` download. No-op when an operator `$LTX_GEMMA_DIR` is set, when
+/// a local `models/mlx/gemma` sibling is already complete, or when the bundle snapshot's `gemma/` is
+/// already complete. `pub(crate)` so the eros convert job provisions gemma at install time
+/// ([`crate::model_jobs::run_model_convert_job`]) — the generation path is the self-healing backstop.
+/// Mirrors [`ensure_ltx_q8_present`].
+#[cfg(target_os = "macos")]
+pub(crate) async fn ensure_ltx_bundle_gemma_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    if std::env::var_os("LTX_GEMMA_DIR").is_some() {
+        return Ok(());
+    }
+    // A complete `<data>/models/mlx/gemma` sibling already satisfies the eros resolver — nothing to
+    // fetch (also short-circuits an operator who provisioned gemma there by hand).
+    let local_sibling = settings.data_dir.join("models").join("mlx").join("gemma");
+    if ltx_gemma_dir_is_complete(&local_sibling) {
+        return Ok(());
+    }
+    if let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) {
+        if ltx_gemma_dir_is_complete(&root.join("gemma")) {
+            return Ok(());
+        }
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".ltx-gemma-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec!["gemma/*".to_owned()];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api,
+        settings,
+        job,
+        LTX_BUNDLE_REPO,
+        LTX_BUNDLE_REVISION,
+        &files,
+        &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
+}
+
+/// LoRAs for an LTX generation: the manifest-declared auto distill LoRA (when present) followed by
+/// the user LoRAs (sc-3035). A model that declares `mlx.autoDistillLora` (10Eros) is NOT
+/// pre-distilled, so its distill LoRA must be injected at runtime with per-pass strengths or its
+/// video degrades to noise — see [`resolve_ltx_distill_adapter`]. Every user LoRA applies at a
+/// uniform per-pass strength (`pass_scales` left `None` → the engine uses `scale` on every distilled
+/// stage). peft LoKr allowed (engine residual), LyCORIS rejected.
 #[cfg(target_os = "macos")]
 fn resolve_ltx_adapters(
     settings: &Settings,
@@ -5021,16 +7015,113 @@ fn resolve_ltx_adapters(
             "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
         )));
     }
-    let mut specs = Vec::with_capacity(request.loras.len());
+    let mut specs = Vec::with_capacity(request.loras.len() + 1);
+    // The auto distill LoRA is the model's base recipe (per-pass 1.0/0.4); user LoRAs stack on top.
+    if let Some(distill) = resolve_ltx_distill_adapter(settings, request)? {
+        specs.push(distill);
+    }
     for lora in &request.loras {
         let path = lora_path(lora).ok_or_else(|| {
             WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
         })?;
-        let file = resolve_lora_file(settings, path)?;
+        let file = resolve_lora_file(
+            settings,
+            path,
+            crate::image_jobs::declared_adapter_file(lora),
+        )?;
         let kind = classify_adapter(&file)?;
         specs.push(AdapterSpec::new(file, lora_scale(lora), kind));
     }
     Ok(specs)
+}
+
+/// The auto-injected per-pass distill LoRA for an LTX model that declares `mlx.autoDistillLora`
+/// (`ltx_2_3_eros` today), or `None` when the model declares none or the user opted out via
+/// `advanced.useDistillLora = false`. 10Eros's base checkpoint is not pre-distilled, so without this
+/// LoRA its MLX video collapses to noise a few frames in (the manifest documents that exact symptom).
+///
+/// The LoRA is the `coRequisite` `resources.distilledLora` (the cond_safe variant, sc-9696), so it
+/// installs alongside the checkpoint and is resolved from the HF cache here. Strengths come from
+/// `mlx.autoDistillLora` (`stage1Strength` full first pass / `stage2Strength` reduced spatial-upscale
+/// pass — TenStrip's guidance for rank<=72 cond_safe LoRAs), overridable via
+/// `advanced.distillStage1Strength` / `distillStage2Strength`, and applied as
+/// `pass_scales = [stage1, stage2]` (the engine's LTX per-pass feature, sc-2687). Declared-but-missing
+/// fails with an actionable error rather than silently producing noise.
+///
+/// Ported from the deleted Python `MlxVideoAdapter` (b821d74e): the injection was lost when video
+/// generation moved to the Rust worker in the sc-3037 cutover, which is why 10Eros regressed to noise.
+#[cfg(target_os = "macos")]
+fn resolve_ltx_distill_adapter(
+    settings: &Settings,
+    request: &VideoRequest,
+) -> WorkerResult<Option<AdapterSpec>> {
+    let Some(auto) = request
+        .model_manifest_entry
+        .get("mlx")
+        .and_then(Value::as_object)
+        .and_then(|mlx| mlx.get("autoDistillLora"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(None);
+    };
+    // Opt-out knob (default on): the distill LoRA is a required runtime component for these models.
+    let enabled = request
+        .advanced
+        .get("useDistillLora")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if !enabled {
+        return Ok(None);
+    }
+    let stage1 = advanced::f32(
+        &request.advanced,
+        "distillStage1Strength",
+        auto.get("stage1Strength")
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0) as f32,
+    );
+    let stage2 = advanced::f32(
+        &request.advanced,
+        "distillStage2Strength",
+        auto.get("stage2Strength")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.4) as f32,
+    );
+    // The distill LoRA repo/file live in `resources.distilledLora` (the recommended cond_safe variant).
+    let (repo, file) = request
+        .model_manifest_entry
+        .get("resources")
+        .and_then(Value::as_object)
+        .and_then(|res| res.get("distilledLora"))
+        .and_then(Value::as_object)
+        .and_then(|d| {
+            Some((
+                d.get("repo").and_then(Value::as_str)?,
+                d.get("file").and_then(Value::as_str)?,
+            ))
+        })
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "This model declares mlx.autoDistillLora but resources.distilledLora is missing its \
+                 repo/file, so the distill LoRA cannot be resolved."
+                    .to_owned(),
+            )
+        })?;
+    // The LoRA is a download co-requisite (sc-9696), so it is expected in the HF cache. Fail with an
+    // actionable message if it is absent rather than silently degrading the output to noise.
+    let path = huggingface_snapshot_dir(&settings.data_dir, repo)
+        .map(|dir| dir.join(file))
+        .filter(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "The required distill LoRA for this model is not installed ({repo}/{file}). \
+                 Re-download the model to fetch its co-requisite distill LoRA."
+            ))
+        })?;
+    let kind = classify_adapter(&path)?;
+    Ok(Some(
+        AdapterSpec::new(path, stage1, kind).with_pass_scales(vec![stage1, stage2]),
+    ))
 }
 
 /// Optional I2V conditioning for LTX: a `source_asset_id` → a single `Reference` image
@@ -5512,13 +7603,24 @@ async fn generate_ltx(
         }
         _ => resolve_ltx_conditioning(settings, request, project_path)?,
     };
-    // The macOS default download is lean (q4 + gemma); a Q8 job fetches the bundle's q8/ on demand
-    // before resolving (sc-5679). No-op unless Q8 is requested and q8/ is absent.
+    // The macOS default download is lean (q4 + gemma); a Q8 / bf16 job fetches the bundle's q8/ or
+    // bf16/ on demand before resolving (sc-5679 / sc-8513). No-op unless that tier is requested and
+    // its subdir is absent.
     ensure_ltx_q8_present(api, settings, job, request).await?;
+    ensure_ltx_bf16_present(api, settings, job, request).await?;
+    // The eros install ships no bundled TE, so provision the bundle's `gemma/` on demand (no-op for
+    // the base model, which bundles gemma with its checkpoint). Self-heals installs that predate this.
+    ensure_ltx_gemma_present(api, settings, job, request).await?;
     let model_dir = resolve_ltx_model_dir(settings, request)?;
-    // When the resolved dir is the SceneWorks bundle subdir, its sibling `gemma/` is the text
-    // encoder — point the engine at it (sc-5608) before load. No-op for legacy/local conversions.
-    ensure_bundled_ltx_gemma_dir(&model_dir);
+    // Thread the Gemma-3 text encoder onto the LoadSpec (sc-8827, was `$LTX_GEMMA_DIR`). Base: the
+    // SceneWorks bundle subdir's sibling `gemma/`. Eros: the separately-provisioned gemma
+    // ([`ensure_ltx_gemma_present`]) — a `models/mlx/gemma` sibling or the bundle snapshot's `gemma/`.
+    // `None` ⇒ the engine falls back to the HF-cache gemma snapshot.
+    let text_encoder_dir = if request.model == "ltx_2_3_eros" {
+        resolve_ltx_eros_gemma_dir(settings, &model_dir)
+    } else {
+        resolve_bundled_ltx_gemma_dir(&model_dir)
+    };
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -5542,9 +7644,10 @@ async fn generate_ltx(
         use_uncensored_enhancer: advanced::bool(&request.advanced, "useUncensoredEnhancer"),
         enhance_max_tokens,
         enhance_temperature,
+        text_encoder_dir,
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, input).await
+    generate_video(api, settings, job, backend, &request.advanced, input).await
 }
 
 // ---------------------------------------------------------------------------
@@ -5833,7 +7936,7 @@ async fn generate_svd(
         conditioning_fps: Some(svd_i32(request, "conditioningFps", "condFps", 7, 1, 30) as u32),
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, input).await
+    generate_video(api, settings, job, backend, &request.advanced, input).await
 }
 
 // ---------------------------------------------------------------------------
@@ -6081,7 +8184,10 @@ async fn load_source_video_frames(
         )));
     }
 
-    let work_dir = std::env::temp_dir().join(format!("sw-replace-frames-{}", job.id));
+    // Sanitize the job id before it becomes a temp-dir path component (F-111): a hostile id would
+    // otherwise escape `temp_dir()`. Mirrors `sw-person-track-{safe_download_dir(job.id)}` in media_jobs.
+    let work_dir =
+        std::env::temp_dir().join(format!("sw-replace-frames-{}", safe_download_dir(&job.id)));
     tokio::fs::create_dir_all(&work_dir).await?;
     let pattern = work_dir.join("src_%05d.png");
     let filters = format!(
@@ -6194,21 +8300,54 @@ fn resolve_character_references(
             }
         }
     }
+    // The approved references we will attempt (capped at the engine's 4-reference contract). A
+    // reference that fails to load must NOT be dropped silently: a corrupted approved reference
+    // otherwise quietly weakens identity conditioning with zero signal (sc-8922, F-120). Warn per
+    // skipped reference (asset id + error) and, when some — but not all — loaded, emit a summary the
+    // operator can compare against the approved count.
+    let attempted: Vec<String> = ids
+        .into_iter()
+        .filter(|id| !id.is_empty())
+        .take(4)
+        .collect();
+    let approved_count = attempted.len();
     let mut images = Vec::new();
-    for asset_id in ids.into_iter().filter(|id| !id.is_empty()).take(4) {
-        if let Ok(image) = load_reference_image(
+    for asset_id in attempted {
+        match load_reference_image(
             &settings.data_dir,
             &request.project_id,
             &asset_id,
             project_path,
         ) {
-            images.push(image);
+            Ok(image) => images.push(image),
+            Err(error) => {
+                tracing::warn!(
+                    event = "character_reference_load_failed",
+                    characterId = %character_id,
+                    assetId = %asset_id,
+                    error = %error,
+                    "skipping an unreadable approved character reference — identity conditioning \
+                     will use fewer references than approved"
+                );
+            }
         }
     }
     if images.is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Replace Person requires at least one approved character reference image.".to_owned(),
         ));
+    }
+    if images.len() < approved_count {
+        tracing::warn!(
+            event = "character_references_partially_loaded",
+            characterId = %character_id,
+            loaded = images.len(),
+            approved = approved_count,
+            "loaded fewer character references than were approved — {} of {} approved references \
+             could not be read; identity conditioning is reduced",
+            approved_count - images.len(),
+            approved_count
+        );
     }
     Ok(images)
 }
@@ -6423,10 +8562,7 @@ async fn generate_wan_vace_engine(
         replacement_mode_from(&request.replacement_mode),
     )?;
 
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     let steps = request.advanced.get("steps").and_then(|value| {
         value
             .as_u64()
@@ -6459,7 +8595,7 @@ async fn generate_wan_vace_engine(
         control_scale: Some(advanced::f32(&request.advanced, "conditioningScale", 1.0)),
         ..VideoGenInput::default()
     };
-    let decoded = generate_video(api, settings, job, backend, input).await?;
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
     let status = replacement_status_value(
         &track,
         track_id,
@@ -6559,9 +8695,11 @@ async fn load_clip_anchor_frames(
     take: ClipFramePosition,
 ) -> WorkerResult<Vec<Image>> {
     let media_path = resolve_clip_media_path(settings, project_id, asset_id, project_path)?;
+    // Sanitize the job id before it becomes a temp-dir path component (F-111): a hostile id would
+    // otherwise escape `temp_dir()` even with the uuid suffix. Mirrors the person-track work dir.
     let work_dir = std::env::temp_dir().join(format!(
         "sw-anchor-frames-{}-{}",
-        job.id,
+        safe_download_dir(&job.id),
         Uuid::new_v4().simple()
     ));
     tokio::fs::create_dir_all(&work_dir).await?;
@@ -6820,10 +8958,7 @@ async fn generate_wan_vace_extend_bridge(
         left_anchor,
         right_anchor,
     )?;
-    let negative_prompt = {
-        let trimmed = request.negative_prompt.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_owned())
-    };
+    let negative_prompt = non_empty_negative_prompt(request);
     let steps = request.advanced.get("steps").and_then(|value| {
         value
             .as_u64()
@@ -6856,7 +8991,7 @@ async fn generate_wan_vace_extend_bridge(
         control_scale: Some(advanced::f32(&request.advanced, "conditioningScale", 1.0)),
         ..VideoGenInput::default()
     };
-    generate_video(api, settings, job, backend, input).await
+    generate_video(api, settings, job, backend, &request.advanced, input).await
 }
 
 #[cfg(test)]
@@ -6866,6 +9001,160 @@ mod tests {
 
     fn request(value: Value) -> VideoRequest {
         VideoRequest::from_payload(&value.as_object().cloned().unwrap())
+    }
+
+    /// sc-8879 / sc-9879 (F-077 follow-up): the video SeedVR2 upscale fetches the same fixed
+    /// third-party mirror as the image lane, and must pin an exact commit rather than the mutable
+    /// `main` branch so an upstream re-push can't silently swap the 3B DiT + VAE weights. Lock the
+    /// constant to a real 40-hex lowercase commit id (mirrors `seedvr2_revision_is_pinned_commit_not_main`
+    /// in the image-upscale lane).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn seedvr2_video_revision_is_pinned_commit_not_main() {
+        assert_ne!(
+            SEEDVR2_REVISION, "main",
+            "video SeedVR2 must pin a fixed revision"
+        );
+        assert_eq!(
+            SEEDVR2_REVISION.len(),
+            40,
+            "a pinned HF revision is a 40-char commit sha"
+        );
+        assert!(
+            SEEDVR2_REVISION
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "the pinned revision must be lowercase hex"
+        );
+    }
+
+    /// sc-9879 (F-077 follow-up): the image (`upscale_jobs`) and video (`video_jobs`) SeedVR2 fetches
+    /// pull the IDENTICAL files from the IDENTICAL fixed mirror, so their pinned commit must agree.
+    /// Two independent consts (a shared source of truth would need a cfg-split hoist across the two
+    /// modules) — lock them together here so a bump to one lane without the other fails loudly
+    /// (mirrors this PR's InstantID/PuLID shared-repo sha-agreement tests).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn seedvr2_video_revision_matches_image_lane() {
+        assert_eq!(
+            SEEDVR2_REVISION,
+            crate::upscale_jobs::SEEDVR2_REVISION,
+            "video and image SeedVR2 fetch the same mirror + files; their pinned commit must match"
+        );
+        assert_eq!(
+            SEEDVR2_REPO,
+            crate::upscale_jobs::SEEDVR2_REPO,
+            "video and image SeedVR2 must reference the same upstream mirror repo"
+        );
+    }
+
+    /// sc-9879 (F-077 follow-up): `ensure_ltx_q8_present` pulls `q8/*` from the FIXED SceneWorks LTX-2.3
+    /// bundle const (non-overridable here), so it must pin an exact commit rather than the mutable `main`
+    /// branch — an upstream re-push would otherwise silently swap the Q8 checkpoint we load. Lock the pin
+    /// to a real 40-hex lowercase commit id (mirrors the SeedVR2 format test above).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_bundle_revision_is_pinned_commit_not_main() {
+        assert_ne!(
+            LTX_BUNDLE_REVISION, "main",
+            "LTX q8 bundle must pin a fixed revision"
+        );
+        assert_eq!(
+            LTX_BUNDLE_REVISION.len(),
+            40,
+            "a pinned HF revision is a 40-char commit sha"
+        );
+        assert!(
+            LTX_BUNDLE_REVISION
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "the pinned revision must be lowercase hex"
+        );
+    }
+
+    // sc-8828 (F-026): `resolve_video_route` is the extracted native (MLX) dispatch decision — the
+    // predicate ladder pulled out of `run_video_generate_job`'s 4-tuple match. These lock the branches
+    // whose routing depends only on the mode + model id (not on staged weights), so a future family edit
+    // that reorders the ladder or mis-routes `replace_person` fails loudly here.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn video_route_replace_person_dispatches_by_model() {
+        let settings = Settings::from_env();
+
+        // `replace_person` on the SCAIL-2 model → the SCAIL-2 replacement backend (sc-5452), carrying
+        // the resolved engine id — NOT Wan-VACE.
+        let scail2 = request(json!({
+            "projectId": "p", "model": "scail2_14b", "mode": "replace_person",
+        }));
+        assert_eq!(
+            resolve_video_route(&scail2, &settings),
+            VideoRoute::ReplacePersonScail2("scail2_14b"),
+        );
+
+        // `replace_person` on the dual-expert Wan2.2 VACE-Fun model → its own variant (sc-3459), never
+        // the single-expert Wan-VACE checkpoint.
+        let vace_fun = request(json!({
+            "projectId": "p", "model": "wan_2_2_vace_fun_14b", "mode": "replace_person",
+        }));
+        assert_eq!(
+            resolve_video_route(&vace_fun, &settings),
+            VideoRoute::ReplacePersonWanVaceFun,
+        );
+
+        // `replace_person` on any other replace-capable model → single-expert Wan-VACE (sc-3521).
+        let other = request(json!({
+            "projectId": "p", "model": "wan_2_2_ti2v_5b", "mode": "replace_person",
+        }));
+        assert_eq!(
+            resolve_video_route(&other, &settings),
+            VideoRoute::ReplacePersonWanVace,
+        );
+
+        // An unknown model with no engine + no resolvable weights → the stub (the loud-fail path lives in
+        // the execution arm via `ensure_video_engine_weights`).
+        let unknown = request(json!({
+            "projectId": "p", "model": "definitely_not_a_video_engine", "mode": "text_to_video",
+        }));
+        assert_eq!(resolve_video_route(&unknown, &settings), VideoRoute::Stub);
+    }
+
+    // sc-8828 (F-026): the candle sibling — `resolve_candle_video_route`. Locks the `backend_candle_enabled`
+    // gate (off → Stub, so routing is unchanged until parity) + the mode/model dispatch.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn candle_video_route_gates_on_backend_flag_then_mode() {
+        let mut settings = Settings::from_env();
+
+        // Candle disabled (default) → always the stub, regardless of model/mode.
+        settings.backend_candle_enabled = false;
+        let scail2_replace = request(json!({
+            "projectId": "p", "model": "scail2_14b", "mode": "replace_person",
+        }));
+        assert_eq!(
+            resolve_candle_video_route(&scail2_replace, &settings),
+            CandleVideoRoute::Stub,
+        );
+
+        // Enabled: `replace_person` on the candle SCAIL-2 model → the SCAIL-2 replacement variant;
+        // any other replace-capable model → candle Wan-VACE.
+        settings.backend_candle_enabled = true;
+        assert_eq!(
+            resolve_candle_video_route(&scail2_replace, &settings),
+            CandleVideoRoute::ReplacePersonScail2(candle_scail2_engine_id("scail2_14b").unwrap()),
+        );
+        let extend = request(json!({
+            "projectId": "p", "model": "wan_2_2_ti2v_5b", "mode": "extend_clip",
+        }));
+        assert_eq!(
+            resolve_candle_video_route(&extend, &settings),
+            CandleVideoRoute::WanVaceExtendBridge,
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -8211,14 +10500,14 @@ mod tests {
         assert_eq!(wan_engine_id("wan_2_2_vace_fun_14b"), None);
     }
 
-    /// Per-model sampling (sc-4997): both A14B MoE models (T2V + I2V) force the 4-step
-    /// Lightning preset (CFG off); the dense 5B honors an explicit user `steps`/`guidanceScale`
-    /// and otherwise applies the interim default with CFG retained.
+    /// Per-model sampling (sc-4997 / sc-10047): with the Lightning toggle on (the default) both A14B
+    /// MoE models (T2V + I2V) force the 4-step Lightning preset (CFG off); the dense 5B honors an
+    /// explicit user `steps`/`guidanceScale` and otherwise applies the interim default with CFG retained.
     #[cfg(target_os = "macos")]
     #[test]
     fn wan_sampling_overrides_both_14b_and_5b_interim() {
         let req = request(json!({ "projectId": "p" }));
-        // Both A14B MoE models: forced 4-step / guide 1.0 (Lightning baked).
+        // Both A14B MoE models default to Lightning on → forced 4-step / guide 1.0.
         assert_eq!(wan_sampling("wan2_2_t2v_14b", &req), (Some(4), Some(1.0)));
         assert_eq!(wan_sampling("wan2_2_i2v_14b", &req), (Some(4), Some(1.0)));
         // 5B, no override → interim default steps, CFG left to the engine (None ⇒ guide 5.0).
@@ -8231,9 +10520,72 @@ mod tests {
             "projectId": "p", "advanced": { "steps": 6, "guidanceScale": 1.0 }
         }));
         assert_eq!(wan_sampling("wan2_2_ti2v_5b", &over), (Some(6), Some(1.0)));
-        // The 14B Lightning preset ignores user overrides — the distill is mandatory.
+        // The 14B Lightning preset (toggle on) ignores user steps/guidance — the distill forces 4/1.0.
         assert_eq!(wan_sampling("wan2_2_t2v_14b", &over), (Some(4), Some(1.0)));
         assert_eq!(wan_sampling("wan2_2_i2v_14b", &over), (Some(4), Some(1.0)));
+    }
+
+    /// sc-10047: `wan_lightning_on` — default-on toggle. Absent / explicit `true` on an A14B MoE model
+    /// ⇒ on; explicit `false` ⇒ off; the dense 5B and any non-Wan engine are never Lightning.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wan_lightning_on_defaults_on_for_a14b_and_honors_toggle() {
+        let absent = request(json!({ "projectId": "p" }));
+        // A14B MoE: absent ⇒ default-on (backward compatible with the prior always-on behavior).
+        assert!(wan_lightning_on("wan2_2_t2v_14b", &absent));
+        assert!(wan_lightning_on("wan2_2_i2v_14b", &absent));
+        // Explicit true ⇒ on.
+        let on = request(json!({ "projectId": "p", "advanced": { "lightning": true } }));
+        assert!(wan_lightning_on("wan2_2_t2v_14b", &on));
+        assert!(wan_lightning_on("wan2_2_i2v_14b", &on));
+        // Explicit false ⇒ off.
+        let off = request(json!({ "projectId": "p", "advanced": { "lightning": false } }));
+        assert!(!wan_lightning_on("wan2_2_t2v_14b", &off));
+        assert!(!wan_lightning_on("wan2_2_i2v_14b", &off));
+        // The dense 5B and non-Wan engines are never Lightning regardless of the flag.
+        assert!(!wan_lightning_on("wan2_2_ti2v_5b", &absent));
+        assert!(!wan_lightning_on("wan2_2_ti2v_5b", &on));
+        assert!(!wan_lightning_on("some_other_engine", &on));
+    }
+
+    /// sc-10047: with the Lightning toggle OFF, the A14B MoE models run the native multi-step CFG
+    /// recipe — honor an explicit user `steps`/`guidanceScale`, else `None` so the engine's config.json
+    /// A14B non-distill defaults (40 steps, dual CFG) stand. 5B is unaffected by the toggle.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wan_sampling_toggle_off_runs_native_multistep_cfg() {
+        // Toggle off, no user override → (None, None): the engine's A14B non-distill defaults stand.
+        let off = request(json!({ "projectId": "p", "advanced": { "lightning": false } }));
+        assert_eq!(wan_sampling("wan2_2_t2v_14b", &off), (None, None));
+        assert_eq!(wan_sampling("wan2_2_i2v_14b", &off), (None, None));
+        // Toggle off, user override → honored (multi-step + CFG on).
+        let off_over = request(json!({
+            "projectId": "p",
+            "advanced": { "lightning": false, "steps": 30, "guidanceScale": 4.0 }
+        }));
+        assert_eq!(
+            wan_sampling("wan2_2_t2v_14b", &off_over),
+            (Some(30), Some(4.0))
+        );
+        assert_eq!(
+            wan_sampling("wan2_2_i2v_14b", &off_over),
+            (Some(30), Some(4.0))
+        );
+        // Toggle on with the same overrides → still the forced 4-step Lightning preset.
+        let on_over = request(json!({
+            "projectId": "p",
+            "advanced": { "lightning": true, "steps": 30, "guidanceScale": 4.0 }
+        }));
+        assert_eq!(
+            wan_sampling("wan2_2_t2v_14b", &on_over),
+            (Some(4), Some(1.0))
+        );
+        // 5B ignores the lightning flag entirely (no toggle) — interim default steps still apply.
+        let five_b = request(json!({ "projectId": "p", "advanced": { "lightning": false } }));
+        assert_eq!(
+            wan_sampling("wan2_2_ti2v_5b", &five_b),
+            (Some(WAN5B_INTERIM_STEPS), None)
+        );
     }
 
     /// `advanced.mlxQuantize` maps to a quant level; absent → dense / engine-resolved.
@@ -8248,6 +10600,287 @@ mod tests {
         assert_eq!(resolve_wan_quant(&dense), None);
         let absent = request(json!({ "projectId": "p" }));
         assert_eq!(resolve_wan_quant(&absent), None);
+    }
+
+    /// Write the six files that make a Wan2.2 A14B tier subdir COMPLETE
+    /// ([`wan_tier_is_complete`]), so [`wan_tier_subdir`] treats it as present.
+    #[cfg(target_os = "macos")]
+    fn write_complete_wan_tier(root: &Path, tier: &str) {
+        let dir = root.join(tier);
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in [
+            "high_noise_model.safetensors",
+            "low_noise_model.safetensors",
+            "t5_encoder.safetensors",
+            "vae.safetensors",
+            "tokenizer.json",
+            "config.json",
+        ] {
+            std::fs::write(dir.join(file), b"x").unwrap();
+        }
+    }
+
+    /// `mlxQuantize` selects the preferred A14B tier, then falls back to the always-smaller
+    /// present tiers (bf16 is only ever tried when explicitly requested).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wan_tier_order_prefers_then_falls_back() {
+        let bf16 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 0 } }));
+        assert_eq!(wan_tier_order(&bf16), &["bf16", "q8", "q4"]);
+        let q8 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
+        assert_eq!(wan_tier_order(&q8), &["q8", "q4"]);
+        let q4 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
+        assert_eq!(wan_tier_order(&q4), &["q4", "q8"]);
+        // Absent knob defaults to the lean q4 tier; bf16 is never in a default job's search path.
+        let absent = request(json!({ "projectId": "p" }));
+        assert_eq!(wan_tier_order(&absent), &["q4", "q8"]);
+    }
+
+    /// [`wan_tier_subdir`] resolves the requested tier, falls back to a smaller COMPLETE
+    /// tier, ignores a partially-downloaded one, and returns `None` for a legacy flat root.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wan_tier_subdir_resolves_and_falls_back() {
+        let root = std::env::temp_dir().join(format!("sw_wan_tier_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&root).unwrap();
+        // Legacy flat root (no tier subdirs) → None (caller keeps root + load-time quant).
+        let q8_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
+        assert_eq!(wan_tier_subdir(&root, &q8_req), None);
+
+        // Only q4 present: a q8 request falls back to the smaller complete q4 tier.
+        write_complete_wan_tier(&root, "q4");
+        assert_eq!(wan_tier_subdir(&root, &q8_req), Some(root.join("q4")));
+
+        // A partial q8 (missing a file) is skipped, still falling back to q4.
+        std::fs::create_dir_all(root.join("q8")).unwrap();
+        std::fs::write(root.join("q8").join("config.json"), b"x").unwrap();
+        assert_eq!(wan_tier_subdir(&root, &q8_req), Some(root.join("q4")));
+
+        // Completed q8 now wins for a q8 request; a default job still prefers q4.
+        write_complete_wan_tier(&root, "q8");
+        assert_eq!(wan_tier_subdir(&root, &q8_req), Some(root.join("q8")));
+        let default_req = request(json!({ "projectId": "p" }));
+        assert_eq!(wan_tier_subdir(&root, &default_req), Some(root.join("q4")));
+
+        // bf16 request with no bf16 tier falls back to q8 (never silently to a default).
+        let bf16_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 0 } }));
+        assert_eq!(wan_tier_subdir(&root, &bf16_req), Some(root.join("q8")));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Every Wan quant-matrix tier repo (TI2V-5B sc-9941 / T2V sc-9942 / I2V sc-9943) must pin an
+    /// exact commit (not the mutable `main`) so an upstream re-push can't swap a checkpoint the
+    /// on-demand fetch loads (mirrors the LTX/SeedVR2 pins). `wan_tier_repo` also routes each model id
+    /// to its own repo+revision.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wan_tier_revisions_are_pinned_commits_not_main() {
+        for (label, revision) in [
+            ("TI2V-5B", WAN_TI2V_5B_REVISION),
+            ("T2V", WAN_T2V_14B_REVISION),
+            ("I2V", WAN_I2V_14B_REVISION),
+        ] {
+            assert_ne!(
+                revision, "main",
+                "the {label} tier repo must pin a fixed revision before release"
+            );
+            assert_eq!(
+                revision.len(),
+                40,
+                "a pinned HF revision is a 40-char commit sha ({label})"
+            );
+            assert!(
+                revision
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "the pinned {label} revision must be lowercase hex"
+            );
+        }
+        // Each quant-matrix model id routes to its own repo + revision (the 5B engine's request.model
+        // is `wan_2_2`); a model with no hosted matrix has no tier repo.
+        assert_eq!(
+            wan_tier_repo("wan_2_2"),
+            Some((WAN_TI2V_5B_REPO, WAN_TI2V_5B_REVISION))
+        );
+        assert_eq!(
+            wan_tier_repo("wan_2_2_t2v_14b"),
+            Some((WAN_T2V_14B_REPO, WAN_T2V_14B_REVISION))
+        );
+        assert_eq!(
+            wan_tier_repo("wan_2_2_i2v_14b"),
+            Some((WAN_I2V_14B_REPO, WAN_I2V_14B_REVISION))
+        );
+        assert_eq!(wan_tier_repo("bernini"), None);
+    }
+
+    /// sc-9945: the Bernini quant-matrix repo must pin an exact commit (not the mutable `main`) so an
+    /// upstream re-push can't swap a checkpoint the on-demand tier fetch loads. INTENTIONALLY red until
+    /// the tiers are hosted and `BERNINI_REVISION` is pinned to the real commit (mirrors sc-9941's flow).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bernini_tier_revision_is_pinned_commit_not_main() {
+        assert_ne!(
+            BERNINI_REVISION, "main",
+            "the Bernini tier repo must pin a fixed revision before release"
+        );
+        assert_eq!(
+            BERNINI_REVISION.len(),
+            40,
+            "a pinned HF revision is a 40-char commit sha"
+        );
+        assert!(
+            BERNINI_REVISION
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "the pinned Bernini revision must be lowercase hex"
+        );
+    }
+
+    /// sc-9945: a COMPLETE Bernini tier (all [`BERNINI_TIER_FILES`], incl. the planner's nested
+    /// `mllm/tokenizer.json`) resolves for the requested quant, and a missing preferred tier falls
+    /// through to the next smaller complete tier — never silently to the wrong one. Composite: the three
+    /// packable weights live in the SAME tier subdir as the dense remainder, so one resolution covers
+    /// both the planner and the renderer.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bernini_tier_subdir_resolves_complete_tier() {
+        let root = std::env::temp_dir().join(format!("bernini-tier-test-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let make_tier = |tier: &str| {
+            for file in BERNINI_TIER_FILES {
+                let path = root.join(tier).join(file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, b"x").unwrap();
+            }
+        };
+        make_tier("q4");
+        make_tier("q8");
+
+        // Default (no bits) → q4.
+        assert_eq!(bernini_tier_subdir(&root, None), Some(root.join("q4")));
+        // Q8 (bits >= 8) → q8.
+        assert_eq!(bernini_tier_subdir(&root, Some(8)), Some(root.join("q8")));
+        // bf16 (bits <= 0) with no bf16 tier falls back to q8 (never silently to a default).
+        assert_eq!(bernini_tier_subdir(&root, Some(0)), Some(root.join("q8")));
+        // An incomplete tier (missing the nested planner tokenizer) is not resolved.
+        std::fs::remove_file(root.join("q8").join("mllm/tokenizer.json")).unwrap();
+        assert_eq!(bernini_tier_subdir(&root, Some(8)), Some(root.join("q4")));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The single-expert TI2V-5B tier (sc-9941) is COMPLETE with one `model.safetensors` (not the
+    /// A14B two-expert set), and `wan_tier_subdir` resolves it for the `wan_2_2` model id.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wan_tier_ti2v_5b_single_expert_completeness() {
+        assert_eq!(wan_tier_files("wan_2_2"), WAN_TI2V_5B_TIER_FILES);
+        assert_eq!(wan_tier_files("wan_2_2_t2v_14b"), WAN_A14B_TIER_FILES);
+
+        let root = std::env::temp_dir().join(format!("sw_wan5b_{}", Uuid::new_v4().simple()));
+        let dir = root.join("q4");
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in WAN_TI2V_5B_TIER_FILES {
+            std::fs::write(dir.join(file), b"x").unwrap();
+        }
+        // Complete for the 5B (single transformer) but NOT for the A14B set (missing the experts).
+        assert!(wan_tier_is_complete(&dir, WAN_TI2V_5B_TIER_FILES));
+        assert!(!wan_tier_is_complete(&dir, WAN_A14B_TIER_FILES));
+
+        let req = request(json!({ "projectId": "p", "model": "wan_2_2" }));
+        assert_eq!(wan_tier_subdir(&root, &req), Some(dir));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Write the six files that make a SCAIL-2 tier subdir COMPLETE ([`scail2_tier_is_complete`]), so
+    /// [`scail2_tier_subdir`] treats it as present.
+    #[cfg(target_os = "macos")]
+    fn write_complete_scail2_tier(root: &Path, tier: &str) {
+        let dir = root.join(tier);
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in SCAIL2_TIER_FILES {
+            std::fs::write(dir.join(file), b"x").unwrap();
+        }
+    }
+
+    /// `mlxQuantize` selects the preferred SCAIL-2 tier, then falls back to the always-smaller present
+    /// tiers (bf16 is only ever tried when explicitly requested) — mirrors [`wan_tier_order`].
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scail2_tier_order_prefers_then_falls_back() {
+        let bf16 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 0 } }));
+        assert_eq!(scail2_tier_order(&bf16), &["bf16", "q8", "q4"]);
+        let q8 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
+        assert_eq!(scail2_tier_order(&q8), &["q8", "q4"]);
+        let q4 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
+        assert_eq!(scail2_tier_order(&q4), &["q4", "q8"]);
+        // Absent knob defaults to the lean q4 tier; bf16 is never in a default job's search path.
+        let absent = request(json!({ "projectId": "p" }));
+        assert_eq!(scail2_tier_order(&absent), &["q4", "q8"]);
+    }
+
+    /// [`scail2_tier_subdir`] resolves the requested tier, falls back to a smaller COMPLETE tier,
+    /// ignores a partially-downloaded one, and returns `None` for a legacy flat root.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scail2_tier_subdir_resolves_and_falls_back() {
+        let root = std::env::temp_dir().join(format!("sw_scail2_tier_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&root).unwrap();
+        // Legacy flat root (no tier subdirs) → None (caller keeps root + load-time quant).
+        let q8_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
+        assert_eq!(scail2_tier_subdir(&root, &q8_req), None);
+
+        // Only q4 present: a q8 request falls back to the smaller complete q4 tier.
+        write_complete_scail2_tier(&root, "q4");
+        assert_eq!(scail2_tier_subdir(&root, &q8_req), Some(root.join("q4")));
+
+        // A partial q8 (missing files) is skipped, still falling back to q4.
+        std::fs::create_dir_all(root.join("q8")).unwrap();
+        std::fs::write(root.join("q8").join("config.json"), b"x").unwrap();
+        assert_eq!(scail2_tier_subdir(&root, &q8_req), Some(root.join("q4")));
+
+        // Completed q8 now wins for a q8 request; a default job still prefers q4.
+        write_complete_scail2_tier(&root, "q8");
+        assert_eq!(scail2_tier_subdir(&root, &q8_req), Some(root.join("q8")));
+        let default_req = request(json!({ "projectId": "p" }));
+        assert_eq!(
+            scail2_tier_subdir(&root, &default_req),
+            Some(root.join("q4"))
+        );
+
+        // bf16 request with no bf16 tier falls back to q8 (never silently to a default).
+        let bf16_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 0 } }));
+        assert_eq!(scail2_tier_subdir(&root, &bf16_req), Some(root.join("q8")));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The SCAIL-2 quant-matrix tier repo (sc-9944) must pin an exact commit (not the mutable `main`)
+    /// so an upstream re-push can't swap a checkpoint the on-demand fetch loads (mirrors the Wan pins),
+    /// and `scail2_tier_repo` routes only the `scail2_14b` id to it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scail2_tier_revision_is_pinned_commit_not_main() {
+        assert_ne!(
+            SCAIL2_REVISION, "main",
+            "the SCAIL-2 tier repo must pin a fixed revision before release"
+        );
+        assert_eq!(
+            SCAIL2_REVISION.len(),
+            40,
+            "a pinned HF revision is a 40-char commit sha"
+        );
+        assert!(
+            SCAIL2_REVISION
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "the pinned SCAIL-2 revision must be lowercase hex"
+        );
+        assert_eq!(
+            scail2_tier_repo("scail2_14b"),
+            Some((SCAIL2_REPO, SCAIL2_REVISION))
+        );
+        assert_eq!(scail2_tier_repo("wan_2_2"), None);
+        assert_eq!(scail2_tier_repo("bernini"), None);
     }
 
     /// The `.high_noise.safetensors` → `.low_noise.safetensors` sibling convention
@@ -8337,6 +10970,103 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Lay down a fake `lightx2v/Wan2.2-Lightning` HF snapshot under `data_dir` with the
+    /// per-architecture high/low pair, so [`resolve_lightning_loras`] resolves the Lightning
+    /// distill in a hermetic test (mirrors `write_complete_wan_tier`). Returns the two file paths.
+    #[cfg(target_os = "macos")]
+    fn write_fake_wan_lightning(data_dir: &Path, engine_id: &str) -> (PathBuf, PathBuf) {
+        let subdir = match engine_id {
+            "wan2_2_t2v_14b" => "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
+            "wan2_2_i2v_14b" => "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1",
+            other => panic!("no Lightning subdir for {other}"),
+        };
+        let base = data_dir
+            .join("cache")
+            .join("huggingface")
+            .join("hub")
+            .join("models--lightx2v--Wan2.2-Lightning")
+            .join("snapshots")
+            .join("deadbeef")
+            .join(subdir);
+        std::fs::create_dir_all(&base).unwrap();
+        let high = base.join("high_noise_model.safetensors");
+        let low = base.join("low_noise_model.safetensors");
+        std::fs::write(&high, b"x").unwrap();
+        std::fs::write(&low, b"x").unwrap();
+        (high, low)
+    }
+
+    /// sc-10047: `resolve_wan_adapters` gates the A14B Lightning distill pair on the default-on
+    /// toggle. Toggle on (default) → the high/low Lightning pair is prepended (per-expert tagged),
+    /// then user LoRAs. Toggle off → NO Lightning adapters, but user LoRAs are still honored. Only an
+    /// explicit `lightning:false` opts out; absent defaults to on (backward compatible). This test is
+    /// hermetic: env vars pointing HF cache elsewhere would break the fixture, so skip when set.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wan_adapters_gate_lightning_on_toggle() {
+        // The fake HF snapshot only resolves when the cache-dir env overrides are unset (else the
+        // real cache is consulted). Skip rather than assert-false in that unusual local config.
+        if std::env::var_os("HF_HUB_CACHE").is_some()
+            || std::env::var_os("HUGGINGFACE_HUB_CACHE").is_some()
+            || std::env::var_os("HF_HOME").is_some()
+        {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sw_wan_light_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (high, low) = write_fake_wan_lightning(&dir, "wan2_2_t2v_14b");
+        // A user LoRA lives under data_dir so the confinement check passes.
+        let user_lora = dir.join("style.safetensors");
+        write_lora_fixture(&user_lora, None);
+
+        let settings = Settings {
+            data_dir: dir.clone(),
+            ..Settings::from_env()
+        };
+
+        // Toggle ON (default / absent) → Lightning high/low pair, then the user LoRA (3 specs).
+        for adv in [json!({}), json!({ "lightning": true })] {
+            let req = request(json!({
+                "projectId": "p",
+                "advanced": adv,
+                "loras": [ { "path": user_lora.to_string_lossy(), "weight": 0.5 } ],
+            }));
+            let specs = resolve_wan_adapters(&settings, &req, "wan2_2_t2v_14b")
+                .expect("resolve adapters (lightning on)");
+            assert_eq!(specs.len(), 3, "lightning pair + user lora");
+            assert_eq!(specs[0].path, high);
+            assert_eq!(specs[0].moe_expert, Some(MoeExpert::High));
+            assert_eq!(specs[1].path, low);
+            assert_eq!(specs[1].moe_expert, Some(MoeExpert::Low));
+            // The user LoRA is the single-file shared spec (no high_noise sibling).
+            assert_eq!(specs[2].path, user_lora.canonicalize().unwrap());
+            assert!(specs[2].moe_expert.is_none());
+            assert!((specs[2].scale - 0.5).abs() < 1e-6);
+        }
+
+        // Toggle OFF → NO Lightning adapters; the user LoRA is still applied (1 spec).
+        let off = request(json!({
+            "projectId": "p",
+            "advanced": { "lightning": false },
+            "loras": [ { "path": user_lora.to_string_lossy(), "weight": 0.5 } ],
+        }));
+        let specs = resolve_wan_adapters(&settings, &off, "wan2_2_t2v_14b")
+            .expect("resolve adapters (lightning off)");
+        assert_eq!(specs.len(), 1, "no Lightning, user LoRA only");
+        assert_eq!(specs[0].path, user_lora.canonicalize().unwrap());
+        assert!(specs[0].moe_expert.is_none());
+
+        // Toggle OFF works even when the Lightning snapshot is absent (nothing to resolve): remove
+        // the fake snapshot and confirm the off path still succeeds with just the user LoRA.
+        std::fs::remove_file(&high).unwrap();
+        std::fs::remove_file(&low).unwrap();
+        let specs_no_light = resolve_wan_adapters(&settings, &off, "wan2_2_t2v_14b")
+            .expect("lightning-off needs no Lightning snapshot");
+        assert_eq!(specs_no_light.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// sc-5723 (WKA-002): a LoRA path from the (attacker-controllable) payload that
     /// resolves outside every app-managed root is rejected before the file is opened —
     /// the worker must not be pointed at an arbitrary host `.safetensors`. The fixture
@@ -8423,6 +11153,117 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// sc-8830 drift-fix regression: the shared [`resolve_lora_file`] resolves a `.safetensors`
+    /// nested in a **subdirectory** of the LoRA dir (via core's recursive `first_safetensors_path`).
+    /// The old candle twin `candle_resolve_lora_file` used a shallow non-recursive `read_dir`, so it
+    /// returned "LoRA has no .safetensors" for exactly this shape — a latent candle-lane bug that
+    /// converging on the core helper fixes. Both backends now resolve it identically.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolve_lora_file_finds_nested_safetensors() {
+        let dir = std::env::temp_dir().join(format!("sw_lora_nested_{}", Uuid::new_v4().simple()));
+        let nested = dir.join("adapter");
+        std::fs::create_dir_all(&nested).unwrap();
+        let weight = nested.join("model.safetensors");
+        write_lora_fixture(&weight, None);
+
+        let settings = Settings {
+            data_dir: dir.clone(),
+            ..Settings::from_env()
+        };
+        // Point the resolver at the LoRA dir (not the file); it must recurse into `adapter/`.
+        // No declared file → falls back to the recursive scan.
+        let resolved = resolve_lora_file(&settings, dir.clone(), None)
+            .expect("nested .safetensors must resolve");
+        assert_eq!(resolved, weight.canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// sc-10221: a trained LoRA's folder holds step checkpoints alongside the final
+    /// adapter; the video resolver must load the manifest-declared final file, not an
+    /// arbitrary sibling the directory scan might pick.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolve_lora_file_prefers_declared_over_checkpoint() {
+        let dir = std::env::temp_dir().join(format!("sw_lora_ckpt_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let final_adapter = dir.join("my_style.safetensors");
+        write_lora_fixture(&dir.join("my_style-step250.safetensors"), None);
+        write_lora_fixture(&final_adapter, None);
+
+        let settings = Settings {
+            data_dir: dir.clone(),
+            ..Settings::from_env()
+        };
+        let resolved = resolve_lora_file(&settings, dir.clone(), Some("my_style.safetensors"))
+            .expect("declared adapter must resolve");
+        assert_eq!(resolved, final_adapter.canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// sc-8830: the shared [`resolve_dense_adapters`] enforces exactly the `max_loras` cap it is
+    /// handed — one shared count guard for every dense family (Wan-VACE / SCAIL-2, both backends).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolve_dense_adapters_honors_the_max_lora_cap() {
+        let dir = std::env::temp_dir().join(format!("sw_dense_cap_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("style.safetensors");
+        write_lora_fixture(&plain, None);
+        let settings = Settings {
+            data_dir: dir.clone(),
+            ..Settings::from_env()
+        };
+
+        // Two LoRAs under a cap of 1 → rejected; the same two under a cap of 2 → accepted.
+        let two: Vec<Value> = (0..2)
+            .map(|_| json!({ "path": plain.to_string_lossy(), "weight": 0.5 }))
+            .collect();
+        let req = request(json!({ "projectId": "p", "loras": two }));
+        assert!(matches!(
+            resolve_dense_adapters(&settings, &req, 1),
+            Err(WorkerError::InvalidPayload(_))
+        ));
+        let specs = resolve_dense_adapters(&settings, &req, 2).expect("under cap resolves");
+        assert_eq!(specs.len(), 2);
+        assert!(specs.iter().all(|s| s.moe_expert.is_none()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// sc-8830: [`non_empty_negative_prompt`] trims and maps empty/whitespace to `None` (so engines
+    /// see "no negative", not the empty string) and passes a real negative through trimmed.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn non_empty_negative_prompt_trims_and_drops_empty() {
+        let empty = request(json!({ "projectId": "p", "negativePrompt": "   " }));
+        assert_eq!(non_empty_negative_prompt(&empty), None);
+        let missing = request(json!({ "projectId": "p" }));
+        assert_eq!(non_empty_negative_prompt(&missing), None);
+        let real = request(json!({ "projectId": "p", "negativePrompt": "  blurry  " }));
+        assert_eq!(non_empty_negative_prompt(&real), Some("blurry".to_owned()));
+    }
+
+    /// sc-8830: the shared [`resolve_mlx_dense_quant`] (Bernini / SCAIL-2) defaults to Q4, honors
+    /// `mlxQuantize: 8` → Q8, and treats `<= 0` as bf16 (`None`) — never defaulting to bf16.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolve_mlx_dense_quant_defaults_q4_and_honors_override() {
+        let default = request(json!({ "projectId": "p" }));
+        assert_eq!(resolve_mlx_dense_quant(&default), Some(Quant::Q4));
+        let q8 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
+        assert_eq!(resolve_mlx_dense_quant(&q8), Some(Quant::Q8));
+        let q4 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
+        assert_eq!(resolve_mlx_dense_quant(&q4), Some(Quant::Q4));
+        let bf16 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 0 } }));
+        assert_eq!(resolve_mlx_dense_quant(&bf16), None);
+        // String forms parse the same way (the payload knob can arrive as a JSON string).
+        let q8_str = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": "8" } }));
+        assert_eq!(resolve_mlx_dense_quant(&q8_str), Some(Quant::Q8));
+    }
+
     /// A locally-converted Wan2.2 TI2V-5B dir if one is present (env override or the
     /// app-managed default), else `None` so the real-weight smoke skips.
     #[cfg(target_os = "macos")]
@@ -8482,6 +11323,756 @@ mod tests {
             .frames
             .iter()
             .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize));
+    }
+
+    /// Real in-process load+generate verification for the Wan2.2 T2V-A14B quant-matrix tiers
+    /// (sc-9942, epic 8506). For each tier subdir present under `$SCENEWORKS_WAN_T2V_14B_TIER_OUT`
+    /// (`bf16/`/`q8/`/`q4/`, e.g. the wan_t2v_14b_tier_build output), loads the tier through the SAME
+    /// engine path a job uses (`run_video_generation`, `quant: None` — the pre-packed config.json is
+    /// authoritative) and denoises a tiny 5-frame clip, asserting the frames come back RGB8-sized and
+    /// NON-degenerate (real pixel variance, so a broken packed load surfaces instead of silent noise).
+    /// This is the on-device evidence that every hosted tier loads packed with no install-time convert
+    /// peak. Runs a few CFG steps WITHOUT the Lightning distill so it is self-contained (no LoRA
+    /// download); output is a coherence check, not a quality bar. `#[ignore]` — needs the built tiers
+    /// (~28–69 GB each) + a big-memory Mac; the cache limit is capped so loading bf16 then q8 then q4
+    /// in one process does not accumulate residue (sc-5567).
+    ///
+    /// ```sh
+    /// export SCENEWORKS_WAN_T2V_14B_TIER_OUT=<tier-out-root>   # holds bf16/ q8/ q4/
+    /// cargo test -p sceneworks-worker --release --lib wan_t2v_14b_tier_real_weights -- --ignored --nocapture
+    /// ```
+    #[cfg(target_os = "macos")]
+    #[ignore = "loads the built Wan2.2 T2V-A14B tiers; run manually on a Mac where they are present"]
+    #[test]
+    fn wan_t2v_14b_tier_real_weights() {
+        let Some(root) = std::env::var_os("SCENEWORKS_WAN_T2V_14B_TIER_OUT").map(PathBuf::from)
+        else {
+            eprintln!(
+                "skipping wan_t2v_14b_tier_real_weights: set SCENEWORKS_WAN_T2V_14B_TIER_OUT"
+            );
+            return;
+        };
+        // Cap the buffer cache so three sequential heavy loads release between tiers (sc-5567).
+        mlx_rs::memory::set_cache_limit(0);
+        let mut verified = 0;
+        for tier in ["bf16", "q8", "q4"] {
+            let dir = root.join(tier);
+            if !wan_tier_is_complete(&dir, WAN_A14B_TIER_FILES) {
+                eprintln!("skipping {tier}: {} is not a complete tier", dir.display());
+                continue;
+            }
+            eprintln!("verifying {tier} tier → {}", dir.display());
+            let input = VideoGenInput {
+                sampler: None,
+                scheduler: None,
+                engine_id: "wan2_2_t2v_14b",
+                model_dir: dir.clone(),
+                // Pre-packed tier: config.json carries the quant; the engine reconstructs the experts
+                // packed and rejects a conflicting override, so load with None (the worker path does
+                // the same in resolve_wan_tier_dir_and_quant).
+                quant: None,
+                prompt: "a calm ocean wave at sunset, cinematic".to_owned(),
+                // A few CFG steps WITHOUT the Lightning distill — enough to exercise the packed
+                // experts + VAE decode and produce non-degenerate frames for a load check.
+                width: 256,
+                height: 256,
+                frames: 5,
+                fps: 16,
+                steps: Some(6),
+                guidance: Some(5.0),
+                seed: 7,
+                ..VideoGenInput::default()
+            };
+            let cancel = CancelFlag::new();
+            let mut steps = 0u32;
+            let mut on_progress = |progress: Progress| {
+                if let Progress::Step { .. } = progress {
+                    steps += 1;
+                }
+            };
+            let decoded = run_video_generation(input, &cancel, &mut on_progress)
+                .unwrap_or_else(|e| panic!("{tier} tier T2V generation failed: {e:?}"));
+            // The engine's temporal VAE fixes the decoded frame count (a 5-latent-frame request
+            // decodes to 8 RGB frames for the A14B); assert a real multi-frame clip, not an exact
+            // count.
+            assert!(
+                decoded.frames.len() > 1,
+                "{tier}: got {} frames, expected a multi-frame clip",
+                decoded.frames.len()
+            );
+            assert!(steps > 0, "{tier}: denoise progress streamed");
+            assert!(
+                decoded
+                    .frames
+                    .iter()
+                    .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize),
+                "{tier}: frames are RGB8-sized"
+            );
+            // Non-degenerate: a broken packed load tends to decode to a flat/NaN frame. Require real
+            // spatial variance in the first frame.
+            let f0 = &decoded.frames[0];
+            let mean = f0.pixels.iter().map(|&p| p as f64).sum::<f64>() / f0.pixels.len() as f64;
+            let var = f0
+                .pixels
+                .iter()
+                .map(|&p| (p as f64 - mean).powi(2))
+                .sum::<f64>()
+                / f0.pixels.len() as f64;
+            assert!(
+                var.sqrt() > 3.0,
+                "{tier}: frame 0 looks degenerate (std {:.2}) — packed load likely broken",
+                var.sqrt()
+            );
+            mlx_rs::memory::clear_cache();
+            verified += 1;
+        }
+        assert!(
+            verified > 0,
+            "no tier subdirs found under SCENEWORKS_WAN_T2V_14B_TIER_OUT"
+        );
+        eprintln!("verified {verified} tier(s)");
+    }
+
+    /// Locate a tier subdir (`q4`/`q8`/`bf16`) for a hosted Wan A14B mirror, honoring an explicit
+    /// env override first, then the HF hub cache (`~/.cache/huggingface/hub/models--<repo>/snapshots/
+    /// <rev>/<tier>`). Returns the tier dir only when it is a COMPLETE A14B tier (the six-file set),
+    /// else `None` so the on-device test skips cleanly. Used by
+    /// [`wan_a14b_lightning_additive_ondevice`] to drive the real q4 tier + Lightning additive path
+    /// (sc-10049, epic 10043) exactly as a job does.
+    #[cfg(target_os = "macos")]
+    fn wan_a14b_cached_tier(env_var: &str, repo: &str, tier: &str) -> Option<PathBuf> {
+        if let Ok(root) = std::env::var(env_var) {
+            let dir = PathBuf::from(root.trim()).join(tier);
+            if wan_tier_is_complete(&dir, WAN_A14B_TIER_FILES) {
+                return Some(dir);
+            }
+        }
+        // HF hub cache: models--<org>--<name>/snapshots/<rev>/<tier>.
+        let home = std::env::var("HOME").ok()?;
+        let cache = PathBuf::from(&home)
+            .join(".cache/huggingface/hub")
+            .join(format!("models--{}", repo.replace('/', "--")))
+            .join("snapshots");
+        let snapshots = std::fs::read_dir(&cache).ok()?;
+        for entry in snapshots.flatten() {
+            let dir = entry.path().join(tier);
+            if wan_tier_is_complete(&dir, WAN_A14B_TIER_FILES) {
+                return Some(dir);
+            }
+        }
+        None
+    }
+
+    /// Resolve the cached Lightning distill high/low pair for an A14B engine straight from the HF
+    /// hub cache (the same layout [`resolve_lightning_loras`] reads under `data_dir`, but pointed at
+    /// `~/.cache/huggingface`). Returns `None` when the pair is absent so the on-device test skips.
+    #[cfg(target_os = "macos")]
+    fn wan_a14b_cached_lightning(engine_id: &str) -> Option<(PathBuf, PathBuf)> {
+        let subdir = match engine_id {
+            "wan2_2_t2v_14b" => "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
+            "wan2_2_i2v_14b" => "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1",
+            _ => return None,
+        };
+        let home = std::env::var("HOME").ok()?;
+        let cache = PathBuf::from(&home)
+            .join(".cache/huggingface/hub/models--lightx2v--Wan2.2-Lightning/snapshots");
+        for entry in std::fs::read_dir(&cache).ok()?.flatten() {
+            let base = entry.path().join(subdir);
+            let high = base.join("high_noise_model.safetensors");
+            let low = base.join("low_noise_model.safetensors");
+            if high.is_file() && low.is_file() {
+                return Some((high, low));
+            }
+        }
+        None
+    }
+
+    /// **sc-10049 (epic 10043) — the on-device close of the loop on sc-10030.** Drives the REAL
+    /// Wan2.2 T2V-A14B **q4** tier through the exact engine path a job uses (`run_video_generation`
+    /// → `gen_core::load` → `Generator::generate`) with the Lightning distill pair installed as
+    /// **forward-time additive adapters** on the pre-quantized (packed) experts. This is the exact
+    /// case that FAILED before this epic with the mlx-gen `model.rs:614` rejection —
+    /// `"LoRA adapters on a pre-quantized snapshot need dequantize-then-merge … not yet wired"` —
+    /// and must now complete a 4-step distilled clip with the base STAYING packed (the low-memory-Mac
+    /// guarantee this epic exists for: NO ~28 GB/expert dense dequant spike).
+    ///
+    /// Three sub-cases on the same cached q4 tier:
+    ///   1. **Lightning ON, 4 steps** — the Lightning high/low pair (per-expert tagged) as additive
+    ///      adapters; asserts a coherent multi-frame clip (the additive path completed, no 614 error).
+    ///   2. **Lightning OFF, multi-step CFG** — no adapters, several CFG steps; the native recipe
+    ///      still runs on the packed tier (regression guard the toggle-off path is intact).
+    ///   3. **Lightning ON + a plain user LoRA** — the distill pair PLUS a single-file plain LoRA
+    ///      (the additive user-LoRA path on a packed base). A real Civitai-style LoRA is used when
+    ///      `SCENEWORKS_WAN_USER_LORA` points at one; otherwise the low-noise Lightning half doubles
+    ///      as a valid single-file plain-LoRA fixture (same PEFT `diffusion_model.`-prefixed keys),
+    ///      still exercising the plain-LoRA additive install onto the packed experts.
+    ///
+    /// Peak RSS is sampled around each generation and printed so the run's log is the memory evidence
+    /// (a dequant-then-merge of a 14B bf16 expert would spike ~28 GB/expert; the packed q4 path holds
+    /// far below that). `#[ignore]` — needs the cached q4 tier + the Lightning pair + a Metal device.
+    ///
+    /// ```sh
+    /// # tiers + Lightning are auto-discovered in ~/.cache/huggingface; override the tier root with
+    /// # SCENEWORKS_WAN_T2V_14B_TIER_OUT and a user LoRA with SCENEWORKS_WAN_USER_LORA if desired.
+    /// cargo test -p sceneworks-worker --release --lib \
+    ///   wan_a14b_lightning_additive_ondevice -- --ignored --nocapture
+    /// ```
+    #[cfg(target_os = "macos")]
+    #[ignore = "loads the real Wan2.2 T2V-A14B q4 tier + Lightning pair; run manually on a Mac (sc-10049)"]
+    #[test]
+    fn wan_a14b_lightning_additive_ondevice() {
+        const ENGINE: &str = "wan2_2_t2v_14b";
+        let Some(tier) = wan_a14b_cached_tier(
+            "SCENEWORKS_WAN_T2V_14B_TIER_OUT",
+            "SceneWorks/wan2.2-t2v-a14b-mlx",
+            "q4",
+        ) else {
+            eprintln!(
+                "skipping wan_a14b_lightning_additive_ondevice: no complete q4 T2V-A14B tier in \
+                 ~/.cache/huggingface (or SCENEWORKS_WAN_T2V_14B_TIER_OUT/q4)"
+            );
+            return;
+        };
+        let Some((light_high, light_low)) = wan_a14b_cached_lightning(ENGINE) else {
+            eprintln!(
+                "skipping wan_a14b_lightning_additive_ondevice: Lightning distill pair not cached"
+            );
+            return;
+        };
+        eprintln!("q4 tier   → {}", tier.display());
+        eprintln!("lightning → {}", light_high.display());
+
+        // Cap the buffer cache so the sequential heavy loads release between sub-cases (sc-5567).
+        mlx_rs::memory::set_cache_limit(0);
+
+        // Sub-case common frame/coherence assertions.
+        fn assert_coherent(label: &str, decoded: &DecodedVideo, steps: u32) {
+            assert!(
+                decoded.frames.len() > 1,
+                "{label}: got {} frames, expected a multi-frame clip",
+                decoded.frames.len()
+            );
+            assert!(steps > 0, "{label}: denoise progress streamed");
+            assert!(
+                decoded
+                    .frames
+                    .iter()
+                    .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize),
+                "{label}: frames are RGB8-sized"
+            );
+            let f0 = &decoded.frames[0];
+            let mean = f0.pixels.iter().map(|&p| p as f64).sum::<f64>() / f0.pixels.len() as f64;
+            let var = f0
+                .pixels
+                .iter()
+                .map(|&p| (p as f64 - mean).powi(2))
+                .sum::<f64>()
+                / f0.pixels.len() as f64;
+            assert!(
+                var.sqrt() > 3.0,
+                "{label}: frame 0 looks degenerate (std {:.2}) — additive load likely broken",
+                var.sqrt()
+            );
+            eprintln!(
+                "{label}: OK — {} frames, {steps} steps, frame0 std {:.2}",
+                decoded.frames.len(),
+                var.sqrt()
+            );
+        }
+
+        let run = |label: &str, adapters: Vec<AdapterSpec>, steps: u32, guidance: Option<f32>| {
+            let input = VideoGenInput {
+                sampler: None,
+                scheduler: None,
+                engine_id: ENGINE,
+                model_dir: tier.clone(),
+                // Pre-packed q4 tier: config.json is authoritative, so load with None (the worker
+                // path does the same). Adapters install ADDITIVELY on the packed experts.
+                quant: None,
+                adapters,
+                prompt: "a calm ocean wave at sunset, cinematic".to_owned(),
+                width: 256,
+                height: 256,
+                frames: 5,
+                fps: 16,
+                steps: Some(steps),
+                guidance,
+                seed: 7,
+                ..VideoGenInput::default()
+            };
+            let cancel = CancelFlag::new();
+            let mut n_steps = 0u32;
+            let mut on_progress = |p: Progress| {
+                if let Progress::Step { .. } = p {
+                    n_steps += 1;
+                }
+            };
+            // Reset the MLX GPU allocator's peak counter so `get_peak_memory` below reports THIS
+            // sub-case's peak — the number a dense dequant-then-merge would blow up (a 14B bf16
+            // expert dequant is ~28 GB/expert; the packed q4 additive path stays far below that).
+            mlx_rs::memory::reset_peak_memory();
+            let decoded = run_video_generation(input, &cancel, &mut on_progress)
+                .unwrap_or_else(|e| panic!("{label} generation failed: {e:?}"));
+            assert_coherent(label, &decoded, n_steps);
+            let mlx_peak_gib =
+                mlx_rs::memory::get_peak_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
+            eprintln!(
+                "{label}: MLX peak GPU mem {mlx_peak_gib:.2} GiB, process RSS {} MiB",
+                peak_rss_mib()
+            );
+            // Guard: the packed q4 additive path must hold well under a dense dequant spike. Two
+            // dequantized 14B bf16 experts alone would be ~56 GB resident; assert the MLX peak stays
+            // below a generous 40 GB ceiling so a regression that dequantizes-then-merges is caught.
+            assert!(
+                mlx_peak_gib < 40.0,
+                "{label}: MLX peak {mlx_peak_gib:.2} GiB — a dense per-expert dequant spike \
+                 (~28 GB/expert) appears to have happened; the packed q4 additive path regressed"
+            );
+            mlx_rs::memory::clear_cache();
+        };
+
+        // 1) Lightning ON, 4 steps — the exact pre-epic model.rs:614 failure case, now additive.
+        run(
+            "q4+lightning(4-step)",
+            vec![
+                moe_adapter(light_high.clone(), 1.0, AdapterKind::Lora, MoeExpert::High),
+                moe_adapter(light_low.clone(), 1.0, AdapterKind::Lora, MoeExpert::Low),
+            ],
+            4,
+            None,
+        );
+
+        // 2) Lightning OFF — native multi-step CFG on the packed tier (regression guard).
+        run("q4+lightning-off(6-step CFG)", Vec::new(), 6, Some(5.0));
+
+        // 3) Lightning ON + a plain single-file user LoRA (additive user-LoRA on a packed base).
+        let user_lora = std::env::var("SCENEWORKS_WAN_USER_LORA")
+            .ok()
+            .map(|s| PathBuf::from(s.trim().to_owned()))
+            .filter(|p| p.is_file())
+            // Fall back to the low-noise Lightning half as a valid single-file plain LoRA fixture.
+            .unwrap_or_else(|| light_low.clone());
+        eprintln!("user LoRA → {}", user_lora.display());
+        run(
+            "q4+lightning+userLoRA",
+            vec![
+                moe_adapter(light_high.clone(), 1.0, AdapterKind::Lora, MoeExpert::High),
+                moe_adapter(light_low.clone(), 1.0, AdapterKind::Lora, MoeExpert::Low),
+                // Single-file → shared across both experts (moe_expert: None), the plain-LoRA
+                // additive path (the exact user-Civitai-LoRA shape).
+                AdapterSpec::new(user_lora, 0.6, AdapterKind::Lora),
+            ],
+            4,
+            None,
+        );
+    }
+
+    /// Best-effort current-process resident set size in MiB, read dependency-free via `ps -o rss=`
+    /// (macOS reports RSS in KiB). Used only to print memory evidence in the on-device tests — a
+    /// coarse guard that the packed q4 additive path holds well below a dense per-expert dequant
+    /// spike (~28 GB/expert). Returns 0 when `ps` is unavailable / unparsable (evidence-only).
+    #[cfg(target_os = "macos")]
+    fn peak_rss_mib() -> u64 {
+        let pid = std::process::id().to_string();
+        let out = match std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &pid])
+            .output()
+        {
+            Ok(o) if o.status.success() => o.stdout,
+            _ => return 0,
+        };
+        String::from_utf8_lossy(&out)
+            .trim()
+            .parse::<u64>()
+            .map(|kib| kib / 1024)
+            .unwrap_or(0)
+    }
+
+    /// **sc-10049 (epic 10043) — the I2V sibling of [`wan_a14b_lightning_additive_ondevice`].**
+    /// Drives the REAL Wan2.2 **I2V**-A14B **q4** tier with a synthesized start frame + the Lightning
+    /// distill pair installed additively on the packed experts. Same close-the-loop assertion as the
+    /// T2V case (the pre-epic `model.rs:614` rejection is gone; a 4-step distilled clip completes with
+    /// the base staying packed), for the image-to-video engine. A start image is REQUIRED for I2V, so
+    /// the test builds a small gradient RGB8 frame (no asset store needed) and passes it as the
+    /// `Conditioning::Reference`. Prints the MLX GPU peak per sub-case as the memory evidence and
+    /// asserts it holds below the dense-dequant ceiling. `#[ignore]` — needs the cached I2V q4 tier +
+    /// the I2V Lightning pair + a Metal device.
+    ///
+    /// ```sh
+    /// cargo test -p sceneworks-worker --release --lib \
+    ///   wan_i2v_a14b_lightning_additive_ondevice -- --ignored --nocapture
+    /// ```
+    #[cfg(target_os = "macos")]
+    #[ignore = "loads the real Wan2.2 I2V-A14B q4 tier + Lightning pair; run manually on a Mac (sc-10049)"]
+    #[test]
+    fn wan_i2v_a14b_lightning_additive_ondevice() {
+        const ENGINE: &str = "wan2_2_i2v_14b";
+        let Some(tier) = wan_a14b_cached_tier(
+            "SCENEWORKS_WAN_I2V_14B_TIER_OUT",
+            "SceneWorks/wan2.2-i2v-a14b-mlx",
+            "q4",
+        ) else {
+            eprintln!(
+                "skipping wan_i2v_a14b_lightning_additive_ondevice: no complete q4 I2V-A14B tier"
+            );
+            return;
+        };
+        let Some((light_high, light_low)) = wan_a14b_cached_lightning(ENGINE) else {
+            eprintln!(
+                "skipping wan_i2v_a14b_lightning_additive_ondevice: Lightning pair not cached"
+            );
+            return;
+        };
+        eprintln!("q4 I2V tier → {}", tier.display());
+
+        mlx_rs::memory::set_cache_limit(0);
+
+        // A small non-flat start frame (diagonal gradient) so the VAE-encoded `y` is meaningful.
+        let (w, h) = (256u32, 256u32);
+        let mut pixels = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                pixels.push((x % 256) as u8);
+                pixels.push((y % 256) as u8);
+                pixels.push(((x + y) % 256) as u8);
+            }
+        }
+        let start = gen_core::Image {
+            width: w,
+            height: h,
+            pixels,
+        };
+        let conditioning = vec![Conditioning::Reference {
+            image: start,
+            strength: None,
+        }];
+
+        let run = |label: &str, adapters: Vec<AdapterSpec>, steps: u32, guidance: Option<f32>| {
+            let input = VideoGenInput {
+                sampler: None,
+                scheduler: None,
+                engine_id: ENGINE,
+                model_dir: tier.clone(),
+                quant: None,
+                adapters,
+                conditioning: conditioning.clone(),
+                prompt: "a calm ocean wave at sunset, cinematic".to_owned(),
+                width: w,
+                height: h,
+                frames: 5,
+                fps: 16,
+                steps: Some(steps),
+                guidance,
+                seed: 7,
+                ..VideoGenInput::default()
+            };
+            let cancel = CancelFlag::new();
+            let mut n_steps = 0u32;
+            let mut on_progress = |p: Progress| {
+                if let Progress::Step { .. } = p {
+                    n_steps += 1;
+                }
+            };
+            mlx_rs::memory::reset_peak_memory();
+            let decoded = run_video_generation(input, &cancel, &mut on_progress)
+                .unwrap_or_else(|e| panic!("{label} I2V generation failed: {e:?}"));
+            assert!(
+                decoded.frames.len() > 1,
+                "{label}: expected a multi-frame clip, got {}",
+                decoded.frames.len()
+            );
+            assert!(n_steps > 0, "{label}: denoise progress streamed");
+            assert!(
+                decoded
+                    .frames
+                    .iter()
+                    .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize),
+                "{label}: frames RGB8-sized"
+            );
+            let f0 = &decoded.frames[0];
+            let mean = f0.pixels.iter().map(|&p| p as f64).sum::<f64>() / f0.pixels.len() as f64;
+            let var = f0
+                .pixels
+                .iter()
+                .map(|&p| (p as f64 - mean).powi(2))
+                .sum::<f64>()
+                / f0.pixels.len() as f64;
+            assert!(
+                var.sqrt() > 3.0,
+                "{label}: frame 0 degenerate (std {:.2})",
+                var.sqrt()
+            );
+            let mlx_peak_gib =
+                mlx_rs::memory::get_peak_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
+            eprintln!(
+                "{label}: OK — {} frames, {n_steps} steps, std {:.2}, MLX peak {mlx_peak_gib:.2} GiB",
+                decoded.frames.len(),
+                var.sqrt()
+            );
+            assert!(
+                mlx_peak_gib < 40.0,
+                "{label}: MLX peak {mlx_peak_gib:.2} GiB — dense dequant spike; q4 additive regressed"
+            );
+            mlx_rs::memory::clear_cache();
+        };
+
+        // I2V q4 Lightning ON (4-step) — the close-the-loop case for the image-to-video engine.
+        run(
+            "i2v-q4+lightning(4-step)",
+            vec![
+                moe_adapter(light_high, 1.0, AdapterKind::Lora, MoeExpert::High),
+                moe_adapter(light_low, 1.0, AdapterKind::Lora, MoeExpert::Low),
+            ],
+            4,
+            None,
+        );
+    }
+
+    /// Real in-process load+generate verification for the Wan2.2 **TI2V-5B** quant-matrix tiers
+    /// (sc-9941, epic 8506) — the single-expert sibling of [`wan_t2v_14b_tier_real_weights`]. For each
+    /// tier subdir present under `$SCENEWORKS_WAN_TI2V_5B_TIER_OUT` (`bf16/`/`q8/`/`q4/`, the
+    /// wan_ti2v_5b_tier_build output), loads the tier through the SAME engine path a job uses
+    /// (`run_video_generation`, `quant: None` — the pre-packed config.json is authoritative) and
+    /// denoises a tiny text-to-video clip, asserting the frames come back RGB8-sized and NON-degenerate
+    /// (real pixel variance, so a broken packed load surfaces instead of silent noise). This is the
+    /// on-device evidence that every hosted 5B tier loads packed (single `model.safetensors`
+    /// transformer) with no install-time convert peak. Runs a few CFG steps so it is self-contained;
+    /// output is a coherence check, not a quality bar. `#[ignore]` — needs the built tiers + a Metal
+    /// device; the cache limit is capped so loading bf16 then q8 then q4 in one process does not
+    /// accumulate residue (sc-5567).
+    ///
+    /// ```sh
+    /// export SCENEWORKS_WAN_TI2V_5B_TIER_OUT=<tier-out-root>   # holds bf16/ q8/ q4/
+    /// cargo test -p sceneworks-worker --release --lib wan_ti2v_5b_tier_real_weights -- --ignored --nocapture
+    /// ```
+    #[cfg(target_os = "macos")]
+    #[ignore = "loads the built Wan2.2 TI2V-5B tiers; run manually on a Mac where they are present"]
+    #[test]
+    fn wan_ti2v_5b_tier_real_weights() {
+        let Some(root) = std::env::var_os("SCENEWORKS_WAN_TI2V_5B_TIER_OUT").map(PathBuf::from)
+        else {
+            eprintln!(
+                "skipping wan_ti2v_5b_tier_real_weights: set SCENEWORKS_WAN_TI2V_5B_TIER_OUT"
+            );
+            return;
+        };
+        // Cap the buffer cache so three sequential loads release between tiers (sc-5567).
+        mlx_rs::memory::set_cache_limit(0);
+        let mut verified = 0;
+        for tier in ["bf16", "q8", "q4"] {
+            let dir = root.join(tier);
+            if !wan_tier_is_complete(&dir, WAN_TI2V_5B_TIER_FILES) {
+                eprintln!("skipping {tier}: {} is not a complete tier", dir.display());
+                continue;
+            }
+            eprintln!("verifying {tier} tier → {}", dir.display());
+            let input = VideoGenInput {
+                sampler: None,
+                scheduler: None,
+                engine_id: "wan2_2_ti2v_5b",
+                model_dir: dir.clone(),
+                // Pre-packed tier: config.json carries the quant; the engine reconstructs the
+                // transformer packed and rejects a conflicting override, so load with None (the worker
+                // path does the same in resolve_wan_tier_dir_and_quant).
+                quant: None,
+                prompt: "a calm ocean wave at sunset, cinematic".to_owned(),
+                width: 256,
+                height: 256,
+                frames: 5,
+                fps: 24,
+                steps: Some(8),
+                seed: 7,
+                ..VideoGenInput::default()
+            };
+            let cancel = CancelFlag::new();
+            let mut steps = 0u32;
+            let mut on_progress = |progress: Progress| {
+                if let Progress::Step { .. } = progress {
+                    steps += 1;
+                }
+            };
+            let decoded = run_video_generation(input, &cancel, &mut on_progress)
+                .unwrap_or_else(|e| panic!("{tier} tier TI2V-5B generation failed: {e:?}"));
+            assert!(
+                decoded.frames.len() > 1,
+                "{tier}: got {} frames, expected a multi-frame clip",
+                decoded.frames.len()
+            );
+            assert!(steps > 0, "{tier}: denoise progress streamed");
+            assert!(
+                decoded
+                    .frames
+                    .iter()
+                    .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize),
+                "{tier}: frames are RGB8-sized"
+            );
+            // Non-degenerate: a broken packed load tends to decode to a flat/NaN frame. Require real
+            // spatial variance in the first frame.
+            let f0 = &decoded.frames[0];
+            let mean = f0.pixels.iter().map(|&p| p as f64).sum::<f64>() / f0.pixels.len() as f64;
+            let var = f0
+                .pixels
+                .iter()
+                .map(|&p| (p as f64 - mean).powi(2))
+                .sum::<f64>()
+                / f0.pixels.len() as f64;
+            assert!(
+                var.sqrt() > 3.0,
+                "{tier}: frame 0 looks degenerate (std {:.2}) — packed load likely broken",
+                var.sqrt()
+            );
+            mlx_rs::memory::clear_cache();
+            verified += 1;
+        }
+        assert!(
+            verified > 0,
+            "no tier subdirs found under SCENEWORKS_WAN_TI2V_5B_TIER_OUT"
+        );
+        eprintln!("verified {verified} tier(s)");
+    }
+
+    /// Real in-process load+generate verification for the Wan2.2 **I2V-A14B** quant-matrix tiers
+    /// (sc-9943, epic 8506) — the image→video sibling of [`wan_t2v_14b_tier_real_weights`]. For each
+    /// tier subdir present under `$SCENEWORKS_WAN_I2V_14B_TIER_OUT` (`bf16/`/`q8/`/`q4/`, the
+    /// wan_i2v_14b_tier_build output), loads the tier through the SAME engine path a job uses
+    /// (`run_video_generation`, `quant: None` — the pre-packed config.json is authoritative) and,
+    /// conditioning on a synthetic START IMAGE (the I2V in_dim-36 image-concat path a T2V run does not
+    /// exercise), denoises a tiny clip — asserting the frames come back RGB8-sized and NON-degenerate
+    /// (real pixel variance, so a broken packed load or a mis-wired image-cond path surfaces instead of
+    /// silent noise). This is the on-device evidence that every hosted I2V tier loads packed with no
+    /// install-time convert peak AND drives the image conditioning. Runs a few CFG steps WITHOUT the
+    /// Lightning distill so it is self-contained (no LoRA download); output is a coherence check, not a
+    /// quality bar. `#[ignore]` — needs the built tiers (~28–69 GB each) + a big-memory Mac; the cache
+    /// limit is capped so loading bf16 then q8 then q4 in one process does not accumulate residue
+    /// (sc-5567).
+    ///
+    /// ```sh
+    /// export SCENEWORKS_WAN_I2V_14B_TIER_OUT=<tier-out-root>   # holds bf16/ q8/ q4/
+    /// cargo test -p sceneworks-worker --release --lib wan_i2v_14b_tier_real_weights -- --ignored --nocapture
+    /// ```
+    #[cfg(target_os = "macos")]
+    #[ignore = "loads the built Wan2.2 I2V-A14B tiers; run manually on a Mac where they are present"]
+    #[test]
+    fn wan_i2v_14b_tier_real_weights() {
+        let Some(root) = std::env::var_os("SCENEWORKS_WAN_I2V_14B_TIER_OUT").map(PathBuf::from)
+        else {
+            eprintln!(
+                "skipping wan_i2v_14b_tier_real_weights: set SCENEWORKS_WAN_I2V_14B_TIER_OUT"
+            );
+            return;
+        };
+        const W: u32 = 256;
+        const H: u32 = 256;
+        // A non-degenerate synthetic start frame (a smooth two-axis gradient) so the image-concat
+        // conditioning carries real content the engine can propagate — fit through the SAME
+        // `fit_engine_image` the I2V resolve path calls, so the reference reaches the engine exactly
+        // as a job's would.
+        let source = {
+            let mut pixels = Vec::with_capacity((W * H * 3) as usize);
+            for y in 0..H {
+                for x in 0..W {
+                    pixels.push((x * 255 / W) as u8);
+                    pixels.push((y * 255 / H) as u8);
+                    pixels.push(128);
+                }
+            }
+            crate::image_jobs::fit_engine_image(
+                Image {
+                    width: W,
+                    height: H,
+                    pixels,
+                },
+                W,
+                H,
+                "pad",
+            )
+            .expect("fit synthetic I2V start frame")
+        };
+        // Cap the buffer cache so three sequential heavy loads release between tiers (sc-5567).
+        mlx_rs::memory::set_cache_limit(0);
+        let mut verified = 0;
+        for tier in ["bf16", "q8", "q4"] {
+            let dir = root.join(tier);
+            if !wan_tier_is_complete(&dir, WAN_A14B_TIER_FILES) {
+                eprintln!("skipping {tier}: {} is not a complete tier", dir.display());
+                continue;
+            }
+            eprintln!("verifying {tier} tier → {}", dir.display());
+            let input = VideoGenInput {
+                sampler: None,
+                scheduler: None,
+                engine_id: "wan2_2_i2v_14b",
+                model_dir: dir.clone(),
+                // Pre-packed tier: config.json carries the quant; the engine reconstructs the experts
+                // packed and rejects a conflicting override, so load with None (the worker path does
+                // the same in resolve_wan_tier_dir_and_quant).
+                quant: None,
+                // The I2V-defining input: a source frame the engine VAE-encodes into its channel-concat
+                // conditioning (the in_dim-36 path). Without it the I2V engine errors, so this also
+                // proves the image-cond wiring on each packed tier.
+                conditioning: vec![Conditioning::Reference {
+                    image: source.clone(),
+                    strength: None,
+                }],
+                prompt: "the camera slowly pushes in, cinematic".to_owned(),
+                // A few CFG steps WITHOUT the Lightning distill — enough to exercise the packed
+                // experts + VAE decode and produce non-degenerate frames for a load check.
+                width: W,
+                height: H,
+                frames: 5,
+                fps: 16,
+                steps: Some(6),
+                guidance: Some(5.0),
+                seed: 7,
+                ..VideoGenInput::default()
+            };
+            let cancel = CancelFlag::new();
+            let mut steps = 0u32;
+            let mut on_progress = |progress: Progress| {
+                if let Progress::Step { .. } = progress {
+                    steps += 1;
+                }
+            };
+            let decoded = run_video_generation(input, &cancel, &mut on_progress)
+                .unwrap_or_else(|e| panic!("{tier} tier I2V generation failed: {e:?}"));
+            // The engine's temporal VAE fixes the decoded frame count (a 5-latent-frame request
+            // decodes to a multi-frame clip for the A14B); assert a real multi-frame clip.
+            assert!(
+                decoded.frames.len() > 1,
+                "{tier}: got {} frames, expected a multi-frame clip",
+                decoded.frames.len()
+            );
+            assert!(steps > 0, "{tier}: denoise progress streamed");
+            assert!(
+                decoded
+                    .frames
+                    .iter()
+                    .all(|f| f.pixels.len() == (f.width * f.height * 3) as usize),
+                "{tier}: frames are RGB8-sized"
+            );
+            // Non-degenerate: a broken packed load or dropped image-cond tends to decode to a
+            // flat/NaN frame. Require real spatial variance in the first frame.
+            let f0 = &decoded.frames[0];
+            let mean = f0.pixels.iter().map(|&p| p as f64).sum::<f64>() / f0.pixels.len() as f64;
+            let var = f0
+                .pixels
+                .iter()
+                .map(|&p| (p as f64 - mean).powi(2))
+                .sum::<f64>()
+                / f0.pixels.len() as f64;
+            assert!(
+                var.sqrt() > 3.0,
+                "{tier}: frame 0 looks degenerate (std {:.2}) — packed load likely broken",
+                var.sqrt()
+            );
+            mlx_rs::memory::clear_cache();
+            verified += 1;
+        }
+        assert!(
+            verified > 0,
+            "no tier subdirs found under SCENEWORKS_WAN_I2V_14B_TIER_OUT"
+        );
+        eprintln!("verified {verified} tier(s)");
     }
 
     /// Real-weight image→video fit smoke (sc-6139): proves the Crop/Pad pre-fit reaches the
@@ -8731,19 +12322,29 @@ mod tests {
             }
         }
         let root = std::env::temp_dir().join(format!("sw_ltx_bundle_{}", Uuid::new_v4().simple()));
-        let (q4, q8) = (root.join("q4"), root.join("q8"));
+        let (q4, q8, bf16) = (root.join("q4"), root.join("q8"), root.join("bf16"));
         write_complete_ltx_dir(&q4);
         write_complete_ltx_dir(&q8);
+        write_complete_ltx_dir(&bf16);
         std::fs::create_dir_all(root.join("gemma")).unwrap();
 
-        // Default prefers q4; mlxQuantize: 8 prefers q8.
+        // Each tier order prefers its own subdir (default q4, mlxQuantize:8 q8, mlxQuantize<=0 bf16).
         assert_eq!(
-            ltx_bundle_subdir(&root, false).as_deref(),
+            ltx_bundle_subdir(&root, &["q4", "q8"]).as_deref(),
             Some(q4.as_path())
         );
         assert_eq!(
-            ltx_bundle_subdir(&root, true).as_deref(),
+            ltx_bundle_subdir(&root, &["q8", "q4"]).as_deref(),
             Some(q8.as_path())
+        );
+        assert_eq!(
+            ltx_bundle_subdir(&root, &["bf16", "q8", "q4"]).as_deref(),
+            Some(bf16.as_path())
+        );
+        // The default order never loads the huge bf16 tier even when present.
+        assert_eq!(
+            ltx_bundle_subdir(&root, &["q4", "q8"]).as_deref(),
+            Some(q4.as_path())
         );
 
         // The gemma encoder is found as a sibling of the loaded quant dir.
@@ -8752,21 +12353,141 @@ mod tests {
             Some(root.join("gemma").as_path())
         );
 
-        // An incomplete preferred subdir falls back to the complete sibling.
+        // An incomplete preferred subdir falls back to the complete sibling (q8 → q4, bf16 → q8).
         std::fs::remove_file(q8.join("vocoder.safetensors")).unwrap();
         assert_eq!(
-            ltx_bundle_subdir(&root, true).as_deref(),
+            ltx_bundle_subdir(&root, &["q8", "q4"]).as_deref(),
+            Some(q4.as_path())
+        );
+        std::fs::remove_file(bf16.join("vocoder.safetensors")).unwrap();
+        assert_eq!(
+            ltx_bundle_subdir(&root, &["bf16", "q8", "q4"]).as_deref(),
             Some(q4.as_path())
         );
 
         // No complete subdir → None; no gemma sibling → None.
         let bare = std::env::temp_dir().join(format!("sw_ltx_bare_{}", Uuid::new_v4().simple()));
         std::fs::create_dir_all(bare.join("q4")).unwrap();
-        assert!(ltx_bundle_subdir(&bare, false).is_none());
+        assert!(ltx_bundle_subdir(&bare, &["q4", "q8"]).is_none());
         assert!(bundled_ltx_gemma_dir(&bare.join("q4")).is_none());
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    /// Lay down a complete Gemma-3 text-encoder snapshot at `dir`: `config.json`, a two-shard
+    /// `model.safetensors.index.json`, and the shards it maps. Mirrors the real bundle `gemma/` so the
+    /// completeness + eros-resolution tests are hermetic.
+    #[cfg(target_os = "macos")]
+    fn write_complete_gemma_dir(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        std::fs::write(
+            dir.join("model.safetensors.index.json"),
+            br#"{"weight_map":{"a":"model-00001-of-00002.safetensors","b":"model-00002-of-00002.safetensors"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("model-00001-of-00002.safetensors"), b"x").unwrap();
+        std::fs::write(dir.join("model-00002-of-00002.safetensors"), b"x").unwrap();
+    }
+
+    /// `ltx_gemma_dir_is_complete`: needs `config.json` + every shard the index maps (or a lone
+    /// single-file checkpoint); a missing shard, missing config, or bad index all fail.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_gemma_completeness_requires_config_and_all_shards() {
+        let root = std::env::temp_dir().join(format!("sw_gemma_ok_{}", Uuid::new_v4().simple()));
+        write_complete_gemma_dir(&root);
+        assert!(ltx_gemma_dir_is_complete(&root));
+
+        // A missing shard the index references → incomplete (a partial download must not pass).
+        std::fs::remove_file(root.join("model-00002-of-00002.safetensors")).unwrap();
+        assert!(!ltx_gemma_dir_is_complete(&root));
+
+        // Missing config.json → incomplete even with weights present.
+        std::fs::write(root.join("model-00002-of-00002.safetensors"), b"x").unwrap();
+        std::fs::remove_file(root.join("config.json")).unwrap();
+        assert!(!ltx_gemma_dir_is_complete(&root));
+
+        // Single-file checkpoint (no index) is complete once config + the lone weights file exist.
+        let single = std::env::temp_dir().join(format!("sw_gemma_1f_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&single).unwrap();
+        std::fs::write(single.join("config.json"), b"{}").unwrap();
+        assert!(!ltx_gemma_dir_is_complete(&single));
+        std::fs::write(single.join("model.safetensors"), b"x").unwrap();
+        assert!(ltx_gemma_dir_is_complete(&single));
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&single);
+    }
+
+    /// `resolve_ltx_eros_gemma_dir`: a complete `models/mlx/gemma` sibling of the eros checkpoint wins;
+    /// an incomplete/absent sibling with no bundle snapshot → `None` (provider surfaces the clear
+    /// "set LTX_GEMMA_DIR" error). Skipped when an operator `$LTX_GEMMA_DIR` is set (the override path
+    /// returns `None` by design, exercised by [`resolve_bundled_ltx_gemma_dir`]'s own coverage).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolve_ltx_eros_gemma_prefers_local_sibling() {
+        if std::env::var_os("LTX_GEMMA_DIR").is_some() {
+            return;
+        }
+        let data = std::env::temp_dir().join(format!("sw_eros_gemma_{}", Uuid::new_v4().simple()));
+        let mlx = data.join("models").join("mlx");
+        let eros = mlx.join("ltx_2_3_eros");
+        std::fs::create_dir_all(&eros).unwrap();
+        let settings = Settings {
+            data_dir: data.clone(),
+            ..Settings::from_env()
+        };
+
+        // No sibling gemma and no bundle snapshot in this fresh data dir → None.
+        assert!(resolve_ltx_eros_gemma_dir(&settings, &eros).is_none());
+
+        // A complete `models/mlx/gemma` sibling is resolved as the eros TE.
+        let gemma = mlx.join("gemma");
+        write_complete_gemma_dir(&gemma);
+        assert_eq!(
+            resolve_ltx_eros_gemma_dir(&settings, &eros).as_deref(),
+            Some(gemma.as_path())
+        );
+
+        // An incomplete sibling does not win (falls through to the absent bundle → None).
+        std::fs::remove_file(gemma.join("model-00001-of-00002.safetensors")).unwrap();
+        assert!(resolve_ltx_eros_gemma_dir(&settings, &eros).is_none());
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// sc-8827 (F-025): the LTX Gemma-encoder dir rides `LoadSpec::text_encoder` (via
+    /// `VideoGenInput::text_encoder_dir`) instead of the process-global `$LTX_GEMMA_DIR`. This asserts
+    /// the path flows through `video_load_spec` onto the spec — `None` maps to `None` (env/`<root>`
+    /// fallback in the provider), a dir maps to `Some(WeightsSource::Dir(..))`.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn video_load_spec_threads_text_encoder_dir() {
+        let base = VideoGenInput {
+            engine_id: "ltx_2_3",
+            model_dir: PathBuf::from("/models/ltx/q4"),
+            ..VideoGenInput::default()
+        };
+        // No override → text_encoder None (the provider reads its env/`<root>` fallback).
+        assert!(
+            video_load_spec(&base).text_encoder.is_none(),
+            "no text_encoder_dir ⇒ no spec override"
+        );
+        // An explicit gemma dir rides the spec as a Dir source.
+        let gemma = PathBuf::from("/models/ltx/gemma");
+        let with_te = VideoGenInput {
+            text_encoder_dir: Some(gemma.clone()),
+            ..base
+        };
+        assert!(
+            matches!(video_load_spec(&with_te).text_encoder, Some(WeightsSource::Dir(ref p)) if *p == gemma),
+            "text_encoder_dir rides LoadSpec::text_encoder as a Dir source"
+        );
     }
 
     /// Q8 opt-in detection (sc-5679): `advanced.mlxQuantize: 8` (int or string) → true; absent / Q4
@@ -8783,6 +12504,34 @@ mod tests {
         assert!(!ltx_wants_q8(&request(
             json!({ "projectId": "p", "model": "ltx_2_3", "prompt": "x" })
         )));
+    }
+
+    /// bf16 opt-in detection (sc-8513): `advanced.mlxQuantize <= 0` (int or string) → true; Q4/Q8 /
+    /// absent → false. Drives the dense-tier preference + the on-demand bf16 fetch. Also asserts the
+    /// tier order the three cases resolve to (bf16 only ever tried on an explicit opt-in).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_wants_bf16_and_tier_order() {
+        let with = |adv: Value| {
+            request(json!({ "projectId": "p", "model": "ltx_2_3", "prompt": "x", "advanced": adv }))
+        };
+        assert!(ltx_wants_bf16(&with(json!({ "mlxQuantize": 0 }))));
+        assert!(ltx_wants_bf16(&with(json!({ "mlxQuantize": -1 }))));
+        assert!(ltx_wants_bf16(&with(json!({ "mlxQuantize": "0" }))));
+        assert!(!ltx_wants_bf16(&with(json!({ "mlxQuantize": 4 }))));
+        assert!(!ltx_wants_bf16(&with(json!({ "mlxQuantize": 8 }))));
+        let plain = request(json!({ "projectId": "p", "model": "ltx_2_3", "prompt": "x" }));
+        assert!(!ltx_wants_bf16(&plain));
+
+        assert_eq!(
+            ltx_bundle_tier_order(&with(json!({ "mlxQuantize": 0 }))),
+            &["bf16", "q8", "q4"]
+        );
+        assert_eq!(
+            ltx_bundle_tier_order(&with(json!({ "mlxQuantize": 8 }))),
+            &["q8", "q4"]
+        );
+        assert_eq!(ltx_bundle_tier_order(&plain), &["q4", "q8"]);
     }
 
     #[cfg(target_os = "macos")]
@@ -9019,6 +12768,256 @@ mod tests {
         );
     }
 
+    // sc-9595: streaming worker-window chunking for the SeedVR2 upscale (replaces the sc-8829 host-RAM
+    // cap). The seam-correctness guarantee is that WORKER-WINDOWED streaming assembly is FRAME-IDENTICAL
+    // to a single whole-clip `video::assemble_overlap` — same frame count, order, and cross-fade blend —
+    // reusing the engine's own public `plan_chunks`/`assemble_overlap` one level up. These tests model
+    // the engine as a deterministic per-chunk upscale (a pure function of its source pixel window +
+    // seed, which is what `pipeline::preprocess_chunk` guarantees), exactly as the real driver does, and
+    // exercise the `Seedvr2StreamAssembler`. Real-weight PIXEL identity of an internally sub-chunked
+    // worker window is a GPU-golden concern the ignore-gated smokes don't run (see the PR notes).
+
+    /// A single-channel synthetic frame (1×1 RGB, all bytes = `v`) — enough to test frame identity,
+    /// ordering, and the cross-fade blend byte-exactly.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn syn_frame(v: u8) -> Image {
+        Image {
+            width: 1,
+            height: 1,
+            pixels: vec![v, v, v],
+        }
+    }
+
+    /// Model the engine's whole-clip upscale over synthetic frames: `plan_chunks` at engine chunk `c`,
+    /// each chunk = the (identity-)upscaled source window (clamp-padded past the end, like
+    /// `preprocess_chunk`), then `assemble_overlap`. Mirrors `pipeline::generate_video` exactly, minus
+    /// the real tensor pass — the deterministic per-chunk structure is what worker windowing must
+    /// reproduce.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn engine_whole_clip_synthetic(src: &[Image], c: i32, ov: i32) -> Vec<Image> {
+        let n = src.len() as i32;
+        let plan = seedvr2_video::plan_chunks(n, c, ov);
+        let mut chunk_frames: Vec<Vec<Image>> = Vec::with_capacity(plan.len());
+        for chunk in &plan {
+            let mut frames = Vec::with_capacity(chunk.len as usize);
+            for j in 0..chunk.len {
+                let idx = (chunk.start + j).clamp(0, n - 1) as usize;
+                frames.push(src[idx].clone());
+            }
+            chunk_frames.push(frames);
+        }
+        seedvr2_video::assemble_overlap(&plan, &chunk_frames, n, ov)
+    }
+
+    /// Drive the worker-window streaming path over synthetic frames: `plan_chunks` at the worker chunk
+    /// size, upscale each window via `engine_whole_clip_synthetic` (the engine re-plans internally at
+    /// engine chunk `engine_c` over the LOCAL window), and cross-fade across worker windows with the
+    /// `Seedvr2StreamAssembler`. Returns the streamed frame sequence + the max retained-tail length
+    /// observed (the memory bound).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn worker_streamed_synthetic(
+        src: &[Image],
+        worker_chunk: i32,
+        engine_c: i32,
+        ov: i32,
+    ) -> (Vec<Image>, usize) {
+        let n = src.len() as i32;
+        let plan = seedvr2_video::plan_chunks(n, worker_chunk, ov);
+        let mut assembler = Seedvr2StreamAssembler::new(n, ov);
+        let mut out: Vec<Image> = Vec::new();
+        let mut max_tail = 0usize;
+        for chunk in &plan {
+            let start = chunk.start.max(0) as usize;
+            if start >= src.len() {
+                break;
+            }
+            let end = (start + chunk.len.max(0) as usize).min(src.len());
+            let window_src: Vec<Image> = src[start..end].to_vec();
+            let upscaled = engine_whole_clip_synthetic(&window_src, engine_c, ov);
+            out.extend(assembler.push_window(chunk.start, upscaled));
+            max_tail = max_tail.max(assembler.retained.len());
+        }
+        out.extend(assembler.finish());
+        (out, max_tail)
+    }
+
+    /// THE core seam-correctness guarantee (sc-9595): windowed streaming assembly is frame-identical to
+    /// a single whole-clip `assemble_overlap`, across a sweep of frame counts, worker-chunk sizes, and
+    /// engine-chunk sizes — including where the worker chunk and engine chunk differ. Byte-exact on the
+    /// synthetic frames, so both the frame ORDER and the cross-fade BLEND match the whole-clip path.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn seedvr2_stream_matches_whole_clip_assembly() {
+        let ov = seedvr2_video::DEFAULT_OVERLAP;
+        let mut cases = 0;
+        for n in [1usize, 5, 8, 12, 16, 20, 28, 40, 41, 64, 100, 137, 256, 257] {
+            let src: Vec<Image> = (0..n)
+                .map(|i| syn_frame(((i * 13 + 5) % 251) as u8))
+                .collect();
+            for &worker_chunk in &[16i32, 20, 32, 64] {
+                for &engine_c in &[8i32, 12, 16, 24, 32] {
+                    let whole = engine_whole_clip_synthetic(&src, engine_c, ov);
+                    let (streamed, _) = worker_streamed_synthetic(&src, worker_chunk, engine_c, ov);
+                    assert_eq!(
+                        streamed.len(),
+                        n,
+                        "frame count preserved (n={n}, worker={worker_chunk}, engine={engine_c})"
+                    );
+                    assert_eq!(
+                        streamed, whole,
+                        "windowed == whole-clip (n={n}, worker={worker_chunk}, engine={engine_c})"
+                    );
+                    cases += 1;
+                }
+            }
+        }
+        assert!(cases > 200, "swept a broad matrix ({cases} cases)");
+    }
+
+    /// The streaming assembler holds BOUNDED memory: the retained tail never exceeds one worker window
+    /// plus the overlap, regardless of clip length — the property that removes the whole-clip host-RAM
+    /// footprint the sc-8829 cap existed to bound.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn seedvr2_stream_retains_bounded_tail() {
+        let ov = seedvr2_video::DEFAULT_OVERLAP;
+        let worker_chunk = SEEDVR2_WORKER_CHUNK_FRAMES;
+        // A long clip that would be tens of GB of RGB8 whole — the exact case the cap rejected.
+        let n = 4000usize;
+        let src: Vec<Image> = (0..n).map(|i| syn_frame((i % 251) as u8)).collect();
+        let (streamed, max_tail) = worker_streamed_synthetic(&src, worker_chunk, 16, ov);
+        assert_eq!(streamed.len(), n, "every frame emitted, in order");
+        // The retained tail is at most one merged worker window (worker_chunk + a partial next window's
+        // overlap), never the whole clip — orders of magnitude below `n`.
+        assert!(
+            max_tail as i32 <= worker_chunk + ov + 1,
+            "retained tail {max_tail} bounded by one window (~{}), not the {n}-frame clip",
+            worker_chunk + ov
+        );
+    }
+
+    /// Frame ORDER is preserved end-to-end: each streamed frame carries its source ordinal through the
+    /// (identity) upscale + cross-fade, so the sequence is monotonic and complete (no drops/dupes/swaps)
+    /// even across worker-window boundaries with a partial trailing window.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn seedvr2_stream_preserves_frame_order() {
+        let ov = seedvr2_video::DEFAULT_OVERLAP;
+        // 150 frames, worker chunk 64 → 3 worker windows with a partial last one; a value per ordinal.
+        let n = 150usize;
+        let src: Vec<Image> = (0..n).map(|i| syn_frame((i % 251) as u8)).collect();
+        let (streamed, _) = worker_streamed_synthetic(&src, SEEDVR2_WORKER_CHUNK_FRAMES, 16, ov);
+        assert_eq!(streamed.len(), n);
+        // Non-overlap frames pass through unblended → equal to the source ordinal value; overlap frames
+        // are cross-faded but between two IDENTICAL-value windows here only at seams. Compare to the
+        // whole-clip oracle for the exact expected values.
+        let whole = engine_whole_clip_synthetic(&src, 16, ov);
+        assert_eq!(
+            streamed, whole,
+            "streamed frames match the whole-clip oracle"
+        );
+    }
+
+    /// Cap removal (sc-9595): a clip that the sc-8829 cap would have REJECTED (huge whole-clip RGB8
+    /// footprint) now streams to completion with the correct frame count and no error — the capability
+    /// narrowing is gone. (The removed `check_seedvr2_host_ram` / `seedvr2_estimated_host_bytes`
+    /// helpers no longer exist; this test would not compile if a hard cap were reintroduced in the
+    /// streaming path.)
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn seedvr2_stream_upscales_formerly_capped_clip() {
+        let ov = seedvr2_video::DEFAULT_OVERLAP;
+        // ~4300 frames — the finding's pathological few-minute 1080p clip the old cap rejected outright.
+        let n = 4300usize;
+        let src: Vec<Image> = (0..n).map(|i| syn_frame((i % 251) as u8)).collect();
+        let (streamed, max_tail) =
+            worker_streamed_synthetic(&src, SEEDVR2_WORKER_CHUNK_FRAMES, 16, ov);
+        assert_eq!(
+            streamed.len(),
+            n,
+            "the formerly-capped clip streams in full"
+        );
+        assert!(
+            (max_tail as i32) < n as i32 / 10,
+            "peak retained frames stay far below the whole clip (bounded memory)"
+        );
+    }
+
+    /// The `ScratchDir` RAII guard removes the (multi-GB, in prod) output PNG scratch on the ERROR path
+    /// (sc-9595 review): dropping an ARMED guard deletes a populated dir — this is the guarantee that
+    /// covers a create_dir_all / progress-POST / encode `?`-return or a cancel between the stream and the
+    /// encode, where the old code leaked the whole 4× sequence. Disarming (the success path, after the
+    /// caller already removed the dir) makes Drop a no-op so it can't fight a concurrent same-name reuse.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn scratch_dir_guard_cleans_up_on_drop_and_respects_disarm() {
+        let base = std::env::temp_dir().join(format!(
+            "sceneworks_seedvr2_scratchtest_{}",
+            Uuid::new_v4().simple()
+        ));
+
+        // ARMED guard dropped (error path): a populated dir + a nested file are removed on Drop.
+        let armed_dir = base.join("armed");
+        std::fs::create_dir_all(&armed_dir).unwrap();
+        std::fs::write(armed_dir.join("frame_00001.png"), b"not-a-real-png").unwrap();
+        assert!(armed_dir.exists(), "precondition: scratch populated");
+        {
+            let _guard = ScratchDir::new(armed_dir.clone());
+            // Simulate the post-stream encode span returning Err before any manual cleanup: the guard
+            // goes out of scope here without disarming.
+        }
+        assert!(
+            !armed_dir.exists(),
+            "armed guard's Drop must remove the leaked output scratch on the error path"
+        );
+
+        // DISARMED guard dropped (success path): the caller already removed the dir, and Drop must NOT
+        // re-remove — modelled by a dir the guard deliberately leaves intact.
+        let disarmed_dir = base.join("disarmed");
+        std::fs::create_dir_all(&disarmed_dir).unwrap();
+        {
+            let mut guard = ScratchDir::new(disarmed_dir.clone());
+            guard.disarm();
+        }
+        assert!(
+            disarmed_dir.exists(),
+            "disarmed guard's Drop must be a no-op (caller owns cleanup)"
+        );
+
+        // A guard over an ALREADY-removed dir drops cleanly (benign NotFound, no panic).
+        let missing_dir = base.join("missing");
+        {
+            let _guard = ScratchDir::new(missing_dir.clone());
+        }
+        assert!(!missing_dir.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// `advanced.noAudio` maps to the engine's `video_mode = "no_audio"`; enhance flags
     /// flow through. Asserts the LTX request build (the VideoGenInput, pre-load).
     #[cfg(target_os = "macos")]
@@ -9035,6 +13034,151 @@ mod tests {
         let settings = Settings::from_env();
         let none = resolve_ltx_adapters(&settings, &req).unwrap();
         assert!(none.is_empty());
+    }
+
+    /// Lay down a fake HF snapshot file under `data_dir`
+    /// (`cache/huggingface/hub/models--<org>--<name>/snapshots/<rev>/<file>`) and return its path, so
+    /// [`resolve_ltx_distill_adapter`] resolves hermetically (mirrors `write_fake_wan_lightning`).
+    #[cfg(target_os = "macos")]
+    fn write_fake_hf_lora(data_dir: &Path, repo: &str, file: &str) -> PathBuf {
+        let snapshot = data_dir
+            .join("cache")
+            .join("huggingface")
+            .join("hub")
+            .join(format!("models--{}", repo.replace('/', "--")))
+            .join("snapshots")
+            .join("deadbeef");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        let path = snapshot.join(file);
+        write_lora_fixture(&path, None);
+        path
+    }
+
+    /// The `ltx_2_3_eros` manifest shape [`resolve_ltx_distill_adapter`] reads: `mlx.autoDistillLora`
+    /// per-pass strengths plus the `resources.distilledLora` repo/file.
+    #[cfg(target_os = "macos")]
+    fn eros_manifest_entry(repo: &str, file: &str) -> Value {
+        json!({
+            "mlx": { "autoDistillLora": { "stage1Strength": 1.0, "stage2Strength": 0.4 } },
+            "resources": { "distilledLora": { "repo": repo, "file": file } },
+        })
+    }
+
+    /// Regression (10Eros noise): `ltx_2_3_eros` is not pre-distilled, so `resolve_ltx_adapters` must
+    /// auto-inject its cond_safe distill LoRA at per-pass strengths (1.0 first pass / 0.4 upscale) ahead
+    /// of any user LoRAs — the injection was lost in the sc-3037 Python→Rust video cutover, leaving the
+    /// undistilled base to collapse to noise. Strengths honor `advanced.distillStage*Strength`;
+    /// `advanced.useDistillLora = false` opts out.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_eros_auto_injects_distill_lora_per_pass() {
+        // The fake HF snapshot only resolves when the cache-dir env overrides are unset (else the real
+        // cache is consulted). Skip rather than assert-false in that unusual local config.
+        if std::env::var_os("HF_HUB_CACHE").is_some()
+            || std::env::var_os("HUGGINGFACE_HUB_CACHE").is_some()
+            || std::env::var_os("HF_HOME").is_some()
+        {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sw_eros_distill_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let repo = "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments";
+        let file = "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors";
+        let distill = write_fake_hf_lora(&dir, repo, file);
+        let settings = Settings {
+            data_dir: dir.clone(),
+            ..Settings::from_env()
+        };
+
+        // Default: the distill LoRA is injected alone, at per-pass 1.0/0.4.
+        let req = request(json!({
+            "projectId": "p", "model": "ltx_2_3_eros", "prompt": "a fox",
+            "modelManifestEntry": eros_manifest_entry(repo, file),
+        }));
+        let specs = resolve_ltx_adapters(&settings, &req).expect("resolve eros adapters");
+        assert_eq!(specs.len(), 1, "the distill LoRA must be injected");
+        assert_eq!(specs[0].path, distill);
+        assert_eq!(specs[0].kind, AdapterKind::Lora);
+        assert_eq!(specs[0].pass_scales, Some(vec![1.0, 0.4]));
+
+        // A user LoRA stacks AFTER the distill (the distill is the model's base recipe).
+        let user = dir.join("style.safetensors");
+        write_lora_fixture(&user, None);
+        let req_user = request(json!({
+            "projectId": "p", "model": "ltx_2_3_eros", "prompt": "a fox",
+            "modelManifestEntry": eros_manifest_entry(repo, file),
+            "loras": [ { "path": user.to_string_lossy(), "weight": 0.5 } ],
+        }));
+        let specs = resolve_ltx_adapters(&settings, &req_user).expect("resolve eros + user");
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].pass_scales, Some(vec![1.0, 0.4]), "distill first");
+        assert!(
+            specs[1].pass_scales.is_none(),
+            "user LoRA is uniform per-pass"
+        );
+        assert!((specs[1].scale - 0.5).abs() < 1e-6);
+
+        // `advanced` overrides the per-pass strengths.
+        let req_override = request(json!({
+            "projectId": "p", "model": "ltx_2_3_eros", "prompt": "a fox",
+            "modelManifestEntry": eros_manifest_entry(repo, file),
+            "advanced": { "distillStage1Strength": 0.8, "distillStage2Strength": 0.2 },
+        }));
+        let specs = resolve_ltx_adapters(&settings, &req_override).expect("override strengths");
+        assert_eq!(specs[0].pass_scales, Some(vec![0.8, 0.2]));
+
+        // Opt-out disables the injection entirely (no user LoRAs → empty).
+        let req_off = request(json!({
+            "projectId": "p", "model": "ltx_2_3_eros", "prompt": "a fox",
+            "modelManifestEntry": eros_manifest_entry(repo, file),
+            "advanced": { "useDistillLora": false },
+        }));
+        assert!(resolve_ltx_adapters(&settings, &req_off)
+            .unwrap()
+            .is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A model that declares `mlx.autoDistillLora` but whose co-requisite distill LoRA is not installed
+    /// fails with an actionable payload error rather than silently degrading to noise; a model that
+    /// declares no `autoDistillLora` (base `ltx_2_3`) injects nothing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_distill_lora_missing_errors_and_base_model_is_noop() {
+        if std::env::var_os("HF_HUB_CACHE").is_some()
+            || std::env::var_os("HUGGINGFACE_HUB_CACHE").is_some()
+            || std::env::var_os("HF_HOME").is_some()
+        {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sw_eros_missing_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = Settings {
+            data_dir: dir.clone(),
+            ..Settings::from_env()
+        };
+
+        // Declared distill LoRA, but nothing on disk → actionable error (not silent noise).
+        let repo = "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments";
+        let file = "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors";
+        let req = request(json!({
+            "projectId": "p", "model": "ltx_2_3_eros", "prompt": "a fox",
+            "modelManifestEntry": eros_manifest_entry(repo, file),
+        }));
+        assert!(matches!(
+            resolve_ltx_adapters(&settings, &req),
+            Err(WorkerError::InvalidPayload(_))
+        ));
+
+        // Base `ltx_2_3` declares no `autoDistillLora` → no injection.
+        let base = request(json!({
+            "projectId": "p", "model": "ltx_2_3", "prompt": "a fox",
+            "modelManifestEntry": { "family": "ltx-video" },
+        }));
+        assert!(resolve_ltx_adapters(&settings, &base).unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The FLF keyframe knobs (sc-3055) parse from JSON numbers + numeric strings and fall back
@@ -9403,9 +13547,9 @@ mod tests {
             eprintln!("skipping ltx_real_weights_with_audio: no complete LTX snapshot found");
             return;
         };
-        // The bundle ships gemma beside the q4/q8 dir; point the engine at it (matches the worker
-        // path) so the smoke needs no separate mlx-community/gemma snapshot in the HF cache.
-        ensure_bundled_ltx_gemma_dir(&model_dir);
+        // The bundle ships gemma beside the q4/q8 dir; thread it onto the LoadSpec (matches the worker
+        // path, sc-8827) so the smoke needs no separate mlx-community/gemma snapshot in the HF cache.
+        let text_encoder_dir = resolve_bundled_ltx_gemma_dir(&model_dir);
         let input = VideoGenInput {
             sampler: None,
             scheduler: None,
@@ -9417,6 +13561,7 @@ mod tests {
             frames: 9,
             fps: 24,
             seed: 7,
+            text_encoder_dir,
             ..VideoGenInput::default()
         };
         let cancel = CancelFlag::new();
@@ -9485,6 +13630,27 @@ mod tests {
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
+    }
+
+    /// F-118: video upscale accepts only 2x and 4x. Any other factor is rejected with a clear error
+    /// rather than silently coerced to 2x (which produced a quietly-different output). Compiled on
+    /// both the macOS and candle lanes, matching the gate on [`resolve_video_upscale_factor`].
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn video_upscale_factor_accepts_2_and_4_rejects_others() {
+        assert_eq!(resolve_video_upscale_factor(2).expect("2x"), 2);
+        assert_eq!(resolve_video_upscale_factor(4).expect("4x"), 4);
+        for bad in [0u8, 1, 3, 5, 8] {
+            let err = resolve_video_upscale_factor(bad)
+                .expect_err("unsupported factor must be rejected, not coerced");
+            assert!(
+                matches!(err, WorkerError::InvalidPayload(ref m) if m.contains("factor 2 or 4")),
+                "factor {bad} should yield a clear InvalidPayload error, got {err:?}"
+            );
+        }
     }
 }
 
@@ -9603,5 +13769,103 @@ mod candle_video_label_tests {
                 "{engine_id} without a source image must error"
             );
         }
+    }
+
+    /// The candle Wan Lightning toggle (sc-10138) drives the sampling recipe: A14B MoE default-on
+    /// (absent flag) ⇒ 4-step / CFG-off; explicit opt-out ⇒ native multi-step CFG (engine defaults, or a
+    /// user override); the dense 5B has no toggle and applies the interim step default.
+    #[test]
+    fn candle_wan_lightning_toggle_drives_sampling() {
+        let req = |advanced: Value| {
+            VideoRequest::from_payload(json!({ "advanced": advanced }).as_object().unwrap())
+        };
+
+        for moe in ["wan2_2_t2v_14b", "wan2_2_i2v_14b"] {
+            // Default-on (absent flag): the 4-step / CFG-off Lightning recipe.
+            let on = req(json!({}));
+            assert!(candle_wan_lightning_on(moe, &on), "{moe} default-on");
+            assert_eq!(
+                candle_wan_sampling(moe, &on),
+                (Some(4), Some(1.0)),
+                "{moe} lightning recipe"
+            );
+
+            // Explicit opt-out → native multi-step CFG: no user override ⇒ (None, None) so the engine
+            // config defaults stand; a user override is honored verbatim.
+            let off = req(json!({ "lightning": false }));
+            assert!(!candle_wan_lightning_on(moe, &off), "{moe} opt-out");
+            assert_eq!(
+                candle_wan_sampling(moe, &off),
+                (None, None),
+                "{moe} native defaults"
+            );
+            let off_override =
+                req(json!({ "lightning": false, "steps": 30, "guidanceScale": 3.5 }));
+            assert_eq!(
+                candle_wan_sampling(moe, &off_override),
+                (Some(30), Some(3.5))
+            );
+        }
+
+        // Dense TI2V-5B: no Lightning toggle (always off), interim step default, user override wins.
+        let five_b = req(json!({}));
+        assert!(!candle_wan_lightning_on("wan2_2_ti2v_5b", &five_b));
+        assert_eq!(
+            candle_wan_sampling("wan2_2_ti2v_5b", &five_b),
+            (Some(CANDLE_WAN5B_INTERIM_STEPS), None)
+        );
+        assert_eq!(
+            candle_wan_sampling("wan2_2_ti2v_5b", &req(json!({ "steps": 12 }))).0,
+            Some(12)
+        );
+    }
+
+    /// (sc-10027) `candle_wan_tier_subdir` picks the q4/q8 subdir per `advanced.mlxQuantize` (default q4),
+    /// falls back through the tier order, requires a complete tier, and returns `None` for a non-wan
+    /// engine or a flat/dense repo with no tier subdirs.
+    #[test]
+    fn candle_wan_tier_subdir_resolves_by_mlx_quantize() {
+        let root = std::env::temp_dir().join(format!("sc10027_wan_tier_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // Complete q4 + q8 A14B tiers (transformer + transformer_2 + text_encoder + vae + tokenizer).
+        for tier in ["q4", "q8"] {
+            for sub in [
+                "transformer",
+                "transformer_2",
+                "text_encoder",
+                "vae",
+                "tokenizer",
+            ] {
+                std::fs::create_dir_all(root.join(tier).join(sub)).unwrap();
+            }
+        }
+        let req = |adv: Value| {
+            VideoRequest::from_payload(json!({ "advanced": adv }).as_object().unwrap())
+        };
+
+        // Default (no mlxQuantize) → q4.
+        let (d, q) = candle_wan_tier_subdir(&root, "wan2_2_t2v_14b", &req(json!({}))).unwrap();
+        assert!(d.ends_with("q4"));
+        assert_eq!(q, Some(Quant::Q4));
+        // mlxQuantize = 8 → q8.
+        let (d, q) =
+            candle_wan_tier_subdir(&root, "wan2_2_t2v_14b", &req(json!({ "mlxQuantize": 8 })))
+                .unwrap();
+        assert!(d.ends_with("q8"));
+        assert_eq!(q, Some(Quant::Q8));
+        // bf16 requested but no bf16 tier present → falls back through q8/q4 (never a missing dir).
+        let (d, _) =
+            candle_wan_tier_subdir(&root, "wan2_2_t2v_14b", &req(json!({ "mlxQuantize": 0 })))
+                .unwrap();
+        assert!(d.ends_with("q8") || d.ends_with("q4"));
+        // Non-wan engine → None (ltx loads its flat snapshot).
+        assert!(candle_wan_tier_subdir(&root, "ltx_2_3_distilled", &req(json!({}))).is_none());
+        // A flat repo (the dense Wan-AI/*-Diffusers fallback — no tier subdirs) → None.
+        let flat = std::env::temp_dir().join(format!("sc10027_flat_{}", std::process::id()));
+        std::fs::create_dir_all(&flat).unwrap();
+        assert!(candle_wan_tier_subdir(&flat, "wan2_2_t2v_14b", &req(json!({}))).is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&flat).ok();
     }
 }

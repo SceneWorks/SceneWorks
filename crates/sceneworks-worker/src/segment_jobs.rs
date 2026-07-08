@@ -22,15 +22,13 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use gen_core::CancelFlag;
-
 use crate::downloads::DownloadContext;
 use crate::person_segment_sam3::{
     ensure_segmenter_weights, segment_box_blocking, segment_points_blocking,
 };
 use crate::{
     fresh_asset_id, heartbeat, now_rfc3339, progress_payload, run_blocking_with_heartbeat,
-    update_job, ApiClient, Settings, WorkerError, WorkerResult,
+    task_join_error, update_job, ApiClient, Settings, WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
@@ -39,7 +37,6 @@ use sceneworks_core::project_store::ProjectStore;
 /// test): keep an instance when `σ(logit)·σ(presence) > THRESHOLD`, binarize its mask at `σ > MASK`.
 const SEGMENT_THRESHOLD: f32 = 0.5;
 const SEGMENT_MASK_THRESHOLD: f32 = 0.5;
-const CANCEL_MESSAGE: &str = "Smart-select canceled by user.";
 
 /// Resolve a `sourceAssetId` to its on-disk media path + the asset's `displayName` via the project
 /// sidecar (mirrors `upscale_jobs::resolve_source` / `image_adapters.find_asset_media_path`).
@@ -235,11 +232,6 @@ pub(crate) async fn run_image_segment_job(
             ))
         })?;
 
-    let source_image = crate::image_decode::decode_image_any(&source_path)
-        .map_err(|e| WorkerError::InvalidPayload(format!("Source image could not be loaded: {e}")))?
-        .to_rgb8();
-    let (src_w, src_h) = (source_image.width(), source_image.height());
-
     update_job(
         api,
         &job.id,
@@ -279,18 +271,40 @@ pub(crate) async fn run_image_segment_job(
         ),
     )
     .await?;
-    let cancel = CancelFlag::new();
+    // The source read + full image decode is folded into each blocking task below (sc-8909 / F-107)
+    // so it never stalls the async runtime thread; the task returns the decoded dimensions alongside
+    // the mask so the `src_w*src_h` GrayImage can be built after.
     // Points → SAM3 tracker single-frame PVS (interactive clicks); box → SAM3 concept detector.
-    let mask = if let Some(points) = points {
+    //
+    // Cancel is `None` by explicit per-engine decision (sc-8908 / F-106, mirroring the kps/SCRFD note
+    // at `run_blocking_with_heartbeat`): both `segment_points_blocking` and `segment_box_blocking` run
+    // ONE bounded SAM3 forward pass on ONE image (`Sam3Tracker::segment_points` /
+    // `Sam3ImageSegmenter::segment_with_boxes` at the pinned mlx-gen rev take no cancel flag and have
+    // no per-step/per-frame loop for a flag to poll — unlike the video `propagate` path, which does
+    // thread one). A flag here could only be tripped BEFORE the compute starts, which the bounded join
+    // already covers, so passing a `Some(flag)` that the engine never reads was a no-op that merely
+    // read as if the compute were cancelable. Threading a real flag would require a new engine seam for
+    // zero cancellation benefit, so we drop the un-trippable flag instead.
+    let (mask, src_w, src_h) = if let Some(points) = points {
         run_blocking_with_heartbeat(
             api,
             settings,
             &job.id,
-            Some(cancel.clone()),
-            CANCEL_MESSAGE,
+            None,
+            "",
             "smart-select task",
+            crate::no_cancel_ack(),
             tokio::task::spawn_blocking(move || {
-                segment_points_blocking(model_path, source_image, points)
+                let source_image = crate::image_decode::decode_image_any(&source_path)
+                    .map_err(|e| {
+                        WorkerError::InvalidPayload(format!(
+                            "Source image could not be loaded: {e}"
+                        ))
+                    })?
+                    .to_rgb8();
+                let (src_w, src_h) = (source_image.width(), source_image.height());
+                let mask = segment_points_blocking(model_path, source_image, points)?;
+                Ok::<_, WorkerError>((mask, src_w, src_h))
             }),
         )
         .await?
@@ -300,11 +314,20 @@ pub(crate) async fn run_image_segment_job(
             api,
             settings,
             &job.id,
-            Some(cancel.clone()),
-            CANCEL_MESSAGE,
+            None,
+            "",
             "smart-select task",
+            crate::no_cancel_ack(),
             tokio::task::spawn_blocking(move || {
-                segment_box_blocking(
+                let source_image = crate::image_decode::decode_image_any(&source_path)
+                    .map_err(|e| {
+                        WorkerError::InvalidPayload(format!(
+                            "Source image could not be loaded: {e}"
+                        ))
+                    })?
+                    .to_rgb8();
+                let (src_w, src_h) = (source_image.width(), source_image.height());
+                let mask = segment_box_blocking(
                     model_path,
                     tokenizer_path,
                     source_image,
@@ -312,7 +335,8 @@ pub(crate) async fn run_image_segment_job(
                     &concept,
                     threshold,
                     mask_threshold,
-                )
+                )?;
+                Ok::<_, WorkerError>((mask, src_w, src_h))
             }),
         )
         .await?
@@ -336,9 +360,16 @@ pub(crate) async fn run_image_segment_job(
         tokio::fs::create_dir_all(parent).await?;
     }
     let tmp_path = media_path.with_extension("tmp.png");
-    mask_image
-        .save_with_format(&tmp_path, image::ImageFormat::Png)
-        .map_err(|e| WorkerError::Io(std::io::Error::other(e)))?;
+    // Encode the mask PNG off the async runtime thread (sc-8909 / F-107) so the blocking encode never
+    // stalls the heartbeat.
+    let encode_tmp = tmp_path.clone();
+    tokio::task::spawn_blocking(move || {
+        mask_image
+            .save_with_format(&encode_tmp, image::ImageFormat::Png)
+            .map_err(|e| WorkerError::Io(std::io::Error::other(e)))
+    })
+    .await
+    .map_err(|e| task_join_error("smart-select mask encode task", e))??;
     tokio::fs::rename(&tmp_path, &media_path)
         .await
         .inspect_err(|_| {

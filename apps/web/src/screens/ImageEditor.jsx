@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { LoraKeywordSummary } from "../components/LoraKeywordSummary.jsx";
 import { createPortal } from "react-dom";
 import { Stage, Layer, Image as KonvaImage, Line, Rect, Transformer } from "react-konva";
 import { apiFetch } from "../api.js";
@@ -8,8 +9,11 @@ import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
-import { makeObjElement, makeTextElement, normalizeHexColor } from "../ideogramCaption.js";
+import { useLoraSelection } from "../components/LoraPickerField.jsx";
+import { MAX_JOB_LORAS_TOTAL } from "../presetUtils.js";
+import { guidanceDefaultFromModel } from "../samplerOptions.js";
 import {
+  BLEND_MODES,
   activeLayerOf,
   addLayer,
   compositeLayersToCanvas,
@@ -26,25 +30,7 @@ import {
   singleLayerWorking,
   snapshotLayers,
 } from "../imageLayers.js";
-import { LayersPanel } from "../components/LayersPanel.jsx";
 import { CurveEditor } from "../components/CurveEditor.jsx";
-import {
-  IDENTITY_LEVELS,
-  IDENTITY_CURVES,
-  isIdentityLevels,
-  isIdentityCurves,
-  applyLevels,
-  applyCurves,
-  computeHistogram,
-} from "../colorGrade.js";
-import {
-  maskAlphaFromRgba,
-  writeMaskAlphaToRgba,
-  invertAlpha,
-  dilateAlpha,
-  erodeAlpha,
-  blurAlpha,
-} from "../maskRefine.js";
 // Pure job builders + model/engine helpers (sc-6112) — extracted to a konva-free module
 // so the Library batch flow can reuse them; imported for internal use and re-exported
 // below to keep this module's public surface (and its tests) unchanged.
@@ -61,6 +47,53 @@ import {
   availableUpscaleEngines as upscaleEnginesForPlatform,
   useUpscaleEngineFallback,
 } from "../upscaleEngines.js";
+// Per-tool logic extracted to dedicated hooks + pure helper modules (sc-9752, F-052
+// follow-up). Each hook owns its tool's state/refs/handlers and is wired below; the pure
+// helpers are re-exported here so this module's public surface (and ImageEditor.test.jsx's
+// imports) stay byte-for-byte unchanged.
+import { useColorGradeTool } from "./imageEditor/useColorGradeTool.js";
+import { useBoxesTool } from "./imageEditor/useBoxesTool.js";
+import { useMaskTool } from "./imageEditor/useMaskTool.js";
+import {
+  COLOR_ADJUSTMENTS,
+  IDENTITY_COLOR_ADJUST,
+  isIdentityAdjust,
+  gradePixel,
+  applyColorAdjustments,
+  konvaColorFilter,
+} from "./imageEditor/colorGradeMath.js";
+import {
+  BOX_TYPES,
+  MAX_BOX_PALETTE,
+  MAX_DOCUMENT_PALETTE,
+  isValidHexColor,
+  rectToBbox,
+  bboxToRect,
+  boxPaletteIsValid,
+  documentPalette,
+  documentPaletteIsValid,
+  boxIsValid,
+  BOX_PALETTE,
+  MIN_BOX_PX,
+  rectFromPoints,
+  clampRectToCanvas,
+  makeBox,
+  boxFillStyle,
+  addPaletteColor,
+  removePaletteColor,
+  boxMetadataGaps,
+  paintBoxesOnContext,
+  colorName,
+  composeColorPrompt,
+  boxesToIdeogramElements,
+} from "./imageEditor/boxGeometry.js";
+import {
+  buildSegmentJobBody,
+  rectToSegmentBox,
+  tintMaskRgbaInPlace,
+  MASK_PREVIEW_RGBA,
+  maskHasContent,
+} from "./imageEditor/maskShared.js";
 
 export {
   buildDetailJobBody,
@@ -72,10 +105,132 @@ export {
   upscaleFactorsForEngine,
 };
 
+// Re-export the per-tool pure helpers (sc-9752) so the editor's public surface + its
+// test imports are unchanged after the extraction.
+export {
+  COLOR_ADJUSTMENTS,
+  IDENTITY_COLOR_ADJUST,
+  isIdentityAdjust,
+  gradePixel,
+  applyColorAdjustments,
+  konvaColorFilter,
+  BOX_TYPES,
+  MAX_BOX_PALETTE,
+  MAX_DOCUMENT_PALETTE,
+  isValidHexColor,
+  rectToBbox,
+  bboxToRect,
+  boxPaletteIsValid,
+  documentPalette,
+  documentPaletteIsValid,
+  boxIsValid,
+  BOX_PALETTE,
+  MIN_BOX_PX,
+  rectFromPoints,
+  clampRectToCanvas,
+  makeBox,
+  boxFillStyle,
+  addPaletteColor,
+  removePaletteColor,
+  boxMetadataGaps,
+  paintBoxesOnContext,
+  colorName,
+  composeColorPrompt,
+  boxesToIdeogramElements,
+  buildSegmentJobBody,
+  rectToSegmentBox,
+  tintMaskRgbaInPlace,
+  MASK_PREVIEW_RGBA,
+  maskHasContent,
+};
+
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 16;
 const ZOOM_STEP = 1.2;
 const MIN_CROP_PX = 8;
+
+// Redesign panel layout (epic 10243): accordion (default) / right / left / bottom,
+// persisted across sessions. Invalid/absent → accordion.
+export const EDITOR_LAYOUTS = ["accordion", "right", "left", "bottom"];
+const EDITOR_LAYOUT_KEY = "sceneworks-ie-layout";
+export function readStoredEditorLayout() {
+  try {
+    const saved = window.localStorage.getItem(EDITOR_LAYOUT_KEY);
+    if (EDITOR_LAYOUTS.includes(saved)) return saved;
+  } catch {
+    /* ignore (private mode etc.) */
+  }
+  return "accordion";
+}
+
+// Tool identity for the rail / accordion headers / inspector header (epic 10243).
+export const EDITOR_TOOL_ORDER = ["move", "transform", "crop", "upscale", "detail", "color", "edit", "boxes"];
+export const EDITOR_TOOL_META = {
+  move: { label: "Move", desc: "Pan and inspect the canvas" },
+  transform: { label: "Transform", desc: "Move, scale & rotate the layer" },
+  crop: { label: "Crop", desc: "Trim to a size or ratio" },
+  upscale: { label: "Upscale", desc: "Increase resolution with AI" },
+  detail: { label: "Detail", desc: "Refine texture with tile ControlNet" },
+  color: { label: "Color grade", desc: "Adjust tone, levels & curves" },
+  edit: { label: "AI Edit", desc: "Prompt-driven edit & inpaint" },
+  boxes: { label: "Boxes", desc: "Region layout & color-keyed edit" },
+};
+
+// Inline stroke icons ported from the design handoff `ICONS` map (epic 10243).
+const strokeSvg = (props, children) => (
+  <svg fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.9} viewBox="0 0 24 24" {...props}>
+    {children}
+  </svg>
+);
+export const EDITOR_TOOL_ICONS = {
+  move: strokeSvg({ key: "move" }, [
+    <polyline key="a" points="5 9 2 12 5 15" />, <polyline key="b" points="9 5 12 2 15 5" />,
+    <polyline key="c" points="15 19 12 22 9 19" />, <polyline key="d" points="19 9 22 12 19 15" />,
+    <line key="e" x1="2" x2="22" y1="12" y2="12" />, <line key="f" x1="12" x2="12" y1="2" y2="22" />,
+  ]),
+  transform: strokeSvg({ key: "transform" }, [
+    <rect key="a" height="16" rx="1" width="16" x="4" y="4" />,
+    <circle key="b" cx="4" cy="4" fill="currentColor" r="2" />, <circle key="c" cx="20" cy="4" fill="currentColor" r="2" />,
+    <circle key="d" cx="4" cy="20" fill="currentColor" r="2" />, <circle key="e" cx="20" cy="20" fill="currentColor" r="2" />,
+  ]),
+  crop: strokeSvg({ key: "crop" }, [
+    <path key="a" d="M6 2v14a2 2 0 0 0 2 2h14" />, <path key="b" d="M18 22V8a2 2 0 0 0-2-2H2" />,
+  ]),
+  upscale: strokeSvg({ key: "upscale" }, [
+    <polyline key="a" points="15 3 21 3 21 9" />, <polyline key="b" points="9 21 3 21 3 15" />,
+    <line key="c" x1="21" x2="14" y1="3" y2="10" />, <line key="d" x1="3" x2="10" y1="21" y2="14" />,
+  ]),
+  detail: strokeSvg({ key: "detail" }, [
+    <path key="a" d="M12 3l1.9 4.8L19 9.5l-4.1 2.9L16 18l-4-2.7L8 18l1.1-5.6L5 9.5l5.1-1.7z" />,
+  ]),
+  color: strokeSvg({ key: "color" }, [
+    <circle key="a" cx="12" cy="12" r="9" />, <path key="b" d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none" />,
+  ]),
+  edit: strokeSvg({ key: "edit" }, [
+    <path key="a" d="M15 4l5 5" />, <path key="b" d="M4 20l4-1 10-10-3-3L5 16z" />,
+    <path key="c" d="M14 5l1.5-1.5a2 2 0 0 1 3 3L17 8" />,
+  ]),
+  boxes: strokeSvg({ key: "boxes" }, [
+    <rect key="a" height="7" rx="1" width="8" x="3" y="4" />, <rect key="b" height="12" rx="1" width="8" x="13" y="4" />,
+    <rect key="c" height="6" rx="1" width="8" x="3" y="14" />,
+  ]),
+};
+const IeChevron = () => (
+  <svg fill="none" height="15" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} viewBox="0 0 24 24" width="15">
+    <path d="M6 9l6 6 6-6" />
+  </svg>
+);
+const IeEyeOpen = () => (
+  <svg fill="none" height="15" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" width="15">
+    <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z" />
+    <circle cx="12" cy="12" r="3" />
+  </svg>
+);
+const IeEyeOff = () => (
+  <svg className="ie-vis-off" fill="none" height="15" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" width="15">
+    <path d="M17.9 17.9A10.4 10.4 0 0 1 12 19C5 19 1 12 1 12a19 19 0 0 1 5.1-5.9M9.9 4.2A10.9 10.9 0 0 1 12 4c7 0 11 7 11 7a19 19 0 0 1-2.2 3.2M1 1l22 22" />
+  </svg>
+);
 
 // Modifier glyph for the shortcut reference (the handler accepts both ⌘ and Ctrl).
 const IS_MAC =
@@ -118,11 +273,6 @@ const EDITOR_SHORTCUTS = [
     ],
   },
 ];
-
-// Future-tool scaffold (epic 2427) — rendered as inert buttons so the frame + the
-// next slices' insertion points stay in place. All current epic-2427 tools are live
-// (Move + Crop + Upscale + Color + AI Edit + Detail), so this is empty for now.
-const UPCOMING_TOOLS = [];
 
 // Upper bound on images in a FLUX.2 multi-reference edit, matching the worker's MAX_EDIT_REFERENCES
 // (image_jobs/flux2.rs). The working image takes one slot, so the editor allows up to 3 user refs.
@@ -168,13 +318,26 @@ export function editOutputAspectRatio(key) {
   return EDIT_OUTPUT_ASPECTS.find((aspect) => aspect.key === key)?.ratio ?? null;
 }
 
+// Snap an edit-output pixel dimension to a multiple of 16 (min 16). Every image engine
+// requires dims divisible by 16 (VAE ×8 · patch ×2 — e.g. mlx-gen z-image's SIZE_MULTIPLE
+// guard); an imported/cropped source at arbitrary dims (e.g. 832×1165) would otherwise be
+// forwarded verbatim and hard-fail at generation. Mirrors snapCanvasDim's rounding, without
+// its blank-canvas [256, 2048] clamp — an edit must not force-grow a small source to 256.
+function alignEditDim(px) {
+  return Math.max(16, Math.round(px / 16) * 16);
+}
+
 // Output W×H for an editor edit given the target aspect + fit mode, keeping the working
 // image at native scale (never upscales). "match"/unknown aspect → working size. crop =
 // largest target-aspect rect INSIDE the image (trim the overflow); pad/outpaint =
-// smallest target-aspect canvas CONTAINING the image (extend → border to fill). Pure.
+// smallest target-aspect canvas CONTAINING the image (extend → border to fill). Result dims
+// are always snapped to a multiple of 16 so the engine's size guard accepts them; the worker
+// crop/pad-fits the source to these dims (never stretches). Pure.
 export function editOutputDims(workingW, workingH, aspectKey, fitMode) {
   const ratio = editOutputAspectRatio(aspectKey);
-  if (!ratio || !workingW || !workingH) return { width: workingW, height: workingH };
+  if (!ratio || !workingW || !workingH) {
+    return { width: alignEditDim(workingW), height: alignEditDim(workingH) };
+  }
   const imageRatio = workingW / workingH;
   let width;
   let height;
@@ -197,134 +360,13 @@ export function editOutputDims(workingW, workingH, aspectKey, fitMode) {
       height = Math.round(workingW / ratio);
     }
   }
-  return { width: Math.max(1, width), height: Math.max(1, height) };
+  return { width: alignEditDim(width), height: alignEditDim(height) };
 }
 
 // Whether a model accepts an inpaint mask — the manifest tags it `image_inpaint`
 // (sc-2476). Gates the mask tool in the editor. Pure.
 export function modelIsInpaintCapable(model) {
   return (model?.capabilities ?? []).includes("image_inpaint");
-}
-
-// Whether the brush strokes form an actual mask region (at least one non-erase
-// stroke with a drawn segment). Erase-only strokes don't count. Pure.
-export function maskHasContent(lines) {
-  return (lines ?? []).some((line) => !line.erase && (line.points?.length ?? 0) >= 2);
-}
-
-// Color-grade controls (sc-2439). Each is a normalized −1..1 slider where 0 is the
-// identity; `gradePixel` defines the math. Pure data so the panel + reset are trivial.
-const COLOR_ADJUSTMENTS = [
-  { key: "brightness", label: "Brightness" },
-  { key: "contrast", label: "Contrast" },
-  { key: "saturation", label: "Saturation" },
-  { key: "temperature", label: "Temperature" },
-];
-
-export const IDENTITY_COLOR_ADJUST = { brightness: 0, contrast: 0, saturation: 0, temperature: 0 };
-
-const clamp8 = (value) => (value < 0 ? 0 : value > 255 ? 255 : Math.round(value));
-
-// True when no grade is applied (all sliders at 0) — lets the preview/Apply skip work.
-export function isIdentityAdjust(adjust) {
-  return COLOR_ADJUSTMENTS.every(({ key }) => !(adjust?.[key]));
-}
-
-// Grade one RGB pixel by the −1..1 adjustments, in a fixed order: temperature
-// (warm raises R / lowers B), brightness (additive), contrast (around mid-gray),
-// then saturation (blend toward/away from luma). Pure + clamped for unit testing.
-export function gradePixel([r, g, b], adjust) {
-  const { brightness = 0, contrast = 0, saturation = 0, temperature = 0 } = adjust ?? {};
-  r += temperature * 30;
-  b -= temperature * 30;
-  const add = brightness * 255;
-  r += add;
-  g += add;
-  b += add;
-  const cf = 1 + contrast;
-  r = (r - 128) * cf + 128;
-  g = (g - 128) * cf + 128;
-  b = (b - 128) * cf + 128;
-  const luma = 0.299 * r + 0.587 * g + 0.114 * b;
-  const sf = 1 + saturation;
-  r = luma + sf * (r - luma);
-  g = luma + sf * (g - luma);
-  b = luma + sf * (b - luma);
-  return [clamp8(r), clamp8(g), clamp8(b)];
-}
-
-// Apply the grade to a flat RGBA buffer in place (alpha untouched). Shared by the
-// Konva live-preview filter and the Apply bake, so preview === baked result.
-export function applyColorAdjustments(data, adjust) {
-  if (isIdentityAdjust(adjust)) return;
-  for (let i = 0; i < data.length; i += 4) {
-    const [r, g, b] = gradePixel([data[i], data[i + 1], data[i + 2]], adjust);
-    data[i] = r;
-    data[i + 1] = g;
-    data[i + 2] = b;
-  }
-}
-
-// Konva custom filter for the live preview — reads the grade from the node's attrs
-// (set declaratively by react-konva) and runs the shared math, so preview === bake.
-// `gradeMode` selects which grade is previewed (sc-6109): the brightness/contrast
-// "adjust", levels, or curves.
-function konvaColorFilter(imageData) {
-  const mode = this.getAttr("gradeMode");
-  if (mode === "levels") applyLevels(imageData.data, this.getAttr("gradeLevels"));
-  else if (mode === "curves") applyCurves(imageData.data, this.getAttr("gradeCurves"));
-  else applyColorAdjustments(imageData.data, this.getAttr("colorAdjust"));
-}
-
-// The `POST /api/v1/jobs` body for a smart-select image_segment job (sc-3751 / backend
-// sc-6105). Same generic-jobs shape as upscale/detail; the worker (native-MLX SAM3) reads
-// `sourceAssetId` + a `box` prompt `[x1,y1,x2,y2]` in source-image pixel coords and returns a
-// binary mask asset. Pure for testing.
-export function buildSegmentJobBody({ project, requestedGpu, sourceAssetId, box, displayName }) {
-  return {
-    type: "image_segment",
-    projectId: project.id,
-    projectName: project.name ?? null,
-    requestedGpu,
-    payload: {
-      projectId: project.id,
-      sourceAssetId,
-      box,
-      displayName,
-    },
-  };
-}
-
-// Convert an image-pixel rect `{x,y,width,height}` to a SAM3 box prompt `[x1,y1,x2,y2]`, ordered
-// (positive width/height) and rounded to whole pixels. Pure for testing.
-export function rectToSegmentBox(rect) {
-  const x1 = Math.round(Math.min(rect.x, rect.x + rect.width));
-  const y1 = Math.round(Math.min(rect.y, rect.y + rect.height));
-  const x2 = Math.round(Math.max(rect.x, rect.x + rect.width));
-  const y2 = Math.round(Math.max(rect.y, rect.y + rect.height));
-  return [x1, y1, x2, y2];
-}
-
-// The smart-select mask preview tint: translucent pink, matching the brush-stroke color so the
-// auto-mask and any brush refinements read as one selection.
-export const MASK_PREVIEW_RGBA = [255, 40, 120, 128];
-
-// Recolor a decoded white-on-black mask's RGBA buffer in place to pink-on-transparent for the
-// on-canvas preview: foreground (luminance > 127) → translucent pink, background → transparent.
-// Pure (operates on the pixel buffer) so it's unit-testable without a real canvas.
-export function tintMaskRgbaInPlace(data) {
-  const [r, g, b, a] = MASK_PREVIEW_RGBA;
-  for (let i = 0; i < data.length; i += 4) {
-    if (data[i] > 127) {
-      data[i] = r;
-      data[i + 1] = g;
-      data[i + 2] = b;
-      data[i + 3] = a;
-    } else {
-      data[i + 3] = 0;
-    }
-  }
-  return data;
 }
 
 // Filename for a Save / Download export (sc-2434): the source name with an
@@ -414,188 +456,6 @@ function cropOverlayRects(imgW, imgH, rect) {
   ];
 }
 
-// ── Box layout (Workstream A, sc-6089) ───────────────────────────────────────
-// The colored-box layout tool lets the user draw labeled rectangles that drive
-// generation two ways: a structured `bbox` for Ideogram 4 (epic 4725) and a
-// color-keyed region prompt for any edit model. A box is a pure data record in
-// image-pixel coords:
-//   { id, rect:{x,y,width,height}, color:"#RRGGBB", type:"obj"|"text",
-//     desc, text? /* type==="text" */, colorPalette?:["#RRGGBB",…] /* ≤5 */ }
-// The conversion/validation below is pure (no React/Konva) so the box tool, the
-// Ideogram elements adapter (sc-6095), and the color-keyed path (sc-6093/6094)
-// all share one source of truth.
-export const BOX_TYPES = ["obj", "text"];
-
-// Ideogram's structured-caption palette limits (epic 4725 S3): ≤5 colors per
-// element, ≤16 across the whole document.
-export const MAX_BOX_PALETTE = 5;
-export const MAX_DOCUMENT_PALETTE = 16;
-
-// Uppercase `#RRGGBB` only — the Ideogram S3 contract is case-sensitive, so a
-// lowercase value is invalid (the per-box metadata editor, sc-6091, normalizes
-// user input to uppercase before storing). Pure.
-const HEX_COLOR_RE = /^#[0-9A-F]{6}$/;
-export function isValidHexColor(color) {
-  return typeof color === "string" && HEX_COLOR_RE.test(color);
-}
-
-// Normalize one pixel coordinate to Ideogram's 0–1000 grid (origin top-left),
-// rounded to an integer and clamped to the canvas. Guards a zero/absent dim.
-function normBboxCoord(px, dim) {
-  if (!dim) return 0;
-  return clamp(Math.round((px / dim) * 1000), 0, 1000);
-}
-
-// rect {x,y,width,height} (image-pixel coords) → `[y_min, x_min, y_max, x_max]`,
-// integers normalized 0–1000, origin top-left, clamped to the canvas. Component
-// order matches epic 4725 S3 exactly. Robust to flipped (negative-size) rects.
-export function rectToBbox(rect, imgW, imgH) {
-  const x0 = normBboxCoord(rect.x, imgW);
-  const x1 = normBboxCoord(rect.x + rect.width, imgW);
-  const y0 = normBboxCoord(rect.y, imgH);
-  const y1 = normBboxCoord(rect.y + rect.height, imgH);
-  return [Math.min(y0, y1), Math.min(x0, x1), Math.max(y0, y1), Math.max(x0, x1)];
-}
-
-// Inverse of `rectToBbox` for round-tripping a stored bbox back onto a canvas of
-// the given size. Returns image-pixel coords (unrounded, like `centeredCropRect`);
-// the 0–1000 quantization means the round-trip is exact only to grid resolution.
-export function bboxToRect([yMin, xMin, yMax, xMax], imgW, imgH) {
-  return {
-    x: (xMin / 1000) * imgW,
-    y: (yMin / 1000) * imgH,
-    width: ((xMax - xMin) / 1000) * imgW,
-    height: ((yMax - yMin) / 1000) * imgH,
-  };
-}
-
-// A per-element palette is valid when it is ≤5 uppercase `#RRGGBB` colors. An
-// absent palette is valid (it's optional). Pure.
-export function boxPaletteIsValid(palette) {
-  if (palette == null) return true;
-  if (!Array.isArray(palette)) return false;
-  return palette.length <= MAX_BOX_PALETTE && palette.every(isValidHexColor);
-}
-
-// The document-level palette: the de-duplicated union of every box's per-element
-// `colorPalette`, order-preserving (Ideogram key order is quality-relevant, S3). Pure.
-export function documentPalette(boxes) {
-  const seen = [];
-  for (const box of boxes ?? []) {
-    for (const color of box?.colorPalette ?? []) {
-      if (!seen.includes(color)) seen.push(color);
-    }
-  }
-  return seen;
-}
-
-// The document palette must stay ≤16 colors overall (epic 4725 S3). Pure.
-export function documentPaletteIsValid(boxes) {
-  return documentPalette(boxes).length <= MAX_DOCUMENT_PALETTE;
-}
-
-// A box is valid for serialization when it has positive geometry, a known type,
-// a non-empty description, and — for text elements — a non-empty literal string.
-// Color/palette validity is checked separately (`isValidHexColor`/`boxPaletteIsValid`)
-// since the color-keyed path needs only color + desc, not a full Ideogram element. Pure.
-export function boxIsValid(box) {
-  if (!box || !box.rect) return false;
-  if (!(box.rect.width > 0) || !(box.rect.height > 0)) return false;
-  if (!BOX_TYPES.includes(box.type)) return false;
-  if (typeof box.desc !== "string" || box.desc.trim() === "") return false;
-  if (box.type === "text" && (typeof box.text !== "string" || box.text.trim() === "")) return false;
-  return true;
-}
-
-// ── Box drawing tool (Workstream A, sc-6090) ─────────────────────────────────
-// A small palette of distinct, nameable colors for the box tool, plus a custom
-// `#RRGGBB`. All entries are uppercase #RRGGBB (valid per `isValidHexColor`) so a
-// drawn box is well-formed for the color-keyed path and the Ideogram adapter.
-export const BOX_PALETTE = [
-  { name: "Red", value: "#FF0000" },
-  { name: "Green", value: "#00C853" },
-  { name: "Blue", value: "#2962FF" },
-  { name: "Yellow", value: "#FFD600" },
-  { name: "Orange", value: "#FF6D00" },
-  { name: "Purple", value: "#AA00FF" },
-  { name: "Cyan", value: "#00B8D4" },
-  { name: "Pink", value: "#FF4081" },
-];
-
-// Smallest box (image pixels) a drag must cover to commit — a click or tiny
-// smudge is discarded rather than creating a degenerate box.
-export const MIN_BOX_PX = 8;
-
-// Axis-aligned rect spanning two points (image-pixel coords). Pure — the drag
-// direction (up-left vs down-right) is normalized to a positive-size rect.
-export function rectFromPoints(a, b) {
-  return {
-    x: Math.min(a.x, b.x),
-    y: Math.min(a.y, b.y),
-    width: Math.abs(a.x - b.x),
-    height: Math.abs(a.y - b.y),
-  };
-}
-
-// Clamp a rect to the canvas, keeping width/height ≥ minPx and the rect fully
-// inside [0,imgW]×[0,imgH]. Mirrors the crop tool's clamp but pure (takes dims).
-export function clampRectToCanvas(rect, imgW, imgH, minPx = MIN_BOX_PX) {
-  const width = clamp(rect.width, minPx, imgW);
-  const height = clamp(rect.height, minPx, imgH);
-  return {
-    width,
-    height,
-    x: clamp(rect.x, 0, imgW - width),
-    y: clamp(rect.y, 0, imgH - height),
-  };
-}
-
-// Build a new box record (the sc-6089 model) from a drawn rect + color. Metadata
-// (type/desc/text/colorPalette) starts at safe defaults; the per-box metadata
-// editor (sc-6091) fills it in. `id` is supplied by the caller (session-unique).
-export function makeBox(id, rect, color) {
-  return { id, rect, color, type: "obj", desc: "", text: "", colorPalette: [] };
-}
-
-// A semi-transparent CSS rgba() fill from a `#RRGGBB` color for the box overlay.
-// Pure; falls back to a neutral fill if the color isn't a valid 6-digit hex.
-export function boxFillStyle(hex, alpha) {
-  if (!isValidHexColor(hex)) return `rgba(127,127,127,${alpha})`;
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
-}
-
-// ── Per-box metadata (Workstream A, sc-6091) ─────────────────────────────────
-// Append a color to a per-element palette (uppercased), ignoring duplicates,
-// invalid hex, and anything past the ≤5 cap. Pure; returns the same array
-// reference when nothing changes so callers can no-op cheaply.
-export function addPaletteColor(palette, color, max = MAX_BOX_PALETTE) {
-  const list = palette ?? [];
-  const value = typeof color === "string" ? color.toUpperCase() : color;
-  if (!isValidHexColor(value) || list.includes(value) || list.length >= max) return list;
-  return [...list, value];
-}
-
-// Remove a color from a per-element palette. Pure; returns a new array.
-export function removePaletteColor(palette, color) {
-  return (palette ?? []).filter((entry) => entry !== color);
-}
-
-// What a box still needs to serialize as a valid Ideogram element (S3): a
-// description, the literal text for a text element, and a valid ≤5 palette.
-// Returns a human list of what's missing ("" when ready). The color-keyed edit
-// path only needs color + desc, so this does NOT gate that path. Pure.
-export function boxMetadataGaps(box) {
-  if (!box) return [];
-  const gaps = [];
-  if (typeof box.desc !== "string" || box.desc.trim() === "") gaps.push("a description");
-  if (box.type === "text" && (typeof box.text !== "string" || box.text.trim() === "")) gaps.push("the literal text");
-  if (!boxPaletteIsValid(box.colorPalette)) gaps.push("a valid color palette (≤5)");
-  return gaps;
-}
-
 // ── Blank-canvas "New layout" (Workstream A, sc-6092) ────────────────────────
 // A from-scratch substrate for layout-from-nothing (Ideogram text-to-image). The
 // dimensions obey Ideogram's constraints: multiples of 16 within [256, 2048].
@@ -622,70 +482,6 @@ export function blankCanvasDims(aspectKey, longSide) {
     width = longSide * ratio;
   }
   return { width: snapCanvasDim(width), height: snapCanvasDim(height) };
-}
-
-// ── Bake → pass-through edit (Workstream A, sc-6093) ─────────────────────────
-// Paint each box as a solid colored rectangle onto a 2D context — the color-keyed
-// region signal the edit model reads ("replace the {color} region with …"). The
-// caller draws the working image first; this overlays the boxes. Pure given the
-// context, so the paint order/coords are unit-testable without a real canvas.
-export function paintBoxesOnContext(ctx, boxes) {
-  for (const box of boxes ?? []) {
-    ctx.fillStyle = box.color;
-    ctx.fillRect(box.rect.x, box.rect.y, box.rect.width, box.rect.height);
-  }
-}
-
-// ── Auto color-prompt (Workstream A, sc-6094) ────────────────────────────────
-// Friendly color name for a palette/custom hex — palette colors get their name
-// lowercased (#FF0000 → "red"); anything else falls back to the hex itself so the
-// prompt still references a concrete color. Pure.
-export function colorName(hex) {
-  const found = BOX_PALETTE.find((entry) => entry.value === hex);
-  return found ? found.name.toLowerCase() : hex;
-}
-
-// Compose an editable color-keyed edit prompt from the boxes: one clause per
-// described box, referencing it by its visible color so the model maps region →
-// element. Boxes missing the needed text (obj → desc; text → literal) are skipped.
-// Pure; "" when nothing is describable yet. The user can edit the result freely.
-export function composeColorPrompt(boxes) {
-  const clauses = [];
-  for (const box of boxes ?? []) {
-    const name = colorName(box.color);
-    if (box.type === "text") {
-      const text = (box.text ?? "").trim();
-      if (!text) continue;
-      const desc = (box.desc ?? "").trim();
-      clauses.push(`place the text "${text}" in the ${name} region${desc ? ` (${desc})` : ""}`);
-    } else {
-      const desc = (box.desc ?? "").trim();
-      if (!desc) continue;
-      clauses.push(`replace the ${name} region with ${desc}`);
-    }
-  }
-  if (!clauses.length) return "";
-  return `${clauses.map((clause) => clause.charAt(0).toUpperCase() + clause.slice(1)).join(". ")}.`;
-}
-
-// ── Boxes → Ideogram elements[] adapter (Workstream A, sc-6095) ──────────────
-// Convert the editor's boxes into Ideogram 4 structured-caption `elements[]`
-// (epic 4725 S3 contract), one element per box, via ideogramCaption.js's factories
-// so the canonical key order is guaranteed (obj: type,bbox,desc,color_palette;
-// text: type,bbox,text,desc,color_palette). bbox is the 0–1000 grid from
-// `rectToBbox`; palette entries are normalized to uppercase #RRGGBB and dropped if
-// empty/invalid (an empty palette is omitted entirely). Pure — this supplies only
-// the spatial elements; the non-spatial caption fields are epic 4725's (S3/S4/S7).
-export function boxesToIdeogramElements(boxes, imgW, imgH) {
-  return (boxes ?? []).map((box) => {
-    const bbox = rectToBbox(box.rect, imgW, imgH);
-    const palette = (box.colorPalette ?? []).map(normalizeHexColor).filter(Boolean);
-    const color_palette = palette.length ? palette : null;
-    if (box.type === "text") {
-      return makeTextElement({ bbox, text: box.text ?? "", desc: box.desc ?? "", color_palette });
-    }
-    return makeObjElement({ bbox, desc: box.desc ?? "", color_palette });
-  });
 }
 
 // Decode a blob into an HTMLImageElement via a same-origin object: URL. Asset
@@ -815,6 +611,13 @@ export function ImageEditor() {
     editorLaunch = null,
     clearEditorLaunch,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
+    // Project LoRA catalog (sc-10254): fed to the AI Edit LoRA picker, gated to the
+    // edit model's compatible families.
+    loras = [],
+    // Global theme (sc-10244): the redesign top-bar ☾/☀ toggle drives the app-wide
+    // data-theme, not a screen-local override — consistent with the rest of the app.
+    theme = "light",
+    changeTheme,
   } = useAppContext();
   // Mac UI gating (sc-3486): the upscale tool itself runs in-process on Rust (Real-ESRGAN,
   // sc-3489), so it is available on a gated Mac — this block is a defensive guard that stays
@@ -837,11 +640,34 @@ export function ImageEditor() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
 
+  // Redesign shell UI state (epic 10243). `layout` picks one of four panel
+  // arrangements (accordion default) and persists to localStorage; `accCollapsed`
+  // collapses the open accordion tool; `layersOpen` collapses the Layers block.
+  const [layout, setLayoutState] = useState(readStoredEditorLayout);
+  const setLayout = useCallback((next) => {
+    setLayoutState(next);
+    try {
+      window.localStorage.setItem(EDITOR_LAYOUT_KEY, next);
+    } catch {
+      /* ignore (private mode etc.) */
+    }
+  }, []);
+  const [accCollapsed, setAccCollapsed] = useState(false);
+  const [layersOpen, setLayersOpen] = useState(true);
+  // One undo checkpoint per opacity DRAG (mirrors LayersPanel): the first change of
+  // a gesture snapshots; subsequent ticks coalesce until pointer-up resets it.
+  const layerOpacityGestureRef = useRef(false);
+
   // Crop tool (sc-2430): client-side, rasterized into a new working image on Apply.
   const [tool, setTool] = useState("move");
   const [ratioKey, setRatioKey] = useState("free");
   const [rotated, setRotated] = useState(false);
   const [cropRect, setCropRect] = useState(null); // image-pixel coords, or null
+  // Straighten (sc-10255): degrees the image is rotated before the axis-aligned crop
+  // is rasterized on Apply (−15..15). 0 = no rotation (identical to the plain crop).
+  const [straighten, setStraighten] = useState(0);
+  // One undo checkpoint per Transform slider DRAG (mirrors the opacity gesture).
+  const transformGestureRef = useRef(false);
 
   // Upscale tool (sc-2433): engine + factor for the in-flight request.
   const [upscaleEngine, setUpscaleEngine] = useState("real-esrgan");
@@ -861,18 +687,27 @@ export function ImageEditor() {
     setUpscaleFactor,
   });
 
-  // Color grade (sc-2439): non-destructive −1..1 adjustments previewed live via a
-  // Konva filter, baked into the working image on Apply.
-  const [colorAdjust, setColorAdjust] = useState(IDENTITY_COLOR_ADJUST);
-  // Curves + levels (sc-6109): the Color tool has three modes — the brightness/
-  // contrast "adjust" (above), per-channel levels, and an editable tone curve. Each
-  // previews via the same Konva filter and bakes via the same Canvas-2D pass. The
-  // active channel ("master" | "r" | "g" | "b") is shared by the levels + curves UI.
-  const [colorMode, setColorMode] = useState("adjust"); // "adjust" | "levels" | "curves"
-  const [levels, setLevels] = useState(IDENTITY_LEVELS);
-  const [curves, setCurves] = useState(IDENTITY_CURVES);
-  const [colorChannel, setColorChannel] = useState("master");
+  // Per-tool logic lives in dedicated hooks now (sc-9752): the color-grade, mask, and
+  // box tools each own their state/refs/handlers. They are called below (after the shared
+  // callbacks they invoke — checkpoint / stagePointToImage / replaceLayerImage / runAiOp —
+  // are defined) via stable ref bridges, so the hook call order stays fixed and each hook
+  // always invokes the LATEST callback exactly as the pre-extraction inline closures did.
+  const imageNodeRef = useRef(null); // Konva image node — cached for color-grade filtering + transform
   const histogramRef = useRef(null);
+  // Stable bridges to callbacks defined later in this component. Assigned once those
+  // callbacks exist; the tool hooks call `bridge.current(...)` so they read the latest
+  // definition (identical to reading the live closure inline).
+  const checkpointRef = useRef(() => {});
+  const stagePointToImageRef = useRef(() => null);
+  const replaceLayerImageRef = useRef(() => {});
+  const runAiOpRef = useRef(() => {});
+  const checkpointBridge = useCallback(() => checkpointRef.current(), []);
+  const stagePointToImageBridge = useCallback((event) => stagePointToImageRef.current(event), []);
+  const replaceLayerImageBridge = useCallback(
+    (id, image, objectUrl, blob) => replaceLayerImageRef.current(id, image, objectUrl, blob),
+    [],
+  );
+  const runAiOpBridge = useCallback((opts) => runAiOpRef.current(opts), []);
 
   // AI prompt edit (sc-2435): an edit-capable model + instruction + optional seed,
   // run against the working image through the existing edit_image flow.
@@ -880,6 +715,9 @@ export function ImageEditor() {
   const [editModel, setEditModel] = useState("");
   const [editPrompt, setEditPrompt] = useState("");
   const [editSeed, setEditSeed] = useState("");
+  // Guidance override (sc-10275): "" = use the edit model's default (shown as the
+  // input placeholder); a finite value rides advanced.guidanceScale.
+  const [editGuidance, setEditGuidance] = useState("");
   // Canvas-extend / outpaint (sc-2556): target output aspect (default "match" = the
   // working size) and how to fill it (crop trims, pad bars, outpaint generates).
   const [editAspect, setEditAspect] = useState("match");
@@ -896,48 +734,11 @@ export function ImageEditor() {
   // Keyboard-shortcut quick reference panel (sc-6111).
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
-  // Inpaint mask (sc-2436): freehand brush strokes in image-pixel coords, rasterized
-  // to a mask asset on Run for inpaint-capable models. `maskMode` is the paint sub-mode
-  // of the AI Edit tool (Stage panning is suspended while it's on).
-  const [maskLines, setMaskLines] = useState([]); // [{ points:[x,y,…], size, erase }]
-  const [maskMode, setMaskMode] = useState(false);
-  const [maskBrush, setMaskBrush] = useState(64);
-  const [maskErase, setMaskErase] = useState(false);
-  const maskPaintingRef = useRef(false);
-  // Mask refinement (sc-6110): feather / grow / shrink radius in px for the post-process ops.
-  const [maskRefineRadius, setMaskRefineRadius] = useState(6);
-
-  // Smart-select (sc-3751): a box-drag sub-mode of the mask tool that runs the SAM3 `image_segment`
-  // job (sc-6105) and loads the returned binary mask as an editable base UNDER the brush strokes.
-  // `maskBaseImage` is the white-on-black mask bitmap (rasterized into the mask PNG alongside the
-  // strokes); `maskOverlay` is its pink-on-transparent preview (rendered in the mask layer, so the
-  // eraser's destination-out clears it too). `maskSubTool` toggles brush vs. box-select.
-  const [maskBaseImage, setMaskBaseImage] = useState(null); // HTMLImageElement | null
-  const [maskOverlay, setMaskOverlay] = useState(null); // HTMLCanvasElement | null
-  const [maskSubTool, setMaskSubTool] = useState("brush"); // "brush" | "select"
-  const [selectDraft, setSelectDraft] = useState(null); // live selection rect during a drag
-  const selectDrawingRef = useRef(false);
-  const selectStartRef = useRef(null);
-
   // Reference-image conditioning (sc-6107): user-attached library images that jointly condition the
   // AI Edit alongside the working image, on a FLUX.2 `multiReference` edit model. The working image is
   // added at run time (it's staged as a scratch source), so this holds only the user's picks.
   const [refAssetIds, setRefAssetIds] = useState([]); // string[] of library asset ids
   const [refPickerOpen, setRefPickerOpen] = useState(false);
-
-  // Box layout tool (sc-6090): colored rectangles drawn over the working image in
-  // image-pixel coords. They drive the color-keyed edit path (sc-6093) and the
-  // Ideogram bbox path (sc-6095). Session-only overlay state — boxes are not baked
-  // into the working bitmap here, so they don't mark the session dirty.
-  const [boxes, setBoxes] = useState([]); // [{ id, rect, color, type, desc, text, colorPalette }]
-  const [selectedBoxId, setSelectedBoxId] = useState(null);
-  const [boxColor, setBoxColor] = useState(BOX_PALETTE[0].value);
-  const [boxDraft, setBoxDraft] = useState(null); // live rect during a drag-draw
-  const boxDrawingRef = useRef(false);
-  const boxStartRef = useRef(null);
-  const boxIdRef = useRef(0);
-  const boxNodeRefs = useRef(new Map()); // id → Konva node, for transformer binding
-  const boxTransformerRef = useRef(null);
 
   // Blank-canvas "New layout" (sc-6092): a from-scratch substrate for box layout
   // (Ideogram text-to-image). The modal picks an aspect + long-side size → W×H.
@@ -961,6 +762,10 @@ export function ImageEditor() {
   // The chosen edit model + whether it accepts an inpaint mask (gates the mask tool).
   const selectedEditModel = editModels.find((model) => model.id === editModel) ?? null;
   const canMask = modelIsInpaintCapable(selectedEditModel);
+  // Style/subject LoRAs for the AI Edit tool (sc-10254). Same family-gated selection +
+  // serialization the studios use (useLoraSelection → serializeLora), threaded top-level
+  // into buildEditJobBody; the worker's edit streams apply them via resolve_adapters.
+  const editLoraSelection = useLoraSelection(loras, selectedEditModel);
   // Whether the edit model conditions on extra reference images (FLUX.2 multi-reference edit, sc-6107):
   // the manifest tags it `ui.multiReference`. Gates the reference picker; off-models hide it entirely.
   const multiRefCapable = Boolean(selectedEditModel?.ui?.multiReference);
@@ -969,12 +774,6 @@ export function ImageEditor() {
   useEffect(() => {
     if (!multiRefCapable && refAssetIds.length) setRefAssetIds([]);
   }, [multiRefCapable, refAssetIds.length]);
-
-  // Leave paint mode (restoring Stage panning) when the edit tool is closed or the
-  // model can't inpaint — otherwise the canvas would stay in a paint state with no UI.
-  useEffect(() => {
-    if (maskMode && (tool !== "edit" || !canMask)) setMaskMode(false);
-  }, [tool, canMask, maskMode]);
 
   // Save / export (sc-2434). `dirty` tracks edits not yet persisted to the Library;
   // `edits` is the ordered provenance chain; `savedAssetId` flags a completed Save
@@ -997,7 +796,6 @@ export function ImageEditor() {
   const cropRectRef = useRef(null);
   const transformerRef = useRef(null);
   const layerTransformerRef = useRef(null); // Konva transformer bound to the active layer (sc-6120)
-  const imageNodeRef = useRef(null); // Konva image node — cached for color-grade filtering + transform
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
 
   // Undo/redo (sc-6106): a bounded snapshot history over the working-image session.
@@ -1020,18 +818,134 @@ export function ImageEditor() {
   const editsRef = useRef(edits);
   const dirtyRef = useRef(dirty);
   const savedAssetIdRef = useRef(savedAssetId);
-  const boxesRef = useRef(boxes);
-  const boxColorRef = useRef(boxColor);
   const aiOpRef = useRef(aiOp);
   useEffect(() => { editsRef.current = edits; }, [edits]);
   useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
   useEffect(() => { savedAssetIdRef.current = savedAssetId; }, [savedAssetId]);
-  useEffect(() => { boxesRef.current = boxes; }, [boxes]);
-  useEffect(() => { boxColorRef.current = boxColor; }, [boxColor]);
   useEffect(() => { aiOpRef.current = aiOp; }, [aiOp]);
   useEffect(() => { workingRef.current = working; }, [working]);
 
-  const imageAssets = (assets ?? []).filter(assetCanRenderAsImage);
+  // ── Per-tool hooks (sc-9752, F-052 follow-up) ──────────────────────────────
+  // Each tool owns its own state, refs, and handlers. They're called here — before the
+  // snapshot/reset/pointer plumbing that reads their refs — and receive the shared,
+  // late-defined callbacks through the stable ref bridges above (checkpoint /
+  // stagePointToImage / replaceLayerImage / runAiOp), so the call order is fixed and each
+  // hook invokes the LATEST callback exactly as the inline closures did. The boxes hook's
+  // `boxesRef`/`boxColorRef`/`boxIdRef` are the SAME snapshot-mirror refs the editor reads
+  // in captureSnapshot / writes in applyHistoryAux — the ref-mirror contract is preserved.
+  const colorGradeTool = useColorGradeTool({
+    working,
+    tool,
+    imageNodeRef,
+    histogramRef,
+    checkpoint: checkpointBridge,
+    replaceLayerImage: replaceLayerImageBridge,
+    blobToImage,
+    setTool,
+    setEdits,
+    setDirty,
+  });
+  const {
+    colorAdjust,
+    colorMode,
+    levels,
+    curves,
+    colorChannel,
+    setColorMode,
+    setColorChannel,
+    setCurves,
+    channelStroke,
+    activeGradeIsIdentity,
+    startColorGrade,
+    setAdjustValue,
+    resetAdjust,
+    setLevelsValue,
+    resetActiveColorMode,
+    applyColorGrade,
+    resetColorState,
+    discardColorPreview,
+  } = colorGradeTool;
+
+  const boxesTool = useBoxesTool({
+    working,
+    tool,
+    checkpoint: checkpointBridge,
+    stagePointToImage: stagePointToImageBridge,
+    setTool,
+  });
+  const {
+    boxes,
+    selectedBoxId,
+    boxColor,
+    boxDraft,
+    setBoxes,
+    setSelectedBoxId,
+    setBoxColor,
+    setBoxDraft,
+    boxesRef,
+    boxColorRef,
+    boxIdRef,
+    boxDrawingRef,
+    boxTransformerRef,
+    selectBoxTool,
+    registerBoxNode,
+    boxPointerDown,
+    boxPointerMove,
+    boxPointerUp,
+    updateBox,
+    handleBoxDragEnd,
+    handleBoxTransformEnd,
+    chooseBoxColor,
+    deleteBox,
+    clearBoxes,
+    resetBoxState,
+  } = boxesTool;
+
+  const maskTool = useMaskTool({
+    working,
+    tool,
+    canMask,
+    aiOp,
+    activeProject,
+    requestedGpu,
+    runAiOp: runAiOpBridge,
+    stagePointToImage: stagePointToImageBridge,
+    blobToImage,
+    setTool,
+  });
+  const {
+    maskLines,
+    maskMode,
+    maskBrush,
+    maskErase,
+    maskRefineRadius,
+    maskBaseImage,
+    maskOverlay,
+    maskSubTool,
+    selectDraft,
+    setMaskMode,
+    setMaskBrush,
+    setMaskErase,
+    setMaskRefineRadius,
+    setMaskSubTool,
+    maskPointerDown,
+    maskPointerMove,
+    maskPointerUp,
+    clearMask,
+    selectPointerDown,
+    selectPointerMove,
+    selectPointerUp,
+    cancelSelectDrag,
+    rasterizeMaskToFile,
+    refineMask,
+    resetMaskState,
+  } = maskTool;
+
+  // Memoize the image-renderable subset (sc-8939): the Image Editor re-renders on every
+  // pointermove of a brush stroke / box drag, and re-filtering the full catalog each time
+  // is needless work (jank on big projects). Only recompute when the catalog changes; this
+  // also stabilizes the identity `imageAssets` feeds into the open-from-asset callback dep.
+  const imageAssets = useMemo(() => (assets ?? []).filter(assetCanRenderAsImage), [assets]);
 
   // Track the container size so the Konva stage fills the available canvas area.
   // Measure once up front (a ResizeObserver alone can miss the first layout) and
@@ -1081,28 +995,19 @@ export function ImageEditor() {
   const resetEditorOverlays = useCallback(() => {
     setTool("move");
     setCropRect(null);
-    setColorAdjust(IDENTITY_COLOR_ADJUST);
-    setColorMode("adjust");
-    setLevels(IDENTITY_LEVELS);
-    setCurves(IDENTITY_CURVES);
-    setColorChannel("master");
+    // Per-tool state resets are owned by each tool hook now (sc-9752). Each reset mirrors
+    // the exact lines it replaced: color → adjust/levels/curves/mode/channel identity;
+    // mask → strokes + smart-select base + sub-mode + select gesture latch; boxes →
+    // boxes/selection/draft + node registry + draw latch.
+    resetColorState();
     // A new working bitmap invalidates the mask (dims/content changed) — strokes + smart-select base.
-    setMaskLines([]);
-    setMaskMode(false);
-    setMaskBaseImage(null);
-    setMaskOverlay(null);
-    setMaskSubTool("brush");
-    setSelectDraft(null);
-    selectDrawingRef.current = false;
+    resetMaskState();
     // A new editing session starts with no attached reference images (sc-6107).
     setRefAssetIds([]);
     setRefPickerOpen(false);
     // Boxes are in image-pixel coords → a new bitmap (open/crop/upscale/AI op) invalidates them.
-    setBoxes([]);
-    setSelectedBoxId(null);
-    setBoxDraft(null);
-    boxNodeRefs.current.clear();
-    boxDrawingRef.current = false;
+    resetBoxState();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Replace the whole working document with a fresh single-layer stack from one
@@ -1141,6 +1046,9 @@ export function ImageEditor() {
       boxColor: boxColorRef.current,
       boxIdSeq: boxIdRef.current,
     };
+    // boxesRef / boxColorRef / boxIdRef are stable refs (from useBoxesTool); empty deps
+    // preserve the pre-extraction behavior (a checkpoint reads them live, sc-9752).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const syncHistoryFlags = useCallback(() => {
@@ -1154,6 +1062,8 @@ export function ImageEditor() {
     historyRef.current = historyCheckpoint(historyRef.current, captureSnapshot());
     syncHistoryFlags();
   }, [captureSnapshot, syncHistoryFlags]);
+  // Keep the tool hooks' bridge pointed at the latest checkpoint (sc-9752).
+  checkpointRef.current = checkpoint;
 
   // Start a fresh history for a newly opened session (clears both stacks).
   const resetHistory = useCallback(() => {
@@ -1179,6 +1089,9 @@ export function ImageEditor() {
     // Restore the layer-id counter so a layer added after this undo can't recycle
     // an id that a redo would bring back (mirrors boxIdSeq).
     if (typeof snap.layerIdSeq === "number") layerIdRef.current = snap.layerIdSeq;
+    // The box setters + refs come from useBoxesTool but are stable (useState setters +
+    // useRefs); empty deps preserve the pre-extraction behavior (sc-9752).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const restoreSnapshot = useCallback(
@@ -1515,16 +1428,17 @@ export function ImageEditor() {
   function startCrop() {
     if (!working) return;
     setTool("crop");
+    setStraighten(0);
     setCropRect(centeredCropRect(working.width, working.height, cropRatioForKey(ratioKey, rotated)));
   }
 
   function cancelCrop() {
     setTool("move");
     setCropRect(null);
-    // Discard any unbaked color preview (adjust / levels / curves).
-    setColorAdjust(IDENTITY_COLOR_ADJUST);
-    setLevels(IDENTITY_LEVELS);
-    setCurves(IDENTITY_CURVES);
+    setStraighten(0);
+    // Discard any unbaked color preview (adjust / levels / curves). Owned by the color
+    // hook now (sc-9752), which resets exactly those three values and leaves mode/channel.
+    discardColorPreview();
   }
 
   // Escape (sc-6111): cancel the most specific in-progress gesture, falling back to
@@ -1535,9 +1449,8 @@ export function ImageEditor() {
       setBoxDraft(null);
       return;
     }
-    if (selectDrawingRef.current) {
-      selectDrawingRef.current = false;
-      setSelectDraft(null);
+    // Cancel an in-flight smart-select drag (mask hook owns the gesture latch, sc-9752).
+    if (cancelSelectDrag()) {
       return;
     }
     if (tool === "crop") {
@@ -1633,6 +1546,8 @@ export function ImageEditor() {
     if (prev?.objectUrl && prev.objectUrl !== objectUrl) URL.revokeObjectURL(prev.objectUrl);
     setWorking((cur) => replaceLayerBitmap(cur, id, { image, objectUrl, blob }));
   }, []);
+  // Keep the color-grade hook's bridge pointed at the latest replaceLayerImage (sc-9752).
+  replaceLayerImageRef.current = replaceLayerImage;
 
   // A document-level AI op (upscale / outpaint / box-keyed edit) flattens the stack
   // into one base layer; warn before discarding a multi-layer stack.
@@ -1664,7 +1579,19 @@ export function ImageEditor() {
           const canvas = document.createElement("canvas");
           canvas.width = sw;
           canvas.height = sh;
-          canvas.getContext("2d").drawImage(layer.image, sx, sy, sw, sh, 0, 0, sw, sh);
+          const ctx = canvas.getContext("2d");
+          if (straighten) {
+            // Straighten (sc-10255): rotate the layer by `straighten°` about the crop-rect
+            // centre, then take the axis-aligned sw×sh window — a rotate-then-crop. Corners
+            // that rotate past the source edge come through transparent (inset your crop).
+            const cx = sx + sw / 2;
+            const cy = sy + sh / 2;
+            ctx.translate(sw / 2, sh / 2);
+            ctx.rotate((straighten * Math.PI) / 180);
+            ctx.drawImage(layer.image, -cx, -cy);
+          } else {
+            ctx.drawImage(layer.image, sx, sy, sw, sh, 0, 0, sw, sh);
+          }
           const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
           if (!blob) throw new Error("Could not encode the crop.");
           const { image, objectUrl } = await blobToImage(blob);
@@ -1691,9 +1618,10 @@ export function ImageEditor() {
       }),
     }));
     oldLayers.forEach((layer) => layer.objectUrl && URL.revokeObjectURL(layer.objectUrl));
-    setEdits((prev) => [...prev, { op: "crop", width: sw, height: sh }]);
+    setEdits((prev) => [...prev, { op: "crop", width: sw, height: sh, ...(straighten ? { straighten } : {}) }]);
+    setStraighten(0);
     setDirty(true);
-  }, [working, cropRect, checkpoint, resetEditorOverlays]);
+  }, [working, cropRect, straighten, checkpoint, resetEditorOverlays]);
 
   // Bind the transformer to the crop rect whenever crop mode is active.
   useEffect(() => {
@@ -1715,134 +1643,6 @@ export function ImageEditor() {
     transformer.nodes(node ? [node] : []);
     transformer.getLayer()?.batchDraw();
   }, [tool, working]);
-
-  // ── Color grade (sc-2439; curves + levels sc-6109) ─────────────────────────
-  function startColorGrade() {
-    if (!working) return;
-    setTool("color");
-    setColorMode("adjust");
-    setColorChannel("master");
-    setColorAdjust(IDENTITY_COLOR_ADJUST);
-    setLevels(IDENTITY_LEVELS);
-    setCurves(IDENTITY_CURVES);
-  }
-
-  const setAdjustValue = (key, value) => setColorAdjust((prev) => ({ ...prev, [key]: value }));
-  const resetAdjust = (key) => setAdjustValue(key, 0);
-
-  // Patch the active channel's levels (sc-6109).
-  const setLevelsValue = (key, value) =>
-    setLevels((prev) => ({ ...prev, [colorChannel]: { ...prev[colorChannel], [key]: value } }));
-
-  // Reset the currently-selected color mode (all channels) to its identity.
-  function resetActiveColorMode() {
-    if (colorMode === "levels") setLevels(IDENTITY_LEVELS);
-    else if (colorMode === "curves") setCurves(IDENTITY_CURVES);
-    else setColorAdjust(IDENTITY_COLOR_ADJUST);
-  }
-
-  // Stroke for the curve editor / channel cue.
-  const channelStroke = { master: "var(--accent)", r: "#d44", g: "#4a4", b: "#46d" }[colorChannel];
-
-  // Whether the currently-selected color mode is at its identity (gates Apply + the
-  // live-preview cache).
-  function activeGradeIsIdentity() {
-    if (colorMode === "levels") return isIdentityLevels(levels);
-    if (colorMode === "curves") return isIdentityCurves(curves);
-    return isIdentityAdjust(colorAdjust);
-  }
-
-  // Live preview: Konva applies filters only on a cached node, and re-running them
-  // needs a re-cache. Cache the active layer's node (re-caching when ANY grade input
-  // changes) while the color tool is active with a non-identity grade; clear it
-  // otherwise so Move/other tools see the untouched bitmap. The filter reads the
-  // gradeMode + colorAdjust/levels/curves attrs.
-  useEffect(() => {
-    const node = imageNodeRef.current;
-    if (!node) return;
-    if (tool === "color" && !activeGradeIsIdentity()) {
-      node.cache();
-    } else {
-      node.clearCache();
-    }
-    node.getLayer()?.batchDraw();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tool, colorMode, colorAdjust, levels, curves, working]);
-
-  // Draw the active layer's histogram for the levels mode (sc-6109). Recomputed when
-  // the layer or selected channel changes; cheap (one pass over the layer bitmap).
-  useEffect(() => {
-    const canvas = histogramRef.current;
-    if (!canvas || tool !== "color" || colorMode !== "levels") return;
-    const layer = activeLayerOf(working);
-    if (!layer) return;
-    const off = document.createElement("canvas");
-    off.width = layer.image.naturalWidth;
-    off.height = layer.image.naturalHeight;
-    const octx = off.getContext("2d");
-    octx.drawImage(layer.image, 0, 0);
-    const hist = computeHistogram(octx.getImageData(0, 0, off.width, off.height).data);
-    const series = colorChannel === "master" ? hist.luma : hist[colorChannel];
-    const peak = Math.max(1, ...series);
-    const ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = colorChannel === "r" ? "#d44" : colorChannel === "g" ? "#4a4" : colorChannel === "b" ? "#46d" : "#888";
-    const bw = canvas.width / 256;
-    for (let i = 0; i < 256; i += 1) {
-      const h = (series[i] / peak) * canvas.height;
-      ctx.fillRect(i * bw, canvas.height - h, Math.max(1, bw), h);
-    }
-  }, [tool, colorMode, colorChannel, working]);
-
-  // Apply: bake the active mode's grade (adjust / levels / curves) into the ACTIVE
-  // layer using the SAME pixel math as the live preview (a 2D-canvas pass), writing
-  // it back in place — stack + dims preserved (sc-6119). Records the grade in the
-  // edit chain (sc-6109).
-  const applyColorGrade = useCallback(async () => {
-    const layer = activeLayerOf(working);
-    if (!working || !layer) return;
-    // Resolve the active mode's transform + provenance entry; bail if it's identity.
-    let transform;
-    let edit;
-    if (colorMode === "levels") {
-      if (isIdentityLevels(levels)) return;
-      const baked = levels;
-      transform = (data) => applyLevels(data, baked);
-      edit = { op: "levels", levels: baked };
-    } else if (colorMode === "curves") {
-      if (isIdentityCurves(curves)) return;
-      const baked = curves;
-      transform = (data) => applyCurves(data, baked);
-      edit = { op: "curves", curves: baked };
-    } else {
-      if (isIdentityAdjust(colorAdjust)) return;
-      const baked = { ...colorAdjust };
-      transform = (data) => applyColorAdjustments(data, baked);
-      edit = { op: "color", ...baked };
-    }
-    const w = layer.image.naturalWidth;
-    const h = layer.image.naturalHeight;
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(layer.image, 0, 0);
-    const imageData = ctx.getImageData(0, 0, w, h);
-    transform(imageData.data);
-    ctx.putImageData(imageData, 0, 0);
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
-    if (!blob) return;
-    const { image, objectUrl } = await blobToImage(blob);
-    checkpoint();
-    replaceLayerImage(layer.id, image, objectUrl, blob);
-    // The grade is baked; drop every live preview.
-    setColorAdjust(IDENTITY_COLOR_ADJUST);
-    setLevels(IDENTITY_LEVELS);
-    setCurves(IDENTITY_CURVES);
-    setTool("move");
-    setEdits((prev) => [...prev, edit]);
-    setDirty(true);
-  }, [working, colorMode, colorAdjust, levels, curves, replaceLayerImage, checkpoint]);
 
   // ── Layer stack ops (sc-6118) ─────────────────────────────────────────────
   // Wire the layers panel to the pure layer-stack ops (../imageLayers.js). Each
@@ -1976,118 +1776,36 @@ export function ImageEditor() {
     setDirty(true);
   }
 
-  // ── Box layout tool (sc-6090) ─────────────────────────────────────────────
-  function selectBoxTool() {
-    if (working) setTool("boxes");
+  // Numeric Transform controls (sc-10255): merge a patch into the active layer's
+  // transform. Bound two-way to the same {x,y,scaleX,scaleY,rotation} the canvas
+  // handles drive, so typing/sliding moves the layer and dragging updates the fields.
+  // `gestureStart` gates the undo checkpoint so a slider drag is one step, not many.
+  function setActiveTransform(patch, { gestureStart = true } = {}) {
+    const layer = activeLayerOf(workingRef.current);
+    if (!layer) return;
+    if (gestureStart) checkpoint();
+    setWorking((prev) => setLayerProps(prev, layer.id, { transform: { ...layer.transform, ...patch } }));
+    setDirty(true);
   }
-
-  const nextBoxId = () => `box_${(boxIdRef.current += 1)}`;
-
-  // Konva node registry so the transformer can bind to the selected box; the ref
-  // callback removes a node when its box unmounts (tool switch / delete).
-  const registerBoxNode = (id, node) => {
-    if (node) boxNodeRefs.current.set(id, node);
-    else boxNodeRefs.current.delete(id);
+  const onTransformSlider = (patch) => {
+    const start = !transformGestureRef.current;
+    transformGestureRef.current = true;
+    setActiveTransform(patch, { gestureStart: start });
   };
-
-  function boxPointerDown(event) {
-    if (tool !== "boxes" || !working) return;
-    // Only a click on the canvas background starts a new box — clicks on an
-    // existing box (select/drag) or a transformer handle (resize) are left alone.
-    const stage = event.target.getStage();
-    const name = event.target?.name?.() ?? "";
-    const onBackground = event.target === stage || name === "editor-image" || name === "editor-bg";
-    if (!onBackground) return;
-    const pt = stagePointToImage(event);
-    if (!pt) return;
-    boxDrawingRef.current = true;
-    boxStartRef.current = pt;
-    setSelectedBoxId(null);
-    setBoxDraft({ x: pt.x, y: pt.y, width: 0, height: 0 });
-  }
-
-  function boxPointerMove(event) {
-    if (!boxDrawingRef.current) return;
-    const pt = stagePointToImage(event);
-    if (!pt) return;
-    setBoxDraft(rectFromPoints(boxStartRef.current, pt));
-  }
-
-  function boxPointerUp() {
-    if (!boxDrawingRef.current) return;
-    boxDrawingRef.current = false;
-    const draft = boxDraft;
-    setBoxDraft(null);
-    // Discard a click / sub-minimum smudge; otherwise commit a new colored box.
-    if (!draft || draft.width < MIN_BOX_PX || draft.height < MIN_BOX_PX) return;
-    const rect = clampRectToCanvas(draft, working.width, working.height);
-    const id = nextBoxId();
-    checkpoint();
-    setBoxes((prev) => [...prev, makeBox(id, rect, boxColor)]);
-    setSelectedBoxId(id);
-  }
-
-  const updateBoxRect = (id, rect) =>
-    setBoxes((prev) => prev.map((box) => (box.id === id ? { ...box, rect } : box)));
-
-  // Patch a box's metadata (sc-6091): type / desc / text / colorPalette.
-  const updateBox = (id, patch) =>
-    setBoxes((prev) => prev.map((box) => (box.id === id ? { ...box, ...patch } : box)));
-
-  function handleBoxDragEnd(id, event) {
-    const node = event.target;
-    const rect = clampRectToCanvas(
-      { x: node.x(), y: node.y(), width: node.width(), height: node.height() },
-      working.width,
-      working.height,
-    );
-    node.setAttrs(rect);
-    checkpoint();
-    updateBoxRect(id, rect);
-  }
-
-  function handleBoxTransformEnd(id, event) {
-    const node = event.target;
-    const rect = clampRectToCanvas(
-      { x: node.x(), y: node.y(), width: node.width() * node.scaleX(), height: node.height() * node.scaleY() },
-      working.width,
-      working.height,
-    );
-    node.scaleX(1);
-    node.scaleY(1);
-    node.setAttrs(rect);
-    checkpoint();
-    updateBoxRect(id, rect);
-  }
-
-  // Selecting a palette color sets the color for new boxes and recolors the
-  // selected box (the palette acts on the active box). Stored uppercase so the
-  // box stays valid per `isValidHexColor` even from a lowercase <input type=color>.
-  function chooseBoxColor(color) {
-    const value = color.toUpperCase();
-    // Recoloring the active box is an undoable step; setting the color for future
-    // boxes (no selection) is not — it changes no committed state.
-    if (selectedBoxId) checkpoint();
-    setBoxColor(value);
-    if (selectedBoxId) {
-      setBoxes((prev) => prev.map((box) => (box.id === selectedBoxId ? { ...box, color: value } : box)));
-    }
-  }
-
-  function deleteBox(id) {
-    if (!id) return;
-    checkpoint();
-    setBoxes((prev) => prev.filter((box) => box.id !== id));
-    boxNodeRefs.current.delete(id);
-    setSelectedBoxId((cur) => (cur === id ? null : cur));
-  }
-
-  function clearBoxes() {
-    if (boxes.length) checkpoint();
-    setBoxes([]);
-    boxNodeRefs.current.clear();
-    setSelectedBoxId(null);
-    setBoxDraft(null);
+  const endTransformGesture = () => {
+    transformGestureRef.current = false;
+  };
+  function flipActiveLayer(axis) {
+    const layer = activeLayerOf(workingRef.current);
+    if (!layer) return;
+    const t = layer.transform;
+    // Flip in place: negate the axis scale AND shift the origin by the scaled extent so
+    // the layer keeps its local bounding box instead of mirroring off its top-left pivot.
+    const patch =
+      axis === "h"
+        ? { scaleX: -t.scaleX, x: t.x + (layer.image?.naturalWidth ?? 0) * t.scaleX }
+        : { scaleY: -t.scaleY, y: t.y + (layer.image?.naturalHeight ?? 0) * t.scaleY };
+    setActiveTransform(patch);
   }
 
   // Flatten the visible layer stack onto a fresh canvas at the document size
@@ -2173,17 +1891,10 @@ export function ImageEditor() {
     boxPointerUp(event);
   }
 
-  // Bind the transformer to the selected box whenever the box tool is active.
-  useEffect(() => {
-    const transformer = boxTransformerRef.current;
-    if (tool !== "boxes" || !transformer) return;
-    const node = selectedBoxId ? boxNodeRefs.current.get(selectedBoxId) : null;
-    transformer.nodes(node ? [node] : []);
-    transformer.getLayer()?.batchDraw();
-  }, [tool, selectedBoxId, boxes]);
-
   // ── Inpaint mask brush (sc-2436) ──────────────────────────────────────────
-  // Pointer position in image-pixel coords (undo the stage pan/zoom), clamped.
+  // Pointer position in image-pixel coords (undo the stage pan/zoom), clamped. Stays in
+  // the editor (it reads `view` + `working` + the shared `clamp`) and is bridged into the
+  // mask + boxes hooks via stagePointToImageRef so they read the latest closure (sc-9752).
   function stagePointToImage(event) {
     const stage = event.target.getStage();
     const pointer = stage?.getPointerPosition();
@@ -2193,123 +1904,7 @@ export function ImageEditor() {
       y: clamp((pointer.y - view.y) / view.scale, 0, working.height),
     };
   }
-
-  function maskPointerDown(event) {
-    if (!maskMode || maskSubTool !== "brush" || !working) return;
-    const pt = stagePointToImage(event);
-    if (!pt) return;
-    maskPaintingRef.current = true;
-    setMaskLines((prev) => [...prev, { points: [pt.x, pt.y], size: maskBrush, erase: maskErase }]);
-  }
-
-  function maskPointerMove(event) {
-    if (!maskMode || maskSubTool !== "brush" || !maskPaintingRef.current) return;
-    const pt = stagePointToImage(event);
-    if (!pt) return;
-    setMaskLines((prev) => {
-      if (!prev.length) return prev;
-      const last = prev[prev.length - 1];
-      return [...prev.slice(0, -1), { ...last, points: [...last.points, pt.x, pt.y] }];
-    });
-  }
-
-  function maskPointerUp() {
-    maskPaintingRef.current = false;
-  }
-
-  function clearMask() {
-    setMaskLines([]);
-    setMaskBaseImage(null);
-    setMaskOverlay(null);
-  }
-
-  // ── Smart-select box (sc-3751) ────────────────────────────────────────────
-  // A box-drag sub-mode of the mask tool: drag a selection rect, then on release run the SAM3
-  // `image_segment` job over it. Mirrors the sc-6090 box draw, but transient (one rect → one run).
-  function selectPointerDown(event) {
-    if (!maskMode || maskSubTool !== "select" || !working) return;
-    const pt = stagePointToImage(event);
-    if (!pt) return;
-    selectDrawingRef.current = true;
-    selectStartRef.current = pt;
-    setSelectDraft({ x: pt.x, y: pt.y, width: 0, height: 0 });
-  }
-
-  function selectPointerMove(event) {
-    if (!selectDrawingRef.current) return;
-    const pt = stagePointToImage(event);
-    if (!pt) return;
-    setSelectDraft(rectFromPoints(selectStartRef.current, pt));
-  }
-
-  function selectPointerUp() {
-    if (!selectDrawingRef.current) return;
-    selectDrawingRef.current = false;
-    const draft = selectDraft;
-    setSelectDraft(null);
-    // Discard a click / sub-minimum smudge; otherwise run segmentation over the box.
-    if (!draft || draft.width < MIN_BOX_PX || draft.height < MIN_BOX_PX) return;
-    const rect = clampRectToCanvas(draft, working.width, working.height);
-    runSmartSelect(rect);
-  }
-
-  // Rasterize the brush strokes to a mask PNG File aligned to the working bitmap:
-  // white = edit region on black. Erase strokes punch holes (destination-out on a
-  // transparent scratch), then it's flattened onto black so the worker's convert("L")
-  // reads white-on-black. Mirrors the same compositing as the on-canvas preview.
-  // Composite the current mask (smart-select base + brush strokes) onto a fresh
-  // white-on-black canvas at working dims. Shared by the inpaint upload + the mask
-  // refine ops (sc-6110). White = edit region; erased holes flatten to black (=keep).
-  function rasterizeMaskToCanvas() {
-    const scratch = document.createElement("canvas");
-    scratch.width = working.width;
-    scratch.height = working.height;
-    const sctx = scratch.getContext("2d");
-    // Smart-select base first (sc-3751): the white-on-black SAM3 mask underlays the brush strokes,
-    // so paint strokes add to it and erase strokes (destination-out) carve it back. Its opaque
-    // black areas are harmless — the final flatten is onto black anyway.
-    if (maskBaseImage) sctx.drawImage(maskBaseImage, 0, 0);
-    sctx.lineCap = "round";
-    sctx.lineJoin = "round";
-    sctx.strokeStyle = "#ffffff";
-    sctx.fillStyle = "#ffffff";
-    for (const line of maskLines) {
-      sctx.globalCompositeOperation = line.erase ? "destination-out" : "source-over";
-      sctx.lineWidth = line.size;
-      const p = line.points;
-      if (p.length === 2) {
-        sctx.beginPath();
-        sctx.arc(p[0], p[1], line.size / 2, 0, Math.PI * 2);
-        sctx.fill();
-        continue;
-      }
-      sctx.beginPath();
-      sctx.moveTo(p[0], p[1]);
-      for (let i = 2; i < p.length; i += 2) sctx.lineTo(p[i], p[i + 1]);
-      sctx.stroke();
-    }
-    // Flatten onto black so erased/holes read as black (= keep).
-    const out = document.createElement("canvas");
-    out.width = working.width;
-    out.height = working.height;
-    const octx = out.getContext("2d");
-    octx.fillStyle = "#000000";
-    octx.fillRect(0, 0, out.width, out.height);
-    octx.drawImage(scratch, 0, 0);
-    return out;
-  }
-
-  function rasterizeMaskToFile() {
-    return new Promise((resolve, reject) => {
-      rasterizeMaskToCanvas().toBlob((blob) => {
-        if (!blob) {
-          reject(new Error("Could not encode the mask."));
-          return;
-        }
-        resolve(new File([blob], "mask.png", { type: "image/png" }));
-      }, "image/png");
-    });
-  }
+  stagePointToImageRef.current = stagePointToImage;
 
   // ── AI ops on the working image (sc-2432 seam) ────────────────────────────
   // Flatten the composited document to a PNG File. `filename` overrides the name
@@ -2406,6 +2001,9 @@ export function ImageEditor() {
     },
     [working, aiOp, activeProject, workingImageToFile, activeLayerToFile, confirmFlatten, importAsset, token, purgeAsset, trackEditorScratchOp],
   );
+  // Keep the mask hook's bridge pointed at the latest runAiOp (sc-9752) — runSmartSelect
+  // stages a scratch image_segment job through this exact seam.
+  runAiOpRef.current = runAiOp;
 
   function runUpscale() {
     const valid = upscaleFactorsForEngine(upscaleEngine);
@@ -2498,98 +2096,9 @@ export function ImageEditor() {
           width: outWidth,
           height: outHeight,
           fitMode,
+          loras: editLoraSelection.serializedLoras,
+          guidanceScale: editGuidance,
         }),
-    });
-  }
-
-  // Decode a worker mask (white-on-black PNG at working dims) into the editable mask base: a
-  // white-on-black canvas for rasterizeMaskToFile + a pink-on-transparent overlay for the preview.
-  // Drawn scaled to the working dims defensively (the mask is produced at the working size).
-  function loadMaskBase(image) {
-    const base = document.createElement("canvas");
-    base.width = working.width;
-    base.height = working.height;
-    base.getContext("2d").drawImage(image, 0, 0, working.width, working.height);
-    const overlay = document.createElement("canvas");
-    overlay.width = working.width;
-    overlay.height = working.height;
-    const octx = overlay.getContext("2d");
-    octx.drawImage(base, 0, 0);
-    const data = octx.getImageData(0, 0, overlay.width, overlay.height);
-    tintMaskRgbaInPlace(data.data);
-    octx.putImageData(data, 0, 0);
-    setMaskBaseImage(base);
-    setMaskOverlay(overlay);
-  }
-
-  // Install a refined white-on-black mask canvas as the new mask base (sc-6110): it
-  // becomes the base + a fresh pink overlay, and the brush strokes are cleared (they
-  // are now baked into the canvas). Mirrors loadMaskBase but from a canvas.
-  function applyRefinedMask(maskCanvas) {
-    const overlay = document.createElement("canvas");
-    overlay.width = working.width;
-    overlay.height = working.height;
-    const octx = overlay.getContext("2d");
-    octx.drawImage(maskCanvas, 0, 0);
-    const data = octx.getImageData(0, 0, overlay.width, overlay.height);
-    tintMaskRgbaInPlace(data.data);
-    octx.putImageData(data, 0, 0);
-    setMaskBaseImage(maskCanvas);
-    setMaskOverlay(overlay);
-    setMaskLines([]);
-  }
-
-  // Mask refinement (sc-6110): flatten the current mask, run a pure pixel op
-  // (feather / grow / shrink / invert), and reinstall it as the base. No-op when no
-  // mask exists, except invert (empty mask → select-all).
-  function refineMask(op) {
-    if (!working) return;
-    if (op !== "invert" && !maskHasContent(maskLines) && !maskBaseImage) return;
-    const canvas = rasterizeMaskToCanvas();
-    const w = canvas.width;
-    const h = canvas.height;
-    const ctx = canvas.getContext("2d");
-    const imageData = ctx.getImageData(0, 0, w, h);
-    const alpha = maskAlphaFromRgba(imageData.data);
-    let refined;
-    if (op === "invert") refined = invertAlpha(alpha);
-    else if (op === "grow") refined = dilateAlpha(alpha, w, h, maskRefineRadius);
-    else if (op === "shrink") refined = erodeAlpha(alpha, w, h, maskRefineRadius);
-    else refined = blurAlpha(alpha, w, h, maskRefineRadius);
-    writeMaskAlphaToRgba(imageData.data, refined);
-    ctx.putImageData(imageData, 0, 0);
-    applyRefinedMask(canvas);
-  }
-
-  // Run the SAM3 image_segment job over the selection box (sc-3751): stage the working image, post
-  // the job, and on completion load the returned binary mask as an editable base under the strokes.
-  // It does NOT replace the working image (onComplete owns the result), so the session is unchanged
-  // except for the mask layer; the brush/eraser then refines it before Inpaint.
-  function runSmartSelect(rect) {
-    if (!working || aiOp || !canMask) return;
-    const box = rectToSegmentBox(rect);
-    runAiOp({
-      label: "smart select",
-      endpoint: "/api/v1/jobs",
-      buildBody: (scratch) =>
-        buildSegmentJobBody({
-          project: activeProject,
-          requestedGpu,
-          sourceAssetId: scratch.id,
-          box,
-          displayName: working?.source?.name,
-        }),
-      onComplete: async (resultAsset) => {
-        const res = await fetch(assetUrl(resultAsset));
-        if (!res.ok) throw new Error(`Failed to load mask (${res.status})`);
-        const { image, objectUrl } = await blobToImage(await res.blob());
-        loadMaskBase(image);
-        URL.revokeObjectURL(objectUrl); // the pixels are copied into the base/overlay canvases
-        // Return to the mask tool so the auto-mask can be refined with the brush/eraser.
-        setTool("edit");
-        setMaskMode(true);
-        setMaskSubTool("brush");
-      },
     });
   }
 
@@ -2751,83 +2260,1402 @@ export function ImageEditor() {
   // pre-fill the prompt field on demand; "" when no box is describable yet.
   const composedPrompt = composeColorPrompt(boxes);
 
-  return (
-    <section className="main-surface image-editor-surface">
-      <div className="image-editor-bar">
-        <span className="image-editor-title" title={working ? working.source.name : undefined}>
-          {working ? working.source.name : "No image open"}
-        </span>
-        <div className="image-editor-bar-actions">
-          <button className={working ? "" : "primary"} onClick={() => setPickerOpen(true)} type="button">
-            Open
-          </button>
-          <button onClick={() => setNewLayoutOpen(true)} title="Start a blank canvas for box layout" type="button">
-            New layout
-          </button>
+  // ── Redesign shell derived values / dispatch (epic 10243) ──────────────────
+  const activeMeta = EDITOR_TOOL_META[tool];
+  const zoomPct = Math.round(view.scale * 100);
+  const layerCount = working ? working.layers.length : 0;
+  const docName = working ? working.source.name : "No image open";
+  const docFormat = working ? (working.source.name?.split(".").pop() || "png").toUpperCase() : "";
+  const docSub = working ? `${working.width} × ${working.height} · ${docFormat}` : "No document";
+  // Accordion open only when the tool's panel isn't collapsed (accordion mode only).
+  const panelOpen = !(layout === "accordion" && accCollapsed);
+  const maskActive = canMask && (maskHasContent(maskLines) || Boolean(maskBaseImage));
+
+  function toolIsDisabled(key) {
+    if (key === "move") return false;
+    if (aiOp) return true;
+    if (key === "upscale") return Boolean(macUpscaleBlock);
+    if (key === "detail") return detailModels.length === 0;
+    return false;
+  }
+  // Route each tool through its existing entry handler (some prime state, e.g. crop
+  // rect / transform target / color preview) — mirrors the pre-redesign toolbar.
+  function selectTool(key) {
+    if (toolIsDisabled(key)) return;
+    if (key === "move") cancelCrop();
+    else if (key === "transform") startTransform();
+    else if (key === "crop") startCrop();
+    else if (key === "color") startColorGrade();
+    else if (key === "boxes") selectBoxTool();
+    else setTool(key);
+  }
+  // Accordion header: clicking the open tool collapses it; any other selects + expands.
+  function onAccordionHead(key) {
+    if (tool === key) setAccCollapsed((v) => !v);
+    else {
+      setAccCollapsed(false);
+      selectTool(key);
+    }
+  }
+  const toolHint = {
+    move: "Drag to pan · scroll to zoom",
+    transform: "Drag the handles on the canvas to move, scale or rotate",
+    crop: "Drag the crop handles, or set an exact size on the right",
+    upscale: "Pick an engine and factor, then run",
+    detail: "Tune detail & structure, then enhance",
+    color: "Grade with adjust, levels or curves",
+    edit: maskMode ? "Paint or box-select the region to edit" : "Describe the edit on the right",
+    boxes: "Drag to draw a region, then describe it",
+  }[tool];
+
+  // Short engine blurbs for the upscale radio cards (design copy). Keyed by the
+  // platform engine list (`availableUpscaleEngines`); unknown keys get no blurb.
+  const UPSCALE_ENGINE_DESC = {
+    "real-esrgan": "Fast, faithful general-purpose upscaler. Great default.",
+    seedvr2: "Detail-restoring diffusion upscaler for degraded sources.",
+    "aura-sr": "Sharpest output, best for print. Slower.",
+  };
+  const setCropDim = (dim, raw) => {
+    const value = Number(raw);
+    if (!cropRect || !working || !Number.isFinite(value)) return;
+    setCropRect(clampCropToImage({ ...cropRect, [dim]: value }));
+  };
+
+  const renderToolPanel = (key) => {
+    switch (key) {
+      case "move":
+        return (
+          <>
+            <div className="ie-section">
+              <div className="ie-sec-title">Document</div>
+              <div className="ie-readout">
+                <span className="ie-readout-k">Dimensions</span>
+                <span className="ie-readout-v">
+                  {working.width} × {working.height}
+                </span>
+              </div>
+              <div className="ie-readout">
+                <span className="ie-readout-k">Layers</span>
+                <span className="ie-readout-v">{layerCount}</span>
+              </div>
+              <p className="ie-note">
+                Drag on the canvas to pan. Scroll to zoom. Pick a tool to start editing — each tool&apos;s controls appear
+                here.
+              </p>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">Quick actions</div>
+              <button className="ie-btn block" onClick={fitToView} type="button">
+                Fit to view
+              </button>
+              <button className="ie-btn block" onClick={actualSize} type="button">
+                Actual size (100%)
+              </button>
+            </div>
+          </>
+        );
+      case "transform": {
+        const tLayer = activeLayerOf(working);
+        const t = tLayer?.transform ?? identityTransform();
+        const scalePct = Math.round(Math.abs(t.scaleX) * 100);
+        const signX = t.scaleX < 0 ? -1 : 1;
+        const signY = t.scaleY < 0 ? -1 : 1;
+        return (
+          <>
+            <div className="ie-section">
+              <div className="ie-sec-title">Position</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">X</span>
+                  </div>
+                  <input
+                    className="ie-input ie-numfield"
+                    onChange={(event) => setActiveTransform({ x: Number(event.target.value) || 0 })}
+                    type="number"
+                    value={Math.round(t.x)}
+                  />
+                </div>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Y</span>
+                  </div>
+                  <input
+                    className="ie-input ie-numfield"
+                    onChange={(event) => setActiveTransform({ y: Number(event.target.value) || 0 })}
+                    type="number"
+                    value={Math.round(t.y)}
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">Scale &amp; rotation</div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Scale</span>
+                  <span className="ie-field-val">{scalePct}%</span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={300}
+                  min={10}
+                  onBlur={endTransformGesture}
+                  onChange={(event) => {
+                    const pct = Number(event.target.value) / 100;
+                    onTransformSlider({ scaleX: signX * pct, scaleY: signY * pct });
+                  }}
+                  onMouseUp={endTransformGesture}
+                  onTouchEnd={endTransformGesture}
+                  type="range"
+                  value={scalePct}
+                />
+              </div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Rotation</span>
+                  <span className="ie-field-val">{Math.round(t.rotation)}°</span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={180}
+                  min={-180}
+                  onBlur={endTransformGesture}
+                  onChange={(event) => onTransformSlider({ rotation: Number(event.target.value) })}
+                  onMouseUp={endTransformGesture}
+                  onTouchEnd={endTransformGesture}
+                  type="range"
+                  value={Math.round(t.rotation)}
+                />
+              </div>
+              <div className="ie-seg two" style={{ width: "100%" }}>
+                <button className="ie-seg-btn" onClick={() => flipActiveLayer("h")} type="button">
+                  Flip horizontal
+                </button>
+                <button className="ie-seg-btn" onClick={() => flipActiveLayer("v")} type="button">
+                  Flip vertical
+                </button>
+              </div>
+            </div>
+            <div className="ie-section">
+              <p className="ie-note">You can also drag the handles on the canvas to move, scale or rotate the layer.</p>
+              <button className="ie-btn block" onClick={resetActiveLayerTransform} type="button">
+                Reset transform
+              </button>
+              <button className="ie-btn block primary" onClick={() => setTool("move")} type="button">
+                Done
+              </button>
+            </div>
+          </>
+        );
+      }
+      case "crop":
+        return (
+          <>
+            <div className="ie-section">
+              <div className="ie-sec-title">Aspect ratio</div>
+              <div className="ie-seg wrap" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
+                {CROP_RATIOS.map((entry) => (
+                  <button
+                    className="ie-seg-btn"
+                    data-active={ratioKey === entry.key}
+                    key={entry.key}
+                    onClick={() => chooseRatio(entry.key)}
+                    type="button"
+                  >
+                    {entry.label}
+                  </button>
+                ))}
+              </div>
+              <button
+                className="ie-btn block"
+                data-active={rotated}
+                disabled={ratioKey === "free" || ratioKey === "1:1"}
+                onClick={toggleRotate}
+                type="button"
+              >
+                ⟲ Swap orientation
+              </button>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">Size</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: "8px", alignItems: "end" }}>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Width</span>
+                  </div>
+                  <input
+                    className="ie-input ie-numfield"
+                    onChange={(event) => setCropDim("width", event.target.value)}
+                    type="number"
+                    value={cropRect ? Math.round(cropRect.width) : ""}
+                  />
+                </div>
+                <span style={{ paddingBottom: "10px", color: "var(--ie-faint)" }}>×</span>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Height</span>
+                  </div>
+                  <input
+                    className="ie-input ie-numfield"
+                    onChange={(event) => setCropDim("height", event.target.value)}
+                    type="number"
+                    value={cropRect ? Math.round(cropRect.height) : ""}
+                  />
+                </div>
+              </div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Straighten</span>
+                  <span className="ie-field-val">
+                    {straighten > 0 ? "+" : ""}
+                    {straighten}°
+                  </span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={15}
+                  min={-15}
+                  onChange={(event) => setStraighten(Number(event.target.value))}
+                  type="range"
+                  value={straighten}
+                />
+                <p className="ie-note">Rotates the image within the crop; applied on Apply. Inset the crop so the corners stay filled.</p>
+              </div>
+            </div>
+            <div className="ie-section">
+              <button className="ie-btn block primary" onClick={applyCrop} type="button">
+                Apply crop
+              </button>
+              <button className="ie-btn block" onClick={cancelCrop} type="button">
+                Cancel
+              </button>
+            </div>
+          </>
+        );
+      case "upscale":
+        return (
+          <>
+            <div className="ie-section">
+              <div className="ie-sec-title">Engine</div>
+              <div className="ie-cards">
+                {availableUpscaleEngines.map((entry) => (
+                  <button
+                    className="ie-card"
+                    data-active={upscaleEngine === entry.key}
+                    key={entry.key}
+                    onClick={() => {
+                      setUpscaleEngine(entry.key);
+                      if (!entry.factors.includes(upscaleFactor)) setUpscaleFactor(entry.factors[0]);
+                    }}
+                    type="button"
+                  >
+                    <span className="ie-radio" />
+                    <span>
+                      <span className="ie-card-name">{entry.label}</span>
+                      {UPSCALE_ENGINE_DESC[entry.key] ? (
+                        <span className="ie-card-desc">{UPSCALE_ENGINE_DESC[entry.key]}</span>
+                      ) : null}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">Scale factor</div>
+              <div className="ie-seg wrap two">
+                {upscaleFactorsForEngine(upscaleEngine).map((value) => (
+                  <button
+                    className="ie-seg-btn"
+                    data-active={upscaleFactor === value}
+                    key={value}
+                    onClick={() => setUpscaleFactor(value)}
+                    type="button"
+                  >
+                    {value}×
+                  </button>
+                ))}
+              </div>
+              {upscaleEngineHasSoftness(upscaleEngine) ? (
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Detail recovery</span>
+                    <span className="ie-field-val">{upscaleSoftness.toFixed(2)}</span>
+                  </div>
+                  <input
+                    className="ie-range"
+                    max={1}
+                    min={0}
+                    onChange={(event) => setUpscaleSoftness(Number(event.target.value))}
+                    step={0.05}
+                    type="range"
+                    value={upscaleSoftness}
+                  />
+                  <p className="ie-note">Higher restores more texture from a degraded source; 0 stays faithful to the original.</p>
+                </div>
+              ) : null}
+              <div className="ie-readout">
+                <span className="ie-readout-k">Output size</span>
+                <span className="ie-readout-v">
+                  {working.width * upscaleFactor} × {working.height * upscaleFactor}
+                </span>
+              </div>
+            </div>
+            <div className="ie-section">
+              <button className="ie-btn block primary" disabled={!!aiOp} onClick={runUpscale} type="button">
+                Upscale image
+              </button>
+              <button className="ie-btn block" onClick={() => setTool("move")} type="button">
+                Cancel
+              </button>
+            </div>
+          </>
+        );
+      case "detail":
+        return detailModels.length === 0 ? (
+          <div className="ie-section">
+            <p className="ie-note">No detail-capable models installed.</p>
+          </div>
+        ) : (
+          <>
+            <div className="ie-section">
+              <div className="ie-sec-title">Backbone</div>
+              <select className="ie-select" onChange={(event) => setDetailModel(event.target.value)} value={detailModel}>
+                {detailModels.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label ?? model.id}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="ie-section">
+              <div className="ie-sec-title">Refinement</div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Detail amount</span>
+                  <span className="ie-field-val">{Math.round(detailStrength * 100)}%</span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={0.8}
+                  min={0.3}
+                  onChange={(event) => setDetailStrength(Number(event.target.value))}
+                  step={0.05}
+                  type="range"
+                  value={detailStrength}
+                />
+                <p className="ie-note">Higher invents more fine texture.</p>
+              </div>
+              <div className="ie-field">
+                <div className="ie-field-top">
+                  <span className="ie-field-label">Structure lock</span>
+                  <span className="ie-field-val">{Math.round(detailCnScale * 100)}%</span>
+                </div>
+                <input
+                  className="ie-range"
+                  max={1}
+                  min={0.4}
+                  onChange={(event) => setDetailCnScale(Number(event.target.value))}
+                  step={0.05}
+                  type="range"
+                  value={detailCnScale}
+                />
+                <p className="ie-note">Higher keeps the result closer to the source composition.</p>
+              </div>
+            </div>
+            <div className="ie-section">
+              <button className="ie-btn block primary" disabled={!!aiOp || !detailModel} onClick={runDetail} type="button">
+                Enhance detail
+              </button>
+              <button className="ie-btn block" onClick={() => setTool("move")} type="button">
+                Cancel
+              </button>
+            </div>
+          </>
+        );
+      case "color":
+        return (
+          <>
+            <div className="ie-section">
+              <div className="ie-seg wrap" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
+                {[
+                  ["adjust", "Adjust"],
+                  ["levels", "Levels"],
+                  ["curves", "Curves"],
+                ].map(([mode, label]) => (
+                  <button
+                    className="ie-seg-btn"
+                    data-active={colorMode === mode}
+                    key={mode}
+                    onClick={() => setColorMode(mode)}
+                    type="button"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {colorMode === "adjust" ? (
+              <div className="ie-section">
+                <div className="ie-sec-title">Tone &amp; color</div>
+                {COLOR_ADJUSTMENTS.map(({ key: adjKey, label }) => (
+                  <div className="ie-field" key={adjKey}>
+                    <div className="ie-field-top">
+                      <span className="ie-field-label">{label}</span>
+                      <span className="ie-field-val">
+                        {colorAdjust[adjKey] > 0 ? "+" : ""}
+                        {Math.round(colorAdjust[adjKey] * 100)}
+                      </span>
+                    </div>
+                    <input
+                      className="ie-range"
+                      max={1}
+                      min={-1}
+                      onChange={(event) => setAdjustValue(adjKey, Number(event.target.value))}
+                      onDoubleClick={() => resetAdjust(adjKey)}
+                      step={0.01}
+                      type="range"
+                      value={colorAdjust[adjKey]}
+                    />
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {colorMode === "levels" ? (
+              <div className="ie-section">
+                <div className="ie-sec-title">Channel</div>
+                <select className="ie-select" onChange={(event) => setColorChannel(event.target.value)} value={colorChannel}>
+                  <option value="master">Master (RGB)</option>
+                  <option value="r">Red</option>
+                  <option value="g">Green</option>
+                  <option value="b">Blue</option>
+                </select>
+                <canvas className="ie-histo" height={56} ref={histogramRef} width={280} />
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Black point</span>
+                    <span className="ie-field-val">{levels[colorChannel].black}</span>
+                  </div>
+                  <input
+                    className="ie-range"
+                    max={254}
+                    min={0}
+                    onChange={(event) => setLevelsValue("black", Number(event.target.value))}
+                    step={1}
+                    type="range"
+                    value={levels[colorChannel].black}
+                  />
+                </div>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">Gamma</span>
+                    <span className="ie-field-val">{levels[colorChannel].gamma.toFixed(2)}</span>
+                  </div>
+                  <input
+                    className="ie-range"
+                    max={2.5}
+                    min={0.1}
+                    onChange={(event) => setLevelsValue("gamma", Number(event.target.value))}
+                    step={0.01}
+                    type="range"
+                    value={levels[colorChannel].gamma}
+                  />
+                </div>
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label">White point</span>
+                    <span className="ie-field-val">{levels[colorChannel].white}</span>
+                  </div>
+                  <input
+                    className="ie-range"
+                    max={255}
+                    min={1}
+                    onChange={(event) => setLevelsValue("white", Number(event.target.value))}
+                    step={1}
+                    type="range"
+                    value={levels[colorChannel].white}
+                  />
+                </div>
+              </div>
+            ) : null}
+            {colorMode === "curves" ? (
+              <div className="ie-section">
+                <div className="ie-sec-title">Tone curve</div>
+                <select className="ie-select" onChange={(event) => setColorChannel(event.target.value)} value={colorChannel}>
+                  <option value="master">Master (RGB)</option>
+                  <option value="r">Red</option>
+                  <option value="g">Green</option>
+                  <option value="b">Blue</option>
+                </select>
+                <div className="ie-curvewrap">
+                  <CurveEditor
+                    onChange={(points) => setCurves((prev) => ({ ...prev, [colorChannel]: points }))}
+                    points={curves[colorChannel]}
+                    stroke={channelStroke}
+                  />
+                </div>
+                <p className="ie-note">Drag points to reshape the curve. Double-click to add a point.</p>
+              </div>
+            ) : null}
+            <div className="ie-section">
+              <button className="ie-btn block" disabled={activeGradeIsIdentity()} onClick={resetActiveColorMode} type="button">
+                Reset
+              </button>
+              <button
+                className="ie-btn block primary"
+                disabled={activeGradeIsIdentity()}
+                onClick={applyColorGrade}
+                type="button"
+              >
+                Apply grade
+              </button>
+            </div>
+          </>
+        );
+      case "edit":
+        return renderEditPanel();
+      case "boxes":
+        return renderBoxesPanel();
+      default:
+        return null;
+    }
+  };
+
+  const renderLoraSection = () => {
+    const { compatibleLoras, selectedLoraIds, toggleLora, weightFor, setWeight } = editLoraSelection;
+    const nextLora = compatibleLoras.find((lora) => !selectedLoraIds.includes(lora.id));
+    const addDisabled = !nextLora || selectedLoraIds.length >= MAX_JOB_LORAS_TOTAL;
+    return (
+      <div className="ie-section">
+        <div className="ie-sec-title">
+          LoRAs
           <button
-            aria-pressed={shortcutsOpen}
-            className={shortcutsOpen ? "image-editor-help active" : "image-editor-help"}
-            onClick={() => setShortcutsOpen((on) => !on)}
-            title="Keyboard shortcuts (?)"
+            className="ie-btn sm ghost"
+            disabled={addDisabled}
+            onClick={() => nextLora && toggleLora(nextLora)}
+            style={{ height: "24px" }}
             type="button"
           >
-            ⌨
+            + Add
           </button>
-          {working && working.source.assetId ? (
-            <button
-              onClick={() => setPreviewAsset?.(imageAssets.find((item) => item.id === working.source.assetId))}
-              title="Preview the source asset"
-              type="button"
-            >
-              Source
-            </button>
-          ) : null}
-          {working ? (
-            <>
-              <button
-                className="image-editor-undo"
-                disabled={!historyFlags.canUndo || Boolean(aiOp)}
-                onClick={undo}
-                title="Undo (⌘Z)"
-                type="button"
-              >
-                Undo
-              </button>
-              <button
-                className="image-editor-redo"
-                disabled={!historyFlags.canRedo || Boolean(aiOp)}
-                onClick={redo}
-                title="Redo (⇧⌘Z / Ctrl+Y)"
-                type="button"
-              >
-                Redo
-              </button>
-              <button onClick={runDownload} title="Download a PNG to your computer" type="button">
-                Download
-              </button>
-              {savedAssetId && !dirty ? <span className="image-editor-saved">Saved ✓</span> : null}
-              <button
-                className="primary"
-                disabled={!dirty || saving}
-                onClick={runSave}
-                title="Save a new image to the project Library"
-                type="button"
-              >
-                {saving ? "Saving…" : "Save"}
-              </button>
-            </>
+        </div>
+        {selectedLoraIds.length ? (
+          selectedLoraIds
+            .map((id) => compatibleLoras.find((lora) => lora.id === id))
+            .filter(Boolean)
+            .map((lora) => (
+              <div className="ie-lora" key={lora.id}>
+                <div className="ie-lora-top">
+                  <span className="ie-lora-name">{lora.name ?? lora.id}</span>
+                  <button className="ie-btn icon sm ghost" onClick={() => toggleLora(lora)} title="Remove" type="button">
+                    ✕
+                  </button>
+                </div>
+                <LoraKeywordSummary lora={lora} />
+                <div className="ie-field">
+                  <div className="ie-field-top">
+                    <span className="ie-field-label" style={{ fontSize: "11.5px", color: "var(--ie-muted)" }}>
+                      Weight
+                    </span>
+                    <span className="ie-field-val">{weightFor(lora).toFixed(2)}</span>
+                  </div>
+                  <input
+                    aria-label={`${lora.name ?? lora.id} weight`}
+                    className="ie-range"
+                    max={2}
+                    min={0}
+                    onChange={(event) => setWeight(lora.id, Number(event.target.value))}
+                    step={0.05}
+                    type="range"
+                    value={weightFor(lora)}
+                  />
+                </div>
+              </div>
+            ))
+        ) : (
+          <p className="ie-note">No LoRAs applied. Add a style or subject LoRA to steer the edit.</p>
+        )}
+      </div>
+    );
+  };
+
+  const renderEditPanel = () => {
+    if (editModels.length === 0) {
+      return (
+        <div className="ie-section">
+          <p className="ie-note">No edit-capable models installed.</p>
+        </div>
+      );
+    }
+    return (
+      <>
+        <div className="ie-section">
+          <div className="ie-sec-title">Model</div>
+          <select className="ie-select" onChange={(event) => setEditModel(event.target.value)} value={editModel}>
+            {editModels.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.label ?? model.id}
+              </option>
+            ))}
+          </select>
+          <div className="ie-field">
+            <div className="ie-field-top">
+              <span className="ie-field-label">Instruction</span>
+            </div>
+            <textarea
+              className="ie-textarea"
+              onChange={(event) => setEditPrompt(event.target.value)}
+              placeholder="Describe the edit — e.g. “replace the background with a foggy pine forest at dawn”"
+              value={editPrompt}
+            />
+          </div>
+        </div>
+
+        {editLoraSelection.compatibleLoras.length ? renderLoraSection() : null}
+
+        <div className="ie-section">
+          <div className="ie-sec-title">Output</div>
+          <div className="ie-field">
+            <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+              Aspect
+            </span>
+            <div className="ie-seg wrap four">
+              {EDIT_OUTPUT_ASPECTS.map((aspect) => (
+                <button
+                  className="ie-seg-btn"
+                  data-active={editAspect === aspect.key}
+                  key={aspect.key}
+                  onClick={() => setEditAspect(aspect.key)}
+                  type="button"
+                >
+                  {aspect.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {editAspect !== "match" ? (
+            <FitModeControl
+              inpaintCapable={canMask}
+              label="Fill new area"
+              onChange={setEditFitMode}
+              value={effectiveFitMode(editFitMode, canMask)}
+            />
           ) : null}
         </div>
+
+        {canMask ? (
+          <div className="ie-section">
+            <div className="ie-sec-title">
+              Mask
+              <button
+                className="ie-btn sm ghost"
+                data-active={maskMode}
+                onClick={() => setMaskMode((on) => !on)}
+                style={{ height: "24px" }}
+                type="button"
+              >
+                {maskMode ? "On" : "Off"}
+              </button>
+            </div>
+            {maskMode ? (
+              <>
+                {smartSelectSupported ? (
+                  <div className="ie-seg two" style={{ width: "100%" }}>
+                    <button
+                      className="ie-seg-btn"
+                      data-active={maskSubTool === "brush"}
+                      onClick={() => setMaskSubTool("brush")}
+                      type="button"
+                    >
+                      Brush
+                    </button>
+                    <button
+                      className="ie-seg-btn"
+                      data-active={maskSubTool === "select"}
+                      disabled={aiOp?.label === "smart select"}
+                      onClick={() => {
+                        setMaskSubTool("select");
+                        setMaskErase(false);
+                      }}
+                      type="button"
+                    >
+                      {aiOp?.label === "smart select" ? "Segmenting…" : "Smart select"}
+                    </button>
+                  </div>
+                ) : null}
+                {!smartSelectSupported || maskSubTool === "brush" ? (
+                  <>
+                    <div className="ie-field">
+                      <div className="ie-field-top">
+                        <span className="ie-field-label">Brush size</span>
+                        <span className="ie-field-val">{maskBrush} px</span>
+                      </div>
+                      <input
+                        className="ie-range"
+                        max={300}
+                        min={5}
+                        onChange={(event) => setMaskBrush(Number(event.target.value))}
+                        step={1}
+                        type="range"
+                        value={maskBrush}
+                      />
+                    </div>
+                    <button className="ie-btn block" data-active={maskErase} onClick={() => setMaskErase((on) => !on)} type="button">
+                      Eraser
+                    </button>
+                  </>
+                ) : (
+                  <p className="ie-note">Drag a box around an object on the canvas — SAM3 auto-masks it.</p>
+                )}
+                <div>
+                  <span className="ie-field-label" style={{ display: "block", marginBottom: "7px" }}>
+                    Refine selection
+                  </span>
+                  <div className="ie-field" style={{ marginBottom: "8px" }}>
+                    <div className="ie-field-top">
+                      <span className="ie-field-label" style={{ fontSize: "11.5px", color: "var(--ie-muted)" }}>
+                        Radius
+                      </span>
+                      <span className="ie-field-val">{maskRefineRadius}px</span>
+                    </div>
+                    <input
+                      className="ie-range"
+                      max={40}
+                      min={1}
+                      onChange={(event) => setMaskRefineRadius(Number(event.target.value))}
+                      step={1}
+                      type="range"
+                      value={maskRefineRadius}
+                    />
+                  </div>
+                  <div className="ie-chip-row">
+                    <button
+                      className="ie-chip"
+                      disabled={!maskHasContent(maskLines) && !maskBaseImage}
+                      onClick={() => refineMask("feather")}
+                      type="button"
+                    >
+                      Feather
+                    </button>
+                    <button
+                      className="ie-chip"
+                      disabled={!maskHasContent(maskLines) && !maskBaseImage}
+                      onClick={() => refineMask("grow")}
+                      type="button"
+                    >
+                      Grow
+                    </button>
+                    <button
+                      className="ie-chip"
+                      disabled={!maskHasContent(maskLines) && !maskBaseImage}
+                      onClick={() => refineMask("shrink")}
+                      type="button"
+                    >
+                      Shrink
+                    </button>
+                    <button className="ie-chip" onClick={() => refineMask("invert")} type="button">
+                      Invert
+                    </button>
+                    <button
+                      className="ie-chip"
+                      disabled={!maskLines.length && !maskBaseImage}
+                      onClick={clearMask}
+                      type="button"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <p className="ie-note">Turn on a mask to confine the edit to a painted or selected region (inpaint).</p>
+            )}
+          </div>
+        ) : null}
+
+        {multiRefCapable ? (
+          <div className="ie-section">
+            <div className="ie-sec-title">Reference images</div>
+            <div className="ie-refs">
+              {refAssetIds.map((id) => {
+                const asset = imageAssets.find((item) => item.id === id);
+                return (
+                  <div className="ie-ref" key={id}>
+                    {asset ? <img alt="" src={assetUrl(asset)} /> : <span>?</span>}
+                    <button
+                      aria-label="Remove reference"
+                      className="ie-ref-remove"
+                      onClick={() => setRefAssetIds((prev) => prev.filter((other) => other !== id))}
+                      type="button"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                );
+              })}
+              <button
+                className="ie-ref-add"
+                disabled={refAssetIds.length >= MAX_EDIT_REFERENCES - 1}
+                onClick={() => setRefPickerOpen(true)}
+                title="Condition the edit on reference image(s)"
+                type="button"
+              >
+                +
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="ie-section">
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+            <div className="ie-field">
+              <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+                Seed
+              </span>
+              <input
+                className="ie-input"
+                min={0}
+                onChange={(event) => setEditSeed(event.target.value)}
+                placeholder="Random"
+                style={{ fontFamily: "var(--ie-mono)" }}
+                type="number"
+                value={editSeed}
+              />
+            </div>
+            <div className="ie-field">
+              <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+                Guidance
+              </span>
+              <input
+                className="ie-input"
+                min={0}
+                onChange={(event) => setEditGuidance(event.target.value)}
+                placeholder={guidanceDefaultFromModel(selectedEditModel)?.toString() ?? "Default"}
+                step={0.1}
+                style={{ fontFamily: "var(--ie-mono)" }}
+                type="number"
+                value={editGuidance}
+              />
+            </div>
+          </div>
+          <button className="ie-btn block primary" disabled={!editPrompt.trim() || !!aiOp} onClick={runEdit} type="button">
+            {maskActive ? "Inpaint region" : "Generate edit"}
+          </button>
+        </div>
+      </>
+    );
+  };
+
+  const renderBoxesPanel = () => (
+    <>
+      <div className="ie-section">
+        <div className="ie-sec-title">Box color</div>
+        <div className="ie-swatches">
+          {BOX_PALETTE.map((entry) => (
+            <button
+              aria-label={entry.name}
+              className="ie-swatch"
+              data-active={boxColor === entry.value}
+              key={entry.value}
+              onClick={() => chooseBoxColor(entry.value)}
+              style={{ background: entry.value }}
+              title={entry.name}
+              type="button"
+            />
+          ))}
+          <label className="ie-swatch ie-swatch-custom" title="Custom color">
+            <input aria-label="Custom box color" onChange={(event) => chooseBoxColor(event.target.value)} type="color" value={boxColor.toLowerCase()} />
+          </label>
+        </div>
+        <p className="ie-note">Drag on the canvas to draw a colored region, then describe what belongs there.</p>
       </div>
 
-      {status.error ? <div className="notice notice-error image-editor-notice">{status.error}</div> : null}
+      <div className="ie-section">
+        <div className="ie-sec-title">Regions ({boxes.length})</div>
+        {boxes.length ? (
+          <div className="ie-chip-row">
+            {boxes.map((box, index) => {
+              const incomplete = boxMetadataGaps(box).length > 0;
+              return (
+                <button
+                  className="ie-chip"
+                  data-active={selectedBoxId === box.id}
+                  key={box.id}
+                  onClick={() => setSelectedBoxId(box.id)}
+                  title={box.desc ? `${index + 1}: ${box.desc}` : `Box ${index + 1} — needs a description`}
+                  type="button"
+                >
+                  <span className="ie-dot" style={{ background: box.color }} />
+                  {index + 1}
+                  {incomplete ? <span className="warn">!</span> : null}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="ie-note">Drag on the image to draw a box.</p>
+        )}
+        {boxes.length ? (
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button className="ie-btn sm" disabled={!selectedBoxId} onClick={() => deleteBox(selectedBoxId)} type="button">
+              Delete
+            </button>
+            <button className="ie-btn sm" disabled={!boxes.length} onClick={clearBoxes} type="button">
+              Clear all
+            </button>
+          </div>
+        ) : null}
+      </div>
 
-      <div
-        className="image-editor-canvas-wrap"
-        onDragOver={(event) => event.preventDefault()}
-        onDrop={handleDrop}
-        ref={containerRef}
-      >
+      {selectedBox ? (
+        <div className="ie-section">
+          <div className="ie-sec-title">
+            Region details
+            <span className="ie-field-val">Box {boxes.indexOf(selectedBox) + 1}</span>
+          </div>
+          <div className="ie-seg two" style={{ width: "100%" }}>
+            <button
+              className="ie-seg-btn"
+              data-active={selectedBox.type === "obj"}
+              onClick={() => updateBox(selectedBox.id, { type: "obj" })}
+              type="button"
+            >
+              Object
+            </button>
+            <button
+              className="ie-seg-btn"
+              data-active={selectedBox.type === "text"}
+              onClick={() => updateBox(selectedBox.id, { type: "text" })}
+              type="button"
+            >
+              Text
+            </button>
+          </div>
+          <div className="ie-field">
+            <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+              Description
+            </span>
+            <input
+              className="ie-input"
+              onChange={(event) => updateBox(selectedBox.id, { desc: event.target.value })}
+              placeholder="What is in this region?"
+              value={selectedBox.desc ?? ""}
+            />
+          </div>
+          {selectedBox.type === "text" ? (
+            <div className="ie-field">
+              <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+                Literal text
+              </span>
+              <input
+                className="ie-input"
+                onChange={(event) => updateBox(selectedBox.id, { text: event.target.value })}
+                placeholder="Text to render"
+                value={selectedBox.text ?? ""}
+              />
+            </div>
+          ) : null}
+          <div className="ie-field">
+            <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+              Element colors ({(selectedBox.colorPalette ?? []).length}/{MAX_BOX_PALETTE})
+            </span>
+            <div className="ie-swatches">
+              {(selectedBox.colorPalette ?? []).map((color) => (
+                <button
+                  aria-label={`Remove ${color}`}
+                  className="ie-swatch"
+                  key={color}
+                  onClick={() => updateBox(selectedBox.id, { colorPalette: removePaletteColor(selectedBox.colorPalette, color) })}
+                  style={{ background: color }}
+                  title={`Remove ${color}`}
+                  type="button"
+                />
+              ))}
+              {(selectedBox.colorPalette ?? []).length < MAX_BOX_PALETTE ? (
+                <label className="ie-swatch ie-swatch-custom" title="Add color">
+                  <input
+                    aria-label="Add element color"
+                    onChange={(event) => updateBox(selectedBox.id, { colorPalette: addPaletteColor(selectedBox.colorPalette, event.target.value) })}
+                    type="color"
+                  />
+                </label>
+              ) : null}
+            </div>
+          </div>
+          {selectedBoxGaps.length ? (
+            <p className="ie-note">For Ideogram layout this box still needs {selectedBoxGaps.join(", ")}. The color-keyed edit path only needs a color + description.</p>
+          ) : (
+            <p className="ie-note" style={{ color: "var(--ie-accent)" }}>
+              Ready for Ideogram layout ✓
+            </p>
+          )}
+        </div>
+      ) : null}
+
+      {boxes.length ? (
+        <div className="ie-section">
+          <div className="ie-sec-title">Generate</div>
+          {editModels.length ? (
+            <>
+              <select className="ie-select" onChange={(event) => setEditModel(event.target.value)} value={editModel}>
+                {editModels.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label ?? model.id}
+                  </option>
+                ))}
+              </select>
+              <input
+                className="ie-input"
+                onChange={(event) => setEditPrompt(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !aiOp && editModel) runBoxEdit();
+                }}
+                placeholder="Prompt (or use Auto-prompt)"
+                value={editPrompt}
+              />
+              <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "8px" }}>
+                <button className="ie-btn" disabled={!composedPrompt} onClick={() => setEditPrompt(composedPrompt)} type="button">
+                  Auto-prompt
+                </button>
+                <button className="ie-btn primary" disabled={!!aiOp || !editModel} onClick={runBoxEdit} type="button">
+                  Generate
+                </button>
+              </div>
+            </>
+          ) : (
+            <p className="ie-note">No edit-capable models installed.</p>
+          )}
+        </div>
+      ) : null}
+    </>
+  );
+
+  const handleLayerOpacityInput = (id, raw) => {
+    const start = !layerOpacityGestureRef.current;
+    layerOpacityGestureRef.current = true;
+    changeLayerOpacity(id, Math.max(0, Math.min(100, Number(raw) || 0)) / 100, start);
+  };
+  const endLayerOpacityGesture = () => {
+    layerOpacityGestureRef.current = false;
+  };
+
+  const renderLayers = () => (
+    <aside className="ie-layers" aria-label="Layers">
+      <div className="ie-layers-head">
+        <button className="ie-layers-title" onClick={() => setLayersOpen((v) => !v)} title="Collapse layers" type="button">
+          <span className="ie-acc-chev" data-open={layersOpen}>
+            <IeChevron />
+          </span>
+          <svg fill="none" height="15" stroke="currentColor" strokeLinejoin="round" strokeWidth={2} viewBox="0 0 24 24" width="15">
+            <polygon points="12 2 2 7 12 12 22 7 12 2" />
+            <polyline points="2 17 12 22 22 17" />
+            <polyline points="2 12 12 17 22 12" />
+          </svg>
+          Layers
+          <span className="ie-layers-count">{layerCount}</span>
+        </button>
+        <button className="ie-btn icon sm ghost" disabled={Boolean(aiOp)} onClick={addBlankLayer} title="Add layer" type="button">
+          +
+        </button>
+      </div>
+      {layersOpen ? (
+        <div className="ie-layers-list">
+          {working.layers
+            .map((layer, index) => ({ layer, index }))
+            .reverse()
+            .map(({ layer, index }) => {
+              const isActive = layer.id === working.activeLayerId;
+              const pct = Math.round(layer.opacity * 100);
+              return (
+                <div className="ie-layer" data-active={isActive} key={layer.id} onClick={() => selectLayer(layer.id)}>
+                  <div className="ie-layer-row">
+                    <button
+                      className="ie-layer-vis"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleLayerVisible(layer.id);
+                      }}
+                      title="Toggle visibility"
+                      type="button"
+                    >
+                      {layer.visible ? <IeEyeOpen /> : <IeEyeOff />}
+                    </button>
+                    {layer.objectUrl ? (
+                      <img
+                        alt=""
+                        className="ie-layer-thumb"
+                        src={layer.objectUrl}
+                        style={layer.visible ? undefined : { opacity: 0.35, filter: "grayscale(1)" }}
+                      />
+                    ) : (
+                      <span className="ie-layer-thumb" />
+                    )}
+                    <span
+                      className="ie-layer-name"
+                      onDoubleClick={() => {
+                        const name = window.prompt("Rename layer", layer.name)?.trim();
+                        if (name) renameLayer(layer.id, name);
+                      }}
+                      title="Double-click to rename"
+                    >
+                      {layer.name}
+                    </span>
+                    {layer.blendMode && layer.blendMode !== "source-over" ? (
+                      <span className="ie-layer-blend">
+                        {(BLEND_MODES.find((mode) => mode.value === layer.blendMode)?.label ?? layer.blendMode).slice(0, 4)}
+                      </span>
+                    ) : null}
+                  </div>
+                  {isActive ? (
+                    <>
+                      <div className="ie-layer-op" onClick={(event) => event.stopPropagation()}>
+                        <input
+                          className="ie-range"
+                          max={100}
+                          min={0}
+                          onBlur={endLayerOpacityGesture}
+                          onChange={(event) => handleLayerOpacityInput(layer.id, event.target.value)}
+                          onMouseUp={endLayerOpacityGesture}
+                          onTouchEnd={endLayerOpacityGesture}
+                          type="range"
+                          value={pct}
+                        />
+                        <div className="ie-layer-opnum">
+                          <input
+                            aria-label={`${layer.name} opacity`}
+                            className="ie-input"
+                            max={100}
+                            min={0}
+                            onBlur={endLayerOpacityGesture}
+                            onChange={(event) => handleLayerOpacityInput(layer.id, event.target.value)}
+                            type="number"
+                            value={pct}
+                          />
+                        </div>
+                      </div>
+                      <div className="ie-layer-blendsel" onClick={(event) => event.stopPropagation()}>
+                        <select
+                          aria-label={`${layer.name} blend mode`}
+                          className="ie-select"
+                          onChange={(event) => setLayerBlend(layer.id, event.target.value)}
+                          value={layer.blendMode || "source-over"}
+                        >
+                          {BLEND_MODES.map((mode) => (
+                            <option key={mode.value} value={mode.value}>
+                              {mode.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="ie-chip-row" onClick={(event) => event.stopPropagation()} style={{ marginTop: "8px" }}>
+                        <button className="ie-btn sm ghost" disabled={index >= working.layers.length - 1} onClick={() => reorderLayer(layer.id, index + 1)} title="Move up" type="button">
+                          ↑
+                        </button>
+                        <button className="ie-btn sm ghost" disabled={index <= 0} onClick={() => reorderLayer(layer.id, index - 1)} title="Move down" type="button">
+                          ↓
+                        </button>
+                        <button className="ie-btn sm ghost" onClick={() => duplicateLayerById(layer.id)} title="Duplicate" type="button">
+                          ⧉
+                        </button>
+                        <button className="ie-btn sm ghost danger" disabled={working.layers.length <= 1} onClick={() => deleteLayer(layer.id)} title="Delete" type="button">
+                          ✕
+                        </button>
+                      </div>
+                    </>
+                  ) : null}
+                </div>
+              );
+            })}
+        </div>
+      ) : null}
+    </aside>
+  );
+
+  const renderInspectorBody = () => (
+    <div className="ie-insp-body">
+      {EDITOR_TOOL_ORDER.map((key) => {
+        const open = tool === key && panelOpen;
+        return (
+          <React.Fragment key={key}>
+            <button
+              className="ie-acc-head"
+              data-active={tool === key}
+              disabled={toolIsDisabled(key)}
+              onClick={() => onAccordionHead(key)}
+              type="button"
+            >
+              <span className="ie-acc-ic">{EDITOR_TOOL_ICONS[key]}</span>
+              <span className="ie-acc-label">{EDITOR_TOOL_META[key].label}</span>
+              <span className="ie-acc-chev" data-open={open}>
+                <IeChevron />
+              </span>
+            </button>
+            {open ? renderToolPanel(key) : null}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+
+  return (
+    <section className="main-surface image-editor-surface ie-shell" data-ie-layout={layout}>
+      <header className="ie-topbar">
+        <div className="ie-brand">
+          <div className="ie-brand-mark">
+            <svg fill="none" height="15" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} viewBox="0 0 24 24" width="15">
+              <path d="M7 2v15a1 1 0 001 1h15M2 7h15a1 1 0 011 1v15" />
+            </svg>
+          </div>
+          <div className="ie-doc">
+            <div className="ie-doc-name" title={docName}>
+              {docName}
+            </div>
+            <div className="ie-doc-sub">{docSub}</div>
+          </div>
+        </div>
+
+        <button className="ie-btn sm" onClick={() => setPickerOpen(true)} type="button">
+          Open
+        </button>
+        <button
+          className="ie-btn sm"
+          onClick={() => setNewLayoutOpen(true)}
+          title="Start a blank canvas for box layout"
+          type="button"
+        >
+          New layout
+        </button>
+        {working && working.source.assetId ? (
+          <button
+            className="ie-btn sm ghost"
+            onClick={() => setPreviewAsset?.(imageAssets.find((item) => item.id === working.source.assetId))}
+            title="Preview the source asset"
+            type="button"
+          >
+            Source
+          </button>
+        ) : null}
+        <button
+          aria-pressed={shortcutsOpen}
+          className="ie-btn icon sm ghost"
+          onClick={() => setShortcutsOpen((on) => !on)}
+          title="Keyboard shortcuts (?)"
+          type="button"
+        >
+          ⌨
+        </button>
+
+        <div className="ie-spacer" />
+
+        {working ? (
+          <div className="ie-topgroup">
+            <button className="ie-btn icon sm" disabled={!historyFlags.canUndo || Boolean(aiOp)} onClick={undo} title="Undo (⌘Z)" type="button">
+              <svg fill="none" height="15" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} viewBox="0 0 24 24" width="15">
+                <path d="M9 14L4 9l5-5" />
+                <path d="M4 9h11a5 5 0 015 5v0a5 5 0 01-5 5H9" />
+              </svg>
+            </button>
+            <button className="ie-btn icon sm" disabled={!historyFlags.canRedo || Boolean(aiOp)} onClick={redo} title="Redo (⇧⌘Z / Ctrl+Y)" type="button">
+              <svg fill="none" height="15" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} viewBox="0 0 24 24" width="15">
+                <path d="M15 14l5-5-5-5" />
+                <path d="M20 9H9a5 5 0 00-5 5v0a5 5 0 005 5h6" />
+              </svg>
+            </button>
+          </div>
+        ) : null}
+
+        <div className="ie-divider" />
+
+        <div className="ie-seg" title="Panel layout">
+          {[
+            ["accordion", "Stacked panels", <React.Fragment key="g"><rect height="16" rx="2" width="18" x="3" y="4" /><line x1="3" x2="21" y1="9" y2="9" /><line x1="3" x2="21" y1="14" y2="14" /></React.Fragment>],
+            ["right", "Inspector right", <React.Fragment key="g"><rect height="16" rx="2" width="18" x="3" y="4" /><line x1="15" x2="15" y1="4" y2="20" /></React.Fragment>],
+            ["left", "Inspector left", <React.Fragment key="g"><rect height="16" rx="2" width="18" x="3" y="4" /><line x1="9" x2="9" y1="4" y2="20" /></React.Fragment>],
+            ["bottom", "Dock bottom", <React.Fragment key="g"><rect height="16" rx="2" width="18" x="3" y="4" /><line x1="3" x2="21" y1="14" y2="14" /></React.Fragment>],
+          ].map(([mode, label, glyph]) => (
+            <button
+              className="ie-seg-btn ie-seg-icon"
+              data-active={layout === mode}
+              key={mode}
+              onClick={() => setLayout(mode)}
+              title={label}
+              type="button"
+            >
+              <svg fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                {glyph}
+              </svg>
+            </button>
+          ))}
+        </div>
+
+        <button
+          className="ie-btn icon sm ghost"
+          onClick={() => changeTheme?.(theme === "dark" ? "light" : "dark")}
+          title="Toggle theme"
+          type="button"
+        >
+          {theme === "dark" ? "☀" : "☾"}
+        </button>
+
+        {working ? (
+          <>
+            <div className="ie-divider" />
+            <button className="ie-btn sm" onClick={runDownload} title="Download a PNG to your computer" type="button">
+              Download
+            </button>
+            {savedAssetId && !dirty ? (
+              <span className="ie-doc-sub" style={{ color: "var(--ie-accent)" }}>
+                Saved ✓
+              </span>
+            ) : null}
+            <button
+              className="ie-btn sm primary"
+              disabled={!dirty || saving}
+              onClick={runSave}
+              title="Save a new image to the project Library"
+              type="button"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </>
+        ) : null}
+      </header>
+
+      {working ? (
+        <nav className="ie-rail" aria-label="Tools">
+          <div className="ie-rail-cap">Tools</div>
+          {EDITOR_TOOL_ORDER.map((key) => (
+            <button
+              className="ie-tool"
+              data-active={tool === key}
+              disabled={toolIsDisabled(key)}
+              key={key}
+              onClick={() => selectTool(key)}
+              title={EDITOR_TOOL_META[key].desc}
+              type="button"
+            >
+              {EDITOR_TOOL_ICONS[key]}
+              <span>{EDITOR_TOOL_META[key].label}</span>
+            </button>
+          ))}
+        </nav>
+      ) : null}
+
+      <main className="ie-canvas" onDragOver={(event) => event.preventDefault()} onDrop={handleDrop} ref={containerRef}>
+        {status.error ? (
+          <div
+            className="ie-hint"
+            role="alert"
+            style={{ borderColor: "color-mix(in srgb, var(--ie-danger) 55%, var(--ie-border))", color: "var(--ie-danger)" }}
+          >
+            {status.error}
+          </div>
+        ) : working ? (
+          <div className="ie-hint">
+            {EDITOR_TOOL_ICONS[tool]}
+            <span>{toolHint}</span>
+          </div>
+        ) : null}
         {working && stageSize.width > 0 && stageSize.height > 0 ? (
           <Stage
             draggable={tool !== "crop" && tool !== "boxes" && tool !== "transform" && !maskMode}
@@ -3037,16 +3865,16 @@ export function ImageEditor() {
             ) : null}
           </Stage>
         ) : (
-          <div className="image-editor-empty">
+          <div className="ie-canvas-empty">
             {status.loading ? (
               <p>Loading image…</p>
             ) : (
               <>
-                <p className="image-editor-empty-title">Open an image to start editing</p>
-                <p className="image-editor-empty-hint">Drag &amp; drop an image here, or click Open.</p>
-                <p className="image-editor-empty-hint">
+                <p className="ie-canvas-empty-title">Open an image to start editing</p>
+                <p className="ie-note">Drag &amp; drop an image here, or click Open.</p>
+                <p className="ie-note">
                   Or{" "}
-                  <button className="image-editor-linkbtn" onClick={() => setNewLayoutOpen(true)} type="button">
+                  <button className="ie-linkbtn" onClick={() => setNewLayoutOpen(true)} type="button">
                     start a blank layout
                   </button>{" "}
                   to compose with boxes.
@@ -3084,841 +3912,86 @@ export function ImageEditor() {
           </div>
         ) : null}
 
-        {working ? (
-          <LayersPanel
-            layers={working.layers}
-            activeLayerId={working.activeLayerId}
-            busy={Boolean(aiOp)}
-            onSelect={selectLayer}
-            onToggleVisible={toggleLayerVisible}
-            onSetOpacity={changeLayerOpacity}
-            onSetBlend={setLayerBlend}
-            onRename={renameLayer}
-            onReorder={reorderLayer}
-            onAdd={addBlankLayer}
-            onDelete={deleteLayer}
-            onDuplicate={duplicateLayerById}
-          />
-        ) : null}
-
-        {working ? (
-          <aside className="image-editor-toolbar" aria-label="Editor tools">
-            <button
-              className={tool === "move" ? "image-editor-tool active" : "image-editor-tool"}
-              onClick={cancelCrop}
-              title="Move / pan (M)"
-              type="button"
-            >
-              Move
-            </button>
-            <button
-              className={tool === "transform" ? "image-editor-tool active" : "image-editor-tool"}
-              disabled={!!aiOp}
-              onClick={startTransform}
-              title="Transform the active layer — move / scale / rotate (T)"
-              type="button"
-            >
-              Transform
-            </button>
-            <button
-              className={tool === "crop" ? "image-editor-tool active" : "image-editor-tool"}
-              disabled={!!aiOp}
-              onClick={startCrop}
-              title="Crop (C)"
-              type="button"
-            >
-              Crop
-            </button>
-            <button
-              className={tool === "upscale" ? "image-editor-tool active" : "image-editor-tool"}
-              disabled={!!aiOp || Boolean(macUpscaleBlock)}
-              onClick={() => setTool("upscale")}
-              title={macUpscaleBlock ? macUpscaleBlock.text : "Upscale (U)"}
-              type="button"
-            >
-              Upscale
-            </button>
-            <button
-              className={tool === "detail" ? "image-editor-tool active" : "image-editor-tool"}
-              disabled={!!aiOp || detailModels.length === 0}
-              onClick={() => setTool("detail")}
-              title="Detail enhance — tile-ControlNet refine (D)"
-              type="button"
-            >
-              Detail
-            </button>
-            <button
-              className={tool === "color" ? "image-editor-tool active" : "image-editor-tool"}
-              disabled={!!aiOp}
-              onClick={startColorGrade}
-              title="Color grade (G)"
-              type="button"
-            >
-              Color
-            </button>
-            <button
-              className={tool === "edit" ? "image-editor-tool active" : "image-editor-tool"}
-              disabled={!!aiOp}
-              onClick={() => setTool("edit")}
-              title="AI prompt edit (E)"
-              type="button"
-            >
-              AI Edit
-            </button>
-            <button
-              className={tool === "boxes" ? "image-editor-tool active" : "image-editor-tool"}
-              disabled={!!aiOp}
-              onClick={selectBoxTool}
-              title="Box layout — draw colored regions, color-keyed edit / Ideogram bbox (B)"
-              type="button"
-            >
-              Boxes
-            </button>
-            {UPCOMING_TOOLS.map((upcoming) => (
-              <button
-                className="image-editor-tool"
-                disabled
-                key={upcoming.id}
-                title={`${upcoming.label} — coming soon (${upcoming.story})`}
-                type="button"
-              >
-                {upcoming.label}
-              </button>
-            ))}
-          </aside>
-        ) : null}
-
-        {tool === "crop" && cropRect ? (
-          <div className="image-editor-cropbar">
-            <div className="image-editor-ratios" role="group" aria-label="Crop ratio">
-              {CROP_RATIOS.map((entry) => (
-                <button
-                  className={ratioKey === entry.key ? "active" : ""}
-                  key={entry.key}
-                  onClick={() => chooseRatio(entry.key)}
-                  type="button"
-                >
-                  {entry.label}
-                </button>
-              ))}
-            </div>
-            <button
-              className={rotated ? "active" : ""}
-              disabled={ratioKey === "free" || ratioKey === "1:1"}
-              onClick={toggleRotate}
-              title="Rotate ratio (swap orientation)"
-              type="button"
-            >
-              ⟲ Rotate
-            </button>
-            <span className="image-editor-cropdims">
-              {Math.round(cropRect.width)} × {Math.round(cropRect.height)}
-            </span>
-            <button className="primary" onClick={applyCrop} type="button">
-              Apply
-            </button>
-            <button onClick={cancelCrop} type="button">
-              Cancel
-            </button>
-          </div>
-        ) : null}
-
-        {tool === "transform" && working ? (
-          <div className="image-editor-cropbar">
-            <span className="image-editor-cropdims">
-              Drag, scale or rotate <strong>{activeLayerOf(working)?.name}</strong> on the canvas
-            </span>
-            <button onClick={resetActiveLayerTransform} type="button">
-              Reset transform
-            </button>
-            <button onClick={() => setTool("move")} type="button">
-              Done
-            </button>
-          </div>
-        ) : null}
-
-        {tool === "upscale" && working ? (
-          <div className="image-editor-cropbar">
-            <div className="image-editor-ratios" role="group" aria-label="Upscale engine">
-              {availableUpscaleEngines.map((entry) => (
-                <button
-                  className={upscaleEngine === entry.key ? "active" : ""}
-                  key={entry.key}
-                  onClick={() => {
-                    setUpscaleEngine(entry.key);
-                    if (!entry.factors.includes(upscaleFactor)) setUpscaleFactor(entry.factors[0]);
-                  }}
-                  type="button"
-                >
-                  {entry.label}
-                </button>
-              ))}
-            </div>
-            <div className="image-editor-ratios" role="group" aria-label="Upscale factor">
-              {upscaleFactorsForEngine(upscaleEngine).map((value) => (
-                <button
-                  className={upscaleFactor === value ? "active" : ""}
-                  key={value}
-                  onClick={() => setUpscaleFactor(value)}
-                  type="button"
-                >
-                  {value}×
-                </button>
-              ))}
-            </div>
-            {upscaleEngineHasSoftness(upscaleEngine) ? (
-              <label className="image-editor-upscale-softness" title="Higher restores more detail from a degraded source; 0 keeps it faithful.">
-                Detail
-                <input
-                  aria-label="SeedVR2 detail (softness)"
-                  max="1"
-                  min="0"
-                  onChange={(event) => setUpscaleSoftness(Number(event.target.value))}
-                  step="0.05"
-                  type="range"
-                  value={upscaleSoftness}
-                />
-                <span>{upscaleSoftness.toFixed(2)}</span>
-              </label>
-            ) : null}
-            <span className="image-editor-cropdims">
-              {working.width * upscaleFactor} × {working.height * upscaleFactor}
-            </span>
-            <button className="primary" disabled={!!aiOp} onClick={runUpscale} type="button">
-              Upscale
-            </button>
-            <button onClick={() => setTool("move")} type="button">
-              Cancel
-            </button>
-          </div>
-        ) : null}
-
-        {tool === "detail" && working ? (
-          <div className="image-editor-cropbar image-editor-detailbar">
-            {detailModels.length === 0 ? (
-              <span className="image-editor-cropdims">No detail-capable models installed</span>
-            ) : (
-              <>
-                <select
-                  aria-label="Detail backbone"
-                  className="image-editor-editmodel"
-                  onChange={(event) => setDetailModel(event.target.value)}
-                  value={detailModel}
-                >
-                  {detailModels.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.label ?? model.id}
-                    </option>
-                  ))}
-                </select>
-                <label className="image-editor-slider" title="Detail amount — higher invents more texture">
-                  <span className="image-editor-slider-label">Detail</span>
-                  <input
-                    aria-label="Detail strength"
-                    max={0.8}
-                    min={0.3}
-                    onChange={(event) => setDetailStrength(Number(event.target.value))}
-                    step={0.05}
-                    type="range"
-                    value={detailStrength}
-                  />
-                  <span className="image-editor-slider-value">{Math.round(detailStrength * 100)}</span>
-                </label>
-                <label className="image-editor-slider" title="Structure lock — higher keeps the result closer to the source">
-                  <span className="image-editor-slider-label">Structure</span>
-                  <input
-                    aria-label="Structure lock"
-                    max={1}
-                    min={0.4}
-                    onChange={(event) => setDetailCnScale(Number(event.target.value))}
-                    step={0.05}
-                    type="range"
-                    value={detailCnScale}
-                  />
-                  <span className="image-editor-slider-value">{Math.round(detailCnScale * 100)}</span>
-                </label>
-                <button className="primary" disabled={!!aiOp || !detailModel} onClick={runDetail} type="button">
-                  Enhance
-                </button>
-              </>
-            )}
-            <button onClick={() => setTool("move")} type="button">
-              Cancel
-            </button>
-          </div>
-        ) : null}
-
-        {tool === "color" && working ? (
-          <div className="image-editor-cropbar image-editor-colorbar">
-            <div className="image-editor-color-modes" role="group" aria-label="Color mode">
-              {[
-                ["adjust", "Adjust"],
-                ["levels", "Levels"],
-                ["curves", "Curves"],
-              ].map(([mode, label]) => (
-                <button
-                  key={mode}
-                  className={colorMode === mode ? "active" : ""}
-                  onClick={() => setColorMode(mode)}
-                  type="button"
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            {colorMode === "adjust"
-              ? COLOR_ADJUSTMENTS.map(({ key, label }) => (
-                  <label className="image-editor-slider" key={key} title="Double-click the slider to reset">
-                    <span className="image-editor-slider-label">{label}</span>
-                    <input
-                      aria-label={label}
-                      max={1}
-                      min={-1}
-                      onChange={(event) => setAdjustValue(key, Number(event.target.value))}
-                      onDoubleClick={() => resetAdjust(key)}
-                      step={0.01}
-                      type="range"
-                      value={colorAdjust[key]}
-                    />
-                    <span className="image-editor-slider-value">{Math.round(colorAdjust[key] * 100)}</span>
-                  </label>
-                ))
-              : null}
-
-            {colorMode === "levels" || colorMode === "curves" ? (
-              <select
-                aria-label="Channel"
-                className="image-editor-editmodel"
-                onChange={(event) => setColorChannel(event.target.value)}
-                value={colorChannel}
-              >
-                <option value="master">Master</option>
-                <option value="r">Red</option>
-                <option value="g">Green</option>
-                <option value="b">Blue</option>
-              </select>
-            ) : null}
-
-            {colorMode === "levels" ? (
-              <>
-                <canvas className="image-editor-histogram" height={56} ref={histogramRef} width={200} />
-                <label className="image-editor-slider" title="Black point">
-                  <span className="image-editor-slider-label">Black</span>
-                  <input
-                    aria-label="Black point"
-                    max={254}
-                    min={0}
-                    onChange={(event) => setLevelsValue("black", Number(event.target.value))}
-                    step={1}
-                    type="range"
-                    value={levels[colorChannel].black}
-                  />
-                  <span className="image-editor-slider-value">{levels[colorChannel].black}</span>
-                </label>
-                <label className="image-editor-slider" title="Gamma (midtones)">
-                  <span className="image-editor-slider-label">Gamma</span>
-                  <input
-                    aria-label="Gamma"
-                    max={2.5}
-                    min={0.1}
-                    onChange={(event) => setLevelsValue("gamma", Number(event.target.value))}
-                    step={0.01}
-                    type="range"
-                    value={levels[colorChannel].gamma}
-                  />
-                  <span className="image-editor-slider-value">{levels[colorChannel].gamma.toFixed(2)}</span>
-                </label>
-                <label className="image-editor-slider" title="White point">
-                  <span className="image-editor-slider-label">White</span>
-                  <input
-                    aria-label="White point"
-                    max={255}
-                    min={1}
-                    onChange={(event) => setLevelsValue("white", Number(event.target.value))}
-                    step={1}
-                    type="range"
-                    value={levels[colorChannel].white}
-                  />
-                  <span className="image-editor-slider-value">{levels[colorChannel].white}</span>
-                </label>
-              </>
-            ) : null}
-
-            {colorMode === "curves" ? (
-              <CurveEditor
-                points={curves[colorChannel]}
-                stroke={channelStroke}
-                onChange={(points) => setCurves((prev) => ({ ...prev, [colorChannel]: points }))}
-              />
-            ) : null}
-
-            <button disabled={activeGradeIsIdentity()} onClick={resetActiveColorMode} type="button">
-              Reset
-            </button>
-            <button className="primary" disabled={activeGradeIsIdentity()} onClick={applyColorGrade} type="button">
-              Apply
-            </button>
-            <button onClick={cancelCrop} type="button">
-              Cancel
-            </button>
-          </div>
-        ) : null}
-
-        {tool === "edit" && working ? (
-          <div className="image-editor-cropbar image-editor-editbar">
-            {editModels.length === 0 ? (
-              <span className="image-editor-cropdims">No edit-capable models installed</span>
-            ) : (
-              <>
-                <select
-                  aria-label="Edit model"
-                  className="image-editor-editmodel"
-                  onChange={(event) => setEditModel(event.target.value)}
-                  value={editModel}
-                >
-                  {editModels.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.label ?? model.id}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  aria-label="Edit prompt"
-                  className="image-editor-editprompt"
-                  onChange={(event) => setEditPrompt(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && editPrompt.trim() && !aiOp) runEdit();
-                  }}
-                  placeholder="Describe the edit…"
-                  type="text"
-                  value={editPrompt}
-                />
-                <input
-                  aria-label="Seed (optional)"
-                  className="image-editor-editseed"
-                  min={0}
-                  onChange={(event) => setEditSeed(event.target.value)}
-                  placeholder="Seed"
-                  type="number"
-                  value={editSeed}
-                />
-                <select
-                  aria-label="Output aspect"
-                  className="image-editor-editmodel"
-                  onChange={(event) => setEditAspect(event.target.value)}
-                  title="Output aspect — extend the canvas and fill the new area"
-                  value={editAspect}
-                >
-                  {EDIT_OUTPUT_ASPECTS.map((aspect) => (
-                    <option key={aspect.key} value={aspect.key}>
-                      {aspect.label}
-                    </option>
-                  ))}
-                </select>
-                {editAspect !== "match" ? (
-                  <FitModeControl
-                    value={effectiveFitMode(editFitMode, canMask)}
-                    onChange={setEditFitMode}
-                    inpaintCapable={canMask}
-                    label="Fill"
-                  />
-                ) : null}
-                {canMask ? (
-                  <>
-                    <button
-                      className={maskMode ? "active" : ""}
-                      onClick={() => setMaskMode((on) => !on)}
-                      title="Mask a region to confine the edit (inpaint): paint it, or smart-select with a box"
-                      type="button"
-                    >
-                      {maskHasContent(maskLines) || maskBaseImage ? "Mask ✓" : "Mask"}
-                    </button>
-                    {maskMode ? (
-                      <>
-                        {smartSelectSupported ? (
-                          <>
-                            <button
-                              className={maskSubTool === "brush" ? "active" : ""}
-                              onClick={() => setMaskSubTool("brush")}
-                              title="Paint the mask by hand"
-                              type="button"
-                            >
-                              Brush
-                            </button>
-                            <button
-                              className={maskSubTool === "select" ? "active" : ""}
-                              disabled={aiOp?.label === "smart select"}
-                              onClick={() => {
-                                setMaskSubTool("select");
-                                setMaskErase(false);
-                              }}
-                              title="Smart-select: drag a box around an object to auto-mask it (SAM3)"
-                              type="button"
-                            >
-                              {aiOp?.label === "smart select" ? "Segmenting…" : "Smart select"}
-                            </button>
-                          </>
-                        ) : null}
-                        {!smartSelectSupported || maskSubTool === "brush" ? (
-                          <>
-                            <label className="image-editor-slider" title="Brush size">
-                              <span className="image-editor-slider-label">Brush</span>
-                              <input
-                                aria-label="Brush size"
-                                max={300}
-                                min={5}
-                                onChange={(event) => setMaskBrush(Number(event.target.value))}
-                                step={1}
-                                type="range"
-                                value={maskBrush}
-                              />
-                            </label>
-                            <button
-                              className={maskErase ? "active" : ""}
-                              onClick={() => setMaskErase((on) => !on)}
-                              title="Eraser"
-                              type="button"
-                            >
-                              Eraser
-                            </button>
-                          </>
-                        ) : (
-                          <span className="image-editor-hint">Drag a box around an object</span>
-                        )}
-                        <button
-                          disabled={!maskLines.length && !maskBaseImage}
-                          onClick={clearMask}
-                          type="button"
-                        >
-                          Clear
-                        </button>
-                        {/* Mask refinement (sc-6110): post-process the current mask. */}
-                        <label className="image-editor-slider" title="Feather / grow / shrink radius (px)">
-                          <span className="image-editor-slider-label">Refine</span>
-                          <input
-                            aria-label="Mask refine radius"
-                            max={40}
-                            min={1}
-                            onChange={(event) => setMaskRefineRadius(Number(event.target.value))}
-                            step={1}
-                            type="range"
-                            value={maskRefineRadius}
-                          />
-                          <span className="image-editor-slider-value">{maskRefineRadius}</span>
-                        </label>
-                        <button
-                          disabled={!maskHasContent(maskLines) && !maskBaseImage}
-                          onClick={() => refineMask("feather")}
-                          title="Feather (soften) the mask edges"
-                          type="button"
-                        >
-                          Feather
-                        </button>
-                        <button
-                          disabled={!maskHasContent(maskLines) && !maskBaseImage}
-                          onClick={() => refineMask("grow")}
-                          title="Grow the selection (dilate)"
-                          type="button"
-                        >
-                          Grow
-                        </button>
-                        <button
-                          disabled={!maskHasContent(maskLines) && !maskBaseImage}
-                          onClick={() => refineMask("shrink")}
-                          title="Shrink the selection (erode)"
-                          type="button"
-                        >
-                          Shrink
-                        </button>
-                        <button onClick={() => refineMask("invert")} title="Invert the selection" type="button">
-                          Invert
-                        </button>
-                      </>
-                    ) : null}
-                  </>
-                ) : null}
-                {multiRefCapable ? (
-                  <span className="image-editor-refs" aria-label="Reference images">
-                    <span className="image-editor-slider-label">Reference</span>
-                    {refAssetIds.map((id) => {
-                      const asset = imageAssets.find((item) => item.id === id);
-                      return (
-                        <span className="image-editor-ref-chip" key={id}>
-                          {asset ? <img alt="" src={assetUrl(asset)} /> : <span>?</span>}
-                          <button
-                            aria-label="Remove reference"
-                            onClick={() => setRefAssetIds((prev) => prev.filter((other) => other !== id))}
-                            title="Remove reference"
-                            type="button"
-                          >
-                            ×
-                          </button>
-                        </span>
-                      );
-                    })}
-                    <button
-                      disabled={refAssetIds.length >= MAX_EDIT_REFERENCES - 1}
-                      onClick={() => setRefPickerOpen(true)}
-                      title="Condition the edit on reference image(s) — identity/style alongside the working image"
-                      type="button"
-                    >
-                      + Reference
-                    </button>
-                  </span>
-                ) : null}
-                <button className="primary" disabled={!editPrompt.trim() || !!aiOp} onClick={runEdit} type="button">
-                  {canMask && (maskHasContent(maskLines) || maskBaseImage) ? "Inpaint" : "Edit"}
-                </button>
-              </>
-            )}
-            <button
-              onClick={() => {
-                setTool("move");
-                setMaskMode(false);
-              }}
-              type="button"
-            >
-              Cancel
-            </button>
-          </div>
-        ) : null}
-
-        {tool === "boxes" && working ? (
-          <div className="image-editor-cropbar image-editor-boxbar">
-            <div className="image-editor-box-palette" role="group" aria-label="Box color">
-              {BOX_PALETTE.map((entry) => (
-                <button
-                  aria-label={entry.name}
-                  aria-pressed={boxColor === entry.value}
-                  className={boxColor === entry.value ? "image-editor-swatch active" : "image-editor-swatch"}
-                  key={entry.value}
-                  onClick={() => chooseBoxColor(entry.value)}
-                  style={{ background: entry.value }}
-                  title={entry.name}
-                  type="button"
-                />
-              ))}
-              <label className="image-editor-swatch image-editor-swatch-custom" title="Custom color">
-                <input
-                  aria-label="Custom box color"
-                  onChange={(event) => chooseBoxColor(event.target.value)}
-                  type="color"
-                  value={boxColor.toLowerCase()}
-                />
-              </label>
-            </div>
-            {boxes.length ? (
-              <div className="image-editor-box-list" role="group" aria-label="Boxes">
-                {boxes.map((box, index) => {
-                  const incomplete = boxMetadataGaps(box).length > 0;
-                  return (
-                    <button
-                      className={`image-editor-box-chip${selectedBoxId === box.id ? " active" : ""}${incomplete ? " incomplete" : ""}`}
-                      key={box.id}
-                      onClick={() => setSelectedBoxId(box.id)}
-                      title={box.desc ? `${index + 1}: ${box.desc}` : `Box ${index + 1} — needs a description`}
-                      type="button"
-                    >
-                      <span className="image-editor-box-dot" style={{ background: box.color }} />
-                      {index + 1}
-                      {incomplete ? <span className="image-editor-box-chip-flag" aria-hidden="true">!</span> : null}
-                    </button>
-                  );
-                })}
-              </div>
-            ) : (
-              <span className="image-editor-cropdims">Drag on the image to draw a box</span>
-            )}
-            {boxes.length ? (
-              editModels.length ? (
-                <>
-                  <select
-                    aria-label="Box edit model"
-                    className="image-editor-editmodel"
-                    onChange={(event) => setEditModel(event.target.value)}
-                    value={editModel}
-                  >
-                    {editModels.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.label ?? model.id}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    disabled={!composedPrompt}
-                    onClick={() => setEditPrompt(composedPrompt)}
-                    title="Compose a prompt from the boxes' colors + descriptions (editable)"
-                    type="button"
-                  >
-                    Auto prompt
-                  </button>
-                  <input
-                    aria-label="Box edit prompt"
-                    className="image-editor-editprompt"
-                    onChange={(event) => setEditPrompt(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && !aiOp && editModel) runBoxEdit();
-                    }}
-                    placeholder="Describe the edit (e.g. replace the red region with…)"
-                    type="text"
-                    value={editPrompt}
-                  />
-                  <button className="primary" disabled={!!aiOp || !editModel} onClick={runBoxEdit} type="button">
-                    Generate
-                  </button>
-                </>
-              ) : (
-                <span className="image-editor-cropdims">No edit-capable models installed</span>
-              )
-            ) : null}
-            <button disabled={!selectedBoxId} onClick={() => deleteBox(selectedBoxId)} type="button">
-              Delete
-            </button>
-            <button disabled={!boxes.length} onClick={clearBoxes} type="button">
-              Clear
-            </button>
-            <button onClick={() => setTool("move")} type="button">
-              Cancel
-            </button>
-          </div>
-        ) : null}
-
-        {tool === "boxes" && selectedBox ? (
-          <div className="image-editor-boxmeta" aria-label="Box details">
-            <div className="image-editor-boxmeta-title">
-              <span className="image-editor-box-dot" style={{ background: selectedBox.color }} />
-              Box {boxes.indexOf(selectedBox) + 1}
-            </div>
-            <div className="image-editor-boxmeta-types" role="group" aria-label="Element type">
-              <button
-                className={selectedBox.type === "obj" ? "active" : ""}
-                onClick={() => updateBox(selectedBox.id, { type: "obj" })}
-                type="button"
-              >
-                Object
-              </button>
-              <button
-                className={selectedBox.type === "text" ? "active" : ""}
-                onClick={() => updateBox(selectedBox.id, { type: "text" })}
-                type="button"
-              >
-                Text
-              </button>
-            </div>
-            <label className="image-editor-boxmeta-field">
-              <span>Description</span>
-              <input
-                aria-label="Box description"
-                onChange={(event) => updateBox(selectedBox.id, { desc: event.target.value })}
-                placeholder="What is in this region?"
-                type="text"
-                value={selectedBox.desc ?? ""}
-              />
-            </label>
-            {selectedBox.type === "text" ? (
-              <label className="image-editor-boxmeta-field">
-                <span>Text</span>
-                <input
-                  aria-label="Literal text"
-                  onChange={(event) => updateBox(selectedBox.id, { text: event.target.value })}
-                  placeholder="Literal text to render"
-                  type="text"
-                  value={selectedBox.text ?? ""}
-                />
-              </label>
-            ) : null}
-            <div className="image-editor-boxmeta-field">
-              <span>
-                Element colors ({(selectedBox.colorPalette ?? []).length}/{MAX_BOX_PALETTE})
-              </span>
-              <div className="image-editor-box-palette">
-                {(selectedBox.colorPalette ?? []).map((color) => (
-                  <button
-                    aria-label={`Remove ${color}`}
-                    className="image-editor-swatch"
-                    key={color}
-                    onClick={() =>
-                      updateBox(selectedBox.id, { colorPalette: removePaletteColor(selectedBox.colorPalette, color) })
-                    }
-                    style={{ background: color }}
-                    title={`Remove ${color}`}
-                    type="button"
-                  />
-                ))}
-                {(selectedBox.colorPalette ?? []).length < MAX_BOX_PALETTE ? (
-                  <label className="image-editor-swatch image-editor-swatch-custom" title="Add color">
-                    <input
-                      aria-label="Add element color"
-                      onChange={(event) =>
-                        updateBox(selectedBox.id, {
-                          colorPalette: addPaletteColor(selectedBox.colorPalette, event.target.value),
-                        })
-                      }
-                      type="color"
-                    />
-                  </label>
-                ) : null}
-              </div>
-            </div>
-            {selectedBoxGaps.length ? (
-              <p className="image-editor-boxmeta-hint">
-                For Ideogram layout this box still needs {selectedBoxGaps.join(", ")}. The color-keyed edit path only
-                needs a color + description.
-              </p>
-            ) : (
-              <p className="image-editor-boxmeta-ready">Ready for Ideogram layout ✓</p>
-            )}
-          </div>
-        ) : null}
-
         {aiOp ? (
-          <div className="image-editor-busy">
-            <div className="image-editor-busy-card">
-              <p className="image-editor-busy-title">
+          <div className="ie-busy">
+            <div className="ie-busy-card">
+              <p className="ie-busy-title">
                 {aiOp.label === "upscale"
                   ? "Upscaling…"
                   : aiOp.label === "edit"
-                    ? "Editing…"
+                    ? "Running AI edit…"
                     : aiOp.label === "detail"
                       ? "Enhancing detail…"
-                      : "Working…"}
+                      : aiOp.label === "smart select"
+                        ? "Segmenting…"
+                        : "Working…"}
               </p>
-              <p className="image-editor-busy-msg">
+              <p className="ie-busy-msg">
                 {activeAiJob?.message ||
-                  (activeAiJob?.status === "queued" ? "Queued — waiting for a worker." : "Processing…")}
+                  (activeAiJob?.status === "queued" ? "Queued — waiting for a worker." : "Processing on GPU worker…")}
               </p>
-              {typeof activeAiJob?.progress === "number" ? (
-                <div className="image-editor-busy-bar">
-                  <span style={{ width: `${Math.round(activeAiJob.progress * 100)}%` }} />
-                </div>
-              ) : null}
+              <div className="ie-busy-track">
+                {typeof activeAiJob?.progress === "number" ? (
+                  <div className="ie-busy-fill determinate" style={{ width: `${Math.round(activeAiJob.progress * 100)}%` }} />
+                ) : (
+                  <div className="ie-busy-fill" />
+                )}
+              </div>
             </div>
           </div>
         ) : null}
 
         {working ? (
-          <div className="image-editor-viewbar">
-            <button onClick={() => zoomAtCenter(1 / ZOOM_STEP)} title="Zoom out (−)" type="button">
+          <div className="ie-viewbar">
+            <button className="ie-btn icon sm ghost" onClick={() => zoomAtCenter(1 / ZOOM_STEP)} title="Zoom out (−)" type="button">
               −
             </button>
-            <span className="image-editor-zoom">{Math.round(view.scale * 100)}%</span>
-            <button onClick={() => zoomAtCenter(ZOOM_STEP)} title="Zoom in (+)" type="button">
+            <span className="ie-zoom">{zoomPct}%</span>
+            <button className="ie-btn icon sm ghost" onClick={() => zoomAtCenter(ZOOM_STEP)} title="Zoom in (+)" type="button">
               +
             </button>
-            <button onClick={fitToView} title="Fit to view (0)" type="button">
+            <div className="ie-divider" style={{ height: "18px" }} />
+            <button className="ie-btn sm ghost" onClick={fitToView} title="Fit to view (0)" type="button">
               Fit
             </button>
-            <button onClick={actualSize} title="Actual size (1)" type="button">
+            <button className="ie-btn sm ghost" onClick={actualSize} title="Actual size (1)" type="button">
               100%
             </button>
-            <span className="image-editor-dims">
-              {working.width} × {working.height}
-            </span>
           </div>
         ) : null}
-      </div>
+      </main>
 
+      {working ? (
+        <aside className="ie-inspector" aria-label="Properties">
+          <div className="ie-insp-head">
+            <div className="ie-insp-icon">{EDITOR_TOOL_ICONS[tool]}</div>
+            <div>
+              <div className="ie-insp-title">{activeMeta.label}</div>
+              <div className="ie-insp-desc">{activeMeta.desc}</div>
+            </div>
+          </div>
+          {renderInspectorBody()}
+        </aside>
+      ) : null}
+
+      {working ? renderLayers() : null}
+
+      <footer className="ie-statusbar">
+        <span className="ie-status-dot" />
+        <span>{activeMeta.label}</span>
+        <span className="ie-mono">·&nbsp; {zoomPct}%</span>
+        {working ? (
+          <span className="ie-mono">
+            ·&nbsp; {working.width} × {working.height}
+          </span>
+        ) : null}
+        <div className="ie-spacer" />
+        <span className="ie-mono">{layerCount} layers</span>
+        <span>·</span>
+        <span>RGB / 8-bit</span>
+        <span>·</span>
+        <span>sRGB</span>
+      </footer>
       {pickerOpen ? (
         <DatasetAddDialog
           assets={assets ?? []}

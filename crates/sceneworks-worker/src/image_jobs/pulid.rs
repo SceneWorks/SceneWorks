@@ -18,9 +18,15 @@
 const PULID_MODEL: &str = "pulid_flux_dev";
 /// The mlx-gen registry id the worker loads through `gen_core::load`.
 const PULID_ENGINE_ID: &str = "pulid_flux";
-/// FLUX.1-dev backbone repo when the manifest omits `repo` (the torch `pulid_flux_dev`
-/// MODEL_TARGETS default). NC-gated — same posture as the base `flux_dev` built-in.
-const PULID_FLUX_REPO: &str = "black-forest-labs/FLUX.1-dev";
+/// FLUX.1-dev backbone repo for the MLX path (sc-9947): the SAME ungated `SceneWorks/flux1-dev-mlx`
+/// quant-matrix turnkey the base `flux_dev` built-in consumes — self-contained q4/q8/bf16 tier subdirs,
+/// packed-detected by `mlx_gen_flux::load_flux1` (which `mlx-gen-pulid` delegates the backbone to). This
+/// de-gates PuLID on macOS (no HF token / license-accept, the sc-8669 `flux_dev` precedent) and drops the
+/// install-time convert peak (the packed tier loads directly). The candle (Windows/Linux) lane keeps the
+/// upstream gated dense BFL layout via its own `PULID_CANDLE_FLUX_REPO` const — its packed consumption is a
+/// separate epic-9083 slice — so this const is the MLX-only lever, NOT a shared manifest `repo` (which both
+/// resolvers would read).
+const PULID_FLUX_REPO: &str = "SceneWorks/flux1-dev-mlx";
 /// The PuLID-FLUX adapter checkpoint (IDFormer + PerceiverAttention CA blocks). Public repo,
 /// downloaded directly (the torch path used the same `guozinan/PuLID` / `v0.9.1` weight).
 const PULID_ADAPTER_REPO: &str = "guozinan/PuLID";
@@ -52,10 +58,13 @@ const PULID_MAX_SEQUENCE_LENGTH: u32 = 128;
 /// recipe; mirrors `mlx_instantid` for the InstantID path).
 const PULID_ADAPTER_LABEL: &str = "mlx_pulid_flux";
 
-/// Resolve the FLUX.1-dev backbone snapshot for PuLID-FLUX: an explicit `modelPath` dir wins,
-/// else the HF cache snapshot for the manifest `repo` (default FLUX.1-dev). `None` means the
-/// base is not present, so the job is not MLX-runnable (it stays on the torch path until the
-/// retirement slice removes it). Mirrors `resolve_instantid_sdxl_base`.
+/// Resolve the FLUX.1-dev backbone snapshot for PuLID-FLUX: an explicit `modelPath` dir wins (a
+/// pre-staged complete FLUX dir — used as-is, never tier-resolved), else the HF cache snapshot for the
+/// manifest `repo` (default `SceneWorks/flux1-dev-mlx`, sc-9947). For the quant-matrix turnkey that root
+/// holds `q4/`/`q8/`/`bf16/` tier subdirs, so pick the SELECTED tier via `standard_tier_subdir` — the SAME
+/// resolver the base `flux_dev` MLX lane uses — exactly as `mlx_gen_flux::load_flux1` (which
+/// `mlx-gen-pulid` delegates the backbone to) packed-loads it. `None` means the base is not present, so the
+/// job is not MLX-runnable. Mirrors `resolve_instantid_sdxl_base` + `base::snapshot_dir_for_request`.
 fn resolve_pulid_flux_base(
     request: &ImageRequest,
     settings: &Settings,
@@ -78,7 +87,16 @@ fn resolve_pulid_flux_base(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(PULID_FLUX_REPO);
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
+    let root = huggingface_snapshot_dir(&settings.data_dir, repo);
+    // Quant-matrix turnkey (sc-9947): descend into the selected q4/q8/bf16 tier subdir. A non-turnkey
+    // `repo`/root (no tier subdirs) falls through to the root untouched inside `standard_tier_subdir`.
+    Ok(root.map(|root| {
+        if uses_standard_tier_layout(request) {
+            standard_tier_subdir(&root, request)
+        } else {
+            root
+        }
+    }))
 }
 
 /// True when this is a native-MLX-eligible PuLID-FLUX job: the production model in
@@ -94,34 +112,13 @@ fn pulid_flux_available(request: &ImageRequest, settings: &Settings) -> bool {
 
 /// Resolve PuLID denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` → 30.
 fn pulid_steps(request: &ImageRequest) -> u32 {
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    request
-        .advanced
-        .get("steps")
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
-        .map(|steps| steps.clamp(1, 80) as u32)
-        .unwrap_or(PULID_DEFAULT_STEPS)
+    resolve_advanced_or_manifest_u32(request, "steps", PULID_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve PuLID guidance: `advanced.guidanceScale` → manifest `guidanceScale` → 4.0 (the FLUX.1-dev
 /// guidance-distilled CFG; the engine's fake-CFG single forward consumes it).
 fn pulid_guidance(request: &ImageRequest) -> f32 {
-    let manifest_default = request
-        .model_manifest_entry
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(PULID_DEFAULT_GUIDANCE);
-    advanced::f32_clamped(&request.advanced, "guidanceScale", manifest_default, 0.0..=30.0)
+    resolve_advanced_or_manifest_f32(request, "guidanceScale", PULID_DEFAULT_GUIDANCE, 0.0..=30.0)
 }
 
 /// The PuLID identity-strength knob → the reference conditioning's `strength` (the engine reads
@@ -147,32 +144,6 @@ fn pulid_timestep_to_start_cfg(request: &ImageRequest) -> u32 {
         PULID_DEFAULT_TIMESTEP_TO_START_CFG,
         0..=20,
     )
-}
-
-/// Resolve PuLID quantization. **Dense (bf16) is the default** — the torch-parity production
-/// baseline (64 GB-tier; ArcFace cosine ~0.80 @1024²/30-step). Q8/Q4 only on an explicit
-/// `advanced.mlxQuantize` / manifest opt-in, which materially lowers the RAM floor (the FLUX.1-dev
-/// backbone 23.8 → 12 → 6.5 GB; the PuLID conditioning stays f32 either way, so identity is
-/// near-lossless — engine e2e Q8 0.6841 / Q4 0.6835 vs bf16 0.68 @512²). Returns the engine
-/// `Quant` + the recipe bit count.
-fn pulid_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
-    let raw = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(quant_int)
-        .or_else(|| {
-            request
-                .model_manifest_entry
-                .get("mlx")
-                .and_then(|mlx| mlx.get("quantize"))
-                .and_then(quant_int)
-        });
-    match raw {
-        Some(bits) if bits > 0 && bits <= 4 => (Some(Quant::Q4), Some(4)),
-        Some(bits) if bits > 4 => (Some(Quant::Q8), Some(8)),
-        // None / 0 / negative → dense bf16 (the default + the validated torch-parity envelope).
-        _ => (None, None),
-    }
 }
 
 /// The resolved engine weight inputs: the three files/dirs the engine reads from its env-var seam.
@@ -201,36 +172,17 @@ fn pulid_weights_env_preset() -> Option<PulidWeights> {
     })
 }
 
-struct EnvRestore {
-    values: [(&'static str, Option<std::ffi::OsString>); 3],
-}
-
-impl Drop for EnvRestore {
-    fn drop(&mut self) {
-        for (key, value) in &self.values {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
+/// Build the engine's identity-weight seam from the resolved cache paths (sc-8827). The `pulid_flux`
+/// loader reads the PuLID adapter + EVA tower + native face stack from `LoadSpec::identity`, so the
+/// worker threads the paths through the spec instead of mutating the process-global `PULID_*` env vars
+/// at job time on the multithreaded tokio runtime (the old `set_var`/`remove_var` seam was unsound —
+/// F-025). The paths travel with the `LoadSpec` into the spawned load task, no env involved.
+fn pulid_identity_weights(weights: &PulidWeights) -> IdentityWeights {
+    IdentityWeights {
+        encoder: Some(WeightsSource::File(weights.adapter.clone())),
+        eva: Some(WeightsSource::File(weights.eva.clone())),
+        face_dir: Some(WeightsSource::Dir(weights.face_dir.clone())),
     }
-}
-
-fn set_pulid_weight_env(weights: &PulidWeights) -> EnvRestore {
-    let guard = EnvRestore {
-        values: [
-            ("PULID_FLUX_WEIGHTS", std::env::var_os("PULID_FLUX_WEIGHTS")),
-            ("PULID_EVA_WEIGHTS", std::env::var_os("PULID_EVA_WEIGHTS")),
-            (
-                "PULID_FACE_WEIGHTS_DIR",
-                std::env::var_os("PULID_FACE_WEIGHTS_DIR"),
-            ),
-        ],
-    };
-    std::env::set_var("PULID_FLUX_WEIGHTS", &weights.adapter);
-    std::env::set_var("PULID_EVA_WEIGHTS", &weights.eva);
-    std::env::set_var("PULID_FACE_WEIGHTS_DIR", &weights.face_dir);
-    guard
 }
 
 /// Resolve all PuLID-FLUX engine weight inputs, downloading the converted bundle + the PuLID
@@ -346,17 +298,30 @@ async fn generate_pulid_flux_stream(
     )?;
 
     let weights = ensure_pulid_weights(api, settings, job).await?;
-    // Feed the engine's weight seam from the resolved cache paths (the `pulid_flux` loader resolves
-    // the PuLID adapter + EVA + face stack from these env vars). Keep them scoped to this async job:
-    // the generator load happens inside the spawned stream task, so they must stay live through
-    // `consume_gen_events`, then `EnvRestore` removes/restores them before the next job.
-    let _pulid_env = set_pulid_weight_env(&weights);
+    // Feed the engine's weight seam from the resolved cache paths on the `LoadSpec` (the `pulid_flux`
+    // loader resolves the PuLID adapter + EVA + face stack from `LoadSpec::identity`, sc-8827). The
+    // paths ride the spec into the spawned load task — no process-global env mutation (the old
+    // `PULID_*` `set_var`/`remove_var` seam was unsound on the multithreaded runtime, F-025).
+    let identity = pulid_identity_weights(&weights);
 
     let steps = pulid_steps(request);
     let guidance = pulid_guidance(request);
     let id_weight = pulid_id_weight(request);
     let start_cfg = pulid_timestep_to_start_cfg(request);
-    let (quant, recipe_bits) = pulid_quant(request);
+    // Quant-matrix backbone (sc-9947): the FLUX.1-dev backbone always supports quant, so resolve the
+    // request quant the SAME way the base `flux_dev` MLX lane does and reconcile it against the tier
+    // subdir actually resolved (`flux_base`) — record the precision that ran + emit `quant_tier_downgraded`
+    // on a genuine fallback (requested tier absent). On an already-packed q4/q8 tier the load quant is a
+    // harmless no-op; the bf16 tier resolves to `None`. The PuLID conditioning (EVA/IDFormer/CA) stays f32
+    // in every case — `load_flux1` quantizes only the backbone linears (sc-3076).
+    let (quant, recipe_bits) = reconcile_resolved_tier_quant(
+        resolve_quant(request),
+        &flux_base,
+        true,
+        &request.model,
+        &job.id,
+        backend,
+    );
     // Curated unified-sampler selection (epic 7114, sc-7432): PuLID-FLUX delegates its denoise to the
     // FLUX backbone, which honors a curated solver/scheduler on the `GenerationRequest` (#537). Read +
     // N3-normalize against the shared curated menu (an unknown name drops to the engine default + emits
@@ -412,17 +377,21 @@ async fn generate_pulid_flux_stream(
     // (source embedded once — the caching AC). The source is the CURRENT job's `referenceAssetId`, so
     // changing the reference changes the scored source. Staging is non-fatal (failure → no scorer →
     // scores omitted, generation still renders).
-    let face_stack_dir = match ensure_face_stack_dir(api, settings, job).await {
-        Ok(dir) => Some(dir),
-        Err(error) => {
-            tracing::warn!(error = %error, "PuLID-FLUX face-stack staging failed; likeness scores omitted");
-            None
-        }
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        true,
+        "PuLID-FLUX face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     let likeness_source = face_stack_dir.as_ref().map(|_| reference.clone());
     let likeness_source_ref = reference_id.to_owned();
 
-    let spec = load_spec(flux_base, quant, Vec::new(), None);
+    let mut spec = load_spec(flux_base, quant, Vec::new(), None);
+    // PuLID identity sub-model paths ride the spec (sc-8827) — the `pulid_flux` loader reads them from
+    // `LoadSpec::identity` instead of the process-global `PULID_*` env vars.
+    spec.identity = Some(identity);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         PULID_ENGINE_ID,

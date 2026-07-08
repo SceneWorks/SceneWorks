@@ -23,6 +23,12 @@
 /// `FLUX2_CONTROL_REPO` / `FLUX2_CONTROL_FILE`.
 const FLUX2_CONTROL_CANDLE_REPO: &str = "alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union";
 const FLUX2_CONTROL_CANDLE_FILE: &str = "FLUX.2-dev-Fun-Controlnet-Union-2602.safetensors";
+/// Pinned revision for the default `FLUX2_CONTROL_CANDLE_REPO` (sc-9879, F-077 follow-up). Fetching the
+/// mutable `main` branch means a re-push (or a compromised token) could silently swap the ControlNet
+/// checkpoint we load; pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). Applied ONLY
+/// to the default repo — a manifest `controlWeights.repo` override keeps `main`. HF's tree API still
+/// reports the file's `lfs.oid`, which `ensure_hf_cached_file` verifies against.
+const FLUX2_CONTROL_CANDLE_REVISION: &str = "b3dcd7836a0e926248dac3ccba8fc0853495764b";
 /// The FLUX.2-dev base diffusers repo when the manifest omits `repo` (the 32B flagship). The candle lane
 /// loads the dense snapshot and Q4-quantizes it at load.
 const FLUX2_CONTROL_CANDLE_BASE_REPO: &str = "black-forest-labs/FLUX.2-dev";
@@ -87,44 +93,24 @@ fn flux2_control_candle_available(request: &ImageRequest, settings: &Settings) -
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → default (28).
 fn flux2_control_candle_steps(request: &ImageRequest) -> u32 {
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    request
-        .advanced
-        .get("steps")
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
-        .map(|steps| steps.clamp(1, 50) as u32)
-        .unwrap_or(FLUX2_CONTROL_CANDLE_DEFAULT_STEPS)
+    resolve_advanced_or_manifest_u32(request, "steps", FLUX2_CONTROL_CANDLE_DEFAULT_STEPS, 1..=50)
 }
 
 /// Resolve embedded guidance: `advanced.guidanceScale` → manifest `guidanceScale` → default (4.0),
 /// clamped. dev rides this scalar on the transformer's guidance embedder (no true-CFG).
 fn flux2_control_candle_guidance(request: &ImageRequest) -> f32 {
-    let manifest_default = request
-        .model_manifest_entry
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(FLUX2_CONTROL_CANDLE_DEFAULT_GUIDANCE);
-    advanced::f32_clamped(
-        &request.advanced,
+    resolve_advanced_or_manifest_f32(
+        request,
         "guidanceScale",
-        manifest_default,
+        FLUX2_CONTROL_CANDLE_DEFAULT_GUIDANCE,
         0.0..=30.0,
     )
 }
 
 /// The (repo, filename) of the control weights — `advanced.controlWeights.{repo,filename}` overrides,
 /// else the Fun-Controlnet-Union `-2602` default (parity with the MLX `flux2_control_repo_file`).
-fn flux2_control_candle_repo_file(request: &ImageRequest) -> (String, String) {
+/// The payload filename must be a plain component (sc-8821 / F-019).
+fn flux2_control_candle_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
     let cw = request
         .advanced
         .get("controlWeights")
@@ -137,10 +123,13 @@ fn flux2_control_candle_repo_file(request: &ImageRequest) -> (String, String) {
             .unwrap_or(default)
             .to_owned()
     };
-    (
+    Ok((
         pick("repo", FLUX2_CONTROL_CANDLE_REPO),
-        pick("filename", FLUX2_CONTROL_CANDLE_FILE),
-    )
+        safe_weight_filename(
+            &pick("filename", FLUX2_CONTROL_CANDLE_FILE),
+            "advanced.controlWeights.filename",
+        )?,
+    ))
 }
 
 /// Resolve the Fun-Controlnet-Union weight **file** the `Flux2Control` provider loads, downloading on
@@ -154,7 +143,7 @@ async fn ensure_flux2_control_candle_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
-    let (repo, file) = flux2_control_candle_repo_file(request);
+    let (repo, file) = flux2_control_candle_repo_file(request)?;
     if let Ok(p) = std::env::var("SCENEWORKS_CONTROLNET_FLUX2") {
         let p = PathBuf::from(p);
         if p.is_file() {
@@ -181,7 +170,15 @@ async fn ensure_flux2_control_candle_weights(
         .join("cache")
         .join("controlnet-flux2")
         .join(&file);
-    ensure_hf_cached_file(&context, &repo, "main", &file, &dst).await?;
+    // Pin the exact commit for the default control repo so `main` moving under us can't swap the
+    // ControlNet checkpoint (sc-9879). A manifest `controlWeights.repo` override may carry its own
+    // revision layout, so only pin when we're on the default repo.
+    let revision = if repo == FLUX2_CONTROL_CANDLE_REPO {
+        FLUX2_CONTROL_CANDLE_REVISION
+    } else {
+        "main"
+    };
+    ensure_hf_cached_file(&context, &repo, revision, &file, &dst).await?;
     Ok(dst)
 }
 
@@ -229,6 +226,11 @@ struct Flux2StrictControl {
     steps: u32,
     guidance: f32,
     control_scale: f32,
+    /// Per-generation PiD decoder weights (epic 7840, sc-8044): `Some` only when this generation opted in
+    /// (`advanced.usePid`) AND the `flux2` PiD + Gemma snapshots are cached. Threaded into `with_pid` at
+    /// load; `use_pid` on the request is `is_some()` so the two stay in lockstep (the engine rejects a
+    /// mismatch). `None` ⇒ native FLUX.2 VAE decode.
+    pid: Option<gen_core::PidWeights>,
 }
 
 impl CandleStrictControl for Flux2StrictControl {
@@ -246,14 +248,29 @@ impl CandleStrictControl for Flux2StrictControl {
         "flux2_control"
     }
 
+    fn out_width(&self) -> u32 {
+        self.width
+    }
+
+    fn out_height(&self) -> u32 {
+        self.height
+    }
+
     fn load(&self) -> WorkerResult<Self::Model> {
         let paths = Flux2ControlPaths {
             root: self.base.clone(),
             control: self.control.clone(),
         };
-        Flux2Control::load(&paths, self.quant).map_err(|error| {
+        let model = Flux2Control::load(&paths, self.quant).map_err(|error| {
             WorkerError::Engine(format!("FLUX.2-dev strict-pose control load failed: {error}"))
-        })
+        })?;
+        // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND the snapshots are cached.
+        match &self.pid {
+            Some(pid) => model.with_pid(pid).map_err(|error| {
+                WorkerError::Engine(format!("FLUX.2 control PiD decoder load failed: {error}"))
+            }),
+            None => Ok(model),
+        }
     }
 
     fn generate_one(
@@ -272,6 +289,8 @@ impl CandleStrictControl for Flux2StrictControl {
             guidance: self.guidance,
             control_scale: self.control_scale,
             seed,
+            // PiD opt-in (sc-8044): in lockstep with the `with_pid` load — `is_some()` ⇒ decoder loaded.
+            use_pid: self.pid.is_some(),
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {
@@ -323,7 +342,16 @@ async fn generate_candle_flux2_control_stream(
         .to_owned();
 
     let pose_count = pose_entries(request).len();
-    let raw_settings = flux2_control_candle_raw_settings(
+    // Per-generation PiD decode (epic 7840, sc-8044): resolve the `flux2` PiD student + Gemma when
+    // `advanced.usePid` is set and the snapshots are cached; else `None` → native FLUX.2 VAE.
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+    // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
+    // 4K/native leaves the requested dims untouched). The shared driver renders the control map at these
+    // same dims (via `out_width`/`out_height`), keeping control + latent aligned.
+    let (width, height) =
+        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
+    let mut raw_settings = flux2_control_candle_raw_settings(
         request,
         &repo,
         steps,
@@ -332,17 +360,20 @@ async fn generate_candle_flux2_control_stream(
         control_scale,
         pose_count,
     );
+    // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
+    raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
     let provider = Flux2StrictControl {
         base,
         control,
         quant,
         prompt: request.prompt.clone(),
-        width: request.width,
-        height: request.height,
+        width,
+        height,
         steps,
         guidance,
         control_scale,
+        pid: pid_weights,
     };
 
     run_candle_strict_control(

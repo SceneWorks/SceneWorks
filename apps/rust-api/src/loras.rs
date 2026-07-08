@@ -182,24 +182,43 @@ pub(crate) async fn delete_lora(
         ),
         _ => return Err(ApiError::bad_request("Unsupported LoRA scope")),
     };
+    let permanent = query.permanent.unwrap_or(false);
+    // Peek (not remove) the manifest entry so a failed move-to-trash leaves the
+    // catalog intact for the client's permanent-delete confirmation prompt.
+    let manifest_entry = if let Some(manifest_path) = manifest_path.as_deref() {
+        load_manifest_entries(&state, manifest_path, "loras")
+            .await?
+            .into_iter()
+            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(lora_id.as_str()))
+    } else {
+        None
+    };
+    let cleanup_source = manifest_entry.as_ref().unwrap_or(&lora);
+    let removal = remove_owned_artifacts(
+        lora_artifact_paths(cleanup_source, &default_root),
+        &allowed_roots,
+        permanent,
+    )
+    .await?;
+    if !permanent && !removal.trash_failed_paths.is_empty() {
+        return Ok(Json(json!({
+            "id": lora_id,
+            "kind": "lora",
+            "scope": scope,
+            "trashUnavailable": true,
+            "trashFailedPaths": removal.trash_failed_paths,
+            "removedManifestEntry": false,
+            "removedLocalArtifacts": !removal.removed_paths.is_empty(),
+            "removedPaths": removal.removed_paths,
+            "retainedPaths": removal.retained_paths,
+        })));
+    }
     let removed_entry = if let Some(manifest_path) = manifest_path.as_deref() {
         remove_catalog_manifest_entry(&state, manifest_path, "loras", &lora_id).await?
     } else {
         None
     };
-    let cleanup_source = removed_entry.as_ref().unwrap_or(&lora);
-    let mut removed_paths = Vec::new();
-    let mut retained_paths = Vec::new();
-    for path in lora_artifact_paths(cleanup_source, &default_root) {
-        remove_owned_artifact_path(
-            path,
-            &allowed_roots,
-            &mut removed_paths,
-            &mut retained_paths,
-        )
-        .await?;
-    }
-    if removed_entry.is_none() && removed_paths.is_empty() {
+    if removed_entry.is_none() && removal.removed_paths.is_empty() {
         return Err(ApiError::bad_request(
             "Built-in LoRA catalog entries are read-only unless local files are installed",
         ));
@@ -215,13 +234,279 @@ pub(crate) async fn delete_lora(
         "id": lora_id,
         "kind": "lora",
         "scope": scope,
+        "trashed": !permanent,
         "removedManifestEntry": removed_entry.is_some(),
-        "removedLocalArtifacts": !removed_paths.is_empty(),
-        "removedPaths": removed_paths,
-        "retainedPaths": retained_paths,
+        "removedLocalArtifacts": !removal.removed_paths.is_empty(),
+        "removedPaths": removal.removed_paths,
+        "retainedPaths": removal.retained_paths,
         "warnings": warnings,
         "policy": policy,
     })))
+}
+
+/// Edit a catalog LoRA's user-facing metadata (trigger keywords and usage notes)
+/// after import — the capability scoped under epic 1092 / story 1168 but never
+/// shipped. Only the fields present in the request change. Built-in entries are
+/// read-only (their manifest is compiled in); import a copy to annotate them.
+pub(crate) async fn update_lora(
+    State(state): State<AppState>,
+    Path(lora_id): Path<String>,
+    Query(query): Query<LoraCatalogItemQuery>,
+    ApiJson(body): ApiJson<LoraUpdateRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let lora = lora_catalog(&state, query.project_id.as_deref())
+        .await?
+        .into_iter()
+        .find(|item| {
+            item.get("id").and_then(Value::as_str) == Some(lora_id.as_str())
+                && query.scope.as_deref().map_or(true, |scope| {
+                    item.get("scope").and_then(Value::as_str) == Some(scope)
+                })
+        })
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            detail: "LoRA not found".to_owned(),
+        })?;
+    let scope = query
+        .scope
+        .as_deref()
+        .or_else(|| lora.get("scope").and_then(Value::as_str))
+        .unwrap_or("global");
+    // Mirror delete_lora's scope routing to find the writable manifest.
+    let manifest_path = match scope {
+        "global" => state
+            .settings
+            .config_dir
+            .join("manifests")
+            .join("user.loras.jsonc"),
+        "project" => {
+            let Some(project_id) = query.project_id.as_deref() else {
+                return Err(ApiError::bad_request(
+                    "Editing a project LoRA requires projectId",
+                ));
+            };
+            project_path_for_id(state.clone(), project_id)
+                .await?
+                .join("loras")
+                .join("manifest.jsonc")
+        }
+        "builtin" => {
+            return Err(ApiError::bad_request(
+                "Built-in LoRA metadata is read-only. Import a copy to add trigger keywords or notes.",
+            ));
+        }
+        _ => return Err(ApiError::bad_request("Unsupported LoRA scope")),
+    };
+    let trigger_words = body.trigger_words.clone();
+    let notes = body.notes.clone();
+    let updated = mutate_manifest_entries(&state, &manifest_path, "loras", move |entries| {
+        let mut updated = None;
+        let entries = entries
+            .into_iter()
+            .map(|mut entry| {
+                if entry.get("id").and_then(Value::as_str) == Some(lora_id.as_str()) {
+                    if let Some(object) = entry.as_object_mut() {
+                        if let Some(trigger_words) = trigger_words.as_ref() {
+                            object.insert("triggerWords".to_owned(), json!(trigger_words));
+                        }
+                        if let Some(notes) = notes.as_ref() {
+                            object.insert("notes".to_owned(), Value::String(notes.clone()));
+                        }
+                        object.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
+                    }
+                    updated = Some(entry.clone());
+                }
+                entry
+            })
+            .collect::<Vec<_>>();
+        Ok((entries, updated))
+    })
+    .await?;
+    updated.map(Json).ok_or_else(|| ApiError {
+        status: StatusCode::NOT_FOUND,
+        detail: "LoRA has no editable manifest entry in this scope".to_owned(),
+    })
+}
+
+/// Best-effort trigger-keyword suggestions for a LoRA, read live from the
+/// installed adapter's embedded `ss_tag_frequency` metadata. Powers the tag
+/// editor's click-to-add typeahead. Returns an empty list (never an error) when
+/// the LoRA isn't installed or its file carries no such metadata.
+pub(crate) async fn lora_embedded_tags(
+    State(state): State<AppState>,
+    Path(lora_id): Path<String>,
+    Query(query): Query<LoraCatalogItemQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let lora = lora_catalog(&state, query.project_id.as_deref())
+        .await?
+        .into_iter()
+        .find(|item| {
+            item.get("id").and_then(Value::as_str) == Some(lora_id.as_str())
+                && query.scope.as_deref().map_or(true, |scope| {
+                    item.get("scope").and_then(Value::as_str) == Some(scope)
+                })
+        })
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            detail: "LoRA not found".to_owned(),
+        })?;
+    let Some(installed_path) = lora
+        .get("installedPath")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return Ok(Json(json!({ "tags": [] })));
+    };
+    let tags = tokio::task::spawn_blocking(move || read_embedded_trigger_tags(&installed_path))
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(json!({ "tags": tags })))
+}
+
+/// Split a comma-delimited trigger-keyword string into a trimmed, de-duplicated
+/// list. Multipart form fields arrive as one string (the web tag editor joins the
+/// keyword chips with commas); the JSON import path sends a `triggerWords` array
+/// and bypasses this.
+fn parse_comma_keywords(value: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .filter(|token| seen.insert(token.to_owned()))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `ss_tag_frequency` can list hundreds of caption tokens; cap suggestions to the
+/// most frequent so the editor stays usable.
+const MAX_EMBEDDED_TAGS: usize = 40;
+
+/// Resolve a LoRA's installed file and extract ranked candidate trigger tags from
+/// its embedded metadata. Any failure yields an empty list, since this only feeds
+/// a suggestion UI.
+fn read_embedded_trigger_tags(installed_path: &str) -> Vec<String> {
+    let Some(safetensors_path) = first_safetensors_path(FsPath::new(installed_path)) else {
+        return Vec::new();
+    };
+    match read_safetensors_header(&safetensors_path) {
+        Ok(header) => parse_tag_frequency(&header),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Parse `ss_tag_frequency` from a safetensors `__metadata__` header into a
+/// frequency-ranked, de-duplicated tag list. The value is usually a JSON-encoded
+/// string of shape `{ "<dataset_dir>": { "tag": count, .. }, .. }` (occasionally
+/// the flat `{ "tag": count }`). Tolerant of a missing key, a non-string value,
+/// invalid JSON, and either shape.
+fn parse_tag_frequency(header: &Value) -> Vec<String> {
+    let Some(raw) = header
+        .get("__metadata__")
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("ss_tag_frequency"))
+    else {
+        return Vec::new();
+    };
+    let decoded = match raw {
+        Value::String(text) => match serde_json::from_str::<Value>(text) {
+            Ok(value) => value,
+            Err(_) => return Vec::new(),
+        },
+        other => other.clone(),
+    };
+    let Some(outer) = decoded.as_object() else {
+        return Vec::new();
+    };
+    let mut counts: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for (key, value) in outer {
+        match value {
+            // Nested shape: dataset dir -> { tag: count }.
+            Value::Object(inner) => {
+                for (tag, count) in inner {
+                    let tag = tag.trim();
+                    if !tag.is_empty() {
+                        *counts.entry(tag.to_owned()).or_default() += count.as_f64().unwrap_or(0.0);
+                    }
+                }
+            }
+            // Flat shape: tag -> count.
+            Value::Number(number) => {
+                let tag = key.trim();
+                if !tag.is_empty() {
+                    *counts.entry(tag.to_owned()).or_default() += number.as_f64().unwrap_or(0.0);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut ranked: Vec<(String, f64)> = counts.into_iter().collect();
+    // Most frequent first; ties broken alphabetically for deterministic output.
+    ranked.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    ranked
+        .into_iter()
+        .map(|(tag, _)| tag)
+        .take(MAX_EMBEDDED_TAGS)
+        .collect()
+}
+
+#[cfg(test)]
+mod embedded_tag_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_nested_tag_frequency_ranked_by_count() {
+        let header = json!({
+            "__metadata__": {
+                "ss_tag_frequency": "{\"1_concept\": {\"rare_token\": 2, \"common_token\": 10}}"
+            }
+        });
+        assert_eq!(
+            parse_tag_frequency(&header),
+            vec!["common_token", "rare_token"]
+        );
+    }
+
+    #[test]
+    fn parses_flat_tag_frequency() {
+        let header = json!({
+            "__metadata__": { "ss_tag_frequency": "{\"solo\": 5, \"1girl\": 9}" }
+        });
+        assert_eq!(parse_tag_frequency(&header), vec!["1girl", "solo"]);
+    }
+
+    #[test]
+    fn merges_counts_across_dirs() {
+        let header = json!({
+            "__metadata__": {
+                "ss_tag_frequency": "{\"a\": {\"shared\": 1}, \"b\": {\"shared\": 4, \"other\": 2}}"
+            }
+        });
+        assert_eq!(parse_tag_frequency(&header), vec!["shared", "other"]);
+    }
+
+    #[test]
+    fn tolerates_missing_and_malformed() {
+        assert!(parse_tag_frequency(&json!({ "__metadata__": {} })).is_empty());
+        assert!(parse_tag_frequency(&json!({})).is_empty());
+        assert!(parse_tag_frequency(
+            &json!({ "__metadata__": { "ss_tag_frequency": "not json" } })
+        )
+        .is_empty());
+        assert!(
+            parse_tag_frequency(&json!({ "__metadata__": { "ss_tag_frequency": 42 } })).is_empty()
+        );
+    }
+
+    #[test]
+    fn parse_comma_keywords_trims_and_dedupes() {
+        assert_eq!(parse_comma_keywords(" a , b ,a,, c "), vec!["a", "b", "c"]);
+    }
 }
 
 pub(crate) async fn lora_catalog(
@@ -470,69 +755,97 @@ pub(crate) async fn queue_lora_import_job(
             })
         })
         .unwrap_or_else(|| "Imported LoRA".to_owned());
-    let lora_id = payload
-        .lora_id
-        .clone()
-        .unwrap_or_else(|| slugify_lora_id(&name));
-    let target_name = safe_download_dir(&lora_id);
-    let (target_dir, manifest_path, source_path, project_id, project_name, allowed_source_roots) =
-        if payload.scope == "project" {
-            let Some(project_id) = payload.project_id.clone() else {
-                return Err(ApiError::bad_request(
-                    "Project LoRA imports require projectId",
-                ));
-            };
-            let project_path = project_path_for_id(state.clone(), &project_id).await?;
-            (
-                project_path
-                    .join("loras")
-                    .join("imports")
-                    .join(&target_name),
-                project_path.join("loras").join("manifest.jsonc"),
-                format!("loras/imports/{target_name}"),
-                Some(project_id),
-                None,
-                vec![
-                    state.settings.data_dir.join("loras"),
-                    project_path.join("loras"),
-                ],
-            )
-        } else {
-            (
-                state.settings.data_dir.join("loras").join(&target_name),
-                state
-                    .settings
-                    .config_dir
-                    .join("manifests")
-                    .join("user.loras.jsonc"),
-                format!("loras/{target_name}"),
-                None,
-                None,
-                vec![state.settings.data_dir.join("loras")],
-            )
+    // Scope-derived roots and the manifest path do not depend on the LoRA id, so
+    // resolve them first. The id is minted *after* family resolution (below) so the
+    // target folder can carry the canonical family token (sc-10214): a krea_2 and a
+    // flux2 LoRA that share a display name (e.g. two "Realism Engine" variants) then
+    // land in separate `<family>_<slug>` folders instead of co-mingling their
+    // safetensors in one dir, where the header inspector picks a file non-deterministically.
+    let (
+        loras_base_dir,
+        manifest_path,
+        path_prefix,
+        project_id,
+        project_name,
+        allowed_source_roots,
+    ) = if payload.scope == "project" {
+        let Some(project_id) = payload.project_id.clone() else {
+            return Err(ApiError::bad_request(
+                "Project LoRA imports require projectId",
+            ));
         };
-    if let Some(source_path) = payload.source_path.as_deref() {
-        let allowed_source_roots = if payload.uploaded_source_path {
-            vec![state.settings.data_dir.join("cache").join("lora-uploads")]
-        } else {
-            allowed_source_roots
-        };
-        validate_lora_import_source_path(source_path, &allowed_source_roots)?;
-        // A paired Wan A14B MoE upload (sc-1991) carries a second low-noise file.
-        // Validate it against the same upload root and record both halves under the
-        // high/low_noise convention so the worker resolves the high half as primary
-        // (transformer) and the low half as the transformer_2 sibling.
+        let project_path = project_path_for_id(state.clone(), &project_id).await?;
+        (
+            project_path.join("loras").join("imports"),
+            project_path.join("loras").join("manifest.jsonc"),
+            "loras/imports".to_owned(),
+            Some(project_id),
+            None,
+            vec![
+                state.settings.data_dir.join("loras"),
+                project_path.join("loras"),
+            ],
+        )
+    } else {
+        (
+            state.settings.data_dir.join("loras"),
+            state
+                .settings
+                .config_dir
+                .join("manifests")
+                .join("user.loras.jsonc"),
+            "loras".to_owned(),
+            None,
+            None,
+            vec![state.settings.data_dir.join("loras")],
+        )
+    };
+    // Resolve the family before the id: a local file's architecture is detected from
+    // its safetensors header and reconciled against any user-declared family so the id
+    // below can carry the canonical family token (sc-10214).
+    let source_roots = if payload.uploaded_source_path {
+        vec![state.settings.data_dir.join("cache").join("lora-uploads")]
+    } else {
+        allowed_source_roots
+    };
+    if let Some(local_source) = payload.source_path.as_deref() {
+        validate_lora_import_source_path(local_source, &source_roots)?;
+        // A paired Wan A14B MoE upload (sc-1991) carries a second low-noise file;
+        // validate it against the same upload root here. The high/low_noise filenames
+        // are assigned once the family-scoped target name is known, below.
         if let Some(secondary_source_path) = payload.secondary_source_path.as_deref() {
-            validate_lora_import_source_path(secondary_source_path, &allowed_source_roots)?;
-            let (high_name, low_name) = wan_moe_pair_filenames(&target_name);
-            payload.files = vec![high_name, low_name];
+            validate_lora_import_source_path(secondary_source_path, &source_roots)?;
         }
-        let detected = detect_family_from_local_path(source_path)?;
+        let detected = detect_family_from_local_path(local_source)?;
         payload.family = reconcile_lora_family(
             payload.family.take(),
             detected,
-            &format!("source_path={source_path}"),
+            &format!("source_path={local_source}"),
         )?;
+    }
+    // Mint the id (see `derive_lora_id`): explicit caller id wins, else a
+    // family-scoped `<family>_<slug>` so folders never collide across families.
+    let lora_id = derive_lora_id(payload.lora_id.as_deref(), &name, payload.family.as_deref());
+    let target_name = safe_download_dir(&lora_id);
+    let target_dir = loras_base_dir.join(&target_name);
+    let source_path = format!("{path_prefix}/{target_name}");
+    // Record the paired Wan MoE halves now that the family-scoped target name exists.
+    if payload.source_path.is_some() && payload.secondary_source_path.is_some() {
+        let (high_name, low_name) = wan_moe_pair_filenames(&target_name);
+        payload.files = vec![high_name, low_name];
+    }
+    // Belt-and-suspenders against co-mingling different families in one record folder
+    // (sc-10214): reject when the resolved folder already holds a safetensors of a
+    // *different* family, with an honest message instead of stacking two adapters the
+    // header inspector would arbitrate non-deterministically. Same-family re-imports
+    // (the folder's existing file matches) are still allowed.
+    if let Some(family) = payload.family.as_deref() {
+        if let Some(existing) = conflicting_folder_family(&target_dir, family)? {
+            return Err(ApiError::bad_request(format!(
+                "The folder for LoRA '{lora_id}' already contains a {existing} LoRA. \
+                 Import this {family} LoRA under a different name so each family keeps its own folder."
+            )));
+        }
     }
     let timestamp = now_rfc3339();
     let mut manifest_entry = json!({
@@ -545,6 +858,9 @@ pub(crate) async fn queue_lora_import_job(
             "path": source_path,
         },
         "files": payload.files.clone(),
+        // Always recorded (empty when unset) so imported entries match the built-in
+        // catalog shape and the required `triggerWords` contract field.
+        "triggerWords": payload.trigger_words.clone(),
         "createdAt": timestamp,
         "updatedAt": timestamp,
     });
@@ -564,6 +880,12 @@ pub(crate) async fn queue_lora_import_job(
     if let Some(base_model) = payload.base_model.clone() {
         if let Some(object) = manifest_entry.as_object_mut() {
             object.insert("baseModel".to_owned(), Value::String(base_model));
+        }
+    }
+    let trimmed_notes = payload.notes.trim();
+    if !trimmed_notes.is_empty() {
+        if let Some(object) = manifest_entry.as_object_mut() {
+            object.insert("notes".to_owned(), Value::String(trimmed_notes.to_owned()));
         }
     }
     let mut payload = to_json_object(&payload)?;
@@ -601,6 +923,8 @@ pub(crate) async fn lora_import_request_from_multipart(
         source_url: None,
         source_path: None,
         files: Vec::new(),
+        trigger_words: Vec::new(),
+        notes: String::new(),
         family: None,
         base_model: None,
         expected_sha256: None,
@@ -663,6 +987,10 @@ pub(crate) async fn lora_import_request_from_multipart(
                 "name" => payload.name = Some(value.to_owned()),
                 "family" => payload.family = Some(value.to_owned()),
                 "baseModel" => payload.base_model = Some(value.to_owned()),
+                // The web tag editor joins keyword chips with commas; the JSON import
+                // path instead sends a `triggerWords` array and bypasses this parser.
+                "triggerWords" => payload.trigger_words = parse_comma_keywords(value),
+                "notes" => payload.notes = value.to_owned(),
                 "scope" => payload.scope = value.to_owned(),
                 "projectId" => payload.project_id = Some(value.to_owned()),
                 _ => {}
@@ -694,7 +1022,7 @@ pub(crate) async fn lora_import_request_from_multipart(
 
 pub(crate) async fn write_lora_upload_field_to_staged_file(
     state: &AppState,
-    mut field: axum::extract::multipart::Field<'_>,
+    field: axum::extract::multipart::Field<'_>,
     filename: &str,
 ) -> Result<PathBuf, ApiError> {
     let upload_dir = state
@@ -707,35 +1035,16 @@ pub(crate) async fn write_lora_upload_field_to_staged_file(
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let temp_path = upload_dir.join(filename);
-    let mut file = tokio::fs::File::create(&temp_path)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let mut uploaded_bytes = 0usize;
-    let write_result = async {
-        while let Some(chunk) = field
-            .chunk()
-            .await
-            .map_err(|error| ApiError::bad_request(error.to_string()))?
-        {
-            uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
-            if uploaded_bytes > max_lora_upload_bytes() {
-                return Err(ApiError::payload_too_large(
-                    "Uploaded LoRA file exceeds the 2GB limit",
-                ));
-            }
-            file.write_all(&chunk)
-                .await
-                .map_err(|error| ApiError::internal(error.to_string()))?;
-        }
-        file.flush()
-            .await
-            .map_err(|error| ApiError::internal(error.to_string()))
-    }
-    .await;
-    if let Err(error) = write_result {
-        cleanup_staged_lora_upload(&temp_path).await;
-        return Err(error);
-    }
+    // sc-8886 (F-084): shared streaming writer. Cleanup removes the staged file AND its
+    // per-upload parent directory, so an aborted upload leaves no `upload-<uuid>/` dir.
+    stream_multipart_field_to_file(
+        field,
+        &temp_path,
+        max_lora_upload_bytes(),
+        || "Uploaded LoRA file exceeds the 2GB limit".to_owned(),
+        || cleanup_staged_lora_upload(&temp_path),
+    )
+    .await?;
     Ok(temp_path)
 }
 
@@ -997,7 +1306,7 @@ pub(crate) fn read_safetensors_header_for_api(
 pub(crate) fn sweep_stale_lora_uploads(data_dir: &FsPath) -> std::io::Result<usize> {
     sweep_stale_lora_uploads_before(
         data_dir,
-        SystemTime::now() - Duration::from_secs(STALE_LORA_UPLOAD_SECONDS),
+        SystemTime::now() - Duration::from_secs(STALE_UPLOAD_SECONDS),
     )
 }
 
@@ -1005,31 +1314,9 @@ pub(crate) fn sweep_stale_lora_uploads_before(
     data_dir: &FsPath,
     cutoff: SystemTime,
 ) -> std::io::Result<usize> {
-    let upload_root = data_dir.join("cache").join("lora-uploads");
-    let entries = match std::fs::read_dir(upload_root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error),
-    };
-    let mut removed = 0usize;
-    for entry in entries {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if !file_type.is_dir() {
-            continue;
-        }
-        let filename = entry.file_name();
-        let filename = filename.to_string_lossy();
-        if !filename.starts_with("upload-") {
-            continue;
-        }
-        let modified = entry.metadata()?.modified().unwrap_or(UNIX_EPOCH);
-        if modified <= cutoff {
-            std::fs::remove_dir_all(entry.path())?;
-            removed += 1;
-        }
-    }
-    Ok(removed)
+    // sc-8885 (F-083): LoRA uploads only ever stage per-upload directories, so the
+    // shared sweeper's file+dir handling is a strict superset of the old dir-only loop.
+    sweep_stale_uploads(data_dir, "lora-uploads", cutoff)
 }
 
 pub(crate) fn lora_source_provider(payload: &LoraImportRequest) -> &'static str {
@@ -1116,6 +1403,56 @@ pub(crate) fn reconcile_lora_family(
             mismatch.detected, mismatch.supplied, mismatch.detected
         ))
     })
+}
+
+/// Derives the stored LoRA id (which also names its on-disk folder via
+/// `safe_download_dir`) for an import (sc-10214).
+///
+/// An explicit caller-supplied id wins — programmatic callers own their id. Otherwise
+/// the display name is slugified and, when the family is known, prefixed with the
+/// canonical family token (itself slugified so a hyphenated/dotted token like `z-image`
+/// or `sd1.5` yields a clean all-underscore id) so `<family>_<slug>` folders never
+/// collide across families: a krea_2 and a flux2 LoRA that share a display name (e.g.
+/// two "Realism Engine" variants) resolve to `krea_2_realism_engine` and
+/// `flux2_realism_engine` rather than one shared folder, and a z-image LoRA to
+/// `z_image_<slug>`. An unresolved family (HF/URL imports) falls back to the bare slug.
+pub(crate) fn derive_lora_id(
+    explicit_id: Option<&str>,
+    name: &str,
+    family: Option<&str>,
+) -> String {
+    if let Some(explicit) = explicit_id {
+        return explicit.to_owned();
+    }
+    let slug = slugify_lora_id(name);
+    match family {
+        Some(family) => format!(
+            "{}_{}",
+            slugify_lora_id(&canonical_lora_family(family)),
+            slug
+        ),
+        None => slug,
+    }
+}
+
+/// Returns the family already occupying `target_dir` when it differs from
+/// `incoming_family` (sc-10214), so the caller can reject the import instead of letting
+/// two families share one record folder — where the header inspector (`first_safetensors_path`)
+/// would pick a file non-deterministically. Returns `Ok(None)` for an empty folder or a
+/// same-family folder (a legitimate re-import/update).
+fn conflicting_folder_family(
+    target_dir: &FsPath,
+    incoming_family: &str,
+) -> Result<Option<String>, ApiError> {
+    let Some(existing) = detect_family_from_local_path(target_dir.to_string_lossy().as_ref())?
+    else {
+        return Ok(None);
+    };
+    if canonical_lora_family(&existing) != canonical_lora_family(incoming_family) {
+        Ok(Some(existing))
+    } else {
+        Ok(None)
+    }
 }
 
 pub(crate) fn lora_is_installed(path: &FsPath) -> bool {
@@ -1303,5 +1640,94 @@ mod base_model_gating_tests {
         });
         validate_lora_specs_for_model(&models, &[], "krea_2_turbo", &[lora], true, "LoRA")
             .expect("krea_2 detected family must pass against a krea_2 (→krea-2) model surface");
+    }
+
+    // sc-10214: the id (and thus the on-disk folder) is family-scoped so two variants of
+    // one LoRA that share a display name never resolve to the same folder.
+    #[test]
+    fn derive_lora_id_prefixes_canonical_family() {
+        assert_eq!(
+            derive_lora_id(None, "Realism Engine", Some("flux2")),
+            "flux2_realism_engine"
+        );
+        assert_eq!(
+            derive_lora_id(None, "Realism Engine", Some("krea_2")),
+            "krea_2_realism_engine"
+        );
+        // A hyphenated family token slugifies to a clean all-underscore id.
+        assert_eq!(
+            derive_lora_id(None, "Detail LoRA", Some("z-image")),
+            "z_image_detail_lora"
+        );
+        // A krea_2 and a flux2 variant of the same-named LoRA land in different folders —
+        // the exact collision that mis-detected a flux2 import as krea_2.
+        assert_ne!(
+            derive_lora_id(None, "Realism Engine", Some("flux2")),
+            derive_lora_id(None, "Realism Engine", Some("krea_2"))
+        );
+    }
+
+    #[test]
+    fn derive_lora_id_canonicalizes_family_spelling() {
+        // ai-toolkit's separator-less `krea2` and the hyphen form both canonicalize to
+        // the stored `krea_2` token, so the folder is stable regardless of source spelling.
+        assert_eq!(
+            derive_lora_id(None, "Realism Engine", Some("krea2")),
+            "krea_2_realism_engine"
+        );
+        assert_eq!(
+            derive_lora_id(None, "Realism Engine", Some("krea-2")),
+            "krea_2_realism_engine"
+        );
+    }
+
+    #[test]
+    fn derive_lora_id_falls_back_and_respects_explicit_id() {
+        // Unresolved family (HF/URL import) -> bare slug, unchanged from prior behaviour.
+        assert_eq!(
+            derive_lora_id(None, "Realism Engine", None),
+            "realism_engine"
+        );
+        // An explicit caller-supplied id is used verbatim (never re-prefixed).
+        assert_eq!(
+            derive_lora_id(Some("my_custom_id"), "Realism Engine", Some("flux2")),
+            "my_custom_id"
+        );
+    }
+
+    #[test]
+    fn conflicting_folder_family_flags_cross_family_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_krea_lora(tmp.path());
+        // A flux2 import targeting a folder that already holds a krea_2 adapter conflicts.
+        assert_eq!(
+            conflicting_folder_family(tmp.path(), "flux2")
+                .unwrap()
+                .as_deref(),
+            Some("krea_2")
+        );
+        // Same-family re-import is allowed (no conflict), incl. spelling variants.
+        assert_eq!(
+            conflicting_folder_family(tmp.path(), "krea_2").unwrap(),
+            None
+        );
+        assert_eq!(
+            conflicting_folder_family(tmp.path(), "krea2").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn conflicting_folder_family_ignores_empty_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A fresh (or never-created) folder never conflicts — the common new-import path.
+        assert_eq!(
+            conflicting_folder_family(tmp.path(), "flux2").unwrap(),
+            None
+        );
+        assert_eq!(
+            conflicting_folder_family(&tmp.path().join("does_not_exist"), "flux2").unwrap(),
+            None
+        );
     }
 }

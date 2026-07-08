@@ -104,7 +104,8 @@ fn detail_refine_tile(
             Conditioning::Control {
                 image: tile,
                 kind: ControlKind::Other("tile".to_owned()),
-                scale: params.cn_scale,
+                // gen-core drift (sc-9940): scale is now Option<f32>; explicit tile-CN scale → Some.
+                scale: Some(params.cn_scale),
             },
         ],
         cancel: cancel.clone(),
@@ -496,13 +497,17 @@ pub(crate) async fn run_image_detail_job(
                 if canceled {
                     continue; // drain so the blocking sender never blocks; terminal posts after stop.
                 }
-                if last_cancel_check.elapsed() >= Duration::from_secs(2) {
-                    last_cancel_check = Instant::now();
-                    if cancel_requested_peek(api, &job.id).await {
-                        begin_detail_cancel(api, &job.id, &cancel, backend).await;
-                        canceled = true;
-                        continue;
-                    }
+                // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API poll
+                // so a quit stops the tile pass at this step, matching a user cancel.
+                if shutdown_requested()
+                    || (last_cancel_check.elapsed() >= Duration::from_secs(2) && {
+                        last_cancel_check = Instant::now();
+                        cancel_requested_peek(api, &job.id).await
+                    })
+                {
+                    begin_detail_cancel(api, &job.id, &cancel, backend).await;
+                    canceled = true;
+                    continue;
                 }
                 update_job(
                     api,
@@ -521,12 +526,15 @@ pub(crate) async fn run_image_detail_job(
             }
             _ = interval.tick() => {
                 heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                if !canceled && last_cancel_check.elapsed() >= Duration::from_secs(2) {
-                    last_cancel_check = Instant::now();
-                    if cancel_requested_peek(api, &job.id).await {
-                        begin_detail_cancel(api, &job.id, &cancel, backend).await;
-                        canceled = true;
-                    }
+                // sc-9618: honor a process shutdown on every tick (local flag read, unthrottled).
+                if !canceled && (shutdown_requested()
+                    || (last_cancel_check.elapsed() >= Duration::from_secs(2) && {
+                        last_cancel_check = Instant::now();
+                        cancel_requested_peek(api, &job.id).await
+                    }))
+                {
+                    begin_detail_cancel(api, &job.id, &cancel, backend).await;
+                    canceled = true;
                 }
             }
         }
@@ -569,12 +577,20 @@ pub(crate) async fn run_image_detail_job(
     let (out_w, out_h) = (refined.width(), refined.height());
     let media_path = project_path.join(&media_rel);
     let temp_path = media_path.with_extension("tmp.png");
-    refined
-        .save_with_format(&temp_path, image::ImageFormat::Png)
-        .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
-    std::fs::rename(&temp_path, &media_path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&temp_path);
-    })?;
+    // Encode + atomically promote the refined PNG off the async runtime thread (sc-8909 / F-107).
+    let encode_tmp = temp_path.clone();
+    let encode_final = media_path.clone();
+    tokio::task::spawn_blocking(move || {
+        refined
+            .save_with_format(&encode_tmp, image::ImageFormat::Png)
+            .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
+        std::fs::rename(&encode_tmp, &encode_final).inspect_err(|_| {
+            let _ = std::fs::remove_file(&encode_tmp);
+        })?;
+        Ok::<_, WorkerError>(())
+    })
+    .await
+    .map_err(|error| crate::task_join_error("detail asset encode task", error))??;
 
     let result = detail_result(
         &request,

@@ -102,8 +102,8 @@ function baseContext(overrides = {}) {
   };
 }
 
-const toolButtons = (container) => [...container.querySelectorAll(".image-editor-tool")];
-const barButtons = (container) => [...container.querySelectorAll(".image-editor-bar-actions button")];
+const toolButtons = (container) => [...container.querySelectorAll(".ie-tool")];
+const barButtons = (container) => [...container.querySelectorAll(".ie-topbar button")];
 const barButton = (container, label) => barButtons(container).find((b) => b.textContent.trim() === label);
 
 describe("ImageEditor scaffold", () => {
@@ -139,22 +139,24 @@ describe("ImageEditor scaffold", () => {
 
     expect(container.textContent).toContain("Open an image to start editing");
     // No working image → no Konva stage, view controls, or floating tool palette.
-    expect(container.querySelector(".image-editor-viewbar")).toBeNull();
+    expect(container.querySelector(".ie-viewbar")).toBeNull();
     expect(toolButtons(container)).toHaveLength(0);
   });
 
   it("offers always-enabled 'Open' + 'New layout' actions before an image loads", async () => {
     await render(baseContext());
     // Open (dialog picks the source) + New layout (blank canvas, sc-6092) + the
-    // keyboard-shortcuts help toggle (sc-6111). No separate "Open from project" /
-    // "Upload" buttons.
-    expect(barButtons(container).map((b) => b.textContent.trim())).toEqual(["Open", "New layout", "⌨"]);
+    // keyboard-shortcuts help toggle (sc-6111) are always present. The redesigned
+    // top bar (epic 10243) also carries a layout switcher + theme toggle, so assert
+    // the always-on actions by name rather than the exact button set.
+    const labels = () => barButtons(container).map((b) => b.textContent.trim());
+    expect(labels()).toEqual(expect.arrayContaining(["Open", "New layout", "⌨"]));
     expect(barButton(container, "Open").disabled).toBe(false);
     expect(barButton(container, "New layout").disabled).toBe(false);
 
     // Same with a project active.
     await render(baseContext({ activeProject: { id: "project_1", name: "My Project" } }));
-    expect(barButtons(container).map((b) => b.textContent.trim())).toEqual(["Open", "New layout", "⌨"]);
+    expect(labels()).toEqual(expect.arrayContaining(["Open", "New layout", "⌨"]));
     expect(barButton(container, "New layout").disabled).toBe(false);
   });
 
@@ -941,18 +943,22 @@ describe("AI prompt edit", () => {
   });
 
   it("computes output dims for the canvas-extend control (match / extend / crop)", () => {
-    // Match canvas → working size unchanged, fit mode irrelevant.
+    // Match canvas → working size unchanged (already 16-aligned), fit mode irrelevant.
     expect(editOutputDims(1024, 1024, "match", "outpaint")).toEqual({ width: 1024, height: 1024 });
     // 16:9 outpaint on a square → extend width, keep height at native (add side border).
-    expect(editOutputDims(1024, 1024, "16:9", "outpaint")).toEqual({ width: 1820, height: 1024 });
+    // 1820 (1024·16/9) is snapped up to the nearest multiple of 16 → 1824.
+    expect(editOutputDims(1024, 1024, "16:9", "outpaint")).toEqual({ width: 1824, height: 1024 });
     // 16:9 pad behaves the same geometry as outpaint (extend, then bars vs generate).
-    expect(editOutputDims(1024, 1024, "16:9", "pad")).toEqual({ width: 1820, height: 1024 });
-    // 16:9 crop on a square → shrink to the aspect inside the image (trim height).
+    expect(editOutputDims(1024, 1024, "16:9", "pad")).toEqual({ width: 1824, height: 1024 });
+    // 16:9 crop on a square → shrink to the aspect inside the image (trim height); 576 = 36·16.
     expect(editOutputDims(1024, 1024, "16:9", "crop")).toEqual({ width: 1024, height: 576 });
     // Portrait target on a square extends height.
-    expect(editOutputDims(1024, 1024, "9:16", "outpaint")).toEqual({ width: 1024, height: 1820 });
-    // Unknown aspect / zero dims fall back to the working size.
-    expect(editOutputDims(800, 600, "bogus", "pad")).toEqual({ width: 800, height: 600 });
+    expect(editOutputDims(1024, 1024, "9:16", "outpaint")).toEqual({ width: 1024, height: 1824 });
+    // Unknown aspect / zero dims fall back to the working size — snapped to a multiple of 16
+    // (600 → 608), so the engine's size guard accepts an arbitrary imported/cropped source.
+    expect(editOutputDims(800, 600, "bogus", "pad")).toEqual({ width: 800, height: 608 });
+    // A cropped source at arbitrary dims (the z-image failure: 832×1165) snaps to 832×1168.
+    expect(editOutputDims(832, 1165, "match", "crop")).toEqual({ width: 832, height: 1168 });
     expect(editOutputAspectRatio("1:1")).toBe(1);
     expect(editOutputAspectRatio("match")).toBeNull();
   });
@@ -1002,6 +1008,45 @@ describe("AI prompt edit", () => {
     expect(
       buildEditJobBody({ ...base, referenceAssetIds: ["work_scratch", "ref_a"] }).referenceAssetIds,
     ).toEqual(["work_scratch", "ref_a"]);
+  });
+
+  it("includes loras only when a non-empty list is supplied (sc-10254)", () => {
+    const base = {
+      project: { id: "p", name: "P" },
+      requestedGpu: "auto",
+      sourceAssetId: "a",
+      model: "flux2_dev",
+      prompt: "x",
+      width: 10,
+      height: 10,
+    };
+    // Omitted entirely by default and for an empty list (worker sees no loras key).
+    expect("loras" in buildEditJobBody(base)).toBe(false);
+    expect("loras" in buildEditJobBody({ ...base, loras: [] })).toBe(false);
+    // Passed through top-level (sibling of advanced), verbatim, when present.
+    const loras = [{ id: "l1", name: "Film Grain", weight: 0.8 }];
+    const body = buildEditJobBody({ ...base, loras });
+    expect(body.loras).toEqual(loras);
+    expect(body.advanced).toEqual({});
+  });
+
+  it("sends advanced.guidanceScale only for a finite override (sc-10275)", () => {
+    const base = {
+      project: { id: "p", name: "P" },
+      requestedGpu: "auto",
+      sourceAssetId: "a",
+      model: "flux2_dev",
+      prompt: "x",
+      width: 10,
+      height: 10,
+    };
+    // Empty / null / non-numeric → omitted, so the model's per-family default stands.
+    expect(buildEditJobBody(base).advanced).toEqual({});
+    expect(buildEditJobBody({ ...base, guidanceScale: "" }).advanced).toEqual({});
+    expect(buildEditJobBody({ ...base, guidanceScale: null }).advanced).toEqual({});
+    // A finite value (number or numeric string) rides advanced.guidanceScale.
+    expect(buildEditJobBody({ ...base, guidanceScale: 3.5 }).advanced).toEqual({ guidanceScale: 3.5 });
+    expect(buildEditJobBody({ ...base, guidanceScale: "4" }).advanced).toEqual({ guidanceScale: 4 });
   });
 });
 

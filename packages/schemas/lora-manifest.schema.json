@@ -11,6 +11,15 @@
       "items": {
         "type": "object",
         "properties": {
+          "triggerWords": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Activation keywords that make the LoRA work."
+          },
+          "notes": {
+            "type": "string",
+            "description": "Free-text usage guidance a keyword list can't capture (how to combine keywords, recommended weights, etc.)."
+          },
           "icLora": { "type": "boolean" },
           "conditioningRole": {
             "type": "string",

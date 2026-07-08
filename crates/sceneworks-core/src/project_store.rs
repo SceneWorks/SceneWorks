@@ -777,6 +777,16 @@ impl ProjectStore {
     ) -> ProjectStoreResult<Value> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         let timeline_id = required_str(&timeline, "id")?.to_owned();
+        // The client supplies `id`, and `timeline_file_path` embeds its last 8
+        // chars into the write path while `relative_string`'s lexical strip lets
+        // an unnormalized `..`-bearing id through — charset-check it (matching the
+        // asset/character/track/dataset guards) BEFORE any path is derived so the
+        // write can never escape the project dir (sc-8871 / F-069).
+        if !is_safe_id(&timeline_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid timeline id".to_owned(),
+            ));
+        }
         let timeline_project_id = required_str(&timeline, "projectId")?;
         if timeline_project_id != project_id {
             return Err(ProjectStoreError::BadRequest(
@@ -2137,49 +2147,138 @@ impl ProjectStore {
     /// `metadata.characterReferences`, all three must change: flip `origin` to a
     /// library-visible studio value, drop the recipe's `characterId`, and strip the
     /// asset's `characterReferences`, then unlink it from every character sidecar.
+    ///
+    /// The move carries the asset's whole upscale-fold group (sc-10205), so a
+    /// folded original/upscaled pair never gets split across collections. Returns
+    /// the array of updated normalized assets, the requested one first.
     pub fn move_asset_to_library(
         &self,
         project_id: &str,
         asset_id: &str,
     ) -> ProjectStoreResult<Value> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
-        let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
-        let mut asset = read_json(&sidecar_path)?;
-        {
-            let object = asset.as_object_mut().ok_or_else(|| {
-                ProjectStoreError::BadRequest("Asset sidecar must be an object".to_owned())
-            })?;
-            // Promote to a library-visible origin by media type so the
-            // `character_studio` exclusion (LibraryScreen) no longer applies.
-            let asset_type = object
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let origin = match asset_type {
-                "video" => "video_studio",
-                "document" => "document_studio",
-                _ => "image_studio",
-            };
-            object.insert("origin".to_owned(), Value::String(origin.to_owned()));
-            // Detach the character association the grid filters on.
-            if let Some(settings) = object
-                .get_mut("recipe")
-                .and_then(Value::as_object_mut)
-                .and_then(|recipe| recipe.get_mut("normalizedSettings"))
-                .and_then(Value::as_object_mut)
+        let character_store = CharacterStore::new(&self.data_dir, project_path.clone());
+        let mut moved = Vec::new();
+        for member_id in upscale_lineage_group(&project_path, asset_id) {
+            let sidecar_path = self.find_asset_sidecar(&project_path, &member_id)?;
+            let mut asset = read_json(&sidecar_path)?;
             {
-                settings.remove("characterId");
+                let object = asset.as_object_mut().ok_or_else(|| {
+                    ProjectStoreError::BadRequest("Asset sidecar must be an object".to_owned())
+                })?;
+                // Promote to a library-visible origin by media type so the
+                // `character_studio` exclusion (LibraryScreen) no longer applies.
+                let asset_type = object
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let origin = match asset_type {
+                    "video" => "video_studio",
+                    "document" => "document_studio",
+                    _ => "image_studio",
+                };
+                object.insert("origin".to_owned(), Value::String(origin.to_owned()));
+                // Detach the character association the grid filters on.
+                if let Some(settings) = object
+                    .get_mut("recipe")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|recipe| recipe.get_mut("normalizedSettings"))
+                    .and_then(Value::as_object_mut)
+                {
+                    settings.remove("characterId");
+                }
+                if let Some(metadata) = object.get_mut("metadata").and_then(Value::as_object_mut) {
+                    metadata.remove("characterReferences");
+                }
             }
-            if let Some(metadata) = object.get_mut("metadata").and_then(Value::as_object_mut) {
-                metadata.remove("characterReferences");
-            }
+            write_json(&sidecar_path, &asset)?;
+            index_asset(&project_path, &asset, Some(&sidecar_path))?;
+            // Drop the asset from every character's references[] (character sidecars + index).
+            character_store.remove_asset_references(&member_id)?;
+            moved.push(normalize_asset(project_id, &project_path, &sidecar_path)?);
         }
-        write_json(&sidecar_path, &asset)?;
-        index_asset(&project_path, &asset, Some(&sidecar_path))?;
-        // Drop the asset from every character's references[] (character sidecars + index).
-        CharacterStore::new(&self.data_dir, project_path.clone())
-            .remove_asset_references(asset_id)?;
-        normalize_asset(project_id, &project_path, &sidecar_path)
+        Ok(Value::Array(moved))
+    }
+
+    /// Move a library asset into a character's assets (sc-10200): the true-move
+    /// twin of [`Self::move_asset_to_library`]. A character-sidecar `references[]`
+    /// entry is NOT the right vehicle for a move — it leaves the asset in the Main
+    /// Asset Library (its `origin` stays library-visible) and surfaces it in the
+    /// curated "Approved set" panel (which renders every `references[]` entry). So
+    /// a move must: flip `origin` to `character_studio` (the Library's allow-list
+    /// then excludes it), anchor the target association in
+    /// `metadata.characterReferences` only (the Character assets grid and the
+    /// `?character=` scope both match on it), and detach the asset from everything
+    /// else — the recipe's `characterId` and every character's curated
+    /// `references[]` — without adding a curated reference to the target.
+    ///
+    /// The move carries the asset's whole upscale-fold group (sc-10205): the
+    /// Library renders a linked original/upscaled pair as ONE folded tile, so a
+    /// move of the visible tile must take the hidden fold-mate along or it stays
+    /// stranded in the Library. Returns the array of updated normalized assets,
+    /// the requested one first.
+    pub fn move_asset_to_character(
+        &self,
+        project_id: &str,
+        asset_id: &str,
+        character_id: &str,
+    ) -> ProjectStoreResult<Value> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        let character_store = CharacterStore::new(&self.data_dir, project_path.clone());
+        // Reject an unknown/deleted target before mutating anything.
+        character_store.get_character(project_id, character_id)?;
+        let mut moved = Vec::new();
+        for member_id in upscale_lineage_group(&project_path, asset_id) {
+            let sidecar_path = self.find_asset_sidecar(&project_path, &member_id)?;
+            let mut asset = read_json(&sidecar_path)?;
+            {
+                let object = asset.as_object_mut().ok_or_else(|| {
+                    ProjectStoreError::BadRequest("Asset sidecar must be an object".to_owned())
+                })?;
+                object.insert(
+                    "origin".to_owned(),
+                    Value::String("character_studio".to_owned()),
+                );
+                // The recipe's characterId is a competing association vector (it would
+                // keep the asset in the previous character's grid), so clear it and let
+                // the metadata anchor own the membership.
+                if let Some(settings) = object
+                    .get_mut("recipe")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|recipe| recipe.get_mut("normalizedSettings"))
+                    .and_then(Value::as_object_mut)
+                {
+                    settings.remove("characterId");
+                }
+                let metadata = object
+                    .entry("metadata".to_owned())
+                    .or_insert_with(|| json!({}));
+                let metadata = metadata.as_object_mut().ok_or_else(|| {
+                    ProjectStoreError::BadRequest("Asset metadata must be an object".to_owned())
+                })?;
+                // `source` distinguishes this move anchor from the "character-sidecar"
+                // mirror entries `update_asset_character_link` manages — that rebuild
+                // must not drop the anchor when a curated reference is added/removed.
+                metadata.insert(
+                    "characterReferences".to_owned(),
+                    json!([{
+                        "characterId": character_id,
+                        "source": "library-move",
+                        "approved": false,
+                        "role": "asset",
+                        "linkedAt": utc_now(),
+                    }]),
+                );
+            }
+            write_json(&sidecar_path, &asset)?;
+            index_asset(&project_path, &asset, Some(&sidecar_path))?;
+            // Leave no curated membership behind: the move detaches the asset from every
+            // character's references[] (including the target's — the Approved set is
+            // hand-curated and a bulk move must not populate it).
+            character_store.remove_asset_references(&member_id)?;
+            moved.push(normalize_asset(project_id, &project_path, &sidecar_path)?);
+        }
+        Ok(Value::Array(moved))
     }
 
     pub fn get_asset(&self, project_id: &str, asset_id: &str) -> ProjectStoreResult<Value> {
@@ -2257,10 +2356,15 @@ impl ProjectStore {
         })
     }
 
+    /// Permanently remove a (usually already-trashed) asset. With `permanent = false`
+    /// the on-disk media/sidecar are moved to the OS trash (recoverable); if that move
+    /// fails nothing is deleted and the result carries `status = "trash_unavailable"`
+    /// so the caller can prompt the user to confirm a permanent delete (`permanent = true`).
     pub fn purge_asset(
         &self,
         project_id: &str,
         asset_id: &str,
+        permanent: bool,
     ) -> ProjectStoreResult<AssetMutationResult> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
@@ -2271,20 +2375,53 @@ impl ProjectStore {
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
         );
+        let trash_dir = project_path.join("trash");
+        let asset_trash_dir = sidecar_path
+            .parent()
+            .filter(|parent| {
+                parent.file_name().and_then(|name| name.to_str()) == Some(asset_id)
+                    && parent.parent() == Some(trash_dir.as_path())
+            })
+            .map(Path::to_path_buf);
+        if !permanent {
+            // Move the asset's footprint to the OS trash rather than unlinking it. When
+            // the asset already lives in `trash/<id>/`, trash that directory in one shot;
+            // otherwise trash the media file and sidecar directly.
+            let targets: Vec<PathBuf> = if let Some(dir) = asset_trash_dir.clone() {
+                vec![dir]
+            } else {
+                let mut targets = Vec::new();
+                if media_path.exists() && media_path.is_file() {
+                    targets.push(media_path.clone());
+                }
+                if sidecar_path.exists() {
+                    targets.push(sidecar_path.clone());
+                }
+                targets
+            };
+            if !targets.is_empty() && trash::delete_all(&targets).is_err() {
+                // Nothing was removed; let the caller confirm a permanent delete.
+                return Ok(AssetMutationResult {
+                    id: asset_id.to_owned(),
+                    status: "trash_unavailable".to_owned(),
+                });
+            }
+            CharacterStore::new(&self.data_dir, project_path.clone())
+                .remove_asset_references(asset_id)?;
+            purge_asset_record(&project_path, asset_id)?;
+            return Ok(AssetMutationResult {
+                id: asset_id.to_owned(),
+                status: "purged".to_owned(),
+            });
+        }
         CharacterStore::new(&self.data_dir, project_path.clone())
             .remove_asset_references(asset_id)?;
         if media_path.exists() && media_path.is_file() {
             fs::remove_file(media_path)?;
         }
         fs::remove_file(&sidecar_path).ok();
-        let trash_dir = project_path.join("trash");
-        if sidecar_path.parent().is_some_and(|parent| {
-            parent.file_name().and_then(|name| name.to_str()) == Some(asset_id)
-                && parent.parent() == Some(trash_dir.as_path())
-        }) {
-            if let Some(parent) = sidecar_path.parent() {
-                fs::remove_dir_all(parent).ok();
-            }
+        if let Some(parent) = asset_trash_dir {
+            fs::remove_dir_all(parent).ok();
         }
         purge_asset_record(&project_path, asset_id)?;
         Ok(AssetMutationResult {
@@ -2417,7 +2554,12 @@ struct ReindexCounts {
 /// gate and never got the column — the dataset list query then failed with
 /// "no such column: character_id". Bumping forces the idempotent migration to
 /// replay and add the column on existing databases.
-const PROJECT_SCHEMA_VERSION: i64 = 3;
+///
+/// v4: sc-10117 — no schema change, but the bump forces the one-time reindex in
+/// `ensure_project_db_ready`, which now heals inline-upscaled asset sidecars that
+/// were missing their fold lineage (`extra.upscaledFromAssetId` / `lineage`), so
+/// existing upscale pairs collapse in the Library on next open.
+const PROJECT_SCHEMA_VERSION: i64 = 4;
 
 fn project_schema_version(connection: &Connection) -> ProjectStoreResult<i64> {
     Ok(connection.query_row("pragma user_version", [], |row| row.get(0))?)
@@ -2494,7 +2636,191 @@ pub fn ensure_project_db_ready(project_path: &Path) -> ProjectStoreResult<()> {
     Ok(())
 }
 
+/// sc-10117: heal upscale-variant lineage on inline-upscaled asset sidecars.
+///
+/// The Image Studio inline "Upscale" post-pass historically linked each `(Nx upscaled)` variant to
+/// its base image with a bare `upscaledFrom` field that nothing read — and that was dropped at
+/// sidecar-build time — so those variants never carried `extra.upscaledFromAssetId` /
+/// `lineage.sourceAssetId` and never folded with their originals in the Library / Recent Batches.
+/// The link was never persisted, so it is reconstructed from generation-set structure: within a
+/// generation set an upscaled file `…_{index}_up{N}x.<ext>` is the upscaled variant of the base
+/// `…_{index}.<ext>`. Rewrites only upscaled sidecars still missing the link (idempotent + additive)
+/// and returns how many were healed. A reconstruction with no matching base is left untouched rather
+/// than inventing a bogus parent.
+fn backfill_upscale_variant_lineage(project_path: &Path) -> ProjectStoreResult<usize> {
+    let sidecars = asset_sidecars(project_path)?;
+    // (generationSetId, relative media path) -> asset id, for every asset in the project.
+    let mut base_ids: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new();
+    let mut parsed: Vec<(PathBuf, Value)> = Vec::with_capacity(sidecars.len());
+    for sidecar_path in sidecars {
+        let Ok(asset) = read_json(&sidecar_path) else {
+            continue;
+        };
+        if let (Some(id), Some(genset), Some(path)) = (
+            asset.get("id").and_then(Value::as_str),
+            asset.get("generationSetId").and_then(Value::as_str),
+            asset.pointer("/file/path").and_then(Value::as_str),
+        ) {
+            base_ids.insert((genset.to_owned(), path.to_owned()), id.to_owned());
+        }
+        parsed.push((sidecar_path, asset));
+    }
+
+    let mut healed = 0usize;
+    for (sidecar_path, mut asset) in parsed {
+        // Already linked (a standalone image_upscale asset, or a prior heal) — skip.
+        if asset
+            .pointer("/extra/upscaledFromAssetId")
+            .and_then(Value::as_str)
+            .is_some()
+        {
+            continue;
+        }
+        // Only touch assets the inline upscale post-pass produced (they carry an `upscale` record).
+        if asset
+            .pointer("/recipe/rawAdapterSettings/upscale")
+            .is_none()
+        {
+            continue;
+        }
+        let (Some(genset), Some(path)) = (
+            asset
+                .get("generationSetId")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            asset
+                .pointer("/file/path")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        ) else {
+            continue;
+        };
+        let Some((base_path, factor)) = strip_upscale_suffix(&path) else {
+            continue;
+        };
+        // The reconstructed base must actually exist in the same generation set.
+        let Some(base_id) = base_ids.get(&(genset, base_path)).cloned() else {
+            continue;
+        };
+        let engine = asset
+            .pointer("/recipe/rawAdapterSettings/upscale/engine")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        apply_upscale_variant_link(&mut asset, &base_id, factor, &engine);
+        // A single failed rewrite must not abort the whole heal (or the reindex that calls it).
+        if write_json(&sidecar_path, &asset).is_ok() {
+            healed += 1;
+        }
+    }
+    Ok(healed)
+}
+
+/// Split an upscaled media path `…_up{N}x.<ext>` into its base path `….<ext>` and the factor `N`.
+/// Returns `None` when the filename doesn't carry the inline-upscale suffix.
+fn strip_upscale_suffix(path: &str) -> Option<(String, u8)> {
+    let (stem, ext) = path.rsplit_once('.')?;
+    let marker = stem.rfind("_up")?;
+    let factor: u8 = stem[marker + 3..].strip_suffix('x')?.parse().ok()?;
+    Some((format!("{}.{ext}", &stem[..marker]), factor))
+}
+
+/// Stamp the fold/lineage keys the Library reads onto an upscaled asset in place, mirroring the
+/// worker's standalone `image_upscale` fact (`sourceAssetId` / `parents` / `extra` markers).
+fn apply_upscale_variant_link(asset: &mut Value, base_id: &str, factor: u8, engine: &str) {
+    let Some(object) = asset.as_object_mut() else {
+        return;
+    };
+    if let Some(lineage) = object
+        .entry("lineage")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    {
+        lineage.insert("sourceAssetId".to_owned(), json!(base_id));
+        lineage.insert("parents".to_owned(), json!([base_id]));
+    }
+    if let Some(extra) = object
+        .entry("extra")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    {
+        extra.insert("isUpscaled".to_owned(), json!(true));
+        extra.insert("upscaledFromAssetId".to_owned(), json!(base_id));
+        extra.insert("factor".to_owned(), json!(factor));
+        if !engine.is_empty() {
+            extra.insert("engine".to_owned(), json!(engine));
+        }
+    }
+}
+
+/// Collect the upscale-fold lineage group around `asset_id` (sc-10205): the asset
+/// itself, the original it was upscaled from, and transitively every upscaled
+/// variant pointing back into the group. Mirrors the web's fold keys
+/// (`extra.upscaledFromAssetId`, falling back to `lineage.sourceAssetId` when
+/// `extra.isUpscaled` — assetVariants.js): the Library renders such a pair as ONE
+/// tile, so a move of the visible asset must carry the whole group. The requested
+/// id is always first. Unreadable sidecars are skipped — worst case the group
+/// degrades to the single asset, never to an error.
+fn upscale_lineage_group(project_path: &Path, asset_id: &str) -> Vec<String> {
+    let mut group = vec![asset_id.to_owned()];
+    let Ok(sidecars) = asset_sidecars(project_path) else {
+        return group;
+    };
+    // Every asset's fold parent (the original it was upscaled from), if any.
+    let mut parent_of: Vec<(String, String)> = Vec::new();
+    for sidecar_path in sidecars {
+        let Ok(asset) = read_json(&sidecar_path) else {
+            continue;
+        };
+        let Some(id) = asset.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let parent = asset
+            .pointer("/extra/upscaledFromAssetId")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                asset
+                    .pointer("/extra/isUpscaled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    .then(|| {
+                        asset
+                            .pointer("/lineage/sourceAssetId")
+                            .and_then(Value::as_str)
+                    })
+                    .flatten()
+            });
+        if let Some(parent) = parent {
+            parent_of.push((id.to_owned(), parent.to_owned()));
+        }
+    }
+    // Fixed-point closure over the parent links in both directions (covers
+    // upscale-of-upscale chains and multiple variants of one original).
+    loop {
+        let before = group.len();
+        for (child, parent) in &parent_of {
+            let child_in = group.iter().any(|id| id == child);
+            let parent_in = group.iter().any(|id| id == parent);
+            if child_in && !parent_in {
+                group.push(parent.clone());
+            } else if parent_in && !child_in {
+                group.push(child.clone());
+            }
+        }
+        if group.len() == before {
+            break;
+        }
+    }
+    group
+}
+
 fn reindex_project_path(project_path: &Path) -> ProjectStoreResult<ReindexCounts> {
+    // sc-10117: rewrite inline-upscaled sidecars missing their fold link BEFORE indexing, so the
+    // rebuilt index — and the Library, which reads the sidecars directly — sees the healed lineage.
+    // Additive + idempotent, so it is safe to run on every reindex.
+    backfill_upscale_variant_lineage(project_path)?;
+
     let mut connection = connect_project_db(project_path)?;
     let transaction = connection.transaction()?;
     apply_project_migrations(&transaction)?;
@@ -3828,18 +4154,68 @@ fn guess_mime_from_filename(filename: &str) -> Option<String> {
         })
 }
 
+/// Extensions we allow a stored upload to carry, keyed by the media type they belong to. A stored
+/// filename's extension re-derives the serve mime in [`ProjectStore::project_file`] via
+/// [`guess_mime_from_filename`], and that mime is echoed verbatim into the file-serving endpoint's
+/// `Content-Type` header, so an attacker who controls the stored extension controls the served
+/// content type on the API origin. This allow-list is the gate: only extensions that map to an
+/// inert media type (image/video) are ever stored, so a `video/mp4` upload named `evil.html` can
+/// never be stored `.html` and served `text/html` → no content-type confusion / stored XSS
+/// (sc-8872). Notably it excludes `.svg` (→ `image/svg+xml`, script-capable) and every
+/// document/script extension.
+///
+/// Every extension here re-derives, through `guess_mime_from_filename`, to a mime that starts with
+/// `image/` or `video/` and is NOT `image/svg+xml` — the property the tests pin.
+const SAFE_UPLOAD_EXTENSIONS: &[&str] = &[
+    // Raster images (SVG deliberately omitted — it is script-capable).
+    "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "heic",
+    "heif", // Video.
+    "mp4", "m4v", "mov", "webm", "mkv", "avi", "ogv", "mpeg", "mpg", "wmv", "flv", "3gp", "3g2",
+];
+
+/// True when `extension` (no leading dot, already lowercased) is an allow-listed media extension
+/// whose serve mime is an inert `image/`/`video/` type (never `text/html`, `image/svg+xml`, etc.).
+fn is_safe_upload_extension(extension: &str) -> bool {
+    SAFE_UPLOAD_EXTENSIONS.contains(&extension)
+}
+
+/// Pick the stored extension for an upload **without trusting the client filename** (sc-8872).
+///
+/// The stored extension is what re-derives the serve mime later, so it must reflect the actual
+/// media type, not whatever the client named the file. Precedence:
+/// 1. The declared/sniffed `mime_type`'s canonical safe extension, when we recognize the mime.
+/// 2. Otherwise the client filename's extension, but only if it is on the media allow-list.
+/// 3. Otherwise `.bin` (serves `application/octet-stream` — inert), never an attacker-chosen
+///    `.html`/`.svg`/`.js`.
+///
+/// A `video/mp4` upload named `evil.html` therefore stores `.mp4` (rule 1); a genuinely unknown
+/// mime with a dangerous extension neutralizes to `.bin` (rule 3).
 fn upload_extension(filename: &str, mime_type: &str) -> String {
+    // 1. Prefer the extension the declared/sniffed mime canonically maps to, so the stored file's
+    //    serve mime round-trips back to the type we actually accepted. mime_guess lists candidates;
+    //    take the first one that is on our media allow-list.
+    if let Some(extension) = mime_guess::get_mime_extensions_str(mime_type)
+        .into_iter()
+        .flatten()
+        .map(|value| value.to_ascii_lowercase())
+        .find(|value| is_safe_upload_extension(value))
+    {
+        return format!(".{extension}");
+    }
+
+    // 2. Fall back to the client extension only when it is itself an allow-listed media extension —
+    //    never a document/script extension the client renamed the file to.
     if let Some(extension) = Path::new(filename)
         .extension()
         .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .filter(|value| is_safe_upload_extension(value))
     {
-        return format!(".{}", extension.to_ascii_lowercase());
+        return format!(".{extension}");
     }
-    match mime_guess::get_mime_extensions_str(mime_type).and_then(|extensions| extensions.first()) {
-        Some(extension) => format!(".{extension}"),
-        None => ".bin".to_owned(),
-    }
+
+    // 3. Anything else neutralizes to an inert, non-renderable extension.
+    ".bin".to_owned()
 }
 
 fn move_or_copy_file(source: &Path, destination: &Path) -> ProjectStoreResult<()> {
@@ -3856,12 +4232,13 @@ fn move_or_copy_file(source: &Path, destination: &Path) -> ProjectStoreResult<()
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_project_migrations, build_generated_asset_sidecar, connect_project_db,
-        find_timeline_file, guess_mime_from_filename, index_timeline, is_safe_relative_path,
-        normalize_asset_tags, sniff_image_format, AssetScope, CharacterCreateInput,
-        CharacterLookInput, ProjectStore, ProjectStoreError, UploadAsset,
+        apply_project_migrations, backfill_upscale_variant_lineage, build_generated_asset_sidecar,
+        connect_project_db, find_timeline_file, guess_mime_from_filename, index_timeline,
+        is_safe_relative_path, is_safe_upload_extension, normalize_asset_tags, read_json,
+        sniff_image_format, upload_extension, AssetScope, CharacterCreateInput, CharacterLookInput,
+        CharacterReferenceInput, ProjectStore, ProjectStoreError, UploadAsset,
         GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID, PROJECT_FOLDERS,
-        PROJECT_SCHEMA_VERSION,
+        PROJECT_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
     };
     use rusqlite::Connection;
     use serde_json::{json, Value};
@@ -4005,7 +4382,7 @@ mod tests {
     /// alongside a deliberate schema change — and when you do, you MUST bump
     /// `PROJECT_SCHEMA_VERSION` so the `user_version=` line below changes too.
     const EXPECTED_PROJECT_DB_SCHEMA: &str = concat!(
-        "user_version=3\n",
+        "user_version=4\n",
         "table assets: id TEXT notnull=0 default=NULL pk=1, type TEXT notnull=1 default=NULL pk=0, display_name TEXT notnull=1 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, generation_set_id TEXT notnull=0 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, favorite INTEGER notnull=1 default=0 pk=0, rating INTEGER notnull=1 default=0 pk=0, rejected INTEGER notnull=1 default=0 pk=0, trashed INTEGER notnull=1 default=0 pk=0, sidecar_path TEXT notnull=0 default=NULL pk=0, origin TEXT notnull=0 default=NULL pk=0\n",
         "table character_looks: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, description TEXT notnull=1 default='' pk=0, approved_reference_ids TEXT notnull=1 default='[]' pk=0, recipe_settings TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
         "table character_loras: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, lora_id TEXT notnull=0 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, source_path TEXT notnull=0 default=NULL pk=0, project_path TEXT notnull=0 default=NULL pk=0, copied_into_project INTEGER notnull=1 default=0 pk=0, category TEXT notnull=1 default='character' pk=0, scope TEXT notnull=1 default='project' pk=0, trigger_words TEXT notnull=1 default='[]' pk=0, default_weight REAL notnull=1 default=1.0 pk=0, compatibility TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
@@ -4289,6 +4666,83 @@ mod tests {
         assert_eq!(safe["id"], json!("asset_safe1"));
     }
 
+    /// sc-8871 (F-069): `save_timeline` derives the write path from the
+    /// client-supplied `id` (last 8 chars slugged into the filename) and
+    /// `relative_string`'s lexical strip lets an unnormalized `..`-bearing id
+    /// through, so — matching the asset/character/track/dataset guards — the id
+    /// must be charset-checked before any path is derived. A traversal or
+    /// separator-bearing id is rejected with `BadRequest` and writes nothing;
+    /// a normal id still saves under the project's `timelines/` dir.
+    #[test]
+    fn save_timeline_rejects_unsafe_id_before_deriving_path() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Boundary").expect("project creates");
+        let timelines_dir = std::path::Path::new(&project.path).join("timelines");
+
+        let timeline_with = |id: &str| {
+            json!({
+                "id": id,
+                "projectId": project.id,
+                "name": "My Timeline",
+            })
+        };
+
+        for unsafe_id in [
+            "../../../../tmp/escape",
+            "timeline/../../escape",
+            "a/b/c",
+            "id.with.dots",
+            "  ",
+            "",
+        ] {
+            let result = store.save_timeline(&project.id, timeline_with(unsafe_id));
+            assert!(
+                matches!(result, Err(ProjectStoreError::BadRequest(_))),
+                "expected id {unsafe_id:?} to be rejected, got {result:?}"
+            );
+        }
+
+        // Nothing should have been written for any rejected id — no file can land
+        // inside (or escape) the timelines dir.
+        let timeline_files: Vec<_> = std::fs::read_dir(&timelines_dir)
+            .map(|entries| entries.filter_map(Result::ok).collect())
+            .unwrap_or_default();
+        assert!(
+            timeline_files.is_empty(),
+            "rejected ids must not write any timeline file, found {timeline_files:?}"
+        );
+        // And the traversal target above the project root must not exist either.
+        assert!(
+            !temp_dir
+                .path()
+                .join("escape.sceneworks.timeline.json")
+                .exists(),
+            "traversal id must not write outside the project dir"
+        );
+
+        // A normal safe id still saves correctly under timelines/.
+        let saved = store
+            .save_timeline(&project.id, timeline_with("timeline_abc123"))
+            .expect("safe timeline id persists");
+        assert_eq!(saved["id"], json!("timeline_abc123"));
+        let written: Vec<_> = std::fs::read_dir(&timelines_dir)
+            .expect("timelines dir exists after save")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(".sceneworks.timeline.json"))
+            })
+            .collect();
+        assert_eq!(
+            written.len(),
+            1,
+            "exactly one timeline file should be written for the safe id, found {written:?}"
+        );
+    }
+
     #[test]
     fn write_generation_set_embeds_replayable_recipe_from_first_asset_fact() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
@@ -4482,9 +4936,11 @@ mod tests {
             .expect("get before");
         assert_eq!(before["origin"], json!("character_studio"));
 
-        let moved = store
+        // sc-10205: the endpoint returns the moved group (requested asset first).
+        let moved_group = store
             .move_asset_to_library(&project.id, "char_shot")
             .expect("move to library");
+        let moved = &moved_group[0];
 
         // Origin promoted (image media -> image_studio), so the Library no longer excludes it.
         assert_eq!(moved["origin"], json!("image_studio"));
@@ -4509,6 +4965,227 @@ mod tests {
             .get_asset(&project.id, "char_shot")
             .expect("get after");
         assert_eq!(after["origin"], json!("image_studio"));
+    }
+
+    /// sc-10200: the true-move twin of `move_asset_to_library`. A Library asset
+    /// moved into a character must leave the Library (origin flip), anchor on the
+    /// target via `metadata.characterReferences` ONLY (no curated `references[]`
+    /// entry — the "Approved set" is hand-curated), detach from every other
+    /// character, and survive a curated reference add/remove cycle on the target.
+    #[test]
+    fn move_asset_to_character_flips_origin_and_anchors_without_curated_reference() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Gallery").expect("project creates");
+
+        // A plain Image Studio output: origin image_studio, library-visible.
+        let fact = json!({
+            "assetId": "lib_shot",
+            "mediaPath": "assets/images/genset_lib/lib_shot.png",
+            "mimeType": "image/png",
+            "displayName": "Plate #1",
+            "createdAt": "2026-05-25T00:00:00Z",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "adapter": "z_image_diffusers",
+            "prompt": "plate",
+        });
+        store
+            .persist_generated_asset(&project.id, "job-1", "genset_lib", &fact)
+            .expect("asset persists");
+
+        let mira = store
+            .create_character(
+                &project.id,
+                CharacterCreateInput {
+                    name: "Mira".to_owned(),
+                    character_type: "person".to_owned(),
+                    description: String::new(),
+                },
+            )
+            .expect("Mira creates");
+        let dax = store
+            .create_character(
+                &project.id,
+                CharacterCreateInput {
+                    name: "Dax".to_owned(),
+                    character_type: "person".to_owned(),
+                    description: String::new(),
+                },
+            )
+            .expect("Dax creates");
+        let mira_id = mira["id"].as_str().expect("Mira id").to_owned();
+        let dax_id = dax["id"].as_str().expect("Dax id").to_owned();
+
+        // Pre-existing curated link on Mira (the legacy "Move" behavior): the move
+        // must clean this up rather than leave a dual membership behind.
+        store
+            .add_character_reference(
+                &project.id,
+                &mira_id,
+                CharacterReferenceInput {
+                    asset_id: "lib_shot".to_owned(),
+                    approved: false,
+                    role: "asset".to_owned(),
+                    notes: String::new(),
+                },
+            )
+            .expect("Mira link");
+
+        // An unknown target must reject before mutating anything.
+        assert!(store
+            .move_asset_to_character(&project.id, "lib_shot", "char_missing")
+            .is_err());
+
+        // sc-10205: the endpoint returns the moved group (requested asset first).
+        let moved_group = store
+            .move_asset_to_character(&project.id, "lib_shot", &dax_id)
+            .expect("move to Dax");
+        let moved = &moved_group[0];
+
+        // Origin flipped, so the Library allow-list now excludes the asset.
+        assert_eq!(moved["origin"], json!("character_studio"));
+        // Anchored on Dax via metadata only, tagged as a move (not a sidecar mirror).
+        let links = moved["metadata"]["characterReferences"]
+            .as_array()
+            .expect("anchor links");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0]["characterId"], json!(dax_id));
+        assert_eq!(links[0]["source"], json!("library-move"));
+        // Neither character carries a curated references[] entry: Mira's stale link
+        // is gone and Dax's Approved set stays hand-curated.
+        let mira_after = store
+            .get_character(&project.id, &mira_id)
+            .expect("Mira after");
+        assert_eq!(mira_after["references"].as_array().map(Vec::len), Some(0));
+        let dax_after = store
+            .get_character(&project.id, &dax_id)
+            .expect("Dax after");
+        assert_eq!(dax_after["references"].as_array().map(Vec::len), Some(0));
+
+        // A curated reference add/remove cycle on the target must not orphan the
+        // asset: the sidecar mirror rebuild only manages its own entries.
+        store
+            .add_character_reference(
+                &project.id,
+                &dax_id,
+                CharacterReferenceInput {
+                    asset_id: "lib_shot".to_owned(),
+                    approved: true,
+                    role: "reference".to_owned(),
+                    notes: String::new(),
+                },
+            )
+            .expect("Dax curated link");
+        store
+            .remove_character_reference(&project.id, &dax_id, "lib_shot")
+            .expect("Dax curated unlink");
+        let cycled = store
+            .get_asset(&project.id, "lib_shot")
+            .expect("get cycled");
+        let cycled_links = cycled["metadata"]["characterReferences"]
+            .as_array()
+            .expect("anchor survives");
+        assert_eq!(cycled_links.len(), 1);
+        assert_eq!(cycled_links[0]["source"], json!("library-move"));
+
+        // Reversible: move-to-library restores a library origin and drops the anchor.
+        let back_group = store
+            .move_asset_to_library(&project.id, "lib_shot")
+            .expect("move back");
+        let back = &back_group[0];
+        assert_eq!(back["origin"], json!("image_studio"));
+        assert!(back["metadata"]["characterReferences"].is_null());
+    }
+
+    /// sc-10205: a linked original/upscaled pair renders as ONE folded Library
+    /// tile (the upscaled child is the visible asset), so moving the visible
+    /// asset must carry the whole fold group — in both directions. Splitting the
+    /// pair strands the hidden mate in the source collection.
+    #[test]
+    fn move_asset_carries_the_upscale_fold_group_both_directions() {
+        use crate::store_util::{read_json, write_json};
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Gallery").expect("project creates");
+
+        for (asset_id, path) in [
+            ("base_shot", "assets/images/genset_pair/base_shot.png"),
+            ("up_shot", "assets/images/genset_pair/base_shot_up2x.png"),
+        ] {
+            let fact = json!({
+                "assetId": asset_id,
+                "mediaPath": path,
+                "mimeType": "image/png",
+                "displayName": asset_id,
+                "createdAt": "2026-05-25T00:00:00Z",
+                "mode": "text_to_image",
+                "model": "z_image_turbo",
+                "adapter": "z_image_diffusers",
+                "prompt": "plate",
+            });
+            store
+                .persist_generated_asset(&project.id, "job-1", "genset_pair", &fact)
+                .expect("asset persists");
+        }
+
+        // Stamp the fold lineage the Library reads (sc-10117 keys) on the child.
+        let project_path = store.find_project_path(&project.id).expect("project path");
+        let child_sidecar =
+            project_path.join("assets/images/genset_pair/base_shot_up2x.sceneworks.json");
+        {
+            let mut asset = read_json(&child_sidecar).expect("read child");
+            super::apply_upscale_variant_link(&mut asset, "base_shot", 2, "seedvr2");
+            write_json(&child_sidecar, &asset).expect("write child");
+        }
+        store
+            .index_asset_sidecar(&project.id, &child_sidecar)
+            .expect("reindex child");
+
+        let character = store
+            .create_character(
+                &project.id,
+                CharacterCreateInput {
+                    name: "Mira".to_owned(),
+                    character_type: "person".to_owned(),
+                    description: String::new(),
+                },
+            )
+            .expect("character creates");
+        let character_id = character["id"].as_str().expect("character id").to_owned();
+
+        // Move the VISIBLE folded asset (the upscaled child): both must move.
+        let moved = store
+            .move_asset_to_character(&project.id, "up_shot", &character_id)
+            .expect("move pair to character");
+        let moved = moved.as_array().expect("moved group");
+        assert_eq!(moved.len(), 2, "the whole fold group moves");
+        assert_eq!(moved[0]["id"], json!("up_shot"), "requested asset first");
+        for asset in moved {
+            assert_eq!(asset["origin"], json!("character_studio"));
+            assert_eq!(
+                asset["metadata"]["characterReferences"][0]["characterId"],
+                json!(character_id)
+            );
+        }
+        let base_after = store
+            .get_asset(&project.id, "base_shot")
+            .expect("base after");
+        assert_eq!(
+            base_after["origin"],
+            json!("character_studio"),
+            "the hidden fold-mate left the Library too"
+        );
+
+        // And back: moving the child to the Library brings the original along.
+        let back = store
+            .move_asset_to_library(&project.id, "up_shot")
+            .expect("move pair back");
+        let back = back.as_array().expect("back group");
+        assert_eq!(back.len(), 2);
+        for asset in back {
+            assert_eq!(asset["origin"], json!("image_studio"));
+        }
     }
 
     /// V-4: a pre-migration project surfaces an EMPTY `assets` table even though
@@ -4635,6 +5312,86 @@ mod tests {
         );
         assert_eq!(asset["extra"]["factor"], json!(2));
         assert_eq!(asset["extra"]["engine"], json!("real-esrgan"));
+    }
+
+    /// sc-10117: the inline Image Studio upscale post-pass used to link its `(Nx upscaled)` variant
+    /// to the base only via a dead `upscaledFrom` field, so existing upscaled assets have no fold
+    /// lineage. The backfill reconstructs it from the `_up{N}x` filename within the generation set so
+    /// the pair collapses in the Library. Additive + idempotent.
+    #[test]
+    fn backfill_reconstructs_inline_upscale_variant_lineage() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Upscales").expect("project creates");
+
+        // A base image and its inline-upscaled variant in one generation set. The upscaled fact
+        // mirrors the OLD write_upscaled_asset output: an `upscale` recipe record but NO
+        // sourceAssetId/extra link (the dead `upscaledFrom` field never reached the sidecar).
+        let base = json!({
+            "assetId": "base_1",
+            "mediaPath": "assets/images/genset_up/2026-07-01_z_image_turbo_scene_0001.png",
+            "mimeType": "image/png",
+            "displayName": "Scene #1",
+            "createdAt": "2026-07-01T00:00:00Z",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+        });
+        let upscaled = json!({
+            "assetId": "up_1",
+            "mediaPath": "assets/images/genset_up/2026-07-01_z_image_turbo_scene_0001_up2x.png",
+            "mimeType": "image/png",
+            "displayName": "Scene #1 (2x upscaled)",
+            "createdAt": "2026-07-01T00:00:01Z",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "rawAdapterSettings": { "upscale": { "enabled": true, "engine": "seedvr2", "factor": 2 } },
+        });
+        store
+            .persist_generated_asset(&project.id, "job-1", "genset_up", &base)
+            .expect("base persists");
+        store
+            .persist_generated_asset(&project.id, "job-1", "genset_up", &upscaled)
+            .expect("upscaled persists");
+
+        let project_path = store.find_project_path(&project.id).expect("project path");
+        let up_sidecar = project_path.join(
+            "assets/images/genset_up/2026-07-01_z_image_turbo_scene_0001_up2x.sceneworks.json",
+        );
+
+        // Precondition: the upscaled sidecar has no fold link yet.
+        let before = read_json(&up_sidecar).expect("read upscaled sidecar");
+        assert!(
+            before.pointer("/extra/upscaledFromAssetId").is_none(),
+            "precondition: the buggy inline upscale left no fold link"
+        );
+        assert!(before
+            .pointer("/lineage/sourceAssetId")
+            .and_then(Value::as_str)
+            .is_none());
+
+        let healed = backfill_upscale_variant_lineage(&project_path).expect("backfill runs");
+        assert_eq!(healed, 1, "exactly the one upscaled variant is healed");
+
+        let after = read_json(&up_sidecar).expect("re-read healed sidecar");
+        assert_eq!(after["extra"]["upscaledFromAssetId"], json!("base_1"));
+        assert_eq!(after["extra"]["isUpscaled"], json!(true));
+        assert_eq!(after["extra"]["factor"], json!(2));
+        assert_eq!(after["extra"]["engine"], json!("seedvr2"));
+        assert_eq!(after["lineage"]["sourceAssetId"], json!("base_1"));
+        assert_eq!(after["lineage"]["parents"], json!(["base_1"]));
+
+        // The base sidecar is untouched — it must NOT be marked as an upscale.
+        let base_sidecar = project_path
+            .join("assets/images/genset_up/2026-07-01_z_image_turbo_scene_0001.sceneworks.json");
+        let base_after = read_json(&base_sidecar).expect("read base sidecar");
+        assert!(
+            base_after.pointer("/extra/isUpscaled").is_none(),
+            "the base image must not be marked upscaled"
+        );
+
+        // Idempotent: a second pass heals nothing (the link is now present).
+        let again = backfill_upscale_variant_lineage(&project_path).expect("second backfill");
+        assert_eq!(again, 0, "already-linked variants are skipped");
     }
 
     #[test]
@@ -4959,6 +5716,109 @@ mod tests {
         assert_eq!(std::fs::read(&stored).expect("read stored"), bytes);
     }
 
+    /// sc-8872 (F-070): the stored extension is derived from the declared/sniffed mime, never
+    /// trusted from the client filename. A `video/mp4` upload named `evil.html` must NOT be stored
+    /// `.html` (which `project_file` would then serve as `text/html`, enabling stored XSS on the
+    /// API origin). `.svg`/`.js`/`.html` neutralize; a genuine mime always wins.
+    #[test]
+    fn upload_extension_derives_from_mime_not_client_filename() {
+        // Declared video mime wins over a dangerous client extension.
+        assert_eq!(upload_extension("evil.html", "video/mp4"), ".mp4");
+        assert_eq!(upload_extension("evil.svg", "video/mp4"), ".mp4");
+        assert_eq!(upload_extension("evil.js", "video/webm"), ".webm");
+        // A legit media extension on a matching mime is preserved.
+        assert_eq!(upload_extension("clip.mp4", "video/mp4"), ".mp4");
+        assert_eq!(upload_extension("clip.webm", "video/webm"), ".webm");
+        // Unknown mime: a safe client media extension is honored, a dangerous one neutralizes.
+        assert_eq!(
+            upload_extension("clip.mp4", "application/octet-stream"),
+            ".mp4"
+        );
+        assert_eq!(
+            upload_extension("evil.html", "application/octet-stream"),
+            ".bin"
+        );
+        // SVG is script-capable and deliberately excluded, so it never survives as `.svg`.
+        assert_eq!(upload_extension("logo.svg", "image/svg+xml"), ".bin");
+        // Every allow-listed extension re-derives to an inert image/video serve mime — never
+        // `text/html` or `image/svg+xml` — which is the property `project_file` relies on.
+        for extension in SAFE_UPLOAD_EXTENSIONS {
+            let mime = guess_mime_from_filename(&format!("stored.{extension}"))
+                .unwrap_or_else(|| format!("no mime for .{extension}"));
+            assert!(
+                mime.starts_with("image/") || mime.starts_with("video/"),
+                ".{extension} serves inert media mime, got {mime}"
+            );
+            assert_ne!(mime, "image/svg+xml", ".{extension} must not serve svg");
+        }
+        assert!(is_safe_upload_extension("mp4"));
+        assert!(!is_safe_upload_extension("svg"));
+        assert!(!is_safe_upload_extension("html"));
+    }
+
+    /// sc-8872 (F-070): end-to-end — a `video/mp4` upload named `evil.html` is stored with a `.mp4`
+    /// extension and `project_file` serves it as `video/mp4`, never `text/html`. A legitimate
+    /// `.webm` upload still round-trips. This pins the content-type-confusion fix through the exact
+    /// serve path the file endpoint uses.
+    #[test]
+    fn import_asset_video_stores_and_serves_safe_mime_regardless_of_client_filename() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Serve").expect("project creates");
+
+        // A `video/mp4` upload whose client filename lies about its type.
+        let evil_src = temp_dir.path().join("upload-evil");
+        std::fs::write(&evil_src, b"<script>alert(1)</script> not really html")
+            .expect("source writes");
+        let evil = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "evil.html".to_owned(),
+                    content_type: Some("video/mp4".to_owned()),
+                    source_path: evil_src,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("imports");
+
+        let evil_rel = evil["file"]["path"].as_str().expect("path");
+        assert!(
+            evil_rel.ends_with(".mp4"),
+            "video stored as .mp4, not the client .html, got {evil_rel}"
+        );
+        assert_eq!(evil["type"], json!("video"));
+        // The user's original filename is still shown, only the stored name is neutralized.
+        assert_eq!(evil["displayName"], json!("evil.html"));
+
+        // The file-serving endpoint derives its Content-Type from the stored name — it must now be
+        // an inert video type, never `text/html`.
+        let served = store.project_file(&project.id, evil_rel).expect("serves");
+        assert_eq!(served.content_type, "video/mp4");
+        assert_ne!(served.content_type, "text/html");
+
+        // A legitimate webm upload still stores and serves correctly.
+        let webm_src = temp_dir.path().join("upload-webm");
+        std::fs::write(&webm_src, b"fake but non-empty webm bytes").expect("source writes");
+        let webm = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "clip.webm".to_owned(),
+                    content_type: Some("video/webm".to_owned()),
+                    source_path: webm_src,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("imports");
+        let webm_rel = webm["file"]["path"].as_str().expect("path");
+        assert!(webm_rel.ends_with(".webm"), "webm kept, got {webm_rel}");
+        let webm_served = store.project_file(&project.id, webm_rel).expect("serves");
+        assert_eq!(webm_served.content_type, "video/webm");
+    }
+
     /// sc-6143: a valid-but-unsupported image (BMP here) is transcoded to lossless PNG at import,
     /// the original upload temp is cleaned up, and the user-facing display name is retained.
     /// macOS-only (real `sips`); the ffmpeg path is covered by the worker tests.
@@ -5072,7 +5932,7 @@ mod tests {
             Err(ProjectStoreError::BadRequest(_))
         ));
         assert!(matches!(
-            store.purge_asset(&project.id, evil),
+            store.purge_asset(&project.id, evil, true),
             Err(ProjectStoreError::BadRequest(_))
         ));
         // The traversal target is untouched.

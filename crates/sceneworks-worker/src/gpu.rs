@@ -29,7 +29,12 @@ pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
             .find(|gpu| gpu.id == requested_gpu_id)
             .unwrap_or_else(|| fallback_gpu(requested_gpu_id))
     };
-    with_candle_capabilities(gpu, settings)
+    // Compute-capability probe for the INT8-ConvRot sm_89 gate (sc-9300). Probed here (the async
+    // discovery) and threaded into the sync `with_candle_capabilities` — the worker has no nvml, so
+    // this is a bounded `nvidia-smi --query-gpu=compute_cap` subprocess like the utilization query.
+    // Only meaningful on the candle lane; a cheap no-op probe on CPU / non-NVIDIA (returns `None`).
+    let compute_cap = nvidia_max_compute_cap().await;
+    with_candle_capabilities(gpu, settings, compute_cap)
 }
 
 /// Light up the Windows/CUDA candle SDXL lane on the discovered nvidia GPU (epic 3672, sc-3678).
@@ -48,7 +53,11 @@ pub(crate) async fn discover_gpu(settings: &Settings) -> DiscoveredGpu {
     not(all(not(target_os = "macos"), feature = "backend-candle")),
     allow(unused_mut, unused_variables)
 )]
-fn with_candle_capabilities(mut gpu: DiscoveredGpu, settings: &Settings) -> DiscoveredGpu {
+fn with_candle_capabilities(
+    mut gpu: DiscoveredGpu,
+    settings: &Settings,
+    compute_cap: Option<f32>,
+) -> DiscoveredGpu {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     if settings.backend_candle_enabled && gpu.capabilities.contains(&WorkerCapability::Gpu) {
         let derived = crate::engines::registry_capabilities(settings);
@@ -166,6 +175,19 @@ fn with_candle_capabilities(mut gpu: DiscoveredGpu, settings: &Settings) -> Disc
             // The lane marker the routing gate keys off (mirrors the existing `nvidia` marker).
             gpu.capabilities
                 .push(WorkerCapability::Unknown("candle".to_owned()));
+            // Krea 2 INT8-ConvRot eligibility marker (sc-9300, epic 9083). Advertised ONLY when this
+            // candle worker's GPU clears the sm_89 compute-cap floor (the online-rotation IGEMM path;
+            // the candle-gen engine hard-floors it via `ensure_int8_floor` too). Bundling the candle
+            // lane (this block only runs under `backend_candle_enabled`) with the compute-cap check
+            // into one advertised capability lets the api/web picker HIDE the `int8-convrot` tier on
+            // an ineligible card (macOS/MLX never reaches here; a pre-Ada NVIDIA GPU probes < 8.9) —
+            // graceful, rather than only erroring at generate time. Per-tier VRAM is the manifest's
+            // separate memory-eligibility gate, like every other tier.
+            if compute_cap_meets_int8_convrot(compute_cap) {
+                gpu.capabilities.push(WorkerCapability::Unknown(
+                    INT8_CONVROT_CAPABILITY.to_owned(),
+                ));
+            }
         }
     }
     gpu
@@ -212,6 +234,63 @@ pub(crate) async fn query_nvidia_gpus() -> Vec<DiscoveredGpu> {
         }
         _ => Vec::new(),
     }
+}
+
+/// The advertised marker capability meaning "this candle worker can run the Krea 2 INT8-ConvRot
+/// variant" (sc-9300, epic 9083). It bundles the two worker-side gates the ConvRot lane needs
+/// (locked decision 7): the candle lane (only pushed under `backend_candle_enabled` in
+/// [`with_candle_capabilities`]) AND a GPU compute capability >= 8.9 (sm_89 / RTX 40xx+, the online-
+/// rotation IGEMM floor the candle-gen engine enforces via `ensure_int8_floor`). The api surfaces
+/// this on the worker snapshot and the web picker (`quantTier.js`) shows the `int8-convrot` tier only
+/// when a registered worker advertises it — so an ineligible card (macOS/MLX, or a pre-Ada NVIDIA GPU)
+/// HIDES the variant gracefully rather than only failing at generate time. The third gate (per-tier
+/// VRAM / `candle.minMemoryGb`) rides the existing manifest memory-eligibility path, like every tier.
+///
+/// Consumed only by the candle-lane capability block in [`with_candle_capabilities`], so gate to the
+/// candle build to avoid a dead-code warning in the non-candle (macOS / plain-CUDA) build.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const INT8_CONVROT_CAPABILITY: &str = "int8_convrot";
+
+/// The minimum NVIDIA compute capability the INT8-ConvRot online-rotation IGEMM path requires
+/// (sm_89 / Ada — RTX 40xx and the RTX PRO Blackwell line). Pre-Ada cards (sm_80 A100, sm_86 RTX 30xx)
+/// lack the int8 IMMA throughput the path assumes; the candle-gen engine hard-floors it too.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const INT8_CONVROT_MIN_COMPUTE_CAP: f32 = 8.9;
+
+/// Highest CUDA compute capability across the visible NVIDIA GPUs, via
+/// `nvidia-smi --query-gpu=compute_cap` (e.g. `8.9`, `12.0`). `None` when nvidia-smi is absent /
+/// times out / reports no parseable cap (a non-NVIDIA or CPU worker) — the caller then treats the
+/// worker as ConvRot-ineligible. Cheap, bounded (3s) subprocess, matching [`query_nvidia_gpus`]; the
+/// `compute_cap` query field is a stable nvidia-smi column (driver R495+, well below any CUDA-12 box).
+pub(crate) async fn nvidia_max_compute_cap() -> Option<f32> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(3),
+        Command::new("nvidia-smi")
+            .args(["--query-gpu=compute_cap", "--format=csv,noheader,nounits"])
+            .output(),
+    )
+    .await;
+    match output {
+        Ok(Ok(output)) if output.status.success() => {
+            parse_max_compute_cap(&String::from_utf8_lossy(&output.stdout))
+        }
+        _ => None,
+    }
+}
+
+/// Parse the highest `major.minor` compute cap from the `nvidia-smi --query-gpu=compute_cap` CSV
+/// (one row per GPU). Ignores blank / unparseable rows; `None` when nothing parses.
+pub(crate) fn parse_max_compute_cap(output: &str) -> Option<f32> {
+    output
+        .lines()
+        .filter_map(|line| line.trim().parse::<f32>().ok())
+        .fold(None, |acc, cap| Some(acc.map_or(cap, |m: f32| m.max(cap))))
+}
+
+/// Whether a probed compute cap clears the INT8-ConvRot sm_89 floor. `None` (no probe) ⇒ ineligible.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn compute_cap_meets_int8_convrot(cap: Option<f32>) -> bool {
+    cap.is_some_and(|c| c >= INT8_CONVROT_MIN_COMPUTE_CAP)
 }
 
 pub(crate) fn parse_nvidia_smi_gpus(output: &str) -> Vec<DiscoveredGpu> {
@@ -288,28 +367,42 @@ pub(crate) async fn gpu_utilization(gpu_id: &str) -> Option<WorkerUtilizationSna
 /// unprivileged). Returns `None` only when no probe yields anything.
 #[cfg(target_os = "macos")]
 pub(crate) async fn query_mlx_utilization() -> Option<WorkerUtilizationSnapshot> {
-    let total_mb = sysctl_memsize_mb().await;
-    let used_mb = vm_stat_used_mb().await;
-    let gpu_load_percent = ioreg_gpu_load().await;
+    // Run the three independent probes concurrently rather than serially: awaited back-to-back their
+    // per-probe timeouts (sysctl 2s + vm_stat 2s + ioreg 3s) could stack to ~7s of latency on a hung
+    // machine and push a heartbeat past the sweep budget; `join!` bounds the wait to the slowest
+    // single probe (~3s) instead (sc-8928).
+    let (total_mb, used_mb, gpu_load_percent) =
+        tokio::join!(sysctl_memsize_mb(), vm_stat_used_mb(), ioreg_gpu_load(),);
     mlx_utilization_from(total_mb, used_mb, gpu_load_percent)
 }
 
-/// Total unified memory (MB) via `sysctl -n hw.memsize`.
+/// Total unified memory (MB) via `sysctl -n hw.memsize`. The machine's physical RAM never changes at
+/// runtime, so the first successful read is cached process-wide and every subsequent call (each
+/// heartbeat) skips the subprocess entirely (sc-8928). A failed probe is NOT cached — it re-probes
+/// next time.
 #[cfg(target_os = "macos")]
 async fn sysctl_memsize_mb() -> Option<u64> {
+    static MEMSIZE_MB: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    if let Some(cached) = MEMSIZE_MB.get() {
+        return Some(*cached);
+    }
     let output = tokio::time::timeout(
         Duration::from_secs(2),
         Command::new("sysctl").args(["-n", "hw.memsize"]).output(),
     )
     .await;
-    match output {
+    let mb = match output {
         Ok(Ok(output)) if output.status.success() => String::from_utf8_lossy(&output.stdout)
             .trim()
             .parse::<u64>()
             .ok()
             .map(|bytes| bytes / (1024 * 1024)),
         _ => None,
+    };
+    if let Some(mb) = mb {
+        let _ = MEMSIZE_MB.set(mb);
     }
+    mb
 }
 
 /// Total unified memory in GB (`sysctl hw.memsize`), for per-job memory-budget guards such as the

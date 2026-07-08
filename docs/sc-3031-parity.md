@@ -3,6 +3,11 @@
 **Epic 3018.** The validation gate before the cutovers (sc-3032 image, sc-3037 video) delete the
 Python MLX path. This document is the parity record the story asks for.
 
+> **Note (epic 8283 / sc-9786):** the reproduction harness this doc references
+> (`docs/sc-3031/ab_python.py`, `compare.py`, `driver.sh`) was removed once the
+> Python worker was retired — it imported the now-deleted `apps/worker/scene_worker`.
+> This document is the retained historical record of the validation it performed.
+
 ## What "parity" means here (and what it can't mean)
 
 The Rust engines and the Python paths are **independent implementations**, so bit-exact pixel match

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiFetch } from "../api.js";
-import { useAppContext } from "../context/AppContext.js";
+import { useAppStatic } from "../context/AppContext.js";
 import { isDesktop, tauriInvoke } from "../runtime.js";
 
 // In-app Logs viewer (sc-3452). Shows the current session's activity — most
@@ -64,7 +64,7 @@ async function fetchLogs(token, { afterSeq, limit, source, level }) {
 }
 
 export function LogsScreen() {
-  const { token } = useAppContext();
+  const { token } = useAppStatic();
   const [entries, setEntries] = useState([]);
   const [source, setSource] = useState("");
   const [level, setLevel] = useState("");

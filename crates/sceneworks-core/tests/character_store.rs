@@ -398,7 +398,7 @@ fn purge_asset_removes_character_references_and_look_ids() {
         .expect("look creates");
 
     store
-        .purge_asset(&project.id, &asset_id)
+        .purge_asset(&project.id, &asset_id, true)
         .expect("asset purges");
 
     let character = store

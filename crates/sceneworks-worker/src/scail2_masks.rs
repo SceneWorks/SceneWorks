@@ -41,16 +41,6 @@ pub(crate) const PALETTE: [[u8; 3]; 6] = [
 pub(crate) const BG_BLACK: [u8; 3] = [0, 0, 0];
 pub(crate) const BG_WHITE: [u8; 3] = [255, 255, 255];
 
-/// The palette color for an object id, or `None` if the object is past the 6-color cap (SCAIL-2's
-/// scheme has six person classes; extra people get no color and read as background).
-fn color_for(order: &[i32], oid: i32) -> Option<[u8; 3]> {
-    order
-        .iter()
-        .position(|&o| o == oid)
-        .filter(|&i| i < PALETTE.len())
-        .map(|i| PALETTE[i])
-}
-
 /// Fill an RGB pixel buffer with a solid background color.
 fn filled(width: usize, height: usize, bg: [u8; 3]) -> Vec<u8> {
     let mut px = vec![0u8; width * height * 3];
@@ -61,7 +51,23 @@ fn filled(width: usize, height: usize, bg: [u8; 3]) -> Vec<u8> {
 }
 
 /// Paint one person's binary mask into the RGB buffer with `color`.
-fn paint(px: &mut [u8], mask: &[u8], color: [u8; 3]) {
+///
+/// The mask is one byte per pixel and `px` is three bytes per pixel, so a correct call has
+/// `mask.len() == px.len() / 3`. A mismatch can only mean the SAM3 pass produced a mask at a
+/// different resolution than the `width*height` the painter allocated from — an upstream
+/// dimension bug that would otherwise silently corrupt the color-coded conditioning (painting
+/// fewer pixels for a short mask, ignoring the tail of a long one). Surface it as a typed error
+/// instead of the old silent per-pixel guard (sc-8907 / F-105); the guard stays as defense in
+/// depth so a bug that slips the length check still can't write out of bounds.
+fn paint(px: &mut [u8], mask: &[u8], color: [u8; 3]) -> WorkerResult<()> {
+    if mask.len() != px.len() / 3 {
+        return Err(WorkerError::Engine(format!(
+            "scail2 mask/buffer size mismatch: mask has {} pixels, buffer holds {} \
+             (SAM3 mask resolution does not match the painted frame size)",
+            mask.len(),
+            px.len() / 3
+        )));
+    }
     for (p, &m) in mask.iter().enumerate() {
         if m > 0 {
             let o = p * 3;
@@ -70,31 +76,35 @@ fn paint(px: &mut [u8], mask: &[u8], color: [u8; 3]) {
             }
         }
     }
+    Ok(())
 }
 
 /// Paint the per-frame **driving** color masks: a solid `bg`, each tracked person filled its palette
 /// color. People are painted in left-to-right order so a right-neighbor overlap wins (the upstream
 /// paint order), keeping assignments deterministic. Returns one RGB mask per driving frame.
-pub(crate) fn paint_driving_masks(masks: &AllPersonMasks, bg: [u8; 3]) -> Vec<Image> {
+pub(crate) fn paint_driving_masks(masks: &AllPersonMasks, bg: [u8; 3]) -> WorkerResult<Vec<Image>> {
     let (w, h) = (masks.width as usize, masks.height as usize);
     masks
         .per_frame
         .iter()
         .map(|frame| {
             let mut px = filled(w, h, bg);
-            for &oid in &masks.order {
-                let Some(color) = color_for(&masks.order, oid) else {
+            // The paint order *is* the palette order, so a person's index in `order`
+            // is its color index — take it from `enumerate` instead of re-searching
+            // `order` per person (was O(n²) via `position`) (sc-8952).
+            for (index, &oid) in masks.order.iter().enumerate() {
+                let Some(&color) = PALETTE.get(index) else {
                     continue;
                 };
                 if let Some((_, mask)) = frame.iter().find(|(o, _)| *o == oid) {
-                    paint(&mut px, mask, color);
+                    paint(&mut px, mask, color)?;
                 }
             }
-            Image {
+            Ok(Image {
                 width: masks.width,
                 height: masks.height,
                 pixels: px,
-            }
+            })
         })
         .collect()
 }
@@ -122,7 +132,7 @@ pub(crate) fn paint_reference_mask(masks: &AllPersonMasks, bg: [u8; 3]) -> Worke
             )
         })?;
     let mut px = filled(w, h, bg);
-    paint(&mut px, &primary.1, PALETTE[0]);
+    paint(&mut px, &primary.1, PALETTE[0])?;
     Ok(Image {
         width: masks.width,
         height: masks.height,
@@ -182,7 +192,7 @@ mod tests {
 
     #[test]
     fn driving_paints_palette_by_left_to_right_order_on_bg() {
-        let out = paint_driving_masks(&two_person_masks(), BG_BLACK);
+        let out = paint_driving_masks(&two_person_masks(), BG_BLACK).unwrap();
         assert_eq!(out.len(), 1);
         // pixel 0 = object 3 = order[0] = blue; pixel 1 = object 7 = order[1] = red.
         assert_eq!(&out[0].pixels[0..3], &PALETTE[0], "leftmost person → blue");
@@ -197,7 +207,7 @@ mod tests {
             width: 2,
             height: 1,
         };
-        let out = paint_driving_masks(&masks, BG_WHITE);
+        let out = paint_driving_masks(&masks, BG_WHITE).unwrap();
         assert_eq!(&out[0].pixels[0..3], &PALETTE[0], "person → blue");
         assert_eq!(&out[0].pixels[3..6], &BG_WHITE, "empty pixel → white bg");
     }
@@ -215,7 +225,7 @@ mod tests {
             width: 1,
             height: 1,
         };
-        let out = paint_driving_masks(&masks, BG_BLACK);
+        let out = paint_driving_masks(&masks, BG_BLACK).unwrap();
         assert_eq!(
             &out[0].pixels[0..3],
             &BG_BLACK,
@@ -242,6 +252,40 @@ mod tests {
             &out.pixels[3..6],
             &PALETTE[0],
             "largest person painted blue"
+        );
+    }
+
+    #[test]
+    fn driving_errors_on_mask_buffer_size_mismatch() {
+        // sc-8907 / F-105: a per-person SAM3 mask whose pixel count doesn't match the painted frame
+        // (declared 2x1 = 2 px, but the mask carries 3) is an upstream dimension bug — surface a
+        // typed error instead of silently painting a corrupted conditioning mask.
+        let masks = AllPersonMasks {
+            order: vec![1],
+            per_frame: vec![vec![(1, vec![255, 0, 255])]], // 3-px mask for a 2-px frame
+            width: 2,
+            height: 1,
+        };
+        let err = paint_driving_masks(&masks, BG_BLACK).unwrap_err();
+        assert!(
+            matches!(err, WorkerError::Engine(ref m) if m.contains("mask/buffer size mismatch")),
+            "expected a typed size-mismatch error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn reference_errors_on_mask_buffer_size_mismatch() {
+        // The reference painter shares the same guard: a mismatched primary-person mask errors.
+        let masks = AllPersonMasks {
+            order: vec![4],
+            per_frame: vec![vec![(4, vec![255, 255, 255, 255, 255])]], // 5-px mask for a 4-px frame
+            width: 4,
+            height: 1,
+        };
+        let err = paint_reference_mask(&masks, BG_WHITE).unwrap_err();
+        assert!(
+            matches!(err, WorkerError::Engine(ref m) if m.contains("mask/buffer size mismatch")),
+            "expected a typed size-mismatch error, got {err:?}"
         );
     }
 

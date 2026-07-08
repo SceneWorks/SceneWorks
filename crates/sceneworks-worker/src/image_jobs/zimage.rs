@@ -1,15 +1,15 @@
-/// The engine registry id for the Z-Image Fun-Controlnet-Union variant.
+/// The engine registry id for the Z-Image Fun-Controlnet-Union variant. The default control repo is
+/// the `STRICT_CONTROL_ENGINES` table row for this id (resolved via `strict_control_default_repo`),
+/// so the resolver, error message, and download hint stay in lockstep on a table repoint (sc-2257
+/// parity).
 const ZIMAGE_CONTROL_ENGINE_ID: &str = "z_image_turbo_control";
-/// Default Fun-Controlnet-Union control-weights repo + file (sc-2257 parity).
-const ZIMAGE_CONTROL_REPO: &str = "alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1";
 const ZIMAGE_CONTROL_FILE: &str = "Z-Image-Turbo-Fun-Controlnet-Union-2.1-8steps.safetensors";
 
 /// The engine registry id for the **base** (non-distilled, full-CFG) Z-Image Fun-Controlnet-Union
 /// variant (sc-8251). Same VACE Fun-Union control branch as the Turbo variant, but assembled from a
-/// base `Tongyi-MAI/Z-Image` snapshot + the base control checkpoint, and driven with REAL CFG.
+/// base `Tongyi-MAI/Z-Image` snapshot + the base control checkpoint, and driven with REAL CFG. Default
+/// control repo comes from the `STRICT_CONTROL_ENGINES` table (via `strict_control_default_repo`).
 const ZIMAGE_BASE_CONTROL_ENGINE_ID: &str = "z_image_control";
-/// Default base Fun-Controlnet-Union control-weights repo + file (sc-8251).
-const ZIMAGE_BASE_CONTROL_REPO: &str = "alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1";
 const ZIMAGE_BASE_CONTROL_FILE: &str = "Z-Image-Fun-Controlnet-Union-2.1.safetensors";
 
 // `pose_entries` / `parse_poses` / `PoseInput` moved to `base.rs` (shared by the candle InstantID
@@ -36,14 +36,16 @@ fn zimage_base_control_available(request: &ImageRequest, settings: &Settings) ->
 }
 
 /// Resolve the Fun-Controlnet-Union checkpoint (`advanced.controlWeights.{repo,filename}`
-/// else defaults) to a single `.safetensors` in the HF cache. `None` when absent (the
-/// model-download flow fetches it ahead of generation, like base weights).
+/// else defaults) to a single `.safetensors` in the HF cache. `Ok(None)` when absent (the
+/// model-download flow fetches it ahead of generation, like base weights); `Err` when the
+/// payload filename is not a plain component (sc-8821 / F-019 — a `../…` filename must not
+/// escape the snapshot).
 fn resolve_control_weights_for(
     request: &ImageRequest,
     settings: &Settings,
     default_repo: &'static str,
     default_file: &'static str,
-) -> Option<PathBuf> {
+) -> WorkerResult<Option<PathBuf>> {
     let control = request
         .advanced
         .get("controlWeights")
@@ -58,16 +60,24 @@ fn resolve_control_weights_for(
             .to_owned()
     };
     let repo = str_field("repo", default_repo);
-    let filename = str_field("filename", default_file);
-    let snapshot = huggingface_snapshot_dir(&settings.data_dir, &repo)?;
+    let filename = safe_weight_filename(
+        &str_field("filename", default_file),
+        "advanced.controlWeights.filename",
+    )?;
+    let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, &repo) else {
+        return Ok(None);
+    };
     let path = snapshot.join(filename);
-    path.exists().then_some(path)
+    Ok(path.exists().then_some(path))
 }
 
 /// Resolve the Z-Image Fun-Controlnet-Union checkpoint. The default repo comes from the shared
 /// strict-control table (single source of truth — `STRICT_CONTROL_ENGINES`); the file default stays
 /// engine-specific.
-fn resolve_control_weights(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
+fn resolve_control_weights(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
     resolve_control_weights_for(
         request,
         settings,
@@ -79,7 +89,10 @@ fn resolve_control_weights(request: &ImageRequest, settings: &Settings) -> Optio
 /// Resolve the **base** Z-Image Fun-Controlnet-Union checkpoint (sc-8251). The default repo comes from
 /// the shared strict-control table (single source of truth — `STRICT_CONTROL_ENGINES`); the file
 /// default stays engine-specific.
-fn resolve_base_control_weights(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
+fn resolve_base_control_weights(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
     resolve_control_weights_for(
         request,
         settings,
@@ -131,8 +144,7 @@ fn zimage_control_load(
     adapters: Vec<AdapterSpec>,
 ) -> WorkerResult<Box<dyn Generator>> {
     let spec = zimage_control_spec(weights_dir, control_weights, quant, adapters);
-    gen_core::load(ZIMAGE_CONTROL_ENGINE_ID, &spec)
-        .map_err(|error| WorkerError::Engine(format!("Z-Image control load failed: {error}")))
+    load_control_engine(ZIMAGE_CONTROL_ENGINE_ID, &spec)
 }
 
 #[cfg(all(target_os = "macos", test))]
@@ -144,8 +156,7 @@ fn zimage_base_control_load(
 ) -> WorkerResult<Box<dyn Generator>> {
     // Shares the Turbo control's `LoadSpec` shape (base dir + control overlay); only the engine id differs.
     let spec = zimage_control_spec(weights_dir, control_weights, quant, adapters);
-    gen_core::load(ZIMAGE_BASE_CONTROL_ENGINE_ID, &spec)
-        .map_err(|error| WorkerError::Engine(format!("Z-Image base control load failed: {error}")))
+    load_control_engine(ZIMAGE_BASE_CONTROL_ENGINE_ID, &spec)
 }
 
 /// Generate one strict-pose image: the pre-built `conditioning` (the required `Control` plus an optional
@@ -234,13 +245,14 @@ async fn generate_zimage_control_stream(
     // AND a referenceAssetId is present — parity with `MlxZImageAdapter._identity_init_requested`.
     // The reference is shared across the whole pose set (identity is constant; only the per-pose
     // skeleton changes). None → the pose-only tier (the validated sc-2257 default).
-    let identity_init = resolve_zimage_identity_init(request, settings, project_path)?;
+    let identity_init = resolve_identity_init(request, settings, project_path)?;
 
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("Z-Image weights not found".to_owned()))?;
-    let control_weights = resolve_control_weights(request, settings).ok_or_else(|| {
+    let control_weights = resolve_control_weights(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
-            "Z-Image strict-pose control weights not found (download {ZIMAGE_CONTROL_REPO})."
+            "Z-Image strict-pose control weights not found (download {}).",
+            strict_control_default_repo(ZIMAGE_CONTROL_ENGINE_ID)
         ))
     })?;
     let (quant, quant_bits) = resolve_quant(request);
@@ -285,17 +297,14 @@ async fn generate_zimage_control_stream(
     // omitted, the set still renders. The `!Send` scorer is built ONCE inside the closure (source
     // embedded once, reused across all poses — the caching AC).
     let likeness_source = resolve_control_identity_source(request, settings, project_path);
-    let face_stack_dir = if likeness_source.is_some() {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        likeness_source.is_some(),
+        "pose-set face-stack staging failed; likeness scores omitted",
+    )
+    .await;
 
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
@@ -484,15 +493,16 @@ async fn generate_zimage_base_control_stream(
     let request = &plan.request;
     // Identity img2img-init (opt-in escape hatch, off by default) — same gate as the Turbo path
     // (`advanced.referenceStrength > 0` AND a `referenceAssetId`). Shared across the whole pose set.
-    let identity_init = resolve_zimage_identity_init(request, settings, project_path)?;
+    let identity_init = resolve_identity_init(request, settings, project_path)?;
 
     let zimage = mlx_model("z_image")
         .ok_or_else(|| WorkerError::InvalidPayload("z-image base model row missing".to_owned()))?;
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("Z-Image base weights not found".to_owned()))?;
-    let control_weights = resolve_base_control_weights(request, settings).ok_or_else(|| {
+    let control_weights = resolve_base_control_weights(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
-            "Z-Image base strict-control weights not found (download {ZIMAGE_BASE_CONTROL_REPO})."
+            "Z-Image base strict-control weights not found (download {}).",
+            strict_control_default_repo(ZIMAGE_BASE_CONTROL_ENGINE_ID)
         ))
     })?;
     let (quant, quant_bits) = resolve_quant(request);
@@ -532,6 +542,24 @@ async fn generate_zimage_base_control_stream(
     // while only the per-pose skeleton changes (Python parity).
     let seed = resolve_seed(request, 0);
 
+    // Identity-likeness scoring (epic 4406, sc-4410): the base strict-control lane is a Character-
+    // Studio pose-library job just like Turbo; when it carries a character identity `referenceAssetId`,
+    // score every finished pose against that source identity face through the SHARED generator-agnostic
+    // seam. Resolve the source identity image + asset id and stage the antelopev2 face stack (same
+    // bundle InstantID uses; a no-op if cached). All non-fatal: a missing reference / staging failure →
+    // no scorer → scores omitted, the set still renders. The `!Send` scorer is built ONCE inside the
+    // closure (source embedded once, reused across all poses — the caching AC). This is the base mirror
+    // of the identical block in `generate_zimage_control_stream` (sc-8822 closed the copy-paste gap).
+    let likeness_source = resolve_control_identity_source(request, settings, project_path);
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        likeness_source.is_some(),
+        "pose-set face-stack staging failed; likeness scores omitted",
+    )
+    .await;
+
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
@@ -549,7 +577,17 @@ async fn generate_zimage_base_control_stream(
             let control_source = control_source.as_ref();
             let depth_weights_dir = depth_weights_dir.as_deref();
             let negative_prompt = negative_prompt.clone();
-            drive_gen_items(tx, poses, move |_index, pose, on_progress| {
+            // Build the per-job identity-likeness scorer ONCE on the generator-worker thread (the
+            // `!Send` face stack lives here); the source identity is embedded once and reused across
+            // every pose (sc-4410). `None` ⇒ no identity reference / non-fatal construction failure.
+            let scorer = match (&face_stack_dir, &likeness_source) {
+                (Some(dir), Some((source, _))) => {
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                }
+                _ => None,
+            };
+            let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
+            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
                     user_control,
@@ -579,7 +617,22 @@ async fn generate_zimage_base_control_stream(
                     &cancel,
                     on_progress,
                 )?;
-                Ok(Some((seed, out_w, out_h, pixels)))
+                // Score this finished pose against the cached source embedding (sc-4410). The strict-
+                // control lane produces the FINAL image directly (no face-restore pass), so this scores
+                // what the user sees. Image build + pixel clone paid ONLY when a scorer exists; a
+                // full-body / turned pose with no reliable frontal face → honest detected:false N/A.
+                let face_likeness = scorer.as_ref().and_then(|scorer| {
+                    crate::face_likeness::score_generated_image(
+                        Some(scorer),
+                        &Image {
+                            width: out_w,
+                            height: out_h,
+                            pixels: pixels.clone(),
+                        },
+                        likeness_source_ref.as_deref(),
+                    )
+                });
+                Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
             })
         },
     );
@@ -602,62 +655,10 @@ async fn generate_zimage_base_control_stream(
     .await
 }
 
-/// The clamped identity img2img-init strength for the Z-Image strict-pose set, or `None` for the
-/// pose-only tier (sc-3146). `Some(strength)` iff `advanced.referenceStrength > 0` AND a non-empty
-/// `referenceAssetId` is present — parity with `MlxZImageAdapter._identity_init_requested`. The
-/// strict-pose stream always carries poses (`zimage_control_available`), so the
-/// bare-reference-without-poses rejection is handled upstream; here a `referenceStrength` set
-/// without an asset simply falls back to pose-only, matching the Python gate rather than erroring.
-///
-/// `strength` is the user value clamped to `[0.05, 1.0]` and carries the mflux `image_strength`
-/// convention **verbatim** (no numeric inversion): the mlx-gen Z-Image control engine and mflux
-/// agree — higher strength → later denoise start (`init_time_step`) → output stays closer to the
-/// init. Mirrors `MlxZImageAdapter._reference_strength` + the sidecar's verbatim forward. Pure
-/// (request only) so the parity-sensitive gate + clamp are unit-testable without asset I/O.
-fn zimage_identity_strength(request: &ImageRequest) -> Option<f32> {
-    let strength = request
-        .advanced
-        .get("referenceStrength")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .filter(|strength| *strength > 0.0)?;
-    let has_asset = request
-        .reference_asset_id
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|id| !id.is_empty());
-    has_asset.then(|| (strength as f32).clamp(0.05, 1.0))
-}
-
-/// Resolve the optional identity img2img-init for the Z-Image strict-pose set (sc-3146):
-/// `Some((image, strength))` when [`zimage_identity_strength`] engages, decoding `referenceAssetId`
-/// via [`load_reference_image`]; `None` for the default pose-only tier. The reference is shared
-/// across the whole pose set (identity is constant; only the per-pose skeleton changes).
-fn resolve_zimage_identity_init(
-    request: &ImageRequest,
-    settings: &Settings,
-    project_path: &Path,
-) -> WorkerResult<Option<(Image, f32)>> {
-    let Some(strength) = zimage_identity_strength(request) else {
-        return Ok(None);
-    };
-    let asset_id = request
-        .reference_asset_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .expect("zimage_identity_strength guarantees a non-empty referenceAssetId");
-    let image = load_reference_image(
-        &settings.data_dir,
-        &request.project_id,
-        asset_id,
-        project_path,
-    )?;
-    Ok(Some((image, strength)))
-}
+// sc-8946 (F-144): the Z-Image identity gate (`zimage_identity_strength`) and its init resolver
+// (`resolve_identity_init`) were line-for-line copies of the FLUX.2-dev pair. Both now share
+// the single [`identity_strength`] / [`resolve_identity_init`] in base.rs — this lane calls those
+// directly (see `resolve_identity_init(request, settings, project_path)` at the strict-pose streams).
 
 /// Resolve the Z-Image Image-Edit img2img init for `mode == "edit_image"` (epic 3529):
 /// `Some((source, strength))` decoding `sourceAssetId` and pre-fitting it to the output W×H

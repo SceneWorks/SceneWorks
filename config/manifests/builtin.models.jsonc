@@ -112,7 +112,24 @@
           "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
         }
       },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120)
+      // at 1024² via the candle-gen VramProbe harness. q4 packed tier overall-peak 18.4 GB, bf16 dense
+      // 32.0 GB; minMemoryGb 40 covers the heaviest (bf16) tier with headroom. candle loads lazily, so
+      // load-peak is negligible — the denoise peak dominates.
+      "candle": {
+        "minMemoryGb": 40,
+        "vramGbByTier": { "q4": 18.4, "bf16": 32.0 },
+        "measured": true
+      },
       "ui": {
+        // img2img reference-guided t2i (epic 8588 A4.5, sc-10193): the `ui.img2img` flag drives the
+        // Image Studio "Image reference" tile + strength slider (referenceAssetId + advanced.strength).
+        // Distinct from the Character Studio `referenceStrength` identity-init (sc-3619) below, which
+        // keeps precedence on the worker (resolve_identity_init first, then this generic img2img). Both
+        // feed the same z-image img2img entrypoint (Conditioning::Reference); only the strength keying
+        // differs. Full 0–1 slider (default 0.5), unclamped — usable band is model-specific.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Z-Image-Turbo",
         "description": "Fast first image target for local text-to-image generation.",
         "recommendedFor": ["text_to_image", "style_variations"],
@@ -236,6 +253,12 @@
         }
       },
       "ui": {
+        // img2img reference-guided t2i (epic 8588 A4.5, sc-10193): base Z-Image is NOT in the worker's
+        // z_image_turbo|z_image_edit reference arm, so this `ui.img2img` flag routes it straight through
+        // the generic img2img latent-init (resolve_img2img_init_generic → the shared Conditioning::Reference
+        // → z-image base engine's encode_init_latents). Full 0–1 slider (default 0.5), unclamped.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Z-Image",
         "description": "Undistilled base Z-Image text-to-image (real CFG, ~50 steps); higher quality than Turbo at a higher compute cost.",
         "recommendedFor": ["text_to_image", "style_variations"],
@@ -381,6 +404,41 @@
           "files": ["bf16/*"],
           "estimatedSizeBytes": 57731960832,
           "footprint": { "diskSizeBytes": 57731960832, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // Packed 2512-Fun-Controlnet-Union strict-control tier (sc-9870, epic 8236). SceneWorks re-host
+        // of alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union as a per-tier packed matrix — each subdir
+        // is a SINGLE `model.safetensors` control overlay: q4/ q8/ bf16/. This replaces the old dense
+        // alibaba-pai overlay staging (sc-8350): the base-Qwen strict-pose lane (candle `qwen_control.rs`
+        // + MLX `qwen.rs`, engine id `qwen_image_control`) now resolves the control subdir that MATCHES
+        // the selected transformer tier (advanced.mlxQuantize → q4/q8/bf16, via `qwen_control_tier_subdir`)
+        // for a coherent A/B — a q4 base pairs with the q4 control overlay, etc. Listed as co-requisites
+        // (FETCH-ALL) so the whole control matrix installs alongside the base and A/B tier-toggling never
+        // needs a gen-time fetch; the drivers still on-demand-fetch a missing tier as a safety net. The
+        // packed overlays are small (q4 ~0.99 GB / q8 ~1.87 GB / bf16 ~3.51 GB) relative to the 20B base.
+        // The sc-8350 two-overlay ambiguity is gone: each tier subdir ships exactly one control file.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-2512-fun-controlnet-union",
+          "coRequisite": true,
+          "files": ["q4/model.safetensors"],
+          "estimatedSizeBytes": 989855744,
+          "footprint": { "diskSizeBytes": 989855744, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-2512-fun-controlnet-union",
+          "coRequisite": true,
+          "files": ["q8/model.safetensors"],
+          "estimatedSizeBytes": 1873805312,
+          "footprint": { "diskSizeBytes": 1873805312, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-2512-fun-controlnet-union",
+          "coRequisite": true,
+          "files": ["bf16/model.safetensors"],
+          "estimatedSizeBytes": 3506438144,
+          "footprint": { "diskSizeBytes": 3506438144, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -424,6 +482,15 @@
           "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
           "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
         }
+      },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
+      // 1024²/10-step via the candle-gen nvidia-smi peak monitor: q4 packed overall-peak 56.3 GB (the
+      // 20B DiT + Qwen2.5-VL TE + Qwen-Image VAE; the heaviest measured image tier). minMemoryGb 64
+      // covers it with headroom; q8/bf16 ESTIMATED (~66 / ~80 GB) pending measurement.
+      "candle": {
+        "minMemoryGb": 64,
+        "vramGbByTier": { "q4": 56.3, "q8": 66.0, "bf16": 80.0 },
+        "measured": false
       },
       "ui": {
         "label": "Qwen Image",
@@ -710,13 +777,18 @@
         // artifact tagged with a `variant` key + a `footprint` (required on-disk diskSizeBytes;
         // resident/peak backfilled by sc-8770). diskSizeBytes are the EXACT summed on-disk bytes of
         // each SceneWorks/lens-mlx tier subdir. Replaces the dead whole-repo microsoft/Lens download.
+        // sc-9092 (epic 9083 gap #3): these per-tier MLX turnkey subdirs are now installable on
+        // Windows/Linux too — the candle Lens loader packed-detects the SAME `SceneWorks/lens-mlx`
+        // q4/q8/bf16 tier the macOS path loads (candle-gen sc-8799), so the off-Mac lane picks its tier
+        // at download exactly like macOS, and the separate `SceneWorks/Lens` bf16 diffusers INFERENCE
+        // entry (the retired `candle_lens_repo` target) is removed.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/lens-mlx",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 18998339228,
           "footprint": { "diskSizeBytes": 18998339228, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -725,7 +797,7 @@
           "repo": "SceneWorks/lens-mlx",
           "variant": "q8",
           "files": ["q8/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 29921486998,
           "footprint": { "diskSizeBytes": 29921486998, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -734,43 +806,27 @@
           "repo": "SceneWorks/lens-mlx",
           "variant": "bf16",
           "files": ["bf16/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 22347329085,
           "footprint": { "diskSizeBytes": 22347329085, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
-          // Off-Mac candle (Windows/Linux) diffusers rehost (sc-8799): the MLX turnkeys above are packed
-          // q4/q8/bf16 tiers the candle diffusers loader can't read, so the candle lane loads THIS
-          // self-contained diffusers snapshot (tokenizer/ text_encoder/ transformer/ vae/ at the repo
-          // root — what candle_gen_lens::Pipeline::load_components reads), rebuilt from Comfy-Org/Lens +
-          // openai/gpt-oss-20b (MXFP4) + FLUX.2-dev after the original microsoft/Lens went dead. Whole
-          // repo (files: []); the candle provider quantizes on-the-fly (Q4/Q8, descriptor-gated) at
-          // load, so the single bf16 source serves every candle quant tier. Mirrors ideogram_4's
-          // off-Mac bf16 entry + the Wan2.2 macOS-MLX/off-Mac-diffusers split. Resolved by
-          // `candle_lens_repo` (image_jobs/base.rs). Candle sibling of the MLX host sc-8767.
-          "provider": "huggingface",
-          "repo": "SceneWorks/Lens",
-          "variant": "bf16",
-          "files": [],
-          "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 22334041829,
-          "footprint": { "diskSizeBytes": 22334041829, "residentMemoryBytes": null, "peakMemoryBytes": null }
-        },
-        {
-          // macOS LoRA-training base (sc-8797): the same SceneWorks/Lens diffusers rehost the off-Mac
-          // entry above fetches, exposed as an installable variant on macOS. The MLX q4/q8/bf16 tiers
+          // LoRA-training base (sc-8797): the SceneWorks/Lens FLAT diffusers rehost, exposed as an
+          // installable variant. The MLX q4/q8/bf16 tiers
           // above are packed turnkey SUBDIRS the trainer's flat-diffusers loader doesn't read and the
           // training installed-gate (`training_base_model_installed`, keyed on the target's
           // `baseModelRepo` HF-cache presence) doesn't see — before the tier split (sc-8767) the lens
           // install WAS the flat microsoft/Lens repo, so one download served inference + training.
-          // Installing this variant restores that for macOS training; off-Mac needs nothing extra (the
-          // bf16 candle entry already fetches the whole repo). Per-variant install state probes this
-          // entry's own repo, so it tracks independently of the MLX tiers (sc-8508).
+          // sc-9092: candle inference now packed-loads the `SceneWorks/lens-mlx` turnkey tiers directly
+          // (the separate off-Mac bf16 diffusers INFERENCE entry is retired), so the flat-diffusers
+          // TRAINING base is exposed on Windows/Linux too (the candle LoRA trainer's flat loader still
+          // needs it) — not just macOS. Per-variant install state probes this entry's own repo, so it
+          // tracks independently of the MLX inference tiers (sc-8508).
           "provider": "huggingface",
           "repo": "SceneWorks/Lens",
           "variant": "training",
           "files": [],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 22334041829,
           "footprint": { "diskSizeBytes": 22334041829, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
@@ -823,8 +879,8 @@
           "title": "Lens Prompt Guide",
           "path": "/prompt-guides/lens.md",
           "sources": [
-            { "label": "Microsoft Lens model card", "url": "https://huggingface.co/microsoft/Lens" },
-            { "label": "Microsoft Lens-Turbo model card", "url": "https://huggingface.co/microsoft/Lens-Turbo" }
+            { "label": "Lens — SceneWorks MLX rehost", "url": "https://huggingface.co/SceneWorks/lens-mlx" },
+            { "label": "Lens-Turbo — SceneWorks MLX rehost", "url": "https://huggingface.co/SceneWorks/lens-turbo-mlx" }
           ]
         }
       }
@@ -848,13 +904,18 @@
         // on-disk from the SceneWorks/lens-turbo-mlx repo. Note the q8 text-encoder int8 up-cast of the
         // MXFP4 MoE is LARGER than bf16, so q8 > bf16 on disk here. Replaces the whole-repo dense
         // microsoft/Lens-Turbo download.
+        // sc-9092 (epic 9083 gap #3): installable on Windows/Linux too — the candle Lens-Turbo loader
+        // packed-detects the SAME `SceneWorks/lens-turbo-mlx` q4/q8/bf16 tier the macOS path loads
+        // (candle-gen sc-8799), so the off-Mac lane picks its tier at download exactly like macOS, and
+        // the separate `SceneWorks/Lens-Turbo` bf16 diffusers entry (the retired `candle_lens_repo`
+        // target) is removed.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/lens-turbo-mlx",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 21830326407,
           // Measured on-device (sc-8516, harness crates/sceneworks-worker/src/footprint_measure.rs):
           // Apple Silicon, 1024², fresh process, via mlx_rs::memory::{get_active_memory,get_peak_memory}.
@@ -870,7 +931,7 @@
           "repo": "SceneWorks/lens-turbo-mlx",
           "variant": "q8",
           "files": ["q8/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 32753474289,
           "footprint": { "diskSizeBytes": 32753474289, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -879,25 +940,9 @@
           "repo": "SceneWorks/lens-turbo-mlx",
           "variant": "bf16",
           "files": ["bf16/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 30651441376,
           "footprint": { "diskSizeBytes": 30651441376, "residentMemoryBytes": null, "peakMemoryBytes": null }
-        },
-        {
-          // Off-Mac candle (Windows/Linux) diffusers rehost (sc-8799): the distilled sibling of the
-          // base-Lens off-Mac entry above. The MLX turnkeys are packed q4/q8/bf16 tiers the candle
-          // diffusers loader can't read, so the candle lane loads THIS self-contained diffusers snapshot
-          // (tokenizer/ text_encoder/ transformer/ vae/ at the repo root), rebuilt from Comfy-Org/Lens'
-          // lens_turbo_bf16 DiT + openai/gpt-oss-20b (MXFP4) + FLUX.2-dev after microsoft/Lens-Turbo went
-          // dead. Whole repo (files: []); candle quantizes on-the-fly at load. Resolved by
-          // `candle_lens_repo`. Candle sibling of the MLX host sc-8763.
-          "provider": "huggingface",
-          "repo": "SceneWorks/Lens-Turbo",
-          "variant": "bf16",
-          "files": [],
-          "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 22334041788,
-          "footprint": { "diskSizeBytes": 22334041788, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -943,6 +988,15 @@
         "quantize": 4,
         "standardTierLayout": true
       },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
+      // 1024²/8-step via the candle-gen nvidia-smi peak monitor: q4 packed overall-peak 37.3 GB (the
+      // gpt-oss MXFP4 encoder + Flux.2 VAE dominate). minMemoryGb 44 covers it with headroom; q8/bf16
+      // ESTIMATED (~42 / ~52 GB) pending measurement.
+      "candle": {
+        "minMemoryGb": 44,
+        "vramGbByTier": { "q4": 37.3, "q8": 42.0, "bf16": 52.0 },
+        "measured": false
+      },
       "ui": {
         "label": "Lens-Turbo",
         "description": "Microsoft Lens distilled 4-step text-to-image (gpt-oss-20b text encoder + FLUX.2 VAE). Strong prompt following and text rendering; needs a large-VRAM GPU (~30GB mxfp4 / ~60GB bf16).",
@@ -952,8 +1006,8 @@
           "title": "Lens-Turbo Prompt Guide",
           "path": "/prompt-guides/lens-turbo.md",
           "sources": [
-            { "label": "Microsoft Lens-Turbo model card", "url": "https://huggingface.co/microsoft/Lens-Turbo" },
-            { "label": "Microsoft Lens model card", "url": "https://huggingface.co/microsoft/Lens" }
+            { "label": "Lens-Turbo — SceneWorks MLX rehost", "url": "https://huggingface.co/SceneWorks/lens-turbo-mlx" },
+            { "label": "Lens — SceneWorks MLX rehost", "url": "https://huggingface.co/SceneWorks/lens-mlx" }
           ]
         }
       }
@@ -1080,6 +1134,94 @@
       }
     },
     {
+      // SenseNova-U1-8B-MoT-Infographic-V2 (epic 9959): a coexisting checkpoint refresh of the SAME
+      // NEO-unify architecture as `sensenova_u1_8b` (identical config.json + tensor namespace — verified
+      // byte-for-byte), specialized for infographic generation with sharper dense small-text, more stable
+      // complex layouts, better aesthetics, and a black-background fix. Because the architecture is
+      // unchanged, it rides the EXISTING `sensenova_u1_8b` engine (engines.rs ModelRow engine_id) with no
+      // engine change — only a new hosted quant-matrix re-host + this catalog entry. Not `recommended`
+      // yet (pending on-device A/B vs V1). Full capability surface, identical to V1.
+      "id": "sensenova_u1_8b_infographic_v2",
+      "name": "SenseNova-U1 8B Infographic V2",
+      "family": "sensenova-u1",
+      "type": "image",
+      "adapter": "sensenova_u1",
+      "capabilities": ["text_to_image", "edit_image", "character_image", "vqa", "interleave"],
+      "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (epic 9959, S1): a public/ungated re-host of
+        // sensenova/SenseNova-U1-8B-MoT-Infographic-V2 built with the same `prequantize_turnkey` harness
+        // as the base. Per-tier subdirs (each a complete from_snapshot tree: packed/dense backbone +
+        // tokenizer + config): q4/ (default), q8/, bf16/. Byte sizes are EXACT on-disk measurements of
+        // the hosted repo per subdir.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 11824526363,
+          "footprint": { "diskSizeBytes": 11824526363, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 19927923905,
+          "footprint": { "diskSizeBytes": 19927923905, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 35121744859,
+          "footprint": { "diskSizeBytes": 35121744859, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/sensenova-u1-8b-infographic-v2-mlx"
+      },
+      "gated": false,
+      "defaults": {
+        "resolution": "2048x2048",
+        "steps": 50,
+        "guidanceScale": 4.0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "shift",
+        "schedulerShift": 3.0
+      },
+      "limits": {
+        "resolutions": ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"],
+        "count": [1, 2, 4],
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "loraCompatibility": {
+        "families": ["sensenova-u1"],
+        "types": []
+      },
+      "mlx": {
+        "quantize": 4,
+        "standardTierLayout": true
+      },
+      "ui": {
+        "label": "SenseNova-U1 8B Infographic V2",
+        "description": "Infographic-specialized variant of SenseNova-U1 (NEO-unify, ~16B), a coexisting checkpoint refresh of the base 8B model. Tuned for information-dense visual content — posters, presentations, comics, resumes, knowledge illustrations — with sharper dense small-text, more stable complex layouts, improved aesthetics, and a fix for the black-background issue. Same unified surface as the base: text-to-image, instruction editing, wardrobe-preserving Character Studio, VQA, and Document Studio (interleaved text+image). Heavy: ~35GB bf16, ~50 steps; runs on large-VRAM GPUs and 96GB+ Apple Silicon (MPS).",
+        "recommendedFor": ["text_to_image", "edit_image", "character_image"],
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "promptGuide": {
+          "title": "SenseNova-U1 8B Infographic V2 Prompt Guide",
+          "path": "/prompt-guides/sensenova-u1-8b-infographic-v2.md",
+          "sources": [
+            { "label": "SenseNova-U1 Infographic V2 model card", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT-Infographic-V2" },
+            { "label": "SenseNova-U1 prompt enhancement doc", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT/blob/main/docs/prompt_enhancement.md" }
+          ]
+        }
+      }
+    },
+    {
       "id": "sensenova_u1_8b_fast",
       "name": "SenseNova-U1 8B Fast",
       "family": "sensenova-u1",
@@ -1195,6 +1337,100 @@
             { "label": "SenseNova-U1 model card", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT" },
             { "label": "SenseNova-U1 prompt enhancement doc", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT/blob/main/docs/prompt_enhancement.md" },
             { "label": "SenseNova-U1 Infographic model card", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT-Infographic" }
+          ]
+        }
+      }
+    },
+    {
+      // Infographic-V2 8-step distilled variant (epic 9959, sc-9963). The V1 8-step distill LoRA
+      // (sensenova/SenseNova-U1-8B-MoT-LoRAs) merges cleanly onto V2 (296/296 gen-path targets) and
+      // renders coherent 8-step infographics — validated on-device. Pre-merged + packed per tier
+      // (distill_merged.json marker → load_fast skips the load-time merge), riding the existing
+      // sensenova_u1_8b_fast engine. T2I / edit / character only (no VQA / interleave), 8 steps / cfg 1.0.
+      "id": "sensenova_u1_8b_infographic_v2_fast",
+      "name": "SenseNova-U1 8B Infographic V2 Fast",
+      "family": "sensenova-u1",
+      "type": "image",
+      "adapter": "sensenova_u1",
+      "capabilities": ["text_to_image", "edit_image", "character_image"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 11824526409,
+          "footprint": { "diskSizeBytes": 11824526409, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 19927924235,
+          "footprint": { "diskSizeBytes": 19927924235, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 35121633249,
+          "footprint": { "diskSizeBytes": 35121633249, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx"
+      },
+      "gated": false,
+      "defaults": {
+        "resolution": "2048x2048",
+        "steps": 8,
+        "guidanceScale": 1.0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "shift",
+        "schedulerShift": 3.0
+      },
+      "limits": {
+        "resolutions": ["2048x2048", "2720x1536", "2496x1664", "2368x1760", "1536x2720", "1664x2496", "1760x2368"],
+        "count": [1, 2, 4],
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "loraCompatibility": {
+        "families": ["sensenova-u1"],
+        "types": []
+      },
+      "mlx": {
+        "quantize": 4,
+        "standardTierLayout": true
+      },
+      "ui": {
+        "label": "SenseNova-U1 8B Infographic V2 Fast",
+        "description": "8-step distilled SenseNova-U1 Infographic V2 — ~5–6× faster infographic/poster text-to-image, editing, and Character Studio reference at a small quality trade-off. Same infographic strengths as the V2 base (dense small-text, stable layouts, black-background fix) at 8 steps / cfg 1.0. Ships as its own pre-built quant-matrix (q4 default / q8 / bf16), each a self-contained tier with the 8-step distill LoRA already merged in — no separate LoRA download. Use the V2 base for max-quality dense-text work.",
+        "recommendedFor": ["text_to_image", "edit_image", "character_image"],
+        "variationStrength": { "label": "Reference strength", "default": 1.5, "min": 0.5, "max": 4.0, "step": 0.1 },
+        "viewAngles": [
+          { "id": "three_quarter_left", "label": "Three-quarter left" },
+          { "id": "three_quarter_right", "label": "Three-quarter right" },
+          { "id": "left_profile", "label": "Left profile" },
+          { "id": "right_profile", "label": "Right profile" },
+          { "id": "up", "label": "Looking up" },
+          { "id": "down", "label": "Looking down" },
+          { "id": "up_left", "label": "Up · left" },
+          { "id": "up_right", "label": "Up · right" },
+          { "id": "down_left", "label": "Down · left" },
+          { "id": "down_right", "label": "Down · right" },
+          { "id": "front", "label": "Front" }
+        ],
+        "promptGuide": {
+          "title": "SenseNova-U1 8B Infographic V2 Fast Prompt Guide",
+          "path": "/prompt-guides/sensenova-u1-8b-infographic-v2.md",
+          "sources": [
+            { "label": "SenseNova-U1 Infographic V2 model card", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT-Infographic-V2" },
+            { "label": "SenseNova-U1 prompt enhancement doc", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT/blob/main/docs/prompt_enhancement.md" }
           ]
         }
       }
@@ -1412,9 +1648,8 @@
       "family": "ideogram",
       "type": "image",
       // Ideogram 4: 9.3B single-stream flow-matching DiT (asymmetric CFG — two DiTs) +
-      // Qwen3-VL-8B text encoder, native MLX only (no torch backend), so hidden off-Mac via
-      // macOnly. Dispatched through the engines::MODEL_TABLE / gen_core registry id `ideogram_4`
-      // (adapter label below is the asset stamp, mirrors mlx_<family>). Epic 4725.
+      // Qwen3-VL-8B text encoder. Dispatched through the engines::MODEL_TABLE / gen_core registry id
+      // `ideogram_4` (adapter label below is the asset stamp, mirrors mlx_<family>). Epic 4725.
       "adapter": "mlx_ideogram",
       // text_to_image + img2img/Remix edit + mask inpaint/outpaint (sc-6303): the native engine's
       // edit path VAE-encodes the source and denoises from a strength-derived step; `image_inpaint`
@@ -1422,7 +1657,13 @@
       // worker's `resolve_ideogram_edit` (base MLX path) builds the source `Reference` + optional
       // `Conditioning::Mask`; the Edit tab gates on `edit_image` + `macSupport.features.edit`.
       "capabilities": ["text_to_image", "edit_image", "image_inpaint"],
-      "macOnly": true,
+      // sc-9092 (epic 9083 gap #3): macOnly is now a no-op label (mirroring krea/lens/klein/flux2_dev) —
+      // candle availability is driven by the routing tables (`CANDLE_ROUTED_MODELS` / `is_candle_engine`),
+      // not this flag. The candle (Windows/Linux) lane packed-loads the SAME `SceneWorks/ideogram-4-mlx`
+      // q4/q8 turnkey the macOS path loads (candle-gen sc-9412), so the per-tier turnkey download above is
+      // installable off-Mac and the separate `SceneWorks/ideogram-4` bf16 diffusers off-Mac entry (the
+      // retired `candle_ideogram_repo` target) is removed.
+      "macOnly": false,
       // Ideogram 4 was trained on STRUCTURED JSON CAPTIONS, not free text — plain text is
       // out-of-distribution (coherent but prompt-agnostic). SceneWorks builds the JSON caption
       // (high-level description + style + compositional deconstruction with 0-1000 bounding boxes
@@ -1435,25 +1676,55 @@
           // packed `q4/` (default, ~15.4 GB) + `q8/` (~28.7 GB, opt-in via advanced mlxQuantize: 8)
           // subdirs, each a self-contained snapshot (2 DiTs + Qwen3-VL TE + VAE + tokenizer). The
           // worker (resolve_ideogram_model_dir, image_jobs) picks the quant subdir and fetches q8/
-          // on demand. Gated non-commercial license; macOS-only download.
+          // on demand. Gated non-commercial license.
+          // sc-9092 (epic 9083 gap #3): installable on Windows/Linux too — the candle Ideogram loader
+          // packed-detects the SAME `SceneWorks/ideogram-4-mlx` q4/q8 tier the macOS path loads
+          // (candle-gen sc-9412, both DiTs), so the off-Mac candle lane picks its tier at download
+          // exactly like macOS via the shared `resolve_weights_dir`/`ideogram_model_subdir`, and the
+          // separate off-Mac `SceneWorks/ideogram-4` bf16 diffusers entry (the retired
+          // `candle_ideogram_repo` target) is removed. q4 is the default tier; sc-9607 wires the `q8/`
+          // on-demand fetch (`ensure_ideogram_tier_present`) on BOTH lanes, so off-Mac now picks q8 too
+          // (previously off-Mac gracefully fell back to q4).
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4-mlx",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 15400562623,
           "footprint": { "diskSizeBytes": 15400562623, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
-          // bf16 snapshot — shared across backends from the separate `SceneWorks/ideogram-4` repo's
-          // `bf16/` subdir (the MLX-quantized `ideogram-4-mlx` turnkey above is not bf16). Off-Mac the
-          // candle provider loads it (epic 6561 / sc-6859, `candle_ideogram_subdir`); on macOS it is the
-          // selectable full-precision MLX tier (sc-8513, epic 8506) — the worker resolves this repo's
-          // `bf16/` subdir when advanced mlxQuantize<=0 (rather than a duplicate copy in the MLX repo).
-          // A later quant variant can slot in alongside `bf16/` without a rename. Gated non-commercial.
+          // q8 packed tier (sc-9642): the SAME `SceneWorks/ideogram-4-mlx` turnkey's `q8/` subdir (both
+          // DiTs + dense TE/VAE), installable on ALL platforms — candle packed-detects it exactly like q4
+          // (sc-9412), so off-Mac gets the real q4/q8 A-B picker instead of q4-only. Higher fidelity than
+          // q4 at ~2x the size / VRAM (see candle.minMemoryGb). The bundled `q8/turbo_lora.safetensors`
+          // rides the glob but is inert for the base (non-turbo) model. Size excludes the ~0.85 GB LoRA,
+          // mirroring the q4 estimate above. (Previously q8 was reachable ONLY via the sc-9607
+          // generation-time on-demand fetch — never a Models-page-installable variant.)
+          "provider": "huggingface",
+          "repo": "SceneWorks/ideogram-4-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 28682662418,
+          "footprint": { "diskSizeBytes": 28682662418, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // bf16 snapshot — shared from the separate `SceneWorks/ideogram-4` repo's `bf16/` subdir (the
+          // MLX-quantized `ideogram-4-mlx` turnkey above is not bf16). On macOS it is the selectable
+          // full-precision MLX tier (sc-8513, epic 8506) — the worker resolves this repo's `bf16/` subdir
+          // when advanced mlxQuantize<=0 (rather than a duplicate copy in the MLX repo). A later quant
+          // variant can slot in alongside `bf16/` without a rename. Gated non-commercial.
           // sc-8508: this is a genuine per-tier quant variant (q4 vs bf16 of the same model), so it is
           // labeled `variant: bf16` — even though the two tiers happen to live in separate HF repos.
+          // sc-9650: installable on Windows/Linux too — the candle Ideogram loader reads this repo's
+          // `bf16/` single-file `transformer/model.safetensors` and dense-loads it via `linear_detect`
+          // (no `.scales` sibling → the dense arm), exactly like macOS/MLX; the worker resolves it off-Mac
+          // through the un-gated `IDEOGRAM_BF16_REPO` bf16 branch (GPU-validated on sm_120: renders a
+          // coherent 1024² image). ~55 GB on disk / ~80 GB MEASURED VRAM for the two-DiT path — a 96 GB-card
+          // tier (see the candle VRAM block below). The packed q4/q8 tiers above still come from the `-mlx`
+          // turnkey; `candle_ideogram_repo` stays retired.
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4",
           "variant": "bf16",
@@ -1503,16 +1774,40 @@
         "quantize": 4,
         "repo": "SceneWorks/ideogram-4-mlx"
       },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
+      // 1024²/10-step via the candle-gen nvidia-smi peak monitor: q4 packed overall-peak 38.5 GB (the
+      // two-DiT Ideogram path). minMemoryGb 46 gates the DEFAULT (q4) tier and covers it with headroom;
+      // q8 ESTIMATED (~44 GB). bf16 (sc-9650, off-Mac dense tier) MEASURED ~80 GB overall-peak (RTX PRO
+      // 6000, 1024²/48-step — the two dense-bf16 DiTs dominate); a 96 GB-card tier, small cards see it
+      // gated by its `vramGbByTier` ceiling.
+      "candle": {
+        "minMemoryGb": 46,
+        "vramGbByTier": { "q4": 38.5, "q8": 44.0, "bf16": 80.0 },
+        "measured": false
+      },
       // Ideogram Non-Commercial Model Agreement (gated): accept the license at the source repo and
       // add a Hugging Face token under Settings → Service credentials before downloading. NOTE: the
       // SceneWorks turnkey repo is currently PRIVATE; the end-user credential/access path for a
       // private gated repo is tracked in sc-5999 (license/gating UI + credential flow).
       "gated": true,
       "credentialHost": "huggingface.co",
+      // licenseUrl is the upstream Ideogram license TEXT; the "Request access" button is derived
+      // separately from the download repo (`gatedRepoUrl` → SceneWorks/ideogram-4-mlx, sc-5999), so
+      // license and access are intentionally two different pages for this model. Leave as upstream.
       "licenseUrl": "https://huggingface.co/ideogram-ai/ideogram-4-fp8",
       "ui": {
+        // img2img reference-guided t2i (epic 8588 A4.4, sc-10192): the `ui.img2img` flag drives the
+        // Image Studio "Image reference" tile + strength slider (referenceAssetId + advanced.strength).
+        // No engine change was needed — a `Conditioning::Reference` with NO `Mask` already IS a plain
+        // img2img denoise (start step from strength, tail of schedule) in the native edit path (sc-6303);
+        // this just exposes it as a plain-t2i surface. Distinct from the Remix/inpaint `edit_image`
+        // surface (which adds a `Mask`); the worker routes the two by mode (edit_image →
+        // resolve_ideogram_edit, text_to_image → the generic img2img arm). Ideogram is a
+        // `structuredPrompt` model, so the tile renders alongside the JSON-caption builder.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Ideogram 4",
-        "description": "Ideogram 4 — 9.3B flow-matching text-to-image with structured JSON-caption prompting (bounding-box layout + color palettes), MLX-only (Apple Silicon). Pre-quantized Q4 (~15 GB, default) / Q8. Distributed under the Ideogram Non-Commercial Model Agreement (gated): accept the license at huggingface.co/ideogram-ai/ideogram-4-fp8 and add a Hugging Face token under Settings → Service credentials before downloading. Trained on JSON captions — SceneWorks builds the caption from your prompt.",
+        "description": "Ideogram 4 — 9.3B flow-matching text-to-image with structured JSON-caption prompting (bounding-box layout + color palettes). Runs on Apple Silicon (MLX) and Windows/Linux (candle/CUDA). Pre-quantized Q4 (~15 GB, default) + Q8 (~29 GB) tiers. Distributed under the Ideogram Non-Commercial Model Agreement (gated): accept the license at huggingface.co/ideogram-ai/ideogram-4-fp8, then use Request access on the model page and add a Hugging Face token under Settings → Service credentials before downloading. Trained on JSON captions — SceneWorks builds the caption from your prompt.",
         "recommendedFor": ["text_to_image"],
         "pid": { "checkpointId": "pid_flux2" },
         "promptGuide": {
@@ -1541,7 +1836,9 @@
       // Same edit surface as the base (sc-6303): the shared denoise serves img2img/Remix + mask
       // inpaint/outpaint in the CFG-free turbo path too (only the initial latent + start step differ).
       "capabilities": ["text_to_image", "edit_image", "image_inpaint"],
-      "macOnly": true,
+      // sc-9092: macOnly is a no-op label (see `ideogram_4`) — the candle (Windows/Linux) lane packed-loads
+      // the SAME `SceneWorks/ideogram-4-mlx` q4 turnkey (with the bundled turbo LoRA) the macOS path loads.
+      "macOnly": false,
       // Same structured JSON-caption prompt surface as the base model (turbo distills the base, so
       // the caption contract is identical).
       "structuredPrompt": true,
@@ -1554,22 +1851,46 @@
           // BEFORE the LoRA was published shares this repo's snapshot, and a coarse `q4/*` glob is
           // already satisfied by the base files — so the missing LoRA would never flag "incomplete"
           // / show the Fix button. The specific path makes the check exact (apps/rust-api models.rs).
+          // sc-9092: installable on Windows/Linux too — the candle Ideogram-Turbo loader packed-detects
+          // the SAME `SceneWorks/ideogram-4-mlx` q4 turnkey (carrying the bundled `turbo_lora.safetensors`)
+          // the macOS path loads (candle-gen sc-9412), so the off-Mac candle lane picks its tier at
+          // download exactly like macOS, and the separate off-Mac `SceneWorks/ideogram-4` bf16 diffusers
+          // entry (the retired `candle_ideogram_repo` target) is removed.
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4-mlx",
           "variant": "q4",
           "default": true,
           "files": ["q4/*", "q4/turbo_lora.safetensors"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 16247340792,
           "footprint": { "diskSizeBytes": 16247340792, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
+          // q8 packed tier (sc-9642): the SAME `SceneWorks/ideogram-4-mlx` turnkey's `q8/` subdir,
+          // carrying the bundled `turbo_lora.safetensors` (listed EXPLICITLY for the exact cache-health
+          // check, like q4). Installable on ALL platforms — candle packed-detects it like q4 (sc-9412),
+          // so off-Mac gets the real q4/q8 A-B picker. Size includes the ~0.85 GB LoRA (turbo uses it).
+          "provider": "huggingface",
+          "repo": "SceneWorks/ideogram-4-mlx",
+          "variant": "q8",
+          "files": ["q8/*", "q8/turbo_lora.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 29529440587,
+          "footprint": { "diskSizeBytes": 29529440587, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
           // bf16 snapshot — shared from the separate `SceneWorks/ideogram-4` repo's `bf16/` subdir,
-          // which carries `turbo_lora.safetensors` (the turbo loader merges it at load). Off-Mac the
-          // candle provider loads it (epic 6561 / sc-6859); on macOS it is the selectable full-precision
-          // MLX tier (sc-8513) — the worker resolves this repo's `bf16/` when advanced mlxQuantize<=0,
-          // rather than duplicating it into the MLX turnkey repo. Same gated non-commercial license.
+          // which carries `turbo_lora.safetensors` (the turbo loader merges it at load). On macOS it is the
+          // selectable full-precision MLX tier (sc-8513) — the worker resolves this repo's `bf16/` when
+          // advanced mlxQuantize<=0, rather than duplicating it into the MLX turnkey repo. Same gated
+          // non-commercial license.
           // sc-8508: genuine per-tier quant variant (q4 vs bf16 of the same model) → labeled `bf16`.
+          // bf16 (sc-8513): the separate `SceneWorks/ideogram-4` `bf16/` dense tier, carrying
+          // `turbo_lora.safetensors`. sc-9654: installable on Windows/Linux too — the candle Ideogram-Turbo
+          // loader dense-loads this `bf16/` (same layout as the base) and merges the LoRA. The two dense-tier
+          // merge bugs (BF16/F32 fold + the CPU-override device move) are fixed in candle-gen #334, now
+          // pinned above; GPU-validated on sm_120 (a coherent 8-step 1024² render). ~55 GB / ~80 GB VRAM →
+          // a large-card tier (see the candle VRAM block). (Base q4/q8 come from the `-mlx` turnkey.)
           "provider": "huggingface",
           "repo": "SceneWorks/ideogram-4",
           "variant": "bf16",
@@ -1608,12 +1929,29 @@
         "quantize": 4,
         "repo": "SceneWorks/ideogram-4-mlx"
       },
+      // candle/CUDA VRAM gate (sc-9654). Turbo is CFG-free single-DiT, so it runs LIGHTER than the two-DiT
+      // base: bf16 MEASURED ~46 GB overall-peak on an RTX PRO 6000 (sm_120, 1024²/8-step) vs the base's ~80
+      // GB. q4/q8 ESTIMATED below the base's (24/28 vs base 38.5/44 — the MLX active floor is ~24 GiB Q4),
+      // pending a candle measurement. bf16 is a large-card tier; small cards see it gated by its
+      // `vramGbByTier` ceiling. minMemoryGb 30 gates the default (q4) tier with headroom.
+      "candle": {
+        "minMemoryGb": 30,
+        "vramGbByTier": { "q4": 24.0, "q8": 28.0, "bf16": 46.0 },
+        "measured": false
+      },
       "gated": true,
       "credentialHost": "huggingface.co",
+      // See `ideogram_4`: licenseUrl is the upstream license TEXT; access is the separate "Request
+      // access" button (`gatedRepoUrl` → SceneWorks/ideogram-4-mlx, sc-5999). Leave as upstream.
       "licenseUrl": "https://huggingface.co/ideogram-ai/ideogram-4-fp8",
       "ui": {
+        // img2img reference-guided t2i (epic 8588 A4.4, sc-10192): same plain-t2i "Image reference"
+        // surface as the base `ideogram_4` (a `Conditioning::Reference` with no `Mask` = plain img2img in
+        // the CFG-free turbo denoise; only the initial latent + start step differ). See `ideogram_4` ui.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Ideogram 4 Turbo",
-        "description": "Ideogram 4 Turbo — the few-step (~8) fast variant of Ideogram 4: same 9.3B flow-matching model and structured JSON-caption prompting, distilled to a CFG-free single-DiT path (the ostris TurboTime LoRA) for ~2x faster renders. MLX-only (Apple Silicon). Shares the gated Ideogram 4 turnkey — accept the license at huggingface.co/ideogram-ai/ideogram-4-fp8 and add a Hugging Face token under Settings → Service credentials before downloading.",
+        "description": "Ideogram 4 Turbo — the few-step (~8) fast variant of Ideogram 4: same 9.3B flow-matching model and structured JSON-caption prompting, distilled to a CFG-free single-DiT path (the ostris TurboTime LoRA) for ~2x faster renders. Runs on Apple Silicon (MLX) and Windows/Linux (candle/CUDA). Shares the gated Ideogram 4 turnkey (Q4 default + Q8 selectable) — accept the license at huggingface.co/ideogram-ai/ideogram-4-fp8, then use Request access on the model page and add a Hugging Face token under Settings → Service credentials before downloading.",
         "recommendedFor": ["text_to_image"],
         "pid": { "checkpointId": "pid_flux2" },
         "promptGuide": {
@@ -1646,33 +1984,31 @@
       // `adapter` is the asset stamp (mirrors mlx_<family>).
       "adapter": "mlx_boogu",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      // sc-9092 (epic 9083 gap #3): macOnly is now a no-op label (mirroring krea/lens/ideogram) — candle
+      // availability is driven by the routing tables (`CANDLE_ROUTED_MODELS` / `is_candle_engine`), not
+      // this flag. The candle (Windows/Linux) lane packed-loads the SAME `SceneWorks/boogu-image-mlx`
+      // Q8 `base/` subfolder the macOS path loads (candle-gen sc-9410 packed-detect, via the shared
+      // `resolve_weights_dir`/`boogu_model_subdir`), so the per-variant turnkey download below is
+      // installable off-Mac and the separate `Boogu/Boogu-Image-0.1-Base` diffusers entry (the retired
+      // `candle_boogu_repo` target) is removed.
+      "macOnly": false,
       "downloads": [
         {
           // Pre-converted MLX turnkey on the SceneWorks HF org (epic 6387 / sc-6397): ONE repo with
-          // Q8 `base/ turbo/ edit/` subfolders (the ship default) + `*-bf16/` full-precision
-          // subfolders. Each subfolder is a complete `transformer/` + `mllm/` (Qwen3-VL + tokenizer)
-          // + `vae/` snapshot loadable via BooguPipeline::from_snapshot. This entry pulls only the Q8
-          // `base/` subfolder (leaf-dir globs — the subfolder nests, so a single-level `base/*` would
-          // miss the files). Apache-2.0, ungated.
+          // Q8 `base/ turbo/ edit/` subfolders (the ship default) + `*-bf16/` `*-q4/` full-precision /
+          // packed subfolders. Each subfolder is a complete `transformer/` + `mllm/` (Qwen3-VL +
+          // tokenizer) + `vae/` snapshot loadable via BooguPipeline::from_snapshot. This entry pulls only
+          // the Q8 `base/` subfolder (leaf-dir globs — the subfolder nests, so a single-level `base/*`
+          // would miss the files). Apache-2.0, ungated.
+          // sc-9092: installable on Windows/Linux too — the candle lane packed-loads this SAME Q8 `base/`
+          // subfolder (candle-gen sc-9410). sc-9607: the non-default `-bf16/` `-q4/` tiers are an
+          // on-demand fetch (`ensure_boogu_tier_present`) on BOTH lanes now — off-Mac gets the same
+          // multi-tier picker as macOS (previously off-Mac resolved only the shipped Q8 default).
           "provider": "huggingface",
           "repo": "SceneWorks/boogu-image-mlx",
           "files": ["base/transformer/*", "base/mllm/*", "base/vae/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 23380234752
-        },
-        {
-          // Candle (Windows/Linux CUDA) bf16 snapshot (sc-7524, epic 6831): the candle provider can't
-          // read the MLX-quantized turnkey above, so off-Mac loads bf16 from the ORIGINAL public repo
-          // `Boogu/Boogu-Image-0.1-Base` (Apache-2.0, ungated) — already a complete `mllm/ transformer/
-          // vae/` snapshot at the root (the worker's `candle_boogu_repo` loads from the snapshot root, no
-          // subfolder). Whole repo (empty files list). bf16 only (the candle provider rejects on-the-fly
-          // quant). Windows/Linux download.
-          "provider": "huggingface",
-          "repo": "Boogu/Boogu-Image-0.1-Base",
-          "files": [],
-          "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 38500000000
         }
       ],
       "paths": {
@@ -1713,8 +2049,24 @@
         "quantize": 8,
         "repo": "SceneWorks/boogu-image-mlx"
       },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — ESTIMATED (measured:false): the Boogu Turbo q4
+      // sibling MEASURED 32.7 GB @1024² on candle/CUDA; Base runs the same DiT with more steps + a
+      // heavier schedule, so q4 is scaled to ~38 GB (mlx Base Q8 ~35.5 vs Turbo close-in-size). Tracked
+      // for a Base measurement. minMemoryGb 44 with headroom.
+      "candle": {
+        "minMemoryGb": 44,
+        "vramGbByTier": { "q4": 38.0, "bf16": 52.0 },
+        "measured": false
+      },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Base",
       "ui": {
+        // img2img reference-guided t2i (epic 8588 A4.3, sc-10191): the `ui.img2img` flag drives the
+        // Image Studio "Image reference" tile + strength slider (referenceAssetId + advanced.strength),
+        // routed through the generic img2img arm to Boogu Base's true-CFG img2img entrypoint (mlx-gen
+        // #669). Distinct from `boogu_image_edit`'s Qwen3-VL semantic MultiReference edit. Full 0–1
+        // slider (default 0.5), unclamped — usable band is model-specific.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Boogu Image",
         // Exposes the Image Studio "Full precision (bf16)" toggle (sc-6568): off = the packed Q8
         // default (the downloaded `base/` subfolder); on sends advanced `mlxQuantize: 0` and the
@@ -1748,26 +2100,20 @@
       // code (BooguPipeline::generate_turbo), the `turbo/` checkpoint.
       "adapter": "mlx_boogu",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      // sc-9092: macOnly is a no-op label (see `boogu_image`) — the candle (Windows/Linux) lane packed-loads
+      // the SAME `SceneWorks/boogu-image-mlx` Q8 `turbo/` subfolder the macOS path loads (candle-gen sc-9410).
+      "macOnly": false,
       "downloads": [
         {
           // Q8 `turbo/` subfolder of the shared SceneWorks/boogu-image-mlx turnkey (sc-6397).
+          // sc-9092: installable on Windows/Linux too — the candle lane packed-loads this SAME Q8 `turbo/`
+          // subfolder; the `Boogu/Boogu-Image-0.1-Turbo` off-Mac diffusers entry (retired
+          // `candle_boogu_repo` target) is removed.
           "provider": "huggingface",
           "repo": "SceneWorks/boogu-image-mlx",
           "files": ["turbo/transformer/*", "turbo/mllm/*", "turbo/vae/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 23380234586
-        },
-        {
-          // Candle (Windows/Linux CUDA) bf16 snapshot (sc-7524): off-Mac loads bf16 from the ORIGINAL
-          // public repo `Boogu/Boogu-Image-0.1-Turbo` (the DMD few-step distill — its own weights; same
-          // `mllm/ transformer/ vae/` root layout). Whole repo (empty files list). bf16 only (the candle
-          // provider rejects on-the-fly quant). Apache-2.0, ungated.
-          "provider": "huggingface",
-          "repo": "Boogu/Boogu-Image-0.1-Turbo",
-          "files": [],
-          "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 38500000000
         }
       ],
       "paths": {
@@ -1806,8 +2152,22 @@
         "quantize": 8,
         "repo": "SceneWorks/boogu-image-mlx"
       },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
+      // 1024²/8-step via the candle-gen nvidia-smi peak monitor: q4 packed (group-32, sc-9410) overall
+      // peak 32.7 GB. minMemoryGb 40 covers it with headroom; bf16 ESTIMATED (~48 GB) pending
+      // measurement.
+      "candle": {
+        "minMemoryGb": 40,
+        "vramGbByTier": { "q4": 32.7, "bf16": 48.0 },
+        "measured": false
+      },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Turbo",
       "ui": {
+        // img2img reference-guided t2i (epic 8588 A4.3, sc-10191): same `ui.img2img` surface as
+        // boogu_image, routed to Boogu Turbo's distilled (DMD, CFG-free) img2img entrypoint (mlx-gen
+        // #669). Full 0–1 slider (default 0.5), unclamped.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Boogu Image Turbo",
         // Full-precision bf16 opt-in (sc-6568): on sends `mlxQuantize: 0`; the worker fetches the
         // `turbo-bf16/` subfolder on demand. Off = the packed Q8 `turbo/` default.
@@ -1838,26 +2198,21 @@
       // only. Native MLX only; the `edit/` checkpoint (carries the lazily-loaded f32 vision tower).
       "adapter": "mlx_boogu",
       "capabilities": ["edit_image"],
-      "macOnly": true,
+      // sc-9092: macOnly is a no-op label (see `boogu_image`) — the candle (Windows/Linux) lane packed-loads
+      // the SAME `SceneWorks/boogu-image-mlx` Q8 `edit/` subfolder the macOS path loads (candle-gen sc-9410,
+      // which loads the Qwen3-VL vision tower off-Mac).
+      "macOnly": false,
       "downloads": [
         {
           // Q8 `edit/` subfolder of SceneWorks/boogu-image-mlx (sc-6397).
+          // sc-9092: installable on Windows/Linux too — the candle lane packed-loads this SAME Q8 `edit/`
+          // subfolder; the `Boogu/Boogu-Image-0.1-Edit` off-Mac diffusers entry (retired `candle_boogu_repo`
+          // target) is removed.
           "provider": "huggingface",
           "repo": "SceneWorks/boogu-image-mlx",
           "files": ["edit/transformer/*", "edit/mllm/*", "edit/vae/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 23380234314
-        },
-        {
-          // Candle (Windows/Linux CUDA) bf16 snapshot (sc-7524): off-Mac loads bf16 from the ORIGINAL
-          // public repo `Boogu/Boogu-Image-0.1-Edit` (the instruction-edit checkpoint — its `mllm/` carries
-          // the Qwen3-VL vision tower; same `mllm/ transformer/ vae/` root layout). Whole repo (empty files
-          // list). bf16 only (the candle provider rejects on-the-fly quant). Apache-2.0, ungated.
-          "provider": "huggingface",
-          "repo": "Boogu/Boogu-Image-0.1-Edit",
-          "files": [],
-          "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 38500000000
         }
       ],
       "paths": {
@@ -1924,9 +2279,15 @@
       "type": "image",
       "adapter": "mlx_krea",
       "capabilities": ["text_to_image"],
+      // NB: img2img lives in the model's single `ui` block below (next to label/promptGuide) — a SECOND
+      // `ui` key here would be silently dropped by JSON last-key-wins (the sc-10195 bug that made A3's
+      // img2img toggle never reach the catalog). One `ui` per entry.
       // macOnly is now a no-op label (mirroring klein/flux2_dev): candle availability is driven by the
-      // routing tables (`CANDLE_ROUTED_MODELS` / `is_candle_engine`), not this flag. The candle
-      // (Windows/Linux) lane lights up off the bf16 download below (sc-7581).
+      // routing tables (`CANDLE_ROUTED_MODELS` / `is_candle_engine`), not this flag. sc-9092: the candle
+      // (Windows/Linux) lane now packed-loads the SAME `SceneWorks/krea-2-turbo-mlx` q4/q8/bf16 turnkey
+      // tiers the macOS path loads (candle-gen sc-9411 packed-detect via `krea_model_subdir`), so the
+      // per-tier turnkey downloads below are installable off-Mac and the separate `krea/Krea-2-Turbo`
+      // diffusers entry (the retired `candle_krea_repo` target) is removed.
       "macOnly": false,
       "downloads": [
         {
@@ -1936,6 +2297,11 @@
           // 20,554,619,613 B = transformer 14.57 + text_encoder 5.47 + vae 0.48 GB; rounded up).
           "provider": "huggingface",
           "repo": "SceneWorks/krea-2-turbo-mlx",
+          // sc-9300: the per-tier `variant` keys make Krea 2 a proper variant matrix (like the
+          // standard-tier models) so `/models` emits a `variants[]` entry per tier and the studio tier
+          // picker (`quantTier.js`) can toggle installed tiers. q8 is the shipped default.
+          "variant": "q8",
+          "default": true,
           "files": [
             "q8/transformer/*",
             "q8/text_encoder/*",
@@ -1944,7 +2310,7 @@
             "q8/scheduler/*",
             "q8/model_index.json"
           ],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 20600000000
         },
         {
@@ -1952,6 +2318,7 @@
           // selectable via advanced mlxQuantize<=4 (sc-8508/8509). Same complete-root shape as q8.
           "provider": "huggingface",
           "repo": "SceneWorks/krea-2-turbo-mlx",
+          "variant": "q4",
           "files": [
             "q4/transformer/*",
             "q4/text_encoder/*",
@@ -1960,7 +2327,7 @@
             "q4/scheduler/*",
             "q4/model_index.json"
           ],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 12488709648
         },
         {
@@ -1969,6 +2336,7 @@
           // via advanced mlxQuantize<=0 (sc-8508/8509). Mirror of the dense `krea/Krea-2-Turbo` tree.
           "provider": "huggingface",
           "repo": "SceneWorks/krea-2-turbo-mlx",
+          "variant": "bf16",
           "files": [
             "bf16/transformer/*",
             "bf16/text_encoder/*",
@@ -1977,20 +2345,33 @@
             "bf16/scheduler/*",
             "bf16/model_index.json"
           ],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 35678119918
         },
         {
-          // Candle (Windows/Linux CUDA) dense bf16 — the ungated public `krea/Krea-2-Turbo` diffusers tree
-          // (Krea 2 Community License). The native candle loader (`Weights::from_dir`) reads the diffusers
-          // subdirs from the snapshot ROOT (no quant subdir — the boogu pattern), so it does NOT use the
-          // MLX `q8/` turnkey above; `candle_krea_repo` reads this entry's `repo`. The repo also ships a
-          // redundant ~24 GB single-file `turbo.safetensors`; skip it (the loader reads only the subdirs).
+          // INT8-ConvRot tier (sc-9300, epic 9083) — candle-ONLY (Windows/Linux; NOT macOS/mlx). The
+          // community INT8-ConvRot DiT (online-rotation IGEMM, sc-9601: PSNR 34.4 dB vs bf16, > Q4's
+          // 22.7 dB) hosted PRIVATELY at `SceneWorks/krea-2-turbo-int8-convrot` as a single 13.5 GB
+          // `krea2_turbo_int8_convrot.safetensors`. It REPLACES only the DiT — the rest of the surface
+          // (tokenizer / Qwen3-VL TE / Qwen-Image VAE / config) comes from the canonical bf16 Krea 2
+          // snapshot, which the worker fetches on-demand when this tier is selected. The LoadSpec
+          // the worker builds is `weights = Dir(<bf16 snapshot root>)` + `text_encoder =
+          // File(<convrot .safetensors>)` (see `image_jobs/base.rs resolve_krea_convrot`). Authed HF
+          // download (SceneWorks token, like every private SceneWorks repo). `platforms` OMITS macos so
+          // the Mac picker never lists it; the worker's sm_89 compute-cap capability + the candle
+          // `vramGbByTier.int8-convrot` gate hide it on ineligible cards.
+          // The ConvRot download pulls ONLY the DiT single-file. The canonical bf16 Krea 2 snapshot
+          // (`SceneWorks/krea-2-turbo-mlx` `bf16/` subdir) supplies the non-quantized surface (tokenizer
+          // / Qwen3-VL TE / Qwen-Image VAE / config) the ConvRot LoadSpec `Dir` root points at; the
+          // worker fetches it on-demand when this tier is selected (`ensure_krea_convrot_base_present`,
+          // the sibling of `ensure_boogu_tier_present`) rather than forcing it on q4/q8 users via a
+          // global co-requisite. `platforms` OMITS macos so the Mac picker never lists this tier.
           "provider": "huggingface",
-          "repo": "krea/Krea-2-Turbo",
-          "files": ["model_index.json", "transformer/*", "text_encoder/*", "vae/*", "tokenizer/*"],
+          "repo": "SceneWorks/krea-2-turbo-int8-convrot",
+          "variant": "int8-convrot",
+          "files": ["krea2_turbo_int8_convrot.safetensors"],
           "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 33800000000
+          "estimatedSizeBytes": 13500000000
         }
       ],
       "paths": {
@@ -2030,10 +2411,33 @@
         "quantize": 8,
         "repo": "SceneWorks/krea-2-turbo-mlx"
       },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
+      // 1024²/8-step via the candle-gen nvidia-smi peak monitor: q4 packed overall-peak 26.4 GB (the
+      // single-stream DiT + Qwen3-VL-4B TE + Qwen-Image VAE). minMemoryGb 32 covers it with headroom;
+      // q8/bf16 ESTIMATED (~31 / ~44 GB, consistent with the mlx Q8 ~27 GB / bf16 ~43 GB above) pending
+      // measurement.
+      "candle": {
+        "minMemoryGb": 32,
+        // sc-9300: the INT8-ConvRot tier's VRAM ceiling. The int8 DiT is ~half the bf16 DiT, but the
+        // rest of the resident surface (Qwen3-VL-4B TE + Qwen-Image VAE) is unchanged and the online
+        // Hadamard rotation adds transient activation, so ESTIMATE it near the q8 tier (~31 GB) pending
+        // measurement. It gates the `int8-convrot` variant through the SAME per-tier memory-eligibility
+        // path as q4/q8/bf16 (the third of the three ConvRot gates; the candle lane + sm_89 compute-cap
+        // are the worker's `int8_convrot` capability).
+        "vramGbByTier": { "q4": 26.4, "q8": 31.0, "bf16": 44.0, "int8-convrot": 31.0 },
+        "measured": false
+      },
       "licenseUrl": "https://www.krea.ai/krea-2-licensing",
       "ui": {
+        // img2img reference-guided generation (epic 8588 slice A, sc-8593; sc-10195 UI): a `ui.img2img`
+        // toggle (NOT a capabilities value — z-image owns "image_to_image" for its edit-mode img2img)
+        // drives the "Image reference" prompt-tool + strength slider; the picked image + `img2imgStrength`
+        // seed the CFG-free Turbo denoise (worker resolve_img2img_init_generic → generate_turbo_img2img).
+        // Full 0–1 slider (default 0.5), NOT clamped — usable band is model-specific (A0/sc-8589 ~0.35–0.65).
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Krea 2 Turbo",
-        "description": "Krea 2 Turbo — Krea AI's from-scratch foundation image model, distilled to a fast few-step (~8), CFG-free variant: a 28-block single-stream rectified-flow DiT with a Qwen3-VL-4B text encoder, native MLX (Apple Silicon). Strong photorealism up to 2048². Pre-quantized Q8 (~20.5 GB download, default). Krea 2 Community License (non-commercial). Needs a 48 GB-class Mac.",
+        "description": "Krea 2 Turbo — Krea AI's from-scratch foundation image model, distilled to a fast few-step (~8), CFG-free variant: a 28-block single-stream rectified-flow DiT with a Qwen3-VL-4B text encoder, native MLX (Apple Silicon). Strong photorealism up to 2048². Pre-quantized Q8 (~20.5 GB download, default). Krea 2 Community License (non-commercial). Needs a 48 GB-class Mac. Candle (Windows/Linux) adds an INT8-ConvRot tier (online-rotation int8 DiT), an sm_89-exclusive visibility feature: A/B @1024²/8-step — bf16 ~8.8 s (reference, coherent) · Q4-packed ~9.8 s (PSNR 22.7 dB vs bf16, coherent) · INT8-ConvRot (coherent, PSNR 34.4 dB vs bf16 — visibly closer to full precision than Q4). Requires an RTX 40xx / RTX PRO Blackwell (sm_89+) GPU; hidden on Mac and pre-Ada cards.",
         "recommendedFor": ["text_to_image"],
         // PiD decoder (epic 7840, qwenimage latent space — Krea 2 Turbo reuses the Qwen
         // VAE) — optional per-generation VAE replacement, decode + 2K/4K SR; NC output.
@@ -2051,56 +2455,166 @@
     },
     {
       "id": "krea_2_raw",
-      // Krea 2 Raw (epic 7565 P3, sc-8613) — the UNDISTILLED 12B single-stream DiT that Krea 2 LoRAs
-      // train on; the trained adapter applies back at Krea 2 Turbo inference by family match (the Lens /
-      // Z-Image train-on-base → infer-on-Turbo pattern). This is a training-base DEPENDENCY, not an
-      // inference model: there is no `krea_2_raw` generator (only `krea_2_turbo` is routed), so it is
-      // `utility` (empty capabilities) and never appears in the Image Studio picker. The id MUST equal
-      // the training target's `base_model` (`krea_2_raw`, core training.rs) — the Training UI matches
-      // the base by `item.id === target.baseModel` (TrainingStudio.jsx) and offers this for download
-      // when it's missing.
+      // Krea 2 Raw (epic 9992) — the UNDISTILLED 12B single-stream DiT, now a first-class text-to-image
+      // GENERATION model (TRUE classifier-free guidance: a real guidance scale + optional negative
+      // prompt, 52 steps, resolution-dynamic mu) alongside the distilled CFG-free Krea 2 Turbo — the
+      // Boogu base/turbo precedent. Same gen_core engine code (the `krea_2_raw` descriptor /
+      // KreaPipeline::generate_base, mlx-gen #656); loads the packed Q8 (default) / Q4 / bf16 turnkey
+      // subdir (`krea_model_subdir`) from `SceneWorks/krea-2-raw-mlx` (sc-9995).
       //
-      // Cataloging it lets Model Manager install the base into the HF cache the trainer reads via
-      // `training_base_model_installed` (apps/rust-api training.rs) — closing the "Base model
-      // 'krea_2_raw' is not installed. Install it from the model catalog" dead-end (the bare repo was
-      // never catalogued, unlike every other trainable family's base). Cross-platform as of sc-8614:
-      // `krea_lora` now also routes to the candle (Windows/Linux CUDA) trainer
-      // (CANDLE_ROUTED_TRAINING_KERNELS includes it; MLX_ONLY_TRAINING_KERNELS keeps it off torch), and
-      // BOTH the MLX and candle trainers read the same `krea/Krea-2-Raw` diffusers tree — so a single
-      // whole-repo download serves every platform (no MLX-turnkey vs candle split like Krea 2 Turbo).
-      // Ungated public diffusers tree, Krea 2 Community License (non-commercial).
+      // PATH 1 (epic 9992): this ONE entry is BOTH the generation model AND the LoRA-training base. The
+      // id MUST equal the training target's `base_model` (`krea_2_raw`, core training.rs); the Training
+      // UI matches the base by `item.id === target.baseModel` (TrainingStudio.jsx) and offers this
+      // turnkey for download when missing. The trainer reads the DENSE `bf16/` tier of the SAME repo
+      // (apps/rust-api `resolve_base_model_path` descends into `bf16/` for a tiered turnkey), so training
+      // + generation share one download — no separate diffusers tree. The bf16 tier is byte-identical to
+      // the retired `krea/Krea-2-Raw` diffusers base, so training behavior is unchanged.
+      //
+      // ALL-PLATFORM (epic 9992): both backends register the `krea_2_raw` GENERATOR — `mlx-gen-krea`
+      // (macOS) + `candle-gen-krea` (Windows/Linux CUDA, sc-9994 / candle-gen #350), so `krea_2_raw` is
+      // candle_routed=true (`candle_quant_lora`, mirroring Turbo) and GENERATION runs on all three
+      // platforms. The tier downloads are all-platform for both generation AND the candle TRAINER (which
+      // trains cross-platform off the same `bf16/` tier — CANDLE_ROUTED_TRAINING_KERNELS includes
+      // `krea_lora`). Krea 2 Community License (non-commercial OK; the re-host carries the license +
+      // "Krea" name prefix + attribution).
       "autoDownload": false,
-      "name": "Krea 2 Raw (LoRA training base)",
+      "name": "Krea 2 Raw",
       "family": "krea_2",
-      "type": "utility",
+      "type": "image",
       "adapter": "mlx_krea",
-      "capabilities": [],
+      // Text-to-image GENERATION model (mirrors Krea 2 Turbo). This top-level `capabilities` array is what
+      // the web layer keys on: ImageStudio/`imageModelServesMode` gates the model into the picker on
+      // `capabilities.includes("text_to_image")`, and the Model Manager renders the "Text to Image" chip
+      // from it. `ui.recommendedFor` is a separate recommendation hint and does NOT confer the capability —
+      // without this line Raw is invisible in Image Studio and untagged in the Model Manager (epic 9992).
+      "capabilities": ["text_to_image"],
+      // Routing (not this flag) drives availability: `krea_2_raw` is BOTH mlx- and candle-routed
+      // (sc-9994). All-platform downloads serve generation on all three platforms + the candle trainer.
+      "macOnly": false,
       "downloads": [
         {
+          // Q8 `q8/` subdir of the SceneWorks/krea-2-raw-mlx turnkey (sc-9995). Each quant subdir is a
+          // complete `from_snapshot`-loadable root (transformer/ text_encoder/ vae/ tokenizer/ scheduler/
+          // model_index.json). MEASURED q8 download 20,554,619,432 B. q8 is the shipped default.
           "provider": "huggingface",
-          "repo": "krea/Krea-2-Raw",
-          "files": [],
+          "repo": "SceneWorks/krea-2-raw-mlx",
+          "variant": "q8",
+          "default": true,
+          "files": [
+            "q8/transformer/*",
+            "q8/text_encoder/*",
+            "q8/vae/*",
+            "q8/tokenizer/*",
+            "q8/scheduler/*",
+            "q8/model_index.json"
+          ],
           "platforms": ["macos", "windows", "linux"],
-          "estimatedSizeBytes": 40000000000
+          "estimatedSizeBytes": 20554619432
+        },
+        {
+          // Q4 `q4/` subdir — the lighter quant tier, selectable via advanced mlxQuantize<=4. Same
+          // complete-root shape as q8. MEASURED 12,488,709,625 B.
+          "provider": "huggingface",
+          "repo": "SceneWorks/krea-2-raw-mlx",
+          "variant": "q4",
+          "files": [
+            "q4/transformer/*",
+            "q4/text_encoder/*",
+            "q4/vae/*",
+            "q4/tokenizer/*",
+            "q4/scheduler/*",
+            "q4/model_index.json"
+          ],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 12488709625
+        },
+        {
+          // bf16 `bf16/` subdir — the dense max-fidelity tier (SHARDED transformer; krea's loader takes
+          // the dense base with no quantize, Quant::None). Selectable via advanced mlxQuantize<=0. This
+          // tier is ALSO the Krea 2 LoRA training base (the trainer reads `bf16/`). MEASURED 35,678,121,657 B.
+          "provider": "huggingface",
+          "repo": "SceneWorks/krea-2-raw-mlx",
+          "variant": "bf16",
+          "files": [
+            "bf16/transformer/*",
+            "bf16/text_encoder/*",
+            "bf16/vae/*",
+            "bf16/tokenizer/*",
+            "bf16/scheduler/*",
+            "bf16/model_index.json"
+          ],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 35678121657
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/krea/Krea-2-Raw"
+        "model": "${HF_CACHE}/SceneWorks/krea-2-raw-mlx"
       },
-      "defaults": {},
-      "limits": {},
+      "defaults": {
+        // Raw: undistilled base, TRUE CFG (the engine forwards a real guidance value + negative prompt),
+        // resolution-dynamic mu. Reference Raw preset (sc-7566 spike): 52 steps / guidance 3.5.
+        "resolution": "1024x1024",
+        "steps": 52,
+        "guidanceScale": 3.5,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280", "1536x1536"],
+        "count": [1, 2, 4],
+        // Raw routes the per-generation sampler/scheduler knobs through the unified framework, exactly
+        // like Turbo — the `krea_2_raw` descriptor advertises curated_sampler_names()/
+        // curated_scheduler_names(); the engines.rs drift guard checks this manifest list is a subset.
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
+      },
       "loraCompatibility": {
-        // A LoRA trained here records `family: krea_2` / `baseModel: krea_2_raw` and applies at Krea 2
-        // Turbo inference (family match, no base-model gating — lora_family.rs). Mirrors the Krea 2 Turbo
-        // entry's `families: [krea_2]`.
+        // Krea LoRAs (family krea_2) apply at Raw inference too (family match, no base-model gating —
+        // lora_family.rs), and Raw's bf16 tier is their training base. `types` lists what trains here.
         "families": ["krea_2"],
         "types": ["character", "style"]
       },
+      "mlx": {
+        // Pre-quantized Q8 turnkey (`q8/` subdir) is the default. Raw runs TRUE CFG (two DiT forwards per
+        // step) at 52 steps — slower than the distilled Turbo, but the resident weights (≈ Turbo's)
+        // dominate the peak, so minMemoryGb 48 covers Q8 with headroom (the bf16 dense tier needs more —
+        // the per-tier picker gates it). Mirrors Krea 2 Turbo's mlx block.
+        "minMemoryGb": 48,
+        "quantize": 8,
+        "repo": "SceneWorks/krea-2-raw-mlx"
+      },
+      // candle/CUDA VRAM gate (sc-9994, epic 9992). Raw shares Turbo's resident surface (the 12B
+      // single-stream DiT + Qwen3-VL-4B TE + Qwen-Image VAE), and the resident weights dominate the peak.
+      // q8 MEASURED @1024² on an RTX PRO 6000 (Blackwell sm_120) via the nvidia-smi peak monitor: 33.4 GB
+      // overall-peak — a ~2.4 GB bump over Turbo's estimated q8 31 GB, consistent with Raw's TRUE CFG (two
+      // SEQUENTIAL DiT forwards/step + the extra encoded uncond context; not 2× — the forwards don't
+      // co-reside). q4/bf16 ESTIMATED from the measured q8 using Turbo's inter-tier gaps (q8−q4 ≈ 4.6,
+      // bf16−q8 ≈ 13). No `int8-convrot` tier (that checkpoint is Turbo-only, sc-9300). minMemoryGb 32
+      // gates visibility (the default q8 tier needs 33.4, so a 32 GB card falls to q4 via the per-tier pick).
+      "candle": {
+        "minMemoryGb": 32,
+        "vramGbByTier": { "q4": 28.8, "q8": 33.4, "bf16": 46.4 },
+        "measured": false
+      },
       "licenseUrl": "https://www.krea.ai/krea-2-licensing",
       "ui": {
-        "label": "Krea 2 Raw (training base)",
-        "description": "Undistilled Krea 2 12B DiT — the LoRA training base for Krea 2 (epic 7565). Train a LoRA here and it applies at Krea 2 Turbo inference; this is not a generation model itself. Trains on Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA) (~40 GB download). Krea 2 Community License (non-commercial).",
-        "recommendedFor": [],
+        // img2img reference-guided generation (epic 8588 slice A, sc-10225): the `ui.img2img` toggle (NOT
+        // a capabilities value) drives the "Image reference" prompt-tool + strength slider. Unlike Turbo,
+        // Raw seeds the TRUE-CFG denoise — the picked image + `img2imgStrength` route through the worker's
+        // generic arm (resolve_img2img_init_generic → Conditioning::Reference) to the engine's Raw CFG
+        // entrypoint `generate_base_img2img_with_progress` (mlx-gen #670 / sc-10224), so guidance + the
+        // negative prompt are honored. Full 0–1 slider (default 0.5), NOT clamped — usable band is
+        // model-specific. macOS/MLX only for now (the worker generic img2img arm is Mac-gated); the
+        // candle/Windows-Linux twin is sc-10226.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
+        "label": "Krea 2 Raw",
+        "description": "Krea 2 Raw — Krea AI's undistilled 12B single-stream rectified-flow DiT with a Qwen3-VL-4B text encoder, native MLX (Apple Silicon). The full-fidelity, TRUE classifier-free-guidance counterpart to the fast CFG-free Krea 2 Turbo: run ~52 steps with a real guidance scale (~3.5) and an optional negative prompt for the highest quality and the most control. Pre-quantized Q8 (~20.5 GB download, default); the dense bf16 tier doubles as the Krea 2 LoRA training base. Krea 2 Community License (non-commercial). Runs on Apple Silicon (MLX) and Windows/Linux NVIDIA GPUs (candle/CUDA, sc-9994); needs a 48 GB-class Mac or a ~32 GB-class CUDA GPU.",
+        "recommendedFor": ["text_to_image"],
+        // PiD decoder (epic 7840, qwenimage latent space — Krea 2 Raw reuses the Qwen VAE, like Turbo) —
+        // optional per-generation VAE replacement, decode + 2K/4K SR; NC output. See `qwen_image`.
+        "pid": { "checkpointId": "pid_qwenimage" },
         "promptGuide": {
           "title": "Krea 2 Prompt Guide",
           "path": "/prompt-guides/krea-2.md",
@@ -2564,6 +3078,17 @@
         "minMemoryGb": 96,
         "quantize": 4
       },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — the epic HEADLINE, MEASURED on an RTX PRO 6000
+      // (Blackwell sm_120) at 1024²/8-step via the candle-gen VramProbe. The packed Q4 tier loads its
+      // quantized footprint on-device directly (no dense CPU-staging), so the old ~105 GB dense-staging
+      // load peak is GONE — measured q4 overall-peak 47.2 GB with a negligible load-peak. minMemoryGb 56
+      // covers the measured q4 tier with headroom; q8/bf16 are ESTIMATED (~58 / ~72 GB, scaled from the
+      // 32B DiT weight sizes) pending a q8/bf16 measurement (their TE dirs are not yet cached locally).
+      "candle": {
+        "minMemoryGb": 56,
+        "vramGbByTier": { "q4": 47.2, "q8": 58.0, "bf16": 72.0 },
+        "measured": false
+      },
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/flux2-dev-mlx/blob/main/LICENSE.md",
       "ui": {
@@ -2917,16 +3442,38 @@
       "capabilities": ["text_to_image", "edit_image", "character_image", "style_variations"],
       "downloads": [
         {
-          // Self-contained diffusers checkpoint: bundles the ChatGLM3-6B text
-          // encoder + SDXL-style UNet + VAE. Whole-repo download (~16.5 GiB, approx).
+          // Pre-quantized MLX turnkey tiers (sc-9946, epic 8506): SDXL-style UNet + ChatGLM3-6B
+          // encoder packed (group-64 affine, weight-only), dense SDXL VAE, baked derived fast
+          // tokenizer. Loads packed via mlx-gen-kolors packed-detect — no install-time convert peak.
+          // q4 is the default tier. Tiers are all-platform (mirroring z-image/flux1); the candle
+          // bf16-only cross-cutting caveat is tracked separately across Group-B.
           "provider": "huggingface",
-          "repo": "Kwai-Kolors/Kolors-diffusers",
-          "files": [],
-          "estimatedSizeBytes": 17716740096
+          "repo": "SceneWorks/kolors-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 6401626112,
+          "footprint": { "diskSizeBytes": 6401626112, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/kolors-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 10363817984,
+          "footprint": { "diskSizeBytes": 10363817984, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/kolors-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 17821597696,
+          "footprint": { "diskSizeBytes": 17821597696, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/Kwai-Kolors/Kolors-diffusers"
+        "model": "${HF_CACHE}/SceneWorks/kolors-mlx"
       },
       "defaults": {
         // Model card: DPMSolverMultistep (Karras) / Euler; guidance ~5.0, ~25 steps.
@@ -2949,6 +3496,14 @@
         // until generation-side Kolors LoRA support lands.
         "families": ["kolors"],
         "types": ["style", "enhance", "character"]
+      },
+      "mlx": {
+        // Standard q4/q8/bf16 turnkey tiers (sc-9946, epic 8506). q4 default; the ChatGLM3-6B TE is
+        // packed (not dense) like flux1/sana, so the load-time quant is a harmless no-op on the
+        // already-packed weights and bf16 resolves to Quant::None — no DENSE_TE_TIER_MODELS guard.
+        "minMemoryGb": 24,
+        "quantize": 4,
+        "repo": "SceneWorks/kolors-mlx"
       },
       "ui": {
         "label": "Kolors",
@@ -2986,6 +3541,8 @@
       // driven by the routing tables (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag.
       "adapter": "mlx_sd3",
       "capabilities": ["text_to_image"],
+// NB: img2img lives in the model's single `ui` block below (next to label/promptGuide) — a second
+      // `ui` key here would be silently dropped by JSON last-key-wins (the sc-10195 bug). One `ui` per entry.
       "macOnly": false,
       "downloads": [
         {
@@ -3066,9 +3623,25 @@
         "minMemoryGb": 64,
         "quantize": 4
       },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
+      // 1024²/20-step via the candle-gen VramProbe harness. q4 overall-peak 33.9 GB, bf16 dense 41.3 GB.
+      // Retires the epic 7982 standing "SD3.5 minMemoryGb under measured peak" follow-up: on discrete
+      // VRAM the real overall-peak is ~41 GB (bf16), NOT the unified-memory mlx 64 — minMemoryGb 48
+      // covers the heaviest hosted tier with headroom (the mlx 64 above is the Mac unified-memory OS
+      // peak and is left unchanged; it does not describe a discrete-GPU VRAM ceiling).
+      "candle": {
+        "minMemoryGb": 48,
+        "vramGbByTier": { "q4": 33.9, "bf16": 41.3 },
+        "measured": true
+      },
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/sd3.5-large-mlx/blob/main/LICENSE.md",
       "ui": {
+        // img2img reference-guided generation (epic 8588 A4, sc-10189): `ui.img2img` toggle → the
+        // "Image reference" prompt-tool + strength slider (worker resolve_img2img_init_generic → the
+        // SD3.5 generate_img2img_cfg entrypoint, mlx-gen #667). Full 0–1 slider, default 0.5.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Stable Diffusion 3.5 Large",
         "description": "Stability AI Stable Diffusion 3.5 Large — the 8B multimodal diffusion transformer (MMDiT) flagship, ported natively to MLX (Apple Silicon only). Triple text encoder (CLIP-L + CLIP-G + T5-XXL) for strong prompt adherence and in-image text; true classifier-free guidance with negative prompts. Runs ~28 steps at guidance 3.5 (flow-match Euler, shift 3.0); native 1024×1024. Pre-built and hosted by SceneWorks (Q4 default; Q8 + bf16 also available) — downloads ready-to-run with no install-time conversion or gated download. Distributed under the Stability AI Community License; SceneWorks hosts a public, ungated re-host (Powered by Stability AI), so no Hugging Face token or license acceptance is needed before downloading.",
         "recommendedFor": ["text_to_image", "style_variations"],
@@ -3102,6 +3675,8 @@
       // tables (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag.
       "adapter": "mlx_sd3",
       "capabilities": ["text_to_image"],
+// NB: img2img lives in the model's single `ui` block below (next to label/promptGuide) — a second
+      // `ui` key here would be silently dropped by JSON last-key-wins (the sc-10195 bug). One `ui` per entry.
       "macOnly": false,
       "downloads": [
         {
@@ -3169,9 +3744,22 @@
         "minMemoryGb": 64,
         "quantize": 4
       },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — same 8B MMDiT + triple TE + VAE backbone as SD3.5
+      // Large (few-step schedule only differs), so the candle VRAM is that of Large: measured q4 33.9 GB
+      // / bf16 41.3 GB there. vramGbByTier carried over from the Large measurement; minMemoryGb 48 with
+      // headroom. measured:false — Large-Turbo itself was not separately profiled (identical footprint).
+      "candle": {
+        "minMemoryGb": 48,
+        "vramGbByTier": { "q4": 33.9, "bf16": 41.3 },
+        "measured": false
+      },
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/sd3.5-large-turbo-mlx/blob/main/LICENSE.md",
       "ui": {
+        // img2img reference-guided generation (epic 8588 A4, sc-10189) — same as Large; distilled Turbo
+        // still takes a reference latent-init. Full 0–1 slider, default 0.5.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Stable Diffusion 3.5 Large Turbo",
         "description": "Stable Diffusion 3.5 Large Turbo — the few-step (~4), CFG-free distilled variant of SD3.5 Large: the same 8B multimodal diffusion transformer with a triple text encoder, distilled (ADD) for much faster renders, native MLX (Apple Silicon). Best for fast iteration at flagship quality; native 1024×1024. Runs CFG-free (the negative prompt is inert). Pre-built and hosted by SceneWorks (Q4 default; Q8 + bf16 also available) — downloads ready-to-run with no install-time conversion or gated download. Distributed under the Stability AI Community License; SceneWorks hosts a public, ungated re-host (Powered by Stability AI), so no Hugging Face token or license acceptance is needed before downloading.",
         "recommendedFor": ["text_to_image", "style_variations"],
@@ -3199,6 +3787,8 @@
       // (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag.
       "adapter": "mlx_sd3",
       "capabilities": ["text_to_image"],
+// NB: img2img lives in the model's single `ui` block below (next to label/promptGuide) — a second
+      // `ui` key here would be silently dropped by JSON last-key-wins (the sc-10195 bug). One `ui` per entry.
       "macOnly": false,
       "downloads": [
         {
@@ -3274,9 +3864,22 @@
         "minMemoryGb": 56,
         "quantize": 4
       },
+      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
+      // 1024²/28-step via the candle-gen VramProbe harness: q4 packed overall-peak 28.5 GB. The dense
+      // T5-XXL TE + VAE dominate the 2.5B MMDiT-X (as on mlx), so bf16 is only modestly heavier —
+      // minMemoryGb 36 covers the measured q4 with headroom (bf16 estimated ~33 GB, still < 36).
+      "candle": {
+        "minMemoryGb": 36,
+        "vramGbByTier": { "q4": 28.5, "bf16": 33.0 },
+        "measured": false
+      },
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/sd3.5-medium-mlx/blob/main/LICENSE.md",
       "ui": {
+        // img2img reference-guided generation (epic 8588 A4, sc-10189) — same as Large. Full 0–1 slider,
+        // default 0.5.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "Stable Diffusion 3.5 Medium",
         "description": "Stability AI Stable Diffusion 3.5 Medium — the 2.5B MMDiT-X (dual-attention) mid-tier of the SD3.5 family, ported natively to MLX (Apple Silicon only). Same triple text encoder (CLIP-L + CLIP-G + T5-XXL) and true CFG as Large, with a smaller transformer that renders up to 1440×1440 and a lighter memory footprint. Runs ~40 steps at guidance 4.5 (flow-match Euler, shift 3.0). Pre-built and hosted by SceneWorks (Q4 default; Q8 + bf16 also available) — downloads ready-to-run with no install-time conversion or gated download. Distributed under the Stability AI Community License; SceneWorks hosts a public, ungated re-host (Powered by Stability AI), so no Hugging Face token or license acceptance is needed before downloading.",
         "recommendedFor": ["text_to_image", "style_variations"],
@@ -3315,21 +3918,42 @@
       "capabilities": ["text_to_image"],
       "macOnly": true,
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8489/sc-8513, epic 8506): per-tier
+        // subdirs (q4/ default, q8/, bf16/), each a complete `SanaPipeline::from_snapshot`-loadable
+        // tree — `transformer/` (the Linear-DiT trunk, packed q4/q8 else dense bf16), `vae/` (the 32×
+        // DC-AE f32 decoder, dense in EVERY tier), and `text_encoder/` (the gemma-2-2b-it CHI caption
+        // encoder — `gemma-2-2b-it.safetensors` packed q4/q8 else dense + `tokenizer.json`, sourced
+        // from the SceneWorks/gemma-2-2b-it mirror so the TE weights are NOT duplicated). Un-gated
+        // (the mirror carries the NVIDIA non-commercial NOTICE). mlx-gen #653 packs the transformer +
+        // Gemma-2 TE offline and packed-detects on load (NO install-time quantize). This is the
+        // shared group-64 affine tier, NOT the (unported) 2-bit SANA quant. Sizes measured on-disk.
         {
-          // Pre-converted MLX snapshot on the SceneWorks HF org (sc-8489): ONE
-          // `SanaPipeline::from_snapshot`-loadable root — `transformer/` (the Linear-DiT trunk),
-          // `vae/` (the 32× DC-AE f32 decoder), and `text_encoder/` (the gemma-2-2b-it CHI caption
-          // encoder — `gemma-2-2b-it.safetensors` + `tokenizer.json`, sourced from the
-          // SceneWorks/gemma-2-2b-it mirror so the TE weights are NOT duplicated as a separate
-          // catalog dependency). Un-gated (the mirror carries the NVIDIA non-commercial NOTICE).
-          // Dense bf16 (no quant subdir — the 2-bit SANA quant is intentionally NOT ported).
-          // estimatedSizeBytes is the measured mirror total (transformer F16 3.21GB + DC-AE F32
-          // 1.25GB + merged gemma-2-2b-it TE BF16 5.23GB + license/notice), sc-8604.
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_1600M_1024px_mlx",
-          "files": ["transformer/*", "vae/*", "text_encoder/*"],
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 9704269924
+          "estimatedSizeBytes": 5574343362,
+          "footprint": { "diskSizeBytes": 5574343362, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Sana_1600M_1024px_mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 7010863702,
+          "footprint": { "diskSizeBytes": 7010863702, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Sana_1600M_1024px_mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 9704258849,
+          "footprint": { "diskSizeBytes": 9704258849, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -3365,16 +3989,25 @@
         "types": []
       },
       "mlx": {
-        // Dense bf16 snapshot (no runtime quant — the 2-bit SANA quant is NOT ported; the load path
-        // rejects a quantize override). minMemoryGb 24: the 1.6B Linear-DiT trunk + the ~2.6B gemma
-        // TE + DC-AE decode, a comfortably small footprint relative to the SD3.5 / Boogu flagships.
+        // Quant-matrix turnkey (sc-8489/sc-8513): default q4 (`standard_tier_subdir` resolves the
+        // `q4/` subdir; q8/bf16 selectable via advanced.mlxQuantize). The transformer + Gemma-2 TE are
+        // pre-packed and packed-detected on load (no install-time quantize peak). minMemoryGb 24: the
+        // 1.6B Linear-DiT trunk + the ~2.6B gemma TE + DC-AE decode, comfortably small.
         "minMemoryGb": 24,
+        "quantize": 4,
         "repo": "SceneWorks/Sana_1600M_1024px_mlx"
       },
       "licenseUrl": "https://huggingface.co/Efficient-Large-Model/Sana_1600M_1024px",
       "ui": {
         "label": "SANA 1600M",
-        "description": "NVIDIA SANA 1600M — an efficient Linear-DiT text-to-image model, ported natively to MLX (Apple Silicon only). A 1.6B linear-attention transformer (deep compression 32× DC-AE autoencoder + a gemma-2 instruction text encoder) for fast 1024×1024 generation with true classifier-free guidance and negative prompts. Runs ~20 steps at guidance 4.5 (flow-match Euler, shift 3.0). Dense bf16 (no quantization). Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice. Runs comfortably on a 24 GB-class Mac.",
+        // img2img (sc-10190, epic 8588): SANA's DC-AE encoder was ported (mirror of the decoder,
+        // numerically golden vs diffusers), so a reference image seeds the flow-match denoise from the
+        // encoded init latent. This flag drives BOTH the web "Image reference" tile
+        // (`ui.img2img`) and the worker's model-agnostic generic img2img arm
+        // (`model_supports_img2img` reads `ui.img2img`) — no per-model worker routing. Strength 0.5.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
+        "description": "NVIDIA SANA 1600M — an efficient Linear-DiT text-to-image model, ported natively to MLX (Apple Silicon only). A 1.6B linear-attention transformer (deep compression 32× DC-AE autoencoder + a gemma-2 instruction text encoder) for fast 1024×1024 generation with true classifier-free guidance and negative prompts. Runs ~20 steps at guidance 4.5 (flow-match Euler, shift 3.0). Ships q4 (default) / q8 / bf16 quant tiers — pick per available RAM; each loads pre-packed with no conversion peak. Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice. Runs comfortably on a 24 GB-class Mac.",
         "recommendedFor": ["text_to_image"],
         "promptGuide": {
           "title": "SANA Prompt Guide",
@@ -3413,20 +4046,41 @@
       "capabilities": ["text_to_image"],
       "macOnly": true,
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-8490/sc-8513, epic 8506): per-tier subdirs
+        // (q4/ default, q8/, bf16/), each a complete `SanaPipeline::new_sprint`-loadable tree —
+        // `transformer/` (the Sprint Linear-DiT trunk, packed q4/q8 else dense bf16), `vae/` (the 32×
+        // DC-AE f32 decoder, dense in EVERY tier), and `text_encoder/` (the gemma-2-2b-it CHI caption
+        // encoder — packed q4/q8 else dense + `tokenizer.json`, from the SceneWorks/gemma-2-2b-it
+        // mirror, NOT duplicated). Un-gated (NVIDIA non-commercial NOTICE). mlx-gen #653 packs the
+        // transformer + Gemma-2 TE offline and packed-detects on load (no install-time quantize). This
+        // is the shared group-64 affine tier, NOT the (unported) 2-bit SANA quant. Sizes measured.
         {
-          // Pre-converted MLX snapshot on the SceneWorks HF org (sc-8490): ONE
-          // `SanaPipeline::new_sprint`-loadable root — `transformer/` (the Linear-DiT trunk, Sprint
-          // weights), `vae/` (the 32× DC-AE f32 decoder), and `text_encoder/` (the gemma-2-2b-it CHI
-          // caption encoder — `gemma-2-2b-it.safetensors` + `tokenizer.json`, sourced from the
-          // SceneWorks/gemma-2-2b-it mirror so the TE weights are NOT duplicated as a separate catalog
-          // dependency). Un-gated (the mirror carries the NVIDIA non-commercial NOTICE). Dense bf16 (no
-          // quant subdir). estimatedSizeBytes is the measured mirror total (transformer BF16 3.22GB +
-          // DC-AE F32 1.25GB + merged gemma-2-2b-it TE BF16 5.23GB + license/notice), sc-8607.
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
-          "files": ["transformer/*", "vae/*", "text_encoder/*"],
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 9715830101
+          "estimatedSizeBytes": 5577866495,
+          "footprint": { "diskSizeBytes": 5577866495, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 7017182259,
+          "footprint": { "diskSizeBytes": 7017182259, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 9715818241,
+          "footprint": { "diskSizeBytes": 9715818241, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -3464,15 +4118,23 @@
         "types": []
       },
       "mlx": {
-        // Dense bf16 snapshot (no runtime quant — the 2-bit SANA quant is NOT ported). minMemoryGb 24:
-        // the 1.6B Linear-DiT trunk + the ~2.6B gemma TE + DC-AE decode, a comfortably small footprint.
+        // Quant-matrix turnkey (sc-8490/sc-8513): default q4 (`standard_tier_subdir` resolves `q4/`;
+        // q8/bf16 selectable via advanced.mlxQuantize). Transformer + Gemma-2 TE pre-packed +
+        // packed-detected on load (no install-time quantize peak). minMemoryGb 24: the 1.6B Linear-DiT
+        // trunk + the ~2.6B gemma TE + DC-AE decode, a comfortably small footprint.
         "minMemoryGb": 24,
+        "quantize": 4,
         "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx"
       },
       "licenseUrl": "https://huggingface.co/Efficient-Large-Model/Sana_Sprint_1.6B_1024px",
       "ui": {
         "label": "SANA-Sprint 1.6B",
-        "description": "NVIDIA SANA-Sprint 1.6B — the few-step distillation of SANA, ported natively to MLX (Apple Silicon only). The same 1.6B linear-attention transformer (deep compression 32× DC-AE autoencoder + a gemma-2 instruction text encoder) as base SANA, distilled for ~2-step CFG-free generation via a continuous-time consistency (SCM) sampler and a guidance-embedding trunk — so it generates a 1024×1024 image in a couple of steps with no negative prompt. Dense bf16 (no quantization). Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice. Runs comfortably on a 24 GB-class Mac.",
+        // img2img (sc-10190): same ported DC-AE encoder as base SANA; Sprint seeds the SCM/TrigFlow
+        // few-step loop by renoising the encoded init to the strength-derived start angle. Distilled/
+        // few-step, so the strength window is narrower than base SANA — validate the band on-device.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
+        "description": "NVIDIA SANA-Sprint 1.6B — the few-step distillation of SANA, ported natively to MLX (Apple Silicon only). The same 1.6B linear-attention transformer (deep compression 32× DC-AE autoencoder + a gemma-2 instruction text encoder) as base SANA, distilled for ~2-step CFG-free generation via a continuous-time consistency (SCM) sampler and a guidance-embedding trunk — so it generates a 1024×1024 image in a couple of steps with no negative prompt. Ships q4 (default) / q8 / bf16 quant tiers — pick per available RAM; each loads pre-packed with no conversion peak. Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice. Runs comfortably on a 24 GB-class Mac.",
         "recommendedFor": ["text_to_image"],
         "promptGuide": {
           "title": "SANA Prompt Guide",
@@ -3569,9 +4231,9 @@
       // macOS-only MLX backend. The MLX-SDXL generator is the Rust `mlx-gen-sdxl`
       // path, claimed by the in-process `mlx` GPU worker via the Rust API claim
       // layer (jobs_store::sdxl_mlx_eligible). sc-3060 RETIRED the old in-process
-      // vendored Apple `mlx-examples/stable_diffusion` (scene_worker/_vendor/mlx_sd/)
-      // adapter — the Python worker always routes the torch SdxlDiffusersAdapter now
-      // (every host, every shape); it never runs MLX-SDXL.
+      // vendored Apple `mlx-examples/stable_diffusion` MLX-SDXL adapter (it lived in
+      // the now-deleted Python worker, removed in epic 8283); MLX-SDXL now runs only
+      // through the Rust `mlx-gen-sdxl` path above.
       //
       // mlx.quantize/tier config below is consumed by the RUST worker
       // (standard_tier_subdir / resolve_quant), NOT the retired Apple adapter. The
@@ -3840,21 +4502,49 @@
       // character" picker (a clear reference image is required).
       "capabilities": ["character_image"],
       "downloads": [
+        // SceneWorks pre-built MLX quant-matrix turnkey (sc-9965, epic 8506): the SAME
+        // `SceneWorks/realvisxl-mlx` re-host the plain `realvisxl` model loads (was upstream dense
+        // `SG161222/RealVisXL_V5.0`). Public/ungated (openrail++), per-tier self-contained subdirs
+        // (UNet + both CLIP text encoders + VAE + tokenizer(s) + scheduler + model_index.json):
+        // bf16/ (DEFAULT — the validated fp16 identity envelope, ArcFace-cosine ~0.82 @1024²), q8/,
+        // q4/. `resolve_instantid_sdxl_base` loads the chosen tier's subdir (instantid_tier_subdir);
+        // the mlx-gen SDXL loaders packed-detect the UNet + both CLIP tiers (sc-8746) so q4/q8 load
+        // packed with no install-time convert. Unlike the `realvisxl` t2i model, the InstantID
+        // DEFAULT stays bf16 (dense) because Q4/Q8 measurably drop ArcFace identity — quant is
+        // opt-in via advanced.mlxQuantize; the candle InstantID lane runs dense f16 and always loads
+        // bf16/. The InstantID IdentityNet ControlNet + ip-adapter (~4 GiB) + antelopev2 face pack
+        // stay DENSE (small, precision-sensitive) and are fetched on demand by the adapter, so they
+        // are not listed here. Sizes measured on-disk (shared with the `realvisxl` turnkey).
         {
-          // Photoreal SDXL finetune (UNet + dual CLIP + VAE); the worker loads the
-          // fp16 variant. openrail++ (commercial use OK, ungated). The InstantID
-          // IdentityNet ControlNet + ip-adapter.bin (~4 GiB) and the antelopev2
-          // face pack are fetched on demand by the adapter (mirrors Kolors
-          // IP-Adapter), so they are not listed here.
           "provider": "huggingface",
-          "repo": "SG161222/RealVisXL_V5.0",
-          "files": [],
-          "estimatedSizeBytes": 7105348096
+          "repo": "SceneWorks/realvisxl-mlx",
+          "variant": "bf16",
+          "default": true,
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 7108692804,
+          "footprint": { "diskSizeBytes": 7108692804, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/realvisxl-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 5385840183,
+          "footprint": { "diskSizeBytes": 5385840183, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/realvisxl-mlx",
+          "variant": "q4",
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 3911656467,
+          "footprint": { "diskSizeBytes": 3911656467, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/SG161222/RealVisXL_V5.0"
+        "model": "${HF_CACHE}/SceneWorks/realvisxl-mlx"
       },
+      "gated": false,
       "defaults": {
         // ~30 steps; guidance 3.0 (lowered from 5.0 per sc-3857 render tuning —
         // RealVisXL is CFG-sensitive and 3.0 holds identity with much less of the
@@ -3966,21 +4656,46 @@
       // alone so it appears solely in the "With character" picker. License: FLUX.1
       // [dev] NC (same posture as the flux_dev built-in).
       "capabilities": ["character_image"],
+      // Backbone source (sc-9947 macOS + sc-10103 candle; epics 8506/9083): the SAME ungated
+      // `SceneWorks/flux1-dev-mlx` quant-matrix turnkey the base `flux_dev` built-in consumes —
+      // self-contained q4/ (default) + q8/ + bf16/ subdirs, each a complete from_snapshot tree (packed
+      // transformer + CLIP + T5 + VAE + tokenizers). BOTH lanes packed-detect the SELECTED tier subdir:
+      // macOS via `mlx_gen_pulid` → `mlx_gen_flux::load_flux1` (sc-9947), Windows/Linux via
+      // `candle_gen_pulid`'s `FluxRefBackbone` → the base FLUX `Pipeline::load_components` (sc-10103).
+      // So PuLID loads the SELECTED packed tier on every platform with NO install-time convert peak and
+      // NO upstream BFL gate — replacing the sc-9947 Windows/Linux BFL fallback. The PuLID adapter / EVA /
+      // face stack stay f32 and are fetched on demand (mirrors Kolors/InstantID).
       "downloads": [
+        // Per-tier subdirs (q4/ default, q8/, bf16/), each a complete from_snapshot tree; sizes shared
+        // with `flux_dev` (same repo). All-platforms (the candle lane now reads the turnkey too, sc-10103).
         {
-          // FLUX.1-dev base (BFL flow + VAE + T5 + CLIP-L); the worker loads the
-          // BFL flux1-dev.safetensors + ae.safetensors directly via the vendored
-          // BFL flow loader (skip the diffusers transformer shards). NC + gated;
-          // the PuLID-FLUX adapter weights (~1.5GB) and the QuanSun EVA-CLIP-L
-          // checkpoint (~1.6GB) are fetched on demand (mirrors Kolors/InstantID).
           "provider": "huggingface",
-          "repo": "black-forest-labs/FLUX.1-dev",
-          "files": [],
-          "estimatedSizeBytes": 33500000000
+          "repo": "SceneWorks/flux1-dev-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 9617334683,
+          "footprint": { "diskSizeBytes": 9617334683, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux1-dev-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 18010071290,
+          "footprint": { "diskSizeBytes": 18010071290, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux1-dev-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 33746402173,
+          "footprint": { "diskSizeBytes": 33746402173, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/black-forest-labs/FLUX.1-dev"
+        "model": "${HF_CACHE}/SceneWorks/flux1-dev-mlx"
       },
       "defaults": {
         // sc-2012 spike: 30 steps at guidance 4.0; id_weight=1.0,
@@ -4007,16 +4722,26 @@
       },
       // Native MLX path (sc-3344): PuLID-FLUX runs on the Rust `mlx-gen-pulid` engine — the
       // FLUX.1-dev backbone + the f32 EVA/IDFormer/CA conditioning — retiring the torch MPS path
-      // that drove the old 64 GB gate (an 85.3 GB peak on MPS bf16, sc-2012). Q8 is the default:
-      // near-lossless for identity (engine sc-3076 — Q8 ArcFace 0.6841 ≈ bf16 0.68; the conditioning
-      // stays f32 either way) and far lighter. minMemoryGb mirrors the native `flux_dev` sibling
-      // (42, a measured Q8 FLUX.1-dev gate) plus the ~1.6 GB f32 EVA tower + CA overhead. Q4
-      // (`advanced.mlxQuantize: 4`) drops the backbone to ~6.5 GB for tighter hosts; dense bf16
-      // (`mlxQuantize: 0`) is the sc-2012-exact identity at a higher floor.
+      // that drove the old 64 GB gate (an 85.3 GB peak on MPS bf16, sc-2012). As of sc-9947 the
+      // backbone loads from the `SceneWorks/flux1-dev-mlx` quant-matrix turnkey (see `downloads`):
+      // the worker resolves the SELECTED q4/q8/bf16 tier subdir (`standard_tier_subdir`) and the
+      // packed weights load directly — no install-time convert peak. `quantize: 4` is the DEFAULT
+      // tier (matching the turnkey's `q4` default + the base `flux_dev` sibling): near-lossless for
+      // identity (engine sc-3076 — Q4 ArcFace 0.6835 / Q8 0.6841 ≈ bf16 0.68; the conditioning stays
+      // f32 either way) and the lightest floor (~6.5 GB backbone). Q8 (`advanced.mlxQuantize: 8`) and
+      // dense bf16 (`mlxQuantize: 0`, the sc-2012-exact identity) are user-selectable. minMemoryGb
+      // stays conservative (the measured Q8 `flux_dev` gate + the ~1.6 GB f32 EVA tower + CA overhead);
+      // a follow-up re-measures the now-lighter q4 default on-device.
       "mlx": {
         "minMemoryGb": 44,
-        "quantize": 8
+        "quantize": 4
       },
+      // sc-10103 (epic 9083): the backbone now rides the ungated `SceneWorks/flux1-dev-mlx` re-host
+      // (FLUX.1 [dev] Non-Commercial License redistributed with LICENSE + NOTICE) — no HF token /
+      // license-accept gate, matching the base `flux_dev` built-in. `licenseUrl` points at the NC
+      // license for the Models-screen banner.
+      "gated": false,
+      "licenseUrl": "https://huggingface.co/SceneWorks/flux1-dev-mlx/blob/main/LICENSE.md",
       "loraCompatibility": {
         // FLUX-family backbone, so flux LoRAs apply (sc-1927: declare a real
         // family rather than empty, which would match every LoRA).
@@ -4025,7 +4750,7 @@
       },
       "ui": {
         "label": "PuLID-FLUX (FLUX.1 [dev])",
-        "description": "Identity-preserving FLUX character generation: holds a person's face from a single reference image while the prompt drives scene, pose, and wardrobe. Built on FLUX.1-dev with PuLID's IDFormer cross-attention adapter — the sc-2012 spike measured 0.8016 ArcFace cosine vs reference at id_weight=1.0 / start-cfg=4 (above the InstantID-SDXL no-restore baseline; no face-restoration pass needed). Pick a character with an approved reference image, then raise Variations to explore takes. ~30 steps at guidance 4.0; ~85 GB peak unified memory at 1024². Needs the PuLID-FLUX adapter (~1.5GB) + EVA-CLIP-L (~1.6GB) + antelopev2 face pack, fetched on first use. License: FLUX.1 [dev] non-commercial (gated).",
+        "description": "Identity-preserving FLUX character generation: holds a person's face from a single reference image while the prompt drives scene, pose, and wardrobe. Built on FLUX.1-dev with PuLID's IDFormer cross-attention adapter — the sc-2012 spike measured 0.8016 ArcFace cosine vs reference at id_weight=1.0 / start-cfg=4 (above the InstantID-SDXL no-restore baseline; no face-restoration pass needed). Pick a character with an approved reference image, then raise Variations to explore takes. ~30 steps at guidance 4.0. The FLUX.1-dev backbone loads from the ungated SceneWorks quant-matrix re-host at a user-selectable tier (q4 default / q8 / bf16) on every platform — no Hugging Face token needed; the identity conditioning stays full-precision, so even q4 holds the face (ArcFace ~0.68). Needs the PuLID-FLUX adapter (~1.5GB) + EVA-CLIP-L (~1.6GB) + antelopev2 face pack, fetched on first use. License: FLUX.1 [dev] non-commercial.",
         "recommendedFor": ["character_image"],
         // PuLID identity tuning surfaced in the character-image picker. The
         // reference-strength slider drives idWeight (PuLID's identity-strength
@@ -4068,17 +4793,53 @@
       // mlx-community (gemma) mirrors. Windows/Linux keep loading the multi-file torch checkpoint
       // set from Lightricks/LTX-2.3 (the resources block below is untouched).
       "downloads": [
+        // macOS quant matrix (sc-8513, epic 8506): each LTX tier is a SEPARATE user-selectable
+        // artifact tagged with a `variant`; `q4` (default) installs when no tier is chosen. The shared
+        // Gemma-3-12b-it-bf16 text encoder is a `coRequisite` (sc-9696) — installed alongside whichever
+        // tier(s) the user picks, tracked once, excluded from the tier matrix, and NOT double-counted in
+        // the per-tier footprint. The worker still fetches a toggled-but-not-downloaded tier on demand
+        // (ensure_ltx_{q8,bf16}_present, video_jobs.rs), so advanced.mlxQuantize works without a pre-pick.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.3-mlx",
-          // Lean default (sc-5679): LTX-2.3 MLX `q4/` (~20.5 GB) + the `gemma/` gemma-3-12b-it-bf16
-          // text encoder (~26.4 GB). The `q8/` subdir (~29.7 GB, higher quality) is NOT pulled here;
-          // the worker fetches it on demand the first time a job opts into Q8 (advanced
-          // mlxQuantize: 8) — see ensure_ltx_q8_present / resolve_ltx_model_dir in video_jobs.rs.
-          // No separate gemma download — the worker points the engine at gemma/ via $LTX_GEMMA_DIR.
-          "files": ["q4/*", "gemma/*"],
+          // Shared gemma-3-12b-it-bf16 text encoder (~26.4 GB); the worker points the engine at the
+          // sibling gemma/ (resolve_bundled_ltx_gemma_dir). Fetched with any tier, kept while any
+          // remains. Windows/Linux load Gemma from the resources.gemma repo instead, so macOS-only.
+          "coRequisite": true,
+          "files": ["gemma/*"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 46895585378
+          "estimatedSizeBytes": 26427894918
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.3-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 20467690460,
+          "footprint": { "diskSizeBytes": 20467690460, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.3-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 29728720716,
+          "footprint": { "diskSizeBytes": 29728720716, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/ltx-2.3-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos"],
+          // Dense bf16 tier (sc-8513): built from ltx-2.3-22b-distilled-1.1 via convert_and_assemble
+          // (LtxConvertOpts::default, quantize:false). Exact on-disk size of the hosted bf16/ subdir
+          // (transformer 37.98 GB dense BF16 + the already-bf16 connector/vae/upsampler/vocoder).
+          "estimatedSizeBytes": 47092811992,
+          "footprint": { "diskSizeBytes": 47092811992, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
@@ -4190,9 +4951,9 @@
           // fp8 and fp8-transformer variants; we only need the bf16 all-in-one, which
           // shares the official ltx-2.3-22b-distilled key layout (model.diffusion_model.*
           // transformer + bundled vae/audio_vae/vocoder), so it is a drop-in checkpoint.
-          "files": ["10Eros_v1_bf16.safetensors"],
+          "files": ["10Eros_v1.3_bf16.safetensors"],
           "default": true,
-          "estimatedSizeBytes": 46139885510
+          "estimatedSizeBytes": 46139885750
         },
         {
           // Recommended cond_safe distill LoRA. Required runtime component on the MLX
@@ -4200,6 +4961,10 @@
           // produces usable text-to-video. Only the cond_safe variant is fetched.
           "provider": "huggingface",
           "repo": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
+          // Co-requisite (sc-9696): the cond_safe distill LoRA is a required runtime component
+          // (auto-injected per-pass; see mlx.autoDistillLora), so it must download alongside the
+          // 10Eros checkpoint rather than being a pick-one alternate.
+          "coRequisite": true,
           "files": ["ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"],
           "estimatedSizeBytes": 662072824
         }
@@ -4210,11 +4975,11 @@
       "resources": {
         "checkpoint": {
           "repo": "TenStrip/LTX2.3-10Eros",
-          "file": "10Eros_v1_bf16.safetensors"
+          "file": "10Eros_v1.3_bf16.safetensors"
         },
         "distilledCheckpoint": {
           "repo": "TenStrip/LTX2.3-10Eros",
-          "file": "10Eros_v1_bf16.safetensors"
+          "file": "10Eros_v1.3_bf16.safetensors"
         },
         "spatialUpscaler": {
           "repo": "Lightricks/LTX-2.3",
@@ -4222,8 +4987,9 @@
         },
         "distilledLora": {
           // TenStrip's recommended cond_safe distill LoRA for 10Eros (the model card
-          // warns that larger distill LoRAs harm the fine-tune). Only consumed by the
-          // CUDA ti2vid_two_stages torch path; the MLX path runs the converted dir.
+          // warns that larger distill LoRAs harm the fine-tune). The MLX path auto-injects
+          // this per-pass at runtime (see mlx.autoDistillLora; resolve_ltx_distill_adapter);
+          // the CUDA ti2vid_two_stages torch path consumes it directly.
           "repo": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
           "file": "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"
         },
@@ -4266,7 +5032,7 @@
         "requiresConversion": true,
         "converter": "ltx_video",
         "convertSourceRepo": "TenStrip/LTX2.3-10Eros",
-        "convertSourceFile": "10Eros_v1_bf16.safetensors",
+        "convertSourceFile": "10Eros_v1.3_bf16.safetensors",
         "convertBaseRepo": "Lightricks/LTX-2.3",
         "textEncoderRepo": "mlx-community/gemma-3-12b-it-bf16",
         // 10Eros's base is not pre-distilled, so the MLX adapter auto-injects the
@@ -4368,16 +5134,77 @@
       // SceneWorks HF org (sc-5599, epic 5594); Windows/Linux load the diffusers layout via the
       // torch wan_video adapter. The API serves only the entry matching the running OS.
       "downloads": [
+        // macOS quant matrix (sc-9941, epic 8506): each tier is a SEPARATE user-selectable artifact
+        // tagged with a `variant`; `q4` (default) installs when no tier is chosen. Each tier subdir is
+        // fully self-contained (the single-expert DiT `model.safetensors` + UMT5 T5 + z16 VAE +
+        // tokenizer + config.json with the quant baked in), so the dense T5/VAE repeat per tier (epic
+        // decision #3: storage is a non-issue; keeps the load path a single self-contained dir with no
+        // engine change). The worker fetches a toggled-but-not-downloaded tier on demand
+        // (ensure_wan_tier_present, video_jobs.rs), so advanced.mlxQuantize works without a pre-pick.
+        // The legacy flat root files stay hosted for already-shipped workers that resolve the repo
+        // root; a new worker only ever resolves the tier subdirs (cleanup follow-up sc-9977).
+        // estimatedSizeBytes/footprint are backfilled with the exact hosted subdir sizes post-build.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
-          "files": [],
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 24197123156
+          // The dense UMT5 T5 (~11.4 GB) + z16 VAE (~2.8 GB) are shared bf16 in every tier, so the q4
+          // DiT (~2.9 GB) makes this only modestly smaller than q8/bf16 (same shape as SD3.5).
+          "estimatedSizeBytes": 17142889289,
+          "footprint": { "diskSizeBytes": 17142889289, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 19596557565,
+          "footprint": { "diskSizeBytes": 19596557565, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos"],
+          // Dense bf16 tier (sc-9941): the same content as the legacy flat root (single-expert DiT +
+          // T5 + VAE + tokenizer), hosted under bf16/ for the uniform tier layout. Exact on-disk size
+          // of the built bf16/ subdir.
+          "estimatedSizeBytes": 24197122980,
+          "footprint": { "diskSizeBytes": 24197122980, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // Windows/Linux candle quant matrix (sc-10027, epic 10043): the candle-native packed tiers
+        // (sc-10026) at SceneWorks/wan2.2-ti2v-5b-candle — q4 (default) / q8 subdirs the sc-10025
+        // packed-detect seam loads unchanged; bf16 stays the dense Wan-AI diffusers snapshot.
+        // estimatedSizeBytes/footprint are the built local subdir sizes (backfilled with exact hosted
+        // sizes if they differ).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-ti2v-5b-candle",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 17338835457,
+          "footprint": { "diskSizeBytes": 17338835457, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-ti2v-5b-candle",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 19837231673,
+          "footprint": { "diskSizeBytes": 19837231673, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+          "variant": "bf16",
           "files": [],
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 34203021834
@@ -4432,12 +5259,14 @@
         }
       },
       "mlx": {
-        // Turnkey pre-converted MLX snapshot on the SceneWorks HF org (sc-5599, epic 5594):
-        // dense bf16, self-contained (DiT + UMT5 encoder + VAE + tokenizer), downloaded on
-        // first use — no in-app conversion. The worker still resolves env override
-        // (SCENEWORKS_MLX_WAN5B_DIR) → local <data>/models/mlx/wan_2_2 (a local conversion
-        // supersedes) → this turnkey snapshot. Source Wan-AI/Wan2.2-TI2V-5B is Apache-2.0;
-        // converter "wan_ti2v_5b" emits bf16 (Q4/Q8 applied at load, not baked in).
+        // Turnkey pre-converted MLX snapshot on the SceneWorks HF org (sc-5599, epic 5594),
+        // self-contained (single-expert DiT + UMT5 encoder + VAE + tokenizer). As of the quant matrix
+        // (sc-9941, epic 8506) it ships pre-built q4/q8/bf16 tier subdirs (the quant baked into each
+        // tier's config.json so nothing quantizes at load). The worker resolves env override
+        // (SCENEWORKS_MLX_WAN5B_DIR) → local <data>/models/mlx/wan_2_2 (a local conversion supersedes)
+        // → the requested tier subdir of this snapshot (wan_tier_subdir), loading with no install-time
+        // convert peak. Source Wan-AI/Wan2.2-TI2V-5B is Apache-2.0; converter "wan_ti2v_5b" builds the
+        // bf16 tier and the q8/q4 tiers are derived from it (quantize_wan_transformer, group 64).
         "minMemoryGb": 45,
         "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
         // macOS curated menu (sc-7296): mlx Wan adopts the unified framework over its native
@@ -4478,16 +5307,98 @@
       // from the SceneWorks HF org (sc-5607, epic 5594; replaces the third-party AITRADER mirror);
       // Windows/Linux load the diffusers/GGUF layout via the torch wan_video adapter.
       "downloads": [
+        // macOS quant matrix (sc-9942, epic 8506): each tier is a SEPARATE user-selectable artifact
+        // tagged with a `variant`; `q4` (default) installs when no tier is chosen. Unlike LTX the
+        // TIER subdirs carry no shared TE/VAE coRequisite — every tier subdir is fully self-contained
+        // (both MoE experts + UMT5 T5 + z16 VAE + tokenizer + config.json), so the dense T5/VAE repeat
+        // per tier (epic decision #3: storage is a non-issue; keeps the load path a single
+        // self-contained dir with no engine change). The worker fetches a toggled-but-not-downloaded
+        // tier on demand (ensure_wan_a14b_tier_present, video_jobs.rs), so advanced.mlxQuantize works
+        // without a pre-pick. The legacy flat root files stay hosted for already-shipped workers that
+        // resolve the repo root; a new worker only ever resolves the tier subdirs (cleanup follow-up
+        // sc-9977). estimatedSizeBytes/footprint are backfilled with the exact hosted subdir sizes
+        // post-build.
+        //
+        // The 4-step Lightning distill LoRA (lightx2v/Wan2.2-Lightning) IS a `coRequisite` (sc-10030):
+        // the A14B MoE recipe bakes it as MANDATORY (wan_sampling forces 4 steps / CFG-off and
+        // resolve_wan_adapters always applies the high/low pair), so the model cannot generate without
+        // it. It lives in a separate upstream repo under a per-architecture subdir (T2V ⇒ Seko-V1.1,
+        // NOT cross-compatible with I2V), installs alongside whichever tier(s) the user picks, and
+        // gates install_state. Mirrors the PiD/LTX gemma coRequisite precedent (sc-9696). The worker
+        // also self-heals an already-installed pre-coRequisite worker via ensure_wan_lightning_present
+        // (video_jobs.rs) at gen time.
+        {
+          "provider": "huggingface",
+          "repo": "lightx2v/Wan2.2-Lightning",
+          "coRequisite": true,
+          "files": [
+            "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1/high_noise_model.safetensors",
+            "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1/low_noise_model.safetensors"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 2453954848
+        },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
-          "files": [],
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 69040469369
+          "estimatedSizeBytes": 28644241134,
+          // peakMemoryBytes MEASURED on-device (sc-10049 / epic 10043, 128 GB Apple-Silicon Mac, via
+          // get_peak_memory reset per gen): 18.73 GiB (Lightning off) → 24.48 GiB (Lightning + user LoRA).
+          // Recorded at the 24.5 GiB worst case so the RAM suggestion budgets the realistic ceiling. It is
+          // FAR below diskSizeBytes because A14B is MoE — only ONE 14B expert is resident at a time, not
+          // both — which is exactly why the old model-level minMemoryGb 133 (both experts dense) over-warned.
+          "footprint": { "diskSizeBytes": 28644241134, "residentMemoryBytes": null, "peakMemoryBytes": 26306674688 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 42695163382,
+          "footprint": { "diskSizeBytes": 42695163382, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos"],
+          // Dense bf16 tier (sc-9942): both experts bf16 (~28.58 GB each) + T5 (~11.36 GB) + VAE +
+          // tokenizer — the same content as the legacy flat root, hosted under bf16/ for the uniform
+          // tier layout. Exact on-disk size of the built bf16/ subdir.
+          "estimatedSizeBytes": 69040469649,
+          "footprint": { "diskSizeBytes": 69040469649, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // Windows/Linux candle quant matrix (sc-10027, epic 10043): SceneWorks/wan2.2-t2v-a14b-candle
+        // (sc-10026) — q4 (default) / q8 packed dual-expert tiers; bf16 stays the dense Wan-AI snapshot.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-t2v-a14b-candle",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 29788704888,
+          "footprint": { "diskSizeBytes": 29788704888, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-t2v-a14b-candle",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 44071949832,
+          "footprint": { "diskSizeBytes": 44071949832, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+          "variant": "bf16",
           "files": [],
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 72000000000
@@ -4546,12 +5457,16 @@
       },
       "mlx": {
         // Turnkey pre-converted dual-expert MLX snapshot on the SceneWorks HF org (sc-5607,
-        // epic 5594) — replaces the third-party AITRADER/Wan2.2-T2V-A14B-mlx-bf16 mirror. Dense
-        // bf16, self-contained (high/low-noise experts + UMT5 encoder + z16 VAE + tokenizer),
-        // downloaded on first use. The worker resolves env override (SCENEWORKS_MLX_WAN14B_T2V_DIR)
-        // → local <data>/models/mlx/wan_2_2_t2v_14b → this snapshot. Source Wan-AI/Wan2.2-T2V-A14B
-        // is Apache-2.0; converter "wan_t2v_14b" emits bf16 (Q4/Q8 at load). The lightx2v 4-step
-        // Lightning LoRA is downloaded on demand by MlxVideoAdapter at generation time.
+        // epic 5594) — replaces the third-party AITRADER/Wan2.2-T2V-A14B-mlx-bf16 mirror. As of the
+        // quant matrix (sc-9942, epic 8506) it ships pre-built q4/q8/bf16 tier subdirs (each
+        // self-contained: high/low-noise experts + UMT5 encoder + z16 VAE + tokenizer + config.json,
+        // the quant baked in via config.json so nothing quantizes at load). The worker resolves env
+        // override (SCENEWORKS_MLX_WAN14B_T2V_DIR) → local <data>/models/mlx/wan_2_2_t2v_14b → the
+        // requested tier subdir of this snapshot (wan_t2v_14b_tier_subdir; both MoE experts live in
+        // one subdir), loading with no install-time convert peak. Source Wan-AI/Wan2.2-T2V-A14B is
+        // Apache-2.0; converter "wan_t2v_14b" (mlx-gen-wan convert_t2v_14b) builds each tier. The
+        // mandatory lightx2v 4-step Lightning distill LoRA installs as a `coRequisite` above (sc-10030;
+        // ensure_wan_lightning_present also self-heals a pre-coRequisite worker at gen time).
         "minMemoryGb": 133,
         "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
         // macOS curated menu (sc-7296): the full curated fold-in over the A14B native flow σ
@@ -4588,16 +5503,95 @@
       // from the SceneWorks HF org (sc-5600, epic 5594); Windows/Linux load the diffusers/GGUF
       // layout via the torch wan_video adapter. The API serves only the entry matching the OS.
       "downloads": [
+        // macOS quant matrix (sc-9943, epic 8506): the image→video sibling of the T2V-A14B matrix.
+        // Each tier is a SEPARATE user-selectable artifact tagged with a `variant`; `q4` (default)
+        // installs when no tier is chosen. Every tier subdir is fully self-contained (both MoE
+        // experts at in_dim 36 image-concat + UMT5 T5 + z16 VAE + tokenizer + config.json), so the
+        // dense T5/VAE repeat per tier (epic decision #3: storage is a non-issue; keeps the load path
+        // a single self-contained dir with no engine change). The worker fetches a toggled-but-not-
+        // downloaded tier on demand (ensure_wan_a14b_tier_present, video_jobs.rs), so
+        // advanced.mlxQuantize works without a pre-pick. The legacy flat root files stay hosted for
+        // already-shipped workers that resolve the repo root; a new worker only ever resolves the tier
+        // subdirs (cleanup follow-up sc-9977). estimatedSizeBytes/footprint are the exact hosted
+        // subdir sizes measured from the on-device build.
+        //
+        // Mandatory 4-step Lightning distill LoRA as a `coRequisite` (sc-10030): the I2V-A14B recipe
+        // bakes it (wan_sampling forces 4 steps / CFG-off; resolve_wan_adapters always applies the
+        // high/low pair), so the model cannot generate without it. Per-architecture subdir (I2V ⇒
+        // Seko-V1, NOT cross-compatible with the T2V Seko-V1.1 LoRA). Same upstream repo as T2V's
+        // coRequisite; each model tracks only its own subdir files. See the T2V entry + sc-9696 for
+        // the coRequisite pattern; ensure_wan_lightning_present self-heals a pre-coRequisite worker.
+        {
+          "provider": "huggingface",
+          "repo": "lightx2v/Wan2.2-Lightning",
+          "coRequisite": true,
+          "files": [
+            "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/high_noise_model.safetensors",
+            "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/low_noise_model.safetensors"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 2453954848
+        },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
-          "files": [],
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 69042107874
+          "estimatedSizeBytes": 28645879665,
+          // peakMemoryBytes MEASURED on-device (sc-10049 / epic 10043): q4 I2V Lightning-on 4-step peaked
+          // 22.71 GiB (get_peak_memory). Recorded at the 24.5 GiB shared-with-T2V worst case (identical
+          // packed-additive MoE path, headroom for a user LoRA). Far below diskSizeBytes: A14B is MoE, one
+          // 14B expert resident at a time — the reason the model-level minMemoryGb 133 over-warned.
+          "footprint": { "diskSizeBytes": 28645879665, "residentMemoryBytes": null, "peakMemoryBytes": 26306674688 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 42696802013,
+          "footprint": { "diskSizeBytes": 42696802013, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos"],
+          // Dense bf16 tier (sc-9943): both experts bf16 + T5 + VAE + tokenizer — the same content as
+          // the legacy flat root, hosted under bf16/ for the uniform tier layout. Exact on-disk size
+          // of the built bf16/ subdir.
+          "estimatedSizeBytes": 69042107982,
+          "footprint": { "diskSizeBytes": 69042107982, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // Windows/Linux candle quant matrix (sc-10027, epic 10043): SceneWorks/wan2.2-i2v-a14b-candle
+        // (sc-10026) — q4 (default) / q8 packed dual-expert tiers; bf16 stays the dense Wan-AI snapshot.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-i2v-a14b-candle",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 29792232225,
+          "footprint": { "diskSizeBytes": 29792232225, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-i2v-a14b-candle",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 44075477169,
+          "footprint": { "diskSizeBytes": 44075477169, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+          "variant": "bf16",
           "files": [],
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 72000000000
@@ -4654,12 +5648,15 @@
       },
       "mlx": {
         // Turnkey pre-converted dual-expert MLX snapshot on the SceneWorks HF org (sc-5600,
-        // epic 5594): dense bf16, self-contained (high/low-noise experts + UMT5 encoder + z16
-        // VAE + tokenizer; in_dim 36 image-concat), downloaded on first use — no in-app
-        // conversion. The worker resolves env override (SCENEWORKS_MLX_WAN14B_I2V_DIR) → local
-        // <data>/models/mlx/wan_2_2_i2v_14b (a local conversion supersedes) → this snapshot.
-        // Source Wan-AI/Wan2.2-I2V-A14B is Apache-2.0; converter "wan_i2v_14b" emits bf16
-        // (Q4/Q8 at load). Its distill LoRA is applied at run time.
+        // epic 5594). As of the quant matrix (sc-9943, epic 8506) it ships pre-built q4/q8/bf16 tier
+        // subdirs (each self-contained: high/low-noise experts at in_dim 36 image-concat + UMT5
+        // encoder + z16 VAE + tokenizer + config.json, the quant baked in via config.json so nothing
+        // quantizes at load). The worker resolves env override (SCENEWORKS_MLX_WAN14B_I2V_DIR) →
+        // local <data>/models/mlx/wan_2_2_i2v_14b (a local conversion supersedes) → the requested
+        // tier subdir of this snapshot (wan_a14b_tier_subdir; both MoE experts live in one subdir),
+        // loading with no install-time convert peak. Source Wan-AI/Wan2.2-I2V-A14B is Apache-2.0;
+        // converter "wan_i2v_14b" (mlx-gen-wan convert_i2v_14b) builds each tier. Its distill LoRA is
+        // applied at run time.
         "minMemoryGb": 133,
         "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
         // macOS curated menu (sc-7296): the full curated fold-in over the A14B native flow σ
@@ -4823,17 +5820,49 @@
         "ads2v"
       ],
       "downloads": [
+        // Bernini quant matrix (sc-9945, epic 8506): self-contained q4/ (default) + q8/ + bf16/ tier
+        // subdirs on SceneWorks/bernini-mlx. Each tier is a COMPLETE composite snapshot — the Qwen2.5-VL
+        // planner (backbone packed q4/q8, vision tower + connector + clip-diff dense) + both Wan renderer
+        // experts (packed q4/q8) + the shared dense T5/VAE/tokenizer + config sidecars. Pre-packed tiers
+        // load with no dense-staging peak (the flat layout staged ~82 GiB bf16 then quantized at load).
+        // The dense T5 repeats per tier (epic decision #3: storage non-issue; keeps the load path a
+        // single self-contained dir). The worker fetches a toggled-but-not-downloaded tier on demand
+        // (ensure_bernini_tier_present, video_jobs.rs), so advanced.mlxQuantize works without a pre-pick.
+        // The legacy flat root files stay hosted for already-shipped workers that resolve the repo root;
+        // a new worker only ever resolves the tier subdirs. Shared by bernini + bernini_image (one repo,
+        // HF cache dedupes). estimatedSizeBytes/footprint are measured from the built tiers.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/bernini-mlx",
-          "files": [],
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
           "platforms": ["macos"],
-          // Pre-converted MLX snapshot (planner + dual-expert renderer + stock
-          // Wan2.2 UMT5/VAE/tokenizer), bf16 ≈ 82 GiB (lean — the diffusers-format
-          // t5_text_encoder/t5_tokenizer/vae/scheduler dirs the engine never loads
-          // are excluded). Self-contained — no Wan base or diffusers source needed
-          // at runtime. Q4 default / Q8 opt-in applied at load.
-          "estimatedSizeBytes": 88046829568
+          // ~35.2 GiB measured (experts + planner backbone at 4-bit; dense T5/VAE/vision shared).
+          "estimatedSizeBytes": 37815703819,
+          "footprint": { "diskSizeBytes": 37815703819, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/bernini-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos"],
+          // ~51.3 GiB measured (experts + planner backbone at 8-bit; dense T5/VAE/vision shared).
+          "estimatedSizeBytes": 55129270617,
+          "footprint": { "diskSizeBytes": 55129270617, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/bernini-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos"],
+          // Dense bf16 tier: the same content as the legacy flat root (lean ≈ 82 GiB — the diffusers-format
+          // t5_text_encoder/t5_tokenizer/vae/scheduler dirs the engine never loads are excluded), hosted
+          // under bf16/ for the uniform tier layout (~81.6 GiB measured).
+          "estimatedSizeBytes": 87591990679,
+          "footprint": { "diskSizeBytes": 87591990679, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -4923,15 +5952,37 @@
       "adapter": "bernini",
       "capabilities": ["text_to_image", "edit_image"],
       "downloads": [
+        // Bernini quant matrix (sc-9945, epic 8506) — the SAME q4/ (default) + q8/ + bf16/ tier subdirs
+        // on SceneWorks/bernini-mlx the video `bernini` id uses (one repo, HF cache dedupes even with
+        // both ids installed). Per-tier layout + on-demand fetch (ensure_bernini_tier_present) mirror the
+        // video entry; the image lane resolves through the same tier machinery. estimatedSizeBytes/footprint are measured from the built tiers.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/bernini-mlx",
-          "files": [],
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
           "platforms": ["macos"],
-          // Same pre-converted MLX snapshot the video `bernini` id uses (planner + dual-expert
-          // renderer + stock Wan2.2 UMT5/VAE/tokenizer), bf16 ≈ 82 GiB. Shared HF repo — the
-          // cache stores it once even with both ids installed.
-          "estimatedSizeBytes": 88046829568
+          "estimatedSizeBytes": 37815703819,
+          "footprint": { "diskSizeBytes": 37815703819, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/bernini-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 55129270617,
+          "footprint": { "diskSizeBytes": 55129270617, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/bernini-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 87591990679,
+          "footprint": { "diskSizeBytes": 87591990679, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -5013,17 +6064,49 @@
         "replace_person"
       ],
       "downloads": [
+        // macOS quant matrix (sc-9944, epic 8506): each tier is a SEPARATE user-selectable artifact
+        // tagged with a `variant`; `q4` (default) installs when no tier is chosen. Each tier subdir is
+        // fully self-contained (the DiT `dit.safetensors` at the tier's precision + the shared dense
+        // Wan2.1 z16 VAE + UMT5 T5 encoder + open-CLIP ViT-H/14 visual tower + tokenizer + config.json
+        // with the quant baked in), so the dense VAE/T5/CLIP repeat per tier (epic decision #3: storage
+        // is a non-issue; keeps the load path a single self-contained dir with no engine change). The
+        // worker fetches a toggled-but-not-downloaded tier on demand (ensure_scail2_tier_present,
+        // video_jobs.rs), so advanced.mlxQuantize works without a pre-pick. The legacy flat root files
+        // (the shipped Q4 snapshot + the DPO LoRA pickle) stay hosted for already-shipped workers that
+        // resolve the repo root; a new worker only ever resolves the tier subdirs.
+        // estimatedSizeBytes/footprint are the exact hosted subdir sizes measured post-build.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/scail2-mlx",
-          "files": [],
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
           "platforms": ["macos"],
-          // Pre-converted, pre-quantized MLX snapshot: Q4-packed DiT (~8.9 GB) + stock
-          // Wan2.1 VAE / umt5-xxl + open-CLIP ViT-H/14 visual tower + Bias-Aware DPO LoRA.
-          // Self-contained — no Wan base needed at runtime. Size MEASURED from the HF tree
-          // after sc-5445 shipped the lean Q4 repo (the redundant raw torch pickles —
-          // ~14.4 GB — were pruned; the loaders use only the safetensors).
-          "estimatedSizeBytes": 25241936201
+          // The dense T5 (~11.4 GB) + open-CLIP tower (~2.5 GB) are shared bf16 in every tier, so the
+          // Q4 DiT (~9.6 GB) makes this only modestly smaller than q8/bf16 (same shape as SD3.5).
+          "estimatedSizeBytes": 23993093306,
+          "footprint": { "diskSizeBytes": 23993093306, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/scail2-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 32067131269,
+          "footprint": { "diskSizeBytes": 32067131269, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/scail2-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "platforms": ["macos"],
+          // Dense bf16 tier (sc-9944): the DiT as a true dense mirror of the zai-org fp32 checkpoint
+          // (reconstructed for this story; the pre-sc-5445 dense snapshot had been pruned) + the shared
+          // dense VAE/T5/CLIP/tokenizer. Exact on-disk size of the built bf16/ subdir.
+          "estimatedSizeBytes": 47205846839,
+          "footprint": { "diskSizeBytes": 47205846839, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -5435,6 +6518,11 @@
           // mirror's LICENSE (Gemma Terms) + Prohibited Use Policy + NOTICE alongside the weights.
           "provider": "huggingface",
           "repo": "SceneWorks/gemma-2-2b-it",
+          // Co-requisite (sc-9696): fetched ALONGSIDE the PiD checkpoint, not an alternate to it.
+          // Model Manager downloads both, and the entry only reports installed once both are cached
+          // (else `resolve_pid_weights` silently no-ops to the native VAE). Shared across all four PiD
+          // decoders + SANA, so deleting one PiD decoder must NOT remove it.
+          "coRequisite": true,
           "files": [],
           "estimatedSizeBytes": 5228717488
         }
@@ -5499,12 +6587,20 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/pid-flux",
+          // Whole-repo download (empty `files`): fetches BOTH the 4K-tuned `2kto4k` student AND the
+          // 2K-tuned `res2k` student (`pid_flux_2k.safetensors`, sc-10056) the 2K output tier prefers.
+          // Size ≈ 2× the single 2.72 GB student.
           "files": [],
-          "estimatedSizeBytes": 2724745532
+          "estimatedSizeBytes": 5449491064
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/gemma-2-2b-it",
+          // Co-requisite (sc-9696): fetched ALONGSIDE the PiD checkpoint, not an alternate to it.
+          // Model Manager downloads both, and the entry only reports installed once both are cached
+          // (else `resolve_pid_weights` silently no-ops to the native VAE). Shared across all four PiD
+          // decoders + SANA, so deleting one PiD decoder must NOT remove it.
+          "coRequisite": true,
           "files": [],
           "estimatedSizeBytes": 5228717488
         }
@@ -5568,12 +6664,20 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/pid-flux2",
+          // Whole-repo download (empty `files`): fetches BOTH the 4K-tuned `2kto4k` student AND the
+          // 2K-tuned `res2k` student (`pid_flux2_2k.safetensors`, sc-10056) the 2K output tier prefers.
+          // Size ≈ 2× the single 2.73 GB student.
           "files": [],
-          "estimatedSizeBytes": 2725777732
+          "estimatedSizeBytes": 5451555464
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/gemma-2-2b-it",
+          // Co-requisite (sc-9696): fetched ALONGSIDE the PiD checkpoint, not an alternate to it.
+          // Model Manager downloads both, and the entry only reports installed once both are cached
+          // (else `resolve_pid_weights` silently no-ops to the native VAE). Shared across all four PiD
+          // decoders + SANA, so deleting one PiD decoder must NOT remove it.
+          "coRequisite": true,
           "files": [],
           "estimatedSizeBytes": 5228717488
         }
@@ -5643,6 +6747,11 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/gemma-2-2b-it",
+          // Co-requisite (sc-9696): fetched ALONGSIDE the PiD checkpoint, not an alternate to it.
+          // Model Manager downloads both, and the entry only reports installed once both are cached
+          // (else `resolve_pid_weights` silently no-ops to the native VAE). Shared across all four PiD
+          // decoders + SANA, so deleting one PiD decoder must NOT remove it.
+          "coRequisite": true,
           "files": [],
           "estimatedSizeBytes": 5228717488
         }

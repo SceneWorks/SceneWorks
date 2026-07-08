@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AssetPickerField, ImageEditSourcePickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
-import { AssetMedia } from "../components/assetMedia.jsx";
+import { AssetMedia, assetUrl } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
@@ -9,8 +9,23 @@ import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
 import StructuredPromptBuilder from "../components/StructuredPromptBuilder.jsx";
 import ReferenceCaptionPicker from "../components/ReferenceCaptionPicker.jsx";
+import BatchPromptPanel from "../components/BatchPromptPanel.jsx";
 import {
-  buildStructuredPromptRecipe,
+  cardinality,
+  expandBatch,
+  extractKeys,
+  linkedGroupIssues,
+  missingKeys,
+  parsePromptResolution,
+  splitPromptLines,
+} from "../promptBatch.js";
+import {
+  MAX_IMAGE_DIMENSION,
+  MIN_IMAGE_DIMENSION,
+  resolveEffectiveDimensions,
+} from "../resolutionOverride.js";
+import { batchItemStatus, summarizeBatchRun } from "../batchOps.js";
+import {
   emptyCaption,
   orderCaption,
   parseMagicPromptCaption,
@@ -18,6 +33,7 @@ import {
   serializeCaption,
   validateCaption,
 } from "../ideogramCaption.js";
+import { buildImageJobAdvanced } from "../imageJobAdvanced.js";
 import { usePoseLibrary, useUserPoseLoader } from "../poseLibrary.js";
 
 const PROMPT_SUGGESTION_POOL = [
@@ -76,14 +92,9 @@ function defaultCharacterPrompt(character) {
   }
 }
 import {
-  applyPresetDefault,
-  buildStudioPresetPayload,
   finiteNumberOrUndefined,
-  presetNameTaken,
   serializeLora,
-  clearPresetDefault,
   noPresetId,
-  slugifyPresetId,
 } from "../presetUtils.js";
 import {
   LoraPickerSection,
@@ -92,6 +103,7 @@ import {
   PresetValidationWarnings,
   SavePresetPanel,
   useGenerationStudio,
+  useSavePreset,
 } from "./generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
@@ -108,14 +120,12 @@ import {
   installedTiers,
   shouldShowTierPicker,
   tierLabel,
-  tierQuantize,
 } from "../quantTier.js";
 import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO } from "../constants.js";
 import { pickClosestResolution } from "../resolutionMatch.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
-  macBlockedModels,
   macGatingActive,
   macModelFeatureBlock,
 } from "../macGating.js";
@@ -149,6 +159,17 @@ const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x128
 // segmented control actually exposes. Edit lives in its own workflow; text and
 // character share the text_to_image workflow.
 const IMAGE_MODES = ["text_to_image", "edit_image", "character_image"];
+
+// Above this many resolved images a batch run needs explicit confirmation, so a stray
+// value or an over-eager cross-product can't silently queue a huge job (sc-9957).
+const BATCH_RENDER_CAP = 100;
+
+// Join a saved batch's prompts back into the authoring textarea: multi-line prompts
+// round-trip through the `---` delimiter, a flat list joins on newlines.
+function batchTextFromPrompts(prompts) {
+  const list = Array.isArray(prompts) ? prompts : [];
+  return list.join(list.some((prompt) => prompt.includes("\n")) ? "\n---\n" : "\n");
+}
 
 function preferredOption(defaultValue, options) {
   return options.includes(defaultValue) ? defaultValue : options[0] ?? "default";
@@ -256,12 +277,32 @@ export function ImageStudio() {
     setActiveView,
     setPreviewAsset,
     presets = [],
+    promptBatches = [],
+    createPromptBatch,
+    updatePromptBatch,
+    deletePromptBatch,
     requestedGpu,
     selectedAsset,
     setRequestedGpu,
     updateAssetStatus,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
+    visibleWorkers = [],
   } = useAppContext();
+  // Krea 2 INT8-ConvRot eligibility (sc-9300, epic 9083): the candle-only tier is offered ONLY when a
+  // live worker advertises the `int8_convrot` capability — which the worker emits solely on the candle
+  // lane AND when its GPU clears the sm_89 compute-cap floor (gpu.rs). So macOS/MLX and pre-Ada NVIDIA
+  // hosts (where no worker advertises it) HIDE the tier gracefully rather than only failing at submit.
+  const convRotEligible = useMemo(
+    () =>
+      visibleWorkers.some(
+        (worker) =>
+          worker?.status !== "offline" &&
+          Array.isArray(worker?.capabilities) &&
+          worker.capabilities.includes("int8_convrot"),
+      ),
+    [visibleWorkers],
+  );
+  const tierOptions = useMemo(() => ({ convRotEligible }), [convRotEligible]);
   // Prompt-refinement model catalog entry (sc-5605) — drives the "download the
   // refinement model" affordance in RefinePromptControl when Refine fails because the
   // model isn't provisioned on the native worker.
@@ -332,6 +373,110 @@ export function ImageStudio() {
   };
   const suggestions = mode === "character_image" ? characterSuggestions : sceneSuggestions;
   const [count, setCount] = useState(saved.count ?? 4);
+
+  // Batch Prompt Processing (epic 9952). Batch mode is orthogonal to the T2I/Edit/
+  // Character tab — it swaps the single prompt for a list of {{templated}} prompts run
+  // as one batch against the current settings. State persists like the rest of the
+  // studio; the fan-out on "Run batch" is wired in sc-9956 (slice 4).
+  const [batchMode, setBatchMode] = useState(saved.batchMode ?? false);
+  const [batchPromptsText, setBatchPromptsText] = useState(saved.batchPromptsText ?? "");
+  const [batchVariableValues, setBatchVariableValues] = useState(saved.batchVariableValues ?? {});
+  const [batchName, setBatchName] = useState(saved.batchName ?? "");
+  const [batchScope, setBatchScope] = useState(saved.batchScope ?? "global");
+  const [loadedBatchId, setLoadedBatchId] = useState(saved.loadedBatchId ?? null);
+  const [batchError, setBatchError] = useState("");
+  const [batchBusy, setBatchBusy] = useState(false);
+  // An in-flight / just-finished batch run: { submitting, items: [{ prompt, jobId }] }.
+  // Progress + cancel are derived off the live jobs feed, mirroring the asset batch (sc-6112).
+  const [batchRun, setBatchRun] = useState(null);
+  // True once a run over BATCH_RENDER_CAP is awaiting the user's explicit confirmation.
+  const [batchConfirmPending, setBatchConfirmPending] = useState(false);
+  // Set by Stop/Cancel to break the (possibly slow, structured) enqueue loop mid-flight.
+  const batchAbortRef = useRef(false);
+
+  const batchPrompts = useMemo(() => splitPromptLines(batchPromptsText), [batchPromptsText]);
+  const batchVariables = useMemo(
+    () =>
+      extractKeys(batchPrompts).map((key) => ({
+        key,
+        // The value editor keeps a trailing empty slot; drop blanks so saved batches
+        // and the run payload carry only real values (the engine ignores them anyway).
+        values: (batchVariableValues[key] ?? []).filter((value) => value.trim() !== ""),
+      })),
+    [batchPrompts, batchVariableValues],
+  );
+  // Number of resolved-prompt jobs (pose-independent). Image count = jobs × images-per-prompt,
+  // computed as batchTotal once the pose payload is known (poses replace `count`).
+  const batchJobCount = useMemo(
+    () => cardinality(batchPrompts, batchVariables, 1),
+    [batchPrompts, batchVariables],
+  );
+
+  const applyBatchContent = useCallback(({ prompts, variables, lastValues, name }) => {
+    setBatchPromptsText(batchTextFromPrompts(prompts));
+    const values = {};
+    for (const variable of variables ?? []) {
+      if (variable?.key) values[variable.key] = Array.isArray(variable.values) ? variable.values : [];
+    }
+    for (const [key, vals] of Object.entries(lastValues ?? {})) {
+      if (!(key in values) && Array.isArray(vals)) values[key] = vals;
+    }
+    setBatchVariableValues(values);
+    if (name !== undefined) setBatchName(name ?? "");
+    setBatchError("");
+  }, []);
+
+  const handleSaveBatch = useCallback(async () => {
+    setBatchBusy(true);
+    setBatchError("");
+    try {
+      const payload = {
+        name: batchName.trim(),
+        scope: batchScope,
+        prompts: batchPrompts,
+        variables: batchVariables,
+        lastValues: Object.fromEntries(batchVariables.map((variable) => [variable.key, variable.values])),
+      };
+      const result = loadedBatchId
+        ? await updatePromptBatch(loadedBatchId, payload, batchScope)
+        : await createPromptBatch(payload);
+      if (result?.id) setLoadedBatchId(result.id);
+    } catch (err) {
+      setBatchError(err.message);
+    } finally {
+      setBatchBusy(false);
+    }
+  }, [batchName, batchScope, batchPrompts, batchVariables, loadedBatchId, updatePromptBatch, createPromptBatch]);
+
+  const handleLoadBatch = useCallback(
+    (batch) => {
+      applyBatchContent(batch);
+      setBatchScope(batch.scope === "project" ? "project" : "global");
+      setLoadedBatchId(batch.id ?? null);
+    },
+    [applyBatchContent],
+  );
+
+  const handleDeleteBatch = useCallback(
+    async (batch) => {
+      setBatchError("");
+      try {
+        await deletePromptBatch(batch.id, batch.scope);
+        setLoadedBatchId((current) => (current === batch.id ? null : current));
+      } catch (err) {
+        setBatchError(err.message);
+      }
+    },
+    [deletePromptBatch],
+  );
+
+  const handleImportBatch = useCallback(
+    (payload) => {
+      applyBatchContent(payload);
+      setLoadedBatchId(null);
+    },
+    [applyBatchContent],
+  );
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   const [model, setModel] = useState(saved.model ?? imageModels[0]?.id ?? "z_image_turbo");
   const [seed, setSeed] = useState(saved.seed ?? "");
@@ -353,6 +498,13 @@ export function ImageStudio() {
   // InstantID, `controlnetScale` (IdentityNet landmark lock) rides there too.
   const [referenceAssetId, setReferenceAssetId] = useState("");
   const [ipAdapterScale, setIpAdapterScale] = useState(saved.ipAdapterScale ?? 0.6);
+  // img2img reference-guided generation (epic 8588 slice A, sc-8593): the reference picked in the
+  // "Start from an image" panel (lifted from ReferenceCaptionPicker) drives generation at this
+  // strength on an img2img-capable model (Krea 2 Turbo). Distinct from the character `referenceAssetId`
+  // above — same picker, different purpose. Default 0.5 (the full-range slider midpoint; the usable
+  // band is model-specific, so no clamp beyond the slider's 0–1).
+  const [img2imgReferenceAssetId, setImg2imgReferenceAssetId] = useState("");
+  const [img2imgStrength, setImg2imgStrength] = useState(saved.img2imgStrength ?? 0.5);
   const [controlnetScale, setControlnetScale] = useState(saved.controlnetScale ?? 0.8);
   // Variation knob for backbones whose CFG is decoupled from IP-Adapter:
   // FLUX (true_cfg_scale alongside ipAdapterScale) and Qwen-Image-Edit (true_cfg_scale
@@ -390,6 +542,12 @@ export function ImageStudio() {
   // clear the override.
   const [stepsOverride, setStepsOverride] = useState(saved.steps ?? "");
   const [guidanceOverride, setGuidanceOverride] = useState(saved.guidanceScale ?? "");
+  // Advanced resolution override: a custom Width/Height to experiment beyond the model's
+  // pre-declared Aspect options (e.g. Krea 2 up to 4K). "" = "use the Aspect dropdown" for
+  // that axis, mirroring the Steps/Guidance overrides. Effective dims are derived below and
+  // ride the existing top-level width/height payload; the backend caps each at 256–4096.
+  const [widthOverride, setWidthOverride] = useState(saved.widthOverride ?? "");
+  const [heightOverride, setHeightOverride] = useState(saved.heightOverride ?? "");
   // Flash attention (sc-3674): fused attention on the candle (Windows/CUDA) SDXL backend — faster +
   // less VRAM. Per-payload (sent in `advanced.flashAttn`); the worker honors it only on candle, and
   // ignores it on every other backend. Default on. Sticky pref (persisted), not model-reset.
@@ -422,6 +580,11 @@ export function ImageStudio() {
   // toggle only renders + emits when the model is PiD-eligible AND its checkpoint is installed
   // (showPidToggle), so a stale `true` on a non-eligible model is inert — mirrors bf16Precision.
   const [usePid, setUsePid] = useState(saved.usePid ?? false);
+  // PiD output tier (epic 7840, sc-10054): PiD always super-resolves the base latent 4×, so this picks
+  // the effective base — "4k" keeps the requested base (~4096 output, the pre-tier behavior), "2k" caps
+  // it (~2048 output, faster + less GPU memory). Sticky pref, default "4k". Rides `advanced.pidTarget`
+  // (emitted only when the PiD toggle is shown+on AND "2k" is picked — "4k" is the worker default).
+  const [pidTarget, setPidTarget] = useState(saved.pidTarget === "2k" ? "2k" : "4k");
   const [faceRestore, setFaceRestore] = useState(false);
   // User-created poses (reserved global project) join the built-in library in both
   // the picker and the id→keypoints resolver below, so saved poses can generate.
@@ -440,14 +603,15 @@ export function ImageStudio() {
   const [expanding, setExpanding] = useState(false);
   const [submitError, setSubmitError] = useState("");
   const [guideOpen, setGuideOpen] = useState(false);
-  // "Save as Preset" sidebar control — snapshots the current config into the
-  // workspace preset library. Defaults to project scope, falling back to global
-  // when no project is open (project-scoped presets require a project).
-  const [presetName, setPresetName] = useState("");
-  const [presetScope, setPresetScope] = useState(activeProject ? "project" : "global");
-  const [savingPreset, setSavingPreset] = useState(false);
-  const [presetSaveMessage, setPresetSaveMessage] = useState({ tone: "neutral", text: "" });
-  const presetDefaultSnapshots = useRef({});
+  // Prompt tools (epic UI-refinement): which inline prompt-tool panel is open —
+  // null | "describe" (reference-image caption) | "refine" (rewrite my prompt).
+  // Replaces the always-rendered ReferenceCaptionPicker + RefinePromptControl pair
+  // with two toggle tiles; only one panel opens at a time.
+  const [promptTool, setPromptTool] = useState(null);
+  const togglePromptTool = useCallback(
+    (tool) => setPromptTool((current) => (current === tool ? null : tool)),
+    [],
+  );
   const editImageAssets = useMemo(
     () =>
       assets.filter(
@@ -496,6 +660,15 @@ export function ImageStudio() {
     setUpscaleFactor,
   });
 
+  // PiD decode and Upscale both super-resolve, so they're mutually exclusive in the UI (each
+  // disables the other while active). If a saved/preset state carries both on, drop PiD (keep
+  // Upscale) so neither checkbox is left permanently disabled.
+  useEffect(() => {
+    if (usePid && upscaleEnabled) {
+      setUsePid(false);
+    }
+  }, [usePid, upscaleEnabled]);
+
   useEffect(() => {
     if (mode === "edit_image" && selectedAssetEditableSourceId) {
       setSourceAssetId(selectedAssetEditableSourceId);
@@ -537,10 +710,6 @@ export function ImageStudio() {
   // picker so the user can't select something that would only error. Inert elsewhere.
   const macImageModels = useMemo(
     () => macAvailableModels(imageModels, macCapabilities),
-    [imageModels, macCapabilities],
-  );
-  const macHiddenImageModels = useMemo(
-    () => macBlockedModels(imageModels, macCapabilities),
     [imageModels, macCapabilities],
   );
   const macGating = macGatingActive(macCapabilities);
@@ -609,6 +778,14 @@ export function ImageStudio() {
   // Optional label/range override for the primary reference-strength slider (sc-8278: klein maps it
   // to image-guidance over 1.0–2.5). Absent ⇒ the legacy "Reference strength" 0–1 slider.
   const referenceStrengthCfg = selectedModel?.ui?.referenceStrength;
+  // img2img / reference-guided generation (epic 8588 slice A, sc-8593): a `ui.img2img` flag (Krea 2
+  // Turbo) — a UI toggle like poseLibrary/multiReference, NOT a `capabilities` value (z-image already
+  // uses "image_to_image" for its distinct edit-mode img2img, so a capability gate would collide).
+  // Turns the shared "Start from an image" picker double-duty: the same reference can be described into
+  // a prompt AND/OR guide the render via a strength slider, without needing the vision captioner.
+  // `ui.img2imgStrength` optionally overrides the slider label/range.
+  const supportsImg2img = Boolean(selectedModel?.ui?.img2img);
+  const img2imgStrengthConfig = selectedModel?.ui?.img2imgStrength ?? null;
   // Whether the edit model can outpaint (generate the padded border) — only models that
   // accept an inpaint mask (image_inpaint, SDXL family). Gates the Outpaint fit option.
   const editInpaintCapable = (selectedModel?.capabilities ?? []).includes("image_inpaint");
@@ -629,6 +806,39 @@ export function ImageStudio() {
   const showControlPanel = mode === "text_to_image" && controlModes.length > 0;
   const effectiveControlScale =
     typeof controlScale === "number" ? controlScale : controlScaleConfig?.default ?? 0.9;
+
+  // Pose-library + strict-control conditioning, derived once so the single Generate
+  // (submit) and the batch run (buildBatchJobRequest) share them (sc-9980). Pose emits one
+  // image per selected pose instead of `count` variations; canny/depth carry a control image
+  // routed by the preprocess (derive → sourceAssetId) vs passthrough (advanced.controlImage) toggle.
+  const usePosePayload =
+    (mode === "character_image" && referenceAssetId && poseLibrary) ||
+    (showControlPanel && activeControlMode === "pose");
+  const posePayload =
+    usePosePayload && selectedPoseIds.length
+      ? selectedPoseIds
+          .map((id) => poseById[id])
+          .filter(Boolean)
+          .map((pose) => ({ id: pose.id, keypoints: pose.keypoints }))
+      : [];
+  const controlActive = showControlPanel && Boolean(activeControlMode);
+  const controlIsImageMode = controlActive && activeControlMode !== "pose";
+  const controlPreprocessSourceId =
+    controlIsImageMode && !controlImagePassthrough && controlImageAssetId ? controlImageAssetId : null;
+  const controlPassthroughId =
+    controlIsImageMode && controlImagePassthrough && controlImageAssetId ? controlImageAssetId : null;
+
+  // Images each resolved-prompt job emits: the pose count when poses are selected (they
+  // replace `count` variations), else `count`. Total batch image count feeds the run label
+  // and the cardinality cap.
+  const batchImagesPerPrompt = posePayload.length || count;
+  const batchTotal = batchJobCount * batchImagesPerPrompt;
+
+  // A pending large-run confirmation is for one specific total — reset it whenever the batch
+  // size changes so the user always re-confirms against the current count.
+  useEffect(() => {
+    setBatchConfirmPending(false);
+  }, [batchTotal]);
   // Whether the model exposes its built-in prompt upsampler ("Enhance prompt" toggle) — FLUX.2-dev.
   const promptEnhance = Boolean(selectedModel?.ui?.promptEnhance);
   // Whether the model ships a packed default + a hosted full-precision bf16 build, exposing the
@@ -638,8 +848,14 @@ export function ImageStudio() {
   // The picker renders only when MORE THAN ONE tier is installed; a single installed tier keeps
   // the studio unchanged (no toggle). Boogu's `precisionToggle` is orthogonal — those models are
   // single-download (no variant matrix), so they never hit this path.
-  const availableTiers = useMemo(() => installedTiers(selectedModel), [selectedModel]);
-  const showTierPicker = useMemo(() => shouldShowTierPicker(selectedModel), [selectedModel]);
+  const availableTiers = useMemo(
+    () => installedTiers(selectedModel, tierOptions),
+    [selectedModel, tierOptions],
+  );
+  const showTierPicker = useMemo(
+    () => shouldShowTierPicker(selectedModel, tierOptions),
+    [selectedModel, tierOptions],
+  );
   // PiD decoder toggle visibility (epic 7840, sc-7851): the model's latent space has a PiD
   // backbone (ui.pid) AND that backbone's PiD checkpoint is installed. Hidden otherwise — for
   // non-eligible models (e.g. SenseNova) and for eligible models whose checkpoint isn't
@@ -789,6 +1005,24 @@ export function ImageStudio() {
     },
     [resolutionOptions],
   );
+  // Auto-preset the Aspect from the picked img2img reference (sc-10195): matching the reference's
+  // aspect keeps the latent-init composition valid (a 4:5 reference rendered at 16:9 comes out
+  // wrong-shaped). Mirrors the describe picker's probe (sc-8109/8220) — keyed on the id AND the asset
+  // list so a freshly imported reference re-runs once it resolves. User Aspect override still wins.
+  useEffect(() => {
+    if (!img2imgReferenceAssetId) return;
+    const asset = editImageAssets.find((item) => item.id === img2imgReferenceAssetId);
+    const src = asset && assetUrl(asset);
+    if (!src || typeof Image === "undefined") return;
+    const probe = new Image();
+    probe.onload = () => {
+      if (probe.naturalWidth && probe.naturalHeight) {
+        onReferenceImageLoaded(probe.naturalWidth, probe.naturalHeight);
+      }
+    };
+    probe.src = src;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [img2imgReferenceAssetId, editImageAssets]);
   // Sampler / scheduler menus declared by the model, gated to the ACTIVE backend
   // (epic 7114 P5): `macGatingActive` is the worker `mlx_required` master switch, so
   // it picks the manifest's `mlx.limits` override on Mac/MLX and the `candle.limits`
@@ -885,7 +1119,7 @@ export function ImageStudio() {
     if (availableTiers.includes(quantTier)) {
       return;
     }
-    setQuantTier(defaultTierSelection(selectedModel, lastUsedTiers[model]) ?? "");
+    setQuantTier(defaultTierSelection(selectedModel, lastUsedTiers[model], tierOptions) ?? "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model, availableTiersKey]);
   // Switch the active quant tier (sc-8515): persist it as this model's last-used tier and surface
@@ -997,10 +1231,12 @@ export function ImageStudio() {
     }
     promptEdited.current = true;
     setNegativePrompt(String(recipe.negativePrompt ?? ""));
-    // Recipe replay restores the creative setup, but intentionally leaves Seed
-    // random so "Use this recipe" makes a close variation instead of a byte-for-byte
-    // rerun of the saved asset.
-    setSeed("");
+    // Recipe replay leaves Seed random by default so "Use this recipe" makes a close
+    // variation instead of a byte-for-byte rerun. When the launcher passes a replaySeed
+    // (viewer "Keep seed" toggle), it is already resolved to THIS image's own seed —
+    // replay it verbatim for an exact reproduction. Guard with `!= null` so seed 0 is honored.
+    const replaySeed = launchRequest.replaySeed;
+    setSeed(replaySeed != null && replaySeed !== "" ? String(replaySeed) : "");
     const countValue = finiteRecipeNumber(settings.count);
     if (countValue) {
       setCount(countValue);
@@ -1040,7 +1276,16 @@ export function ImageStudio() {
       setUpscaleSoftness(upscale.softness);
     }
   }, [launchRequest?.id]);
-  const [width, height] = resolution.split("x").map((value) => Number(value));
+  const [dropdownWidth, dropdownHeight] = resolution.split("x").map((value) => Number(value));
+  // A non-empty Width/Height override wins for that axis; empty falls back to the Aspect
+  // dropdown. The resulting dims flow through the existing top-level width/height payload,
+  // so submit() and the batch builder need no further change. Logic lives in the pure,
+  // unit-tested resolveEffectiveDimensions helper.
+  const { width, height, invalid: dimensionsInvalid } = resolveEffectiveDimensions({
+    resolution,
+    widthOverride,
+    heightOverride,
+  });
 
   // Magic-prompt expansion (sc-5997): expand the plain-text idea into an editable caption via the
   // native utility model (same backend as Refine), recording which model drafted it. Returns the
@@ -1072,15 +1317,20 @@ export function ImageStudio() {
   // surfaces the error and lets the user retry, mirroring the magic-prompt error UX. C1: the image is
   // captioning-only — it is consumed here to produce JSON and never passed to generation.
   const onImageCaption = useCallback(
-    async (sourceAssetId) => {
+    // Single id (string) for one reference, or an ARRAY of ids for a mood board (sc-8595): >1 synthesizes
+    // ONE Ideogram JSON caption from the shared style, exactly one keeps the scalar single-image path.
+    async (source) => {
       if (typeof imageCaption !== "function") {
         throw new Error("Image captioning is unavailable.");
       }
       if (!activeProject?.id) {
         throw new Error("Open a project first.");
       }
+      const ids = Array.isArray(source) ? source.filter(Boolean) : [source].filter(Boolean);
+      const multi = ids.length > 1;
       const raw = await imageCaption({
-        sourceAssetId,
+        sourceAssetId: multi ? undefined : ids[0],
+        sourceAssetIds: multi ? ids : undefined,
         projectId: activeProject.id,
         model: VISION_CAPTION_MODEL_REPO,
       });
@@ -1102,15 +1352,21 @@ export function ImageStudio() {
   // never passed to generation.
   const describeCaptionStyle = selectedModel?.captionStyle;
   const onImageDescribe = useCallback(
-    async (sourceAssetId) => {
+    // The shared picker passes a single asset id (string) for one reference, or an ARRAY of ids for a
+    // mood board (sc-8595). Normalize: >1 rides `sourceAssetIds` (worker synthesizes one prompt from the
+    // shared style), exactly one collapses to the scalar `sourceAssetId` (the unchanged single path).
+    async (source) => {
       if (typeof imageDescribe !== "function") {
         throw new Error("Image description is unavailable.");
       }
       if (!activeProject?.id) {
         throw new Error("Open a project first.");
       }
+      const ids = Array.isArray(source) ? source.filter(Boolean) : [source].filter(Boolean);
+      const multi = ids.length > 1;
       const text = await imageDescribe({
-        sourceAssetId,
+        sourceAssetId: multi ? undefined : ids[0],
+        sourceAssetIds: multi ? ids : undefined,
         projectId: activeProject.id,
         model: VISION_CAPTION_MODEL_REPO,
         captionStyle: describeCaptionStyle,
@@ -1125,67 +1381,88 @@ export function ImageStudio() {
     [imageDescribe, activeProject?.id, describeCaptionStyle],
   );
 
-  // When restoring a snapshot, the saved count/resolution/negativePrompt already
-  // reflect the user's last state — skip the one preset-default pass that fires as the
-  // restored preset resolves so it doesn't overwrite them. "None" applies no defaults,
-  // so no guard is needed there.
-  const skipPresetDefaultsOnHydrate = useRef(
-    Object.keys(saved).length > 0 && saved.selectedPresetId !== noPresetId,
-  );
-  // [defaults key, setter] pairs restored through the remember/clear snapshot
-  // machinery, so switching to None (or another preset) puts the user's prior
-  // value back. Only keys the preset actually carries are applied, so older
-  // presets (which only stored count/resolution/negativePrompt) keep working and
-  // full-snapshot presets restore the prompt, cfg, sampler, reference + upscale
-  // knobs. The model is intentionally absent — presets never switch the model.
-  const presetDefaultFields = [
-    ["prompt", setPrompt],
-    ["negativePrompt", setNegativePrompt],
-    ["resolution", setResolution],
-    ["count", setCount],
-    ["guidanceScale", setGuidanceOverride],
-    ["steps", setStepsOverride],
-    ["sampler", setSampler],
-    ["scheduler", setScheduler],
-    ["schedulerShift", setSchedulerShift],
-    ["guidanceMethod", setGuidanceMethod],
-    ["ipAdapterScale", setIpAdapterScale],
-    ["controlnetScale", setControlnetScale],
-    ["trueCfgScale", setTrueCfgScale],
-    ["viewAngle", setViewAngle],
-    ["upscaleEnabled", setUpscaleEnabled],
-    ["upscaleFactor", setUpscaleFactor],
-    ["upscaleEngine", setUpscaleEngine],
-    ["upscaleSoftness", setUpscaleSoftness],
-  ];
-  useEffect(() => {
-    if (skipPresetDefaultsOnHydrate.current && selectedPreset) {
-      skipPresetDefaultsOnHydrate.current = false;
-      return;
-    }
-    if (!selectedPreset) {
-      for (const [key, setter] of presetDefaultFields) {
-        clearPresetDefault(setter, presetDefaultSnapshots, key);
+  // Save-as-Preset + the preset-default hydrate pass (sc-8937 — shared with the Video
+  // studio via useSavePreset). The [key, setter] pairs are restored through the
+  // remember/clear snapshot machinery, so switching to None (or another preset) puts
+  // the user's prior value back. Only keys the preset actually carries are applied, so
+  // older presets (which only stored count/resolution/negativePrompt) keep working and
+  // full-snapshot presets restore the prompt, cfg, sampler, reference + upscale knobs.
+  // The model is intentionally absent — presets never switch the model.
+  const {
+    presetName,
+    setPresetName,
+    presetScope,
+    setPresetScope,
+    savingPreset,
+    presetSaveMessage,
+    setPresetSaveMessage,
+    handleSaveAsPreset,
+  } = useSavePreset({
+    saved,
+    selectedPreset,
+    setSelectedPresetId,
+    presets,
+    mode,
+    model,
+    selectedLoras,
+    effectiveLoraWeight,
+    createPreset,
+    activeProject,
+    setMode,
+    presetDefaultFields: [
+      ["prompt", setPrompt],
+      ["negativePrompt", setNegativePrompt],
+      ["resolution", setResolution],
+      ["count", setCount],
+      ["guidanceScale", setGuidanceOverride],
+      ["steps", setStepsOverride],
+      ["sampler", setSampler],
+      ["scheduler", setScheduler],
+      ["schedulerShift", setSchedulerShift],
+      ["guidanceMethod", setGuidanceMethod],
+      ["ipAdapterScale", setIpAdapterScale],
+      ["img2imgStrength", setImg2imgStrength],
+      ["controlnetScale", setControlnetScale],
+      ["trueCfgScale", setTrueCfgScale],
+      ["viewAngle", setViewAngle],
+      ["upscaleEnabled", setUpscaleEnabled],
+      ["upscaleFactor", setUpscaleFactor],
+      ["upscaleEngine", setUpscaleEngine],
+      ["upscaleSoftness", setUpscaleSoftness],
+    ],
+    // Restore the saved sub-mode ("type"). Edit presets only surface in edit mode, so
+    // this only ever flips between text/character within one workflow.
+    modeIsPresetable: (savedMode) => IMAGE_MODES.includes(savedMode),
+    onApplyDefaults: (defaults) => {
+      // Filling the prompt box counts as a user edit, so character mode's default
+      // prompt won't clobber the restored prompt.
+      if (Object.prototype.hasOwnProperty.call(defaults, "prompt")) {
+        promptEdited.current = true;
       }
-      return;
-    }
-    const defaults = selectedPreset.defaults ?? {};
-    for (const [key, setter] of presetDefaultFields) {
-      if (Object.prototype.hasOwnProperty.call(defaults, key)) {
-        applyPresetDefault(presetDefaultSnapshots, key, setter, defaults[key]);
-      }
-    }
-    // Filling the prompt box counts as a user edit, so character mode's default
-    // prompt won't clobber the restored prompt.
-    if (Object.prototype.hasOwnProperty.call(defaults, "prompt")) {
-      promptEdited.current = true;
-    }
-    // Restore the saved sub-mode ("type"). Edit presets only surface in edit
-    // mode, so this only ever flips between text/character within one workflow.
-    if (IMAGE_MODES.includes(defaults.mode)) {
-      setMode(defaults.mode);
-    }
-  }, [selectedPreset?.id]);
+    },
+    buildDefaults: () => ({
+      prompt,
+      negativePrompt,
+      resolution,
+      count,
+      mode,
+      guidanceScale: finiteNumberOrUndefined(guidanceOverride),
+      steps: finiteNumberOrUndefined(stepsOverride),
+      sampler,
+      scheduler,
+      schedulerShift,
+      guidanceMethod,
+      upscaleEnabled,
+      upscaleFactor,
+      upscaleEngine,
+      upscaleSoftness,
+      // Reference/identity knobs only matter for the character flow; keep them
+      // out of plain text/edit presets so they don't carry irrelevant state.
+      ...(mode === "character_image"
+        ? { ipAdapterScale, controlnetScale, trueCfgScale, viewAngle }
+        : {}),
+    }),
+  });
 
   useStudioSettingsWriter("image", activeProject?.id ?? null, {
     mode,
@@ -1199,6 +1476,8 @@ export function ImageStudio() {
     seed,
     negativePrompt,
     resolution,
+    widthOverride,
+    heightOverride,
     fitMode,
     referenceAssetIds,
     ipAdapterScale,
@@ -1213,6 +1492,12 @@ export function ImageStudio() {
     loraWeights,
     showIncompatibleLoras,
     selectedPresetId,
+    batchMode,
+    batchPromptsText,
+    batchVariableValues,
+    batchName,
+    batchScope,
+    loadedBatchId,
     sampler,
     scheduler,
     schedulerShift,
@@ -1223,77 +1508,9 @@ export function ImageStudio() {
     enhancePrompt,
     bf16Precision,
     usePid,
+    pidTarget,
     lastUsedTiers,
   });
-
-  // Snapshot the current working config into a named recipe preset in the
-  // workspace library. Captures the literal prompt + every visible knob + the
-  // selected LoRAs with their weights; the seed is intentionally left out so the
-  // preset stays reusable. The backend additionally enforces id uniqueness and
-  // model/workflow + LoRA compatibility, surfaced here via err.message.
-  async function handleSaveAsPreset() {
-    const trimmed = presetName.trim();
-    if (!trimmed) {
-      setPresetSaveMessage({ tone: "error", text: "Name the preset before saving." });
-      return;
-    }
-    if (!slugifyPresetId(trimmed)) {
-      setPresetSaveMessage({ tone: "error", text: "Use letters or numbers in the preset name." });
-      return;
-    }
-    if (presetScope === "project" && !activeProject) {
-      setPresetSaveMessage({ tone: "error", text: "Open a project first, or save to all projects." });
-      return;
-    }
-    if (presetNameTaken(trimmed, presets)) {
-      setPresetSaveMessage({ tone: "error", text: `"${trimmed}" already exists — pick a unique name.` });
-      return;
-    }
-    const payload = buildStudioPresetPayload({
-      name: trimmed,
-      scope: presetScope,
-      mode,
-      model,
-      loras: selectedLoras.map((lora) => ({ id: lora.id, weight: effectiveLoraWeight(lora) })),
-      defaults: {
-        prompt,
-        negativePrompt,
-        resolution,
-        count,
-        mode,
-        guidanceScale: finiteNumberOrUndefined(guidanceOverride),
-        steps: finiteNumberOrUndefined(stepsOverride),
-        sampler,
-        scheduler,
-        schedulerShift,
-        guidanceMethod,
-        upscaleEnabled,
-        upscaleFactor,
-        upscaleEngine,
-        upscaleSoftness,
-        // Reference/identity knobs only matter for the character flow; keep them
-        // out of plain text/edit presets so they don't carry irrelevant state.
-        ...(mode === "character_image"
-          ? { ipAdapterScale, controlnetScale, trueCfgScale, viewAngle }
-          : {}),
-      },
-    });
-    setSavingPreset(true);
-    setPresetSaveMessage({ tone: "neutral", text: "" });
-    try {
-      const created = await createPreset(payload);
-      setSelectedPresetId(created?.id ?? payload.id);
-      setPresetName("");
-      setPresetSaveMessage({
-        tone: "success",
-        text: `Saved "${trimmed}" to ${presetScope === "project" ? "this project" : "all projects"}.`,
-      });
-    } catch (err) {
-      setPresetSaveMessage({ tone: "error", text: err.message });
-    } finally {
-      setSavingPreset(false);
-    }
-  }
 
   // Each stacked run carries its already-resolved completed assets + the
   // expected count, which the WorkerProgressCard image-grid variant uses to
@@ -1311,34 +1528,22 @@ export function ImageStudio() {
 
   async function submit(event) {
     event.preventDefault();
+    // Batch mode runs through its own "Run batch" action (sc-9956), never the single
+    // Generate submit — guard so a stray Enter in a batch field can't queue one image.
+    if (batchMode) {
+      return;
+    }
     if (submitting) {
+      return;
+    }
+    if (dimensionsInvalid) {
+      setSubmitError("Width and height must each be between 256 and 4096.");
       return;
     }
     setSubmitting(true);
     try {
-      // Pose library: when poses are selected, the job emits one image per pose
-      // (advanced.poses) instead of `count` variations. Two pose surfaces share this payload:
-      //   * character_image — InstantID pose set (needs an approved reference).
-      //   * text_to_image — the strict-control panel's pose mode (sc-8245): a Fun-Union backbone
-      //     conditions each render on the selected library skeleton; no reference needed.
-      const usePosePayload =
-        (mode === "character_image" && referenceAssetId && poseLibrary) ||
-        (showControlPanel && activeControlMode === "pose");
-      const posePayload =
-        usePosePayload && selectedPoseIds.length
-          ? selectedPoseIds.map((id) => poseById[id]).filter(Boolean).map((pose) => ({ id: pose.id, keypoints: pose.keypoints }))
-          : [];
-      // Strict-control conditioning (sc-8245). Active only for a text-to-image control backbone.
-      // Pose flows through `posePayload` above; canny/depth carry the control type + the uploaded
-      // control image, routed by the preprocess-vs-passthrough toggle:
-      //   * preprocess (derive) → request `sourceAssetId` (the worker auto-derives the map).
-      //   * use-as-is (passthrough) → `advanced.controlImage` (the map is fed verbatim).
-      const controlActive = showControlPanel && Boolean(activeControlMode);
-      const controlIsImageMode = controlActive && activeControlMode !== "pose";
-      const controlPreprocessSourceId =
-        controlIsImageMode && !controlImagePassthrough && controlImageAssetId ? controlImageAssetId : null;
-      const controlPassthroughId =
-        controlIsImageMode && controlImagePassthrough && controlImageAssetId ? controlImageAssetId : null;
+      // posePayload / controlActive / controlPreprocessSourceId / controlPassthroughId are
+      // derived at component scope (shared with the batch run, sc-9980).
       // Resolve the prompt + structured-caption payload. Structured models (Ideogram 4) are
       // JSON-caption-only: raw plain text is out-of-distribution and renders the "Image blocked by
       // safety filter" placeholder (sc-6307/sc-6501). So a structured model ALWAYS sends a JSON
@@ -1420,7 +1625,15 @@ export function ImageStudio() {
         // Fit mode applies to edits only; coerced so a stale "outpaint" never reaches a
         // non-inpaint model (epic 2551). Omitted for non-edit modes (worker default crop).
         fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
-        referenceAssetId: mode === "character_image" ? referenceAssetId || null : null,
+        // character_image: the IP-Adapter identity reference. Otherwise, on an img2img-capable model
+        // (Krea 2 Turbo, sc-8593), the reference picked in the "Start from an image" panel — sent so the
+        // worker's krea arm routes it to img2img latent-init (advanced.strength below).
+        referenceAssetId:
+          mode === "character_image"
+            ? referenceAssetId || null
+            : supportsImg2img
+              ? img2imgReferenceAssetId || null
+              : null,
         loras: selectedLoras.map((lora) => serializeLora(lora, { weight: effectiveLoraWeight(lora) })),
         ...(upscaleEnabled
           ? {
@@ -1433,124 +1646,251 @@ export function ImageStudio() {
               },
             }
           : {}),
-        advanced: {
+        // advanced payload (sc-8854, F-052): assembled by the pure buildImageJobAdvanced
+        // builder so this async submit() stays focused on prompt resolution + the API
+        // call. Every omit-when-default rule (which keeps saved recipes byte-identical)
+        // lives in imageJobAdvanced.js and is covered by imageJobAdvanced.test.js.
+        advanced: buildImageJobAdvanced({
           resolution,
-          // Structured-prompt recipe round-trip (sc-6147): persist the full caption +
-          // original intent + magic-prompt backend alongside the job so "Use this recipe"
-          // can rehydrate the builder rather than replay the serialized JSON as a plain
-          // prompt. Rides in `advanced`, which the worker clones verbatim into the asset's
-          // rawAdapterSettings — no backend change needed. Only for structured models.
-          ...(sendStructured
-            ? {
-                structuredPrompt: buildStructuredPromptRecipe({
-                  intent: submitIntent,
-                  caption: submitCaption,
-                  magicPromptBackend: submitBackend,
-                  edited: !submitBackend,
-                }),
-              }
-            : {}),
-          // Configurable sampler / scheduler (epic 1753). Worker registry
-          // falls back to model-native when given "default", so emitting the
-          // values unconditionally is safe — invalid values are ignored.
-          ...(sampler && sampler !== "default" ? { sampler } : {}),
-          ...(scheduler && scheduler !== "default" ? { scheduler } : {}),
-          // Guidance method (epic 7434). "cfg" is the engine-standard no-op, so it is
-          // omitted — keeping existing recipes byte-identical; only a non-default
-          // method (CFG++) rides the payload. The worker N3-falls an unadvertised
-          // method back to the default, so an invalid value is harmless.
-          ...(guidanceMethod && guidanceMethod !== "cfg" ? { guidanceMethod } : {}),
-          // The schedule shift (time-shift mu) is only honored when a curated
-          // (non-default) scheduler is active — it shapes that curated schedule;
-          // the default scheduler keeps the engine's resolution-native shift, so
-          // emitting it there would override the no-op default (epic 7114).
-          ...(scheduler &&
-          scheduler !== "default" &&
-          Number.isFinite(Number(schedulerShift))
-            ? { schedulerShift: Number(schedulerShift) }
-            : {}),
-          // Step / guidance overrides — empty string means "use the model
-          // default", which the worker reads off MODEL_TARGETS.
-          ...(stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
-            ? { steps: Number(stepsOverride) }
-            : {}),
-          ...(guidanceOverride !== "" && Number.isFinite(Number(guidanceOverride))
-            ? { guidanceScale: Number(guidanceOverride) }
-            : {}),
-          // Flash attention (sc-3674): only emitted when toggled OFF — the worker defaults to ON
-          // when `advanced.flashAttn` is absent, so the default-on case adds nothing to the payload.
-          // Only the candle (Windows/CUDA) SDXL backend reads it; every other backend ignores it.
-          ...(flashAttn ? {} : { flashAttn: false }),
-          // FLUX.2-dev caption upsampling (sc-6135): emitted only when the model declares the
-          // toggle AND it's on (off-by-default; the worker/engine ignore it for other models).
-          ...(promptEnhance && enhancePrompt ? { enhancePrompt: true } : {}),
-          // Boogu precision (sc-6568): emit mlxQuantize:0 (full-precision bf16) only when the model
-          // exposes the precision toggle AND bf16 is selected; the default Q8 emits nothing (the
-          // worker reads manifest mlx.quantize and fetches the `<variant>-bf16/` subfolder on demand).
-          // `!showTierPicker` is a defensive guard: Boogu downloads via `base/`-style subfolder globs
-          // (no `downloads[].variant` keys), so `hasVariantMatrix` — and therefore `showTierPicker` —
-          // is always false for the precisionToggle set; the two controls are disjoint. The guard
-          // makes that invariant load-bearing so a future manifest change can never emit both
-          // mlxQuantize spreads for one model (the tier picker below would win the object-spread
-          // race, but we never render/emit both).
-          ...(precisionToggle && bf16Precision && !showTierPicker ? { mlxQuantize: 0 } : {}),
-          // Quant-tier A/B (sc-8515): when the model has >1 tier installed and a tier is picked,
-          // send that tier's mlxQuantize (bf16→0, q8→8, q4→4). The worker's resolve_quant +
-          // generator cache route to it (reload-always). Emitted only when the picker is shown
-          // AND the picked tier maps to a known quant value, so single-tier models and the
-          // "default" pseudo-variant never leak an mlxQuantize into the payload. Disjoint from the
-          // Boogu precisionToggle above (non-matrix models), enforced by its `!showTierPicker` guard.
-          ...(showTierPicker && tierQuantize(quantTier) !== null
-            ? { mlxQuantize: tierQuantize(quantTier) }
-            : {}),
-          // PiD decoder (epic 7840, sc-7851): emit usePid:true only when the toggle is shown
-          // (model PiD-eligible AND checkpoint installed) AND on. The worker swaps the native
-          // VAE for the PiD decode + 2K/4K super-resolve pass; it rides `advanced` (opaque
-          // pass-through, zero contract-snapshot drift) and is cloned into the asset's
-          // rawAdapterSettings — that recorded `usePid:true` is the output's non-commercial
-          // marker. The worker independently no-ops to the native VAE if the checkpoint is gone.
-          ...(showPidToggle && usePid ? { usePid: true } : {}),
-          // IP-Adapter / InstantID reference strength only applies when a character
-          // reference is attached AND the model uses the IP-Adapter knob; Qwen's
-          // edit pipeline ignores this scalar (hideReferenceStrength gates it out).
-          ...(mode === "character_image" && referenceAssetId && !hideReferenceStrength
-            ? { ipAdapterScale }
-            : {}),
-          // Identity structure (controlnetConditioningScale) is InstantID-only — sent
-          // only when the model exposes the control and a reference is attached.
-          ...(mode === "character_image" && referenceAssetId && identityStructure
-            ? { controlnetConditioningScale: controlnetScale }
-            : {}),
-          // Variation knob (trueCfgScale) — FLUX uses it alongside ipAdapterScale,
-          // Qwen uses it as the only variation lever. Sent only when the model
-          // declares a variationStrength slider AND a reference is attached.
-          ...(mode === "character_image" && referenceAssetId && variationStrength
-            ? { trueCfgScale }
-            : {}),
-          // View angle (InstantID) — only when a specific angle is chosen and no pose is
-          // selected (a library pose drives the whole body, superseding the head angle).
-          ...(mode === "character_image" && referenceAssetId && viewAngles && viewAngle && !posePayload.length
-            ? { viewAngle }
-            : {}),
-          // Pose library (InstantID) — one image per selected pose; faceRestore toggles
-          // the full-body face-restoration pass.
-          ...(posePayload.length ? { poses: posePayload, faceRestore } : {}),
-          // Strict-control conditioning (epic 8236, sc-8245). The control type the worker's shared
-          // strict-control driver reads (strict_control.rs `requested_control_kind`). Pose is the
-          // engine default (omitted → byte-preserved), so only non-pose modes ride the payload. The
-          // control-lock strength (`advanced.controlScale`) is sent whenever the panel is active.
-          ...(controlActive && activeControlMode !== "pose" ? { controlMode: activeControlMode } : {}),
-          // Use-as-is passthrough: a pre-made canny/depth map fed verbatim
-          // (strict_control.rs `resolve_user_control_map`). Derive mode uses request.sourceAssetId.
-          ...(controlPassthroughId ? { controlImage: controlPassthroughId } : {}),
-          ...(controlActive ? { controlScale: effectiveControlScale } : {}),
-        },
+          sendStructured,
+          submitIntent,
+          submitCaption,
+          submitBackend,
+          sampler,
+          scheduler,
+          schedulerShift,
+          stepsOverride,
+          guidanceOverride,
+          guidanceMethod,
+          flashAttn,
+          promptEnhance,
+          enhancePrompt,
+          precisionToggle,
+          bf16Precision,
+          showTierPicker,
+          quantTier,
+          showPidToggle,
+          usePid,
+          pidTarget,
+          mode,
+          referenceAssetId,
+          hideReferenceStrength,
+          ipAdapterScale,
+          // img2img (sc-8593): emit advanced.strength when an img2img-capable model has a reference.
+          supportsImg2img,
+          img2imgReferenceAssetId,
+          img2imgStrength,
+          identityStructure,
+          controlnetScale,
+          variationStrength,
+          trueCfgScale,
+          viewAngles,
+          viewAngle,
+          posePayload,
+          faceRestore,
+          controlActive,
+          activeControlMode,
+          controlPassthroughId,
+          effectiveControlScale,
+        }),
       });
       onLocalJobCreated?.(job);
     } finally {
       setSubmitting(false);
     }
   }
+
+  // One image-job request for a single resolved batch prompt. Reuses the current studio
+  // settings (model, loras, upscale, reference/source per mode, pose-library + strict-control
+  // conditioning, and the whole advanced knob set via the tested buildImageJobAdvanced).
+  // `count` multiplies within each job UNLESS poses are selected, in which case each job
+  // emits one image per pose (images = jobs × posePayload.length). For a structured-caption
+  // model (sc-9980) the caller passes the per-prompt auto-expanded caption via `opts`.
+  const buildBatchJobRequest = (resolvedPrompt, opts = {}) => ({
+    mode,
+    prompt: opts.promptToSend ?? resolvedPrompt,
+    negativePrompt,
+    model,
+    count: posePayload.length ? 1 : count,
+    seed: seed === "" ? null : Number(seed),
+    // A per-prompt [WxH] directive (sc-10063) overrides the studio resolution for this job.
+    width: opts.resolution?.width ?? width,
+    height: opts.resolution?.height ?? height,
+    recipePresetId: selectedPreset?.id ?? null,
+    characterId: mode === "character_image" ? characterId || null : null,
+    characterLookId: mode === "character_image" ? characterLookId || null : null,
+    sourceAssetId:
+      mode === "edit_image" && !multiReference ? sourceAssetId || null : controlPreprocessSourceId,
+    referenceAssetIds:
+      mode === "edit_image" && multiReference && referenceAssetIds.length ? referenceAssetIds : undefined,
+    fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
+    referenceAssetId: mode === "character_image" ? referenceAssetId || null : null,
+    loras: selectedLoras.map((lora) => serializeLora(lora, { weight: effectiveLoraWeight(lora) })),
+    ...(upscaleEnabled
+      ? {
+          upscale: {
+            enabled: true,
+            factor: upscaleFactor,
+            engine: upscaleEngine,
+            ...(upscaleEngineHasSoftness(upscaleEngine) ? { softness: upscaleSoftness } : {}),
+          },
+        }
+      : {}),
+    advanced: buildImageJobAdvanced({
+      resolution: opts.resolution ? `${opts.resolution.width}x${opts.resolution.height}` : resolution,
+      sendStructured: opts.sendStructured ?? false,
+      submitIntent: resolvedPrompt,
+      submitCaption: opts.submitCaption ?? caption,
+      submitBackend: opts.submitBackend ?? magicPromptBackend,
+      sampler,
+      scheduler,
+      schedulerShift,
+      stepsOverride,
+      guidanceOverride,
+      guidanceMethod,
+      flashAttn,
+      promptEnhance,
+      enhancePrompt,
+      precisionToggle,
+      bf16Precision,
+      showTierPicker,
+      quantTier,
+      showPidToggle,
+      usePid,
+      mode,
+      referenceAssetId,
+      hideReferenceStrength,
+      ipAdapterScale,
+      identityStructure,
+      controlnetScale,
+      variationStrength,
+      trueCfgScale,
+      viewAngles,
+      viewAngle,
+      posePayload,
+      faceRestore,
+      controlActive,
+      activeControlMode,
+      controlPassthroughId,
+      effectiveControlScale,
+    }),
+  });
+
+  // Fan out one image job per resolved prompt (mirrors the asset batch, sc-6112): each
+  // posts independently so the worker runs them serially with its between-image cache
+  // release, and progress/cancel read the live jobs feed.
+  async function runBatch(confirmed = false) {
+    if (batchRun?.submitting || !activeProject) {
+      return;
+    }
+    const resolved = expandBatch(batchPrompts, batchVariables);
+    if (!resolved.length) {
+      return;
+    }
+    if (dimensionsInvalid) {
+      setBatchError("Width and height must each be between 256 and 4096.");
+      return;
+    }
+    setBatchError("");
+    // Soft cap: a large run must be confirmed once, showing the exact image count.
+    if (!confirmed && resolved.length * batchImagesPerPrompt > BATCH_RENDER_CAP) {
+      setBatchConfirmPending(true);
+      return;
+    }
+    setBatchConfirmPending(false);
+    batchAbortRef.current = false;
+    // Items carry `error` so not-yet-submitted rows read as pending, not failed, while a
+    // (possibly slow, structured) enqueue is in flight. Updated after each post so progress
+    // ticks up live.
+    const items = resolved.map((entry) => ({ prompt: entry.prompt, jobId: null, error: false }));
+    setBatchRun({ submitting: true, items: items.map((item) => ({ ...item })) });
+    for (let i = 0; i < resolved.length; i += 1) {
+      if (batchAbortRef.current) {
+        break;
+      }
+      const entry = resolved[i];
+      // Strip a leading [WxH] directive (sc-10063): the model gets the clean prompt, the job
+      // gets that per-prompt resolution.
+      const { prompt: cleanPrompt, resolution } = parsePromptResolution(entry.prompt);
+      try {
+        let request;
+        if (structuredPromptModel) {
+          // Structured-caption models (Ideogram 4) reject raw plain text, so auto-expand each
+          // resolved prompt into a JSON caption first (sc-9980) — N sequential refine calls.
+          // A prompt that fails to expand fails only that item; the rest continue.
+          const expanded = await onMagicExpand(cleanPrompt);
+          if (!validateCaption(expanded).ok) {
+            throw new Error("Auto-generated caption was invalid.");
+          }
+          request = buildBatchJobRequest(cleanPrompt, {
+            promptToSend: serializeCaption(expanded),
+            sendStructured: true,
+            submitCaption: expanded,
+            submitBackend: PROMPT_REFINE_MODEL_ID,
+            resolution,
+          });
+        } else {
+          request = buildBatchJobRequest(cleanPrompt, { resolution });
+        }
+        const job = await createImageJob(request);
+        items[i] = { prompt: cleanPrompt, jobId: job?.id ?? null, error: !job?.id };
+      } catch {
+        items[i] = { prompt: cleanPrompt, jobId: null, error: true };
+      }
+      setBatchRun({ submitting: true, items: items.map((item) => ({ ...item })) });
+    }
+    setBatchRun({ submitting: false, items });
+  }
+
+  // Stop the enqueue loop (if still running) and cancel every still-pending job in the run;
+  // completed/failed items are left as-is.
+  function cancelBatchRun() {
+    batchAbortRef.current = true;
+    if (!batchRun) {
+      return;
+    }
+    for (const item of batchRun.items) {
+      if (!item.jobId) {
+        continue;
+      }
+      const status = batchItemStatus(item.jobId, jobs);
+      if (status !== "queued" && status !== "running") {
+        continue;
+      }
+      const job = jobs.find((entry) => entry.id === item.jobId);
+      if (job) {
+        jobAction(job, "cancel");
+      }
+    }
+  }
+
+  const batchRunProgress = batchRun ? summarizeBatchRun(batchRun.items, jobs) : null;
+  const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
+  const batchGroupIssues = linkedGroupIssues(batchPrompts);
+  // Prompt lines whose leading [WxH] directive (sc-10063) is out of the backend 256–4096
+  // range — block the run and name the offending size.
+  const batchResolutionIssues = batchPrompts
+    .map((line) => parsePromptResolution(line).resolution)
+    .filter(
+      (res) =>
+        res &&
+        (res.width < MIN_IMAGE_DIMENSION ||
+          res.width > MAX_IMAGE_DIMENSION ||
+          res.height < MIN_IMAGE_DIMENSION ||
+          res.height > MAX_IMAGE_DIMENSION),
+    );
+  // A structured-caption model can batch, but only if the prompt-refiner is available to
+  // auto-write a caption per resolved prompt (sc-9980).
+  const batchStructuredExpandBlocked =
+    structuredPromptModel && (magicModelMissing || typeof magicPrompt !== "function");
+  const batchRunDisabled =
+    !activeProject ||
+    batchStructuredExpandBlocked ||
+    batchTotal === 0 ||
+    batchMissingKeys.length > 0 ||
+    batchGroupIssues.length > 0 ||
+    batchResolutionIssues.length > 0 ||
+    Boolean(batchRun?.submitting);
 
   const generateDisabled =
     submitting ||
@@ -1579,17 +1919,20 @@ export function ImageStudio() {
       <form className="studio-shell" onSubmit={submit}>
         <div className="surface-header hero studio-prompt-hero">
           <div className="prompt-hero-top">
-            <div className="segmented-control" role="tablist" aria-label="Image mode">
+            <div className="mode-tabs" role="tablist" aria-label="Image mode">
               {[
                 ["text_to_image", "Text"],
                 ["edit_image", "Edit"],
                 ["character_image", "With character"],
               ].map(([value, label]) => {
                 const macBlock = macModeTabBlock(value);
+                const active = mode === value;
                 return (
                   <button
-                    className={mode === value ? "active" : ""}
+                    className={active ? "mode-tab active" : "mode-tab"}
                     key={value}
+                    role="tab"
+                    aria-selected={active}
                     onClick={() => handleModeChange(value)}
                     type="button"
                     disabled={Boolean(macBlock)}
@@ -1601,6 +1944,15 @@ export function ImageStudio() {
                 );
               })}
             </div>
+            <button
+              aria-pressed={batchMode}
+              className={batchMode ? "batch-toggle active" : "batch-toggle"}
+              onClick={() => setBatchMode((on) => !on)}
+              title="Run a list of prompts as one batch with the current settings"
+              type="button"
+            >
+              <Icon.Stars size={13} /> Batch
+            </button>
             <div className="prompt-hero-links">
               <button className="hero-link" onClick={() => setGuideOpen(true)} type="button">
                 <Icon.Book size={14} /> Prompt guide
@@ -1613,6 +1965,98 @@ export function ImageStudio() {
             </div>
           </div>
 
+          {batchMode ? (
+            <div className="prompt-input-row batch">
+              <BatchPromptPanel
+                promptsText={batchPromptsText}
+                onPromptsTextChange={setBatchPromptsText}
+                variableValues={batchVariableValues}
+                onVariableValuesChange={setBatchVariableValues}
+                count={batchImagesPerPrompt}
+                batches={promptBatches}
+                projectId={activeProject?.id ?? null}
+                name={batchName}
+                onNameChange={setBatchName}
+                scope={batchScope}
+                onScopeChange={setBatchScope}
+                loadedBatchId={loadedBatchId}
+                onSave={handleSaveBatch}
+                onLoad={handleLoadBatch}
+                onDelete={handleDeleteBatch}
+                onImport={handleImportBatch}
+                busy={batchBusy}
+                error={batchError}
+              />
+              <div className="batch-run">
+                {batchStructuredExpandBlocked ? (
+                  <p className="batch-warning">
+                    Batch on a structured-caption model needs the prompt-refiner model installed — it
+                    auto-writes a caption for each prompt.
+                  </p>
+                ) : batchMissingKeys.length > 0 ? (
+                  <p className="batch-warning">
+                    Fill in a value for {batchMissingKeys.map((key) => `{{${key}}}`).join(", ")} to run.
+                  </p>
+                ) : batchGroupIssues.length > 0 ? (
+                  <p className="batch-warning">
+                    Give each {batchGroupIssues.map((issue) => `{{${issue.label}:…}}`).join(", ")} the same number of
+                    options to run.
+                  </p>
+                ) : batchResolutionIssues.length > 0 ? (
+                  <p className="batch-warning">
+                    A prompt&rsquo;s [{batchResolutionIssues[0].width}×{batchResolutionIssues[0].height}] size is out of
+                    range — each side must be {MIN_IMAGE_DIMENSION}–{MAX_IMAGE_DIMENSION}.
+                  </p>
+                ) : batchTotal === 0 ? (
+                  <p className="batch-hint">Add at least one prompt to run a batch.</p>
+                ) : null}
+                {batchRun ? (
+                  <div className="batch-run-progress" aria-live="polite">
+                    <span>
+                      {batchRun.submitting
+                        ? `Queued ${batchRunProgress.total - batchRunProgress.pending}/${batchRunProgress.total}`
+                        : `${batchRunProgress.done}/${batchRunProgress.total} done`}
+                      {batchRunProgress.failed ? ` · ${batchRunProgress.failed} failed` : ""}
+                    </span>
+                    {batchRun.submitting ? (
+                      <button className="batch-btn ghost" onClick={cancelBatchRun} type="button">
+                        Stop
+                      </button>
+                    ) : batchRunProgress.active > 0 ? (
+                      <button className="batch-btn ghost" onClick={cancelBatchRun} type="button">
+                        Cancel remaining
+                      </button>
+                    ) : (
+                      <button className="batch-btn ghost" onClick={() => setBatchRun(null)} type="button">
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                ) : null}
+                {batchConfirmPending ? (
+                  <div className="batch-confirm" role="alertdialog">
+                    <span>Queue {batchTotal} images? That’s a large batch.</span>
+                    <button className="prompt-cta" onClick={() => runBatch(true)} type="button">
+                      <Icon.Play size={14} /> Queue {batchTotal}
+                    </button>
+                    <button className="batch-btn ghost" onClick={() => setBatchConfirmPending(false)} type="button">
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    className="prompt-cta"
+                    disabled={batchRunDisabled}
+                    onClick={() => runBatch(false)}
+                    type="button"
+                  >
+                    <Icon.Play size={14} />
+                    {batchRun?.submitting ? "Queueing…" : `Run batch · ${batchTotal}`}
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
           <div className={`prompt-input-row${structuredPromptModel ? " structured" : ""}`}>
             {structuredPromptModel ? (
               <StructuredPromptBuilder
@@ -1664,6 +2108,7 @@ export function ImageStudio() {
               {submitting ? (expanding ? "Expanding…" : "Queueing…") : "Generate"}
             </button>
           </div>
+          )}
           {/* Auto-expand failure (sc-6501): a structured model couldn't turn the plain-text idea
               into a caption (e.g. the prompt-refiner model isn't installed). We never fall back to
               sending raw plain text, so surface the reason and the path forward. */}
@@ -1673,72 +2118,195 @@ export function ImageStudio() {
             </p>
           ) : null}
 
-          {/* Reference-image → plain-text prompt (epic 8203, sc-8208). For NON-structured t2i models,
-              offer the same "start from a reference image" affordance Ideogram has — but it fills the
-              plain prompt box with a description (prose, or booru tags for `captionStyle:"tags"` models).
-              Gated to text-to-image only; the section is hidden unless the macOS-first captioner is
-              platform-eligible (ready, or an install offer exists — both false off-Mac, so it stays
-              hidden there, matching the Ideogram surface). C1: captioning-only, never sent to generation. */}
-          {!structuredPromptModel &&
-          mode === "text_to_image" &&
-          typeof imageDescribe === "function" &&
-          (visionCaptionReady || visionCaptionOffers.length > 0) ? (
-            <ReferenceCaptionPicker
-              onCaption={onImageDescribe}
-              onApply={(text) => setPromptFromUser(text)}
-              onReferenceImageLoaded={onReferenceImageLoaded}
-              referenceAssets={editImageAssets}
-              referenceCharacters={characters}
-              importAsset={importAsset}
-              projectId={activeProject?.id ?? ""}
-              hint="Start from a reference image — the captioner reads it into a detailed prompt you can edit. The image is only used to write the prompt; it isn’t sent to generation."
-              buttonLabel="✨ Describe image"
-              busyLabel="Describing…"
-              emptyMessage="The image did not produce a usable description. Try another reference."
-              errorFallback="Could not describe the image."
-              gateDescription="Download the vision captioner to turn a reference image into a prompt. It runs locally on the native worker; the image is only used to write the prompt."
-              visionCaptionReady={visionCaptionReady}
-              visionCaptionOffers={visionCaptionOffers}
-              visionCaptionDownloadJobs={modelDownloadJobs}
-              onDownloadModel={createModelDownloadJob}
-              onOpenModels={() => setActiveView("Models")}
-              onOpenQueue={onOpenQueue}
-              onCancelJob={onCancelJob}
-            />
-          ) : null}
-
-          {/* Plain-text refine + scene suggestions only make sense for free-text
-              prompts; structured models get the builder + (later) magic-prompt. */}
+          {/* Scene suggestions sit directly under the prompt (UI-refinement 4a). Free-text
+              prompts only; structured models get the builder + (later) magic-prompt. */}
           {structuredPromptModel ? null : (
-            <>
-              <RefinePromptControl
-                guidePath={promptGuide.path}
-                modelId={model}
-                onApply={setPromptFromUser}
-                prompt={prompt}
-                refinePrompt={refinePrompt}
-                refineModel={refineModel}
-                onDownloadRefineModel={refineModel ? () => createModelDownloadJob(refineModel) : undefined}
-                workflow="image"
-              />
-
-              <div className="suggestion-row">
-                <span className="suggestion-row-label">Try:</span>
-                {suggestions.map((suggestion) => (
-                  <button
-                    className="suggestion"
-                    key={suggestion}
-                    onClick={() => setPromptFromUser(suggestion)}
-                    type="button"
-                  >
-                    <Icon.Sparkle size={11} />
-                    {suggestion}
-                  </button>
-                ))}
-              </div>
-            </>
+            <div className="suggestion-row">
+              <span className="suggestion-row-label">Try:</span>
+              {suggestions.map((suggestion) => (
+                <button
+                  className="suggestion"
+                  key={suggestion}
+                  onClick={() => setPromptFromUser(suggestion)}
+                  type="button"
+                >
+                  <Icon.Sparkle size={11} />
+                  {suggestion}
+                </button>
+              ))}
+            </div>
           )}
-        </div>
+
+          {/* Prompt tools (UI-refinement 1b; restructured sc-10195): a framed strip of up to THREE
+              distinct tiles, one panel open at a time (all free-text only — structured models excluded).
+              1) "Image reference" — img2img reference-guided generation (a picked image + strength slider
+                 VISUALLY guides the render). Shown only for img2img-capable models (`supportsImg2img`).
+              2) "Prompt from image" — the reference→text describe flow + mood board (epic 8203/8595): the
+                 vision captioner writes prompt TEXT (captioning-only, never sent to generation). Gated on
+                 the macOS-first captioner being platform-eligible.
+              3) "Refine my prompt" — RefinePromptControl (sc-2041).
+              img2img and describe used to share ONE overloaded tile (sc-8593); splitting them makes the
+              "guide the render vs. write a prompt" choice explicit (Michael, on-device). */}
+          {(() => {
+            // img2img "Image reference" tile — a picked image + strength that SEED the render
+            // (latent-init). Available for every `ui.img2img` model in text-to-image mode, INCLUDING
+            // structured-prompt models (Ideogram, epic 8588 A4.4 sc-10192): the caption builder replaces
+            // the free-text prompt tools, but reference-guided generation is orthogonal to how the prompt
+            // is authored, so the tile coexists with the JSON-caption builder. Needs no vision captioner.
+            const img2imgAvailable = supportsImg2img && mode === "text_to_image";
+            const imageRefActive = img2imgAvailable && promptTool === "imageReference";
+            const img2imgTile = img2imgAvailable ? (
+              <button
+                type="button"
+                className={imageRefActive ? "prompt-tool active" : "prompt-tool"}
+                aria-pressed={imageRefActive}
+                onClick={() => togglePromptTool("imageReference")}
+              >
+                <span className="prompt-tool-title">
+                  <Icon.Image size={15} /> Image reference
+                </span>
+                <span className="prompt-tool-desc">Guide the render with an image (image-to-image)</span>
+              </button>
+            ) : null;
+            const img2imgPanel = imageRefActive ? (
+              <div className="prompt-tool-panel">
+                <div className="structured-reference">
+                  <p className="structured-hint">
+                    Pick an image to guide the render (image-to-image). A higher reference strength
+                    stays closer to it; lower lets the prompt take over.
+                  </p>
+                  <ImageEditSourcePickerField
+                    assets={editImageAssets}
+                    buttonLabel="Select reference image"
+                    changeLabel="Change reference"
+                    characters={characters}
+                    emptyLabel="No reference image selected"
+                    importAsset={importAsset}
+                    label="Reference image"
+                    onChange={setImg2imgReferenceAssetId}
+                    projectId={activeProject?.id}
+                    value={img2imgReferenceAssetId}
+                  />
+                  {img2imgReferenceAssetId ? (
+                    <label className="reference-strength img2img-strength">
+                      {img2imgStrengthConfig?.label ?? "Reference strength"}
+                      <input
+                        max={img2imgStrengthConfig?.max ?? 1}
+                        min={img2imgStrengthConfig?.min ?? 0}
+                        onChange={(event) => setImg2imgStrength(Number(event.target.value))}
+                        step={img2imgStrengthConfig?.step ?? 0.05}
+                        type="range"
+                        value={img2imgStrength}
+                      />
+                      <span>{Number(img2imgStrength).toFixed(2)}</span>
+                    </label>
+                  ) : null}
+                </div>
+              </div>
+            ) : null;
+
+            // Structured-prompt models (Ideogram) get ONLY the img2img tile in this strip: "Prompt from
+            // image" is served by the caption builder's own image→caption picker (epic 8102) and "Refine
+            // my prompt" by its magic-expand, so rendering them here would duplicate those. Nothing to
+            // show when the model doesn't advertise img2img.
+            if (structuredPromptModel) {
+              return img2imgAvailable ? (
+                <div className="prompt-tools">
+                  <div className="prompt-tools-head">
+                    <span className="prompt-tools-title">Prompt tools</span>
+                    <span className="hairline" />
+                  </div>
+                  <div className="prompt-tools-tiles">{img2imgTile}</div>
+                  {img2imgPanel}
+                </div>
+              ) : null;
+            }
+
+            const describeAvailable =
+              mode === "text_to_image" &&
+              typeof imageDescribe === "function" &&
+              (visionCaptionReady || visionCaptionOffers.length > 0);
+            const describeActive = describeAvailable && promptTool === "describe";
+            const refineActive = promptTool === "refine";
+            return (
+              <div className="prompt-tools">
+                <div className="prompt-tools-head">
+                  <span className="prompt-tools-title">Prompt tools</span>
+                  <span className="hairline" />
+                </div>
+                <div className="prompt-tools-tiles">
+                  {img2imgTile}
+                  {describeAvailable ? (
+                    <button
+                      type="button"
+                      className={describeActive ? "prompt-tool active" : "prompt-tool"}
+                      aria-pressed={describeActive}
+                      onClick={() => togglePromptTool("describe")}
+                    >
+                      <span className="prompt-tool-title">
+                        <Icon.Image size={15} /> Prompt from image
+                      </span>
+                      <span className="prompt-tool-desc">Caption a reference (or mood board) into an editable prompt</span>
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className={refineActive ? "prompt-tool active" : "prompt-tool"}
+                    aria-pressed={refineActive}
+                    onClick={() => togglePromptTool("refine")}
+                  >
+                    <span className="prompt-tool-title">
+                      <Icon.Wand size={15} /> Refine my prompt
+                    </span>
+                    <span className="prompt-tool-desc">Rewrite what you typed for clarity &amp; detail</span>
+                  </button>
+                </div>
+                {img2imgPanel}
+                {describeActive ? (
+                  <div className="prompt-tool-panel">
+                    <ReferenceCaptionPicker
+                      onCaption={onImageDescribe}
+                      onApply={(text) => setPromptFromUser(text)}
+                      onReferenceImageLoaded={onReferenceImageLoaded}
+                      referenceAssets={editImageAssets}
+                      referenceCharacters={characters}
+                      importAsset={importAsset}
+                      projectId={activeProject?.id ?? ""}
+                      hint="The image is only used to write the prompt — it isn’t sent to generation."
+                      buttonLabel="✨ Describe image"
+                      busyLabel="Describing…"
+                      showMoodBoard={visionCaptionReady}
+                      emptyMessage="The image did not produce a usable description. Try another reference."
+                      errorFallback="Could not describe the image."
+                      gateDescription="Download the vision captioner to turn a reference image into a prompt. It runs locally on the native worker; the image is only used to write the prompt."
+                      visionCaptionReady={visionCaptionReady}
+                      visionCaptionOffers={visionCaptionOffers}
+                      visionCaptionDownloadJobs={modelDownloadJobs}
+                      onDownloadModel={createModelDownloadJob}
+                      onOpenModels={() => setActiveView("Models")}
+                      onOpenQueue={onOpenQueue}
+                      onCancelJob={onCancelJob}
+                    />
+                  </div>
+                ) : null}
+                {refineActive ? (
+                  <div className="prompt-tool-panel">
+                    <RefinePromptControl
+                      autoStart
+                      guidePath={promptGuide.path}
+                      modelId={model}
+                      onApply={setPromptFromUser}
+                      prompt={prompt}
+                      refinePrompt={refinePrompt}
+                      refineModel={refineModel}
+                      onDownloadRefineModel={refineModel ? () => createModelDownloadJob(refineModel) : undefined}
+                      workflow="image"
+                    />
+                  </div>
+                ) : null}
+              </div>
+            );
+          })()}
 
         {mode === "edit_image" || mode === "character_image" ? (
           <div className="studio-source-band">
@@ -1969,80 +2537,37 @@ export function ImageStudio() {
           </div>
         ) : null}
 
-        <div className="studio-results">
-          <section className="review-panel">
-            <div className="review-panel-head">
-              <h2>Latest batch</h2>
-              <span className="kbd-hint">
-                <kbd>⌘</kbd>
-                <kbd>↵</kbd>
-                to generate
-              </span>
-            </div>
-            {localJobGroups.length ? (
-              <div className="worker-progress-card-stack local-job-stack">
-                {localJobGroups.map(({ job, completedAssets, expectedCount }) => (
-                  <WorkerProgressCard
-                    key={job.id}
-                    job={job}
-                    thumbnailsVariant="image-grid"
-                    thumbnailAssets={completedAssets}
-                    expectedThumbnailCount={expectedCount}
-                    onThumbnailClick={(asset) => onPreview(asset, completedAssets)}
-                    onCancel={onCancelJob}
-                    onOpenQueue={onOpenQueue}
-                  />
-                ))}
-              </div>
-            ) : null}
-            {latestAssets.length ? (
-              <div className="recent-assets">
-                {localJobGroups.length ? <h3 className="recent-assets__title">Recent Assets</h3> : null}
-                <div className="review-grid">
-                  {latestAssets.map((asset) => (
-                    <AssetCard
-                      asset={asset}
-                      deleteAsset={deleteAsset}
-                      key={asset.id}
-                      onPreview={(previewed) => onPreview(previewed, latestAssets)}
-                      purgeAsset={purgeAsset}
-                      updateAssetStatus={updateAssetStatus}
-                    />
+          {/* Generation settings (UI-refinement 2b): the everyday knobs — Model, Aspect,
+              Variations, Style preset — sit in a bar directly under the composer instead of a
+              detached right rail. Power-user knobs fold into Advanced below; the results area
+              reclaims the full width (single-column .studio-results). */}
+          <div className="settings-bar">
+            <div className="settings-bar-row">
+              <label className="settings-field settings-field-model">
+                Model
+                <select onChange={(event) => setModel(event.target.value)} value={model}>
+                  {pickerModels.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
+                    </option>
                   ))}
-                </div>
-              </div>
-            ) : localJobGroups.length ? null : (
-              <div className="empty-panel">No fresh image batch</div>
-            )}
-          </section>
-
-          <section className="studio-controls preset-rail">
-            <div className="preset-rail-head">
-              <h3>Preset</h3>
-              <span className="preset-rail-model-tag">{selectedModel?.name ?? "—"}</span>
+                </select>
+              </label>
+              <label className="settings-field settings-field-aspect">
+                Aspect
+                <select onChange={(event) => setResolution(event.target.value)} value={resolution}>
+                  {resolutionOptions.map((option) => (
+                    <option key={option} value={option}>{formatResolutionLabel(option)}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="settings-field settings-field-count">
+                Variations
+                <input min="1" max="8" onChange={(event) => setCount(Number(event.target.value))} type="number" value={count} />
+              </label>
             </div>
-
-            <label>
-              Model
-              <select onChange={(event) => setModel(event.target.value)} value={model}>
-                {pickerModels.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
-            {macHiddenImageModels.length ? (
-              <p className="mac-gating-note">
-                {macHiddenImageModels.length} model
-                {macHiddenImageModels.length === 1 ? "" : "s"} unavailable on Mac (Rust/MLX only) —
-                see Models for details.
-              </p>
-            ) : null}
-
-            <div className="style-preset-strip">
-              <span className="style-preset-label">Style preset</span>
+            <div className="settings-bar-styles">
+              <span className="settings-bar-label">Style preset</span>
               <div className="preset-chips">
                 <button
                   className={!selectedPreset ? "preset-chip active" : "preset-chip"}
@@ -2063,45 +2588,20 @@ export function ImageStudio() {
                 ))}
               </div>
             </div>
+          </div>
 
-            <SavePresetPanel
-              presetName={presetName}
-              setPresetName={setPresetName}
-              savingPreset={savingPreset}
-              presetSaveMessage={presetSaveMessage}
-              setPresetSaveMessage={setPresetSaveMessage}
-              onSave={handleSaveAsPreset}
-              presetScope={presetScope}
-              setPresetScope={setPresetScope}
-              activeProject={activeProject}
-            />
+          {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
 
-            <div className="control-grid preset-rail-row">
-              <label>
-                Variations
-                <input min="1" max="8" onChange={(event) => setCount(Number(event.target.value))} type="number" value={count} />
-              </label>
-              <label>
-                Aspect
-                <select onChange={(event) => setResolution(event.target.value)} value={resolution}>
-                  {resolutionOptions.map((option) => (
-                    <option key={option} value={option}>{formatResolutionLabel(option)}</option>
-                  ))}
-                </select>
-              </label>
-            </div>
+          <PresetGuidanceStrip
+            selectedPreset={selectedPreset}
+            presetPromptParts={presetPromptParts}
+            presetLoraDetails={presetLoraDetails}
+          />
 
-            <PresetGuidanceStrip
-              selectedPreset={selectedPreset}
-              presetPromptParts={presetPromptParts}
-              presetLoraDetails={presetLoraDetails}
-              noPresetHint="Generation uses only the prompt, model, and visible preset settings."
-            />
-
-            <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
-              <Icon.ChevDown className={advancedOpen ? "chev-rotate open" : "chev-rotate"} size={14} />
-              {advancedOpen ? "Hide advanced" : "Advanced"}
-            </button>
+          <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
+            <Icon.ChevDown className={advancedOpen ? "chev-rotate open" : "chev-rotate"} size={14} />
+            {advancedOpen ? "Hide advanced" : "Advanced"}
+          </button>
 
             {advancedOpen ? (
               <div className="advanced-panel">
@@ -2119,6 +2619,31 @@ export function ImageStudio() {
                   Seed
                   <input onChange={(event) => setSeed(event.target.value)} placeholder="Random" type="number" value={seed} />
                 </label>
+                <label>
+                  Width override
+                  <input
+                    min="256"
+                    max="4096"
+                    onChange={(event) => setWidthOverride(event.target.value)}
+                    placeholder={String(dropdownWidth)}
+                    type="number"
+                    value={widthOverride}
+                  />
+                </label>
+                <label>
+                  Height override
+                  <input
+                    min="256"
+                    max="4096"
+                    onChange={(event) => setHeightOverride(event.target.value)}
+                    placeholder={String(dropdownHeight)}
+                    type="number"
+                    value={heightOverride}
+                  />
+                </label>
+                <span className="field-hint">
+                  Custom size overrides the Aspect dropdown (256–4096 per side; leave blank to use it).
+                </span>
                 {showSamplerPicker ? (
                   <label>
                     Sampler
@@ -2261,21 +2786,43 @@ export function ImageStudio() {
                   </label>
                 ) : null}
                 {showPidToggle ? (
-                  <label
-                    className="checkline pid-decoder-toggle"
-                    title="Decode this generation through NVIDIA's PiD pixel-diffusion decoder instead of the model's VAE: it decodes and super-resolves in one pass, so output comes out at 2K/4K (sharper detail, but slower and more memory). Non-commercial use only — PiD output is licensed for research/evaluation, unlike the rest of the pipeline. Off = the model's native VAE at the selected resolution."
-                  >
-                    <input
-                      checked={usePid}
-                      onChange={(event) => setUsePid(event.target.checked)}
-                      type="checkbox"
-                    />
-                    PiD decoder · 2K/4K <span className="badge badge-nc">Non-Commercial</span>
-                  </label>
+                  <>
+                    <label
+                      className="checkline pid-decoder-toggle"
+                      title="Decode this generation through NVIDIA's PiD pixel-diffusion decoder instead of the model's VAE: it decodes and super-resolves in one pass to 2K or 4K (pick the tier at right — sharper detail, but slower and more memory). Non-commercial use only — PiD output is licensed for research/evaluation, unlike the rest of the pipeline. Off = the model's native VAE at the selected resolution."
+                    >
+                      <input
+                        checked={usePid}
+                        disabled={upscaleEnabled}
+                        onChange={(event) => setUsePid(event.target.checked)}
+                        type="checkbox"
+                      />
+                      PiD decoder <span className="badge badge-nc">Non-Commercial</span>
+                    </label>
+                    {usePid ? (
+                      <label
+                        className="pid-target-select"
+                        title="PiD super-resolves the base render 4×, so this sets the output size: 4K (~4096px, max detail) or 2K (~2048px, faster and less GPU memory). Both are super-resolved from the model's latent."
+                      >
+                        Output
+                        <select
+                          onChange={(event) => setPidTarget(event.target.value)}
+                          value={pidTarget}
+                        >
+                          <option value="4k">4K · max detail</option>
+                          <option value="2k">2K · faster</option>
+                        </select>
+                      </label>
+                    ) : null}
+                  </>
                 ) : null}
-                <label className="checkline upscale-toggle">
+                <label
+                  className="checkline upscale-toggle"
+                  title={usePid ? "Disabled while the PiD decoder is on — PiD already super-resolves to 2K/4K." : undefined}
+                >
                   <input
                     checked={upscaleEnabled}
+                    disabled={usePid}
                     onChange={(event) => setUpscaleEnabled(event.target.checked)}
                     type="checkbox"
                   />
@@ -2283,7 +2830,7 @@ export function ImageStudio() {
                 </label>
                 <label>
                   Scale
-                  <select disabled={!upscaleEnabled} onChange={(event) => setUpscaleFactor(Number(event.target.value))} value={upscaleFactor}>
+                  <select disabled={!upscaleEnabled || usePid} onChange={(event) => setUpscaleFactor(Number(event.target.value))} value={upscaleFactor}>
                     {upscaleFactorsForEngine(upscaleEngine).map((factor) => (
                       <option key={factor} value={factor}>
                         {factor}x
@@ -2293,7 +2840,7 @@ export function ImageStudio() {
                 </label>
                 <label>
                   Engine
-                  <select disabled={!upscaleEnabled} onChange={(event) => handleUpscaleEngineChange(event.target.value)} value={upscaleEngine}>
+                  <select disabled={!upscaleEnabled || usePid} onChange={(event) => handleUpscaleEngineChange(event.target.value)} value={upscaleEngine}>
                     {availableUpscaleEngines.map((engine) => (
                       <option key={engine.key} value={engine.key}>
                         {engine.label}
@@ -2306,7 +2853,7 @@ export function ImageStudio() {
                     Detail
                     <input
                       aria-label="SeedVR2 detail (softness)"
-                      disabled={!upscaleEnabled}
+                      disabled={!upscaleEnabled || usePid}
                       max="1"
                       min="0"
                       onChange={(event) => setUpscaleSoftness(Number(event.target.value))}
@@ -2334,15 +2881,75 @@ export function ImageStudio() {
                   setLoraWeight={setLoraWeight}
                   loraEmptyMessage={loraEmptyMessage}
                 />
+                {/* Save-as-preset folds into Advanced with the rest of the power-user
+                    knobs (UI-refinement 2b). */}
+                <SavePresetPanel
+                  presetName={presetName}
+                  setPresetName={setPresetName}
+                  savingPreset={savingPreset}
+                  presetSaveMessage={presetSaveMessage}
+                  setPresetSaveMessage={setPresetSaveMessage}
+                  onSave={handleSaveAsPreset}
+                  presetScope={presetScope}
+                  setPresetScope={setPresetScope}
+                  activeProject={activeProject}
+                />
               </div>
             ) : null}
 
-            <PresetValidationWarnings presetValidationResult={presetValidationResult} selectedModel={selectedModel} />
-            {selectedLoraValidationResult.incompatible.length ? (
-              <p className="inline-warning">
-                Generate is blocked because these selected LoRAs are incompatible with {selectedModel?.name ?? "the selected model"}: {selectedLoraValidationResult.incompatible.join(", ")}.
-              </p>
+          <PresetValidationWarnings presetValidationResult={presetValidationResult} selectedModel={selectedModel} />
+          {selectedLoraValidationResult.incompatible.length ? (
+            <p className="inline-warning">
+              Generate is blocked because these selected LoRAs are incompatible with {selectedModel?.name ?? "the selected model"}: {selectedLoraValidationResult.incompatible.join(", ")}.
+            </p>
+          ) : null}
+        </div>
+
+        <div className="studio-results">
+          <section className="review-panel">
+            <div className="review-panel-head">
+              <h2>Latest batch</h2>
+              <span className="kbd-hint">
+                <kbd>⌘</kbd>
+                <kbd>↵</kbd>
+                to generate
+              </span>
+            </div>
+            {localJobGroups.length ? (
+              <div className="worker-progress-card-stack local-job-stack">
+                {localJobGroups.map(({ job, completedAssets, expectedCount }) => (
+                  <WorkerProgressCard
+                    key={job.id}
+                    job={job}
+                    thumbnailsVariant="image-grid"
+                    thumbnailAssets={completedAssets}
+                    expectedThumbnailCount={expectedCount}
+                    onThumbnailClick={(asset) => onPreview(asset, completedAssets)}
+                    onCancel={onCancelJob}
+                    onOpenQueue={onOpenQueue}
+                  />
+                ))}
+              </div>
             ) : null}
+            {latestAssets.length ? (
+              <div className="recent-assets">
+                {localJobGroups.length ? <h3 className="recent-assets__title">Recent Assets</h3> : null}
+                <div className="review-grid">
+                  {latestAssets.map((asset) => (
+                    <AssetCard
+                      asset={asset}
+                      deleteAsset={deleteAsset}
+                      key={asset.id}
+                      onPreview={(previewed) => onPreview(previewed, latestAssets)}
+                      purgeAsset={purgeAsset}
+                      updateAssetStatus={updateAssetStatus}
+                    />
+                  ))}
+                </div>
+              </div>
+            ) : localJobGroups.length ? null : (
+              <div className="empty-panel">No fresh image batch</div>
+            )}
           </section>
         </div>
       </form>

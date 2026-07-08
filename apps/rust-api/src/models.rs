@@ -175,7 +175,81 @@ pub(crate) async fn create_model_download_job(
             ApiError::bad_request("Model does not define a Hugging Face download")
         })?,
     };
-    let repo = required_string_field(&download, "repo")?.to_owned();
+    // The selected `download` is always the primary/tier entry — `model_download` and
+    // `model_download_for_variant` skip co-requisites (sc-9696), so a co-requisite can never be
+    // installed as if it were the model itself.
+    let requested_variant = payload
+        .variant
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let job_payload = build_model_download_job_payload(
+        &model,
+        &model_id,
+        &download,
+        requested_variant,
+        true,
+        &state.settings.data_dir,
+    )?;
+
+    // Co-requisites (sc-9696): dependencies that must install ALONGSIDE the primary — e.g. the PiD
+    // decoder's shared gemma-2-2b-it caption encoder, or 10Eros's cond_safe distill LoRA. Without
+    // them the feature silently no-ops (for PiD, `resolve_pid_weights` falls back to the native VAE
+    // with no error). The catalog already filtered `downloads` to this OS, so every co-requisite
+    // here applies. Each is queued as its own ModelDownload job (the worker is one-repo-per-job);
+    // the catalog reports the entry installed only once all of them are cached
+    // (`install_state_for`). `include_family: false` because a co-requisite (e.g. a text encoder)
+    // is a different artifact than the model's primary checkpoint and must not be reconciled
+    // against the model's family.
+    let requested_gpu = requested_gpu_or_auto(payload.requested_gpu);
+    for co_requisite in model_co_requisite_downloads(&model) {
+        let co_payload = build_model_download_job_payload(
+            &model,
+            &model_id,
+            &co_requisite,
+            None,
+            false,
+            &state.settings.data_dir,
+        )?;
+        create_generation_job(
+            state.clone(),
+            JobType::ModelDownload,
+            None,
+            None,
+            co_payload,
+            requested_gpu.clone(),
+        )
+        .await?;
+    }
+
+    // The primary job is the one returned to the caller (its id is what the download UI tracks).
+    let job = create_generation_job(
+        state,
+        JobType::ModelDownload,
+        None,
+        None,
+        job_payload,
+        requested_gpu,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// Build the worker `ModelDownload` job payload for one `download` entry of `model`. Factored out
+/// (sc-9696) so the primary download and each co-requisite share identical payload shaping.
+/// `explicit_variant` records a request-selected quant tier (falling back to the entry's own
+/// `variant`); `include_family` forwards the model's declared family for the worker's post-download
+/// family reconcile (sc-1663) — pass `false` for co-requisites, whose weights are a different artifact
+/// than the model's primary checkpoint.
+fn build_model_download_job_payload(
+    model: &Value,
+    model_id: &str,
+    download: &Value,
+    explicit_variant: Option<&str>,
+    include_family: bool,
+    data_dir: &FsPath,
+) -> Result<JsonObject, ApiError> {
+    let repo = required_string_field(download, "repo")?.to_owned();
     let files = download
         .get("files")
         .and_then(Value::as_array)
@@ -188,29 +262,27 @@ pub(crate) async fn create_model_download_job(
         })
         .unwrap_or_default();
     let mut job_payload = JsonObject::new();
-    job_payload.insert("modelId".to_owned(), Value::String(model_id.clone()));
+    job_payload.insert("modelId".to_owned(), Value::String(model_id.to_owned()));
     job_payload.insert(
         "modelName".to_owned(),
         Value::String(
             model
                 .get("name")
                 .and_then(Value::as_str)
-                .unwrap_or(&model_id)
+                .unwrap_or(model_id)
                 .to_owned(),
         ),
     );
     job_payload.insert(
         "provider".to_owned(),
-        Value::String(required_string_field(&download, "provider")?.to_owned()),
+        Value::String(required_string_field(download, "provider")?.to_owned()),
     );
     job_payload.insert("repo".to_owned(), Value::String(repo.clone()));
     job_payload.insert("files".to_owned(), json!(files));
     // Record which quant tier this job installs (sc-8508) so the download record + per-variant
     // install tracking agree on the tier. Falls back to the selected entry's own `variant` when the
     // request omitted one (the default tier may still be a labeled variant).
-    if let Some(variant) = payload
-        .variant
-        .as_deref()
+    if let Some(variant) = explicit_variant
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
@@ -227,34 +299,24 @@ pub(crate) async fn create_model_download_job(
     // weights match it (parity with model import). The catalog is project-curated, but
     // a mis-declared family would otherwise silently mismatch downstream adapter
     // selection; the worker reconciles and fails on a confident conflict (sc-1663).
-    if let Some(family) = model.get("family").and_then(Value::as_str) {
-        if !family.trim().is_empty() {
-            job_payload.insert("family".to_owned(), Value::String(family.to_owned()));
+    if include_family {
+        if let Some(family) = model.get("family").and_then(Value::as_str) {
+            if !family.trim().is_empty() {
+                job_payload.insert("family".to_owned(), Value::String(family.to_owned()));
+            }
         }
     }
     job_payload.insert(
         "targetDir".to_owned(),
         Value::String(
-            state
-                .settings
-                .data_dir
+            data_dir
                 .join("models")
                 .join(safe_download_dir(&repo))
                 .display()
                 .to_string(),
         ),
     );
-
-    let job = create_generation_job(
-        state,
-        JobType::ModelDownload,
-        None,
-        None,
-        job_payload,
-        requested_gpu_or_auto(payload.requested_gpu),
-    )
-    .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok(job_payload)
 }
 
 /// Convert a model's native checkpoint into the local MLX format (macOS/Apple
@@ -384,7 +446,9 @@ pub(crate) async fn create_model_convert_job(
 pub(crate) async fn delete_model(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
+    Query(query): Query<CatalogDeleteQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    let permanent = query.permanent.unwrap_or(false);
     let catalog = model_catalog(&state).await?;
     let model = catalog
         .into_iter()
@@ -398,25 +462,40 @@ pub(crate) async fn delete_model(
         .config_dir
         .join("manifests")
         .join("user.models.jsonc");
-    let removed_entry =
-        remove_catalog_manifest_entry(&state, &manifest_path, "models", &model_id).await?;
-    let cleanup_source = removed_entry.as_ref().unwrap_or(&model);
-    let mut removed_paths = Vec::new();
-    let mut retained_paths = Vec::new();
+    // Peek (not remove) the manifest entry so that if moving the files to the OS
+    // trash fails we can leave the catalog untouched and prompt for confirmation.
+    let manifest_entry = load_manifest_entries(&state, &manifest_path, "models")
+        .await?
+        .into_iter()
+        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id.as_str()));
+    let cleanup_source = manifest_entry.as_ref().unwrap_or(&model);
     let allowed_roots = vec![
         state.settings.data_dir.join("models"),
         huggingface_hub_cache_dir(&state.settings.data_dir),
     ];
-    for path in model_artifact_paths(cleanup_source, &state.settings.data_dir) {
-        remove_owned_artifact_path(
-            path,
-            &allowed_roots,
-            &mut removed_paths,
-            &mut retained_paths,
-        )
-        .await?;
+    let removal = remove_owned_artifacts(
+        model_artifact_paths(cleanup_source, &state.settings.data_dir),
+        &allowed_roots,
+        permanent,
+    )
+    .await?;
+    // Some owned files could not reach the OS trash and nothing was permanently
+    // deleted. Leave the registry entry in place and ask the client to confirm.
+    if !permanent && !removal.trash_failed_paths.is_empty() {
+        return Ok(Json(json!({
+            "id": model_id,
+            "kind": "model",
+            "trashUnavailable": true,
+            "trashFailedPaths": removal.trash_failed_paths,
+            "removedManifestEntry": false,
+            "removedLocalArtifacts": !removal.removed_paths.is_empty(),
+            "removedPaths": removal.removed_paths,
+            "retainedPaths": removal.retained_paths,
+        })));
     }
-    if removed_entry.is_none() && removed_paths.is_empty() {
+    let removed_entry =
+        remove_catalog_manifest_entry(&state, &manifest_path, "models", &model_id).await?;
+    if removed_entry.is_none() && removal.removed_paths.is_empty() {
         return Err(ApiError::bad_request(
             "Built-in model catalog entries are read-only unless local files are installed",
         ));
@@ -430,10 +509,11 @@ pub(crate) async fn delete_model(
     Ok(Json(json!({
         "id": model_id,
         "kind": "model",
+        "trashed": !permanent,
         "removedManifestEntry": removed_entry.is_some(),
-        "removedLocalArtifacts": !removed_paths.is_empty(),
-        "removedPaths": removed_paths,
-        "retainedPaths": retained_paths,
+        "removedLocalArtifacts": !removal.removed_paths.is_empty(),
+        "removedPaths": removal.removed_paths,
+        "retainedPaths": removal.retained_paths,
         "warnings": warnings,
         "policy": policy,
     })))
@@ -724,7 +804,7 @@ pub(crate) async fn model_import_request_from_multipart(
 
 pub(crate) async fn write_model_upload_field_to_staged_file(
     state: &AppState,
-    mut field: axum::extract::multipart::Field<'_>,
+    field: axum::extract::multipart::Field<'_>,
     filename: &str,
 ) -> Result<PathBuf, ApiError> {
     let upload_dir = state
@@ -737,38 +817,21 @@ pub(crate) async fn write_model_upload_field_to_staged_file(
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let temp_path = upload_dir.join(filename);
-    let mut file = tokio::fs::File::create(&temp_path)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let mut uploaded_bytes = 0usize;
-    let write_result = async {
-        while let Some(chunk) = field
-            .chunk()
-            .await
-            .map_err(|error| ApiError::bad_request(error.to_string()))?
-        {
-            uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
-            if uploaded_bytes > max_model_upload_bytes() {
-                return Err(ApiError::payload_too_large(format!(
-                    "Uploaded model file exceeds the {} limit",
-                    format_bytes(max_model_upload_bytes() as u64)
-                )));
-            }
-            file.write_all(&chunk)
-                .await
-                .map_err(|error| ApiError::internal(error.to_string()))?;
-        }
-        file.flush()
-            .await
-            .map_err(|error| ApiError::internal(error.to_string()))?;
-        Ok(())
-    }
-    .await;
-    if let Err(error) = write_result {
-        drop(file);
-        cleanup_staged_model_upload(&temp_path).await;
-        return Err(error);
-    }
+    // sc-8886 (F-084): shared streaming writer. Cleanup removes the staged file AND its
+    // per-upload parent directory.
+    stream_multipart_field_to_file(
+        field,
+        &temp_path,
+        max_model_upload_bytes(),
+        || {
+            format!(
+                "Uploaded model file exceeds the {} limit",
+                format_bytes(max_model_upload_bytes() as u64)
+            )
+        },
+        || cleanup_staged_model_upload(&temp_path),
+    )
+    .await?;
     Ok(temp_path)
 }
 
@@ -875,28 +938,93 @@ fn install_state_for(
             .join("models")
             .join(safe_download_dir(&download_context.repo));
         let cache_path = huggingface_repo_cache_path(data_dir, &download_context.repo);
-        let cache_health = cache_path
-            .as_ref()
-            .map(|path| huggingface_cache_health(path, &download_context.files));
-        let cache_installed = cache_health.as_ref().is_some_and(|health| health.installed);
-        let cache_incomplete = cache_health
-            .as_ref()
-            .is_some_and(|health| health.incomplete);
-        let missing_required_files = cache_health
-            .as_ref()
-            .map(|health| health.missing_files.clone())
-            .unwrap_or_default();
-        let managed_installed = model_is_installed(&managed_path);
+        // Quant-matrix models (sc-8506/8508): the top-level install state aggregates across ALL
+        // selectable tiers, not just the default one. A model that offers bf16/q8/q4 counts as
+        // installed when ANY tier is fully present, and is only "incomplete" when a tier is genuinely
+        // torn (partially downloaded) AND no complete tier exists. Installing a single valid tier —
+        // even a non-default one — must never surface as an incomplete/repairable cache (sc-9907),
+        // because that rendered a false "Cached files are incomplete" warning + Fix button on a
+        // perfectly good install. Single-variant models keep the default-tier contract below.
+        let (cache_installed, cache_incomplete, mut missing_required_files) =
+            if model_has_variant_matrix(model) {
+                let variants = model_variant_states(model, data_dir);
+                let any_installed = variants.iter().any(|variant| variant.installed);
+                // Only a torn tier (some-but-not-all files present) with no complete sibling is a real
+                // repair candidate; a validly absent tier is "missing", not "incomplete".
+                let torn = variants
+                    .iter()
+                    .find(|variant| variant.cache_incomplete && !variant.installed);
+                let incomplete = !any_installed && torn.is_some();
+                let missing = if any_installed {
+                    Vec::new()
+                } else {
+                    torn.map(|variant| variant.missing_required_files.clone())
+                        .unwrap_or_default()
+                };
+                (any_installed, incomplete, missing)
+            } else {
+                let cache_health = cache_path
+                    .as_ref()
+                    .map(|path| huggingface_cache_health(path, &download_context.files));
+                let installed = cache_health.as_ref().is_some_and(|health| health.installed);
+                let incomplete = cache_health
+                    .as_ref()
+                    .is_some_and(|health| health.incomplete);
+                let missing = cache_health
+                    .as_ref()
+                    .map(|health| health.missing_files.clone())
+                    .unwrap_or_default();
+                (installed, incomplete, missing)
+            };
+        // A quant-matrix model's top-level state is the aggregate of its tier-aware variant states
+        // computed above (cache_installed = "any tier installed"). The repo-level managed marker must
+        // NOT independently mark it installed (sc-9909): a stale .sceneworks-download-complete.json
+        // left by an empty download would otherwise read the whole model as installed while every tier
+        // reads missing. Single-variant models keep the repo-level managed contract.
+        let managed_installed =
+            !model_has_variant_matrix(model) && model_is_installed(&managed_path);
+        let primary_installed = managed_installed || cache_installed;
         let installed_path = if cache_installed || cache_incomplete {
             cache_path.clone()
         } else {
             Some(managed_path)
         };
+        // Co-requisites (sc-9696): the entry counts as installed only when the primary AND every
+        // co-requisite dependency (e.g. the PiD decoder's shared gemma-2-2b-it caption encoder) are
+        // cached. Gating on this keeps a feature that silently no-ops without its dependency (PiD →
+        // native VAE) from advertising as ready, and a present primary with a missing/partial
+        // co-requisite surfaces as a repairable partial install (cache_incomplete → repairAvailable),
+        // whose repair re-runs the download job that now fetches the co-requisite too.
+        let mut co_requisites_installed = true;
+        let mut co_requisite_incomplete = false;
+        for co_requisite in model_co_requisite_downloads(model) {
+            let Some(repo) = co_requisite.get("repo").and_then(Value::as_str) else {
+                continue;
+            };
+            let files = string_array_field(&co_requisite, "files");
+            let health = huggingface_repo_cache_path(data_dir, repo)
+                .map(|path| huggingface_cache_health(&path, &files));
+            if health.as_ref().is_some_and(|health| health.installed) {
+                continue;
+            }
+            co_requisites_installed = false;
+            co_requisite_incomplete |= health.as_ref().is_some_and(|health| health.incomplete);
+            match health
+                .as_ref()
+                .map(|health| health.missing_files.as_slice())
+            {
+                Some(missing) if !missing.is_empty() => missing_required_files
+                    .extend(missing.iter().map(|file| format!("{repo}/{file}"))),
+                _ => missing_required_files.push(repo.to_owned()),
+            }
+        }
         ModelCatalogEntryState {
             downloadable: true,
             installed_path: installed_path.map(|path| path.display().to_string()),
-            installed: managed_installed || cache_installed,
-            cache_incomplete,
+            installed: primary_installed && co_requisites_installed,
+            cache_incomplete: cache_incomplete
+                || (primary_installed && !co_requisites_installed)
+                || co_requisite_incomplete,
             missing_required_files,
         }
     } else if let Some(installed_path) = model_manifest_installed_path(model, data_dir) {
@@ -954,7 +1082,7 @@ fn model_has_variant_matrix(model: &Value) -> bool {
     };
     downloads
         .iter()
-        .filter(|entry| is_supported_model_download(entry))
+        .filter(|entry| is_supported_model_download(entry) && !is_co_requisite_download(entry))
         .any(|entry| {
             entry
                 .get("variant")
@@ -979,7 +1107,8 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
     let mut seen_variants = std::collections::HashSet::new();
     downloads
         .iter()
-        .filter(|entry| is_supported_model_download(entry))
+        // Co-requisites (sc-9696) are dependencies, not selectable tiers — never a variant state.
+        .filter(|entry| is_supported_model_download(entry) && !is_co_requisite_download(entry))
         .filter(|entry| {
             let key = entry
                 .get("variant")
@@ -1008,10 +1137,14 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 .as_ref()
                 .map(|health| health.missing_files.clone())
                 .unwrap_or_default();
-            // The managed dir mirrors the default-download install path; a variant that is present
-            // there (a directly-downloaded turnkey) counts as installed too.
+            // The managed dir mirrors the default-download install path; a variant present there (a
+            // directly-downloaded turnkey) counts as installed too — but the check must be TIER-aware.
+            // A quant-matrix repo writes ONE repo-level completion marker no matter which tier was
+            // fetched, so keying a per-tier "installed" on the bare marker made EVERY tier report
+            // installed after any single tier's download (sc-9909). Require the tier's own files to
+            // actually exist under the managed dir, not just the marker.
             let managed_path = data_dir.join("models").join(safe_download_dir(&repo));
-            let managed_installed = model_is_installed(&managed_path);
+            let managed_installed = managed_tier_installed(&managed_path, &files);
             let installed_path = if installed || cache_incomplete {
                 cache_path
             } else if managed_installed {
@@ -1036,6 +1169,23 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
             }
         })
         .collect()
+}
+
+// Whether a tier's OWN artifacts live in the app-managed turnkey dir (data/models/<repo>), as opposed
+// to the shared HF cache. The repo-level completion marker (.sceneworks-download-complete.json) alone
+// does NOT certify a tier: a quant-matrix repo writes exactly one marker regardless of which tier was
+// downloaded, so a bare-marker check reported every tier of a repo installed after any single tier's
+// fetch (sc-9909). Require BOTH the marker AND — for a tier that declares a `files` filter — that the
+// tier's files actually exist under the managed dir. A single-variant turnkey (empty `files`) is
+// certified by the marker alone, preserving the pre-matrix contract.
+fn managed_tier_installed(managed_path: &FsPath, files: &[String]) -> bool {
+    if !model_is_installed(managed_path) {
+        return false;
+    }
+    files.is_empty()
+        || files
+            .iter()
+            .all(|pattern| snapshot_contains_pattern(managed_path, pattern))
 }
 
 // The on-disk size a `downloads[].footprint.diskSizeBytes` declares, if any — the tier-scoped
@@ -1148,6 +1298,10 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
                 .map(|path| Value::String(path.display().to_string()))
                 .unwrap_or(Value::Null),
         );
+        object.insert(
+            "updateAvailable".to_owned(),
+            Value::Bool(status.update_available),
+        );
     }
 }
 
@@ -1203,9 +1357,21 @@ async fn model_catalog_inner(
             let fallback_size_bytes = download_context
                 .as_ref()
                 .and_then(|context| context.fallback_size_bytes);
-            let effective_download_size_bytes = download_size_bytes.or(fallback_size_bytes);
+            let primary_size_bytes = download_size_bytes.or(fallback_size_bytes);
             let download_size_estimated =
                 download_size_bytes.is_none() && fallback_size_bytes.is_some();
+            // Co-requisites (sc-9696) install alongside the primary, so the displayed footprint must
+            // include them (e.g. PiD's ~2.7 GB checkpoint + ~5.2 GB gemma-2-2b-it). Their sizes come
+            // from the manifest (the live HF estimate above only sizes the primary repo).
+            let co_requisite_size_bytes: u64 = model_co_requisite_downloads(model)
+                .iter()
+                .filter_map(|download| manifest_download_size_bytes(model, download))
+                .sum();
+            let effective_download_size_bytes = match primary_size_bytes {
+                Some(primary) => Some(primary + co_requisite_size_bytes),
+                None if co_requisite_size_bytes > 0 => Some(co_requisite_size_bytes),
+                None => None,
+            };
             let state = install_state_for(download_context, model, &data_dir);
             let object = model
                 .as_object_mut()
@@ -1443,7 +1609,9 @@ pub(crate) fn model_download(model: &Value) -> Option<Value> {
     let downloads = model.get("downloads")?.as_array()?;
     let mut fallback = None;
     for download in downloads {
-        if !is_supported_model_download(download) {
+        // Co-requisites (sc-9696) install alongside the primary, never AS it — skip them when
+        // choosing the canonical entry for size/install-path/download.
+        if !is_supported_model_download(download) || is_co_requisite_download(download) {
             continue;
         }
         fallback.get_or_insert(download);
@@ -1452,6 +1620,33 @@ pub(crate) fn model_download(model: &Value) -> Option<Value> {
         }
     }
     fallback.cloned()
+}
+
+/// True when a download entry is a co-requisite dependency (sc-9696): fetched ALONGSIDE the primary
+/// download rather than as a pick-one alternate, and gating the entry's install state. See the
+/// manifest schema `downloads[].coRequisite`.
+pub(crate) fn is_co_requisite_download(download: &Value) -> bool {
+    download.get("coRequisite").and_then(Value::as_bool) == Some(true)
+}
+
+/// The co-requisite download entries for `model` (sc-9696) — the dependencies that must install
+/// alongside the primary (e.g. the PiD decoder's shared gemma-2-2b-it caption encoder). The catalog
+/// has already restricted `downloads` to the current OS (`retain_downloads_for_os`), so every entry
+/// returned applies to this platform. Only provider-supported entries are returned.
+pub(crate) fn model_co_requisite_downloads(model: &Value) -> Vec<Value> {
+    model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .map(|downloads| {
+            downloads
+                .iter()
+                .filter(|download| {
+                    is_co_requisite_download(download) && is_supported_model_download(download)
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Select a specific quant tier's download entry for a quant-matrix model (sc-8508). Returns the
@@ -1465,6 +1660,7 @@ pub(crate) fn model_download_for_variant(model: &Value, variant: &str) -> Option
         .iter()
         .find(|download| {
             is_supported_model_download(download)
+                && !is_co_requisite_download(download)
                 && download
                     .get("variant")
                     .and_then(Value::as_str)
@@ -1538,7 +1734,17 @@ pub(crate) fn huggingface_cache_health(
     }
     let snapshots = huggingface_snapshot_dirs(repo_root);
     if snapshots.is_empty() {
-        return HuggingFaceCacheHealth::missing(vec!["snapshots/<revision>".to_owned()]);
+        // The repo cache dir exists but holds no snapshot revision at all — an empty skeleton
+        // (bare refs/blobs, e.g. a download that resolved zero files against an unpublished tier, or
+        // a cache whose weights were pruned). Nothing is partially there, so this is MISSING, not a
+        // repairable "incomplete": reporting incomplete surfaced a confusing "Cached files are
+        // incomplete: snapshots/<revision>" banner for a tier that simply was never downloaded
+        // (sc-9909). incomplete:false keeps it a clean not-installed state.
+        return HuggingFaceCacheHealth {
+            installed: false,
+            incomplete: false,
+            missing_files: vec!["snapshots/<revision>".to_owned()],
+        };
     }
     if !files.is_empty() {
         return huggingface_filtered_cache_health(&snapshots, files);
@@ -1582,8 +1788,24 @@ fn huggingface_filtered_cache_health(
         .cloned()
         .collect::<Vec<_>>();
     if missing.is_empty() {
+        // Every expected file/pattern is present — fully installed.
         HuggingFaceCacheHealth::installed()
+    } else if missing.len() == files.len() {
+        // NONE of this filter's expected files are present: the tier is cleanly absent, not torn.
+        // A quant-matrix model keeps every tier in ONE shared repo cache (bf16/, q8/, q4/ subdirs),
+        // so downloading one tier populates the repo snapshot the OTHER tiers' filters also probe.
+        // Reporting a not-downloaded tier as `incomplete` is what surfaced a false "Cached files are
+        // incomplete" warning + Fix button for a perfectly valid single-quant install (sc-9907).
+        // "You didn't download this tier" (missing) must stay distinct from "this tier is
+        // half-downloaded" (incomplete) so nothing upstream raises a spurious repair prompt.
+        HuggingFaceCacheHealth {
+            installed: false,
+            incomplete: false,
+            missing_files: missing,
+        }
     } else {
+        // Some — but not all — expected files are present: a genuinely torn download a re-fetch
+        // should repair.
         HuggingFaceCacheHealth::missing(missing)
     }
 }
@@ -1846,6 +2068,22 @@ pub(crate) struct MlxCatalogStatus {
     pub(crate) install_state: &'static str,
     pub(crate) conversion_state: &'static str,
     pub(crate) converted_path: Option<PathBuf>,
+    /// A newer source checkpoint is available than the one this install was converted from.
+    /// True only for a converted `requiresConversion` model whose manifest `convertSourceFile`
+    /// is NOT present in the `convertSourceRepo` cache (the installed converted dir carries no
+    /// version stamp, so the source cache is the proxy — see `convert_source_file_cached`).
+    pub(crate) update_available: bool,
+}
+
+/// Whether the named source `file` is present in any cached snapshot of `repo` — the proxy for
+/// "the current manifest source has been downloaded." Keys off the manifest fields alone, so it
+/// works for every convert-at-install model with no per-model logic.
+fn convert_source_file_cached(data_dir: &FsPath, repo: &str, file: &str) -> bool {
+    huggingface_repo_cache_path(data_dir, repo)
+        .map(|root| crate::huggingface_snapshot_dirs(&root))
+        .unwrap_or_default()
+        .iter()
+        .any(|snapshot| snapshot.join(file).is_file())
 }
 
 /// macOS Model Manager status for a model's `mlx` variant. Returns `None` when the
@@ -1881,10 +2119,24 @@ pub(crate) fn mlx_catalog_status(
         if converted_dir.join("config.json").is_file()
             || converted_dir.join("model_index.json").is_file()
         {
+            // The converted artifact records no source version, so use the source cache as the
+            // proxy: if the manifest's current `convertSourceFile` is NOT cached, this install was
+            // built from an older source → an update is available. A dir-based converter with no
+            // `convertSourceFile` simply never reports an update (no false positives).
+            let update_available = match (
+                mlx.get("convertSourceRepo").and_then(Value::as_str),
+                mlx.get("convertSourceFile").and_then(Value::as_str),
+            ) {
+                (Some(repo), Some(file)) if !file.trim().is_empty() => {
+                    !convert_source_file_cached(data_dir, repo, file)
+                }
+                _ => false,
+            };
             return Some(MlxCatalogStatus {
                 install_state: "installed",
                 conversion_state: "converted",
                 converted_path: Some(converted_dir),
+                update_available,
             });
         }
         let source_present = mlx
@@ -1899,6 +2151,7 @@ pub(crate) fn mlx_catalog_status(
                 "needs_source"
             },
             converted_path: None,
+            update_available: false,
         })
     } else {
         let repo_installed = mlx
@@ -1921,6 +2174,8 @@ pub(crate) fn mlx_catalog_status(
             },
             conversion_state: "ready",
             converted_path: local_installed.then_some(local_dir),
+            // Turnkey models have no local conversion to go stale (they track their repo directly).
+            update_available: false,
         })
     }
 }
@@ -2221,6 +2476,85 @@ mod variant_install_tests {
         let states = model_variant_states(&model, data_dir);
         assert!(states[0].installed);
         assert!(states[0].installed_path.is_some());
+    }
+
+    /// Mark a convert-at-install model "converted" by writing its local MLX `config.json`.
+    fn seed_converted(data_dir: &FsPath, model_id: &str) {
+        let dir = data_dir.join("models").join("mlx").join(model_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+    }
+
+    /// A converted convert-at-install model reports `updateAvailable` iff the manifest's current
+    /// `convertSourceFile` is NOT in the source cache (the converted dir carries no version stamp,
+    /// so the cache is the proxy). Generic: keys only off the manifest fields.
+    #[test]
+    fn mlx_update_available_tracks_source_file_in_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo = "TenStrip/LTX2.3-10Eros";
+        let model = json!({
+            "id": "ltx_2_3_eros",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "ltx_video",
+                "convertSourceRepo": repo,
+                "convertSourceFile": "10Eros_v1.3_bf16.safetensors"
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        // Not converted + nothing cached → not installed, no update signal.
+        let status = mlx_catalog_status(&model, data_dir).expect("status");
+        assert_eq!(status.install_state, "missing");
+        assert!(!status.update_available);
+
+        // Converted, but only the OLDER source is cached (manifest now points at v1.3) → stale.
+        seed_converted(data_dir, "ltx_2_3_eros");
+        seed_cache(data_dir, repo, &["10Eros_v1_bf16.safetensors"]);
+        let status = mlx_catalog_status(&model, data_dir).expect("status");
+        assert_eq!(status.install_state, "installed");
+        assert_eq!(status.conversion_state, "converted");
+        assert!(
+            status.update_available,
+            "current source not cached → update available"
+        );
+
+        // The manifest's current source file is now cached → up to date.
+        seed_cache(data_dir, repo, &["10Eros_v1.3_bf16.safetensors"]);
+        let status = mlx_catalog_status(&model, data_dir).expect("status");
+        assert!(
+            !status.update_available,
+            "current source cached → no update"
+        );
+    }
+
+    /// A dir-based converter (no `convertSourceFile`) never reports an update — the mechanism
+    /// degrades to a no-op rather than misfiring, so it's safe to leave enabled for all models.
+    #[test]
+    fn mlx_update_unavailable_without_convert_source_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let model = json!({
+            "id": "flux2_dev",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "flux2_dev_quant",
+                "convertSourceRepo": "black-forest-labs/FLUX.2-dev"
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        seed_converted(data_dir, "flux2_dev");
+        let status = mlx_catalog_status(&model, data_dir).expect("status");
+        assert_eq!(status.conversion_state, "converted");
+        assert!(
+            !status.update_available,
+            "no convertSourceFile → never reports an update"
+        );
     }
 
     #[test]

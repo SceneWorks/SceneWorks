@@ -34,6 +34,12 @@ const QWEN_EDIT_CANDLE_2511_REPO: &str = "Qwen/Qwen-Image-Edit-2511";
 const QWEN_EDIT_CANDLE_LIGHTNING_LORA_REPO: &str = "lightx2v/Qwen-Image-Edit-2511-Lightning";
 const QWEN_EDIT_CANDLE_LIGHTNING_LORA_FILE: &str =
     "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors";
+/// Pinned revision for the default candle Lightning distill-LoRA repo (sc-9879, F-077 follow-up).
+/// Fetching the mutable `main` branch means an upstream re-push could silently swap the distill LoRA we
+/// stack at load; pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682).
+/// `HuggingFaceSnapshot::resolve` still verifies each file's `lfs.oid` sha256. Applied ONLY to the
+/// default repo — a non-default repo keeps `main`. Matches the MLX `QWEN_LIGHTNING_LORA_REVISION`.
+const QWEN_EDIT_CANDLE_LIGHTNING_LORA_REVISION: &str = "d74eba145674fd7e31b949324e148e21e7118abd";
 
 /// Qwen-Image-Edit model ids the candle edit route accepts. The base variants map to the single edit
 /// engine (the architecture is identical; `-2511` only flips `zero_cond_t`, which `QwenEdit` auto-detects
@@ -116,41 +122,26 @@ fn qwen_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bo
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → family default
 /// (Lightning → 4, else 30).
 fn qwen_edit_candle_steps(request: &ImageRequest) -> u32 {
-    let default = if is_qwen_edit_lightning(&request.model) {
-        QWEN_EDIT_CANDLE_LIGHTNING_STEPS
-    } else {
-        QWEN_EDIT_CANDLE_DEFAULT_STEPS
-    };
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    request
-        .advanced
-        .get("steps")
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
-        .map(|steps| steps.clamp(1, 50) as u32)
-        .unwrap_or(default)
+    resolve_advanced_or_manifest_u32_with(
+        request,
+        "steps",
+        || {
+            if is_qwen_edit_lightning(&request.model) {
+                QWEN_EDIT_CANDLE_LIGHTNING_STEPS
+            } else {
+                QWEN_EDIT_CANDLE_DEFAULT_STEPS
+            }
+        },
+        1..=50,
+    )
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → default (4.0), clamped.
 fn qwen_edit_candle_guidance(request: &ImageRequest) -> f32 {
-    let manifest_default = request
-        .model_manifest_entry
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(QWEN_EDIT_CANDLE_DEFAULT_GUIDANCE);
-    advanced::f32_clamped(
-        &request.advanced,
+    resolve_advanced_or_manifest_f32(
+        request,
         "guidanceScale",
-        manifest_default,
+        QWEN_EDIT_CANDLE_DEFAULT_GUIDANCE,
         0.0..=30.0,
     )
 }
@@ -225,7 +216,13 @@ async fn ensure_qwen_lightning_lora_cached(
                 "Unable to resolve Hugging Face cache path for {repo}."
             ))
         })?;
-    let revision = "main";
+    // Pin the exact commit for the default distill-LoRA repo so `main` moving under us can't swap the
+    // LoRA (sc-9879). A non-default repo (none exists today, but the param is repo-agnostic) keeps `main`.
+    let revision = if repo == QWEN_EDIT_CANDLE_LIGHTNING_LORA_REPO {
+        QWEN_EDIT_CANDLE_LIGHTNING_LORA_REVISION
+    } else {
+        "main"
+    };
     let client = reqwest::Client::new();
     let snapshot = crate::downloads::HuggingFaceSnapshot::resolve(
         &client,
@@ -313,7 +310,7 @@ async fn generate_candle_qwen_edit_stream(
     let repo = qwen_edit_candle_repo(request);
     // The lightx2v distill LoRA, lazily fetched into the HF cache — `QwenEdit` folds it into the MMDiT at
     // load (sc-6220). Empty for the production (multi-step true-CFG) variants.
-    let adapters: Vec<AdapterSpec> = if lightning {
+    let mut adapters: Vec<AdapterSpec> = if lightning {
         let lora = ensure_qwen_lightning_lora_cached(
             api,
             settings,
@@ -326,6 +323,11 @@ async fn generate_candle_qwen_edit_stream(
     } else {
         Vec::new()
     };
+    // User style/subject LoRAs (sc-10271): folded in alongside any built-in distill LoRA,
+    // mirroring the MLX twin (qwen.rs) — `QwenEdit` applies the whole adapter list at load.
+    // This closes the candle edit-LoRA gap for the Qwen-Image-Edit family; the SDXL / FLUX.2 /
+    // Z-Image candle edit engines still need an `adapters` field in candle-gen (tracked).
+    adapters.extend(resolve_adapters(request, settings)?);
     let mut raw_settings = qwen_edit_candle_raw_settings(request, &repo, steps, guidance);
     // Record the Lightning recipe for telemetry / A-B parity (matches the MLX `distillLora` key format).
     if lightning {

@@ -1,15 +1,17 @@
 use super::auth::{loopback_trusted, requires_token};
 use super::events::{EventHub, EventMessage};
-use super::training::{insufficient_disk_space, resolve_base_model_path};
+use super::training::{
+    insufficient_disk_space, resolve_base_model_path, training_base_model_installed,
+};
 use super::workers::person_readiness_from_workers;
 use super::{
     create_app, create_app_with_state, huggingface_repo_cache_path, inject_converted_model_path,
     inprocess_worker_gpu_id, lora_artifact_paths, merge_model_manifest_entry, mlx_catalog_status,
-    open_bind_override_enabled, safe_download_dir, serialize_job_lora, should_warn_open_bind,
-    strip_jsonc_comments, sweep_stale_asset_uploads_before, sweep_stale_lora_uploads_before,
-    Settings, WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER,
-    DEFAULT_API_HOST, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE,
-    TEST_MAX_LORA_UPLOAD_BYTES,
+    open_bind_override_enabled, safe_download_dir, seed_mode_for_config_dir, serialize_job_lora,
+    should_warn_open_bind, strip_jsonc_comments, sweep_stale_asset_uploads_before,
+    sweep_stale_lora_uploads_before, sweep_stale_uploads, Settings, WorkerCapability,
+    WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, DEFAULT_API_HOST, EVENT_BUFFER_SIZE,
+    HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
 };
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -72,6 +74,26 @@ fn open_bind_override_only_for_explicit_optin() {
             "{value:?} must not opt in"
         );
     }
+}
+
+#[test]
+fn seed_mode_refreshes_the_app_owned_default_but_not_an_explicit_config_dir() {
+    use sceneworks_core::builtin_manifests::SeedMode;
+    // sc-10212: an explicit, non-empty SCENEWORKS_CONFIG_DIR marks an operator-owned dir (repo
+    // checkout / Compose bind mount) → stay authoritative (IfMissing), never dirty a checkout.
+    assert_eq!(
+        seed_mode_for_config_dir(Some("/srv/sceneworks/config")),
+        SeedMode::IfMissing
+    );
+    assert_eq!(
+        seed_mode_for_config_dir(Some("./config")),
+        SeedMode::IfMissing
+    );
+    // Unset, or blank/whitespace (env_path_or treats those as unset) → the platform-default
+    // app-owned dir → Overwrite so a directly-launched API refreshes its builtin catalog on launch.
+    assert_eq!(seed_mode_for_config_dir(None), SeedMode::Overwrite);
+    assert_eq!(seed_mode_for_config_dir(Some("")), SeedMode::Overwrite);
+    assert_eq!(seed_mode_for_config_dir(Some("   ")), SeedMode::Overwrite);
 }
 
 #[test]
@@ -264,6 +286,11 @@ fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         candle_required: false,
         candle_enforce_unsupported: false,
         trust_loopback: false,
+        // Placeholder for oneshot tests (the MCP self-client never dials it);
+        // the live-listener MCP tests overwrite it with the bound address.
+        mcp_api_url: "http://127.0.0.1:0".to_owned(),
+        mcp_job_poll_interval: sceneworks_mcp::JobWaitConfig::default().poll_interval,
+        mcp_job_timeout: sceneworks_mcp::JobWaitConfig::default().timeout,
     }
 }
 
@@ -529,6 +556,79 @@ async fn request_with_headers(
     (status, value)
 }
 
+/// Drive a request through the router with a simulated peer `SocketAddr` in the
+/// request extensions, so the `Option<ConnectInfo<SocketAddr>>` extractor in the
+/// auth middleware resolves to that peer (the plain `oneshot` path has no connect
+/// info and so is never loopback-trusted). Used to exercise the epic-4484
+/// loopback-trust bypass end-to-end (sc-8869).
+async fn request_with_peer(
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    body: Value,
+    peer: &str,
+) -> (StatusCode, Value) {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request builds");
+    let addr: SocketAddr = peer.parse().expect("peer addr parses");
+    request.extensions_mut().insert(ConnectInfo(addr));
+    let response = app.oneshot(request).await.expect("response returns");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body buffers");
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("json body parses")
+    };
+    (status, value)
+}
+
+/// Like `request_with_peer` but also attaches request headers (e.g. an
+/// `authorization` token candidate), so the per-IP auth throttle (sc-8870) can be
+/// exercised against the token oracle with a simulated remote peer.
+async fn request_with_peer_headers(
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    body: Value,
+    peer: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, Value) {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let mut request = builder
+        .body(Body::from(body.to_string()))
+        .expect("request builds");
+    let addr: SocketAddr = peer.parse().expect("peer addr parses");
+    request.extensions_mut().insert(ConnectInfo(addr));
+    let response = app.oneshot(request).await.expect("response returns");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body buffers");
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("json body parses")
+    };
+    (status, value)
+}
+
 async fn request_raw(
     app: axum::Router,
     method: &str,
@@ -726,6 +826,229 @@ async fn import_asset_removes_staged_temp_file_when_a_later_field_errors() {
         leaked.is_empty(),
         "staged upload temp file leaked on error: {leaked:?}"
     );
+}
+
+#[tokio::test]
+async fn import_asset_rejects_duplicate_file_field_and_cleans_first_temp() {
+    // sc-8883 (F-081): a second `file` field must be rejected (400), and the first
+    // already-staged temp must be cleaned up rather than orphaned until the 24h sweep.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    let app = create_app(settings).expect("app creates");
+
+    let boundary = "SCENEWORKS_DUP_FILE_BOUNDARY";
+    let mut body = Vec::new();
+    for name in ["file", "file"] {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"x.png\"\r\n")
+                .as_bytes(),
+        );
+        body.extend_from_slice(b"Content-Type: image/png\r\n\r\n");
+        body.extend_from_slice(b"\x89PNG\r\n\x1a\n payload bytes");
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+    let (status, _, response) = request_raw(
+        app,
+        "POST",
+        "/api/v1/projects/project-1/assets",
+        body,
+        &[(
+            "content-type",
+            &format!("multipart/form-data; boundary={boundary}"),
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let value: Value = serde_json::from_slice(&response).expect("json body parses");
+    assert!(value["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("Only one file field is allowed")));
+
+    // The first staged temp must not leak under cache/uploads.
+    let upload_root = data_dir.join("cache").join("uploads");
+    let leaked: Vec<_> = std::fs::read_dir(&upload_root)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("upload-"))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        leaked.is_empty(),
+        "first staged temp file leaked on duplicate file field: {leaked:?}"
+    );
+}
+
+#[test]
+fn shared_sweep_removes_stale_files_and_dirs_leaves_fresh_and_unrelated() {
+    // sc-8885 (F-083): the unified sweeper handles both loose files and per-upload
+    // directories, and only touches `upload-*` entries at/older than the cutoff.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let root = temp_dir.path().join("data/cache/pose-uploads");
+    std::fs::create_dir_all(&root).expect("root creates");
+    let stale_file = root.join("upload-old.tmp");
+    let stale_dir = root.join("upload-old-dir");
+    let unrelated = root.join("keep-me.txt");
+    std::fs::write(&stale_file, b"x").expect("stale file writes");
+    std::fs::create_dir_all(&stale_dir).expect("stale dir creates");
+    std::fs::write(stale_dir.join("inner"), b"y").expect("inner writes");
+    std::fs::write(&unrelated, b"z").expect("unrelated writes");
+
+    // Cutoff in the future -> everything upload-* qualifies as stale.
+    let removed = sweep_stale_uploads(
+        &temp_dir.path().join("data"),
+        "pose-uploads",
+        SystemTime::now() + Duration::from_secs(1),
+    )
+    .expect("shared sweep");
+    assert_eq!(removed, 2, "both the file and the directory are removed");
+    assert!(!stale_file.exists());
+    assert!(!stale_dir.exists());
+    assert!(unrelated.exists(), "non upload-* entries are left alone");
+
+    // A missing root is not an error.
+    assert_eq!(
+        sweep_stale_uploads(
+            &temp_dir.path().join("data"),
+            "does-not-exist",
+            SystemTime::now(),
+        )
+        .expect("missing root is ok"),
+        0
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_sweep_is_best_effort_when_one_entry_cannot_be_removed() {
+    // sc-8885 (F-083): per-entry reclamation is best-effort — a single unremovable
+    // stale entry (here a directory whose contents can't be deleted) is logged and
+    // skipped so every other stale entry in the sweep is still reclaimed. The original
+    // per-area sweepers used `let _ =` and continued; the unified helper must too.
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let root = temp_dir.path().join("data/cache/pose-uploads");
+    std::fs::create_dir_all(&root).expect("root creates");
+
+    // Two removable stale entries flanking one that cannot be removed.
+    let ok_file_a = root.join("upload-a.tmp");
+    let ok_file_b = root.join("upload-b.tmp");
+    std::fs::write(&ok_file_a, b"a").expect("a writes");
+    std::fs::write(&ok_file_b, b"b").expect("b writes");
+
+    // An unremovable stale directory: it holds an inner file, then we strip write
+    // permission on the directory itself so `remove_dir_all` fails (deleting the inner
+    // entry requires write on its parent) without touching the siblings' removability.
+    let locked_dir = root.join("upload-locked-dir");
+    std::fs::create_dir_all(&locked_dir).expect("locked dir creates");
+    std::fs::write(locked_dir.join("inner"), b"x").expect("inner writes");
+    std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o500))
+        .expect("chmod locked dir");
+
+    // Cutoff in the future -> every upload-* entry qualifies as stale.
+    let removed = sweep_stale_uploads(
+        &temp_dir.path().join("data"),
+        "pose-uploads",
+        SystemTime::now() + Duration::from_secs(1),
+    )
+    .expect("sweep does not abort on a single unremovable entry");
+
+    // Restore permissions so the tempdir can be torn down cleanly.
+    let _ = std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o700));
+
+    assert_eq!(
+        removed, 2,
+        "both removable stale entries are reclaimed despite the locked directory"
+    );
+    assert!(
+        !ok_file_a.exists(),
+        "sibling before the locked entry removed"
+    );
+    assert!(
+        !ok_file_b.exists(),
+        "sibling after the locked entry removed"
+    );
+    assert!(
+        locked_dir.exists(),
+        "the unremovable entry is left in place, not aborting the sweep"
+    );
+}
+
+#[tokio::test]
+async fn create_image_job_rejects_over_length_negative_prompt() {
+    // sc-8884 (F-082): negativePrompt now shares the prompt char cap.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, error) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+            "negativePrompt": "n".repeat(4001),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(error["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("negativePrompt")));
+}
+
+#[tokio::test]
+async fn create_image_job_rejects_oversized_advanced_object() {
+    // sc-8884 (F-082): the free-form `advanced` bag is bounded by serialized size.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, error) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+            "advanced": { "blob": "a".repeat(64 * 1024 + 1) },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(error["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("advanced")));
+}
+
+#[tokio::test]
+async fn create_video_job_rejects_over_length_negative_prompt() {
+    // sc-8884 (F-082): the negative-prompt cap is shared by the video validator too.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, error) = request(
+        app,
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_video",
+            "prompt": "a drone shot",
+            "negativePrompt": "n".repeat(4001),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(error["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("negativePrompt")));
 }
 
 #[tokio::test]
@@ -1087,10 +1410,12 @@ async fn project_and_asset_routes_persist_contract_state() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(reindex["assets"], 2);
 
+    // permanent=true exercises the deterministic hard-delete path; the default
+    // (move-to-OS-trash) is environment-dependent and validated manually.
     let (status, purged) = request(
         app,
         "DELETE",
-        &format!("/api/v1/projects/{project_id}/assets/{asset_id}/purge"),
+        &format!("/api/v1/projects/{project_id}/assets/{asset_id}/purge?permanent=true"),
         Value::Null,
     )
     .await;
@@ -3512,6 +3837,65 @@ async fn timeline_routes_persist_and_create_worker_jobs() {
 }
 
 #[tokio::test]
+async fn real_builtin_catalog_exposes_krea_img2img_ui_flag() {
+    // Regression (Michael, on-device): the "Image reference" img2img tile reads `selectedModel.ui.img2img`.
+    // This runs the ACTUAL shipped repo manifest (not a fixture) through the real /api/v1/models catalog
+    // path, proving the `ui.img2img` flag on krea_2_turbo survives merge → serialize to the response — so a
+    // correct build DOES expose it (any on-device miss is a stale binary/config, not a code defect).
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    // The canonical repo builtin manifest — the same bytes `sceneworks-core` embeds via include_str!.
+    let real_manifest = include_str!("../../../config/manifests/builtin.models.jsonc");
+    std::fs::write(config_dir.join("builtin.models.jsonc"), real_manifest)
+        .expect("builtin models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let krea = models
+        .as_array()
+        .expect("catalog is an array")
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some("krea_2_turbo"))
+        .expect("krea_2_turbo present in the catalog");
+    assert_eq!(
+        krea["ui"]["img2img"],
+        Value::Bool(true),
+        "krea_2_turbo must expose ui.img2img in the /models response (the img2img tile's gate)"
+    );
+    // And SD3.5 (A4.1) + Z-Image (A4.5, sc-10193) + Boogu (A4.3, sc-10191) + Ideogram (A4.4, sc-10192) —
+    // the img2img flags added since — must be exposed the same way (a duplicate-`ui`-key drop would
+    // silently strip the flag while still parsing, sc-10198). Ideogram is a `structuredPrompt` model, so
+    // its flag additionally drives the img2img tile INSIDE the JSON-caption builder surface.
+    for id in [
+        "sd3_5_large",
+        "sd3_5_large_turbo",
+        "sd3_5_medium",
+        "z_image",
+        "z_image_turbo",
+        "boogu_image",
+        "boogu_image_turbo",
+        "ideogram_4",
+        "ideogram_4_turbo",
+        "sana_1600m",
+        "sana_sprint_1600m",
+    ] {
+        let m = models
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
+            .unwrap_or_else(|| panic!("{id} present"));
+        assert_eq!(
+            m["ui"]["img2img"],
+            Value::Bool(true),
+            "{id} ui.img2img exposed"
+        );
+    }
+}
+
+#[tokio::test]
 async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
     // sc-3486: the catalog stamps per-model `macSupport`, and the capabilities endpoint
     // carries the master switch (`macGatingActive` = mlx_required) + infra gating.
@@ -3763,9 +4147,9 @@ async fn image_job_route_threads_reference_asset_ids() {
 }
 
 /// Poll the job list until an Ideogram magic-prompt expansion (`prompt_refine`) job other than
-/// `exclude` appears, and return its id. The image-job handler is blocked awaiting this job, so it
-/// materializes promptly. `exclude` lets a test wait for a *re-sampled* second job after completing
-/// the first.
+/// `exclude` appears, and return its id. The image-job POST returns immediately (fully async,
+/// sc-9120) and a background watcher enqueues this job, so it materializes promptly. `exclude` lets a
+/// test wait for a *re-sampled* second job after completing the first.
 async fn wait_for_prompt_refine_job_excluding(app: &axum::Router, exclude: Option<&str>) -> String {
     for _ in 0..250 {
         let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
@@ -3806,37 +4190,104 @@ async fn complete_prompt_refine_job(app: &axum::Router, job_id: &str, result: Va
     assert_eq!(status, StatusCode::OK);
 }
 
+/// Either the image job left `pending_caption` (the watcher promoted it) or a new `prompt_refine`
+/// re-sample appeared first. Lets a test drive the bounded re-sample loop without racing the two
+/// async events (sc-9120).
+enum PendingOrRefine {
+    Promoted(Value),
+    Refine(String),
+}
+
+/// Poll until EITHER the image job leaves `pending_caption` OR a `prompt_refine` job other than
+/// `exclude_refine` appears — whichever happens first. Used by the bounded-resample degrade test to
+/// feed each attempt a prose reply and then observe the eventual degrade to `queued` (sc-9120).
+async fn wait_for_job_out_of_pending_caption_or_refine(
+    app: &axum::Router,
+    job_id: &str,
+    exclude_refine: Option<&str>,
+) -> PendingOrRefine {
+    for _ in 0..250 {
+        let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+        let items = jobs.as_array().expect("jobs is an array");
+        // Prefer promotion when the image job has already left pending_caption.
+        if let Some(job) = items.iter().find(|job| job["id"] == job_id) {
+            if job["status"] != "pending_caption" {
+                return PendingOrRefine::Promoted(job.clone());
+            }
+        }
+        if let Some(id) = items
+            .iter()
+            .filter(|job| job["type"] == "prompt_refine")
+            .find_map(|job| job["id"].as_str().filter(|id| Some(*id) != exclude_refine))
+        {
+            return PendingOrRefine::Refine(id.to_owned());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("neither a promotion nor a new refine job appeared for {job_id}");
+}
+
+/// Poll a job by id until it leaves `pending_caption` (the background caption watcher promoted it),
+/// and return its final snapshot. Used by the fully-async Ideogram tests (sc-9120): the POST returns
+/// immediately in `pending_caption`, and the prompt rewrite lands on a later async promotion.
+async fn wait_for_job_out_of_pending_caption(app: &axum::Router, job_id: &str) -> Value {
+    for _ in 0..250 {
+        let (status, job) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/jobs/{job_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        if job["status"] != "pending_caption" {
+            return job;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the pending_caption job {job_id} was never promoted out of pending_caption");
+}
+
 #[tokio::test]
-async fn ideogram_plain_text_job_is_rich_auto_captioned_before_dispatch() {
-    // sc-6519: a direct/headless plain-text Ideogram 4 job (no UI auto-expand) is rich-auto-captioned
-    // BEFORE it dispatches — the API runs the same separate magic_prompt expansion the web runs and
-    // rewrites the job's prompt to the rich JSON caption, matching the UI path. The image job is held
-    // (not yet created) while the expansion runs, so there is no 3B/Ideogram co-residency.
+async fn ideogram_plain_text_job_returns_immediately_in_pending_caption() {
+    // sc-9120: a direct/headless plain-text Ideogram 4 job returns 201 IMMEDIATELY in the non-claimable
+    // `pending_caption` status — the POST no longer waits on the magic-prompt expansion at all. A
+    // background watcher then runs the same separate expansion the web runs, rewrites the prompt to the
+    // rich JSON caption, and promotes the job to `queued`, so the worker only ever sees it once queued.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let submit = {
-        let app = app.clone();
-        tokio::spawn(async move {
-            request(
-                app,
-                "POST",
-                "/api/v1/image/jobs",
-                json!({
-                    "projectId": "project-1",
-                    "mode": "text_to_image",
-                    "prompt": "a red fox in a snowy forest",
-                    "model": "ideogram_4",
-                    "count": 1,
-                    "seed": 7
-                }),
-            )
-            .await
-        })
-    };
+    // The POST is NOT spawned/awaited concurrently — it must return on its own, promptly.
+    let (status, image_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "a red fox in a snowy forest",
+            "model": "ideogram_4",
+            "count": 1,
+            "seed": 7
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(image_job["type"], "image_generate");
+    assert_eq!(
+        image_job["status"], "pending_caption",
+        "the POST must return immediately in pending_caption, not wait on the caption"
+    );
+    // Still the ORIGINAL prompt at this point — the rewrite happens on the async promotion.
+    assert_eq!(
+        image_job["payload"]["prompt"],
+        "a red fox in a snowy forest"
+    );
+    let image_job_id = image_job["id"].as_str().expect("job id").to_owned();
 
+    // The background watcher enqueues the magic-prompt expansion carrying the plain prompt, the
+    // magic_prompt task, and the derived aspect ratio.
     let refine_id = wait_for_prompt_refine_job(&app).await;
-    // The expansion job carries the plain prompt, the magic_prompt task, and the derived aspect ratio.
     let (status, refine_job) = request(
         app.clone(),
         "GET",
@@ -3856,55 +4307,40 @@ async fn ideogram_plain_text_job_is_rich_auto_captioned_before_dispatch() {
     // Complete the expansion with a rich caption. The unclaimed job has no owner, so the progress
     // report omits a workerId (matching the store's `(None, None)` ownership rule).
     let caption = r#"{"high_level_description": "a red fox", "compositional_deconstruction": {"background": "a snowy forest at golden hour", "elements": []}}"#;
-    let (status, _) = request(
-        app.clone(),
-        "POST",
-        &format!("/api/v1/jobs/{refine_id}/progress"),
-        json!({
-            "status": "completed",
-            "stage": "completed",
-            "progress": 1,
-            "message": "Caption ready.",
-            "result": { "refinedPrompt": caption }
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
+    complete_prompt_refine_job(&app, &refine_id, json!({ "refinedPrompt": caption })).await;
 
-    // The image job now dispatches with the rich caption as its prompt.
-    let (status, image_job) = submit.await.expect("submit task joins");
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(image_job["type"], "image_generate");
-    assert_eq!(image_job["payload"]["model"], "ideogram_4");
-    assert_eq!(image_job["payload"]["prompt"], caption);
+    // The watcher now promotes the image job to `queued` with the rich caption as its prompt.
+    let promoted = wait_for_job_out_of_pending_caption(&app, &image_job_id).await;
+    assert_eq!(promoted["status"], "queued");
+    assert_eq!(promoted["payload"]["model"], "ideogram_4");
+    assert_eq!(promoted["payload"]["prompt"], caption);
 }
 
 #[tokio::test]
 async fn ideogram_plain_text_job_degrades_to_original_prompt_when_expansion_fails() {
-    // sc-6519 graceful degradation: if the magic_prompt expansion fails (e.g. the refiner is not
-    // staged), the image job still dispatches with the ORIGINAL prompt — the worker's format-guard +
-    // placeholder reseed net (sc-6501) remains the fallback, so a render is always produced.
+    // sc-9120 graceful degradation: if the magic_prompt expansion fails (e.g. the refiner is not
+    // staged), the background watcher still promotes the image job to `queued` with the ORIGINAL prompt
+    // — the worker's format-guard + placeholder reseed net (sc-6501) remains the fallback, so the job
+    // is never stranded in pending_caption and a render is always produced.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let submit = {
-        let app = app.clone();
-        tokio::spawn(async move {
-            request(
-                app,
-                "POST",
-                "/api/v1/image/jobs",
-                json!({
-                    "projectId": "project-1",
-                    "mode": "text_to_image",
-                    "prompt": "a red fox in a snowy forest",
-                    "model": "ideogram_4",
-                    "seed": 7
-                }),
-            )
-            .await
-        })
-    };
+    let (status, image_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "a red fox in a snowy forest",
+            "model": "ideogram_4",
+            "seed": 7
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(image_job["status"], "pending_caption");
+    let image_job_id = image_job["id"].as_str().expect("job id").to_owned();
 
     let refine_id = wait_for_prompt_refine_job(&app).await;
     let (status, _) = request(
@@ -3922,73 +4358,188 @@ async fn ideogram_plain_text_job_degrades_to_original_prompt_when_expansion_fail
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let (status, image_job) = submit.await.expect("submit task joins");
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(image_job["type"], "image_generate");
-    assert_eq!(
-        image_job["payload"]["prompt"],
-        "a red fox in a snowy forest"
-    );
+    let promoted = wait_for_job_out_of_pending_caption(&app, &image_job_id).await;
+    assert_eq!(promoted["status"], "queued");
+    assert_eq!(promoted["type"], "image_generate");
+    assert_eq!(promoted["payload"]["prompt"], "a red fox in a snowy forest");
 }
 
 #[tokio::test]
-async fn ideogram_plain_text_job_degrades_on_invalid_caption_without_resampling() {
-    // sc-8818: the auto-caption runs INLINE in the image-job POST, so it is capped to a SINGLE bounded
-    // attempt (MAX_CAPTION_ATTEMPTS = 1) to keep the request from hanging on repeated re-samples of a
-    // stochastic 3B model. A completed-but-invalid expansion therefore degrades straight to the ORIGINAL
-    // prompt (the worker's format-guard + reseed net recovers it) and does NOT enqueue a second refine
-    // job — so an impatient client's retries can't stack unbounded magic-prompt jobs. (This tightens the
-    // prior sc-6519 behavior, which re-sampled up to 3× and could hold the POST for minutes.)
+async fn ideogram_plain_text_job_degrades_on_invalid_caption_after_bounded_resamples() {
+    // sc-9120: the expansion runs in a BACKGROUND task (no HTTP connection held), so a completed-but-
+    // invalid caption may be re-sampled a small, bounded number of times (MAX_CAPTION_ATTEMPTS). When
+    // every attempt returns prose (not a caption), the watcher degrades the image job to `queued` with
+    // the ORIGINAL prompt (the worker's reseed net recovers it). The re-sample budget is small and
+    // bounded, so an impatient client's retries can't stack unbounded magic-prompt jobs.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let submit = {
-        let app = app.clone();
-        tokio::spawn(async move {
-            request(
-                app,
-                "POST",
-                "/api/v1/image/jobs",
-                json!({
-                    "projectId": "project-1",
-                    "mode": "text_to_image",
-                    "prompt": "a red fox in a snowy forest",
-                    "model": "ideogram_4",
-                    "seed": 7
-                }),
-            )
-            .await
-        })
-    };
-
-    // The single expansion attempt returns prose, not a caption.
-    let first = wait_for_prompt_refine_job(&app).await;
-    complete_prompt_refine_job(
-        &app,
-        &first,
-        json!({ "refinedPrompt": "just a fox, nothing structured" }),
+    let (status, image_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "a red fox in a snowy forest",
+            "model": "ideogram_4",
+            "seed": 7
+        }),
     )
     .await;
-
-    // The image job dispatches PROMPTLY with the original prompt — no second refine job is enqueued.
-    let (status, image_job) = submit.await.expect("submit task joins");
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(
-        image_job["payload"]["prompt"],
-        "a red fox in a snowy forest"
-    );
+    assert_eq!(image_job["status"], "pending_caption");
+    let image_job_id = image_job["id"].as_str().expect("job id").to_owned();
 
-    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
-    let refine_jobs = jobs
+    // Feed every re-sample a prose (non-caption) reply until the watcher exhausts its budget and
+    // degrades. Completing each refine job unblocks the next attempt (a fresh refine job).
+    let mut previous: Option<String> = None;
+    loop {
+        let job =
+            wait_for_job_out_of_pending_caption_or_refine(&app, &image_job_id, previous.as_deref())
+                .await;
+        match job {
+            PendingOrRefine::Promoted(promoted) => {
+                // Degraded to the original prompt once the budget was exhausted.
+                assert_eq!(promoted["status"], "queued");
+                assert_eq!(promoted["payload"]["prompt"], "a red fox in a snowy forest");
+                break;
+            }
+            PendingOrRefine::Refine(refine_id) => {
+                complete_prompt_refine_job(
+                    &app,
+                    &refine_id,
+                    json!({ "refinedPrompt": "just a fox, nothing structured" }),
+                )
+                .await;
+                previous = Some(refine_id);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn pending_caption_ideogram_job_is_cancelable() {
+    // sc-9120: a pending_caption job must be cancelable — it goes straight to `canceled` (no worker to
+    // acknowledge), and a subsequent caption promotion does NOT resurrect it (the guarded UPDATE only
+    // matches a still-pending row).
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, image_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "a red fox in a snowy forest",
+            "model": "ideogram_4",
+            "seed": 7
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(image_job["status"], "pending_caption");
+    let image_job_id = image_job["id"].as_str().expect("job id").to_owned();
+
+    // Cancel while still pending — it terminates immediately.
+    let (status, canceled) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{image_job_id}/cancel"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(canceled["status"], "canceled");
+
+    // Even if the background watcher's expansion later completes and it tries to promote, the canceled
+    // job must NOT flip back to queued. Complete the refine job it enqueued and confirm the image job
+    // stays canceled.
+    let refine_id = wait_for_prompt_refine_job(&app).await;
+    let caption =
+        r#"{"compositional_deconstruction": {"background": "a snowy forest", "elements": []}}"#;
+    complete_prompt_refine_job(&app, &refine_id, json!({ "refinedPrompt": caption })).await;
+    // Give the watcher a moment to attempt (and no-op) the promotion.
+    for _ in 0..25 {
+        let (_, job) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/jobs/{image_job_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(
+            job["status"], "canceled",
+            "a canceled pending_caption job must never be resurrected by a late promotion"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn concurrent_ideogram_captions_share_one_refine_job() {
+    // sc-9120: two identical plain-text Ideogram jobs (an impatient client re-POSTing) must reuse ONE
+    // in-flight magic-prompt refine job rather than stacking a fresh one each time. Both image jobs land
+    // in pending_caption; the second caption watcher reuses the first's refine job.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let post = |app: axum::Router| async move {
+        request(
+            app,
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": "project-1",
+                "mode": "text_to_image",
+                "prompt": "a red fox in a snowy forest",
+                "model": "ideogram_4",
+                "seed": 7
+            }),
+        )
+        .await
+    };
+
+    let (status_a, job_a) = post(app.clone()).await;
+    assert_eq!(status_a, StatusCode::CREATED);
+    assert_eq!(job_a["status"], "pending_caption");
+    // Wait for the first refine job to be in flight before the second POST, so the reuse path is hit
+    // deterministically.
+    let refine_id = wait_for_prompt_refine_job(&app).await;
+
+    let (status_b, job_b) = post(app.clone()).await;
+    assert_eq!(status_b, StatusCode::CREATED);
+    assert_eq!(job_b["status"], "pending_caption");
+    assert_ne!(job_a["id"], job_b["id"], "two distinct image jobs");
+
+    // Let the second watcher run its reuse lookup, then assert exactly one refine job exists.
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let refine_ids: Vec<String> = jobs
         .as_array()
         .expect("jobs is an array")
         .iter()
         .filter(|job| job["type"] == "prompt_refine")
-        .count();
+        .filter_map(|job| job["id"].as_str().map(str::to_owned))
+        .collect();
     assert_eq!(
-        refine_jobs, 1,
-        "a completed-but-invalid caption must NOT be re-sampled into a second refine job (sc-8818)"
+        refine_ids,
+        vec![refine_id.clone()],
+        "the second identical caption must reuse the in-flight refine job, not stack a new one"
     );
+
+    // Completing the shared refine job promotes BOTH image jobs to queued with the rich caption.
+    let caption =
+        r#"{"compositional_deconstruction": {"background": "a snowy forest", "elements": []}}"#;
+    complete_prompt_refine_job(&app, &refine_id, json!({ "refinedPrompt": caption })).await;
+    let a = wait_for_job_out_of_pending_caption(&app, job_a["id"].as_str().unwrap()).await;
+    let b = wait_for_job_out_of_pending_caption(&app, job_b["id"].as_str().unwrap()).await;
+    assert_eq!(a["status"], "queued");
+    assert_eq!(a["payload"]["prompt"], caption);
+    assert_eq!(b["status"], "queued");
+    assert_eq!(b["payload"]["prompt"], caption);
 }
 
 #[tokio::test]
@@ -4267,6 +4818,96 @@ async fn image_describe_refine_job_requires_source_asset_and_project() {
         "POST",
         "/api/v1/prompts/refine",
         json!({ "task": "image_describe", "sourceAssetId": "asset-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn mood_board_refine_job_resolves_multiple_assets_to_image_paths() {
+    // epic 8588 / sc-8595: a "mood board" describe POSTs `sourceAssetIds` (plural). The handler resolves
+    // EACH id to a confined on-disk path, in order, and forwards them as the worker's `imagePaths` array
+    // (no scalar `imagePath`), so the vision model synthesizes ONE prompt from the shared aesthetic.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Mood Board Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
+
+    let mut asset_ids = Vec::new();
+    let mut rel_paths = Vec::new();
+    for name in ["First.png", "Second.png"] {
+        let (status, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            name,
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        asset_ids.push(asset["id"].as_str().expect("asset id").to_owned());
+        rel_paths.push(
+            asset["file"]["path"]
+                .as_str()
+                .expect("file path")
+                .to_owned(),
+        );
+    }
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "image_describe",
+            "sourceAssetIds": asset_ids,
+            "projectId": project_id,
+            "model": "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["payload"]["task"], "image_describe");
+    // The plural array is emitted; the scalar single-image key is NOT.
+    assert!(job["payload"].get("imagePath").is_none());
+    let paths = job["payload"]["imagePaths"]
+        .as_array()
+        .expect("imagePaths array");
+    assert_eq!(paths.len(), 2, "both references resolved");
+    for (path, rel) in paths.iter().zip(rel_paths.iter()) {
+        // Path (not string) comparison: separator-agnostic on Windows (sc-8967).
+        let expected = project_path.join(rel);
+        assert_eq!(std::path::Path::new(path.as_str().unwrap()), expected);
+    }
+}
+
+#[tokio::test]
+async fn mood_board_refine_job_rejects_more_than_the_cap() {
+    // sc-8595: the server-side ceiling (MAX_MOOD_BOARD_IMAGES) is authoritative — a board over the cap is
+    // rejected with 400 before any asset resolution, so a runaway list cannot exhaust the vision runtime.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let too_many: Vec<String> = (0..(crate::prompts::MAX_MOOD_BOARD_IMAGES + 1))
+        .map(|i| format!("asset-{i}"))
+        .collect();
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "image_describe",
+            "sourceAssetIds": too_many,
+            "projectId": "project-1"
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -5669,7 +6310,8 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         url_job["payload"]["sourceUrl"],
         "https://example.com/loras/detail.safetensors"
     );
-    assert_eq!(url_job["payload"]["loraId"], "detail_lora");
+    // sc-10214: a declared family scopes the id/folder (`z-image` → `z_image_` prefix).
+    assert_eq!(url_job["payload"]["loraId"], "z_image_detail_lora");
     assert_eq!(
         url_job["payload"]["manifestEntry"]["source"]["provider"],
         "url"
@@ -5695,7 +6337,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(upload_job["type"], "lora_import");
-    assert_eq!(upload_job["payload"]["loraId"], "uploaded_detail");
+    assert_eq!(upload_job["payload"]["loraId"], "z_image_uploaded_detail");
     assert_eq!(upload_job["payload"]["uploadedSourcePath"], true);
     assert_eq!(
         upload_job["payload"]["manifestEntry"]["source"]["provider"],
@@ -6822,6 +7464,225 @@ fn turbo_cache_health_flags_missing_lora_only_when_listed_explicitly() {
     );
 }
 
+#[test]
+fn filtered_cache_health_reports_absent_filter_as_missing_not_incomplete() {
+    // sc-9907: a filter whose files are ENTIRELY absent is cleanly missing, not torn. Only a
+    // partially-present filter (some files there, some gone) counts as incomplete/repairable.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let repo_root = temp_dir
+        .path()
+        .join("models--SceneWorks--z-image-turbo-mlx");
+    let snapshot = repo_root.join("snapshots/abc123");
+    std::fs::create_dir_all(snapshot.join("q8")).expect("q8 creates");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("refs creates");
+    std::fs::write(repo_root.join("refs/main"), "abc123").expect("ref writes");
+    // Only the q8 tier is on disk.
+    std::fs::write(snapshot.join("q8/model_index.json"), "{}").expect("q8 file writes");
+
+    // The q4 tier is entirely absent → missing, but NOT incomplete (no false repair prompt).
+    let q4 = super::models::huggingface_cache_health(&repo_root, &["q4/*".to_owned()]);
+    assert!(
+        !q4.installed && !q4.incomplete,
+        "an entirely-absent tier is missing, not incomplete: {q4:?}"
+    );
+
+    // The q8 tier is present → installed.
+    let q8 = super::models::huggingface_cache_health(&repo_root, &["q8/*".to_owned()]);
+    assert!(
+        q8.installed && !q8.incomplete,
+        "downloaded tier is installed"
+    );
+}
+
+#[tokio::test]
+async fn quant_matrix_model_with_single_tier_reads_installed_not_incomplete() {
+    // sc-9907: a quant-matrix model keeps every tier in ONE shared repo cache. Downloading a single
+    // valid tier (here q8, NOT the default q4) previously tripped the top-level default-tier check
+    // and surfaced a false "Cached files are incomplete" + Fix button. The card must read installed,
+    // never incomplete/repairable, and the per-tier states must show q8 installed / q4+bf16 missing.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+            {
+              "schemaVersion": 1,
+              "models": [{
+                "id": "z_image_turbo",
+                "name": "Z-Image Turbo",
+                "type": "image",
+                "family": "z-image",
+                "downloads": [
+                  { "provider": "huggingface", "repo": "SceneWorks/z-image-turbo-mlx", "variant": "q4", "default": true, "files": ["q4/*"] },
+                  { "provider": "huggingface", "repo": "SceneWorks/z-image-turbo-mlx", "variant": "q8", "files": ["q8/*"] },
+                  { "provider": "huggingface", "repo": "SceneWorks/z-image-turbo-mlx", "variant": "bf16", "files": ["bf16/*"] }
+                ]
+              }]
+            }
+            "#,
+    )
+    .expect("builtin models writes");
+    for file in [
+        "user.models.jsonc",
+        "builtin.loras.jsonc",
+        "user.loras.jsonc",
+        "builtin.recipe-presets.jsonc",
+        "user.recipe-presets.jsonc",
+    ] {
+        let key = if file.contains("preset") {
+            "presets"
+        } else if file.contains("lora") {
+            "loras"
+        } else {
+            "models"
+        };
+        std::fs::write(
+            config_dir.join(file),
+            format!(r#"{{ "schemaVersion": 1, "{key}": [] }}"#),
+        )
+        .expect("empty manifest writes");
+    }
+    // Only the non-default q8 tier is on disk in the shared repo snapshot.
+    let snapshot = temp_dir
+        .path()
+        .join("data/cache/huggingface/hub/models--SceneWorks--z-image-turbo-mlx/snapshots/abc123");
+    std::fs::create_dir_all(snapshot.join("q8")).expect("q8 dir creates");
+    std::fs::write(snapshot.join("q8/model_index.json"), "{}").expect("q8 file writes");
+    // sc-9909: the real download flow ALSO writes a repo-level completion marker into the app-managed
+    // dir (data/models/<repo>). It is tier-agnostic (one marker per repo, no matter which tier was
+    // fetched), so the per-tier state must NOT treat its presence as "every tier installed".
+    let managed = temp_dir
+        .path()
+        .join("data/models/SceneWorks__z-image-turbo-mlx");
+    std::fs::create_dir_all(&managed).expect("managed dir creates");
+    std::fs::write(
+        managed.join(".sceneworks-download-complete.json"),
+        r#"{ "repo": "SceneWorks/z-image-turbo-mlx" }"#,
+    )
+    .expect("marker writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["id"], "z_image_turbo");
+    assert_eq!(models[0]["hasVariantMatrix"], true);
+    // Top-level card reads installed — a single valid tier is a complete install, not a repair.
+    assert_eq!(models[0]["installState"], "installed");
+    assert_eq!(models[0]["cacheState"], "complete");
+    assert_eq!(models[0]["repairAvailable"], false);
+    assert_eq!(models[0]["missingRequiredFiles"], json!([]));
+
+    // Per-tier truth: q8 installed; q4 (default) and bf16 cleanly missing, NOT incomplete.
+    let variants = models[0]["variants"].as_array().expect("variants array");
+    let state_of = |name: &str| {
+        variants
+            .iter()
+            .find(|variant| variant["variant"] == name)
+            .unwrap_or_else(|| panic!("variant {name} present"))
+            .clone()
+    };
+    let q8 = state_of("q8");
+    assert_eq!(q8["installState"], "installed");
+    assert_eq!(q8["cacheState"], "complete");
+    for absent in ["q4", "bf16"] {
+        let tier = state_of(absent);
+        assert_eq!(tier["installState"], "missing", "{absent} installState");
+        assert_eq!(tier["cacheState"], "missing", "{absent} cacheState");
+    }
+}
+
+#[tokio::test]
+async fn quant_matrix_empty_cache_skeleton_reads_missing_not_incomplete() {
+    // sc-9909: a tier that isn't published upstream resolves ZERO files, leaving an empty HF cache
+    // skeleton (bare blobs/, no snapshots) PLUS a stale repo-level completion marker. That must read
+    // as a clean not-installed model — NOT a false "installed" (from the marker) and NOT the confusing
+    // "Cached files are incomplete: snapshots/<revision>" repair banner.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+            {
+              "schemaVersion": 1,
+              "models": [{
+                "id": "sdxl",
+                "name": "SDXL",
+                "type": "image",
+                "family": "sdxl",
+                "downloads": [
+                  { "provider": "huggingface", "repo": "SceneWorks/sdxl-base-mlx", "variant": "q4", "default": true, "files": ["q4/*"] },
+                  { "provider": "huggingface", "repo": "SceneWorks/sdxl-base-mlx", "variant": "q8", "files": ["q8/*"] },
+                  { "provider": "huggingface", "repo": "SceneWorks/sdxl-base-mlx", "variant": "bf16", "files": ["bf16/*"] }
+                ]
+              }]
+            }
+            "#,
+    )
+    .expect("builtin models writes");
+    for file in [
+        "user.models.jsonc",
+        "builtin.loras.jsonc",
+        "user.loras.jsonc",
+        "builtin.recipe-presets.jsonc",
+        "user.recipe-presets.jsonc",
+    ] {
+        let key = if file.contains("preset") {
+            "presets"
+        } else if file.contains("lora") {
+            "loras"
+        } else {
+            "models"
+        };
+        std::fs::write(
+            config_dir.join(file),
+            format!(r#"{{ "schemaVersion": 1, "{key}": [] }}"#),
+        )
+        .expect("empty manifest writes");
+    }
+    // Empty HF cache skeleton: the repo dir exists (bare blobs/) but has NO snapshot revision.
+    let repo_root = temp_dir
+        .path()
+        .join("data/cache/huggingface/hub/models--SceneWorks--sdxl-base-mlx");
+    std::fs::create_dir_all(repo_root.join("blobs")).expect("blobs dir creates");
+    // ...plus a stale repo-level completion marker in the app-managed dir.
+    let managed = temp_dir
+        .path()
+        .join("data/models/SceneWorks__sdxl-base-mlx");
+    std::fs::create_dir_all(&managed).expect("managed dir creates");
+    std::fs::write(
+        managed.join(".sceneworks-download-complete.json"),
+        r#"{ "repo": "SceneWorks/sdxl-base-mlx" }"#,
+    )
+    .expect("marker writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["id"], "sdxl");
+    // Clean not-installed — no phantom "installed" from the marker, no incomplete/repair banner.
+    assert_eq!(models[0]["installState"], "missing");
+    assert_eq!(models[0]["cacheState"], "missing");
+    assert_eq!(models[0]["repairAvailable"], false);
+    for variant in models[0]["variants"].as_array().expect("variants array") {
+        assert_eq!(
+            variant["installState"], "missing",
+            "{} installState",
+            variant["variant"]
+        );
+        assert_eq!(
+            variant["cacheState"], "missing",
+            "{} cacheState",
+            variant["variant"]
+        );
+    }
+}
+
 #[cfg(windows)]
 fn create_test_symlink_file(
     target: &std::path::Path,
@@ -6986,6 +7847,212 @@ async fn model_download_job_forwards_catalog_family_for_worker_reconciliation() 
     assert_eq!(job["type"], "model_download");
     assert_eq!(job["payload"]["modelId"], "base_model");
     assert_eq!(job["payload"]["family"], "z-image");
+}
+
+/// Write the empty sibling manifests a `model_catalog` build requires, so a co-requisite test
+/// (sc-9696) only has to author its own `builtin.models.jsonc`.
+fn write_empty_sibling_manifests(config_dir: &std::path::Path) {
+    for (name, key) in [
+        ("user.models.jsonc", "models"),
+        ("builtin.loras.jsonc", "loras"),
+        ("user.loras.jsonc", "loras"),
+        ("builtin.recipe-presets.jsonc", "presets"),
+        ("user.recipe-presets.jsonc", "presets"),
+    ] {
+        std::fs::write(
+            config_dir.join(name),
+            format!("{{ \"schemaVersion\": 1, \"{key}\": [] }}"),
+        )
+        .expect("sibling manifest writes");
+    }
+}
+
+#[test]
+fn model_download_and_co_requisite_helpers_partition_downloads() {
+    // sc-9696: a co-requisite (fetch-all dependency) must never be chosen as the primary/tier
+    // download, and must be enumerable separately for the download job + install-state gating.
+    let model = json!({
+        "id": "pid_qwenimage",
+        "downloads": [
+            { "provider": "huggingface", "repo": "SceneWorks/pid-qwenimage" },
+            { "provider": "huggingface", "repo": "SceneWorks/gemma-2-2b-it", "coRequisite": true }
+        ]
+    });
+    assert_eq!(
+        super::model_download(&model).expect("primary resolves")["repo"],
+        "SceneWorks/pid-qwenimage"
+    );
+    let co_requisites = super::model_co_requisite_downloads(&model);
+    assert_eq!(co_requisites.len(), 1);
+    assert_eq!(co_requisites[0]["repo"], "SceneWorks/gemma-2-2b-it");
+
+    // Ordering-independent: a co-requisite listed FIRST still never wins the primary slot.
+    let reordered = json!({
+        "id": "pid_qwenimage",
+        "downloads": [
+            { "provider": "huggingface", "repo": "SceneWorks/gemma-2-2b-it", "coRequisite": true },
+            { "provider": "huggingface", "repo": "SceneWorks/pid-qwenimage" }
+        ]
+    });
+    assert_eq!(
+        super::model_download(&reordered).expect("primary resolves")["repo"],
+        "SceneWorks/pid-qwenimage"
+    );
+}
+
+#[tokio::test]
+async fn model_download_job_enqueues_co_requisite_dependencies() {
+    // sc-9696: installing a model with a co-requisite download (e.g. the PiD decoder's shared
+    // gemma-2-2b-it caption encoder) must queue a SECOND download job for the dependency — else it
+    // is never fetched and the feature silently no-ops (PiD → native VAE). The co-requisite job
+    // must NOT carry the model's family (it is a different artifact than the primary checkpoint).
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+            {
+              "schemaVersion": 1,
+              "models": [{
+                "id": "pid_qwenimage",
+                "name": "PiD Decoder",
+                "type": "utility",
+                "family": "pid",
+                "downloads": [
+                  { "provider": "huggingface", "repo": "SceneWorks/pid-qwenimage" },
+                  { "provider": "huggingface", "repo": "SceneWorks/gemma-2-2b-it", "coRequisite": true }
+                ]
+              }]
+            }
+            "#,
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, primary) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/pid_qwenimage/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // The returned job is the primary (its id is what the download UI tracks).
+    assert_eq!(primary["payload"]["repo"], "SceneWorks/pid-qwenimage");
+    assert_eq!(primary["payload"]["family"], "pid");
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    let download_jobs = jobs
+        .as_array()
+        .expect("jobs is an array")
+        .iter()
+        .filter(|job| job["type"] == "model_download")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        download_jobs.len(),
+        2,
+        "the primary and its one co-requisite must each get a download job"
+    );
+    let co_requisite = download_jobs
+        .iter()
+        .find(|job| job["payload"]["repo"] == "SceneWorks/gemma-2-2b-it")
+        .expect("a co-requisite download job is enqueued");
+    assert!(
+        co_requisite["payload"].get("family").map_or(true, Value::is_null),
+        "a co-requisite job must not carry the model family (different artifact than the checkpoint)"
+    );
+}
+
+#[tokio::test]
+async fn model_catalog_gates_install_state_on_co_requisite() {
+    // sc-9696: the entry is "installed" only when the primary AND every co-requisite are cached.
+    // Primary present but the gemma-2-2b-it caption encoder missing → not-installed + repairable, so
+    // the web PiD toggle stays hidden and the user still has a path to fetch the missing dependency.
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+            {
+              "schemaVersion": 1,
+              "models": [{
+                "id": "pid_qwenimage",
+                "name": "PiD Decoder",
+                "type": "utility",
+                "family": "pid",
+                "downloads": [
+                  { "provider": "huggingface", "repo": "SceneWorks/pid-qwenimage" },
+                  { "provider": "huggingface", "repo": "SceneWorks/gemma-2-2b-it", "coRequisite": true }
+                ]
+              }]
+            }
+            "#,
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+
+    let hub = temp_dir.path().join("data/cache/huggingface/hub");
+    // Primary present: a payload file makes a non-diffusers snapshot resolve as installed.
+    let primary_snapshot = hub.join("models--SceneWorks--pid-qwenimage/snapshots/rev1");
+    std::fs::create_dir_all(&primary_snapshot).expect("primary snapshot dir creates");
+    std::fs::write(
+        primary_snapshot.join("pid_qwenimage_2kto4k.safetensors"),
+        "weights",
+    )
+    .expect("primary weights write");
+
+    // Case A: gemma co-requisite absent → not installed, repairable, and surfaced as missing.
+    let (status, models) = request(
+        create_app(test_settings(&temp_dir)).expect("app creates"),
+        "GET",
+        "/api/v1/models",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["id"], "pid_qwenimage");
+    assert_eq!(
+        models[0]["installState"], "missing",
+        "primary present but co-requisite gemma missing → not installed"
+    );
+    assert_eq!(models[0]["cacheState"], "incomplete");
+    assert_eq!(models[0]["repairAvailable"], true);
+    assert!(
+        models[0]["missingRequiredFiles"]
+            .as_array()
+            .expect("missingRequiredFiles is an array")
+            .iter()
+            .any(|entry| entry
+                .as_str()
+                .is_some_and(|value| value.contains("gemma-2-2b-it"))),
+        "the missing co-requisite must be surfaced in missingRequiredFiles"
+    );
+
+    // Case B: install the gemma co-requisite too → the entry now reports installed.
+    let gemma_snapshot = hub.join("models--SceneWorks--gemma-2-2b-it/snapshots/rev1");
+    std::fs::create_dir_all(&gemma_snapshot).expect("gemma snapshot dir creates");
+    std::fs::write(gemma_snapshot.join("config.json"), "{}").expect("gemma config write");
+    std::fs::write(gemma_snapshot.join("model.safetensors"), "weights")
+        .expect("gemma weights write");
+
+    let (status, models) = request(
+        create_app(test_settings(&temp_dir)).expect("app creates"),
+        "GET",
+        "/api/v1/models",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        models[0]["installState"], "installed",
+        "primary + co-requisite both cached → installed"
+    );
+    assert_eq!(models[0]["cacheState"], "complete");
 }
 
 #[tokio::test]
@@ -7178,10 +8245,12 @@ async fn catalog_delete_routes_remove_manifest_entries_and_owned_artifacts() {
     .expect("user presets writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    // permanent=true keeps the assertions deterministic (the default move-to-OS-trash
+    // path depends on the host having a usable recycle bin/trash).
     let (model_status, model_delete) = request(
         app.clone(),
         "DELETE",
-        "/api/v1/models/delete_me",
+        "/api/v1/models/delete_me?permanent=true",
         Value::Null,
     )
     .await;
@@ -7199,7 +8268,7 @@ async fn catalog_delete_routes_remove_manifest_entries_and_owned_artifacts() {
     let (lora_status, lora_delete) = request(
         app.clone(),
         "DELETE",
-        "/api/v1/loras/delete_style?scope=global",
+        "/api/v1/loras/delete_style?scope=global&permanent=true",
         Value::Null,
     )
     .await;
@@ -7851,6 +8920,174 @@ async fn recipe_preset_crud_routes_persist_global_and_project_presets() {
     .await;
     assert_eq!(bad_status, StatusCode::BAD_REQUEST);
     assert_eq!(bad_error["detail"], "Unsupported recipe preset workflow");
+}
+
+#[tokio::test]
+async fn prompt_batch_crud_routes_persist_global_and_project_batches() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // Create a global batch with templated prompts + multi-valued variables.
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompt-batches",
+        json!({
+            "name": "Character Turnaround",
+            "prompts": [
+                "{{name}} with {{hair}} hair, front view",
+                "{{name}} with {{hair}} hair, profile"
+            ],
+            "variables": [
+                { "key": "name", "values": ["Alice"] },
+                { "key": "hair", "values": ["red", "blue"] }
+            ],
+            "lastValues": { "name": ["Alice"], "hair": ["red", "blue"] }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["id"], "character_turnaround");
+    assert_eq!(created["scope"], "global");
+    assert_eq!(
+        created["prompts"][0],
+        "{{name}} with {{hair}} hair, front view"
+    );
+    assert_eq!(created["variables"][1]["values"][1], "blue");
+    assert!(created["createdAt"].is_string());
+    assert!(created["updatedAt"].is_string());
+
+    let (status, list) = request(app.clone(), "GET", "/api/v1/prompt-batches", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list.as_array().expect("list array").len(), 1);
+    assert_eq!(list[0]["id"], "character_turnaround");
+
+    let (status, fetched) = request(
+        app.clone(),
+        "GET",
+        "/api/v1/prompt-batches/character_turnaround",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["name"], "Character Turnaround");
+
+    // Patch replaces prompts + variables and stamps updatedAt.
+    let (status, updated) = request(
+        app.clone(),
+        "PATCH",
+        "/api/v1/prompt-batches/character_turnaround",
+        json!({
+            "prompts": ["{{name}} smiling"],
+            "variables": [{ "key": "name", "values": ["Bob"] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["prompts"].as_array().expect("prompts").len(), 1);
+    assert_eq!(updated["variables"][0]["values"][0], "Bob");
+
+    // Duplicate carries the current (patched) state under a copied id/name.
+    let (status, duplicated) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompt-batches/character_turnaround/duplicate",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(duplicated["id"], "character_turnaround_copy");
+    assert_eq!(duplicated["name"], "Character Turnaround Copy");
+    assert_eq!(duplicated["prompts"][0], "{{name}} smiling");
+
+    // Non-string variable values are rejected.
+    let (status, bad) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompt-batches",
+        json!({ "name": "Bad", "variables": [{ "key": "x", "values": [1, 2] }] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        bad["detail"],
+        "Prompt batch variable values must be an array of strings"
+    );
+
+    // Read-only-ish scopes are rejected on the query.
+    let (status, _) = request(
+        app.clone(),
+        "GET",
+        "/api/v1/prompt-batches?scope=builtin",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Project-scoped batch lives in the project's own manifest.
+    let (status, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Batch Project" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (status, project_batch) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/prompt-batches?scope=project&projectId={project_id}"),
+        json!({
+            "name": "Project Batch",
+            "prompts": ["{{subject}} portrait"],
+            "variables": [{ "key": "subject", "values": ["cat"] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(project_batch["scope"], "project");
+
+    // With the project in context, both global and project batches list together.
+    let (status, both) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/prompt-batches?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<&str> = both
+        .as_array()
+        .expect("both array")
+        .iter()
+        .filter_map(|batch| batch["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"character_turnaround"));
+    assert!(ids.contains(&"project_batch"));
+
+    // Delete soft-archives: hidden from the default list, duplicate survives.
+    let (status, archived) = request(
+        app.clone(),
+        "DELETE",
+        "/api/v1/prompt-batches/character_turnaround",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(archived["archived"], true);
+
+    let (status, after) = request(app.clone(), "GET", "/api/v1/prompt-batches", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let remaining: Vec<&str> = after
+        .as_array()
+        .expect("after array")
+        .iter()
+        .filter_map(|batch| batch["id"].as_str())
+        .collect();
+    assert!(!remaining.contains(&"character_turnaround"));
+    assert!(remaining.contains(&"character_turnaround_copy"));
 }
 
 #[tokio::test]
@@ -8547,6 +9784,14 @@ async fn project_file_route_serves_files_and_rejects_traversal() {
             .and_then(|value| value.to_str().ok()),
         Some("image/png")
     );
+    // sc-9674 (sc-8872 follow-up): the serve response forbids MIME sniffing so a
+    // user-controlled project file can't be reinterpreted as active content.
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
 
     let (status, _, bytes) = request_raw(
         app.clone(),
@@ -8617,6 +9862,13 @@ async fn project_file_route_serves_byte_ranges() {
     assert_eq!(
         headers.get("accept-ranges").and_then(|v| v.to_str().ok()),
         Some("bytes")
+    );
+    // sc-9674: the 206 partial-content branch also carries nosniff.
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff")
     );
 
     // An open-ended range serves to EOF (this is how WebKit fetches the
@@ -8963,6 +10215,109 @@ async fn stale_sweep_broadcasts_job_updated_for_interrupted_jobs() {
 }
 
 #[tokio::test]
+async fn claim_sweeps_stale_jobs_once_and_still_refreshes_the_queue() {
+    // sc-8889 / F-087: claim_job runs mark_stale_workers_interrupted in its own
+    // transaction, then refreshes the queue via publish_queue_skip_sweep — which
+    // no longer sweeps a SECOND time. This pins that dropping the duplicate sweep
+    // did not regress the claim path: a claim still reaps a stale worker's job to
+    // `interrupted` and still emits queue.updated.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.worker_timeout_seconds = 1;
+    let (app, state) = create_app_with_state(settings).expect("app creates");
+
+    // worker-1 claims a job, then goes stale.
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-1",
+            "gpuId": "gpu-0",
+            "gpuName": null,
+            "capabilities": ["image_generate"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({ "type": "image_generate", "payload": {}, "requestedGpu": "auto" }),
+    )
+    .await;
+    let stale_job_id = created["id"].as_str().expect("job id is string").to_owned();
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+
+    // A fresh worker registers plus a second queued job so worker-2's claim
+    // actually returns work (response.is_some -> the queue refresh fires). Age
+    // worker-1 past the 1s timeout so the next claim's sweep reaps its job.
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-2",
+            "gpuId": "gpu-1",
+            "gpuName": null,
+            "capabilities": ["image_generate"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({ "type": "image_generate", "payload": {}, "requestedGpu": "auto" }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
+    let mut events = state.events.subscribe();
+
+    // worker-2 claims the second job. claim_job runs its own stale sweep
+    // (interrupting worker-1's job) and refreshes the queue via the skip-sweep
+    // path — without sweeping a second time.
+    let (status, claim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-2" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        claim["job"].is_object(),
+        "worker-2 claims the second queued job: {claim}"
+    );
+
+    let claim_events = drain_event_names(&mut events).await;
+    assert!(
+        claim_events.iter().any(|name| name == "queue.updated"),
+        "a claim that returns work still refreshes the queue: {claim_events:?}"
+    );
+
+    // The stale job was reaped exactly by the claim's own single sweep.
+    let (status, job) = request(
+        app,
+        "GET",
+        &format!("/api/v1/jobs/{stale_job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(job["status"], "interrupted");
+    assert_eq!(job["workerId"], Value::Null);
+}
+
+#[tokio::test]
 async fn access_token_is_enforced_on_protected_routes() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let mut settings = test_settings(&temp_dir);
@@ -9093,17 +10448,139 @@ async fn worker_restart_requires_token() {
     assert_eq!(body["ok"], true);
 }
 
+#[tokio::test]
+async fn ui_preferences_get_is_public_but_put_requires_token() {
+    // sc-8869 (F-067): with a token configured, the pre-auth theme READ (GET) stays
+    // public so the UI can load the theme before auth, but the PUT writes
+    // `ui-preferences.json` to disk and must present the token — an unauthenticated
+    // LAN caller can no longer overwrite the file (epic 4484: every write authenticated).
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+
+    // GET without a token: still public (theme read loads before auth).
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(prefs.get("theme").is_none());
+
+    // PUT without a token: rejected (disk write is now authenticated).
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "dark", "accent": "coral" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // The rejected write must not have touched the stored preferences.
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(prefs.get("theme").is_none());
+
+    // PUT with the correct token: accepted, and the write persists.
+    let (status, saved) = request_with_headers(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "dark", "accent": "coral" }),
+        &[("x-sceneworks-token", "secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["theme"], "dark");
+    assert_eq!(saved["accent"], "coral");
+
+    let (status, prefs) = request(app, "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["theme"], "dark");
+    assert_eq!(prefs["accent"], "coral");
+}
+
+#[tokio::test]
+async fn ui_preferences_put_allowed_via_loopback_trust() {
+    // sc-8869 (F-067) / epic 4484: the method-aware gate must not break the
+    // loopback-trust bypass. A loopback peer (the embedded desktop UI/worker) with
+    // `trust_loopback` on writes preferences without a token, exactly as before, while
+    // a LAN peer with no token is still rejected.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    settings.trust_loopback = true;
+    let app = create_app(settings).expect("app creates");
+
+    // Loopback peer, no token → allowed (desktop bypass preserved).
+    let (status, saved) = request_with_peer(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "light" }),
+        "127.0.0.1:51234",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["theme"], "light");
+
+    // LAN peer, no token → still rejected even with trust_loopback on.
+    let (status, _) = request_with_peer(
+        app,
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "dark" }),
+        "192.168.1.5:51234",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn ui_preferences_put_open_when_no_token_configured() {
+    // Behavior with NO token configured must be unchanged: everything is open, so an
+    // unauthenticated PUT still succeeds (the gate only bites when a token is set).
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    assert!(settings.access_token.is_empty());
+    let app = create_app(settings).expect("app creates");
+
+    let (status, saved) = request(
+        app,
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "dark" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["theme"], "dark");
+}
+
 #[test]
 fn requires_token_only_gates_api_paths() {
+    use axum::http::Method;
     // Non-API paths (embedded UI / SPA fallback) must never require a token,
     // or the browser cannot load the bundle to prompt for one.
-    assert!(!requires_token("/"));
-    assert!(!requires_token("/assets/index-abc.js"));
-    assert!(!requires_token("/projects/some-id"));
+    assert!(!requires_token(&Method::GET, "/"));
+    assert!(!requires_token(&Method::GET, "/assets/index-abc.js"));
+    assert!(!requires_token(&Method::GET, "/projects/some-id"));
     // Public API paths stay open; other API paths stay gated.
-    assert!(!requires_token("/api/v1/health"));
-    assert!(requires_token("/api/v1/jobs"));
-    assert!(requires_token("/api/v1/projects"));
+    assert!(!requires_token(&Method::GET, "/api/v1/health"));
+    assert!(requires_token(&Method::GET, "/api/v1/jobs"));
+    assert!(requires_token(&Method::GET, "/api/v1/projects"));
+}
+
+#[test]
+fn requires_token_ui_preferences_is_method_aware() {
+    use axum::http::Method;
+    // sc-8869 (F-067): the theme-preferences route shares a GET (pre-auth theme
+    // read, public) and a PUT (disk write, must be authenticated). Only the GET is
+    // exempt; the PUT — and any other method — is gated when a token is configured.
+    assert!(!requires_token(&Method::GET, "/api/v1/ui-preferences"));
+    assert!(requires_token(&Method::PUT, "/api/v1/ui-preferences"));
+    assert!(requires_token(&Method::POST, "/api/v1/ui-preferences"));
+    // Other single-method public paths stay exempt regardless of method (they
+    // only wire one route method each), and non-public API paths stay gated.
+    assert!(!requires_token(&Method::POST, "/api/v1/auth/verify"));
+    assert!(requires_token(&Method::PUT, "/api/v1/credentials"));
 }
 
 #[tokio::test]
@@ -9135,9 +10612,13 @@ fn embedded_ui_csp_locks_down_scripts_but_allows_app_resources() {
     assert!(!csp.contains("unsafe-eval"));
     // Resources the app genuinely needs.
     assert!(csp.contains("default-src 'self'"));
-    assert!(csp.contains("font-src 'self' https://fonts.gstatic.com data:"));
-    assert!(csp.contains("https://fonts.googleapis.com"));
+    // Fonts are self-hosted (sc-8956): no third-party font host in the CSP.
+    assert!(csp.contains("style-src 'self' 'unsafe-inline'"));
+    assert!(csp.contains("font-src 'self'"));
     assert!(csp.contains("img-src 'self' data: blob:"));
+    // Guard against a regression that silently re-adds the Google font origins.
+    assert!(!csp.contains("fonts.googleapis.com"));
+    assert!(!csp.contains("fonts.gstatic.com"));
     // Tauri IPC for the navigated desktop webview.
     assert!(csp.contains("ipc:"));
     // Hardening directives.
@@ -9177,6 +10658,246 @@ async fn bearer_token_is_accepted_for_access_verification() {
 }
 
 #[tokio::test]
+async fn auth_verify_oracle_throttles_repeated_failures_per_peer() {
+    // sc-8870 (F-068): the public `/api/v1/auth/verify` oracle returns `{ok}` for any
+    // candidate token, so without a lockout a LAN attacker can brute-force the token
+    // (which IS the password in LAN mode) at wire speed. After a burst of wrong-token
+    // attempts from one peer IP, further attempts from that IP are refused with 429,
+    // while a fresh IP and the valid token are unaffected.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+    let attacker = "192.168.1.50:40000";
+    let bad = [("authorization", "Bearer wrong-token")];
+
+    // The first `AUTH_THROTTLE_MAX_FAILURES` (10) wrong guesses answer normally with
+    // `{ok:false}` — the oracle still works, it just counts each miss.
+    for _ in 0..10 {
+        let (status, verified) = request_with_peer_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/verify",
+            Value::Null,
+            attacker,
+            &bad,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(verified["ok"], false);
+    }
+
+    // The next attempt from the same peer is refused before the oracle answers.
+    let (status, body) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/verify",
+        Value::Null,
+        attacker,
+        &bad,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        body["detail"], "Too many authentication attempts; try again later",
+        "throttled response must not leak validity",
+    );
+
+    // Even a *correct* token from the now-blocked peer is refused: the lockout is by
+    // IP, so an attacker can't slip a lucky guess past the throttle.
+    let (status, _) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/verify",
+        Value::Null,
+        attacker,
+        &[("authorization", "Bearer secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    // A different peer IP is untouched and the valid token still verifies — a single
+    // brute-forcer can't lock out the whole deployment, and legitimate use is fine.
+    let (status, verified) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/verify",
+        Value::Null,
+        "10.0.0.9:55555",
+        &[("authorization", "Bearer secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(verified["ok"], true);
+}
+
+#[tokio::test]
+async fn auth_verify_success_clears_peer_throttle_budget() {
+    // sc-8870: a legitimate user who mistypes a few times must not get locked out once
+    // they authenticate — a valid token clears the peer's failure record.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+    let peer = "192.168.1.77:41000";
+
+    // A handful of misses (under the cap of 10), then a success that resets the count.
+    for _ in 0..5 {
+        let (status, _) = request_with_peer_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/verify",
+            Value::Null,
+            peer,
+            &[("authorization", "Bearer wrong-token")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, verified) = request_with_peer_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/auth/verify",
+        Value::Null,
+        peer,
+        &[("authorization", "Bearer secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(verified["ok"], true);
+
+    // With the budget reset, another full window of misses is tolerated again without
+    // an early lockout (would have tripped at 10 total had the success not cleared it).
+    for _ in 0..9 {
+        let (status, verified) = request_with_peer_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/auth/verify",
+            Value::Null,
+            peer,
+            &[("authorization", "Bearer wrong-token")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "post-success budget must be reset");
+        assert_eq!(verified["ok"], false);
+    }
+}
+
+#[tokio::test]
+async fn loopback_trusted_peer_is_never_throttled() {
+    // sc-8870: the epic-4484 loopback-trust bypass must not accrue throttle failures —
+    // the desktop UI/worker reach the API over loopback with no token, and that must
+    // keep working no matter how many times it happens.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    settings.trust_loopback = true;
+    let app = create_app(settings).expect("app creates");
+
+    // Far more than the cap of gated requests with no token, all over loopback → all
+    // served (the bypass returns before the throttle ever sees them).
+    for _ in 0..20 {
+        let (status, _) = request_with_peer(
+            app.clone(),
+            "GET",
+            "/api/v1/jobs",
+            Value::Null,
+            "127.0.0.1:51234",
+        )
+        .await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+        assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
+}
+
+#[tokio::test]
+async fn gated_route_brute_force_is_throttled_per_peer() {
+    // sc-8870: the throttle also covers the token oracle exposed by every gated route
+    // (401-vs-200 reveals a valid token), not just `/auth/verify`. A LAN peer hammering
+    // a gated route with a bad token gets locked out with 429 after the failure cap.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+    let attacker = "192.168.1.60:42000";
+    let bad = [("authorization", "Bearer wrong-token")];
+
+    for _ in 0..10 {
+        let (status, _) = request_with_peer_headers(
+            app.clone(),
+            "GET",
+            "/api/v1/jobs",
+            Value::Null,
+            attacker,
+            &bad,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, body) = request_with_peer_headers(
+        app.clone(),
+        "GET",
+        "/api/v1/jobs",
+        Value::Null,
+        attacker,
+        &bad,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        body["detail"],
+        "Too many authentication attempts; try again later"
+    );
+}
+
+#[tokio::test]
+async fn gated_route_success_clears_peer_throttle_budget() {
+    // sc-8870 (F-068): a valid token on a *gated route* must clear the peer's failure
+    // budget too, not only the `/auth/verify` endpoint. A non-web LAN/API client
+    // (epic 4484) hits gated routes directly with the token header; if it occasionally
+    // sends a wrong token it would creep toward the cap with no reset path unless a
+    // subsequent good request clears it. Accrue several misses, then one successful
+    // gated-route auth from the same peer, then confirm a full fresh window of misses
+    // is tolerated again (would have tripped at 10 total had success not reset it).
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+    let peer = "192.168.1.61:43000";
+    let bad = [("authorization", "Bearer wrong-token")];
+    let good = [("authorization", "Bearer secret-token")];
+
+    // Five misses (under the cap of 10) on a gated route.
+    for _ in 0..5 {
+        let (status, _) =
+            request_with_peer_headers(app.clone(), "GET", "/api/v1/jobs", Value::Null, peer, &bad)
+                .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // A valid token on the same gated route passes auth and resets the budget.
+    let (status, _) =
+        request_with_peer_headers(app.clone(), "GET", "/api/v1/jobs", Value::Null, peer, &good)
+            .await;
+    assert_ne!(status, StatusCode::UNAUTHORIZED);
+    assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    // With the budget reset, nine more misses are tolerated without an early lockout —
+    // without the gated-route `record_success` the 5 + 5th earlier miss would already
+    // have pushed this past 10 and returned 429 instead of 401.
+    for _ in 0..9 {
+        let (status, _) =
+            request_with_peer_headers(app.clone(), "GET", "/api/v1/jobs", Value::Null, peer, &bad)
+                .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "post-success budget must be reset on the gated-route path"
+        );
+    }
+}
+
+#[tokio::test]
 async fn event_tickets_are_protected_and_match_contract_shape() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let mut settings = test_settings(&temp_dir);
@@ -9211,6 +10932,66 @@ async fn event_tickets_are_protected_and_match_contract_shape() {
         app,
         "GET",
         "/api/v1/jobs/events?ticket=missing",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error["detail"], "Invalid or expired event stream ticket");
+}
+
+/// Drive a request but read only the status line, dropping the body. Needed for the
+/// SSE stream endpoint whose successful response body never ends (buffering it would
+/// hang the test).
+async fn request_status_only(app: axum::Router, method: &str, uri: &str) -> StatusCode {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .expect("request builds");
+    app.oneshot(request)
+        .await
+        .expect("response returns")
+        .status()
+}
+
+#[tokio::test]
+async fn sse_event_ticket_is_single_use_at_the_endpoint() {
+    // sc-8947 (F-146): the SSE ticket rides in the `?ticket=` query string because
+    // EventSource can't set headers. The accepted control that bounds a leaked URL is
+    // that the ticket is single-use (and short-TTL): the first `GET /jobs/events`
+    // redeems it, a replay of the same ticket is rejected. This pins that invariant at
+    // the HTTP layer (not just the ticket store) so nobody loosens the SSE gate.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+
+    let (status, ticket) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/events/ticket",
+        Value::Null,
+        &[("x-sceneworks-token", "secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let ticket_value = ticket["ticket"].as_str().expect("ticket value").to_owned();
+
+    // First redemption connects the stream (200 OK, then the SSE body streams — we
+    // only read the status so the never-ending body doesn't hang the test).
+    let status = request_status_only(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/events?ticket={ticket_value}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Replaying the same ticket is rejected — a leaked URL can't be reused.
+    let (status, error) = request(
+        app,
+        "GET",
+        &format!("/api/v1/jobs/events?ticket={ticket_value}"),
         Value::Null,
     )
     .await;
@@ -9374,6 +11155,45 @@ async fn media_tickets_authenticate_project_file_urls() {
     )
     .await;
     assert_ne!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn pose_preview_route_sets_nosniff() {
+    // sc-9674 (sc-8872 follow-up): the pose-preview serve endpoint is a sibling
+    // media route on the API origin, so it must also forbid MIME sniffing. Served
+    // inline for <img> preview, so no attachment disposition.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    let app = create_app(settings).expect("app creates");
+
+    // The handler reads the rendered skeleton from the pose-detect cache; write one.
+    let preview_dir = data_dir.join("cache").join("pose_detect").join("job_ok");
+    std::fs::create_dir_all(&preview_dir).expect("preview dir creates");
+    std::fs::write(preview_dir.join("preview.png"), PNG_32X32).expect("preview writes");
+
+    let (status, headers, bytes) = request_raw(
+        app,
+        "GET",
+        "/api/v1/poses/preview/job_ok/preview.png",
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, PNG_32X32);
+    assert_eq!(
+        headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("image/png")
+    );
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
 }
 
 #[test]
@@ -10097,6 +11917,57 @@ fn resolve_base_model_path_descends_into_hf_snapshot() {
 }
 
 #[test]
+fn tiered_turnkey_base_trains_on_bf16_tier() {
+    // epic 9992 Krea 2 Raw (Path 1): SceneWorks/krea-2-raw-mlx ships bf16/ q8/ q4/ tier subdirs with NO
+    // component tree at the snapshot root. Training reads the DENSE bf16 tier; a repo with only the q8
+    // GENERATION tier installed is NOT training-ready (no dense weights to LoRA-train on).
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+
+    let target = super::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|t| t.base_model == "krea_2_raw")
+        .expect("krea_2_raw target");
+    assert_eq!(
+        target.base_model_repo.as_deref(),
+        Some("SceneWorks/krea-2-raw-mlx"),
+        "Path 1: training shares the generation turnkey re-host"
+    );
+    let repo = target.base_model_repo.clone().expect("repo set");
+
+    let repo_root = huggingface_repo_cache_path(&data_dir, &repo).expect("repo cache path");
+    let revision = "abc123";
+    let snapshot = repo_root.join("snapshots").join(revision);
+    // Only the q8 GENERATION tier installed so far (no bf16 dense weights).
+    std::fs::create_dir_all(snapshot.join("q8").join("transformer")).expect("q8 tree");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("create refs");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("write refs/main");
+
+    // The resolver points training at the bf16 tier (whether or not it is present yet).
+    let resolved = resolve_base_model_path(&target, &data_dir);
+    assert_eq!(
+        resolved,
+        snapshot.join("bf16").display().to_string(),
+        "training must read the dense bf16 tier of a tiered turnkey"
+    );
+    // q8-only → NOT training-ready (the run-gate blocks it).
+    assert!(
+        !training_base_model_installed(&data_dir, &target),
+        "a q8-only tiered turnkey is not training-ready"
+    );
+
+    // Install the dense bf16 component tree → training-ready.
+    std::fs::create_dir_all(snapshot.join("bf16").join("transformer")).expect("bf16 transformer");
+    std::fs::create_dir_all(snapshot.join("bf16").join("text_encoder")).expect("bf16 te");
+    std::fs::create_dir_all(snapshot.join("bf16").join("vae")).expect("bf16 vae");
+    assert!(
+        training_base_model_installed(&data_dir, &target),
+        "bf16 tier present → training-ready"
+    );
+}
+
+#[test]
 fn resolve_base_model_path_prefers_converted_mlx_dir_for_conversion_models() {
     // `requiresConversion` models (Wan) keep usable weights in <data>/models/mlx/<id>, while the
     // HF cache holds only the native *source* checkpoint the converter consumes. Resolving Wan
@@ -10261,6 +12132,83 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
         model.get("quantization").is_none(),
         "native-first: no Torch GGUF quantization block"
     );
+}
+
+#[test]
+fn builtin_manifest_registers_wan_a14b_lightning_corequisite() {
+    // sc-10030 (epic 8506): both A14B MoE video models use the 4-step lightx2v Lightning distill by
+    // default. As of sc-10047 Lightning is a DEFAULT-ON toggle (`advanced.lightning`) rather than
+    // mandatory — a job can opt out and run the native multi-step CFG recipe — but the default path
+    // still applies the high/low pair (wan_sampling → 4-step/CFG-off; resolve_wan_adapters prepends the
+    // pair when the toggle is on). So it must still install as a macOS `coRequisite` so the model
+    // manager provisions it and install_state gates on it — without this the default gen errors "not
+    // downloaded — fetch it via the model manager". The subdir is per-architecture, NOT cross-compatible.
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../config/manifests/builtin.models.jsonc");
+    let raw = std::fs::read_to_string(&manifest_path).expect("read builtin.models.jsonc");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(&raw)).expect("parse builtin.models.jsonc");
+    let models = manifest["models"].as_array().expect("models array");
+
+    // (engine id, expected per-architecture Lightning subdir prefix)
+    let cases = [
+        (
+            "wan_2_2_t2v_14b",
+            "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1",
+        ),
+        (
+            "wan_2_2_i2v_14b",
+            "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1",
+        ),
+    ];
+    for (model_id, subdir) in cases {
+        let model = models
+            .iter()
+            .find(|entry| entry["id"] == model_id)
+            .unwrap_or_else(|| panic!("{model_id} is registered in the catalog"));
+        let downloads = model["downloads"].as_array().expect("downloads array");
+        let lightning = downloads
+            .iter()
+            .find(|download| download["coRequisite"] == Value::Bool(true))
+            .unwrap_or_else(|| panic!("{model_id} declares a Lightning coRequisite"));
+        assert_eq!(lightning["provider"], "huggingface");
+        assert_eq!(
+            lightning["repo"], "lightx2v/Wan2.2-Lightning",
+            "{model_id} coRequisite points at the lightx2v Lightning repo"
+        );
+        // macOS-only (the native MLX path is Mac; Windows/Linux use the torch adapter).
+        let platforms: Vec<&str> = lightning["platforms"]
+            .as_array()
+            .expect("coRequisite platforms array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(
+            platforms,
+            vec!["macos"],
+            "{model_id} Lightning is macOS-only"
+        );
+        // Exactly the per-architecture high/low pair — nothing cross-compatible, no preview assets.
+        let files: Vec<&str> = lightning["files"]
+            .as_array()
+            .expect("coRequisite files array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(
+            files,
+            vec![
+                format!("{subdir}/high_noise_model.safetensors").as_str(),
+                format!("{subdir}/low_noise_model.safetensors").as_str(),
+            ],
+            "{model_id} fetches exactly its per-architecture Lightning pair"
+        );
+        // A coRequisite is never a selectable quant tier.
+        assert!(
+            lightning.get("variant").is_none(),
+            "{model_id} Lightning coRequisite is not a quant tier"
+        );
+    }
 }
 
 #[test]
@@ -10468,4 +12416,352 @@ async fn upload_route_accepts_body_larger_than_json_cap() {
         StatusCode::CREATED,
         "large upload should be staged successfully (got {status}: {upload})"
     );
+}
+
+// ---------------------------------------------------------------------------
+// MCP mount (epic 10231, sc-10233): /mcp rides the same access_control gate as
+// /api/v1, and a real MCP streamable-HTTP client can round-trip the catalog
+// tools against the live app.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn requires_token_gates_the_mcp_mount_for_every_method() {
+    use axum::http::Method;
+    // The MCP mount is token-gated exactly like a gated /api/v1 route — for every
+    // method the transport uses (POST messages, GET SSE stream, DELETE session).
+    for method in [Method::GET, Method::POST, Method::DELETE] {
+        assert!(
+            requires_token(&method, "/mcp"),
+            "{method} /mcp must be gated"
+        );
+        assert!(
+            requires_token(&method, "/mcp/anything"),
+            "{method} /mcp/* must be gated"
+        );
+    }
+    // No prefix bleed: an unrelated path starting with "mcp" is still SPA fallback.
+    assert!(!requires_token(&Method::GET, "/mcpx"));
+}
+
+#[tokio::test]
+async fn mcp_rejects_unauthenticated_lan_request_exactly_like_api_v1() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+
+    // Same peer, no token: /mcp and a gated /api/v1 route must answer identically.
+    let (mcp_status, mcp_body) =
+        request_with_peer(app.clone(), "POST", "/mcp", json!({}), "192.168.1.9:50000").await;
+    let (api_status, api_body) =
+        request_with_peer(app, "GET", "/api/v1/jobs", Value::Null, "192.168.1.9:50001").await;
+    assert_eq!(mcp_status, StatusCode::UNAUTHORIZED);
+    assert_eq!(api_status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        mcp_body, api_body,
+        "rejection body must match the /api/v1 shape"
+    );
+    assert_eq!(mcp_body["authRequired"], true);
+}
+
+/// Status-only variant of `request_with_peer_headers`: rmcp's non-auth error
+/// bodies (e.g. the 406 below) are plain text, so the JSON-parsing helpers
+/// don't apply.
+async fn mcp_status_with_peer(
+    app: axum::Router,
+    peer: &str,
+    headers: &[(&str, &str)],
+) -> StatusCode {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        // Real HTTP/1.1 clients always send Host; the raw oneshot path doesn't,
+        // and rmcp 400s a host-less request before the Accept check.
+        .header("host", "127.0.0.1");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let mut request = builder
+        .body(Body::from(json!({}).to_string()))
+        .expect("request builds");
+    let addr: SocketAddr = peer.parse().expect("peer addr parses");
+    request.extensions_mut().insert(ConnectInfo(addr));
+    let response = app.oneshot(request).await.expect("response returns");
+    response.status()
+}
+
+#[tokio::test]
+async fn mcp_passes_auth_with_valid_token_or_loopback_trust() {
+    // A request that clears auth reaches the rmcp transport, which answers 406
+    // ("must accept application/json and text/event-stream") for a bare POST —
+    // distinct from the middleware's 401, so it proves the gate opened.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+
+    // Valid header token from a LAN peer.
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    let app = create_app(settings).expect("app creates");
+    let status = mcp_status_with_peer(
+        app.clone(),
+        "192.168.1.9:50000",
+        &[("x-sceneworks-token", "secret-token")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_ACCEPTABLE);
+
+    // Loopback-trusted peer with no token (desktop mode, SCENEWORKS_TRUST_LOOPBACK).
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "secret-token".to_owned();
+    settings.trust_loopback = true;
+    let app = create_app(settings).expect("app creates");
+    let status = mcp_status_with_peer(app.clone(), "127.0.0.1:50000", &[]).await;
+    assert_eq!(status, StatusCode::NOT_ACCEPTABLE);
+    // ... but loopback trust must not leak to a LAN peer.
+    let status = mcp_status_with_peer(app, "192.168.1.9:50000", &[]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+fn mcp_tool_content_json(result: &rmcp::model::CallToolResult) -> Value {
+    let text = result
+        .content
+        .first()
+        .and_then(|block| block.as_text())
+        .map(|text| text.text.as_str())
+        .expect("tool result has one text content block");
+    serde_json::from_str(text).expect("tool content is JSON")
+}
+
+#[tokio::test]
+async fn mcp_client_round_trips_catalog_tools_via_loopback_trust() {
+    use rmcp::model::CallToolRequestParams;
+    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+    use rmcp::transport::StreamableHttpClientTransport;
+    use rmcp::ServiceExt;
+
+    // Desktop-style deployment: loopback trusted, no token. The MCP self-client
+    // (settings.mcp_api_url) points back at this same live listener.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let mut settings = test_settings(&temp_dir);
+    settings.trust_loopback = true;
+    settings.mcp_api_url = format!("http://{addr}");
+    let (app, state) = create_app_with_state(settings).expect("app creates");
+    state
+        .project_store
+        .create_project("MCP Round Trip")
+        .expect("project creates");
+    tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
+    });
+
+    let transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
+    );
+    let client = rmcp::model::ClientInfo::default()
+        .serve(transport)
+        .await
+        .expect("MCP client initializes against /mcp");
+
+    // Tool discovery.
+    let tools = client.list_tools(None).await.expect("tools/list succeeds");
+    let names: Vec<&str> = tools.tools.iter().map(|tool| tool.name.as_ref()).collect();
+    for expected in [
+        "list_projects",
+        "list_models",
+        "list_loras",
+        "generate_image",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "missing tool {expected}: {names:?}"
+        );
+    }
+
+    // list_projects round-trips through the real /api/v1/projects route.
+    let result = client
+        .call_tool(CallToolRequestParams::new("list_projects"))
+        .await
+        .expect("list_projects succeeds");
+    assert_ne!(result.is_error, Some(true));
+    let projects = mcp_tool_content_json(&result);
+    let project_names: Vec<&str> = projects
+        .as_array()
+        .expect("projects array")
+        .iter()
+        .filter_map(|project| project["name"].as_str())
+        .collect();
+    assert!(
+        project_names.contains(&"MCP Round Trip"),
+        "created project must be listed: {project_names:?}"
+    );
+
+    // list_models round-trips through the real /api/v1/models route (empty temp
+    // config dir → an array; the round trip is what's under test).
+    let result = client
+        .call_tool(CallToolRequestParams::new("list_models"))
+        .await
+        .expect("list_models succeeds");
+    assert_ne!(result.is_error, Some(true));
+    assert!(mcp_tool_content_json(&result).is_array());
+
+    let _ = client.cancel().await;
+}
+
+#[tokio::test]
+async fn mcp_client_round_trips_with_access_token_and_no_loopback_trust() {
+    use rmcp::model::CallToolRequestParams;
+    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+    use rmcp::transport::StreamableHttpClientTransport;
+    use rmcp::ServiceExt;
+    use std::collections::HashMap;
+
+    // LAN-style deployment: token required, loopback NOT trusted. The MCP client
+    // must present the token on /mcp, and the MCP self-client must present it on
+    // its /api/v1 calls (it gets settings.access_token) — both gates are real here.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let mut settings = test_settings(&temp_dir);
+    settings.access_token = "round-trip-token".to_owned();
+    settings.mcp_api_url = format!("http://{addr}");
+    let (app, state) = create_app_with_state(settings).expect("app creates");
+    state
+        .project_store
+        .create_project("Tokened Round Trip")
+        .expect("project creates");
+    tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
+    });
+
+    let mut headers = HashMap::new();
+    headers.insert(
+        axum::http::HeaderName::from_static("x-sceneworks-token"),
+        axum::http::HeaderValue::from_static("round-trip-token"),
+    );
+    let transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp"))
+            .custom_headers(headers),
+    );
+    let client = rmcp::model::ClientInfo::default()
+        .serve(transport)
+        .await
+        .expect("tokened MCP client initializes against /mcp");
+
+    let result = client
+        .call_tool(CallToolRequestParams::new("list_projects"))
+        .await
+        .expect("list_projects succeeds");
+    assert_ne!(result.is_error, Some(true));
+    let projects = mcp_tool_content_json(&result);
+    assert!(
+        projects
+            .as_array()
+            .expect("projects array")
+            .iter()
+            .any(|project| project["name"] == "Tokened Round Trip"),
+        "created project must be listed: {projects}"
+    );
+
+    let _ = client.cancel().await;
+}
+
+#[tokio::test]
+async fn lora_import_records_trigger_words_and_notes() {
+    // epic 10328: the import request carries trigger keywords + usage notes, and both
+    // land on the queued manifest entry the worker later persists.
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/loras/import",
+        json!({
+            "repo": "owner/lora",
+            "name": "Keyworded LoRA",
+            "files": ["adapter.safetensors"],
+            "triggerWords": ["sksStyle", "neon"],
+            "notes": "Combine sksStyle with neon; keep weight <= 0.7."
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let entry = &job["payload"]["manifestEntry"];
+    assert_eq!(entry["triggerWords"], json!(["sksStyle", "neon"]));
+    assert_eq!(
+        entry["notes"],
+        "Combine sksStyle with neon; keep weight <= 0.7."
+    );
+}
+
+#[tokio::test]
+async fn update_lora_edits_trigger_words_and_notes() {
+    // epic 10328: PATCH /api/v1/loras/:id edits keywords/notes after import, supports
+    // partial updates, and the edit surfaces in the catalog listing.
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let settings = test_settings(&temp_dir);
+    let manifest_dir = settings.config_dir.join("manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir");
+    std::fs::write(
+        manifest_dir.join("user.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [
+            { "id": "my_lora", "name": "My LoRA", "family": "z-image",
+              "triggerWords": ["old"], "notes": "",
+              "source": { "provider": "local", "path": "loras/my_lora.safetensors" } }
+        ] }"#,
+    )
+    .expect("seed manifest");
+
+    let app = create_app(settings).expect("app creates");
+
+    // Full update.
+    let (status, updated) = request(
+        app.clone(),
+        "PATCH",
+        "/api/v1/loras/my_lora?scope=global",
+        json!({ "triggerWords": ["fresh", "tokens"], "notes": "use at 0.8" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["triggerWords"], json!(["fresh", "tokens"]));
+    assert_eq!(updated["notes"], "use at 0.8");
+
+    // Partial update (only notes) leaves the keywords untouched.
+    let (status, updated) = request(
+        app.clone(),
+        "PATCH",
+        "/api/v1/loras/my_lora?scope=global",
+        json!({ "notes": "revised note" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["triggerWords"], json!(["fresh", "tokens"]));
+    assert_eq!(updated["notes"], "revised note");
+
+    // The edit is reflected in GET /api/v1/loras.
+    let (status, loras) = request(app, "GET", "/api/v1/loras", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = loras
+        .as_array()
+        .expect("catalog is an array")
+        .iter()
+        .find(|item| item["id"] == "my_lora")
+        .expect("seeded LoRA present");
+    assert_eq!(entry["triggerWords"], json!(["fresh", "tokens"]));
+    assert_eq!(entry["notes"], "revised note");
 }

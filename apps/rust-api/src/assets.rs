@@ -86,6 +86,14 @@ pub(crate) async fn import_asset(
         {
             match field.name() {
                 Some("file") => {
+                    // sc-8883 (F-081): reject a second `file` field instead of
+                    // overwriting `file` — the old code dropped the first staged temp
+                    // path on the floor, leaking a multi-GB tmp until the 24h sweep (a
+                    // disk-exhaustion lever for an authenticated caller). Matches the
+                    // LoRA/model imports, which also reject a duplicate file field.
+                    if file.is_some() {
+                        return Err(ApiError::bad_request("Only one file field is allowed"));
+                    }
                     let filename = field.file_name().unwrap_or("upload").to_owned();
                     let content_type = field.content_type().map(str::to_owned);
                     let temp_path = write_upload_field_to_temp_file(&state, field).await?;
@@ -156,11 +164,11 @@ pub(crate) async fn write_upload_field_to_temp_file(
 
 /// Remove stale asset-import temp uploads (`<data_dir>/cache/uploads/upload-*`) at
 /// startup — the backstop for aborted or errored imports whose error path didn't
-/// clean up (sc-4204). Mirrors `sweep_stale_pose_uploads` / `sweep_stale_lora_uploads`.
+/// clean up (sc-4204). Thin wrapper over the shared `sweep_stale_uploads` (sc-8885).
 pub(crate) fn sweep_stale_asset_uploads(data_dir: &FsPath) -> std::io::Result<usize> {
     sweep_stale_asset_uploads_before(
         data_dir,
-        SystemTime::now() - Duration::from_secs(STALE_LORA_UPLOAD_SECONDS),
+        SystemTime::now() - Duration::from_secs(STALE_UPLOAD_SECONDS),
     )
 }
 
@@ -168,31 +176,7 @@ pub(crate) fn sweep_stale_asset_uploads_before(
     data_dir: &FsPath,
     cutoff: SystemTime,
 ) -> std::io::Result<usize> {
-    let upload_root = data_dir.join("cache").join("uploads");
-    let entries = match std::fs::read_dir(upload_root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error),
-    };
-    let mut removed = 0usize;
-    for entry in entries {
-        let entry = entry?;
-        let filename = entry.file_name();
-        if !filename.to_string_lossy().starts_with("upload-") {
-            continue;
-        }
-        let modified = entry.metadata()?.modified().unwrap_or(UNIX_EPOCH);
-        if modified <= cutoff {
-            let path = entry.path();
-            let _ = if entry.file_type()?.is_dir() {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_file(&path)
-            };
-            removed += 1;
-        }
-    }
-    Ok(removed)
+    sweep_stale_uploads(data_dir, "uploads", cutoff)
 }
 
 /// Stream a multipart field to a unique temp file under `<data_dir>/cache/<subdir>`,
@@ -201,7 +185,7 @@ pub(crate) fn sweep_stale_asset_uploads_before(
 /// pose-source uploads use `pose-uploads` so they can be swept independently).
 pub(crate) async fn write_upload_field_to_dir(
     state: &AppState,
-    mut field: axum::extract::multipart::Field<'_>,
+    field: axum::extract::multipart::Field<'_>,
     subdir: &str,
 ) -> Result<PathBuf, ApiError> {
     let upload_dir = state.settings.data_dir.join("cache").join(subdir);
@@ -209,37 +193,18 @@ pub(crate) async fn write_upload_field_to_dir(
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let temp_path = upload_dir.join(format!("upload-{}.tmp", Uuid::new_v4().simple()));
-    let mut file = tokio::fs::File::create(&temp_path)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    // sc-4204 (F-API-6): clean up the temp file on EVERY error path (chunk read,
-    // write, flush, or size cap), not just the size cap — an aborted or malformed
-    // multi-gigabyte upload otherwise leaks as an orphaned upload-*.tmp. Mirrors
-    // write_lora_upload_field_to_staged_file.
-    let mut uploaded_bytes = 0usize;
-    let write_result = async {
-        while let Some(chunk) = field
-            .chunk()
-            .await
-            .map_err(|error| ApiError::bad_request(error.to_string()))?
-        {
-            uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
-            if uploaded_bytes > MAX_UPLOAD_BYTES {
-                return Err(ApiError::payload_too_large("Uploaded file is too large"));
-            }
-            file.write_all(&chunk)
-                .await
-                .map_err(|error| ApiError::internal(error.to_string()))?;
-        }
-        file.flush()
-            .await
-            .map_err(|error| ApiError::internal(error.to_string()))
-    }
-    .await;
-    if let Err(error) = write_result {
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(error);
-    }
+    // sc-8886 (F-084): shared streaming writer. Cleanup removes only the temp file —
+    // the `cache/<subdir>` staging dir is shared, not per-upload, so it is left in place.
+    stream_multipart_field_to_file(
+        field,
+        &temp_path,
+        MAX_UPLOAD_BYTES,
+        || "Uploaded file is too large".to_owned(),
+        || async {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+        },
+    )
+    .await?;
     Ok(temp_path)
 }
 
@@ -281,6 +246,25 @@ pub(crate) async fn move_asset_to_library(
     ))
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AssetMoveToCharacterBody {
+    character_id: String,
+}
+
+pub(crate) async fn move_asset_to_character(
+    State(state): State<AppState>,
+    Path((project_id, asset_id)): Path<(String, String)>,
+    Json(body): Json<AssetMoveToCharacterBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.move_asset_to_character(&project_id, &asset_id, &body.character_id)
+        })
+        .await?,
+    ))
+}
+
 pub(crate) async fn delete_asset(
     State(state): State<AppState>,
     Path((project_id, asset_id)): Path<(String, String)>,
@@ -296,10 +280,12 @@ pub(crate) async fn delete_asset(
 pub(crate) async fn purge_asset(
     State(state): State<AppState>,
     Path((project_id, asset_id)): Path<(String, String)>,
+    Query(query): Query<AssetPurgeQuery>,
 ) -> Result<Json<sceneworks_core::project_store::AssetMutationResult>, ApiError> {
+    let permanent = query.permanent.unwrap_or(false);
     Ok(Json(
         project_call(state, move |store| {
-            store.purge_asset(&project_id, &asset_id)
+            store.purge_asset(&project_id, &asset_id, permanent)
         })
         .await?,
     ))

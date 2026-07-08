@@ -26,49 +26,49 @@ use candle_gen::gen_core::Quant;
 use candle_gen_sam3::{Sam3TextConfig, Sam3Tokenizer, Sam3VideoModel, VideoFrameOutput, Weights};
 use gen_core::CancelFlag;
 
-use crate::downloads::{ensure_hf_cached_file, DownloadContext};
-use crate::{Settings, WorkerError, WorkerResult};
+use crate::person_segment_sam3_common::{
+    mask_centroid_x, mask_to_frame, normalize_chw, select_object, BoxNorm, Sam3FrameOutput,
+    CONCEPT_PROMPT, INPUT_SIZE, MASK_GRID,
+};
+use crate::{WorkerError, WorkerResult};
+
+// Backend-neutral SAM3 helpers now live in `person_segment_sam3_common` (sc-8847, F-045). Re-export
+// the download helper + `AllPersonMasks` under this module's path so the existing off-Mac callers
+// (`media_jobs`, `video_jobs`, `scail2_masks`) keep referencing `person_segment_sam3_candle::…`
+// unchanged.
+pub(crate) use crate::person_segment_sam3_common::{ensure_segmenter_weights, AllPersonMasks};
+
+/// Adapt this backend's `candle-gen-sam3` `VideoFrameOutput` to the shared association math
+/// ([`select_object`]); the two backends' `VideoFrameOutput` are the same shape but distinct types,
+/// so each module impls the neutral accessor on its own.
+impl Sam3FrameOutput for VideoFrameOutput {
+    fn obj_ids(&self) -> &[i32] {
+        &self.obj_ids
+    }
+    fn masks(&self) -> &[Vec<f32>] {
+        &self.masks
+    }
+}
 
 /// Cancel copy surfaced when a segmentation is interrupted by a user cancel — the candle sibling
 /// of `person_segment::CANCEL_MESSAGE` (Mac-only, so duplicated like the other shared helpers).
 pub(crate) const CANCEL_MESSAGE: &str = "Person segmentation canceled by user.";
 
+/// Per-propagated-frame progress callback `(frame_index, total_frames)` — the candle sibling of
+/// `person_segment::SegmentProgress` (Mac-only, so duplicated like the other shared helpers).
+pub(crate) type SegmentProgress = Box<dyn FnMut(usize, usize) + Send>;
+
 /// Bail out with [`WorkerError::Canceled`] when the threaded flag has been tripped — the coarse
 /// cancel seam guarding frame decode, the cold multi-GB checkpoint parse, and model build/quantize
-/// (sc-8807). Unlike the MLX twin, this is the ONLY cancel granularity on the candle lane: the
-/// pinned `candle-gen-sam3` `Sam3VideoModel::propagate` does not yet take the gen-core d8038beb
-/// `cancel`/`progress` params, so a tripped flag cannot stop mid-propagate (per-frame cancel +
-/// progress need the upstream candle-gen API bump — tracked in sc-8972).
+/// (sc-8807). The same flag is also threaded into `Sam3VideoModel::propagate`'s per-frame cancel
+/// contract (sc-8972, the candle sibling of gen-core d8038beb), so a tripped flag stops the clip
+/// between propagated frames too.
 fn check_segment_canceled(cancel: Option<&CancelFlag>) -> WorkerResult<()> {
     if cancel.is_some_and(CancelFlag::is_cancelled) {
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
     Ok(())
 }
-
-/// SAM3 checkpoint files (loaded stock from `facebook/sam3`, no conversion).
-const MODEL_FILE: &str = "model.safetensors";
-const TOKENIZER_FILE: &str = "tokenizer.json";
-
-/// Download-on-first-use repo: the stock `facebook/sam3` checkpoint mirror owned by SceneWorks (the
-/// same `model.safetensors` + `tokenizer.json` the MLX path uses — no MLX-specific conversion, despite
-/// the `-mlx` name). Until the public mirror is signed off, point `SCENEWORKS_SAM3_WEIGHTS` at a local
-/// `facebook/sam3` snapshot dir.
-const SEG_REPO: &str = "SceneWorks/sam3-mlx";
-
-/// SAM3 model input is a square 1008×1008 (the processor resizes to a fixed square, not
-/// aspect-preserving — `Sam3VideoProcessor` `size={1008,1008}`).
-const INPUT_SIZE: u32 = 1008;
-
-/// SAM3 mask logits come back on a 288×288 low-res grid (`Sam3VideoModel` `LOW_RES`).
-const MASK_GRID: usize = 288;
-
-/// The text concept driving PCS — the whole point of SAM3 (no manual box).
-const CONCEPT_PROMPT: &str = "person";
-
-/// A normalized `(x, y, width, height)` box (0..1), the per-frame ByteTrack anchor — used here only to
-/// *associate* a SAM3 object id with the selected track, never as a segmenter prompt.
-pub(crate) type BoxNorm = (f64, f64, f64, f64);
 
 /// Affine-quantization level for the segmenter, from `SCENEWORKS_SAM3_QUANT`: **dense by default**
 /// off-Mac (quantizing SAM3's PE vision backbone NaNs — its massive activations overflow GGUF's f16
@@ -97,71 +97,6 @@ fn parse_quant(value: &str) -> Option<Quant> {
 /// identities. Mirrors the MLX module's cache + poison-recovery idiom.
 static WEIGHTS: OnceLock<Mutex<Option<Weights>>> = OnceLock::new();
 
-/// Resolve already-present SAM3 weights: an explicit env pin (`SCENEWORKS_SAM3_WEIGHTS`, a dir or the
-/// `model.safetensors` inside it), then the app cache `<data_dir>/cache/person-segment-sam3/`, then the
-/// model dir `<data_dir>/models/person-segment-sam3/`. Both files must be present. Returns
-/// `(model_path, tokenizer_path)` or `None` (then [`ensure_segmenter_weights`] downloads them).
-pub(crate) fn resolve_segmenter_weights(settings: &Settings) -> Option<(PathBuf, PathBuf)> {
-    let pair_in = |dir: &Path| -> Option<(PathBuf, PathBuf)> {
-        let model = dir.join(MODEL_FILE);
-        let tokenizer = dir.join(TOKENIZER_FILE);
-        (model.exists() && tokenizer.exists()).then_some((model, tokenizer))
-    };
-    if let Ok(pinned) = std::env::var("SCENEWORKS_SAM3_WEIGHTS") {
-        let p = PathBuf::from(pinned);
-        let dir = if p.is_file() {
-            p.parent().map(Path::to_path_buf).unwrap_or(p)
-        } else {
-            p
-        };
-        if let Some(pair) = pair_in(&dir) {
-            return Some(pair);
-        }
-    }
-    for sub in ["cache/person-segment-sam3", "models/person-segment-sam3"] {
-        if let Some(pair) = pair_in(&settings.data_dir.join(sub)) {
-            return Some(pair);
-        }
-    }
-    None
-}
-
-/// Resolve the SAM3 weights, downloading `model.safetensors` + `tokenizer.json` from HuggingFace on
-/// first use (into the app cache) with streaming progress/cancel and size-aware resume.
-pub(crate) async fn ensure_segmenter_weights(
-    settings: &Settings,
-    context: &DownloadContext<'_>,
-) -> WorkerResult<(PathBuf, PathBuf)> {
-    if let Some(pair) = resolve_segmenter_weights(settings) {
-        return Ok(pair);
-    }
-    let dir = settings.data_dir.join("cache").join("person-segment-sam3");
-    let model =
-        ensure_hf_cached_file(context, SEG_REPO, "main", MODEL_FILE, &dir.join(MODEL_FILE)).await?;
-    let tokenizer = ensure_hf_cached_file(
-        context,
-        SEG_REPO,
-        "main",
-        TOKENIZER_FILE,
-        &dir.join(TOKENIZER_FILE),
-    )
-    .await?;
-    Ok((model, tokenizer))
-}
-
-/// Roll the per-clip mask outcome into the sidecar `maskState`: `degraded` (no frame masked → box
-/// fallback), `active` (every detected frame masked), else `generated`. Mirrors
-/// `person_segment::rollup_mask_state` (Mac-only) so the off-Mac contract is identical.
-pub(crate) fn rollup_mask_state(generated: usize, detected_total: usize) -> &'static str {
-    if generated == 0 {
-        "degraded"
-    } else if generated >= detected_total {
-        "active"
-    } else {
-        "generated"
-    }
-}
-
 /// Preprocess an RGB frame to the SAM3 input tensor: resize to a 1008×1008 square (bilinear, fixed-
 /// square — *not* aspect-preserving), normalize by mean/std `0.5` to `[-1,1]`, packed NCHW
 /// `[1,3,1008,1008]` f32 on `device`.
@@ -178,93 +113,6 @@ fn input_tensor(img: &image::RgbImage, device: &Device) -> WorkerResult<Tensor> 
         .map_err(|e| WorkerError::Engine(format!("sam3 input tensor: {e}")))
 }
 
-/// Pack a `size×size` interleaved-RGB `u8` buffer into a channel-major `[3·size·size]` f32 vector with
-/// the SAM3 normalization `x/127.5 − 1` (mean=std=0.5 → range `[-1,1]`). Split out so the
-/// normalization is unit-testable without an image decode. Shared verbatim with the MLX module.
-fn normalize_chw(rgb: &[u8], size: usize) -> Vec<f32> {
-    let plane = size * size;
-    let mut out = vec![0f32; 3 * plane];
-    for (p, px) in rgb.chunks_exact(3).enumerate() {
-        for c in 0..3 {
-            out[c * plane + p] = px[c] as f32 / 127.5 - 1.0;
-        }
-    }
-    out
-}
-
-/// Fraction of a SAM3 object's foreground (mask logit `> 0`) on the `grid×grid` low-res mask whose
-/// pixel center falls inside the normalized `box_norm`. `0.0` when the mask is empty. The association
-/// score: how much of a candidate object sits under the selected person's box.
-fn mask_box_containment(mask_logits: &[f32], grid: usize, box_norm: BoxNorm) -> f64 {
-    let (bx, by, bw, bh) = box_norm;
-    let (x1, y1, x2, y2) = (bx, by, bx + bw, by + bh);
-    let (mut fg, mut inside) = (0u64, 0u64);
-    for my in 0..grid {
-        for mx in 0..grid {
-            if mask_logits[my * grid + mx] > 0.0 {
-                fg += 1;
-                let (cx, cy) = (
-                    (mx as f64 + 0.5) / grid as f64,
-                    (my as f64 + 0.5) / grid as f64,
-                );
-                if cx >= x1 && cx < x2 && cy >= y1 && cy < y2 {
-                    inside += 1;
-                }
-            }
-        }
-    }
-    if fg == 0 {
-        0.0
-    } else {
-        inside as f64 / fg as f64
-    }
-}
-
-/// Pick the SAM3 object id that best matches the selected track: accumulate each present object's
-/// `mask_box_containment` over every anchored clip frame, then take the id with the greatest total.
-/// `None` when no object ever overlaps an anchor (→ degraded to box masks). Shared with the MLX module.
-fn select_object(outputs: &[VideoFrameOutput], anchors: &[Option<BoxNorm>]) -> Option<i32> {
-    use std::collections::HashMap;
-    let mut score: HashMap<i32, f64> = HashMap::new();
-    for (frame, anchor) in outputs.iter().zip(anchors) {
-        let Some(box_norm) = anchor else { continue };
-        for (oid, mask) in frame.obj_ids.iter().zip(&frame.masks) {
-            let c = mask_box_containment(mask, MASK_GRID, *box_norm);
-            if c > 0.0 {
-                *score.entry(*oid).or_insert(0.0) += c;
-            }
-        }
-    }
-    // Deterministic tie-break on the object id so repeated runs agree.
-    score
-        .into_iter()
-        .max_by(|a, b| {
-            a.1.partial_cmp(&b.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(b.0.cmp(&a.0))
-        })
-        .map(|(oid, _)| oid)
-}
-
-/// Binarize a `grid×grid` SAM3 mask (logit `> 0`) to 0/255, resize it to `width×height` (bilinear) and
-/// re-threshold to a clean binary `L` mask — the per-clip-frame output the orchestrator writes.
-fn mask_to_frame(mask_logits: &[f32], grid: usize, width: u32, height: u32) -> Vec<u8> {
-    let bin: Vec<u8> = mask_logits
-        .iter()
-        .map(|&v| if v > 0.0 { 255 } else { 0 })
-        .collect();
-    let Some(small) = image::GrayImage::from_raw(grid as u32, grid as u32, bin) else {
-        return Vec::new();
-    };
-    let resized =
-        image::imageops::resize(&small, width, height, image::imageops::FilterType::Triangle);
-    resized
-        .into_raw()
-        .into_iter()
-        .map(|v| if v > 127 { 255 } else { 0 })
-        .collect()
-}
-
 /// Segment the selected person across a clip with the off-Mac candle SAM3 **text-concept (PCS) video
 /// pipeline** (sc-6247). `clip_frame_paths` is the contiguous detected span (clip-local frame `0` =
 /// first detected frame); `anchors[i]` is the frame's ByteTrack box in normalized `(x, y, width,
@@ -276,21 +124,30 @@ fn mask_to_frame(mask_logits: &[f32], grid: usize, width: u32, height: u32) -> V
 /// fallback). The checkpoint parses once and is cached process-wide; run under `spawn_blocking` (image
 /// decode + GPU inference are blocking).
 ///
-/// `cancel` is the user-cancel flag (sc-8807), checked at the coarse phase boundaries (frame decode,
-/// cold checkpoint parse, model build/quantize). Per-frame cancel + progress inside the propagate
-/// loop need the candle-gen-sam3 API bump (sc-8972) — see [`check_segment_canceled`].
+/// `cancel` is the user-cancel flag (sc-8807): checked at the coarse phase boundaries here (frame
+/// decode, cold checkpoint parse, model build/quantize) and threaded into the engine's per-frame
+/// propagate cancel contract (sc-8972, the candle sibling of gen-core d8038beb), so a tripped flag
+/// stops the clip between frames with [`WorkerError::Canceled`]. `progress` is invoked
+/// `(frame_index, total_frames)` after each propagated frame.
 pub(crate) fn segment_track_blocking(
     model_path: PathBuf,
     tokenizer_path: PathBuf,
     clip_frame_paths: Vec<PathBuf>,
     anchors: Vec<Option<BoxNorm>>,
     cancel: Option<CancelFlag>,
+    mut progress: Option<SegmentProgress>,
 ) -> WorkerResult<Vec<Vec<u8>>> {
-    assert_eq!(
-        clip_frame_paths.len(),
-        anchors.len(),
-        "frames/anchors mismatch"
-    );
+    // A frames/anchors length mismatch is a caller contract violation. The old `assert_eq!`
+    // panicked inside `spawn_blocking`, which `media_jobs` absorbed as a silent "degraded"
+    // (box-fallback) result rather than a surfaced error — return `InvalidPayload` so the
+    // mismatch fails the job loudly (sc-8903, F-101). Kept in sync with the MLX twin.
+    if clip_frame_paths.len() != anchors.len() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "segment clip frames ({}) and anchors ({}) length mismatch",
+            clip_frame_paths.len(),
+            anchors.len()
+        )));
+    }
     check_segment_canceled(cancel.as_ref())?;
     if !anchors.iter().any(Option::is_some) {
         return Err(WorkerError::InvalidPayload(
@@ -317,8 +174,8 @@ pub(crate) fn segment_track_blocking(
         frames.push(input_tensor(&img, &device)?);
     }
 
-    // Guard the cold multi-GB checkpoint parse + model build — the last cancel seam before the
-    // (currently uncancellable, sc-8972) propagate loop.
+    // Guard the cold multi-GB checkpoint parse + model build — the engine only observes the flag
+    // once propagation starts.
     check_segment_canceled(cancel.as_ref())?;
 
     // Cached checkpoint; recover from a poisoned lock by dropping the cached weights and reloading.
@@ -352,11 +209,23 @@ pub(crate) fn segment_track_blocking(
         .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
     check_segment_canceled(cancel.as_ref())?;
 
-    // The pinned candle-gen-sam3 `propagate` takes no `cancel`/`progress` yet (unlike the MLX twin,
-    // gen-core d8038beb); per-frame cancel + progress land with the upstream API bump (sc-8972).
+    // candle-gen-sam3 `propagate` takes `cancel` + per-frame `progress` (sc-8972, the candle
+    // sibling of the MLX video per-step cancel contract, gen-core d8038beb). Thread the caller's
+    // flag/callback so a user cancel stops between frames and each frame reports progress.
     let outputs = model
-        .propagate(&frames, &input_ids, &text_mask)
-        .map_err(|e| WorkerError::Engine(format!("sam3 propagate: {e}")))?;
+        .propagate(
+            &frames,
+            &input_ids,
+            &text_mask,
+            cancel.as_ref(),
+            progress
+                .as_deref_mut()
+                .map(|cb| cb as &mut dyn FnMut(usize, usize)),
+        )
+        .map_err(|e| match e {
+            candle_gen::CandleError::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
+            e => WorkerError::Engine(format!("sam3 propagate: {e}")),
+        })?;
 
     // Associate SAM3's identities to the selected track, then emit that object's per-frame mask.
     let Some(selected) = select_object(&outputs, &anchors) else {
@@ -365,48 +234,32 @@ pub(crate) fn segment_track_blocking(
     };
     let masks = outputs
         .iter()
-        .map(|frame| {
-            frame
-                .obj_ids
-                .iter()
-                .position(|&o| o == selected)
-                .map(|i| mask_to_frame(&frame.masks[i], MASK_GRID, width, height))
-                .unwrap_or_default()
-        })
-        .collect();
+        .map(|frame| frame_mask_for_object(frame, selected, width, height))
+        .collect::<WorkerResult<Vec<_>>>()?;
     Ok(masks)
 }
 
-/// Every tracked person's per-frame mask + a stable left-to-right paint order — the candle sibling of
-/// `crate::person_segment_sam3::AllPersonMasks` (sc-6837, the off-Mac SCAIL-2 lane). Field-identical to
-/// the MLX twin so [`crate::scail2_masks`]'s painters compile against either. Unlike
-/// [`segment_track_blocking`] (which selects ONE person via ByteTrack anchors for replace_person), this
-/// keeps EVERY SAM3 object so each person can be painted a distinct palette color.
-pub(crate) struct AllPersonMasks {
-    /// SAM3 object ids in left-to-right paint order (ascending centroid-x in the frame where each
-    /// object first appears); person index 0 = leftmost = the SCAIL-2 palette's first color.
-    pub order: Vec<i32>,
-    /// `per_frame[f]` = `(obj_id, binary mask row-major width*height, 0/255)` for every object present
-    /// on frame `f` (empty masks dropped). Object ids index into [`AllPersonMasks::order`].
-    pub per_frame: Vec<Vec<(i32, Vec<u8>)>>,
-    pub width: u32,
-    pub height: u32,
-}
-
-/// Normalized centroid-x (0..1) of a SAM3 low-res mask's foreground (logit `> 0`); `None` if the mask
-/// is empty. Sorts tracked people left-to-right for deterministic palette assignment. Shared verbatim
-/// with the MLX module.
-fn mask_centroid_x(mask_logits: &[f32], grid: usize) -> Option<f64> {
-    let (mut sum_x, mut n) = (0f64, 0u64);
-    for my in 0..grid {
-        for mx in 0..grid {
-            if mask_logits[my * grid + mx] > 0.0 {
-                sum_x += (mx as f64 + 0.5) / grid as f64;
-                n += 1;
-            }
-        }
-    }
-    (n > 0).then(|| sum_x / n as f64)
+/// Emit the selected object's binary mask on one SAM3 frame, or an empty vec when the object
+/// isn't present (legitimate per-frame absence → orchestrator box-fallback). Guards the
+/// `obj_ids`/`masks` parallel-vec assumption: an id present in `obj_ids` but with no matching
+/// entry in `masks` is a malformed engine output, surfaced as an `Engine` error rather than
+/// indexing OOB (sc-8905, F-103). Kept in sync with the MLX twin.
+fn frame_mask_for_object(
+    frame: &VideoFrameOutput,
+    selected: i32,
+    width: u32,
+    height: u32,
+) -> WorkerResult<Vec<u8>> {
+    let Some(i) = frame.obj_ids.iter().position(|&o| o == selected) else {
+        return Ok(Vec::new());
+    };
+    let logits = frame.masks.get(i).ok_or_else(|| {
+        WorkerError::Engine(format!(
+            "sam3 frame has obj id {selected} at index {i} but only {} masks",
+            frame.masks.len()
+        ))
+    })?;
+    mask_to_frame(logits, MASK_GRID, width, height)
 }
 
 /// Segment + track every "person" across already-decoded RGB `frames` with the off-Mac candle SAM3
@@ -418,13 +271,15 @@ fn mask_centroid_x(mask_logits: &[f32], grid: usize) -> Option<f64> {
 /// process-wide; a fresh `Sam3VideoModel` is built per call (clean tracking state). Run under
 /// `spawn_blocking` (GPU inference is blocking).
 ///
-/// `cancel` follows [`segment_track_blocking`] (sc-8807): coarse checks only until the
-/// candle-gen-sam3 propagate API bump (sc-8972).
+/// `cancel`/`progress` follow [`segment_track_blocking`] (sc-8807): coarse checks around the cold
+/// checkpoint parse + model build, the engine's per-frame cancel between frames (sc-8972), and a
+/// `(frame_index, total_frames)` callback after each propagated frame.
 pub(crate) fn segment_all_persons_in_memory(
     model_path: &Path,
     tokenizer_path: &Path,
     frames: &[image::RgbImage],
     cancel: Option<CancelFlag>,
+    mut progress: Option<SegmentProgress>,
 ) -> WorkerResult<AllPersonMasks> {
     check_segment_canceled(cancel.as_ref())?;
     let first = frames.first().ok_or_else(|| {
@@ -446,8 +301,8 @@ pub(crate) fn segment_all_persons_in_memory(
         .map(|f| input_tensor(f, &device))
         .collect::<WorkerResult<Vec<_>>>()?;
 
-    // Guard the cold multi-GB checkpoint parse + model build — the last cancel seam before the
-    // (currently uncancellable, sc-8972) propagate loop.
+    // Guard the cold multi-GB checkpoint parse + model build — the engine only observes the flag
+    // once propagation starts.
     check_segment_canceled(cancel.as_ref())?;
 
     // Cached checkpoint; recover from a poisoned lock by dropping + reloading (mirrors
@@ -481,10 +336,22 @@ pub(crate) fn segment_all_persons_in_memory(
         .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
     check_segment_canceled(cancel.as_ref())?;
 
-    // No `cancel`/`progress` on the pinned candle-gen-sam3 propagate yet (sc-8972).
+    // candle-gen-sam3 `propagate` takes `cancel` + per-frame `progress` (sc-8972). Thread the
+    // caller's flag/callback (mirrors `segment_track_blocking`).
     let outputs = model
-        .propagate(&tensors, &input_ids, &text_mask)
-        .map_err(|e| WorkerError::Engine(format!("sam3 propagate: {e}")))?;
+        .propagate(
+            &tensors,
+            &input_ids,
+            &text_mask,
+            cancel.as_ref(),
+            progress
+                .as_deref_mut()
+                .map(|cb| cb as &mut dyn FnMut(usize, usize)),
+        )
+        .map_err(|e| match e {
+            candle_gen::CandleError::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
+            e => WorkerError::Engine(format!("sam3 propagate: {e}")),
+        })?;
 
     // Paint order: each object's centroid-x in the FIRST frame it appears, ascending (tie-break on
     // first-seen frame, then object id, so repeated runs agree). Shared with the MLX module.
@@ -510,6 +377,10 @@ pub(crate) fn segment_all_persons_in_memory(
             .then(a.cmp(b))
     });
 
+    // `zip` already bounds to the shorter of obj_ids/masks; `mask_to_frame` now returns an
+    // `Engine` error on a malformed (grid-mismatched) mask instead of the empty-vec sentinel,
+    // so propagate rather than silently dropping it (sc-8905, F-103). Kept in sync with the MLX
+    // twin.
     let per_frame = outputs
         .iter()
         .map(|frame| {
@@ -517,11 +388,10 @@ pub(crate) fn segment_all_persons_in_memory(
                 .obj_ids
                 .iter()
                 .zip(&frame.masks)
-                .map(|(oid, logits)| (*oid, mask_to_frame(logits, MASK_GRID, width, height)))
-                .filter(|(_, mask)| !mask.is_empty())
-                .collect()
+                .map(|(oid, logits)| Ok((*oid, mask_to_frame(logits, MASK_GRID, width, height)?)))
+                .collect::<WorkerResult<Vec<_>>>()
         })
-        .collect();
+        .collect::<WorkerResult<Vec<_>>>()?;
 
     Ok(AllPersonMasks {
         order,
@@ -569,6 +439,7 @@ mod tests {
             vec![PathBuf::from("/nonexistent/frame.png")],
             vec![Some((0.1, 0.1, 0.5, 0.5))],
             Some(cancel.clone()),
+            None,
         );
         assert!(
             matches!(track, Err(WorkerError::Canceled(_))),
@@ -580,6 +451,7 @@ mod tests {
             Path::new("/nonexistent/tokenizer.json"),
             &frames,
             Some(cancel),
+            None,
         );
         assert!(
             matches!(all, Err(WorkerError::Canceled(_))),
@@ -587,88 +459,30 @@ mod tests {
         );
     }
 
+    /// sc-8903 / F-101: a frames/anchors length mismatch returns `InvalidPayload` (a surfaced
+    /// error) instead of the old `assert_eq!` panic that `media_jobs` absorbed as a silent
+    /// "degraded" box-fallback. Kept in sync with the MLX twin's test. The length check runs
+    /// before any frame decode / weight load, so the nonexistent paths are never touched.
     #[test]
-    fn rollup_maps_generated_counts() {
-        assert_eq!(rollup_mask_state(0, 5), "degraded");
-        assert_eq!(rollup_mask_state(3, 5), "generated");
-        assert_eq!(rollup_mask_state(5, 5), "active");
-        assert_eq!(rollup_mask_state(6, 5), "active");
+    fn frames_anchors_length_mismatch_returns_invalid_payload() {
+        let result = segment_track_blocking(
+            PathBuf::from("/nonexistent/model.safetensors"),
+            PathBuf::from("/nonexistent/tokenizer.json"),
+            vec![
+                PathBuf::from("/nonexistent/a.png"),
+                PathBuf::from("/nonexistent/b.png"),
+            ],
+            vec![Some((0.1, 0.1, 0.5, 0.5))], // one anchor for two frames
+            None,
+            None,
+        );
+        assert!(
+            matches!(result, Err(WorkerError::InvalidPayload(ref m)) if m.contains("length mismatch")),
+            "expected InvalidPayload length mismatch, got {result:?}"
+        );
     }
 
-    #[test]
-    fn normalize_maps_to_signed_unit_range_channel_major() {
-        // 2×2 RGB: black, white, mid-gray, red. mean=std=0.5 → x/127.5 − 1.
-        let rgb = [0, 0, 0, 255, 255, 255, 128, 128, 128, 255, 0, 0];
-        let chw = normalize_chw(&rgb, 2);
-        let plane = 4;
-        assert!((chw[0] - (-1.0)).abs() < 1e-6); // R of black
-        assert!((chw[1] - 1.0).abs() < 1e-6); // R of white
-        assert!((chw[plane] - (-1.0)).abs() < 1e-6); // G of black
-        assert!((chw[2 * plane + 3] - (-1.0)).abs() < 1e-6); // B of red = 0 → -1
-        assert!((chw[3] - 1.0).abs() < 1e-6); // R of red = 255 → 1
-    }
-
-    #[test]
-    fn containment_measures_foreground_inside_box() {
-        let grid = 10;
-        let mut logits = vec![-1.0f32; grid * grid];
-        for my in 2..6 {
-            for mx in 2..6 {
-                logits[my * grid + mx] = 1.0;
-            }
-        }
-        let full = mask_box_containment(&logits, grid, (0.2, 0.2, 0.4, 0.4));
-        assert!((full - 1.0).abs() < 1e-9, "full was {full}");
-        let none = mask_box_containment(&logits, grid, (0.0, 0.0, 0.1, 0.1));
-        assert!(none.abs() < 1e-9, "disjoint was {none}");
-        let half = mask_box_containment(&logits, grid, (0.0, 0.0, 0.4, 1.0));
-        assert!((half - 0.5).abs() < 1e-9, "half was {half}");
-    }
-
-    /// Two-object clip: object 7 sits under the anchor every frame, object 9 elsewhere. The selector
-    /// must return 7, aggregating containment across the span.
-    #[test]
-    fn select_object_picks_the_id_overlapping_the_anchor() {
-        let grid = MASK_GRID;
-        let block = |r: std::ops::Range<usize>, c: std::ops::Range<usize>| -> Vec<f32> {
-            let mut m = vec![-1.0f32; grid * grid];
-            for y in r.clone() {
-                for x in c.clone() {
-                    m[y * grid + x] = 1.0;
-                }
-            }
-            m
-        };
-        let left = block(0..grid / 2, 0..grid / 2);
-        let right = block(grid / 2..grid, grid / 2..grid);
-        let outputs = vec![
-            VideoFrameOutput {
-                obj_ids: vec![7, 9],
-                masks: vec![left.clone(), right.clone()],
-            },
-            VideoFrameOutput {
-                obj_ids: vec![7, 9],
-                masks: vec![left, right],
-            },
-        ];
-        let anchors = vec![Some((0.0, 0.0, 0.5, 0.5)), Some((0.0, 0.0, 0.5, 0.5))];
-        assert_eq!(select_object(&outputs, &anchors), Some(7));
-        assert_eq!(select_object(&outputs, &[None, None]), None);
-    }
-
-    #[test]
-    fn mask_to_frame_binarizes_and_resizes() {
-        let grid = 4;
-        let mut logits = vec![-1.0f32; grid * grid];
-        for y in 0..2 {
-            for x in 0..2 {
-                logits[y * grid + x] = 1.0;
-            }
-        }
-        let out = mask_to_frame(&logits, grid, 8, 8);
-        assert_eq!(out.len(), 64);
-        assert!(out.iter().all(|&v| v == 0 || v == 255), "output is binary");
-        assert_eq!(out[0], 255, "top-left corner is foreground");
-        assert_eq!(out[63], 0, "bottom-right corner is background");
-    }
+    // The pure-helper tests (`normalize_chw`, `mask_box_containment`, `select_object`,
+    // `mask_to_frame`) moved to `person_segment_sam3_common` (sc-8847, F-045) — they exercise the
+    // backend-neutral math once, compiled on both the MLX and candle lanes.
 }

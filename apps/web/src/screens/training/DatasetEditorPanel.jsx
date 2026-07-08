@@ -74,16 +74,14 @@ export function DatasetEditorPanel({
   applyOrderedNames,
   setCaptionDialog,
   health,
-  readiness = null,
-  readinessLoading = false,
+  // sc-8942 (F-140): the Dataset Doctor's readout props (report/loading + the six
+  // fix-action callbacks) are grouped into one `datasetDoctor` bundle instead of being
+  // threaded individually. ConfigureJobPanel takes the same bundle, so the identical
+  // set of props is no longer hand-mirrored across two panels. Shaped exactly like the
+  // DatasetDoctorReadout signature so it can be spread straight onto it.
+  datasetDoctor,
   readinessByKey,
   onToggleItemAck,
-  onRemoveDuplicates,
-  onUpscaleLowRes,
-  onSmartCrop,
-  onStripExif,
-  onAnalyzeDataset,
-  onAnalyzeFaces,
   canSave,
   saveDataset,
   savingDataset,
@@ -112,6 +110,9 @@ export function DatasetEditorPanel({
   captionModelSizeLabel = "",
   captionModelName = "JoyCaption",
 }) {
+  // Local aliases for the doctor readout's report/loading, still referenced directly by
+  // the distributions block and the per-card readiness badges below.
+  const { report: readiness = null, loading: readinessLoading = false } = datasetDoctor ?? {};
   return (
     <>
       <div className="training-panel-head">
@@ -207,15 +208,8 @@ export function DatasetEditorPanel({
             <span>{health.valid ? "Dataset is ready for downstream steps" : "Add image assets to build this dataset"}</span>
           </div>
           <DatasetDoctorReadout
-            report={readiness}
-            loading={readinessLoading}
+            {...datasetDoctor}
             onRecaptionFlagged={(itemIds) => setCaptionDialog({ type: "flagged", itemIds })}
-            onRemoveDuplicates={onRemoveDuplicates}
-            onUpscaleLowRes={onUpscaleLowRes}
-            onSmartCrop={onSmartCrop}
-            onStripExif={onStripExif}
-            onAnalyzeDataset={onAnalyzeDataset}
-            onAnalyzeFaces={onAnalyzeFaces}
           />
           {readiness?.distributions ? (
             <details className="dataset-doctor-advanced">

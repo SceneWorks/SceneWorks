@@ -12,9 +12,11 @@ import {
 import { useAppContext } from "../context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../macGating.js";
 import { apiFetch } from "../api.js";
+import { KeywordTagEditor } from "../components/KeywordTagEditor.jsx";
 import { isDesktop, tauriInvoke } from "../runtime.js";
 import { tierLabel } from "../quantTier.js";
-import { suggestTier } from "../tierSuggestion.js";
+import { suggestTier, tierFits } from "../tierSuggestion.js";
+import { safeExternalUrl } from "../urls.js";
 
 // Wan A14B is a two-expert mixture; its LoRAs come as a high/low-noise pair. These
 // base models accept the optional low-noise expert upload (sc-1991). The 5B model
@@ -107,21 +109,18 @@ const MODEL_TYPE_OPTIONS = [
   { value: "utility", label: "Utility" },
 ];
 
-// sc-7081 (epic 7080): model upload/import is hidden + disabled on every platform until a
+// sc-7081 (epic 7080, P0): model upload/import is hidden + disabled on every platform until a
 // real compatibility + conversion pipeline exists behind it. Today an imported checkpoint
 // has no runnable engine (macOS is MLX-only with a compile-time engine table; off-Mac only
 // loads full diffusers repos), so the form is kept in source but not rendered. The API
 // refuses the request too. Flip to true once the pipeline gates imports on a compatibility
 // verdict.
+//
+// KEEP, don't delete (sc-8941 / F-139): this is the deliberate P0-disabled scaffold that epic
+// 7080's P5 ("re-enable the UI behind the compat gate") restores — not accidental dead code.
+// The whole form + its state/handler below stay compile-time-gated by this flag so the
+// restoration point is preserved. Removing it would discard tracked, in-progress roadmap work.
 const MODEL_IMPORT_ENABLED = false;
-
-// Models render in type-grouped sections. Order is fixed; any model whose `type`
-// isn't listed here falls into a trailing "Other" group so nothing is hidden.
-const MODEL_TYPE_GROUPS = [
-  { type: "image", label: "Image Models" },
-  { type: "video", label: "Video Models" },
-  { type: "utility", label: "Utility Models" },
-];
 
 // Capability descriptors shown as chips on each model card. With models now grouped
 // by `type`, the chips are what tell the user what a card actually does (plain
@@ -233,7 +232,9 @@ function GatedModelNotice({
   onOpenSettings,
 }) {
   const hostLabel = host || "the required service";
-  const showSeparateLicense = licenseUrl && licenseUrl !== repoUrl;
+  const safeRepoUrl = safeExternalUrl(repoUrl);
+  const safeLicenseUrl = safeExternalUrl(licenseUrl);
+  const showSeparateLicense = safeLicenseUrl && safeLicenseUrl !== safeRepoUrl;
   return (
     <div className={present ? "model-gated-notice ready" : "model-gated-notice"}>
       <p className={present ? "inline-success" : "inline-warning"}>
@@ -247,13 +248,13 @@ function GatedModelNotice({
             Add token in Settings
           </button>
         )}
-        {repoUrl ? (
-          <a href={repoUrl} target="_blank" rel="noreferrer noopener">
+        {safeRepoUrl ? (
+          <a href={safeRepoUrl} target="_blank" rel="noreferrer noopener">
             Request access on Hugging Face
           </a>
         ) : null}
         {showSeparateLicense ? (
-          <a href={licenseUrl} target="_blank" rel="noreferrer noopener">
+          <a href={safeLicenseUrl} target="_blank" rel="noreferrer noopener">
             Review license
           </a>
         ) : null}
@@ -409,9 +410,19 @@ function ModelTierDownloadPanel({
           const activeJob = activeJobByTier.get(tier);
           const isSuggested = tier === suggested;
           const checked = selected.has(tier);
+          // Per-tier RAM guidance (sc-10042): whether THIS tier's peak footprint fits the host with
+          // headroom, from the same `tierFits` the suggestion uses (measured `footprint.peakMemoryBytes`
+          // when present — e.g. Wan q4 ~24 GiB — else the disk-based estimate). Replaces the blanket
+          // model-level warning: q4/q8 that actually fit show nothing; only a genuinely over-budget tier
+          // (e.g. bf16 on a small Mac) is flagged. Advisory only — SUGGEST-NEVER-WITHHOLD (epic 8506
+          // decision 1) keeps every tier's checkbox enabled regardless.
+          const overBudget = !tierFits(variant, unifiedMemoryGb);
           const rowClasses = ["model-tier-row"];
           if (isSuggested) {
             rowClasses.push("suggested");
+          }
+          if (overBudget) {
+            rowClasses.push("over-budget");
           }
           return (
             <li className={rowClasses.join(" ")} key={tier}>
@@ -425,6 +436,16 @@ function ModelTierDownloadPanel({
                 <span className="model-tier-label">
                   {tierLabel(tier)}
                   {isSuggested ? <span className="model-tier-suggested-badge">Suggested</span> : null}
+                  {/* Distinct class (NOT `.status-badge`) so it never collides with the per-row
+                      install-state status badge query/rendering — this is a separate RAM advisory. */}
+                  {overBudget ? (
+                    <span
+                      className="model-tier-memory-warning"
+                      title={`This tier's peak memory is estimated above this machine's ~${Math.round(unifiedMemoryGb)} GB. It can still install, but may run out of memory during generation.`}
+                    >
+                      may exceed memory
+                    </span>
+                  ) : null}
                 </span>
               </label>
               <span className="model-tier-size">
@@ -469,6 +490,8 @@ export function ModelManagerScreen() {
     createLoraDownloadJob,
     createModelConvertJob,
     createLoraImportJob,
+    updateLora,
+    fetchLoraEmbeddedTags,
     createModelImportJob,
     presets: recipePresets = [],
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
@@ -487,6 +510,8 @@ export function ModelManagerScreen() {
   const onDownloadVariant = (model, variant) => createModelDownloadJob(model, { variant });
   const onDownloadLora = createLoraDownloadJob;
   const onImportLora = createLoraImportJob;
+  const onUpdateLora = updateLora;
+  const onFetchLoraEmbeddedTags = fetchLoraEmbeddedTags;
   const onImportModel = createModelImportJob;
   const onOpenQueue = () => setActiveView("Queue");
   // LoRA families come from each model's LoRA-compatibility set — NOT its model
@@ -508,8 +533,18 @@ export function ModelManagerScreen() {
     scope: "global",
     family: "",
     baseModel: "",
+    triggerKeywords: [],
+    notes: "",
   });
   const [fileInputKey, setFileInputKey] = useState(0);
+  // Inline trigger-keyword / notes editor for a LoRA row (epic 10328). editingLora keys
+  // the open row by scope:id; the draft holds the working keywords + notes; suggestions
+  // come from the LoRA's embedded ss_tag_frequency metadata (fetched on open).
+  const [editingLora, setEditingLora] = useState("");
+  const [loraEditDraft, setLoraEditDraft] = useState({ triggerWords: [], notes: "" });
+  const [loraEditSuggestions, setLoraEditSuggestions] = useState([]);
+  const [savingLora, setSavingLora] = useState(false);
+  const [loraEditError, setLoraEditError] = useState("");
   const [importingModel, setImportingModel] = useState(false);
   const [modelImportMessage, setModelImportMessage] = useState({ tone: "neutral", text: "" });
   const [modelImportForm, setModelImportForm] = useState({
@@ -523,11 +558,36 @@ export function ModelManagerScreen() {
   const [modelFileInputKey, setModelFileInputKey] = useState(0);
   const [deletingItem, setDeletingItem] = useState("");
   const [deleteMessage, setDeleteMessage] = useState({ tone: "neutral", text: "" });
+  // Tabbed interface (epic 10309): the active tab, the tab to restore when a search
+  // clears, and the persistent search query. Every model now renders as an always-open
+  // card, so the old per-row expand state is gone. Tabs: image | video | utility | lora,
+  // plus a transient "search" tab that only exists while `search` is non-empty.
+  const [activeTab, setActiveTab] = useState("image");
+  const [prevTab, setPrevTab] = useState("image");
+  const [search, setSearch] = useState("");
+  // Typing into search auto-switches to the transient Search Results tab (remembering the
+  // tab we came from); clearing it restores that tab. Clicking a tab just sets it.
+  const handleSearchChange = (event) => {
+    const value = event.target.value;
+    const hasValue = value.trim() !== "";
+    setSearch(value);
+    if (hasValue && activeTab !== "search") {
+      setPrevTab(activeTab);
+      setActiveTab("search");
+    } else if (!hasValue && activeTab === "search") {
+      setActiveTab(prevTab || "image");
+    }
+  };
   // Read the host's memory so MLX models can be gated against their memory tier.
   // Desktop reads it from the Tauri GPU probe; a remote LAN browser reads the
   // auth-protected REST signal (epic 4484 story 9). `isDesktop`/`tauriInvoke` come
   // from the unified runtime helper (story 6).
   const [unifiedMemoryGb, setUnifiedMemoryGb] = useState(null);
+  // "Update" orchestration for convert-at-install models (epic 10285): re-download the newer
+  // source checkpoint, then auto-fire the re-convert once that download completes. Maps a model id
+  // to the specific download job id we're waiting on — a specific id (not "any completed download")
+  // so a stale prior-version download can't trigger the convert before the new source is in.
+  const [pendingUpdate, setPendingUpdate] = useState({});
   // Gated-model credential presence (sc-1898): only fetched when the catalog has a
   // gated model, so non-gated deployments make no extra credential request.
   const [credentials, setCredentials] = useState([]);
@@ -653,6 +713,53 @@ export function ModelManagerScreen() {
     };
   }, [hasGatedModel]);
 
+  // Second half of the "Update" flow: when the tracked source re-download completes, kick the
+  // re-convert (the convert reads the now-current `convertSourceFile` from the cache). We watch the
+  // SPECIFIC download job id, so a previously-completed old-version download never fires this early.
+  useEffect(() => {
+    const entries = Object.entries(pendingUpdate);
+    if (entries.length === 0) {
+      return;
+    }
+    let changed = false;
+    const next = { ...pendingUpdate };
+    for (const [modelId, downloadJobId] of entries) {
+      const download = jobs.find((job) => job.id === downloadJobId);
+      if (!download) {
+        continue; // job not visible yet — keep waiting
+      }
+      if (download.status === "completed") {
+        const activeConvert = jobs.find(
+          (job) =>
+            job.type === "model_convert" &&
+            job.payload?.modelId === modelId &&
+            !terminalStatuses.has(job.status),
+        );
+        if (!activeConvert) {
+          createModelConvertJob({ id: modelId });
+        }
+        delete next[modelId];
+        changed = true;
+      } else if (terminalStatuses.has(download.status)) {
+        // Download failed/canceled/interrupted — abandon the chain; the download error is surfaced.
+        delete next[modelId];
+        changed = true;
+      }
+    }
+    if (changed) {
+      setPendingUpdate(next);
+    }
+  }, [jobs, pendingUpdate, createModelConvertJob]);
+
+  // First half of the "Update" flow: re-download the newer source, then track its job so the effect
+  // above can auto-convert once it lands. Reuses the existing download + convert endpoints.
+  async function handleUpdateModel(model) {
+    const job = await onDownloadModel(model);
+    if (job?.id) {
+      setPendingUpdate((prev) => ({ ...prev, [model.id]: job.id }));
+    }
+  }
+
   function downloadJobsFor(model) {
     return jobs.filter((job) => job.type === "model_download" && job.payload?.modelId === model.id);
   }
@@ -689,6 +796,8 @@ export function ModelManagerScreen() {
         ...(isFileImport ? { file: importForm.file } : { sourceUrl: importForm.sourceUrl.trim() }),
         name: importForm.name.trim() || undefined,
         scope: importForm.scope,
+        triggerWords: importForm.triggerKeywords,
+        notes: importForm.notes.trim() || undefined,
         ...familyOverride,
         ...baseModelOverride,
         ...secondaryOverride,
@@ -702,7 +811,15 @@ export function ModelManagerScreen() {
         !importForm.family && resolvedFamily
           ? ` Detected family: ${normalizeLoraFamily(resolvedFamily)}.`
           : "";
-      setImportForm((current) => ({ ...current, sourceUrl: "", file: null, secondaryFile: null, name: "" }));
+      setImportForm((current) => ({
+        ...current,
+        sourceUrl: "",
+        file: null,
+        secondaryFile: null,
+        name: "",
+        triggerKeywords: [],
+        notes: "",
+      }));
       // Force a re-mount so choosing the same file again still emits a change event.
       setFileInputKey((current) => current + 1);
       setImportMessage({
@@ -765,7 +882,11 @@ export function ModelManagerScreen() {
     setDeleteMessage({ tone: "neutral", text: "" });
     try {
       const result = await onDeleteModel(model);
-      setDeleteMessage({ tone: "success", text: deleteResultText(result, model.name ?? model.id) });
+      if (result?.cancelled) {
+        setDeleteMessage({ tone: "neutral", text: "" });
+      } else {
+        setDeleteMessage({ tone: "success", text: deleteResultText(result, model.name ?? model.id) });
+      }
     } catch (err) {
       setDeleteMessage({ tone: "error", text: err.message });
     } finally {
@@ -784,7 +905,11 @@ export function ModelManagerScreen() {
     setDeleteMessage({ tone: "neutral", text: "" });
     try {
       const result = await onDeleteLora(lora);
-      setDeleteMessage({ tone: "success", text: deleteResultText(result, lora.name ?? lora.id) });
+      if (result?.cancelled) {
+        setDeleteMessage({ tone: "neutral", text: "" });
+      } else {
+        setDeleteMessage({ tone: "success", text: deleteResultText(result, lora.name ?? lora.id) });
+      }
     } catch (err) {
       setDeleteMessage({ tone: "error", text: err.message });
     } finally {
@@ -803,29 +928,12 @@ export function ModelManagerScreen() {
     (isModelFileImport ? !modelImportForm.file : !modelImportForm.sourceUrl.trim());
   const hiddenImportCount =
     familyFilter === "all" ? 0 : pendingLoraImportJobs.filter((job) => job.status !== "completed" && !matchesFamily(job, familyFilter)).length;
-  const visibleLoraCount = visibleLoras.length + localLoraImportJobs.length;
-  const installedLoraCount = visibleLoras.filter((lora) => lora.installState === "installed").length;
-  const unavailableLoraCount = visibleLoras.filter((lora) => lora.installState === "missing").length;
-  const pendingLoraCount = visibleLoraCount - installedLoraCount - unavailableLoraCount;
-  const loraCountText = [
-    installedLoraCount ? `${installedLoraCount} installed` : null,
-    unavailableLoraCount ? `${unavailableLoraCount} unavailable` : null,
-    pendingLoraCount ? `${pendingLoraCount} pending` : null,
-  ].filter(Boolean).join(" · ") || "0 visible";
   const isFileImport = importForm.mode === "file";
   const importDisabled =
     importingLora ||
     !onImportLora ||
     (importForm.scope === "project" && !activeProject) ||
     (isFileImport ? !importForm.file : !importForm.sourceUrl.trim());
-
-  // Models grouped by type for the sectioned layout. Known types keep their fixed
-  // order; anything else lands in a trailing "Other" group. Empty groups drop out.
-  const knownModelTypes = new Set(MODEL_TYPE_GROUPS.map((group) => group.type));
-  const modelGroups = [
-    ...MODEL_TYPE_GROUPS.map((group) => ({ ...group, items: models.filter((model) => model.type === group.type) })),
-    { type: "other", label: "Other Models", items: models.filter((model) => !knownModelTypes.has(model.type)) },
-  ].filter((group) => group.items.length > 0);
 
   // LoRAs split into Built-In (catalog `scope: "builtin"`) and User (global/project)
   // containers. Built-in entries are a flat list with a Download affordance; user
@@ -879,25 +987,36 @@ export function ModelManagerScreen() {
     // Quant-matrix models (sc-8509): render the per-tier download panel with a RAM-based suggestion
     // + multi-select instead of the single Download button. Single-variant models are unchanged.
     const hasTierMatrix = model.hasVariantMatrix === true && orderedMatrixVariants(model).length > 0;
+    const firstCapability = capabilities.length ? capabilityLabel(capabilities[0]) : null;
+    const familyMeta = [model.family ?? "unassociated", firstCapability].filter(Boolean).join(" · ");
+    const macBlock = macModelBlock(model, macCapabilities);
+    // Header install-status badge: warn tones for an incomplete cache, accent for installed,
+    // neutral for missing.
+    const statusClass = incomplete ? "status-badge warning" : installed ? "status-badge installed" : "status-badge";
+    const statusText = incomplete ? "incomplete" : installed ? "installed" : "missing";
     return (
-      <article className="model-card" key={model.id}>
-        <div>
-          <p className="eyebrow">{model.family ?? "unassociated"}</p>
-          <h3>{model.name}</h3>
+      <article className={model.recommended ? "model-card recommended" : "model-card"} key={model.id}>
+        <div className="model-card-head">
+          <span className="model-card-title">
+            <strong>{model.name}</strong>
+            <small>{familyMeta}</small>
+          </span>
+          <span className="model-card-status">
+            <span className={statusClass}>{statusText}</span>
+            {unassociated ? (
+              <span className="status-badge warning" title="Set this model's family in user.models.jsonc before using it for generation.">
+                needs family
+              </span>
+            ) : null}
+            {macBlock ? (
+              <span className="status-badge warning" title={macBlock.text}>
+                not on Mac
+              </span>
+            ) : null}
+          </span>
         </div>
-        <span className={incomplete ? "status-badge warning" : installed ? "status-badge installed" : "status-badge"}>
-          {incomplete ? "incomplete" : installed ? "installed" : "missing"}
-        </span>
-        {unassociated ? (
-          <span className="status-badge warning" title="Set this model's family in user.models.jsonc before using it for generation.">
-            needs family
-          </span>
-        ) : null}
-        {macModelBlock(model, macCapabilities) ? (
-          <span className="status-badge warning" title={macModelBlock(model, macCapabilities).text}>
-            not on Mac
-          </span>
-        ) : null}
+        {isRecommendedModel(model) ? <span className="model-card-rec-chip">★ Recommended</span> : null}
+        <p className="model-card-description">{model.ui?.description ?? model.family ?? model.id}</p>
         {capabilities.length ? (
           <ul className="model-capabilities">
             {capabilities.map((capability) => (
@@ -907,7 +1026,6 @@ export function ModelManagerScreen() {
             ))}
           </ul>
         ) : null}
-        <p>{model.ui?.description ?? model.family ?? model.id}</p>
         {gated && !installed ? (
           <GatedModelNotice
             host={model.credentialHost}
@@ -925,16 +1043,6 @@ export function ModelManagerScreen() {
             {missingRequiredFiles.length ? `: ${missingRequiredFiles.slice(0, 3).join(", ")}${missingRequiredFiles.length > 3 ? "..." : ""}` : ""}.
           </p>
         ) : null}
-        <dl>
-          <div>
-            <dt>Repo</dt>
-            <dd>{model.downloads?.[0]?.repo ?? "none"}</dd>
-          </div>
-          <div>
-            <dt>Download size</dt>
-            <dd>{downloadSize}</dd>
-          </div>
-        </dl>
         {localDownloadJob ? (
           <WorkerProgressCard
             job={localDownloadJob}
@@ -948,18 +1056,47 @@ export function ModelManagerScreen() {
           <div className="mlx-status">
             <div className="mlx-status-badges">
               <span className="status-badge">MLX</span>
-              {mlxMinGb != null ? (
+              {/* The model-level `mlx.minMemoryGb` is a single blanket floor = the HEAVIEST tier's
+                  worst case (e.g. Wan A14B bf16, both MoE experts dense = 133 GB). Showing it
+                  tier-agnostically over-warns quant-matrix models whose default/installed tier is q4
+                  (measured ~24 GiB, one MoE expert resident at a time) — it reads "won't run" on Macs
+                  that run q4/q8 fine. For a matrix model the per-tier download panel below drives the
+                  per-tier RAM guidance instead (sc-10042); keep the blanket badge/warning only for
+                  single-variant MLX models, which have one legitimate footprint. */}
+              {mlxMinGb != null && !hasTierMatrix ? (
                 <span className={mlxEnoughMemory ? "status-badge" : "status-badge warning"}>needs ≥ {mlxMinGb} GB</span>
               ) : null}
             </div>
             <p>{mlxStatusText(model)}</p>
-            {!mlxEnoughMemory ? (
+            {!mlxEnoughMemory && !hasTierMatrix ? (
               <p className="inline-warning">
                 Needs ≥ {mlxMinGb} GB unified memory; this Mac has ~{Math.round(unifiedMemoryGb)} GB. It may run out of memory.
               </p>
             ) : null}
             {convertJob ? <WorkerProgressCard job={convertJob} onCancel={onCancelJob} onOpenQueue={onOpenQueue} /> : null}
-            {showConvertButton ? (
+            {model.updateAvailable ? (
+              <>
+                <p className="inline-warning">
+                  A newer checkpoint is available. Update re-downloads it and re-converts to MLX.
+                </p>
+                <button
+                  disabled={
+                    Boolean(downloadJob) ||
+                    Boolean(convertJob) ||
+                    Boolean(pendingUpdate[model.id]) ||
+                    !mlxEnoughMemory
+                  }
+                  onClick={() => handleUpdateModel(model)}
+                  type="button"
+                >
+                  {convertJob
+                    ? convertJob.status
+                    : downloadJob || pendingUpdate[model.id]
+                      ? "Updating…"
+                      : "Update"}
+                </button>
+              </>
+            ) : showConvertButton ? (
               <button
                 disabled={mlxState === "converted" || Boolean(convertJob) || !mlxEnoughMemory}
                 onClick={() => onConvertModel?.(model)}
@@ -985,13 +1122,31 @@ export function ModelManagerScreen() {
             onDownloadVariant={onDownloadVariant}
           />
         ) : null}
-        <div className="model-card-actions">
-          {hasTierMatrix ? (
-            // A quant-matrix model installs its tiers from the panel above. Keep only a Fix
-            // affordance here for an incomplete cache; otherwise there's no single-tier button.
-            incomplete ? (
+        <div className="model-card-footer">
+          <span className="model-card-size">{downloadSize}</span>
+          <div className="model-card-footer-actions">
+            {hasTierMatrix ? (
+              // A quant-matrix model installs its tiers from the panel above. Keep only a Fix
+              // affordance here for an incomplete cache; otherwise there's no single-tier button.
+              incomplete ? (
+                <button
+                  className="model-card-primary"
+                  disabled={!model.downloadable || Boolean(downloadJob) || licenseAckRequired}
+                  title={licenseAckRequired ? "Accept the license above before downloading." : undefined}
+                  onClick={() =>
+                    failedDownload
+                      ? onResumeDownloadJob(localDownloadJob, { payloadChanges: { downloadAction: "resume" } })
+                      : onDownloadModel(model)
+                  }
+                  type="button"
+                >
+                  {downloadJob ? downloadJob.status : failedDownload ? "Resume Download" : "Fix"}
+                </button>
+              ) : null
+            ) : (
               <button
-                disabled={!model.downloadable || Boolean(downloadJob) || licenseAckRequired}
+                className="model-card-primary"
+                disabled={(installed && !incomplete) || !model.downloadable || Boolean(downloadJob) || licenseAckRequired}
                 title={licenseAckRequired ? "Accept the license above before downloading." : undefined}
                 onClick={() =>
                   failedDownload
@@ -1000,62 +1155,107 @@ export function ModelManagerScreen() {
                 }
                 type="button"
               >
-                {downloadJob ? downloadJob.status : failedDownload ? "Resume Download" : "Fix"}
+                {downloadJob
+                  ? downloadJob.status
+                  : failedDownload
+                      ? "Resume Download"
+                      : incomplete
+                        ? "Fix"
+                        : installed
+                          ? "Ready"
+                          : model.downloadSizeLabel
+                            ? `Download ${downloadSize}`
+                            : "Download"}
               </button>
-            ) : null
-          ) : (
-            <button
-              disabled={(installed && !incomplete) || !model.downloadable || Boolean(downloadJob) || licenseAckRequired}
-              title={licenseAckRequired ? "Accept the license above before downloading." : undefined}
-              onClick={() =>
-                failedDownload
-                  ? onResumeDownloadJob(localDownloadJob, { payloadChanges: { downloadAction: "resume" } })
-                  : onDownloadModel(model)
-              }
-              type="button"
-            >
-              {downloadJob
-                ? downloadJob.status
-                : failedDownload
-                    ? "Resume Download"
-                    : incomplete
-                      ? "Fix"
-                      : installed
-                        ? "Ready"
-                        : model.downloadSizeLabel
-                          ? `Download ${downloadSize}`
-                          : "Download"}
+            )}
+            <button className="danger-action" disabled={!canDelete || deletingItem === deleteKey} onClick={() => deleteModel(model)} type="button">
+              {model.removable === false ? "Protected" : deletingItem === deleteKey ? "Deleting" : "Delete"}
             </button>
-          )}
-          <button className="danger-action" disabled={!canDelete || deletingItem === deleteKey} onClick={() => deleteModel(model)} type="button">
-            {model.removable === false ? "Protected" : deletingItem === deleteKey ? "Deleting" : "Delete"}
-          </button>
+          </div>
         </div>
       </article>
     );
   }
 
+  const loraEditKey = (lora) => `${lora.scope ?? "global"}:${lora.id}`;
+
+  function startEditLora(lora) {
+    setEditingLora(loraEditKey(lora));
+    setLoraEditDraft({
+      triggerWords: Array.isArray(lora.triggerWords) ? lora.triggerWords : [],
+      notes: typeof lora.notes === "string" ? lora.notes : "",
+    });
+    setLoraEditSuggestions([]);
+    setLoraEditError("");
+    if (onFetchLoraEmbeddedTags) {
+      onFetchLoraEmbeddedTags(lora)
+        .then((tags) => setLoraEditSuggestions(Array.isArray(tags) ? tags : []))
+        .catch(() => setLoraEditSuggestions([]));
+    }
+  }
+
+  function cancelEditLora() {
+    setEditingLora("");
+    setLoraEditError("");
+  }
+
+  async function saveEditLora(lora) {
+    if (!onUpdateLora) {
+      return;
+    }
+    setSavingLora(true);
+    setLoraEditError("");
+    try {
+      await onUpdateLora(lora, {
+        triggerWords: loraEditDraft.triggerWords,
+        notes: loraEditDraft.notes.trim(),
+      });
+      setEditingLora("");
+    } catch (error) {
+      setLoraEditError(error?.message ?? "Failed to save LoRA metadata.");
+    } finally {
+      setSavingLora(false);
+    }
+  }
+
   function renderLoraRow(lora) {
     const installed = lora.installState === "installed";
     const missing = lora.installState === "missing";
-    const statusText = missing ? "unavailable" : installed ? "installed" : "pending";
+    const isBuiltin = lora.scope === "builtin";
+    // A built-in that isn't downloaded reads "not installed" (neutral) — it can be fetched.
+    // A user LoRA with no local files reads "unavailable" (danger) — it's registered but broken.
+    const userUnavailable = missing && !isBuiltin;
+    const statusText = installed ? "installed" : missing ? (isBuiltin ? "not installed" : "unavailable") : "pending";
+    const statusClass = installed ? "status-badge installed" : userUnavailable ? "status-badge danger" : "status-badge";
+    const rowClass = userUnavailable ? "lora-row unavailable" : "lora-row";
     const deleteKey = `lora:${lora.scope ?? "global"}:${lora.id}`;
     // Built-in LoRAs with a Hugging Face source can be fetched on demand (sc-5944) —
     // user LoRAs are installed via the import form, so they get no Download affordance.
     const hfSource = (lora.source?.provider ?? lora.provider) === "huggingface";
     const canDownload = Boolean(onDownloadLora) && lora.scope === "builtin" && !installed && hfSource;
     const downloadJob = loraDownloadJobsFor(lora).find((job) => !terminalStatuses.has(job.status));
+    const keywords = Array.isArray(lora.triggerWords) ? lora.triggerWords : [];
+    const notes = typeof lora.notes === "string" ? lora.notes : "";
+    const isEditing = editingLora === loraEditKey(lora);
+    // Built-in entries are read-only (their manifest is compiled in); the backend
+    // rejects PATCH on them, so no Edit affordance is offered.
+    const canEdit = Boolean(onUpdateLora) && lora.scope !== "builtin";
     return (
-      <article className={missing ? "lora-row warning" : "lora-row"} key={lora.id ?? lora.name}>
+      <article className={rowClass} key={lora.id ?? lora.name}>
         <span>
           <strong>{lora.name ?? lora.id}</strong>
           <small>{[lora.scope, lora.family ?? "compatible"].filter(Boolean).join(" | ")}</small>
         </span>
-        <span className={installed ? "status-badge installed" : "status-badge"}>{statusText}</span>
+        <span className={statusClass}>{statusText}</span>
         <span className="lora-row-actions">
           {canDownload ? (
             <button disabled={Boolean(downloadJob)} onClick={() => onDownloadLora(lora)} type="button">
               {downloadJob ? downloadJob.status : "Download"}
+            </button>
+          ) : null}
+          {canEdit && !isEditing ? (
+            <button onClick={() => startEditLora(lora)} type="button">
+              Edit
             </button>
           ) : null}
           <button
@@ -1067,6 +1267,52 @@ export function ModelManagerScreen() {
             {lora.removable === false ? "Protected" : deletingItem === deleteKey ? "Deleting" : "Delete"}
           </button>
         </span>
+        {!isEditing && (keywords.length || notes) ? (
+          <div className="lora-row-meta">
+            {keywords.length ? (
+              <div className="lora-keywords">
+                {keywords.map((keyword) => (
+                  <span className="kw-chip" key={keyword}>
+                    {keyword}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            {notes ? <p className="lora-notes">{notes}</p> : null}
+          </div>
+        ) : null}
+        {isEditing ? (
+          <div className="lora-row-editor">
+            <label>
+              Trigger keywords
+              <KeywordTagEditor
+                disabled={savingLora}
+                onChange={(triggerWords) => setLoraEditDraft((current) => ({ ...current, triggerWords }))}
+                suggestions={loraEditSuggestions}
+                value={loraEditDraft.triggerWords}
+              />
+            </label>
+            <label>
+              Notes
+              <textarea
+                disabled={savingLora}
+                onChange={(event) => setLoraEditDraft((current) => ({ ...current, notes: event.target.value }))}
+                placeholder="How to use this LoRA — keyword combinations, recommended weight, and other tips."
+                rows={2}
+                value={loraEditDraft.notes}
+              />
+            </label>
+            <div className="lora-row-editor-actions">
+              <button disabled={savingLora} onClick={() => saveEditLora(lora)} type="button">
+                {savingLora ? "Saving…" : "Save"}
+              </button>
+              <button disabled={savingLora} onClick={cancelEditLora} type="button">
+                Cancel
+              </button>
+            </div>
+            {loraEditError ? <p className="inline-warning">{loraEditError}</p> : null}
+          </div>
+        ) : null}
         {downloadJob ? (
           <div className="lora-row-progress">
             <WorkerProgressCard job={downloadJob} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
@@ -1076,16 +1322,174 @@ export function ModelManagerScreen() {
     );
   }
 
+  // --- Tabbed interface derivation (epic 10309) ---
+  const query = search.trim().toLowerCase();
+  const hasSearch = query !== "";
+  // When search is cleared but the transient Search tab is still nominally active, fall back
+  // to the tab we came from (handleSearchChange normally does this; this guards other paths).
+  const effectiveTab = activeTab === "search" && !hasSearch ? prevTab || "image" : activeTab;
+
+  // Family filter applies to models via their LoRA-compatibility families (the same union the
+  // dropdown is built from) and to LoRAs via matchesFamily — so a selected token never hides
+  // everything. Search is case-insensitive over name/family/capability labels (models) and
+  // name/family (LoRAs).
+  const modelMatchesFamily = (model) => familyFilter === "all" || modelLoraFamilies(model).includes(familyFilter);
+  const modelCapabilityLabels = (model) =>
+    (Array.isArray(model.capabilities) ? model.capabilities : []).map(capabilityLabel);
+  const modelMatchesQuery = (model) =>
+    !hasSearch ||
+    (model.name ?? model.id ?? "").toLowerCase().includes(query) ||
+    (model.family ?? "").toLowerCase().includes(query) ||
+    modelCapabilityLabels(model).some((label) => label.toLowerCase().includes(query));
+  const loraMatchesQuery = (lora) =>
+    !hasSearch ||
+    (lora.name ?? lora.id ?? "").toLowerCase().includes(query) ||
+    (lora.family ?? "").toLowerCase().includes(query);
+
+  // Cross-type search matches feed the transient Search Results tab + its badge count. LoRAs are
+  // taken from the already family-filtered `visibleLoras`.
+  const searchModelMatches = models.filter(modelMatchesQuery).filter(modelMatchesFamily);
+  const searchLoraMatches = visibleLoras.filter(loraMatchesQuery);
+  const searchTotalCount = searchModelMatches.length + searchLoraMatches.length;
+
+  // Tab definitions — counts are TOTALS per type (not the filtered view). The transient Search
+  // Results tab is appended only while a search is active; its badge is the live match count.
+  const tabDefs = [
+    ["image", "Image Models", models.filter((model) => model.type === "image").length],
+    ["video", "Video Models", models.filter((model) => model.type === "video").length],
+    ["utility", "Utility Models", models.filter((model) => model.type === "utility").length],
+    ["lora", "LoRAs", loras.length],
+  ];
+  if (hasSearch) {
+    tabDefs.push(["search", "⌕ Search Results", searchTotalCount]);
+  }
+
+  const isSearchTab = effectiveTab === "search";
+  const isLoraTab = effectiveTab === "lora";
+  const isModelTab = !isSearchTab && !isLoraTab;
+
+  // A model type panel: an accent Recommended band (when any recommended match) over an
+  // "All {type} models" grid of the rest. Both filtered by the active search + family.
+  function renderModelTabPanel(type) {
+    const activeModels = models
+      .filter((model) => model.type === type)
+      .filter(modelMatchesQuery)
+      .filter(modelMatchesFamily);
+    const recommended = activeModels.filter(isRecommendedModel);
+    const others = activeModels.filter((model) => !isRecommendedModel(model));
+    const typeLabel = { image: "image", video: "video", utility: "utility" }[type] ?? type;
+    const othersHeading =
+      recommended.length > 0 ? `All ${typeLabel} models` : `${typeLabel.charAt(0).toUpperCase()}${typeLabel.slice(1)} models`;
+    return (
+      <div className="models-tab-panel">
+        {recommended.length ? (
+          <div className="models-accent-band">
+            <div className="models-accent-band-head">
+              <span className="models-accent-dot" aria-hidden="true" />
+              <p className="eyebrow">Recommended</p>
+              <span className="models-accent-band-count">{recommended.length}</span>
+              <span className="models-accent-band-caption">Curated getting-started picks</span>
+            </div>
+            <div className="models-card-grid">{recommended.map((model) => renderModelCard(model))}</div>
+          </div>
+        ) : null}
+        {others.length ? (
+          <div className="models-section">
+            <div className="models-section-heading">
+              <h3>{othersHeading}</h3>
+              <span>{others.length}</span>
+            </div>
+            <div className="models-card-grid">{others.map((model) => renderModelCard(model))}</div>
+          </div>
+        ) : null}
+        {recommended.length === 0 && others.length === 0 ? (
+          <div className="models-empty">No models match your search.</div>
+        ) : null}
+      </div>
+    );
+  }
+
+  // The transient Search Results tab: cross-type model matches grouped by type, then a LoRA
+  // section using the shared row. Only non-empty groups render.
+  function renderSearchTabPanel() {
+    const groups = [
+      ["image", "Image Models"],
+      ["video", "Video Models"],
+      ["utility", "Utility Models"],
+    ]
+      .map(([type, label]) => ({ label, items: searchModelMatches.filter((model) => model.type === type) }))
+      .filter((group) => group.items.length > 0);
+    const isEmpty = groups.length === 0 && searchLoraMatches.length === 0;
+    return (
+      <div className="models-tab-panel">
+        {groups.map((group) => (
+          <div className="models-section" key={group.label}>
+            <div className="models-section-heading">
+              <h3>{group.label}</h3>
+              <span>{group.items.length}</span>
+            </div>
+            <div className="models-card-grid">{group.items.map((model) => renderModelCard(model))}</div>
+          </div>
+        ))}
+        {searchLoraMatches.length ? (
+          <div className="models-section">
+            <div className="models-section-heading">
+              <h3>LoRAs</h3>
+              <span>{searchLoraMatches.length}</span>
+            </div>
+            <div className="lora-list">{searchLoraMatches.map((lora) => renderLoraRow(lora))}</div>
+          </div>
+        ) : null}
+        {isEmpty ? <div className="models-empty">No models or LoRAs match &ldquo;{search}&rdquo;.</div> : null}
+      </div>
+    );
+  }
+
   return (
     <section className="main-surface models-surface">
-      <div className="surface-header">
-        <div className="section-heading">
-          <p className="eyebrow">Runtime assets</p>
-          <h2>Models</h2>
+      <div className="section-heading">
+        <p className="eyebrow">Runtime assets</p>
+        <h2>Models</h2>
+      </div>
+
+      <div className="models-tabbar">
+        <div className="mode-tabs" role="tablist" aria-label="Model type">
+          {tabDefs.map(([key, label, count]) => {
+            const active = effectiveTab === key;
+            return (
+              <button
+                key={key}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                className={active ? "mode-tab active" : "mode-tab"}
+                onClick={() => setActiveTab(key)}
+              >
+                {label}
+                <span className="models-tab-count">{count}</span>
+              </button>
+            );
+          })}
         </div>
-        <label>
-          LoRA family
-          <select onChange={(event) => setFamilyFilter(event.target.value)} value={familyFilter}>
+        <div className="models-tabbar-controls">
+          <div className="models-search">
+            <span className="models-search-glyph" aria-hidden="true">
+              ⌕
+            </span>
+            <input
+              type="search"
+              value={search}
+              onChange={handleSearchChange}
+              placeholder="Search models"
+              aria-label="Search models"
+            />
+          </div>
+          <select
+            className="models-family-select"
+            value={familyFilter}
+            onChange={(event) => setFamilyFilter(event.target.value)}
+            aria-label="Filter by family"
+          >
             <option value="all">All families</option>
             {families.map((family) => (
               <option key={family} value={family}>
@@ -1093,368 +1497,360 @@ export function ModelManagerScreen() {
               </option>
             ))}
           </select>
-        </label>
+        </div>
       </div>
 
-      {modelGroups.map((group) => {
-        const recommended = group.items.filter(isRecommendedModel);
-        const additional = group.items.filter((model) => !isRecommendedModel(model));
-        // Only split into Recommended / Additional Supported when both buckets exist;
-        // otherwise show a single grid so we never render an empty or redundant header.
-        const split = recommended.length > 0 && additional.length > 0;
-        return (
-          <details className="model-type-group" key={group.type} open>
-            <summary className="model-type-group-heading">
-              <h3>{group.label}</h3>
-              <span>{group.items.length}</span>
-            </summary>
-            {split ? (
-              <>
-                <div className="model-subgroup">
-                  <div className="model-subgroup-heading">
-                    <h4>Recommended Models</h4>
-                    <span>{recommended.length}</span>
-                  </div>
-                  <div className="model-grid">{recommended.map((model) => renderModelCard(model))}</div>
-                </div>
-                <details className="model-subgroup model-subgroup-additional">
-                  <summary className="model-subgroup-heading">
-                    <h4>Additional Supported Models</h4>
-                    <span>{additional.length}</span>
-                  </summary>
-                  <div className="model-grid">{additional.map((model) => renderModelCard(model))}</div>
-                </details>
-              </>
-            ) : (
-              <div className="model-grid">{group.items.map((model) => renderModelCard(model))}</div>
-            )}
-          </details>
-        );
-      })}
       {deleteMessage.text ? <p className={deleteMessage.tone === "success" ? "inline-success" : "inline-warning"}>{deleteMessage.text}</p> : null}
 
-      <section className="model-import-panel-section">
-        {MODEL_IMPORT_ENABLED && (
-        <form className="lora-import-panel models-import-panel" aria-label="Import model" onSubmit={importModel}>
-          <div>
-            <strong>Import model</strong>
-            <span>{modelImportForm.family || "auto-detect family"}</span>
-          </div>
-          <div className="segmented-control compact-segment" aria-label="Model import source">
-            <button
-              className={modelImportForm.mode === "url" ? "active" : ""}
-              disabled={importingModel}
-              onClick={() => setModelImportForm((current) => ({ ...current, mode: "url" }))}
-              type="button"
-            >
-              URL
-            </button>
-            <button
-              className={modelImportForm.mode === "file" ? "active" : ""}
-              disabled={importingModel}
-              onClick={() => setModelImportForm((current) => ({ ...current, mode: "file" }))}
-              type="button"
-            >
-              Upload
-            </button>
-          </div>
-          <div className="models-import-grid">
-            <label>
-              Type
-              <select
-                disabled={importingModel}
-                onChange={(event) => setModelImportForm((current) => ({ ...current, type: event.target.value }))}
-                value={modelImportForm.type}
-              >
-                {MODEL_TYPE_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Family
-              <select
-                disabled={importingModel || !families.length}
-                onChange={(event) => setModelImportForm((current) => ({ ...current, family: event.target.value }))}
-                value={modelImportForm.family}
-              >
-                {families.length ? (
-                  <>
-                    <option value="">Auto-detect</option>
-                    {families.map((family) => (
-                      <option key={family} value={family}>
-                        {family}
-                      </option>
-                    ))}
-                  </>
-                ) : (
-                  <option value="">No known families</option>
-                )}
-              </select>
-            </label>
-            {isModelFileImport ? (
-              <label>
-                Model File
-                <span className="file-picker-row">
-                  <span className="file-upload-button">
-                    Choose
-                    <input
-                      accept=".safetensors,.ckpt,.pt,.bin"
-                      disabled={importingModel}
-                      key={modelFileInputKey}
-                      onChange={(event) => setModelImportForm((current) => ({ ...current, file: event.target.files?.[0] ?? null }))}
-                      type="file"
-                    />
-                  </span>
-                  <span className="selected-file-name">{modelImportForm.file?.name ?? "No file selected"}</span>
-                </span>
-              </label>
-            ) : (
-              <label>
-                Source URL
-                <input
-                  disabled={importingModel}
-                  onChange={(event) => setModelImportForm((current) => ({ ...current, sourceUrl: event.target.value }))}
-                  placeholder="https://..."
-                  value={modelImportForm.sourceUrl}
-                />
-              </label>
-            )}
-            <label>
-              Name
-              <input
-                disabled={importingModel}
-                onChange={(event) => setModelImportForm((current) => ({ ...current, name: event.target.value }))}
-                placeholder="Optional"
-                value={modelImportForm.name}
-              />
-            </label>
-            <button disabled={modelImportDisabled} type="submit">
-              {importingModel ? (isModelFileImport ? "Uploading" : "Queueing...") : "Queue Import"}
-            </button>
-          </div>
-          {modelImportMessage.text ? <p className={modelImportMessage.tone === "success" ? "inline-success" : "inline-warning"}>{modelImportMessage.text}</p> : null}
-        </form>
-        )}
-        {pendingModelImportJobs.length ? (
-          <div className="lora-import-progress">
-            <strong>Model imports in progress</strong>
-            <div className="local-job-stack">
-              {pendingModelImportJobs.map((job) => (
-                <WorkerProgressCard job={job} key={job.id} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
-              ))}
+      {isModelTab ? renderModelTabPanel(effectiveTab) : null}
+      {isSearchTab ? renderSearchTabPanel() : null}
+
+      {isLoraTab ? (
+        <div className="models-tab-panel">
+          {/* Import LoRA — same accent-band treatment as the Recommended band. */}
+          <form className="models-accent-band models-import-panel" aria-label="Import LoRA" onSubmit={importLora}>
+            <div className="models-accent-band-head">
+              <span className="models-accent-dot" aria-hidden="true" />
+              <p className="eyebrow">Import LoRA</p>
+              <span className="models-accent-band-caption">Add a LoRA from a URL or file — auto-detects family</span>
             </div>
-          </div>
-        ) : null}
-      </section>
-
-      <section className="lora-panel">
-        <div className="lora-panel-header">
-          <div className="section-heading">
-            <p className="eyebrow">LoRAs</p>
-            <h2>{familyFilter === "all" ? "All compatible" : familyFilter}</h2>
-          </div>
-          <span>{loraCountText}</span>
-        </div>
-
-        {builtinLoras.length ? (
-          <details className="lora-scope-group" open>
-            <summary className="lora-scope-group-heading">
-              <h3>Built-In LoRAs</h3>
-              <span>{builtinLoras.length}</span>
-            </summary>
-            <div className="lora-list">{builtinLoras.map((lora) => renderLoraRow(lora))}</div>
-          </details>
-        ) : null}
-
-        <details className="lora-scope-group" open>
-        <summary className="lora-scope-group-heading">
-          <h3>User LoRAs</h3>
-          <span>{userLoras.length}</span>
-        </summary>
-        <form className="lora-import-panel models-import-panel" aria-label="Import LoRA" onSubmit={importLora}>
-          <div>
-            <strong>Import LoRA</strong>
-            <span>{importForm.family || "auto-detect"}</span>
-          </div>
-          <div className="segmented-control compact-segment" aria-label="LoRA import source">
-            <button
-              className={importForm.mode === "url" ? "active" : ""}
-              disabled={importingLora}
-              onClick={() => setImportForm((current) => ({ ...current, mode: "url" }))}
-              type="button"
-            >
-              URL
-            </button>
-            <button
-              className={importForm.mode === "file" ? "active" : ""}
-              disabled={importingLora}
-              onClick={() => setImportForm((current) => ({ ...current, mode: "file" }))}
-              type="button"
-            >
-              Upload
-            </button>
-          </div>
-          <div className="models-import-grid">
-            <label>
-              Scope
-              <select
+            <div className="segmented-control compact-segment" aria-label="LoRA import source">
+              <button
+                className={importForm.mode === "url" ? "active" : ""}
                 disabled={importingLora}
-                onChange={(event) => setImportForm((current) => ({ ...current, scope: event.target.value }))}
-                value={importForm.scope}
+                onClick={() => setImportForm((current) => ({ ...current, mode: "url" }))}
+                type="button"
               >
-                <option value="global">Global</option>
-                <option disabled={!activeProject} value="project">
-                  Project
-                </option>
-              </select>
-            </label>
-            <label>
-              Family
-              <select
-                disabled={importingLora || !families.length}
-                onChange={(event) => setImportForm((current) => ({ ...current, family: event.target.value }))}
-                value={importForm.family}
+                URL
+              </button>
+              <button
+                className={importForm.mode === "file" ? "active" : ""}
+                disabled={importingLora}
+                onClick={() => setImportForm((current) => ({ ...current, mode: "file" }))}
+                type="button"
               >
-                {families.length ? (
-                  <>
-                    <option value="">Auto-detect</option>
-                    {families.map((family) => (
-                      <option key={family} value={family}>
-                        {family}
-                      </option>
-                    ))}
-                  </>
-                ) : (
-                  <option value="">No model families</option>
-                )}
-              </select>
-            </label>
-            {showBaseModelSelect ? (
+                Upload
+              </button>
+            </div>
+            <div className="models-import-grid">
               <label>
-                Base model
+                Scope
                 <select
                   disabled={importingLora}
-                  onChange={(event) => setImportForm((current) => ({ ...current, baseModel: event.target.value }))}
-                  value={importForm.baseModel}
+                  onChange={(event) => setImportForm((current) => ({ ...current, scope: event.target.value }))}
+                  value={importForm.scope}
                 >
-                  <option value="">Auto / unspecified</option>
-                  {wanBaseModelOptions.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.name ?? model.id}
-                    </option>
-                  ))}
+                  <option value="global">Global</option>
+                  <option disabled={!activeProject} value="project">
+                    Project
+                  </option>
                 </select>
               </label>
-            ) : null}
-            {isFileImport ? (
-              <>
+              <label>
+                Family
+                <select
+                  disabled={importingLora || !families.length}
+                  onChange={(event) => setImportForm((current) => ({ ...current, family: event.target.value }))}
+                  value={importForm.family}
+                >
+                  {families.length ? (
+                    <>
+                      <option value="">Auto-detect</option>
+                      {families.map((family) => (
+                        <option key={family} value={family}>
+                          {family}
+                        </option>
+                      ))}
+                    </>
+                  ) : (
+                    <option value="">No model families</option>
+                  )}
+                </select>
+              </label>
+              {showBaseModelSelect ? (
                 <label>
-                  LoRA File
-                  <span className="file-picker-row">
-                    <span className="file-upload-button">
-                      Choose
-                      <input
-                        accept=".safetensors,.ckpt,.pt,.bin"
-                        disabled={importingLora}
-                        key={fileInputKey}
-                        onChange={(event) => setImportForm((current) => ({ ...current, file: event.target.files?.[0] ?? null }))}
-                        type="file"
-                      />
-                    </span>
-                    <span className="selected-file-name">{importForm.file?.name ?? "No file selected"}</span>
-                  </span>
+                  Base model
+                  <select
+                    disabled={importingLora}
+                    onChange={(event) => setImportForm((current) => ({ ...current, baseModel: event.target.value }))}
+                    value={importForm.baseModel}
+                  >
+                    <option value="">Auto / unspecified</option>
+                    {wanBaseModelOptions.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.name ?? model.id}
+                      </option>
+                    ))}
+                  </select>
                 </label>
-                {showSecondaryFileSlot ? (
+              ) : null}
+              {isFileImport ? (
+                <>
                   <label>
-                    Low-noise expert (Wan A14B MoE)
+                    LoRA File
                     <span className="file-picker-row">
                       <span className="file-upload-button">
                         Choose
                         <input
                           accept=".safetensors,.ckpt,.pt,.bin"
                           disabled={importingLora}
-                          key={`secondary-${fileInputKey}`}
-                          onChange={(event) => setImportForm((current) => ({ ...current, secondaryFile: event.target.files?.[0] ?? null }))}
+                          key={fileInputKey}
+                          onChange={(event) => setImportForm((current) => ({ ...current, file: event.target.files?.[0] ?? null }))}
                           type="file"
                         />
                       </span>
-                      <span className="selected-file-name">{importForm.secondaryFile?.name ?? "No file selected"}</span>
+                      <span className="selected-file-name">{importForm.file?.name ?? "No file selected"}</span>
                     </span>
                   </label>
-                ) : null}
-              </>
-            ) : (
+                  {showSecondaryFileSlot ? (
+                    <label>
+                      Low-noise expert (Wan A14B MoE)
+                      <span className="file-picker-row">
+                        <span className="file-upload-button">
+                          Choose
+                          <input
+                            accept=".safetensors,.ckpt,.pt,.bin"
+                            disabled={importingLora}
+                            key={`secondary-${fileInputKey}`}
+                            onChange={(event) => setImportForm((current) => ({ ...current, secondaryFile: event.target.files?.[0] ?? null }))}
+                            type="file"
+                          />
+                        </span>
+                        <span className="selected-file-name">{importForm.secondaryFile?.name ?? "No file selected"}</span>
+                      </span>
+                    </label>
+                  ) : null}
+                </>
+              ) : (
+                <label>
+                  Source URL
+                  <input
+                    disabled={importingLora}
+                    onChange={(event) => setImportForm((current) => ({ ...current, sourceUrl: event.target.value }))}
+                    placeholder="https://..."
+                    value={importForm.sourceUrl}
+                  />
+                </label>
+              )}
               <label>
-                Source URL
+                Name
                 <input
                   disabled={importingLora}
-                  onChange={(event) => setImportForm((current) => ({ ...current, sourceUrl: event.target.value }))}
-                  placeholder="https://..."
-                  value={importForm.sourceUrl}
+                  onChange={(event) => setImportForm((current) => ({ ...current, name: event.target.value }))}
+                  placeholder="Optional"
+                  value={importForm.name}
                 />
               </label>
-            )}
-            <label>
-              Name
-              <input
-                disabled={importingLora}
-                onChange={(event) => setImportForm((current) => ({ ...current, name: event.target.value }))}
-                placeholder="Optional"
-                value={importForm.name}
-              />
-            </label>
-            <button disabled={importDisabled} type="submit">
-              {importingLora ? (isFileImport ? "Uploading" : "Queueing...") : "Queue Import"}
-            </button>
-          </div>
-          {showSecondaryFileSlot ? (
-            <p className="helper-copy">
-              Wan A14B is a two-expert model. Upload both the high-noise file and the low-noise expert so each expert
-              gets its own weights.
-            </p>
-          ) : null}
-          {moeMissingSecondary ? (
-            <p className="inline-warning">
-              No low-noise expert selected — this LoRA will load into the high-noise expert only, leaving the
-              low-noise expert un-adapted.
-            </p>
-          ) : null}
-          {importForm.scope === "project" && !activeProject ? <p className="helper-copy">Open a project before importing a project LoRA.</p> : null}
-          {importMessage.text ? <p className={importMessage.tone === "success" ? "inline-success" : "inline-warning"}>{importMessage.text}</p> : null}
-        </form>
-        {localLoraImportJobs.length ? (
-          <div className="lora-import-progress">
-            <strong>LoRA imports in progress</strong>
-            <div className="local-job-stack">
-              {localLoraImportJobs.map((job) => (
-                <WorkerProgressCard job={job} key={job.id} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
-              ))}
+              <button disabled={importDisabled} type="submit">
+                {importingLora ? (isFileImport ? "Uploading" : "Queueing...") : "Queue Import"}
+              </button>
             </div>
-          </div>
-        ) : null}
-        {hiddenImportCount ? <p className="helper-copy">{hiddenImportCount} LoRA import{hiddenImportCount === 1 ? " is" : "s are"} hidden by this family filter.</p> : null}
-        {userLoras.length ? (
-          <div className="lora-family-groups">
-            {loraGroups.map((group) => (
-              <div className="lora-family-group" key={group.family}>
-                <div className="lora-family-group-heading">
-                  <h3>{group.family === "compatible" ? "Other / compatible" : group.family}</h3>
-                  <span>{group.items.length}</span>
-                </div>
-                <div className="lora-list">{group.items.map((lora) => renderLoraRow(lora))}</div>
+            <div className="lora-import-metadata">
+              <label>
+                Trigger keywords
+                <KeywordTagEditor
+                  disabled={importingLora}
+                  onChange={(triggerKeywords) =>
+                    setImportForm((current) => ({ ...current, triggerKeywords }))
+                  }
+                  placeholder="e.g. sksStyle — press Enter or comma to add"
+                  value={importForm.triggerKeywords}
+                />
+              </label>
+              <label>
+                Notes
+                <textarea
+                  disabled={importingLora}
+                  onChange={(event) => setImportForm((current) => ({ ...current, notes: event.target.value }))}
+                  placeholder="How to use this LoRA — keyword combinations, recommended weight, and other tips."
+                  rows={2}
+                  value={importForm.notes}
+                />
+              </label>
+            </div>
+            {showSecondaryFileSlot ? (
+              <p className="helper-copy">
+                Wan A14B is a two-expert model. Upload both the high-noise file and the low-noise expert so each expert
+                gets its own weights.
+              </p>
+            ) : null}
+            {moeMissingSecondary ? (
+              <p className="inline-warning">
+                No low-noise expert selected — this LoRA will load into the high-noise expert only, leaving the
+                low-noise expert un-adapted.
+              </p>
+            ) : null}
+            {importForm.scope === "project" && !activeProject ? <p className="helper-copy">Open a project before importing a project LoRA.</p> : null}
+            {importMessage.text ? <p className={importMessage.tone === "success" ? "inline-success" : "inline-warning"}>{importMessage.text}</p> : null}
+          </form>
+          {localLoraImportJobs.length ? (
+            <div className="lora-import-progress">
+              <strong>LoRA imports in progress</strong>
+              <div className="local-job-stack">
+                {localLoraImportJobs.map((job) => (
+                  <WorkerProgressCard job={job} key={job.id} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
+                ))}
               </div>
-            ))}
+            </div>
+          ) : null}
+          {hiddenImportCount ? <p className="helper-copy">{hiddenImportCount} LoRA import{hiddenImportCount === 1 ? " is" : "s are"} hidden by this family filter.</p> : null}
+
+          {builtinLoras.length ? (
+            <div className="models-section">
+              <div className="models-section-heading">
+                <h3>Built-In LoRAs</h3>
+                <span>{builtinLoras.length}</span>
+              </div>
+              <div className="lora-list">{builtinLoras.map((lora) => renderLoraRow(lora))}</div>
+            </div>
+          ) : null}
+
+          <div className="models-section">
+            <div className="models-section-heading">
+              <h3>User LoRAs</h3>
+              <span>{userLoras.length}</span>
+            </div>
+            {userLoras.length ? (
+              <div className="models-subgroups">
+                {loraGroups.map((group) => (
+                  <div className="models-subsection" key={group.family}>
+                    <div className="models-section-heading">
+                      <h4>{group.family === "compatible" ? "Other / compatible" : group.family}</h4>
+                      <span>{group.items.length}</span>
+                    </div>
+                    <div className="lora-list">{group.items.map((lora) => renderLoraRow(lora))}</div>
+                  </div>
+                ))}
+              </div>
+            ) : localLoraImportJobs.length ? null : loras.length && familyFilter !== "all" ? (
+              <div className="models-empty">No user LoRAs match {familyFilter}.</div>
+            ) : (
+              <div className="models-empty">No user LoRAs yet — import one above.</div>
+            )}
           </div>
-        ) : localLoraImportJobs.length ? null : loras.length && familyFilter !== "all" ? (
-          <div className="empty-panel compact-panel">No user LoRAs match {familyFilter}</div>
-        ) : (
-          <div className="empty-panel compact-panel">No user LoRAs yet — import one above.</div>
-        )}
-        </details>
-      </section>
+
+          {/* Model import stays compile-gated (epic 7080 / sc-8941 F-139) and renders nothing while
+              disabled; the section only appears to surface any in-flight model-import progress. */}
+          {MODEL_IMPORT_ENABLED || pendingModelImportJobs.length > 0 ? (
+            <section className="model-import-panel-section">
+              {MODEL_IMPORT_ENABLED && (
+                <form className="lora-import-panel models-import-panel" aria-label="Import model" onSubmit={importModel}>
+                  <div>
+                    <strong>Import model</strong>
+                    <span>{modelImportForm.family || "auto-detect family"}</span>
+                  </div>
+                  <div className="segmented-control compact-segment" aria-label="Model import source">
+                    <button
+                      className={modelImportForm.mode === "url" ? "active" : ""}
+                      disabled={importingModel}
+                      onClick={() => setModelImportForm((current) => ({ ...current, mode: "url" }))}
+                      type="button"
+                    >
+                      URL
+                    </button>
+                    <button
+                      className={modelImportForm.mode === "file" ? "active" : ""}
+                      disabled={importingModel}
+                      onClick={() => setModelImportForm((current) => ({ ...current, mode: "file" }))}
+                      type="button"
+                    >
+                      Upload
+                    </button>
+                  </div>
+                  <div className="models-import-grid">
+                    <label>
+                      Type
+                      <select
+                        disabled={importingModel}
+                        onChange={(event) => setModelImportForm((current) => ({ ...current, type: event.target.value }))}
+                        value={modelImportForm.type}
+                      >
+                        {MODEL_TYPE_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Family
+                      <select
+                        disabled={importingModel || !families.length}
+                        onChange={(event) => setModelImportForm((current) => ({ ...current, family: event.target.value }))}
+                        value={modelImportForm.family}
+                      >
+                        {families.length ? (
+                          <>
+                            <option value="">Auto-detect</option>
+                            {families.map((family) => (
+                              <option key={family} value={family}>
+                                {family}
+                              </option>
+                            ))}
+                          </>
+                        ) : (
+                          <option value="">No known families</option>
+                        )}
+                      </select>
+                    </label>
+                    {isModelFileImport ? (
+                      <label>
+                        Model File
+                        <span className="file-picker-row">
+                          <span className="file-upload-button">
+                            Choose
+                            <input
+                              accept=".safetensors,.ckpt,.pt,.bin"
+                              disabled={importingModel}
+                              key={modelFileInputKey}
+                              onChange={(event) => setModelImportForm((current) => ({ ...current, file: event.target.files?.[0] ?? null }))}
+                              type="file"
+                            />
+                          </span>
+                          <span className="selected-file-name">{modelImportForm.file?.name ?? "No file selected"}</span>
+                        </span>
+                      </label>
+                    ) : (
+                      <label>
+                        Source URL
+                        <input
+                          disabled={importingModel}
+                          onChange={(event) => setModelImportForm((current) => ({ ...current, sourceUrl: event.target.value }))}
+                          placeholder="https://..."
+                          value={modelImportForm.sourceUrl}
+                        />
+                      </label>
+                    )}
+                    <label>
+                      Name
+                      <input
+                        disabled={importingModel}
+                        onChange={(event) => setModelImportForm((current) => ({ ...current, name: event.target.value }))}
+                        placeholder="Optional"
+                        value={modelImportForm.name}
+                      />
+                    </label>
+                    <button disabled={modelImportDisabled} type="submit">
+                      {importingModel ? (isModelFileImport ? "Uploading" : "Queueing...") : "Queue Import"}
+                    </button>
+                  </div>
+                  {modelImportMessage.text ? <p className={modelImportMessage.tone === "success" ? "inline-success" : "inline-warning"}>{modelImportMessage.text}</p> : null}
+                </form>
+              )}
+              {pendingModelImportJobs.length ? (
+                <div className="lora-import-progress">
+                  <strong>Model imports in progress</strong>
+                  <div className="local-job-stack">
+                    {pendingModelImportJobs.map((job) => (
+                      <WorkerProgressCard job={job} key={job.id} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </section>
+          ) : null}
+        </div>
+      ) : null}
     </section>
   );
 }

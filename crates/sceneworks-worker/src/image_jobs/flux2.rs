@@ -1,29 +1,99 @@
-/// How a FLUX.2 edit job batches its iterations.
-enum Flux2Grouping {
-    /// `count` independent images (per-image seeds), the plain reference/edit path.
-    Plain,
-    /// The 11-angle Character-Studio set: shared seed, per-angle prompt augment.
-    Angles,
-    /// The best-effort pose tier: `n` poses, shared seed, `[skeleton, reference]` sets.
-    Poses(usize),
+// `EditGrouping` / `edit_grouping` moved to base.rs (sc-8946, F-144): they are the SHARED grouping for
+// the FLUX.2 / Qwen-Edit / SenseNova-U1 edit lanes, not FLUX.2-specific, so navigation lands in base.rs.
+
+/// The per-iteration plan shared by every native edit stream (FLUX.2 / Qwen-Edit / SenseNova-U1,
+/// F-024 sc-8826): the `(seeds, prompts, pose_inputs)` grouping expansion, the
+/// `angleSet`/`poseLibrary` raw-settings stamping, and the identity-likeness gate. Built once by
+/// [`plan_edit_batch`] and consumed by all three lanes so a change to the plain-With-Character gate
+/// (sc-4411) lands in exactly one place.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct EditBatch {
+    /// Per-iteration seed (shared across an angle/pose set, per-image on the plain path).
+    seeds: Vec<i64>,
+    /// Per-iteration prompt (angle/pose augment on the set paths, the base prompt on plain).
+    prompts: Vec<String>,
+    /// Full `PoseInput`s (keypoints + hands + face) for the pose tier; `None` for angles/plain.
+    pose_inputs: Option<Vec<PoseInput>>,
+    /// The lane's base raw settings with `angleSet`/`poseLibrary` stamped per grouping.
+    raw_settings: JsonObject,
+    /// Whether this generation is identity-likeness scored (epic 4406): a Character-Studio angle
+    /// set, a pose-library set, OR a plain With-Character `character_image` job (sc-4411). Drives
+    /// the [`stage_likeness`] call each lane makes with `references[0]` as the scored source.
+    score_likeness: bool,
 }
 
-/// Decide the grouping for a FLUX.2 edit job (parity with the `MlxFlux2Adapter`
-/// decision: pose set > angle set > plain, all gated to `character_image` mode — an
-/// `edit_image` job is never grouped). The caller only reaches this with a reference
-/// present, so `is_character_image` reduces to the mode check.
-fn flux2_grouping(request: &ImageRequest) -> Flux2Grouping {
-    if request.mode != "character_image" {
-        return Flux2Grouping::Plain;
+/// Build the [`EditBatch`] for a native edit stream from its resolved `grouping` and its
+/// lane-specific `raw_settings` (the per-lane `*_edit_raw_settings` output — the ONLY per-stream
+/// input, so the grouping/stamping/gating logic stays identical across FLUX.2 / Qwen / SenseNova).
+///
+/// Grouping expansion (parity with the `Mlx*Adapter` decision):
+/// - `Poses(n)`: shared seed, one `augment_prompt_for_pose` prompt per pose, full `PoseInput`s kept
+///   so whole-body poses thread hand/face articulation into the skeleton (sc-6702 / sc-6599).
+/// - `Angles`: shared seed so noise-derived attributes (hair, lighting) stay constant across angles
+///   — only the head pose changes (sc-2050 InstantID strategy) — with a per-angle prompt augment.
+/// - `Plain`: `count` independent per-image seeds, the base prompt each.
+///
+/// Likeness gate (epic 4406, sc-4409 angles / sc-4410 poses / sc-4411 plain With-Character): the
+/// generator-agnostic post-pass applies to EVERY character_image generation. `character_set` covers
+/// the angle + pose sets; `plain_with_character` is a `character_image` job (so NOT an `edit_image`,
+/// whose `Plain` grouping also lands here but carries a `sourceAssetId`, not an identity reference)
+/// whose `Plain` grouping is the general subject-variation case — for that lane the scored reference
+/// is `references[0]`, which for a `character_image` job IS the `referenceAssetId` (first in the
+/// lane's `*_edit_reference_ids`). `score_likeness` covers all three.
+#[cfg(target_os = "macos")]
+fn plan_edit_batch(
+    request: &ImageRequest,
+    grouping: &EditGrouping,
+    mut raw_settings: JsonObject,
+) -> EditBatch {
+    let set_seed = resolve_seed(request, 0);
+    let (seeds, prompts, pose_inputs): (Vec<i64>, Vec<String>, Option<Vec<PoseInput>>) =
+        match grouping {
+            EditGrouping::Poses(count) => {
+                let poses = parse_poses(request);
+                let prompts = vec![augment_prompt_for_pose(&request.prompt); *count];
+                (vec![set_seed; *count], prompts, Some(poses))
+            }
+            EditGrouping::Angles => {
+                let prompts = CHARACTER_ANGLE_SET_ORDER
+                    .iter()
+                    .map(|angle| augment_prompt_for_angle(&request.prompt, angle))
+                    .collect();
+                (
+                    vec![set_seed; CHARACTER_ANGLE_SET_ORDER.len()],
+                    prompts,
+                    None,
+                )
+            }
+            EditGrouping::Plain => {
+                let count = request.count as usize;
+                let seeds = (0..count).map(|index| resolve_seed(request, index)).collect();
+                (seeds, vec![request.prompt.clone(); count], None)
+            }
+        };
+
+    match grouping {
+        EditGrouping::Angles => {
+            raw_settings.insert("angleSet".to_owned(), Value::Bool(true));
+        }
+        EditGrouping::Poses(_) => {
+            raw_settings.insert("poseLibrary".to_owned(), Value::Bool(true));
+        }
+        EditGrouping::Plain => {}
     }
-    let poses = pose_entries(request).len();
-    if poses > 0 {
-        return Flux2Grouping::Poses(poses);
+
+    let character_set = matches!(grouping, EditGrouping::Angles | EditGrouping::Poses(_));
+    let plain_with_character =
+        matches!(grouping, EditGrouping::Plain) && request.mode == "character_image";
+    let score_likeness = character_set || plain_with_character;
+
+    EditBatch {
+        seeds,
+        prompts,
+        pose_inputs,
+        raw_settings,
+        score_likeness,
     }
-    if advanced::flag(&request.advanced, "angleSet") {
-        return Flux2Grouping::Angles;
-    }
-    Flux2Grouping::Plain
 }
 
 /// True when an Image-Edit *source* (`sourceAssetId`) should be pre-fitted to W×H: `edit_image`
@@ -97,54 +167,14 @@ fn flux2_edit_engine_id(model: &str) -> Option<&'static str> {
     }
 }
 
-/// Upper bound on reference images for a multi-reference edit (sc-6211). Even with the engine's
-/// sequence-gated activation chunking (sc-6266), the FLUX.2-dev edit stays activation-bound: 4
-/// references at 1024² peak ~93 GB and 5 would exceed the 96 GB floor (measured). The per-machine
-/// `flux2_dev_edit_memory_guard` rejects over-budget combinations with an actionable message; this
-/// caps absurd inputs (and bounds the DiT sequence) before that.
-const MAX_EDIT_REFERENCES: usize = 4;
-
-/// Reference asset ids for a FLUX.2 edit. The FLUX.2-dev multi-image picker (sc-6211) sends the
-/// plural `referenceAssetIds` — take all of them in order, capped at [`MAX_EDIT_REFERENCES`]. With no
-/// plural list it falls back to the single-reference flows: the character `referenceAssetId`, else the
-/// Image-Edit `sourceAssetId` (edit_image mode). Mirrors the Python
-/// `ref_id = referenceAssetId or (sourceAssetId if edit_image)`, plus the new multi-reference set.
-fn flux2_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
-    if !request.reference_asset_ids.is_empty() {
-        // Parsed list is already trimmed + non-empty (sceneworks-core `string_list`).
-        return request
-            .reference_asset_ids
-            .iter()
-            .take(MAX_EDIT_REFERENCES)
-            .cloned()
-            .collect();
-    }
-    if let Some(id) = request
-        .reference_asset_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    {
-        return vec![id.to_owned()];
-    }
-    if request.mode == "edit_image" {
-        if let Some(id) = request
-            .source_asset_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        {
-            return vec![id.to_owned()];
-        }
-    }
-    Vec::new()
-}
+// `MAX_EDIT_REFERENCES` / `edit_reference_ids` moved to base.rs (sc-8946, F-144): shared by the
+// FLUX.2 / SenseNova-via-grouping edit lanes, so they live with the other shared edit helpers.
 
 /// True when this is a FLUX.2 edit job (a flux2 edit-capable model + ≥1 reference)
 /// whose base weights resolve — routed to the edit variant rather than txt2img.
 fn flux2_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
     flux2_edit_engine_id(&request.model).is_some()
-        && !flux2_edit_reference_ids(request).is_empty()
+        && !edit_reference_ids(request).is_empty()
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
@@ -364,7 +394,7 @@ async fn generate_flux2_edit_stream(
     let adapter_label = model.adapter_label();
 
     // Resolve the reference image(s) on the async side (decode → Send Image moved in).
-    let reference_ids = flux2_edit_reference_ids(request);
+    let reference_ids = edit_reference_ids(request);
     let mut references = Vec::with_capacity(reference_ids.len());
     for id in &reference_ids {
         references.push(load_reference_image(
@@ -400,96 +430,50 @@ async fn generate_flux2_edit_stream(
 
     // sc-3030 per-iteration grouping: a Character-Studio angle set (11 shared-seed,
     // per-angle prompt) / best-effort pose tier (one per pose, shared seed, each a
-    // `[skeleton, reference]` set) / else the plain per-image reference path.
-    let grouping = flux2_grouping(request);
-    let set_seed = resolve_seed(request, 0);
-    let (seeds, prompts, pose_inputs): (
-        Vec<i64>,
-        Vec<String>,
-        Option<Vec<PoseInput>>,
-    ) = match &grouping {
-        Flux2Grouping::Poses(count) => {
-            // Shared seed so only the pose changes across the set (Python parity).
-            // Keep the full PoseInput (keypoints + hands + face) so whole-body poses
-            // thread their hand/face articulation into the skeleton below (sc-6702).
-            let poses = parse_poses(request);
-            let prompts = vec![augment_prompt_for_pose(&request.prompt); *count];
-            (vec![set_seed; *count], prompts, Some(poses))
-        }
-        Flux2Grouping::Angles => {
-            // Shared seed so noise-derived attributes (hair, lighting) stay constant
-            // across angles — only the head pose changes (sc-2050 InstantID strategy).
-            let prompts = CHARACTER_ANGLE_SET_ORDER
-                .iter()
-                .map(|angle| augment_prompt_for_angle(&request.prompt, angle))
-                .collect();
-            (
-                vec![set_seed; CHARACTER_ANGLE_SET_ORDER.len()],
-                prompts,
-                None,
-            )
-        }
-        Flux2Grouping::Plain => {
-            let count = request.count as usize;
-            let seeds = (0..count)
-                .map(|index| resolve_seed(request, index))
-                .collect();
-            (seeds, vec![request.prompt.clone(); count], None)
-        }
-    };
+    // `[skeleton, reference]` set) / else the plain per-image reference path. The grouping
+    // expansion, angleSet/poseLibrary stamping, and the identity-likeness gate (incl. the sc-4411
+    // plain-With-Character case) are the shared `plan_edit_batch` builder (F-024 sc-8826). The
+    // whole-body pose PoseInputs thread their hand/face articulation into the skeleton below
+    // (sc-6702). Identity-likeness scoring (epic 4406, sc-4409 angles / sc-4410 poses / sc-4411
+    // plain With-Character) applies to EVERY character_image generation on this FLUX.2 edit lane,
+    // which produces the FINAL image directly (no face-restore pass), so scoring the generated
+    // image scores what the user sees.
+    let grouping = edit_grouping(request);
+    let EditBatch {
+        seeds,
+        prompts,
+        pose_inputs,
+        raw_settings,
+        score_likeness,
+    } = plan_edit_batch(
+        request,
+        &grouping,
+        flux2_edit_raw_settings(
+            request,
+            &repo,
+            engine_id,
+            steps,
+            quant_bits,
+            guidance,
+            references.len(),
+        ),
+    );
     let total = seeds.len();
 
-    let mut raw_settings = flux2_edit_raw_settings(
-        request,
-        &repo,
-        engine_id,
-        steps,
-        quant_bits,
-        guidance,
-        references.len(),
-    );
-    match grouping {
-        Flux2Grouping::Angles => {
-            raw_settings.insert("angleSet".to_owned(), Value::Bool(true));
-        }
-        Flux2Grouping::Poses(_) => {
-            raw_settings.insert("poseLibrary".to_owned(), Value::Bool(true));
-        }
-        Flux2Grouping::Plain => {}
-    }
-
-    // Identity-likeness scoring (epic 4406, sc-4409 angles / sc-4410 poses / sc-4411 plain
-    // With-Character): the generator-agnostic post-pass applies to EVERY character_image generation, not
-    // just InstantID-routed ones — a Character-Studio angle set, a pose-library set, OR a plain
-    // With-Character generation on a FLUX.2 edit model is scored through the same shared seam. The FLUX.2
-    // edit path produces the FINAL image directly (no face-restore pass on this lane), so scoring the
-    // generated image scores what the user sees. The PLAIN case (sc-4411) is scored only when this is a
-    // `character_image` job with a character `referenceAssetId` (NOT an `edit_image` job, whose `Plain`
-    // grouping also lands here but carries the `sourceAssetId`, not an identity reference). The angle +
-    // pose sets keep their existing scoring; this just adds the plain `character_image` case so the
-    // common With-Character generation is scored too — `score_likeness` covers all three. Stage the
-    // antelopev2 face stack (same bundle InstantID uses; a no-op if already cached) and capture the
-    // source identity reference + its asset id; the `!Send` scorer is built ONCE inside the
-    // generator-worker closure below and reused across all outputs. Staging is non-fatal (a failure → no
-    // scorer → scores omitted, the generation still renders).
-    let character_set = matches!(grouping, Flux2Grouping::Angles | Flux2Grouping::Poses(_));
-    // Plain With-Character: a `character_image` job (so NOT an `edit_image`) whose `Plain` grouping is the
-    // general subject-variation case (sc-4411). For this lane the scored reference is `references[0]` —
-    // for a character_image job that IS the `referenceAssetId` (it is first in `flux2_edit_reference_ids`).
-    let plain_with_character =
-        matches!(grouping, Flux2Grouping::Plain) && request.mode == "character_image";
-    let score_likeness = character_set || plain_with_character;
-    let face_stack_dir = if score_likeness {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // Stage the antelopev2 face stack (same bundle InstantID uses; a no-op if already cached) and
+    // capture the source identity reference + its asset id; the `!Send` scorer is built ONCE inside
+    // the generator-worker closure below and reused across all outputs. Staging is non-fatal (a
+    // failure → no scorer → scores omitted, the generation still renders). The scored reference is
+    // `references[0]` — for a character_image job that IS the `referenceAssetId` (first in
+    // `edit_reference_ids`).
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        score_likeness,
+        "character_image face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     let likeness_source = (score_likeness && face_stack_dir.is_some()).then(|| references[0].clone());
     let likeness_source_ref = reference_ids.first().cloned();
 
@@ -622,6 +606,13 @@ const FLUX2_DEV_CONTROL_ENGINE_ID: &str = "flux2_dev_control";
 /// recommended one — the previous version lost CFG distillation after control training). The default
 /// *repo* is the shared strict-control table (single source of truth — `STRICT_CONTROL_ENGINES`).
 const FLUX2_CONTROL_FILE: &str = "FLUX.2-dev-Fun-Controlnet-Union-2602.safetensors";
+/// Pinned revision for the default `alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union` control-weights repo
+/// (sc-9879, F-077 follow-up). Fetching the mutable `main` branch means a re-push (or a compromised token)
+/// could silently swap the ControlNet checkpoint we load; pin the exact commit for defense-in-depth
+/// (mirrors sc-8879/sc-9682). Applied ONLY to the default table repo — a manifest `controlWeights.repo`
+/// override carries its own revision layout, so it keeps `main`. HF's tree API still reports the file's
+/// `lfs.oid`, which `ensure_hf_cached_file` verifies the downloaded content against.
+const FLUX2_CONTROL_REVISION: &str = "b3dcd7836a0e926248dac3ccba8fc0853495764b";
 /// The asset `adapter` id recorded on FLUX.2-dev strict-pose assets (the dev base MLX label).
 const FLUX2_CONTROL_ADAPTER_LABEL: &str = "mlx_flux2";
 
@@ -639,7 +630,8 @@ fn flux2_dev_control_available(request: &ImageRequest, settings: &Settings) -> b
 
 /// The (repo, filename) of the FLUX.2-dev control weights — `advanced.controlWeights.{repo,filename}`
 /// overrides, else the `-2602` Fun-Controlnet-Union default (parity with the Z-Image resolver).
-fn flux2_control_repo_file(request: &ImageRequest) -> (String, String) {
+/// The payload filename must be a plain component (sc-8821 / F-019).
+fn flux2_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
     let cw = request
         .advanced
         .get("controlWeights")
@@ -652,15 +644,18 @@ fn flux2_control_repo_file(request: &ImageRequest) -> (String, String) {
             .unwrap_or(default)
             .to_owned()
     };
-    (
+    Ok((
         // Default repo from the shared strict-control table (single source of truth); the file stays
         // engine-specific.
         pick(
             "repo",
             strict_control_default_repo(FLUX2_DEV_CONTROL_ENGINE_ID),
         ),
-        pick("filename", FLUX2_CONTROL_FILE),
-    )
+        safe_weight_filename(
+            &pick("filename", FLUX2_CONTROL_FILE),
+            "advanced.controlWeights.filename",
+        )?,
+    ))
 }
 
 /// Resolve the Fun-Controlnet-Union checkpoint the engine loads, downloading on first use. Order: an
@@ -673,7 +668,7 @@ async fn ensure_flux2_control_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
-    let (repo, file) = flux2_control_repo_file(request);
+    let (repo, file) = flux2_control_repo_file(request)?;
     if let Ok(p) = std::env::var("SCENEWORKS_CONTROLNET_FLUX2") {
         let p = PathBuf::from(p);
         if p.is_file() {
@@ -700,7 +695,15 @@ async fn ensure_flux2_control_weights(
         .join("cache")
         .join("controlnet-flux2")
         .join(&file);
-    crate::downloads::ensure_hf_cached_file(&context, &repo, "main", &file, &dst).await
+    // Pin the exact commit for the default table control repo so `main` moving under us can't swap the
+    // ControlNet checkpoint (sc-9879). A manifest `controlWeights.repo` override may carry its own
+    // revision layout, so only pin when we're on the default repo.
+    let revision = if repo == strict_control_default_repo(FLUX2_DEV_CONTROL_ENGINE_ID) {
+        FLUX2_CONTROL_REVISION
+    } else {
+        "main"
+    };
+    crate::downloads::ensure_hf_cached_file(&context, &repo, revision, &file, &dst).await
 }
 
 /// Pose ControlNet lock strength for FLUX.2-dev: `advanced.controlScale` (default 0.75, clamp [0,2]).
@@ -786,53 +789,10 @@ fn flux2_control_raw_settings(
     raw
 }
 
-/// The clamped identity img2img-init strength for the FLUX.2-dev strict-pose set, or `None` for the
-/// pose-only tier (mirrors `zimage_identity_strength`). `Some` iff `advanced.referenceStrength > 0`
-/// AND a non-empty `referenceAssetId` — the dev control engine accepts an optional `Reference` init
-/// next to the required `Control`. Off by default (pose-only is the validated path).
-fn flux2_identity_strength(request: &ImageRequest) -> Option<f32> {
-    let strength = request
-        .advanced
-        .get("referenceStrength")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .filter(|strength| *strength > 0.0)?;
-    let has_asset = request
-        .reference_asset_id
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|id| !id.is_empty());
-    has_asset.then(|| (strength as f32).clamp(0.05, 1.0))
-}
-
-/// Resolve the optional identity img2img-init for the FLUX.2-dev strict-pose set: `Some((image,
-/// strength))` when [`flux2_identity_strength`] engages (decoding `referenceAssetId`), else `None`
-/// (the default pose-only tier). The reference is shared across the whole pose set.
-fn resolve_flux2_identity_init(
-    request: &ImageRequest,
-    settings: &Settings,
-    project_path: &Path,
-) -> WorkerResult<Option<(Image, f32)>> {
-    let Some(strength) = flux2_identity_strength(request) else {
-        return Ok(None);
-    };
-    let asset_id = request
-        .reference_asset_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .expect("flux2_identity_strength guarantees a non-empty referenceAssetId");
-    let image = load_reference_image(
-        &settings.data_dir,
-        &request.project_id,
-        asset_id,
-        project_path,
-    )?;
-    Ok(Some((image, strength)))
-}
+// sc-8946 (F-144): the FLUX.2-dev identity gate (`flux2_identity_strength`) and its init resolver
+// (`resolve_identity_init`) were line-for-line copies of the Z-Image pair. Both now share the
+// single [`identity_strength`] / [`resolve_identity_init`] in base.rs — the FLUX.2-dev control stream
+// calls those directly.
 
 /// Build the FLUX.2-dev control LoadSpec: the base dev snapshot + the Fun-Controlnet-Union overlay
 /// (+ quant + adapters). The dev base loads manifest-aware (a pre-quantized Q4 snapshot loads packed);
@@ -862,8 +822,7 @@ fn flux2_control_load(
     adapters: Vec<AdapterSpec>,
 ) -> WorkerResult<Box<dyn Generator>> {
     let spec = flux2_control_spec(weights_dir, control_weights, quant, adapters);
-    gen_core::load(FLUX2_DEV_CONTROL_ENGINE_ID, &spec)
-        .map_err(|error| WorkerError::Engine(format!("FLUX.2-dev control load failed: {error}")))
+    load_control_engine(FLUX2_DEV_CONTROL_ENGINE_ID, &spec)
 }
 
 /// Real FLUX.2-dev strict-pose generation: one image per pose, each conditioned on a DWPose skeleton
@@ -883,7 +842,7 @@ async fn generate_flux2_dev_control_stream(
     let request = &plan.request;
     // Optional identity img2img-init (opt-in, off by default — `referenceStrength`-gated), shared
     // across the pose set. `None` → the pose-only tier (the validated sc-2292 default).
-    let identity_init = resolve_flux2_identity_init(request, settings, project_path)?;
+    let identity_init = resolve_identity_init(request, settings, project_path)?;
 
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("FLUX.2-dev weights not found".to_owned()))?;
@@ -937,17 +896,14 @@ async fn generate_flux2_dev_control_stream(
     // set still renders). The `!Send` scorer is built ONCE in the closure (source embedded once, reused
     // across all poses).
     let likeness_source = resolve_control_identity_source(request, settings, project_path);
-    let face_stack_dir = if likeness_source.is_some() {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        likeness_source.is_some(),
+        "pose-set face-stack staging failed; likeness scores omitted",
+    )
+    .await;
 
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);

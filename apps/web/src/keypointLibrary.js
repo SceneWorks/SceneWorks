@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { API_BASE_URL, apiFetch, withMediaTicket } from "./api.js";
-import { useAppContext } from "./context/AppContext.js";
+import { useAppStatic } from "./context/AppContext.js";
 
 // The reserved global project that holds user-created keypoint (face-angle) preset assets
 // (epic 4422, sc-4434). Mirrors crates/sceneworks-core::GLOBAL_KEYPOINTS_PROJECT_ID; hidden
@@ -90,7 +90,7 @@ export async function deleteKeypointCollection(token, collectionId) {
 // Load the preset list (built-in 11 + user) once per token. Best-effort: a fetch failure
 // surfaces via `error`; built-ins always come back from the API so the list is rarely empty.
 export function useKeypointPresets() {
-  const { token } = useAppContext();
+  const { token } = useAppStatic();
   const [state, setState] = useState({ presets: [], loading: true, error: "" });
   const reload = useCallback(
     async (signal) => {
@@ -116,7 +116,7 @@ export function useKeypointPresets() {
 // Load the collection list (built-in default + user collections). Used by the Collections tab
 // and by the per-generation override picker in Character Studio's angle set.
 export function useKeypointCollections() {
-  const { token } = useAppContext();
+  const { token } = useAppStatic();
   const [state, setState] = useState({ collections: [], loading: true, error: "" });
   const reload = useCallback(
     async (signal) => {

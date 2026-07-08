@@ -3,7 +3,7 @@ import { pickClosestResolution } from "../resolutionMatch.js";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
-import { AssetMedia, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
+import { AssetMedia } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
@@ -22,27 +22,6 @@ const MOTIONS = [
   "handheld",
 ];
 
-function formatGpuLabel(requestedGpu) {
-  if (!requestedGpu || requestedGpu === "auto") {
-    return "auto GPU";
-  }
-  return `GPU ${requestedGpu}`;
-}
-
-function estimateRenderSeconds(durationSeconds, quality) {
-  // Rough heuristic: every clip second ~3s on Balanced, ±50% for Draft/Final.
-  const base = Math.max(1, Number(durationSeconds) || 6) * 3;
-  if (quality === "fast") return Math.round(base * 0.5);
-  if (quality === "best") return Math.round(base * 1.5);
-  return Math.round(base);
-}
-
-function formatPlaybackTime(seconds) {
-  const safeSeconds = Math.max(0, Math.round(Number(seconds) || 0));
-  const minutes = Math.floor(safeSeconds / 60);
-  return `${minutes}:${String(safeSeconds % 60).padStart(2, "0")}`;
-}
-
 // Resolve a video job's result assets against the live catalog so the
 // WorkerProgressCard video-player variant can play the finished clip (sc-2089).
 // Shares the unified resolver (sc-8853); the video lane keeps the generationSetId
@@ -51,15 +30,10 @@ function jobVideoResultAssets(job, assets) {
   return resolveJobResultAssets(job, assets, { type: "video" });
 }
 import {
-  applyPresetDefault,
-  buildStudioPresetPayload,
-  clearPresetDefault,
   finiteNumberOrUndefined,
   loraLooksLikeIcLora,
   noPresetId,
-  presetNameTaken,
   serializeLora,
-  slugifyPresetId,
 } from "../presetUtils.js";
 import {
   LoraPickerSection,
@@ -68,16 +42,16 @@ import {
   PresetValidationWarnings,
   SavePresetPanel,
   useGenerationStudio,
+  useSavePreset,
 } from "./generationStudio.jsx";
 import { ReplacePersonPanel } from "./ReplacePersonPanel.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { downloadOffersFor, videoModelUsable } from "../modelEligibility.js";
-import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
+import { PROMPT_REFINE_MODEL_ID, WAN_A14B_LIGHTNING_MODEL_IDS } from "../constants.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
-  macBlockedModels,
   macGatingActive,
   macVideoModeBlock,
 } from "../macGating.js";
@@ -125,7 +99,6 @@ export function VideoStudio() {
     jobAction,
     rememberLocalGenerationJob,
     setActiveView,
-    setSelectedAssetId,
     setPreviewAsset,
     personTracks = [],
     personReadiness = {},
@@ -157,18 +130,19 @@ export function VideoStudio() {
   const onOpenPresets = () => setActiveView("Presets");
   const onOpenQueue = () => setActiveView("Queue");
   const onPreview = setPreviewAsset;
-  const onSendToEditor = (asset) => {
-    if (asset?.id) {
-      setSelectedAssetId(asset.id);
-    }
-    setActiveView("Editor");
-  };
   // Last-used settings for this workspace, restored on mount. The component is keyed
   // by workspace in App.jsx, so this reads the right snapshot per workspace.
   const saved = useMemo(() => loadStudioSettings("video", activeProject?.id ?? null), [activeProject?.id]);
   const [motion, setMotion] = useState(saved.motion ?? "slow push-in");
-  const imageAssets = assets.filter((asset) => asset.type === "image" || asset.type === "frame");
-  const videoAssets = assets.filter((asset) => asset.type === "video");
+  // Memoize the per-type catalog splits (sc-8939): both feed a dozen pickers/trays and
+  // re-filtering the full catalog on every render (including unrelated state churn) is
+  // needless. Recompute only when the catalog changes; stable identities also keep the
+  // downstream memoized offers/consumers from thrashing.
+  const imageAssets = useMemo(
+    () => assets.filter((asset) => asset.type === "image" || asset.type === "frame"),
+    [assets],
+  );
+  const videoAssets = useMemo(() => assets.filter((asset) => asset.type === "video"), [assets]);
   // Open on Text→Video for parity with Image Studio's Text→Image default and the
   // launch-request fallback below (sc-5716); the prior image_to_video default was the odd one out.
   const [mode, setMode] = useState(saved.mode ?? "text_to_video");
@@ -184,10 +158,6 @@ export function VideoStudio() {
   // Mac UI gating (sc-3486): hide torch-only video models (e.g. SVD) and snap off one if selected.
   const macVideoModels = useMemo(
     () => macAvailableModels(videoModels, macCapabilities),
-    [videoModels, macCapabilities],
-  );
-  const macHiddenVideoModels = useMemo(
-    () => macBlockedModels(videoModels, macCapabilities),
     [videoModels, macCapabilities],
   );
   useEffect(() => {
@@ -238,6 +208,12 @@ export function VideoStudio() {
   const [schedulerShift, setSchedulerShift] = useState(saved.schedulerShift ?? 3.0);
   const [stepsOverride, setStepsOverride] = useState(saved.steps ?? "");
   const [guidanceOverride, setGuidanceOverride] = useState(saved.guidanceScale ?? "");
+  // Lightning fast-4-step toggle for Wan2.2 A14B MoE (T2V + I2V) — epic 10043, sc-10048.
+  // Default ON: the worker (sc-10047) reads `advanced.lightning` and, when on, derives the
+  // 4-step / CFG-off distilled recipe; when off it honors the user's steps/guidance (or the
+  // native multi-step CFG default). Only the two A14B engines honor it (see showLightning),
+  // so the dense 5B and non-Wan models never see the control. Persisted per-workspace.
+  const [lightning, setLightning] = useState(saved.lightning ?? true);
   // LTX-2.3 native guidance knobs (epic 1753 sc-1769). The native ltx-core
   // path has no diffusers scheduler to swap — these three values (cfg + STG +
   // rescale) drive its sealed MultiModalGuiderParams instead.
@@ -277,18 +253,6 @@ export function VideoStudio() {
   const [comparisonMode, setComparisonMode] = useState("side_by_side");
   const [abSide, setAbSide] = useState("replacement");
   const [submitting, setSubmitting] = useState(false);
-  const previewVideoRef = useRef(null);
-  const [previewPlaying, setPreviewPlaying] = useState(false);
-  const [previewTime, setPreviewTime] = useState(0);
-  const [previewDuration, setPreviewDuration] = useState(0);
-  // "Save as Preset" sidebar control — snapshots the current config into the
-  // workspace preset library. Defaults to project scope, falling back to global
-  // when no project is open (project-scoped presets require a project).
-  const [presetName, setPresetName] = useState("");
-  const [presetScope, setPresetScope] = useState(activeProject ? "project" : "global");
-  const [savingPreset, setSavingPreset] = useState(false);
-  const [presetSaveMessage, setPresetSaveMessage] = useState({ tone: "neutral", text: "" });
-  const presetDefaultSnapshots = useRef({});
   const capabilities = selectedModel?.capabilities ?? [];
   const supportsMode = capabilities.includes(mode);
   // GGUF quantization variants the torch adapter can load (sc-1982). Declared in
@@ -296,6 +260,12 @@ export function VideoStudio() {
   // per-platform default (Q8_0 on MPS, Q4_K_M on CUDA).
   const quantVariants = Object.entries(selectedModel?.quantization?.variants ?? {});
   const supportsQuantization = quantVariants.length > 0;
+  // Lightning is only meaningful for the two Wan2.2 A14B MoE engines (T2V + I2V); the dense
+  // 5B and every non-Wan engine ignore `advanced.lightning`, so hide the control there
+  // (sc-10048, epic 10043). When it's shown and on, the worker governs steps/guidance with the
+  // 4-step recipe, so the manual Steps/Guidance inputs are disabled to reflect that.
+  const showLightning = WAN_A14B_LIGHTNING_MODEL_IDS.has(selectedModel?.id);
+  const lightningActive = showLightning && lightning;
   const implementedMode = [
     "image_to_video",
     "text_to_video",
@@ -391,79 +361,6 @@ export function VideoStudio() {
   const requiresLtxIcLora = selectedModel?.id === ltxVideoModelId && ltxIcLoraRequiredModes.has(mode);
   const hasLtxIcLora = presetLoraDetails.some((lora) => !lora.missing && loraLooksLikeIcLora(lora));
 
-  // Snapshot the current working config into a named recipe preset in the
-  // workspace library. Captures the literal prompt + every visible knob + the
-  // selected LoRAs with their weights; the seed is intentionally left out so the
-  // preset stays reusable. The backend additionally enforces id uniqueness and
-  // model/workflow + LoRA compatibility, surfaced here via err.message.
-  async function handleSaveAsPreset() {
-    const trimmed = presetName.trim();
-    if (!trimmed) {
-      setPresetSaveMessage({ tone: "error", text: "Name the preset before saving." });
-      return;
-    }
-    if (!slugifyPresetId(trimmed)) {
-      setPresetSaveMessage({ tone: "error", text: "Use letters or numbers in the preset name." });
-      return;
-    }
-    if (!VIDEO_PRESET_MODES.includes(mode)) {
-      setPresetSaveMessage({ tone: "error", text: "Switch to Image, Text, or First/Last mode to save a preset." });
-      return;
-    }
-    if (presetScope === "project" && !activeProject) {
-      setPresetSaveMessage({ tone: "error", text: "Open a project first, or save to all projects." });
-      return;
-    }
-    if (presetNameTaken(trimmed, presets)) {
-      setPresetSaveMessage({ tone: "error", text: `"${trimmed}" already exists — pick a unique name.` });
-      return;
-    }
-    const payload = buildStudioPresetPayload({
-      name: trimmed,
-      scope: presetScope,
-      mode,
-      model,
-      loras: selectedLoras.map((lora) => ({ id: lora.id, weight: effectiveLoraWeight(lora) })),
-      defaults: {
-        prompt,
-        negativePrompt,
-        resolution,
-        duration,
-        fps,
-        quality,
-        mode,
-        guidanceScale: finiteNumberOrUndefined(guidanceOverride),
-        steps: finiteNumberOrUndefined(stepsOverride),
-        sampler,
-        scheduler,
-        schedulerShift,
-        precision,
-        quantization,
-        ltxPipeline,
-        distilledVariant,
-        motion,
-        videoCfgGuidanceScale: finiteNumberOrUndefined(ltxVideoCfg),
-        videoStgGuidanceScale: finiteNumberOrUndefined(ltxVideoStg),
-        videoRescaleScale: finiteNumberOrUndefined(ltxVideoRescale),
-      },
-    });
-    setSavingPreset(true);
-    setPresetSaveMessage({ tone: "neutral", text: "" });
-    try {
-      const created = await createPreset(payload);
-      setSelectedPresetId(created?.id ?? payload.id);
-      setPresetName("");
-      setPresetSaveMessage({
-        tone: "success",
-        text: `Saved "${trimmed}" to ${presetScope === "project" ? "this project" : "all projects"}.`,
-      });
-    } catch (err) {
-      setPresetSaveMessage({ tone: "error", text: err.message });
-    } finally {
-      setSavingPreset(false);
-    }
-  }
-
   useEffect(() => {
     if (selectedAsset?.type === "image" || selectedAsset?.type === "frame") {
       setSourceAssetId(selectedAsset.id);
@@ -553,62 +450,85 @@ export function VideoStudio() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, model, selectedModel, videoModels, macCapabilities]);
 
-  // When restoring a snapshot, the saved length/fps/quality/resolution/negativePrompt
-  // already reflect the user's last state — skip the one preset-default pass that fires
-  // as the restored preset resolves so it doesn't overwrite them. "None" applies no
-  // defaults, so no guard is needed there.
-  const skipPresetDefaultsOnHydrate = useRef(
-    Object.keys(saved).length > 0 && saved.selectedPresetId !== noPresetId,
-  );
-  // [defaults key, setter] pairs restored through the remember/clear snapshot
-  // machinery, so switching to None (or another preset) puts the user's prior
-  // value back. Only keys the preset carries are applied, so older presets keep
-  // working and full-snapshot presets restore the prompt, cfg, sampler, and the
-  // native LTX guidance knobs. The model is intentionally absent — presets never
-  // switch the model.
-  const presetDefaultFields = [
-    ["prompt", setPrompt],
-    ["negativePrompt", setNegativePrompt],
-    ["resolution", setResolution],
-    ["duration", setDuration],
-    ["fps", setFps],
-    ["quality", setQuality],
-    ["guidanceScale", setGuidanceOverride],
-    ["steps", setStepsOverride],
-    ["sampler", setSampler],
-    ["scheduler", setScheduler],
-    ["schedulerShift", setSchedulerShift],
-    ["precision", setPrecision],
-    ["quantization", setQuantization],
-    ["ltxPipeline", setLtxPipeline],
-    ["distilledVariant", setDistilledVariant],
-    ["motion", setMotion],
-    ["videoCfgGuidanceScale", setLtxVideoCfg],
-    ["videoStgGuidanceScale", setLtxVideoStg],
-    ["videoRescaleScale", setLtxVideoRescale],
-  ];
-  useEffect(() => {
-    if (skipPresetDefaultsOnHydrate.current && selectedPreset) {
-      skipPresetDefaultsOnHydrate.current = false;
-      return;
-    }
-    if (!selectedPreset) {
-      for (const [key, setter] of presetDefaultFields) {
-        clearPresetDefault(setter, presetDefaultSnapshots, key);
-      }
-      return;
-    }
-    const defaults = selectedPreset.defaults ?? {};
-    for (const [key, setter] of presetDefaultFields) {
-      if (Object.prototype.hasOwnProperty.call(defaults, key)) {
-        applyPresetDefault(presetDefaultSnapshots, key, setter, defaults[key]);
-      }
-    }
+  // Save-as-Preset + the preset-default hydrate pass (sc-8937 — shared with the Image
+  // studio via useSavePreset). The [key, setter] pairs are restored through the
+  // remember/clear snapshot machinery, so switching to None (or another preset) puts
+  // the user's prior value back. Only keys the preset carries are applied, so older
+  // presets keep working and full-snapshot presets restore the prompt, cfg, sampler,
+  // and the native LTX guidance knobs. The model is intentionally absent — presets
+  // never switch the model.
+  const {
+    presetName,
+    setPresetName,
+    presetScope,
+    setPresetScope,
+    savingPreset,
+    presetSaveMessage,
+    setPresetSaveMessage,
+    handleSaveAsPreset,
+  } = useSavePreset({
+    saved,
+    selectedPreset,
+    setSelectedPresetId,
+    presets,
+    mode,
+    model,
+    selectedLoras,
+    effectiveLoraWeight,
+    createPreset,
+    activeProject,
+    setMode,
+    presetDefaultFields: [
+      ["prompt", setPrompt],
+      ["negativePrompt", setNegativePrompt],
+      ["resolution", setResolution],
+      ["duration", setDuration],
+      ["fps", setFps],
+      ["quality", setQuality],
+      ["guidanceScale", setGuidanceOverride],
+      ["steps", setStepsOverride],
+      ["sampler", setSampler],
+      ["scheduler", setScheduler],
+      ["schedulerShift", setSchedulerShift],
+      ["precision", setPrecision],
+      ["quantization", setQuantization],
+      ["ltxPipeline", setLtxPipeline],
+      ["distilledVariant", setDistilledVariant],
+      ["motion", setMotion],
+      ["videoCfgGuidanceScale", setLtxVideoCfg],
+      ["videoStgGuidanceScale", setLtxVideoStg],
+      ["videoRescaleScale", setLtxVideoRescale],
+    ],
     // Restore the saved sub-mode ("type") when it's a generatable video workflow.
-    if (VIDEO_PRESET_MODES.includes(defaults.mode)) {
-      setMode(defaults.mode);
-    }
-  }, [selectedPreset?.id]);
+    modeIsPresetable: (savedMode) => VIDEO_PRESET_MODES.includes(savedMode),
+    // Video gates saving to the presetable modes; blocks the rest with a message.
+    extraSaveGuard: () =>
+      VIDEO_PRESET_MODES.includes(mode)
+        ? null
+        : "Switch to Image, Text, or First/Last mode to save a preset.",
+    buildDefaults: () => ({
+      prompt,
+      negativePrompt,
+      resolution,
+      duration,
+      fps,
+      quality,
+      mode,
+      guidanceScale: finiteNumberOrUndefined(guidanceOverride),
+      steps: finiteNumberOrUndefined(stepsOverride),
+      sampler,
+      scheduler,
+      schedulerShift,
+      precision,
+      quantization,
+      ltxPipeline,
+      distilledVariant,
+      motion,
+      videoCfgGuidanceScale: finiteNumberOrUndefined(ltxVideoCfg),
+      videoStgGuidanceScale: finiteNumberOrUndefined(ltxVideoStg),
+      videoRescaleScale: finiteNumberOrUndefined(ltxVideoRescale),
+    }),
+  });
 
   useStudioSettingsWriter("video", activeProject?.id ?? null, {
     motion,
@@ -635,6 +555,7 @@ export function VideoStudio() {
     schedulerShift,
     steps: stepsOverride,
     guidanceScale: guidanceOverride,
+    lightning,
     videoCfgGuidanceScale: ltxVideoCfg,
     videoStgGuidanceScale: ltxVideoStg,
     videoRescaleScale: ltxVideoRescale,
@@ -837,10 +758,16 @@ export function VideoStudio() {
           Number.isFinite(Number(schedulerShift))
             ? { schedulerShift: Number(schedulerShift) }
             : {}),
-          ...(stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
+          // Lightning fast-4-step toggle for Wan2.2 A14B MoE (sc-10048, epic 10043). Only the two
+          // A14B engines honor it; emit the explicit bool for them (worker sc-10047 reads
+          // `advanced.lightning`: absent → defaults on, false → off). When on the worker derives
+          // the 4-step/CFG-off recipe, so we suppress the manual steps/guidance overrides below to
+          // keep the payload consistent with the recipe the UI is reflecting.
+          ...(showLightning ? { lightning } : {}),
+          ...(!lightningActive && stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
             ? { steps: Number(stepsOverride) }
             : {}),
-          ...(guidanceOverride !== "" && Number.isFinite(Number(guidanceOverride))
+          ...(!lightningActive && guidanceOverride !== "" && Number.isFinite(Number(guidanceOverride))
             ? { guidanceScale: Number(guidanceOverride) }
             : {}),
           // LTX native guidance knobs (epic 1753 sc-1769). Only emitted for
@@ -878,30 +805,6 @@ export function VideoStudio() {
 
   const generateDisabled = submitting || !canSubmit;
   const renderLabel = mode === "replace_person" ? "Replace person" : "Render clip";
-  const previewAsset = latestAssets[0] ?? null;
-  const estimateSeconds = estimateRenderSeconds(duration, quality);
-  const gpuLabel = formatGpuLabel(requestedGpu);
-  const previewCanPlay = assetCanRenderAsVideo(previewAsset);
-  const previewTotalSeconds = previewDuration || Number(previewAsset?.file?.duration) || Number(duration) || 0;
-  const previewProgress = previewTotalSeconds ? `${Math.min(100, (previewTime / previewTotalSeconds) * 100)}%` : "0%";
-
-  useEffect(() => {
-    setPreviewPlaying(false);
-    setPreviewTime(0);
-    setPreviewDuration(0);
-  }, [previewAsset?.id]);
-
-  function togglePreviewPlayback() {
-    const video = previewVideoRef.current;
-    if (!video || !previewCanPlay) {
-      return;
-    }
-    if (video.paused) {
-      video.play().catch(() => setPreviewPlaying(false));
-      return;
-    }
-    video.pause();
-  }
 
   return (
     <ModelAvailabilityGate
@@ -917,17 +820,20 @@ export function VideoStudio() {
     >
     <section className="main-surface video-studio">
       <form className="studio-shell" onSubmit={submit}>
-        <div className="surface-header hero studio-prompt-hero video-prompt-hero">
+        <div className="surface-header hero studio-prompt-hero">
           <div className="prompt-hero-top">
-            <div className="segmented-control mode-control" role="tablist" aria-label="Video mode">
+            <div className="mode-tabs mode-control" role="tablist" aria-label="Video mode">
               {modeOptions.map(([value, label]) => {
                 // Disabled only when no available model serves this mode on Mac — and never the
                 // active tab, so the user can always switch away (sc-5716).
                 const blocked = value !== mode && macModeTabBlocked(value);
+                const active = mode === value;
                 return (
                   <button
-                    className={mode === value ? "active" : ""}
+                    className={active ? "mode-tab active" : "mode-tab"}
                     key={value}
+                    role="tab"
+                    aria-selected={active}
                     onClick={() => setMode(value)}
                     type="button"
                     disabled={blocked}
@@ -996,9 +902,8 @@ export function VideoStudio() {
               </button>
             ))}
           </div>
-        </div>
 
-        {mode !== "text_to_video" ? (
+          {mode !== "text_to_video" ? (
           <div className="studio-source-band">
             {mode === "image_to_video" || mode === "first_last_frame" ? (
               <AssetPickerField
@@ -1163,8 +1068,413 @@ export function VideoStudio() {
           </div>
         ) : null}
 
-        <div className="video-results">
-          <div className="video-main-stack">
+          <div className="settings-bar">
+            <div className="settings-bar-row">
+              <label className="settings-field settings-field-model">
+                Model
+                <select onChange={(event) => setModel(event.target.value)} value={model}>
+                  {/* Models gated on the selected tab (sc-5716): show only models that serve the
+                      active mode, falling back to the full available list if none do (a reduced
+                      catalog) so the picker is never empty. */}
+                  {(modelsForMode(mode).length ? modelsForMode(mode) : baseVideoModels).map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="settings-field settings-field-aspect">
+                Resolution
+                <select onChange={(event) => setResolution(event.target.value)} value={resolution}>
+                  {resolutionOptions.map((value) => (
+                    <option key={value} value={value}>
+                      {value.replace("x", " × ")}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="settings-field settings-field-count">
+                Duration
+                <select onChange={(event) => setDuration(Number(event.target.value))} value={duration}>
+                  {durationOptions.map((value) => (
+                    <option key={value} value={value}>
+                      {value}s
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="settings-field">
+                Quality
+                <div className="quality-segment" role="radiogroup" aria-label="Quality">
+                  {qualityChoices.map(([value, label]) => (
+                    <button
+                      aria-checked={quality === value}
+                      className={quality === value ? "active" : ""}
+                      key={value}
+                      onClick={() => setQuality(value)}
+                      role="radio"
+                      type="button"
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </label>
+            </div>
+            <div className="settings-bar-styles">
+              <span className="settings-bar-label">Style preset</span>
+              <div className="preset-chips">
+                <button
+                  className={!selectedPreset ? "preset-chip active" : "preset-chip"}
+                  onClick={() => setSelectedPresetId(noPresetId)}
+                  type="button"
+                >
+                  None
+                </button>
+                {availablePresets.map((preset) => (
+                  <button
+                    className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
+                    key={preset.id}
+                    onClick={() => setSelectedPresetId(preset.id)}
+                    type="button"
+                  >
+                    {preset.name ?? preset.id}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <PresetGuidanceStrip
+            selectedPreset={selectedPreset}
+            presetPromptParts={presetPromptParts}
+            presetLoraDetails={presetLoraDetails}
+          />
+
+          {durationHint ? <p className="helper-copy">{durationHint}</p> : null}
+
+          <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
+            <Icon.ChevDown className={advancedOpen ? "chev-rotate open" : "chev-rotate"} size={14} />
+            {advancedOpen ? "Hide advanced" : "Advanced"}
+          </button>
+
+          {advancedOpen ? (
+            <div className="advanced-panel">
+              <label>
+                Frames
+                <select onChange={(event) => setFps(Number(event.target.value))} value={fps}>
+                  {fpsOptions.map((value) => (
+                    <option key={value} value={value}>
+                      {value} fps
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {showLightning ? (
+                <div className="lightning-toggle">
+                  <label className="checkline">
+                    <input
+                      checked={lightning}
+                      onChange={(event) => setLightning(event.target.checked)}
+                      type="checkbox"
+                    />
+                    Lightning (fast 4-step)
+                  </label>
+                  <p className="helper-copy">
+                    {lightning
+                      ? "On: ~10× faster, 4 steps, CFG off, small quality trade-off. Steps and guidance are governed by the recipe."
+                      : "Off: full multi-step quality with CFG (slower). Use the Steps and Guidance controls below."}
+                  </p>
+                </div>
+              ) : null}
+              {model === ltxVideoModelId ? (
+                <>
+                  <label>
+                    LTX pipeline
+                    <select onChange={(event) => setLtxPipeline(event.target.value)} value={ltxPipeline}>
+                      <option value="auto">Auto (follow quality)</option>
+                      <option value="distilled">Distilled (single-stage)</option>
+                      <option value="two_stage">Two-stage (dev + upscaler)</option>
+                    </select>
+                  </label>
+                  <label>
+                    Distilled variant
+                    <select onChange={(event) => setDistilledVariant(event.target.value)} value={distilledVariant}>
+                      <option value="1.1">1.1 (newer aesthetic + audio)</option>
+                      <option value="1.0">1.0 (original)</option>
+                    </select>
+                  </label>
+                  <label>
+                    Precision
+                    <select onChange={(event) => setPrecision(event.target.value)} value={precision}>
+                      <option value="fp8">FP8 (lower VRAM)</option>
+                      <option value="bf16">BF16 (higher quality, CPU offload)</option>
+                    </select>
+                  </label>
+                </>
+              ) : null}
+              {selectedModel?.adapter === "ltx_video" ? (
+                <>
+                  <label>
+                    Video CFG
+                    <input
+                      min="0"
+                      max="30"
+                      onChange={(event) => setLtxVideoCfg(event.target.value)}
+                      placeholder="4.0"
+                      step="0.1"
+                      type="number"
+                      value={ltxVideoCfg}
+                    />
+                  </label>
+                  <label>
+                    Video STG
+                    <input
+                      min="0"
+                      max="10"
+                      onChange={(event) => setLtxVideoStg(event.target.value)}
+                      placeholder="0.0"
+                      step="0.1"
+                      type="number"
+                      value={ltxVideoStg}
+                    />
+                  </label>
+                  <label>
+                    Video rescale
+                    <input
+                      min="0"
+                      max="2"
+                      onChange={(event) => setLtxVideoRescale(event.target.value)}
+                      placeholder="0.7"
+                      step="0.05"
+                      type="number"
+                      value={ltxVideoRescale}
+                    />
+                  </label>
+                </>
+              ) : null}
+              {["extend_clip", "video_bridge"].includes(mode) ? (
+                <>
+                  <label>
+                    {mode === "video_bridge" ? "Left clip strength" : "Clip strength"}
+                    <input
+                      min="0"
+                      max="1"
+                      onChange={(event) => setVideoConditioningStrength(event.target.value)}
+                      placeholder="1.0"
+                      step="0.05"
+                      type="number"
+                      value={videoConditioningStrength}
+                    />
+                  </label>
+                  {mode === "video_bridge" ? (
+                    <label>
+                      Right clip strength
+                      <input
+                        min="0"
+                        max="1"
+                        onChange={(event) => setBridgeRightVideoConditioningStrength(event.target.value)}
+                        placeholder="1.0"
+                        step="0.05"
+                        type="number"
+                        value={bridgeRightVideoConditioningStrength}
+                      />
+                    </label>
+                  ) : null}
+                </>
+              ) : null}
+              {supportsQuantization ? (
+                <label>
+                  Quantization
+                  <select onChange={(event) => setQuantization(event.target.value)} value={quantization}>
+                    <option value="auto">Auto (per-platform default)</option>
+                    {quantVariants.map(([id, variant]) => (
+                      <option key={id} value={id}>
+                        {variant?.label ?? id}
+                      </option>
+                    ))}
+                    <option value="none">Full precision (unquantized)</option>
+                  </select>
+                </label>
+              ) : null}
+              <label>
+                GPU
+                <select onChange={(event) => setRequestedGpu(event.target.value)} value={requestedGpu}>
+                  {gpuOptions.map((gpu) => (
+                    <option key={gpu} value={gpu}>
+                      {gpu === "auto" ? "Auto" : gpu}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Seed
+                <input onChange={(event) => setSeed(event.target.value)} placeholder="Random" type="number" value={seed} />
+              </label>
+              {showSamplerPicker ? (
+                <label>
+                  Sampler
+                  <select onChange={(event) => setSampler(event.target.value)} value={sampler}>
+                    {samplerOptions.map((key) => (
+                      <option key={key} value={key}>
+                        {SAMPLER_LABELS[key] ?? key}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+              {showSchedulerPicker ? (
+                <label>
+                  Scheduler
+                  <select onChange={(event) => setScheduler(event.target.value)} value={scheduler}>
+                    {schedulerOptions.map((key) => (
+                      <option key={key} value={key}>
+                        {SCHEDULER_LABELS[key] ?? key}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+              {showSchedulerPicker && scheduler !== "default" ? (
+                <label>
+                  Schedule shift
+                  <input
+                    max="10"
+                    min="0.1"
+                    onChange={(event) => setSchedulerShift(Number(event.target.value))}
+                    step="0.1"
+                    type="number"
+                    value={schedulerShift}
+                  />
+                </label>
+              ) : null}
+              <label>
+                Steps
+                <input
+                  min="1"
+                  max="80"
+                  disabled={lightningActive}
+                  onChange={(event) => setStepsOverride(event.target.value)}
+                  placeholder={lightningActive ? "4 (Lightning)" : String(stepsDefaultFromModel(selectedModel) ?? "")}
+                  title={lightningActive ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps." : undefined}
+                  type="number"
+                  value={lightningActive ? "" : stepsOverride}
+                />
+              </label>
+              <label>
+                Guidance
+                <input
+                  min="0"
+                  max="30"
+                  disabled={lightningActive}
+                  onChange={(event) => setGuidanceOverride(event.target.value)}
+                  placeholder={lightningActive ? "off (Lightning)" : (() => {
+                    const value = guidanceDefaultFromModel(selectedModel);
+                    return value == null ? "" : String(value);
+                  })()}
+                  step="0.1"
+                  title={lightningActive ? "Governed by Lightning (fast 4-step). Turn Lightning off to set guidance." : undefined}
+                  type="number"
+                  value={lightningActive ? "" : guidanceOverride}
+                />
+              </label>
+              <label>
+                Character
+                <select onChange={(event) => setCharacterId(event.target.value)} value={characterId}>
+                  <option value="">No character</option>
+                  {characters.map((character) => (
+                    <option key={character.id} value={character.id}>
+                      {character.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Look
+                <select onChange={(event) => setCharacterLookId(event.target.value)} value={characterLookId}>
+                  <option value="">Default look</option>
+                  {(characters.find((character) => character.id === characterId)?.looks ?? []).map((look) => (
+                    <option key={look.id} value={look.id}>
+                      {look.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="prompt-field">
+                Negative prompt
+                <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
+              </label>
+              <LoraPickerSection
+                selectedModel={selectedModel}
+                selectedLoras={selectedLoras}
+                selectedLoraIds={selectedLoraIds}
+                compatibleLoras={compatibleLoras}
+                userSelectedLoraCount={userSelectedLoraCount}
+                showIncompatibleLoras={showIncompatibleLoras}
+                setShowIncompatibleLoras={setShowIncompatibleLoras}
+                toggleLora={toggleLora}
+                effectiveLoraWeight={effectiveLoraWeight}
+                setLoraWeight={setLoraWeight}
+                loraEmptyMessage={loraEmptyMessage}
+              />
+              {characterId ? (
+                <div className="guidance-strip">
+                  <strong>Character reference</strong>
+                  <span>
+                    Character and look are saved with the recipe; LTX image conditioning uses IC-LoRA when the selected preset includes one.
+                  </span>
+                </div>
+              ) : null}
+              {/* Save-as-preset folds into Advanced with the rest of the power-user
+                  knobs, matching Image Studio. Gated to the presetable video modes. */}
+              <SavePresetPanel
+                presetName={presetName}
+                setPresetName={setPresetName}
+                savingPreset={savingPreset}
+                presetSaveMessage={presetSaveMessage}
+                setPresetSaveMessage={setPresetSaveMessage}
+                onSave={handleSaveAsPreset}
+                presetScope={presetScope}
+                setPresetScope={setPresetScope}
+                activeProject={activeProject}
+                saveDisabled={!VIDEO_PRESET_MODES.includes(mode)}
+                saveTitle={VIDEO_PRESET_MODES.includes(mode) ? undefined : "Presets are available in Image→Video, Text→Video, or First/Last mode."}
+              />
+              {/* Video upscale (super-resolve an existing clip) folds into Advanced — it
+                  previously lived in the render rail this layout removes. It operates on a
+                  selected existing asset, independent of the current generation payload. */}
+              <VideoUpscalePanel
+                createVideoUpscaleJob={createVideoUpscaleJob}
+                macCapabilities={macCapabilities}
+                onSubmitted={(job) => {
+                  onLocalJobCreated(job);
+                  onOpenQueue();
+                }}
+                selectedAsset={selectedAsset}
+                videoAssets={videoAssets}
+              />
+            </div>
+          ) : null}
+
+          <PresetValidationWarnings presetValidationResult={presetValidationResult} selectedModel={selectedModel} />
+          {blockedMessage ? <p className="inline-warning">{blockedMessage}</p> : null}
+          {selectedLoraValidationResult.incompatible.length ? (
+            <p className="inline-warning">
+              Generate is blocked because these selected LoRAs are incompatible with {selectedModel?.name ?? "the selected model"}: {selectedLoraValidationResult.incompatible.join(", ")}.
+            </p>
+          ) : null}
+        </div>
+
+        <div className="studio-results">
+          <section className="review-panel">
+            <div className="review-panel-head">
+              <h2>Latest batch</h2>
+              <span className="kbd-hint">
+                <kbd>⌘</kbd>
+                <kbd>↵</kbd>
+                to render
+              </span>
+            </div>
             {localJobs.length ? (
               <div className="worker-progress-card-stack local-job-stack">
                 {localJobs.map((job) => {
@@ -1183,552 +1493,70 @@ export function VideoStudio() {
                 })}
               </div>
             ) : null}
-
-            <div className="video-preview-card">
-              <div className="video-preview-stage">
-                {previewAsset ? (
-                  <AssetMedia
-                    asset={previewAsset}
-                    controls={false}
-                    onEnded={() => setPreviewPlaying(false)}
-                    onLoadedMetadata={(event) => setPreviewDuration(event.currentTarget.duration || 0)}
-                    onPause={() => setPreviewPlaying(false)}
-                    onPlay={() => setPreviewPlaying(true)}
-                    onTimeUpdate={(event) => setPreviewTime(event.currentTarget.currentTime || 0)}
-                    ref={previewVideoRef}
-                  />
-                ) : (
-                  <span className="video-preview-empty">No clip rendered yet — set up the prompt above and hit Render</span>
-                )}
-              </div>
-
-              <div className="video-playback-bar">
-                <button
-                  aria-label={previewPlaying ? "Pause preview" : "Play preview"}
-                  className="play-btn"
-                  disabled={!previewCanPlay}
-                  onClick={togglePreviewPlayback}
-                  type="button"
-                >
-                  {previewPlaying ? <Icon.Pause size={14} /> : <Icon.Play size={14} />}
-                </button>
-                <div aria-hidden="true" className="video-playback-scrub">
-                  <span className="video-playback-scrub-fill" style={{ width: previewProgress }} />
-                </div>
-                <span className="video-playback-time">
-                  {formatPlaybackTime(previewTime)} / {formatPlaybackTime(previewTotalSeconds)}
-                </span>
-                <span className="video-playback-estimate">~{estimateSeconds}s on {gpuLabel}</span>
-                <button
-                  className="send-editor-btn"
-                  disabled={!previewAsset || !onSendToEditor}
-                  onClick={() => previewAsset && onSendToEditor?.(previewAsset)}
-                  type="button"
-                >
-                  <Icon.Editor size={14} /> Send to editor
-                </button>
-              </div>
-            </div>
-
-            {videoAssets.length ? (
-              <div className="recent-clips-card">
-                <div className="recent-clips-head">
-                  <h3>Recent clips</h3>
-                  <span className="meta">{localJobs.length || latestAssets.length} this session</span>
-                </div>
-                <div className="recent-clips-strip">
-                  {videoAssets.slice(0, 4).map((asset) => (
-                    <button className="tray-item" key={asset.id} onClick={() => onPreview(asset, videoAssets.slice(0, 4))} type="button">
-                      <AssetMedia asset={asset} />
-                      <span>{asset.displayName}</span>
-                    </button>
+            {latestAssets.length ? (
+              <div className="recent-assets">
+                {localJobs.length ? <h3 className="recent-assets__title">Recent Assets</h3> : null}
+                <div className="review-grid">
+                  {latestAssets.map((asset) => (
+                    <AssetCard
+                      asset={asset}
+                      deleteAsset={deleteAsset}
+                      key={asset.id}
+                      onPreview={(previewed) => onPreview(previewed, latestAssets)}
+                      purgeAsset={purgeAsset}
+                      updateAssetStatus={updateAssetStatus}
+                    />
                   ))}
                 </div>
               </div>
-            ) : null}
+            ) : localJobs.length ? null : (
+              <div className="empty-panel">No fresh clip batch</div>
+            )}
+          </section>
 
-            {comparisonAsset?.recipe?.mode === "replace_person" && comparisonSource ? (
-              <div className="comparison-panel">
-                <div className="comparison-toolbar">
-                  <div className="segmented-control compact-segment" aria-label="Comparison mode">
-                    <button className={comparisonMode === "side_by_side" ? "active" : ""} onClick={() => setComparisonMode("side_by_side")} type="button">
-                      Side by Side
-                    </button>
-                    <button className={comparisonMode === "ab" ? "active" : ""} onClick={() => setComparisonMode("ab")} type="button">
-                      A/B
-                    </button>
-                  </div>
-                  {comparisonMode === "ab" ? (
-                    <div className="segmented-control compact-segment" aria-label="A/B source">
-                      <button className={abSide === "original" ? "active" : ""} onClick={() => setAbSide("original")} type="button">
-                        A
-                      </button>
-                      <button className={abSide === "replacement" ? "active" : ""} onClick={() => setAbSide("replacement")} type="button">
-                        B
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
-                {comparisonMode === "side_by_side" ? (
-                  <div className="comparison-grid">
-                    <div>
-                      <p className="eyebrow">Original</p>
-                      <AssetMedia asset={comparisonSource} />
-                    </div>
-                    <div>
-                      <p className="eyebrow">Replacement</p>
-                      <AssetMedia asset={comparisonAsset} />
-                    </div>
-                  </div>
-                ) : (
-                  <div className="comparison-single">
-                    <p className="eyebrow">{abSide === "original" ? "A Original" : "B Replacement"}</p>
-                    <AssetMedia asset={abSide === "original" ? comparisonSource : comparisonAsset} />
-                  </div>
-                )}
-              </div>
-            ) : null}
-
-            {latestAssets.length > 1 ? (
-              <div className="review-grid video-review-grid">
-                {latestAssets.slice(1).map((asset) => (
-                  <AssetCard
-                    asset={asset}
-                    deleteAsset={deleteAsset}
-                    key={asset.id}
-                    onPreview={(previewed) => onPreview(previewed, latestAssets.slice(1))}
-                    purgeAsset={purgeAsset}
-                    updateAssetStatus={updateAssetStatus}
-                  />
-                ))}
-              </div>
-            ) : null}
-
-            {blockedMessage ? <p className="inline-warning">{blockedMessage}</p> : null}
-            <PresetValidationWarnings presetValidationResult={presetValidationResult} selectedModel={selectedModel} />
-            {selectedLoraValidationResult.incompatible.length ? (
-              <p className="inline-warning">
-                Generate is blocked because these selected LoRAs are incompatible with {selectedModel?.name ?? "the selected model"}: {selectedLoraValidationResult.incompatible.join(", ")}.
-              </p>
-            ) : null}
-          </div>
-
-          <div className="video-rail">
-            <aside className="render-rail">
-              <div className="preset-rail-head">
-                <h3>Render settings</h3>
-                <span className="preset-rail-model-tag">{selectedModel?.name ?? "—"}</span>
-              </div>
-
-              <label>
-                Model
-                <select onChange={(event) => setModel(event.target.value)} value={model}>
-                  {/* Models gated on the selected tab (sc-5716): show only models that serve the
-                      active mode, falling back to the full available list if none do (a reduced
-                      catalog) so the picker is never empty. */}
-                  {(modelsForMode(mode).length ? modelsForMode(mode) : baseVideoModels).map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {macHiddenVideoModels.length ? (
-                <p className="mac-gating-note">
-                  {macHiddenVideoModels.length} model
-                  {macHiddenVideoModels.length === 1 ? "" : "s"} unavailable on Mac (Rust/MLX only).
-                </p>
-              ) : null}
-
-              <div className="style-preset-strip">
-                <span className="style-preset-label">Style preset</span>
-                <div className="preset-chips">
-                  <button
-                    className={!selectedPreset ? "preset-chip active" : "preset-chip"}
-                    onClick={() => setSelectedPresetId(noPresetId)}
-                    type="button"
-                  >
-                    None
+          {/* Replace-person A/B / side-by-side review (video-specific, no Image Studio
+              equivalent) — surfaces the latest replacement clip against its source. */}
+          {comparisonAsset?.recipe?.mode === "replace_person" && comparisonSource ? (
+            <div className="comparison-panel">
+              <div className="comparison-toolbar">
+                <div className="segmented-control compact-segment" aria-label="Comparison mode">
+                  <button className={comparisonMode === "side_by_side" ? "active" : ""} onClick={() => setComparisonMode("side_by_side")} type="button">
+                    Side by Side
                   </button>
-                  {availablePresets.map((preset) => (
-                    <button
-                      className={selectedPreset?.id === preset.id ? "preset-chip active" : "preset-chip"}
-                      key={preset.id}
-                      onClick={() => setSelectedPresetId(preset.id)}
-                      type="button"
-                    >
-                      {preset.name ?? preset.id}
+                  <button className={comparisonMode === "ab" ? "active" : ""} onClick={() => setComparisonMode("ab")} type="button">
+                    A/B
+                  </button>
+                </div>
+                {comparisonMode === "ab" ? (
+                  <div className="segmented-control compact-segment" aria-label="A/B source">
+                    <button className={abSide === "original" ? "active" : ""} onClick={() => setAbSide("original")} type="button">
+                      A
                     </button>
-                  ))}
-                </div>
-              </div>
-
-              <SavePresetPanel
-                presetName={presetName}
-                setPresetName={setPresetName}
-                savingPreset={savingPreset}
-                presetSaveMessage={presetSaveMessage}
-                setPresetSaveMessage={setPresetSaveMessage}
-                onSave={handleSaveAsPreset}
-                presetScope={presetScope}
-                setPresetScope={setPresetScope}
-                activeProject={activeProject}
-                saveDisabled={!VIDEO_PRESET_MODES.includes(mode)}
-                saveTitle={VIDEO_PRESET_MODES.includes(mode) ? undefined : "Presets are available in Image→Video, Text→Video, or First/Last mode."}
-              />
-
-              <label>
-                Quality
-                <div className="quality-segment" role="radiogroup" aria-label="Quality">
-                  {qualityChoices.map(([value, label]) => (
-                    <button
-                      aria-checked={quality === value}
-                      className={quality === value ? "active" : ""}
-                      key={value}
-                      onClick={() => setQuality(value)}
-                      role="radio"
-                      type="button"
-                    >
-                      {label}
+                    <button className={abSide === "replacement" ? "active" : ""} onClick={() => setAbSide("replacement")} type="button">
+                      B
                     </button>
-                  ))}
-                </div>
-              </label>
-
-              <div className="control-grid preset-rail-row">
-                <label>
-                  Duration
-                  <select onChange={(event) => setDuration(Number(event.target.value))} value={duration}>
-                    {durationOptions.map((value) => (
-                      <option key={value} value={value}>
-                        {value}s
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Frames
-                  <select onChange={(event) => setFps(Number(event.target.value))} value={fps}>
-                    {fpsOptions.map((value) => (
-                      <option key={value} value={value}>
-                        {value} fps
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                  </div>
+                ) : null}
               </div>
-
-              <label>
-                Resolution
-                <select onChange={(event) => setResolution(event.target.value)} value={resolution}>
-                  {resolutionOptions.map((value) => (
-                    <option key={value} value={value}>
-                      {value.replace("x", " × ")}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <PresetGuidanceStrip
-                selectedPreset={selectedPreset}
-                presetPromptParts={presetPromptParts}
-                presetLoraDetails={presetLoraDetails}
-                noPresetHint="Generation uses only the prompt, model, and visible render settings."
-              />
-
-              {durationHint ? <p className="helper-copy">{durationHint}</p> : null}
-
-              <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
-                <Icon.ChevDown className={advancedOpen ? "chev-rotate open" : "chev-rotate"} size={14} />
-                {advancedOpen ? "Hide advanced" : "Advanced"}
-              </button>
-
-              {advancedOpen ? (
-                <div className="advanced-panel">
-                  {model === ltxVideoModelId ? (
-                    <>
-                      <label>
-                        LTX pipeline
-                        <select onChange={(event) => setLtxPipeline(event.target.value)} value={ltxPipeline}>
-                          <option value="auto">Auto (follow quality)</option>
-                          <option value="distilled">Distilled (single-stage)</option>
-                          <option value="two_stage">Two-stage (dev + upscaler)</option>
-                        </select>
-                      </label>
-                      <label>
-                        Distilled variant
-                        <select onChange={(event) => setDistilledVariant(event.target.value)} value={distilledVariant}>
-                          <option value="1.1">1.1 (newer aesthetic + audio)</option>
-                          <option value="1.0">1.0 (original)</option>
-                        </select>
-                      </label>
-                      <label>
-                        Precision
-                        <select onChange={(event) => setPrecision(event.target.value)} value={precision}>
-                          <option value="fp8">FP8 (lower VRAM)</option>
-                          <option value="bf16">BF16 (higher quality, CPU offload)</option>
-                        </select>
-                      </label>
-                    </>
-                  ) : null}
-                  {selectedModel?.adapter === "ltx_video" ? (
-                    <>
-                      <label>
-                        Video CFG
-                        <input
-                          min="0"
-                          max="30"
-                          onChange={(event) => setLtxVideoCfg(event.target.value)}
-                          placeholder="4.0"
-                          step="0.1"
-                          type="number"
-                          value={ltxVideoCfg}
-                        />
-                      </label>
-                      <label>
-                        Video STG
-                        <input
-                          min="0"
-                          max="10"
-                          onChange={(event) => setLtxVideoStg(event.target.value)}
-                          placeholder="0.0"
-                          step="0.1"
-                          type="number"
-                          value={ltxVideoStg}
-                        />
-                      </label>
-                      <label>
-                        Video rescale
-                        <input
-                          min="0"
-                          max="2"
-                          onChange={(event) => setLtxVideoRescale(event.target.value)}
-                          placeholder="0.7"
-                          step="0.05"
-                          type="number"
-                          value={ltxVideoRescale}
-                        />
-                      </label>
-                    </>
-                  ) : null}
-                  {["extend_clip", "video_bridge"].includes(mode) ? (
-                    <>
-                      <label>
-                        {mode === "video_bridge" ? "Left clip strength" : "Clip strength"}
-                        <input
-                          min="0"
-                          max="1"
-                          onChange={(event) => setVideoConditioningStrength(event.target.value)}
-                          placeholder="1.0"
-                          step="0.05"
-                          type="number"
-                          value={videoConditioningStrength}
-                        />
-                      </label>
-                      {mode === "video_bridge" ? (
-                        <label>
-                          Right clip strength
-                          <input
-                            min="0"
-                            max="1"
-                            onChange={(event) => setBridgeRightVideoConditioningStrength(event.target.value)}
-                            placeholder="1.0"
-                            step="0.05"
-                            type="number"
-                            value={bridgeRightVideoConditioningStrength}
-                          />
-                        </label>
-                      ) : null}
-                    </>
-                  ) : null}
-                  {supportsQuantization ? (
-                    <label>
-                      Quantization
-                      <select onChange={(event) => setQuantization(event.target.value)} value={quantization}>
-                        <option value="auto">Auto (per-platform default)</option>
-                        {quantVariants.map(([id, variant]) => (
-                          <option key={id} value={id}>
-                            {variant?.label ?? id}
-                          </option>
-                        ))}
-                        <option value="none">Full precision (unquantized)</option>
-                      </select>
-                    </label>
-                  ) : null}
-                  <label>
-                    GPU
-                    <select onChange={(event) => setRequestedGpu(event.target.value)} value={requestedGpu}>
-                      {gpuOptions.map((gpu) => (
-                        <option key={gpu} value={gpu}>
-                          {gpu === "auto" ? "Auto" : gpu}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Seed
-                    <input onChange={(event) => setSeed(event.target.value)} placeholder="Random" type="number" value={seed} />
-                  </label>
-                  {showSamplerPicker ? (
-                    <label>
-                      Sampler
-                      <select onChange={(event) => setSampler(event.target.value)} value={sampler}>
-                        {samplerOptions.map((key) => (
-                          <option key={key} value={key}>
-                            {SAMPLER_LABELS[key] ?? key}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  ) : null}
-                  {showSchedulerPicker ? (
-                    <label>
-                      Scheduler
-                      <select onChange={(event) => setScheduler(event.target.value)} value={scheduler}>
-                        {schedulerOptions.map((key) => (
-                          <option key={key} value={key}>
-                            {SCHEDULER_LABELS[key] ?? key}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  ) : null}
-                  {showSchedulerPicker && scheduler !== "default" ? (
-                    <label>
-                      Schedule shift
-                      <input
-                        max="10"
-                        min="0.1"
-                        onChange={(event) => setSchedulerShift(Number(event.target.value))}
-                        step="0.1"
-                        type="number"
-                        value={schedulerShift}
-                      />
-                    </label>
-                  ) : null}
-                  <label>
-                    Steps
-                    <input
-                      min="1"
-                      max="80"
-                      onChange={(event) => setStepsOverride(event.target.value)}
-                      placeholder={String(stepsDefaultFromModel(selectedModel) ?? "")}
-                      type="number"
-                      value={stepsOverride}
-                    />
-                  </label>
-                  <label>
-                    Guidance
-                    <input
-                      min="0"
-                      max="30"
-                      onChange={(event) => setGuidanceOverride(event.target.value)}
-                      placeholder={(() => {
-                        const value = guidanceDefaultFromModel(selectedModel);
-                        return value == null ? "" : String(value);
-                      })()}
-                      step="0.1"
-                      type="number"
-                      value={guidanceOverride}
-                    />
-                  </label>
-                  <label>
-                    Character
-                    <select onChange={(event) => setCharacterId(event.target.value)} value={characterId}>
-                      <option value="">No character</option>
-                      {characters.map((character) => (
-                        <option key={character.id} value={character.id}>
-                          {character.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Look
-                    <select onChange={(event) => setCharacterLookId(event.target.value)} value={characterLookId}>
-                      <option value="">Default look</option>
-                      {(characters.find((character) => character.id === characterId)?.looks ?? []).map((look) => (
-                        <option key={look.id} value={look.id}>
-                          {look.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="prompt-field">
-                    Negative prompt
-                    <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
-                  </label>
-                  <LoraPickerSection
-                    selectedModel={selectedModel}
-                    selectedLoras={selectedLoras}
-                    selectedLoraIds={selectedLoraIds}
-                    compatibleLoras={compatibleLoras}
-                    userSelectedLoraCount={userSelectedLoraCount}
-                    showIncompatibleLoras={showIncompatibleLoras}
-                    setShowIncompatibleLoras={setShowIncompatibleLoras}
-                    toggleLora={toggleLora}
-                    effectiveLoraWeight={effectiveLoraWeight}
-                    setLoraWeight={setLoraWeight}
-                    loraEmptyMessage={loraEmptyMessage}
-                  />
-                  {characterId ? (
-                    <div className="guidance-strip">
-                      <strong>Character reference</strong>
-                      <span>
-                        Character and look are saved with the recipe; LTX image conditioning uses IC-LoRA when the selected preset includes one.
-                      </span>
-                    </div>
-                  ) : null}
+              {comparisonMode === "side_by_side" ? (
+                <div className="comparison-grid">
+                  <div>
+                    <p className="eyebrow">Original</p>
+                    <AssetMedia asset={comparisonSource} />
+                  </div>
+                  <div>
+                    <p className="eyebrow">Replacement</p>
+                    <AssetMedia asset={comparisonAsset} />
+                  </div>
                 </div>
-              ) : null}
-            </aside>
-
-            <VideoUpscalePanel
-              createVideoUpscaleJob={createVideoUpscaleJob}
-              macCapabilities={macCapabilities}
-              onSubmitted={(job) => {
-                onLocalJobCreated(job);
-                onOpenQueue();
-              }}
-              selectedAsset={selectedAsset}
-              videoAssets={videoAssets}
-            />
-
-            <aside className="tips-card">
-              <h3>Tips</h3>
-              <ul>
-                <li>Short clips (4–6s) compose better in the editor.</li>
-                <li>Describe the motion, not just the scene.</li>
-                <li>Pick a motion chip above to guide the camera.</li>
-              </ul>
-            </aside>
-
-            <aside className="keyboard-card">
-              <h3>Keyboard</h3>
-              <dl>
-                <div className="kbd-row">
-                  <span>Render</span>
-                  <span className="kbd-keys">
-                    <kbd>⌘</kbd>
-                    <kbd>↵</kbd>
-                  </span>
+              ) : (
+                <div className="comparison-single">
+                  <p className="eyebrow">{abSide === "original" ? "A Original" : "B Replacement"}</p>
+                  <AssetMedia asset={abSide === "original" ? comparisonSource : comparisonAsset} />
                 </div>
-                <div className="kbd-row">
-                  <span>Send to editor</span>
-                  <span className="kbd-keys">
-                    <kbd>⇧</kbd>
-                    <kbd>E</kbd>
-                  </span>
-                </div>
-                <div className="kbd-row">
-                  <span>Loop preview</span>
-                  <span className="kbd-keys">
-                    <kbd>L</kbd>
-                  </span>
-                </div>
-              </dl>
-            </aside>
-          </div>
+              )}
+            </div>
+          ) : null}
         </div>
       </form>
       {guideOpen ? (

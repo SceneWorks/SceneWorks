@@ -1,8 +1,8 @@
 //! The video-generation job request (epic 3018, sc-3033).
 //!
-//! Parses a job `payload` into a typed request, mirroring the Python worker's
-//! `video_request_from_job` (apps/worker/scene_worker/video_adapters.py) so the
-//! native MLX Rust worker reads the same payload the UI already sends. The
+//! Parses a job `payload` into a typed request so the native MLX/candle Rust
+//! worker reads the same payload the UI already sends (the parse was ported from
+//! the retired Python worker's `video_request_from_job`). The
 //! `advanced` and `model_manifest_entry` maps pass through verbatim (they carry
 //! per-model knobs like steps/guidanceScale/imageConditioningStrength and the
 //! resolved manifest entry), so adding a model needs no DTO change.

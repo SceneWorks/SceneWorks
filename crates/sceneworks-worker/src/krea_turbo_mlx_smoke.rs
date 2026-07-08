@@ -20,15 +20,9 @@
 
 use std::path::{Path, PathBuf};
 
-use gen_core::{GenerationOutput, GenerationRequest, Image, LoadSpec, Quant, WeightsSource};
+use gen_core::{GenerationOutput, GenerationRequest, LoadSpec, Quant, WeightsSource};
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_string())
-}
+use super::smoke_support::{env_or, image_std, save_png, DEGENERATE_STD_FLOOR_DEFAULT};
 
 /// The engine-complete packed subdir to load: mirror `image_jobs::base::krea_model_subdir`'s default —
 /// prefer `<root>/q8` (the shipped default; carries `transformer/diffusion_pytorch_model.safetensors`),
@@ -68,31 +62,6 @@ fn cached_turnkey_root() -> Option<PathBuf> {
                 .is_file()
                 .then_some(dir)
         })
-}
-
-/// Mean per-pixel std-dev across the RGB channels — a cheap "is the image non-degenerate" check. A NaN /
-/// all-black / flat decode collapses the std toward 0; this guards that degenerate floor. The real
-/// quality call is the saved-PNG eyeball (the `recommended`-flag verdict on sc-7574).
-fn image_std(img: &Image) -> f64 {
-    let n = img.pixels.len() as f64;
-    if n == 0.0 {
-        return 0.0;
-    }
-    let mean = img.pixels.iter().map(|&p| p as f64).sum::<f64>() / n;
-    let var = img
-        .pixels
-        .iter()
-        .map(|&p| (p as f64 - mean).powi(2))
-        .sum::<f64>()
-        / n;
-    var.sqrt()
-}
-
-fn save_png(img: &Image, path: &Path) {
-    image::RgbImage::from_raw(img.width, img.height, img.pixels.clone())
-        .expect("rgb buffer")
-        .save(path)
-        .unwrap_or_else(|e| panic!("save {}: {e}", path.display()));
 }
 
 #[test]
@@ -177,7 +146,7 @@ fn krea_turbo_mlx_gpu_smoke() {
         "engine returned the wrong dimensions"
     );
     assert!(
-        std > 5.0,
+        std > DEGENERATE_STD_FLOOR_DEFAULT,
         "krea_2_turbo render looks degenerate (std {std:.2}) — possible NaN / all-black / flat decode"
     );
     println!(

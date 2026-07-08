@@ -85,6 +85,12 @@ export function MissingMedia({ className = "" }) {
 // source fails to load (the file is gone), rather than leaving a broken image.
 function ImageThumb({ src, className }) {
   const [failed, setFailed] = React.useState(false);
+  // sc-9063: a load failure is per-URL, not per-asset. When the src changes —
+  // e.g. a media ticket finally arrives after a mint failure degraded thumbnails
+  // to the placeholder — retry the load instead of sticking on the marker.
+  React.useEffect(() => {
+    setFailed(false);
+  }, [src]);
   if (failed) {
     return <MissingMedia className={className} />;
   }
@@ -111,6 +117,11 @@ export function AssetThumbnail({ asset, className = "" }) {
 function VideoPoster({ asset, className }) {
   const [failed, setFailed] = React.useState(false);
   const poster = posterUrl(asset);
+  // Same per-URL retry as ImageThumb (sc-9063): a new poster URL (fresh media
+  // ticket) clears a stale failure so the placeholder isn't permanent.
+  React.useEffect(() => {
+    setFailed(false);
+  }, [poster]);
   if (!poster) {
     return <span className={className} onContextMenu={suppressThumbnailContextMenu}>{asset.type ?? "video"}</span>;
   }

@@ -81,7 +81,7 @@ pub struct Managed {
     pub shutting_down: AtomicBool,
 }
 
-/// PIDs of the API + Python worker + MLX worker sidecars owned by this launch.
+/// PIDs of the API + GPU worker (MLX on macOS, candle on Windows) sidecars owned by this launch.
 #[derive(Default, Clone, Serialize, Deserialize)]
 struct SidecarPids {
     api: Option<u32>,
@@ -197,10 +197,10 @@ pub fn shared_huggingface_home() -> PathBuf {
 }
 
 /// Hugging Face cache home injected into both sidecars so the rust-api model
-/// catalog and the Python inference worker resolve weights from the same root.
+/// catalog and the native inference worker resolve weights from the same root.
 /// Without this the API falls back to `<data_dir>/cache/huggingface` while the
-/// worker uses huggingface_hub's default `~/.cache/huggingface`, so they
-/// disagree and every catalog entry shows "missing" (sc-1473 Step 1 gap).
+/// worker uses the HF hub default `~/.cache/huggingface`, so they disagree and
+/// every catalog entry shows "missing" (sc-1473 Step 1 gap).
 /// Resolution order: an explicit `HF_HOME` in the environment (useful under
 /// `tauri dev`), then the user's persisted choice from the first-run splash, then
 /// the shared per-user cache. Because the splash persists this *before* the
@@ -269,19 +269,36 @@ fn append_log(path: &Path, line: &str) {
 }
 
 /// Extract the port from the API's bound-address startup line. In loopback mode the
-/// API logs `…address=127.0.0.1:PORT`; in LAN mode (epic 4484) it binds 0.0.0.0 and
-/// logs `…address=0.0.0.0:PORT`, so both markers are tried. (LAN mode also pre-sets
-/// the known fixed port, so this is the fallback for the dynamic loopback case.)
+/// API logs `event="api_listening" … address=127.0.0.1:PORT`; in LAN mode (epic 4484)
+/// it binds 0.0.0.0 and logs `address=0.0.0.0:PORT`. (LAN mode also pre-sets the known
+/// fixed port, so this is the fallback for the dynamic loopback case.)
+///
+/// Anchored to the API's own startup marker (F-127, sc-8929): the port is read from the
+/// `address=` field of the `api_listening` event ONLY. An earlier diagnostic line that
+/// merely mentions a loopback `host:port` (e.g. a credential-socket or health-probe log)
+/// no longer seeds the wrong port, which previously left window-gating polling a dead
+/// port until the 30 s timeout fired.
 fn parse_listening_port(line: &str) -> Option<u16> {
+    // Only the API's bound-address startup line carries a port we should trust.
+    if !line.contains("api_listening") {
+        return None;
+    }
+    // Read the port from the `address` field specifically (not any bare host:port
+    // elsewhere on the line — a peer addr, a health probe). The packaged sidecar logs
+    // JSON to its piped stdout (`"address":"127.0.0.1:PORT"`), while a TTY/dev stdout
+    // logs the pretty/logfmt form (`address=127.0.0.1:PORT`). Anchor on the field name
+    // and read the first bind marker that follows, so BOTH formats resolve the port —
+    // keying only on `address=` (F-127, sc-8929) silently broke the JSON path, which is
+    // the default packaged loopback launch, stranding window-gating until the 30 s
+    // timeout ("The local API did not start in time.").
+    let rest = line.split("address").nth(1)?;
     for marker in ["127.0.0.1:", "0.0.0.0:"] {
-        if let Some(index) = line.find(marker) {
-            let start = index + marker.len();
-            if let Ok(port) = line[start..]
+        if let Some(index) = rest.find(marker) {
+            let digits: String = rest[index + marker.len()..]
                 .chars()
                 .take_while(char::is_ascii_digit)
-                .collect::<String>()
-                .parse()
-            {
+                .collect();
+            if let Ok(port) = digits.parse() {
                 return Some(port);
             }
         }
@@ -510,7 +527,7 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
             "SCENEWORKS_DATA_DIR",
             resolved_data_dir().to_string_lossy().to_string(),
         )
-        // Pin the config dir so the API and Python worker share one root on all
+        // Pin the config dir so the API and worker share one root on all
         // platforms (Linux otherwise splits XDG data vs config).
         .env(
             "SCENEWORKS_CONFIG_DIR",
@@ -632,11 +649,19 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
                     }
                     text
                 }
-                CommandEvent::Terminated(payload) => format!(
-                    "[desktop] api sidecar terminated: code={:?} signal={:?}\n",
-                    payload.code, payload.signal
-                ),
-                CommandEvent::Error(error) => format!("[desktop] api sidecar error: {error}\n"),
+                CommandEvent::Terminated(payload) => {
+                    let line = format!(
+                        "[desktop] api sidecar terminated: code={:?} signal={:?}\n",
+                        payload.code, payload.signal
+                    );
+                    handle_api_exit(&app_handle);
+                    line
+                }
+                CommandEvent::Error(error) => {
+                    let line = format!("[desktop] api sidecar error: {error}\n");
+                    handle_api_exit(&app_handle);
+                    line
+                }
                 _ => continue,
             };
             if let Some(file) = file.as_mut() {
@@ -649,6 +674,38 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+/// Handle an unexpected exit of the API sidecar (F-128, sc-8930). The API is spawned
+/// once and `run_startup`'s `Managed.api.is_some()` guard blocks a re-spawn; the GPU
+/// workers self-supervise with backoff but the API did not, so if it crashed mid-session
+/// the webview pointed at a dead origin with the "Retry" button inert (its `start_setup`
+/// re-entry short-circuited on the still-populated `api` slot).
+///
+/// Clear the `Managed.api` slot + the recorded PID so the guard now sees `None` and a
+/// Retry re-spawns the API, and surface a setup `error` event so the UI shows the
+/// recoverable error screen instead of a silently-dead window. No-op during a graceful
+/// shutdown (the child was killed on purpose) — see `begin_shutdown`, which `take()`s the
+/// child before this reader observes the resulting `Terminated`.
+fn handle_api_exit(app: &AppHandle) {
+    if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
+        return;
+    }
+    // Drop the child handle + its recorded PID so `run_startup`'s spawn-once guard
+    // re-arms and a Retry actually re-spawns the API.
+    let _ = app.state::<Managed>().api.lock().expect("api lock").take();
+    record_api_pid_cleared(app);
+    // Forget the discovered port so window-gating re-derives it from the fresh spawn.
+    *app.state::<Managed>()
+        .api_port
+        .lock()
+        .expect("api port lock") = None;
+    emit(
+        app,
+        "error",
+        "The local API stopped unexpectedly. Click Retry to restart it.",
+        true,
+    );
 }
 
 /// Health-gate the window on a background thread: wait for the API's
@@ -1193,6 +1250,17 @@ fn record_api_pid(app: &AppHandle, pid: u32) {
     write_sidecar_pidfile(&pids);
 }
 
+/// Clear the recorded API PID after the sidecar exits unexpectedly (F-128, sc-8930), so
+/// the next launch's `reap_stale_sidecars` doesn't try to reap a PID that already died
+/// (or, worse, a recycled one). Paired with clearing the in-memory `Managed.api` slot so
+/// a Retry re-spawns the API.
+fn record_api_pid_cleared(app: &AppHandle) {
+    let state = app.state::<Managed>();
+    let mut pids = state.pids.lock().expect("pids lock");
+    pids.api = None;
+    write_sidecar_pidfile(&pids);
+}
+
 #[cfg(target_os = "macos")]
 fn record_mlx_worker_pid(app: &AppHandle, pid: Option<u32>) {
     let state = app.state::<Managed>();
@@ -1210,7 +1278,9 @@ fn record_candle_worker_pid(app: &AppHandle, pid: Option<u32>) {
 }
 
 /// True when `pid` is one of our sidecars (not a recycled, unrelated PID). The
-/// command line must reference the API binary or the Python worker module.
+/// command line must reference the API binary. The native GPU worker
+/// (`sceneworks-rust-worker`) exits on its own when its parent/API is gone, so
+/// only the API sidecar needs identity-checked reaping.
 #[cfg(unix)]
 fn is_our_sidecar(pid: u32) -> bool {
     let Ok(output) = std::process::Command::new("ps")
@@ -1223,15 +1293,14 @@ fn is_our_sidecar(pid: u32) -> bool {
         return false;
     }
     let command = String::from_utf8_lossy(&output.stdout);
-    command.contains("sceneworks-api") || command.contains("scene_worker")
+    command.contains("sceneworks-api")
 }
 
 #[cfg(windows)]
 fn is_our_sidecar(pid: u32) -> bool {
-    // tasklist exposes the image name (sceneworks-api.exe) but not arguments, so
-    // the Python worker (python.exe -m scene_worker) can't be matched here; the
-    // worker exits on its own when its parent/API is gone, so only the API needs
-    // reaping on Windows.
+    // tasklist exposes the image name (sceneworks-api.exe) but not arguments; the
+    // native GPU worker exits on its own when its parent/API is gone, so only the
+    // API needs reaping on Windows.
     let Ok(output) = std::process::Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .output()
@@ -1661,14 +1730,25 @@ mod bind_tests {
     /// var in prose or `backticks` are allowed and don't match.) The needle is
     /// assembled from parts so this test's own source doesn't trip the `include_str!`
     /// scan of this very file.
+    ///
+    /// F-128 (sc-8930): scans ALL of the crate's source modules, not just four — the
+    /// invariant is only enforced where it's checked, so a `.env("SCENEWORKS_ALLOW_
+    /// OPEN_BIND", …)` added to `update.rs` / `cred_ipc.rs` / `cuda_provision.rs` would
+    /// previously have slipped past. Keep this list in lockstep with `apps/desktop/src`.
     #[test]
     fn desktop_never_sets_allow_open_bind() {
         let needle = concat!("\"SCENEWORKS_", "ALLOW_OPEN_BIND\"");
+        // Every .rs module in apps/desktop/src (cuda_provision.rs is Windows-gated at
+        // compile time, but include_str! reads its source on any host, so its bind env
+        // is scanned everywhere too).
         for source in [
             include_str!("setup.rs"),
             include_str!("settings.rs"),
             include_str!("main.rs"),
             include_str!("net.rs"),
+            include_str!("update.rs"),
+            include_str!("cred_ipc.rs"),
+            include_str!("cuda_provision.rs"),
         ] {
             assert!(
                 !source.contains(needle),
@@ -1690,5 +1770,61 @@ mod bind_tests {
             Some(8787)
         );
         assert_eq!(parse_listening_port("nothing to see here"), None);
+    }
+
+    /// F-127 (sc-8929): the port is read ONLY from the `api_listening` event's
+    /// `address=` field. An earlier diagnostic line that merely mentions a loopback
+    /// `host:port` (a health probe, the credential socket, etc.) must NOT seed a port —
+    /// doing so previously pointed window-gating at a dead port for the full 30 s.
+    #[test]
+    fn parse_listening_port_ignores_unrelated_lines_with_a_host_port() {
+        // A diagnostic line with a loopback host:port but no api_listening marker.
+        assert_eq!(
+            parse_listening_port("probing health at 127.0.0.1:9999 before start"),
+            None
+        );
+        // A line that mentions the event but whose host:port isn't in the address field
+        // (e.g. an incidental reference) doesn't get mis-parsed from the wrong token.
+        assert_eq!(
+            parse_listening_port("api_listening address=127.0.0.1:54321 (peer 127.0.0.1:1)"),
+            Some(54321)
+        );
+        // Real logfmt-style line with fields before/after address= still parses.
+        assert_eq!(
+            parse_listening_port(
+                "2026-07-04 event=api_listening address=127.0.0.1:41234 msg=\"listening\""
+            ),
+            Some(41234)
+        );
+    }
+
+    /// The packaged sidecar's stdout is a pipe, so the API logs JSON
+    /// (`"address":"HOST:PORT"`), not the logfmt `address=HOST:PORT` a TTY/dev run
+    /// emits. Keying only on `address=` (the sc-8929 regression) failed to discover
+    /// the port on a default loopback launch, so window-gating dead-polled until the
+    /// 30 s timeout. Parse the real JSON envelope the desktop reader actually sees.
+    #[test]
+    fn parse_listening_port_handles_json_stdout() {
+        // Loopback (OS-assigned) — the default packaged first-run path.
+        assert_eq!(
+            parse_listening_port(
+                r#"{"message":"SceneWorks Rust API listening","event":"api_listening","address":"127.0.0.1:60294","level":"info","reportedAt":"2026-07-04T15:20:19Z"}"#
+            ),
+            Some(60294)
+        );
+        // LAN (0.0.0.0/fixed) JSON envelope parses too.
+        assert_eq!(
+            parse_listening_port(
+                r#"{"event":"api_listening","address":"0.0.0.0:8787","level":"info"}"#
+            ),
+            Some(8787)
+        );
+        // A JSON line that is NOT the listening event contributes no port.
+        assert_eq!(
+            parse_listening_port(
+                r#"{"event":"utility_worker_inprocess","apiUrl":"http://127.0.0.1:60294"}"#
+            ),
+            None
+        );
     }
 }

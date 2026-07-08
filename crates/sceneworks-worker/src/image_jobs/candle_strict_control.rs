@@ -48,6 +48,14 @@ trait CandleStrictControl: Send + 'static {
     /// The short `start_gen_stream` tag (`zimage_control` / `flux2_control` / `qwen_control`).
     fn stream_tag(&self) -> &'static str;
 
+    /// The output base dimensions for this generation: the geometry the control map (pose skeleton /
+    /// canny / depth) is rendered at, and the size the provider generates. Normally the request's W×H;
+    /// a PiD `2k` output tier (sc-10054) caps them so PiD's fixed 4× lands on ~2048. These MUST equal the
+    /// provider's stored `width`/`height` (used inside `generate_one`), or the control map and the latent
+    /// misalign — so each impl returns exactly those fields.
+    fn out_width(&self) -> u32;
+    fn out_height(&self) -> u32;
+
     /// Load the provider on the blocking thread (download already happened in the async preamble).
     fn load(&self) -> WorkerResult<Self::Model>;
 
@@ -114,7 +122,9 @@ async fn run_candle_strict_control<P: CandleStrictControl>(
     let poses = parse_poses(request);
     let pose_count = poses.len();
 
-    let (width, height) = (request.width, request.height);
+    // Render the control map + generate at the provider's output dims (normally the request's W×H; a PiD
+    // 2K output tier caps them — sc-10054). The provider's stored dims and these are the same value.
+    let (width, height) = (provider.out_width(), provider.out_height());
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     // One shared seed across the pose set (the MLX `_generate_pose_set` convention) so noise-derived
     // attributes (hair, wardrobe, lighting) stay constant while only the pose changes. `resolve_seed`
@@ -128,17 +138,14 @@ async fn run_candle_strict_control<P: CandleStrictControl>(
     // `!Send` scorer is built ONCE in the load closure on the blocking thread (source embedded once,
     // reused across all poses).
     let likeness_source = resolve_control_identity_source(request, settings, project_path);
-    let face_stack_dir = if likeness_source.is_some() {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        likeness_source.is_some(),
+        "pose-set face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
 
     let engine_label = provider.engine_label();

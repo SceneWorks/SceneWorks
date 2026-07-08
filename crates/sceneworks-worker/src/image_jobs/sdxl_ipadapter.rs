@@ -12,6 +12,12 @@
 /// h94 IP-Adapter repo (the ViT-H encoder + the plus/plus-face SDXL weights), matching the MLX SDXL IP
 /// path's `SDXL_IP_ADAPTER_REPO`.
 const SDXL_IPADAPTER_REPO: &str = "h94/IP-Adapter";
+/// Pinned revision for the `h94/IP-Adapter` repo (sc-9879, F-077 follow-up). A fixed, non-overridable
+/// repo (the env pin points at a local dir, not another HF repo), so fetching the mutable `main` branch
+/// means an upstream re-push could silently swap the adapter / CLIP-encoder weights we load. Pin the
+/// exact commit for defense-in-depth (mirrors sc-8879/sc-9682). HF's tree API still reports each file's
+/// `lfs.oid`, which `ensure_hf_cached_file` verifies the downloaded content against.
+const SDXL_IPADAPTER_REVISION: &str = "018e402774aeeddd60609b4ecdb7e298259dc729";
 /// The IP-Adapter-Plus (ViT-H) bundle inside the repo (`image_proj` Resampler + `ip_adapter.*` K/V).
 const SDXL_IPADAPTER_BUNDLE_SRC: &str = "sdxl_models/ip-adapter-plus_sdxl_vit-h.safetensors";
 /// The CLIP ViT-H image-encoder files inside the repo (config + weights).
@@ -84,37 +90,16 @@ fn sdxl_ipadapter_available(request: &ImageRequest, settings: &Settings) -> bool
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` → default (30).
 fn sdxl_ipadapter_steps(request: &ImageRequest) -> u32 {
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    request
-        .advanced
-        .get("steps")
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
-        .map(|steps| steps.clamp(1, 80) as u32)
-        .unwrap_or(SDXL_IPADAPTER_DEFAULT_STEPS)
+    resolve_advanced_or_manifest_u32(request, "steps", SDXL_IPADAPTER_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → the reference-tuned default
 /// (5.0), clamped to a sane CFG range.
 fn sdxl_ipadapter_guidance(request: &ImageRequest) -> f32 {
-    let manifest_default = request
-        .model_manifest_entry
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(SDXL_IPADAPTER_DEFAULT_GUIDANCE);
-    advanced::f32_clamped(
-        &request.advanced,
+    resolve_advanced_or_manifest_f32(
+        request,
         "guidanceScale",
-        manifest_default,
+        SDXL_IPADAPTER_DEFAULT_GUIDANCE,
         0.0..=30.0,
     )
 }
@@ -162,7 +147,7 @@ async fn ensure_sdxl_ipadapter_weights(
     let bundle = ensure_hf_cached_file(
         &context,
         SDXL_IPADAPTER_REPO,
-        "main",
+        SDXL_IPADAPTER_REVISION,
         SDXL_IPADAPTER_BUNDLE_SRC,
         &cache.join("ip-adapter-plus_sdxl_vit-h.safetensors"),
     )
@@ -173,7 +158,7 @@ async fn ensure_sdxl_ipadapter_weights(
         ensure_hf_cached_file(
             &context,
             SDXL_IPADAPTER_REPO,
-            "main",
+            SDXL_IPADAPTER_REVISION,
             source,
             &encoder.join(name),
         )
@@ -251,17 +236,14 @@ async fn generate_candle_sdxl_ipadapter_stream(
     // AC). Staging is non-fatal (failure → no scorer → scores omitted, generation still renders).
     let score_likeness =
         resolve_character_image_likeness_source(request, settings, project_path).is_some();
-    let face_stack_dir = if score_likeness {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        score_likeness,
+        "character_image face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     let likeness_source = face_stack_dir.as_ref().map(|_| reference.clone());
     let likeness_source_ref = reference_id.to_owned();
 
@@ -304,10 +286,23 @@ async fn generate_candle_sdxl_ipadapter_stream(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| sdxl_ipadapter_default_repo(&request.model))
         .to_owned();
-    let raw_settings = sdxl_ipadapter_raw_settings(request, &repo, steps, guidance, ip_scale);
+    // Per-generation PiD decode (epic 7840, sc-8044): resolve the `sdxl` PiD student + Gemma when
+    // `advanced.usePid` is set and the snapshots are cached; else `None` → native VAE. The SDXL IP-Adapter
+    // composes the SDXL VAE, so it shares the one `sdxl` student. `use_pid` and the engine's `with_pid`
+    // load stay in lockstep (the engine rejects a mismatch).
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+
+    let mut raw_settings = sdxl_ipadapter_raw_settings(request, &repo, steps, guidance, ip_scale);
+    // Mark PiD output on the sidecar (epic 7840): the NSCLv1 NC restriction flows to PiD output. Record
+    // whether PiD ACTUALLY ran (opted in AND snapshots cached), not merely whether it was requested.
+    raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
     // Per-image work items: (seed, prompt) — `request.count` images at the reference identity.
-    let (width, height) = (request.width, request.height);
+    // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
+    // 4K/native leaves the requested dims untouched).
+    let (width, height) =
+        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
@@ -327,6 +322,14 @@ async fn generate_candle_sdxl_ipadapter_stream(
             let model = IpAdapterSdxl::load(&paths).map_err(|error| {
                 WorkerError::Engine(format!("SDXL IP-Adapter load failed: {error}"))
             })?;
+            // Attach the optional PiD decoder (sc-8044): `Some` only when this generation opted in AND the
+            // snapshots are cached, so a native-VAE generation is a no-op here.
+            let model = match &pid_weights {
+                Some(pid) => model.with_pid(pid).map_err(|error| {
+                    WorkerError::Engine(format!("SDXL IP-Adapter PiD decoder load failed: {error}"))
+                })?,
+                None => model,
+            };
             // Per-job identity-likeness scorer built ONCE here (on the blocking thread where the `!Send`
             // face stack is allowed); source embedded once, reused across every output (sc-4411 caching
             // AC). `None` ⇒ non-fatal staging / construction failure ⇒ scores omitted.
@@ -357,6 +360,8 @@ async fn generate_candle_sdxl_ipadapter_stream(
                     seed: seed as u64,
                     sampler: sampler.clone(),
                     scheduler: scheduler.clone(),
+                    // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
+                    use_pid,
                     cancel: cancel.clone(),
                 };
                 let out = match model.generate(&req, &reference, &mut *on_progress) {

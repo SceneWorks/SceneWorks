@@ -23,10 +23,10 @@
 //! affine-quantized after load (`Sam3VideoModel::quantize`, sc-4925) — **Q8 by default**
 //! (~0.9 GB, near-lossless), tunable via `SCENEWORKS_SAM3_QUANT` (`q8`/`q4`/`off`).
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use crate::downloads::{ensure_hf_cached_file, DownloadContext};
 use crate::person_segment::{check_segment_canceled, SegmentProgress, CANCEL_MESSAGE};
 use gen_core::CancelFlag;
 use mlx_gen::weights::Weights;
@@ -36,30 +36,29 @@ use mlx_gen_sam3::{
 };
 use mlx_rs::Array;
 
-use crate::{Settings, WorkerError, WorkerResult};
+use crate::person_segment_sam3_common::{
+    mask_centroid_x, mask_to_frame, normalize_chw, select_object, BoxNorm, Sam3FrameOutput,
+    CONCEPT_PROMPT, INPUT_SIZE, MASK_GRID,
+};
+use crate::{WorkerError, WorkerResult};
 
-/// SAM3 checkpoint files (loaded stock from `facebook/sam3`, no conversion).
-const MODEL_FILE: &str = "model.safetensors";
-const TOKENIZER_FILE: &str = "tokenizer.json";
+// Backend-neutral SAM3 helpers now live in `person_segment_sam3_common` (sc-8847, F-045). Re-export
+// the download helper + `AllPersonMasks` under this module's path so the existing callers
+// (`media_jobs`, `video_jobs`, `segment_jobs`, `scail2_masks`) keep referencing
+// `person_segment_sam3::…` unchanged.
+pub(crate) use crate::person_segment_sam3_common::{ensure_segmenter_weights, AllPersonMasks};
 
-/// Download-on-first-use repo: the SAM3 weights mirror owned by SceneWorks. Publishing this
-/// mirror (3.2 GB, Meta SAM License → must ship a LICENSE copy with the Materials) is gated on
-/// sign-off; until then point `SCENEWORKS_SAM3_WEIGHTS` at a local `facebook/sam3` snapshot dir.
-const SEG_REPO: &str = "SceneWorks/sam3-mlx";
-
-/// SAM3 model input is a square 1008×1008 (the processor resizes to a fixed square, not
-/// aspect-preserving — `Sam3VideoProcessor` `size={1008,1008}`, `default_to_square`).
-const INPUT_SIZE: u32 = 1008;
-
-/// SAM3 mask logits come back on a 288×288 low-res grid (`Sam3VideoModel` `LOW_RES`).
-const MASK_GRID: usize = 288;
-
-/// The text concept driving PCS — the whole point of the SAM3 upgrade (no manual box).
-const CONCEPT_PROMPT: &str = "person";
-
-/// A normalized `(x, y, width, height)` box (0..1), the per-frame ByteTrack anchor — used here
-/// only to *associate* a SAM3 object id with the selected track, never as a segmenter prompt.
-pub(crate) type BoxNorm = (f64, f64, f64, f64);
+/// Adapt this backend's `mlx-gen-sam3` `VideoFrameOutput` to the shared association math
+/// ([`select_object`]); the two backends' `VideoFrameOutput` are the same shape but distinct
+/// types, so each module impls the neutral accessor on its own.
+impl Sam3FrameOutput for VideoFrameOutput {
+    fn obj_ids(&self) -> &[i32] {
+        &self.obj_ids
+    }
+    fn masks(&self) -> &[Vec<f32>] {
+        &self.masks
+    }
+}
 
 /// Affine-quantization bits for the segmenter, from `SCENEWORKS_SAM3_QUANT`: **Q8 by default**
 /// (`8` — near-lossless, engine image Q8 IoU 0.9988, ~0.9 GB resident vs F32 ~3.2 GB), `q4` for
@@ -85,57 +84,82 @@ fn parse_quant_bits(value: &str) -> Option<i32> {
 /// already-resident arrays). Mirrors the SAM2 predictor cache + poison-recovery idiom.
 static WEIGHTS: OnceLock<Mutex<Option<Weights>>> = OnceLock::new();
 
-/// Resolve already-present SAM3 weights: an explicit env pin (`SCENEWORKS_SAM3_WEIGHTS`, a dir or
-/// the `model.safetensors` inside it), then the app cache `<data_dir>/cache/person-segment-sam3/`,
-/// then the model dir `<data_dir>/models/person-segment-sam3/`. Both `model.safetensors` and
-/// `tokenizer.json` must be present. Returns `(model_path, tokenizer_path)` or `None` (then
-/// `ensure_segmenter_weights` downloads them).
-pub(crate) fn resolve_segmenter_weights(settings: &Settings) -> Option<(PathBuf, PathBuf)> {
-    let pair_in = |dir: &Path| -> Option<(PathBuf, PathBuf)> {
-        let model = dir.join(MODEL_FILE);
-        let tokenizer = dir.join(TOKENIZER_FILE);
-        (model.exists() && tokenizer.exists()).then_some((model, tokenizer))
-    };
-    if let Ok(pinned) = std::env::var("SCENEWORKS_SAM3_WEIGHTS") {
-        let p = PathBuf::from(pinned);
-        let dir = if p.is_file() {
-            p.parent().map(Path::to_path_buf).unwrap_or(p)
-        } else {
-            p
-        };
-        if let Some(pair) = pair_in(&dir) {
-            return Some(pair);
-        }
-    }
-    for sub in ["cache/person-segment-sam3", "models/person-segment-sam3"] {
-        if let Some(pair) = pair_in(&settings.data_dir.join(sub)) {
-            return Some(pair);
-        }
-    }
-    None
+/// Cache key for the smart-select single-image models: the resolved weight path + the quant tier in
+/// effect. A change in either (different model snapshot, `SCENEWORKS_SAM3_QUANT` flip) rebuilds, so a
+/// re-pinned/re-configured worker never serves a stale quantized instance.
+type Sam3CacheKey = (PathBuf, Option<i32>);
+
+thread_local! {
+    /// Smart-select **box** path (sc-8846 / F-044): the quantized [`Sam3ImageSegmenter`] is cached
+    /// per blocking thread, keyed by `(model_path, quant_bits)`, so repeated interactive clicks skip
+    /// the per-call model build + `quantize(8)` (seconds of latency + a transient dense/quantized
+    /// memory spike each click). Unlike the video paths this is **safe to reuse**: the image
+    /// segmenter is logically stateless — `segment_with_boxes(&self, …)` runs a pure forward + mask
+    /// post-process and retains no per-call image embedding / prompt / mask memory (the only interior
+    /// mutability is a byte-identical position-embedding memo, not segmentation state). Thread-local
+    /// (not a process-wide `Mutex`) because the model embeds an `Rc<Backbone>` → `!Send`/`!Sync`, so
+    /// it cannot cross the `spawn_blocking` thread boundary in a shared `static`; this mirrors
+    /// mlx-gen-sam3's own thread-local resize-matrix cache. One slot per key → interactive (serial)
+    /// smart-select keeps a single quantized model (~0.9 GB Q8) resident, not a per-click copy.
+    static BOX_SEGMENTER: RefCell<Option<(Sam3CacheKey, Sam3ImageSegmenter)>> =
+        const { RefCell::new(None) };
+
+    /// Smart-select **point** path (sc-8846 / F-044): the quantized [`Sam3Tracker`] cached per
+    /// blocking thread, keyed by `(model_path, quant_bits)`. Same rationale as [`BOX_SEGMENTER`]:
+    /// `segment_points(&self, …)` is a pure single-frame forward (encode frame → decode points) with
+    /// no retained memory bank — the video memory bank is assembled in the propagate loop, never
+    /// stored on the tracker — so reusing the instance across clicks is byte-identical.
+    static POINT_TRACKER: RefCell<Option<(Sam3CacheKey, Sam3Tracker)>> = const { RefCell::new(None) };
 }
 
-/// Resolve the SAM3 weights, downloading `model.safetensors` + `tokenizer.json` from HuggingFace
-/// on first use (into the app cache) with streaming progress/cancel and size-aware resume.
-pub(crate) async fn ensure_segmenter_weights(
-    settings: &Settings,
-    context: &DownloadContext<'_>,
-) -> WorkerResult<(PathBuf, PathBuf)> {
-    if let Some(pair) = resolve_segmenter_weights(settings) {
-        return Ok(pair);
+/// Load the shared dense checkpoint into the process-wide [`WEIGHTS`] cache (poison-recovery) and run
+/// `build` against it — the common cache-miss body for the smart-select single-image builders.
+fn with_cached_weights<T>(
+    model_path: &Path,
+    build: impl FnOnce(&Weights) -> WorkerResult<T>,
+) -> WorkerResult<T> {
+    let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        *guard = None;
+        guard
+    });
+    if guard.is_none() {
+        let weights = Weights::from_file(model_path)
+            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
+        *guard = Some(weights);
     }
-    let dir = settings.data_dir.join("cache").join("person-segment-sam3");
-    let model =
-        ensure_hf_cached_file(context, SEG_REPO, "main", MODEL_FILE, &dir.join(MODEL_FILE)).await?;
-    let tokenizer = ensure_hf_cached_file(
-        context,
-        SEG_REPO,
-        "main",
-        TOKENIZER_FILE,
-        &dir.join(TOKENIZER_FILE),
-    )
-    .await?;
-    Ok((model, tokenizer))
+    build(guard.as_ref().expect("weights loaded"))
+}
+
+/// Build a quantized `Sam3ImageSegmenter` from the shared (cached) dense checkpoint — the box
+/// smart-select cache-miss body (sc-8846). Split out so the build + `quantize` cost is in one place.
+fn build_box_segmenter(model_path: &Path, quant: Option<i32>) -> WorkerResult<Sam3ImageSegmenter> {
+    with_cached_weights(model_path, |weights| {
+        let mut model = Sam3ImageSegmenter::from_weights(weights)
+            .map_err(|e| WorkerError::Engine(format!("sam3 image model build: {e}")))?;
+        if let Some(bits) = quant {
+            model
+                .quantize(bits)
+                .map_err(|e| WorkerError::Engine(format!("sam3 quantize q{bits}: {e}")))?;
+        }
+        Ok(model)
+    })
+}
+
+/// Build a quantized `Sam3Tracker` from the shared (cached) dense checkpoint — the point
+/// smart-select cache-miss body (sc-8846), sibling of [`build_box_segmenter`].
+fn build_point_tracker(model_path: &Path, quant: Option<i32>) -> WorkerResult<Sam3Tracker> {
+    with_cached_weights(model_path, |weights| {
+        let mut tracker = Sam3Tracker::from_weights(weights)
+            .map_err(|e| WorkerError::Engine(format!("sam3 tracker build: {e}")))?;
+        if let Some(bits) = quant {
+            tracker
+                .quantize(bits)
+                .map_err(|e| WorkerError::Engine(format!("sam3 tracker quantize q{bits}: {e}")))?;
+        }
+        Ok(tracker)
+    })
 }
 
 /// Preprocess an RGB frame to the SAM3 input tensor: resize to a 1008×1008 square (bilinear,
@@ -150,99 +174,6 @@ fn input_tensor(img: &image::RgbImage) -> Array {
     );
     let chw = normalize_chw(resized.as_raw(), INPUT_SIZE as usize);
     Array::from_slice(&chw, &[1, 3, INPUT_SIZE as i32, INPUT_SIZE as i32])
-}
-
-/// Pack a `size×size` interleaved-RGB `u8` buffer into a channel-major `[3·size·size]` f32 vector
-/// with the SAM3 normalization `(x/255 − 0.5) / 0.5` = `x/127.5 − 1` (mean=std=0.5 → range
-/// `[-1,1]`). Split out so the normalization is unit-testable without an image decode.
-fn normalize_chw(rgb: &[u8], size: usize) -> Vec<f32> {
-    let plane = size * size;
-    let mut out = vec![0f32; 3 * plane];
-    for (p, px) in rgb.chunks_exact(3).enumerate() {
-        for c in 0..3 {
-            out[c * plane + p] = px[c] as f32 / 127.5 - 1.0;
-        }
-    }
-    out
-}
-
-/// Fraction of a SAM3 object's foreground (mask logit `> 0` ⇔ σ `> 0.5`) on the `grid×grid`
-/// low-res mask whose pixel center falls inside the normalized `box_norm`. `0.0` when the mask is
-/// empty. SAM3 masks live in the squashed 1008² space, which maps to the full normalized frame, so
-/// a mask pixel `(mx,my)` has normalized center `((mx+0.5)/grid, (my+0.5)/grid)` — directly
-/// comparable to the ByteTrack box. This is the association score: how much of a candidate object
-/// sits under the selected person's box.
-fn mask_box_containment(mask_logits: &[f32], grid: usize, box_norm: BoxNorm) -> f64 {
-    let (bx, by, bw, bh) = box_norm;
-    let (x1, y1, x2, y2) = (bx, by, bx + bw, by + bh);
-    let (mut fg, mut inside) = (0u64, 0u64);
-    for my in 0..grid {
-        for mx in 0..grid {
-            if mask_logits[my * grid + mx] > 0.0 {
-                fg += 1;
-                let (cx, cy) = (
-                    (mx as f64 + 0.5) / grid as f64,
-                    (my as f64 + 0.5) / grid as f64,
-                );
-                if cx >= x1 && cx < x2 && cy >= y1 && cy < y2 {
-                    inside += 1;
-                }
-            }
-        }
-    }
-    if fg == 0 {
-        0.0
-    } else {
-        inside as f64 / fg as f64
-    }
-}
-
-/// Pick the SAM3 object id that best matches the selected track: for every clip frame with an
-/// anchor box, accumulate each present object's `mask_box_containment`, then take the id with the
-/// greatest total. `None` when no object ever overlaps an anchor (→ degraded to box masks). The
-/// per-frame sum (not a single best frame) rewards an object that stays under the box across the
-/// span, which disambiguates the selected person from nearby people SAM3 also segmented.
-fn select_object(outputs: &[VideoFrameOutput], anchors: &[Option<BoxNorm>]) -> Option<i32> {
-    use std::collections::HashMap;
-    let mut score: HashMap<i32, f64> = HashMap::new();
-    for (frame, anchor) in outputs.iter().zip(anchors) {
-        let Some(box_norm) = anchor else { continue };
-        for (oid, mask) in frame.obj_ids.iter().zip(&frame.masks) {
-            let c = mask_box_containment(mask, MASK_GRID, *box_norm);
-            if c > 0.0 {
-                *score.entry(*oid).or_insert(0.0) += c;
-            }
-        }
-    }
-    // Deterministic tie-break on the object id (BTree-like) so repeated runs agree.
-    score
-        .into_iter()
-        .max_by(|a, b| {
-            a.1.partial_cmp(&b.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(b.0.cmp(&a.0))
-        })
-        .map(|(oid, _)| oid)
-}
-
-/// Binarize a `grid×grid` SAM3 mask (logit `> 0`) to a 0/255 buffer, then resize it to
-/// `width×height` (bilinear) and re-threshold to a clean binary `L` mask — the per-clip-frame
-/// output the orchestrator writes. Inverts SAM3's uniform 1008² squash back to the frame aspect.
-fn mask_to_frame(mask_logits: &[f32], grid: usize, width: u32, height: u32) -> Vec<u8> {
-    let bin: Vec<u8> = mask_logits
-        .iter()
-        .map(|&v| if v > 0.0 { 255 } else { 0 })
-        .collect();
-    let Some(small) = image::GrayImage::from_raw(grid as u32, grid as u32, bin) else {
-        return Vec::new();
-    };
-    let resized =
-        image::imageops::resize(&small, width, height, image::imageops::FilterType::Triangle);
-    resized
-        .into_raw()
-        .into_iter()
-        .map(|v| if v > 127 { 255 } else { 0 })
-        .collect()
 }
 
 /// Segment the selected person across a clip with the native-MLX SAM3 **text-concept (PCS) video
@@ -275,11 +206,17 @@ pub(crate) fn segment_track_blocking(
     cancel: Option<CancelFlag>,
     mut progress: Option<SegmentProgress>,
 ) -> WorkerResult<Vec<Vec<u8>>> {
-    assert_eq!(
-        clip_frame_paths.len(),
-        anchors.len(),
-        "frames/anchors mismatch"
-    );
+    // A frames/anchors length mismatch is a caller contract violation. The old `assert_eq!`
+    // panicked inside `spawn_blocking`, which `media_jobs` absorbed as a silent "degraded"
+    // (box-fallback) result rather than a surfaced error — return `InvalidPayload` so the
+    // mismatch fails the job loudly (sc-8903, F-101). Kept in sync with the candle twin.
+    if clip_frame_paths.len() != anchors.len() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "segment clip frames ({}) and anchors ({}) length mismatch",
+            clip_frame_paths.len(),
+            anchors.len()
+        )));
+    }
     check_segment_canceled(cancel.as_ref())?;
     if !anchors.iter().any(Option::is_some) {
         return Err(WorkerError::InvalidPayload(
@@ -367,16 +304,32 @@ pub(crate) fn segment_track_blocking(
     };
     let masks = outputs
         .iter()
-        .map(|frame| {
-            frame
-                .obj_ids
-                .iter()
-                .position(|&o| o == selected)
-                .map(|i| mask_to_frame(&frame.masks[i], MASK_GRID, width, height))
-                .unwrap_or_default()
-        })
-        .collect();
+        .map(|frame| frame_mask_for_object(frame, selected, width, height))
+        .collect::<WorkerResult<Vec<_>>>()?;
     Ok(masks)
+}
+
+/// Emit the selected object's binary mask on one SAM3 frame, or an empty vec when the object
+/// isn't present (legitimate per-frame absence → orchestrator box-fallback). Guards the
+/// `obj_ids`/`masks` parallel-vec assumption: an id present in `obj_ids` but with no matching
+/// entry in `masks` is a malformed engine output, surfaced as an `Engine` error rather than
+/// indexing OOB (sc-8905, F-103).
+fn frame_mask_for_object(
+    frame: &VideoFrameOutput,
+    selected: i32,
+    width: u32,
+    height: u32,
+) -> WorkerResult<Vec<u8>> {
+    let Some(i) = frame.obj_ids.iter().position(|&o| o == selected) else {
+        return Ok(Vec::new());
+    };
+    let logits = frame.masks.get(i).ok_or_else(|| {
+        WorkerError::Engine(format!(
+            "sam3 frame has obj id {selected} at index {i} but only {} masks",
+            frame.masks.len()
+        ))
+    })?;
+    mask_to_frame(logits, MASK_GRID, width, height)
 }
 
 /// Normalize an `[x1, y1, x2, y2]` pixel box (clamped to the image) to SAM3's `[cx, cy, w, h]`
@@ -421,50 +374,46 @@ pub(crate) fn segment_box_blocking(
     }
     let pixels = input_tensor(&image);
 
-    // Cached checkpoint (poison-recovery), shared with the video path — both consume the same
-    // facebook/sam3 weight map (mirrors person_segment / sc-4277 F-MLXW-13).
-    let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    if guard.is_none() {
-        let weights = Weights::from_file(&model_path)
-            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
-        *guard = Some(weights);
-    }
-    let weights = guard.as_ref().expect("weights loaded");
-
-    let mut model = Sam3ImageSegmenter::from_weights(weights)
-        .map_err(|e| WorkerError::Engine(format!("sam3 image model build: {e}")))?;
-    if let Some(bits) = quant_bits() {
-        model
-            .quantize(bits)
-            .map_err(|e| WorkerError::Engine(format!("sam3 quantize q{bits}: {e}")))?;
-    }
-    let tokenizer = Sam3Tokenizer::from_file(&tokenizer_path, &Sam3TextConfig::sam3())
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
-    let (input_ids, text_mask) = tokenizer
-        .encode(concept)
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
-
     let cxcywh = normalize_box_cxcywh(box_xyxy, width, height);
     let boxes = Array::from_slice(&cxcywh, &[1, 1, 4]);
     let box_labels = [1i32]; // a single positive box prompt
 
-    let instances = model
-        .segment_with_boxes(
-            &pixels,
-            &input_ids,
-            &text_mask,
-            &boxes,
-            &box_labels,
-            (width as f32, height as f32),
-            threshold,
-            mask_threshold,
-        )
-        .map_err(|e| WorkerError::Engine(format!("sam3 segment_with_boxes: {e}")))?;
+    // Cache the quantized segmenter per blocking thread, keyed by (weights, quant), so repeated
+    // interactive clicks skip the per-call `from_weights` + `quantize` (sc-8846 / F-044). The
+    // segmenter is stateless (`segment_with_boxes(&self, …)` is a pure forward + post-process), so
+    // reuse is byte-identical; the dense checkpoint is still parsed once into the shared `WEIGHTS`.
+    // The tokenizer is a cheap host-side parse — kept per-call (no GPU tensors, negligible cost).
+    let quant = quant_bits();
+    let key: Sam3CacheKey = (model_path.clone(), quant);
+    let instances = BOX_SEGMENTER.with(|cell| -> WorkerResult<_> {
+        {
+            let cached = cell.borrow();
+            if cached.as_ref().map(|(k, _)| k) != Some(&key) {
+                drop(cached);
+                let model = build_box_segmenter(&model_path, quant)?;
+                *cell.borrow_mut() = Some((key.clone(), model));
+            }
+        }
+        let cached = cell.borrow();
+        let (_, model) = cached.as_ref().expect("segmenter cached");
+        let tokenizer = Sam3Tokenizer::from_file(&tokenizer_path, &Sam3TextConfig::sam3())
+            .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
+        let (input_ids, text_mask) = tokenizer
+            .encode(concept)
+            .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
+        model
+            .segment_with_boxes(
+                &pixels,
+                &input_ids,
+                &text_mask,
+                &boxes,
+                &box_labels,
+                (width as f32, height as f32),
+                threshold,
+                mask_threshold,
+            )
+            .map_err(|e| WorkerError::Engine(format!("sam3 segment_with_boxes: {e}")))
+    })?;
 
     // Pick the instance whose MASK has the most foreground inside the prompt box. SAM3 PVS returns
     // the box-echo query (its box ≈ the prompt, but the mask can be degenerate) alongside the
@@ -508,7 +457,7 @@ pub(crate) fn segment_box_blocking(
         )
     })?;
     // Reuse the >0 binarize + resize-to-source path (inverts the 1008² squash back to the frame).
-    Ok(mask_to_frame(&grid_mask, grid, width, height))
+    mask_to_frame(&grid_mask, grid, width, height)
 }
 
 /// Smart-select POINT path (epic 6087, sc-6346): segment whatever lies under fg/bg click points on
@@ -550,32 +499,28 @@ pub(crate) fn segment_points_blocking(
     let coords: Vec<(f32, f32)> = points.iter().map(|&(x, y, _)| (x * sx, y * sy)).collect();
     let labels: Vec<i32> = points.iter().map(|&(_, _, l)| l).collect();
 
-    // Cached checkpoint (poison-recovery), shared with the box/video paths — all consume the same
-    // facebook/sam3 weight map (mirrors segment_box_blocking).
-    let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    if guard.is_none() {
-        let weights = Weights::from_file(&model_path)
-            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
-        *guard = Some(weights);
-    }
-    let weights = guard.as_ref().expect("weights loaded");
-
-    let mut tracker = Sam3Tracker::from_weights(weights)
-        .map_err(|e| WorkerError::Engine(format!("sam3 tracker build: {e}")))?;
-    if let Some(bits) = quant_bits() {
+    // Cache the quantized tracker per blocking thread, keyed by (weights, quant), so repeated
+    // interactive clicks skip the per-call `from_weights` + `quantize` (sc-8846 / F-044). The tracker
+    // is stateless on this single-frame path (`segment_points(&self, …)` encodes the frame + decodes
+    // the points, retaining no memory bank), so reuse is byte-identical; the dense checkpoint is
+    // still parsed once into the shared `WEIGHTS`.
+    let quant = quant_bits();
+    let key: Sam3CacheKey = (model_path.clone(), quant);
+    let mask = POINT_TRACKER.with(|cell| -> WorkerResult<_> {
+        {
+            let cached = cell.borrow();
+            if cached.as_ref().map(|(k, _)| k) != Some(&key) {
+                drop(cached);
+                let tracker = build_point_tracker(&model_path, quant)?;
+                *cell.borrow_mut() = Some((key.clone(), tracker));
+            }
+        }
+        let cached = cell.borrow();
+        let (_, tracker) = cached.as_ref().expect("tracker cached");
         tracker
-            .quantize(bits)
-            .map_err(|e| WorkerError::Engine(format!("sam3 tracker quantize q{bits}: {e}")))?;
-    }
-
-    let mask = tracker
-        .segment_points(&pixels, &coords, &labels)
-        .map_err(|e| WorkerError::Engine(format!("sam3 tracker segment_points: {e}")))?;
+            .segment_points(&pixels, &coords, &labels)
+            .map_err(|e| WorkerError::Engine(format!("sam3 tracker segment_points: {e}")))
+    })?;
 
     // Low-res mask logits `[mg, mg]` → binarize `> 0` + resize to source dims (inverts the squash).
     let grid = mask.low_res.shape()[0] as usize;
@@ -585,37 +530,7 @@ pub(crate) fn segment_points_blocking(
         .map_err(|e| WorkerError::Engine(format!("sam3 mask read: {e}")))?
         .as_slice::<f32>()
         .to_vec();
-    Ok(mask_to_frame(&logits, grid, width, height))
-}
-
-/// Every tracked person's per-frame mask + a stable left-to-right paint order — the input to the
-/// SCAIL-2 color-mask painter (sc-5448). Unlike [`segment_track_blocking`] (which selects ONE person
-/// via ByteTrack anchors for replace_person), this keeps EVERY SAM3 object so each person can be
-/// painted a distinct palette color.
-pub(crate) struct AllPersonMasks {
-    /// SAM3 object ids in left-to-right paint order (ascending centroid-x in the frame where each
-    /// object first appears); person index 0 = leftmost = the SCAIL-2 palette's first color.
-    pub order: Vec<i32>,
-    /// `per_frame[f]` = `(obj_id, binary mask row-major width*height, 0/255)` for every object
-    /// present on frame `f` (empty masks dropped). Object ids index into [`AllPersonMasks::order`].
-    pub per_frame: Vec<Vec<(i32, Vec<u8>)>>,
-    pub width: u32,
-    pub height: u32,
-}
-
-/// Normalized centroid-x (0..1) of a SAM3 low-res mask's foreground (logit `> 0`); `None` if the
-/// mask is empty. Used to sort tracked people left-to-right for deterministic palette assignment.
-fn mask_centroid_x(mask_logits: &[f32], grid: usize) -> Option<f64> {
-    let (mut sum_x, mut n) = (0f64, 0u64);
-    for my in 0..grid {
-        for mx in 0..grid {
-            if mask_logits[my * grid + mx] > 0.0 {
-                sum_x += (mx as f64 + 0.5) / grid as f64;
-                n += 1;
-            }
-        }
-    }
-    (n > 0).then(|| sum_x / n as f64)
+    mask_to_frame(&logits, grid, width, height)
 }
 
 /// Segment + track every "person" across already-decoded RGB `frames` with the SAM3 text-concept
@@ -724,6 +639,10 @@ pub(crate) fn segment_all_persons_in_memory(
             .then(a.cmp(b))
     });
 
+    // `zip` already bounds to the shorter of obj_ids/masks, so the parallel-vec assumption is
+    // safe here; `mask_to_frame` now returns an `Engine` error on a malformed (grid-mismatched)
+    // mask instead of the empty-vec sentinel, so propagate rather than silently dropping it
+    // (sc-8905, F-103).
     let per_frame = outputs
         .iter()
         .map(|frame| {
@@ -731,11 +650,10 @@ pub(crate) fn segment_all_persons_in_memory(
                 .obj_ids
                 .iter()
                 .zip(&frame.masks)
-                .map(|(oid, logits)| (*oid, mask_to_frame(logits, MASK_GRID, width, height)))
-                .filter(|(_, mask)| !mask.is_empty())
-                .collect()
+                .map(|(oid, logits)| Ok((*oid, mask_to_frame(logits, MASK_GRID, width, height)?)))
+                .collect::<WorkerResult<Vec<_>>>()
         })
-        .collect();
+        .collect::<WorkerResult<Vec<_>>>()?;
 
     Ok(AllPersonMasks {
         order,
@@ -748,6 +666,32 @@ pub(crate) fn segment_all_persons_in_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The checkpoint filenames now live in the shared module; the real-weights smokes below join them
+    // onto a snapshot dir to build the model/tokenizer paths.
+    use crate::person_segment_sam3_common::{MODEL_FILE, TOKENIZER_FILE};
+
+    /// sc-8846 / F-044: the smart-select model cache is keyed by `(model_path, quant_bits)`, so a
+    /// re-pinned weight snapshot **or** a `SCENEWORKS_SAM3_QUANT` flip is a cache miss (rebuild),
+    /// never a stale quantized instance served under a new configuration. Pins that discriminator
+    /// without needing the 3.2 GB weights.
+    #[test]
+    fn cache_key_distinguishes_weights_and_quant_tier() {
+        let a: Sam3CacheKey = (PathBuf::from("/models/sam3/model.safetensors"), Some(8));
+        // Same key → cache hit.
+        assert_eq!(
+            a.clone(),
+            (PathBuf::from("/models/sam3/model.safetensors"), Some(8))
+        );
+        // Different quant tier (Q8 → Q4) → miss.
+        assert_ne!(
+            a,
+            (PathBuf::from("/models/sam3/model.safetensors"), Some(4))
+        );
+        // Quant off vs on → miss.
+        assert_ne!(a, (PathBuf::from("/models/sam3/model.safetensors"), None));
+        // Different weight snapshot → miss.
+        assert_ne!(a, (PathBuf::from("/other/model.safetensors"), Some(8)));
+    }
 
     /// sc-8807: a pre-tripped cancel flag short-circuits BEFORE frame decode / the cold 3.2 GB
     /// checkpoint parse — the paths point at nothing, so reaching either would error with
@@ -781,6 +725,67 @@ mod tests {
             matches!(all, Err(WorkerError::Canceled(_))),
             "segment_all_persons_in_memory: expected Canceled"
         );
+    }
+
+    /// sc-8903 / F-101: a frames/anchors length mismatch returns `InvalidPayload` (a surfaced
+    /// error) instead of the old `assert_eq!` panic that `media_jobs` absorbed as a silent
+    /// "degraded" box-fallback. The length check runs before any frame decode / weight load, so
+    /// the nonexistent paths are never touched.
+    #[test]
+    fn frames_anchors_length_mismatch_returns_invalid_payload() {
+        let result = segment_track_blocking(
+            PathBuf::from("/nonexistent/model.safetensors"),
+            PathBuf::from("/nonexistent/tokenizer.json"),
+            vec![
+                PathBuf::from("/nonexistent/a.png"),
+                PathBuf::from("/nonexistent/b.png"),
+            ],
+            vec![Some((0.1, 0.1, 0.5, 0.5))], // one anchor for two frames
+            None,
+            None,
+        );
+        assert!(
+            matches!(result, Err(WorkerError::InvalidPayload(ref m)) if m.contains("length mismatch")),
+            "expected InvalidPayload length mismatch, got {result:?}"
+        );
+    }
+
+    /// sc-8905 / F-103: `frame_mask_for_object` guards the obj_ids/masks parallel-vec
+    /// assumption. An id present in `obj_ids` but with no matching `masks` entry (a malformed
+    /// engine output) surfaces an `Engine` error instead of indexing OOB; an absent id returns
+    /// an empty vec (legitimate per-frame absence); a well-formed pair produces a mask.
+    #[test]
+    fn frame_mask_for_object_guards_parallel_vecs() {
+        // obj id 5 is present but `masks` is empty → parallel-vec violation → Engine error.
+        let malformed = VideoFrameOutput {
+            obj_ids: vec![5],
+            masks: vec![],
+        };
+        let err = frame_mask_for_object(&malformed, 5, 8, 8);
+        assert!(
+            matches!(err, Err(WorkerError::Engine(ref m)) if m.contains("masks")),
+            "obj id without a mask must error, got {err:?}"
+        );
+
+        // Selected object absent from this frame → empty vec (box-fallback), not an error.
+        let absent = VideoFrameOutput {
+            obj_ids: vec![9],
+            masks: vec![vec![-1.0f32; MASK_GRID * MASK_GRID]],
+        };
+        let empty = frame_mask_for_object(&absent, 5, 8, 8).expect("absent object is not an error");
+        assert!(
+            empty.is_empty(),
+            "absent object → empty mask (box fallback)"
+        );
+
+        // Well-formed pair → a real binary mask at the requested dims.
+        let present = VideoFrameOutput {
+            obj_ids: vec![5],
+            masks: vec![vec![1.0f32; MASK_GRID * MASK_GRID]],
+        };
+        let mask = frame_mask_for_object(&present, 5, 8, 8).expect("well-formed mask");
+        assert_eq!(mask.len(), 64, "mask sized to width*height");
+        assert!(mask.iter().all(|&v| v == 0 || v == 255), "mask is binary");
     }
 
     #[test]
@@ -824,101 +829,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn normalize_maps_to_signed_unit_range_channel_major() {
-        // 2×2 RGB: black, white, and a mid-gray pixel. mean=std=0.5 → x/127.5 − 1.
-        let rgb = [
-            0, 0, 0, // (0,0) black
-            255, 255, 255, // (0,1) white
-            128, 128, 128, // (1,0) ~mid
-            255, 0, 0, // (1,1) red
-        ];
-        let chw = normalize_chw(&rgb, 2);
-        let plane = 4;
-        // Channel-major: R plane first.
-        assert!((chw[0] - (-1.0)).abs() < 1e-6); // R of black
-        assert!((chw[1] - 1.0).abs() < 1e-6); // R of white
-        assert!((chw[plane] - (-1.0)).abs() < 1e-6); // G of black
-        assert!((chw[2 * plane + 3] - (-1.0)).abs() < 1e-6); // B of red pixel = 0 → -1
-        assert!((chw[3] - 1.0).abs() < 1e-6); // R of red pixel = 255 → 1
-    }
-
-    #[test]
-    fn containment_measures_foreground_inside_box() {
-        // 10×10 grid, a 4×4 foreground block at rows/cols 2..6 (logit 1.0 inside, -1.0 outside).
-        let grid = 10;
-        let mut logits = vec![-1.0f32; grid * grid];
-        for my in 2..6 {
-            for mx in 2..6 {
-                logits[my * grid + mx] = 1.0;
-            }
-        }
-        // Box covering the whole block (normalized 0.2..0.6) → containment 1.0.
-        let full = mask_box_containment(&logits, grid, (0.2, 0.2, 0.4, 0.4));
-        assert!((full - 1.0).abs() < 1e-9, "full was {full}");
-        // Box over the empty top-left corner → 0.0.
-        let none = mask_box_containment(&logits, grid, (0.0, 0.0, 0.1, 0.1));
-        assert!(none.abs() < 1e-9, "disjoint was {none}");
-        // Box over the left half of the block → ~half the foreground inside.
-        let half = mask_box_containment(&logits, grid, (0.0, 0.0, 0.4, 1.0));
-        assert!((half - 0.5).abs() < 1e-9, "half was {half}");
-        // Empty mask → 0.0, never divide-by-zero.
-        assert_eq!(
-            mask_box_containment(&vec![-1.0; grid * grid], grid, (0.0, 0.0, 1.0, 1.0)),
-            0.0
-        );
-    }
-
-    /// A small synthetic two-object clip: object 7 sits under the anchor box every frame, object 9
-    /// sits elsewhere. The selector must return 7, aggregating containment across the span.
-    #[test]
-    fn select_object_picks_the_id_overlapping_the_anchor() {
-        let grid = MASK_GRID;
-        let block = |r: std::ops::Range<usize>, c: std::ops::Range<usize>| -> Vec<f32> {
-            let mut m = vec![-1.0f32; grid * grid];
-            for y in r.clone() {
-                for x in c.clone() {
-                    m[y * grid + x] = 1.0;
-                }
-            }
-            m
-        };
-        // obj 7 in the top-left quadrant; obj 9 in the bottom-right.
-        let left = block(0..grid / 2, 0..grid / 2);
-        let right = block(grid / 2..grid, grid / 2..grid);
-        let outputs = vec![
-            VideoFrameOutput {
-                obj_ids: vec![7, 9],
-                masks: vec![left.clone(), right.clone()],
-            },
-            VideoFrameOutput {
-                obj_ids: vec![7, 9],
-                masks: vec![left, right],
-            },
-        ];
-        // Anchor over the top-left quadrant on both frames.
-        let anchors = vec![Some((0.0, 0.0, 0.5, 0.5)), Some((0.0, 0.0, 0.5, 0.5))];
-        assert_eq!(select_object(&outputs, &anchors), Some(7));
-        // No anchors → no selection.
-        assert_eq!(select_object(&outputs, &[None, None]), None);
-    }
-
-    #[test]
-    fn mask_to_frame_binarizes_and_resizes() {
-        // 4×4 grid, top-left 2×2 foreground → resized to 8×8 should keep a top-left fg region.
-        let grid = 4;
-        let mut logits = vec![-1.0f32; grid * grid];
-        for y in 0..2 {
-            for x in 0..2 {
-                logits[y * grid + x] = 1.0;
-            }
-        }
-        let out = mask_to_frame(&logits, grid, 8, 8);
-        assert_eq!(out.len(), 64);
-        assert!(out.iter().all(|&v| v == 0 || v == 255), "output is binary");
-        assert_eq!(out[0], 255, "top-left corner is foreground");
-        assert_eq!(out[63], 0, "bottom-right corner is background");
-    }
+    // The pure-helper tests (`normalize_chw`, `mask_box_containment`, `select_object`,
+    // `mask_to_frame`) moved to `person_segment_sam3_common` (sc-8847, F-045) — they exercise the
+    // backend-neutral math once, compiled on both the MLX and candle lanes.
 
     /// Real-weights integration smoke (sc-4926, H4): the whole SceneWorks-side pipe — preprocess →
     /// `Sam3VideoModel::propagate("person")` → associate to the anchor → emit a per-frame mask —
@@ -1043,8 +956,28 @@ mod tests {
                 w as f32 * 0.894,
                 h as f32 * 0.989,
             ]);
-        let mask = segment_box_blocking(model, tokenizer, image, box_xyxy, &concept, 0.5, 0.5)
-            .expect("segment_box_blocking");
+        let mask = segment_box_blocking(
+            model.clone(),
+            tokenizer.clone(),
+            image.clone(),
+            box_xyxy,
+            &concept,
+            0.5,
+            0.5,
+        )
+        .expect("segment_box_blocking");
+
+        // sc-8846 / F-044: a SECOND identical call must return the byte-identical mask. The first
+        // call populated the thread-local quantized-segmenter cache; this run hits the cache. A drift
+        // here would mean the cached instance carried per-call state across clicks (state bleed) —
+        // the exact hazard the statelessness analysis ruled out. Same-thread (test runs inline), so
+        // it exercises the warm-cache path directly.
+        let mask2 = segment_box_blocking(model, tokenizer, image, box_xyxy, &concept, 0.5, 0.5)
+            .expect("segment_box_blocking (cached)");
+        assert_eq!(
+            mask, mask2,
+            "cached segmenter must reproduce the mask byte-for-byte (no state bleed)"
+        );
 
         assert_eq!(mask.len(), (w * h) as usize, "mask size = source dims");
         assert!(mask.iter().all(|&v| v == 0 || v == 255), "mask is binary");
@@ -1113,8 +1046,17 @@ mod tests {
                 (v.len() == 2).then(|| (v[0], v[1]))
             })
             .unwrap_or((w as f32 * 0.5, h as f32 * 0.5));
-        let mask = segment_points_blocking(model, image, vec![(px, py, 1)])
+        let mask = segment_points_blocking(model.clone(), image.clone(), vec![(px, py, 1)])
             .expect("segment_points_blocking");
+
+        // sc-8846 / F-044: a SECOND identical call must reproduce the mask byte-for-byte — the warm
+        // thread-local tracker cache carries no per-click state (statelessness verified).
+        let mask2 = segment_points_blocking(model, image, vec![(px, py, 1)])
+            .expect("segment_points_blocking (cached)");
+        assert_eq!(
+            mask, mask2,
+            "cached tracker must reproduce the mask byte-for-byte (no state bleed)"
+        );
 
         assert_eq!(mask.len(), (w * h) as usize, "mask size = source dims");
         assert!(mask.iter().all(|&v| v == 0 || v == 255), "mask is binary");

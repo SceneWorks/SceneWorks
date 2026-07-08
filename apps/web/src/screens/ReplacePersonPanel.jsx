@@ -3,10 +3,6 @@ import { API_BASE_URL, withMediaTicket } from "../api.js";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 
-export function findReplacementModel(videoModels) {
-  return videoModels.find((item) => item.capabilities?.includes("replace_person")) ?? null;
-}
-
 const MASK_STATE_COPY = {
   active: "Per-frame segmentation masks generated for tracked frames.",
   generated: "Per-frame segmentation masks generated for most tracked frames.",
@@ -366,7 +362,7 @@ export function ReplacePersonPanel({
   const trackReady = personReadiness?.track?.ready !== false;
   const replaceReady = personReadiness?.replace?.ready !== false;
   const readinessNotice = !detectReady
-    ? "Detection unavailable: start a GPU worker with the detector backend installed (apps/worker/requirements-person.txt)."
+    ? "Detection unavailable: no live GPU worker is advertising the detector capability."
     : !trackReady
       ? "Tracking unavailable: no live GPU worker is advertising the tracker capability."
       : !replaceReady

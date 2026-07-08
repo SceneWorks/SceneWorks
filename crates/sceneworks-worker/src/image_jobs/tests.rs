@@ -172,6 +172,327 @@ fn steps_default_is_family_default_and_clamps() {
     );
 }
 
+// The shared advanced→manifest→default resolvers the bespoke edit/adapter/control lanes call
+// (sc-8825). Gated identically to the resolvers themselves so they compile on the macOS AND
+// backend-candle lanes. These lock the four behaviors the per-lane inline closures had:
+// advanced wins, manifest is the fallback, absent → the (unclamped) default, and the
+// advanced-or-manifest value is clamped to the caller's range while garbage parses to the default.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
+    // advanced present wins and is clamped to the caller's range.
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "advanced": { "steps": 12 } })),
+            "steps",
+            30,
+            1..=80,
+        ),
+        12
+    );
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "advanced": { "steps": 200 } })),
+            "steps",
+            30,
+            1..=80,
+        ),
+        80
+    );
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "advanced": { "steps": 0 } })),
+            "steps",
+            30,
+            1..=80,
+        ),
+        1
+    );
+    // A numeric string parses just like a JSON int.
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "advanced": { "steps": "24" } })),
+            "steps",
+            30,
+            1..=100,
+        ),
+        24
+    );
+    // advanced absent → manifest fallback (also clamped).
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "modelManifestEntry": { "steps": 200 } })),
+            "steps",
+            30,
+            1..=100,
+        ),
+        100
+    );
+    // Both absent → the default, returned UNCLAMPED (the distilled 4-step default survives a 1..=50
+    // range — clamping the default here would be a behavior change).
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(&request(json!({ "projectId": "p" })), "steps", 4, 1..=50,),
+        4
+    );
+    // Un-parseable advanced → NOT a fallback to manifest (matches the inline closures: a present-but-
+    // garbage advanced value fails the parse and the closure moves on to manifest, then default).
+    assert_eq!(
+        resolve_advanced_or_manifest_u32(
+            &request(json!({ "projectId": "p", "advanced": { "steps": "abc" } })),
+            "steps",
+            30,
+            1..=80,
+        ),
+        30
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
+    // advanced present wins and is clamped to the caller's range.
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 7.5 } })),
+            "guidanceScale",
+            5.0,
+            0.0..=30.0,
+        ),
+        7.5
+    );
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 99.0 } })),
+            "guidanceScale",
+            5.0,
+            0.0..=30.0,
+        ),
+        30.0
+    );
+    // A numeric string parses just like a JSON float.
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": "2.5" } })),
+            "guidanceScale",
+            5.0,
+            0.0..=30.0,
+        ),
+        2.5
+    );
+    // advanced absent → manifest fallback (also clamped).
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p", "modelManifestEntry": { "guidanceScale": 99.0 } })),
+            "guidanceScale",
+            5.0,
+            0.0..=30.0,
+        ),
+        30.0
+    );
+    // Both absent → the per-lane default.
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p" })),
+            "guidanceScale",
+            4.0,
+            0.0..=30.0,
+        ),
+        4.0
+    );
+    // Un-parseable advanced → the f32 reader falls back to the manifest default (here the lane
+    // default 5.0), then clamps — matching the historical `f32_clamped` call.
+    assert_eq!(
+        resolve_advanced_or_manifest_f32(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": "abc" } })),
+            "guidanceScale",
+            5.0,
+            0.0..=30.0,
+        ),
+        5.0
+    );
+}
+
+// The closure-default twins (sc-8825) the model-dependent-default lanes call
+// (`flux_ipadapter`, `qwen_edit_candle`/`zimage_control` per-variant steps). Same
+// precedence/clamp contract as the const twins, PLUS: the `default_fn` fires ONLY when both
+// advanced and manifest are absent (a present advanced/manifest value must short-circuit it).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn resolve_advanced_or_manifest_u32_with_precedence_clamp_and_lazy_default() {
+    use std::cell::Cell;
+
+    // advanced present wins, clamped — default_fn NOT invoked.
+    let called = Cell::new(false);
+    assert_eq!(
+        resolve_advanced_or_manifest_u32_with(
+            &request(json!({ "projectId": "p", "advanced": { "steps": 200 } })),
+            "steps",
+            || {
+                called.set(true);
+                25
+            },
+            1..=100,
+        ),
+        100
+    );
+    assert!(
+        !called.get(),
+        "default_fn must not fire when advanced is present"
+    );
+
+    // manifest fallback wins, clamped — default_fn NOT invoked.
+    let called = Cell::new(false);
+    assert_eq!(
+        resolve_advanced_or_manifest_u32_with(
+            &request(json!({ "projectId": "p", "modelManifestEntry": { "steps": 0 } })),
+            "steps",
+            || {
+                called.set(true);
+                25
+            },
+            1..=100,
+        ),
+        1
+    );
+    assert!(
+        !called.get(),
+        "default_fn must not fire when manifest supplies the value"
+    );
+
+    // Both absent → default_fn IS invoked, its value returned UNCLAMPED (distilled 4 survives 1..=50).
+    let called = Cell::new(false);
+    assert_eq!(
+        resolve_advanced_or_manifest_u32_with(
+            &request(json!({ "projectId": "p" })),
+            "steps",
+            || {
+                called.set(true);
+                4
+            },
+            1..=50,
+        ),
+        4
+    );
+    assert!(
+        called.get(),
+        "default_fn must fire when advanced and manifest are both absent"
+    );
+
+    // Un-parseable advanced → falls through to the (here absent) manifest, then default_fn.
+    let called = Cell::new(false);
+    assert_eq!(
+        resolve_advanced_or_manifest_u32_with(
+            &request(json!({ "projectId": "p", "advanced": { "steps": "abc" } })),
+            "steps",
+            || {
+                called.set(true);
+                30
+            },
+            1..=80,
+        ),
+        30
+    );
+    assert!(called.get(), "garbage advanced falls through to default_fn");
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
+    use std::cell::Cell;
+
+    // NOTE: the f32 variant's `default_fn` supplies the MANIFEST fallback (which `f32_clamped` then
+    // treats as the reader default), so — matching the original inline `manifest.get(..).unwrap_or_else`
+    // — it fires whenever the MANIFEST key is absent, INDEPENDENTLY of whether advanced is present. This
+    // differs from the u32 twin (whose closure is the whole-chain fallback and fires only when BOTH are
+    // absent). These asserts lock that preserved semantic.
+
+    // advanced present wins and is clamped; manifest absent so default_fn still runs to build the
+    // (discarded) manifest fallback — byte-identical to the pre-fold inline code.
+    let called = Cell::new(false);
+    assert_eq!(
+        resolve_advanced_or_manifest_f32_with(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": 99.0 } })),
+            "guidanceScale",
+            || {
+                called.set(true);
+                3.5
+            },
+            0.0..=30.0,
+        ),
+        30.0
+    );
+    assert!(
+        called.get(),
+        "f32 default_fn builds the manifest fallback whenever the manifest key is absent"
+    );
+
+    // manifest supplies the effective default (clamped) — default_fn NOT invoked.
+    let called = Cell::new(false);
+    assert_eq!(
+        resolve_advanced_or_manifest_f32_with(
+            &request(json!({ "projectId": "p", "modelManifestEntry": { "guidanceScale": 99.0 } })),
+            "guidanceScale",
+            || {
+                called.set(true);
+                3.5
+            },
+            0.0..=30.0,
+        ),
+        30.0
+    );
+    assert!(
+        !called.get(),
+        "default_fn must not fire when manifest supplies the value"
+    );
+
+    // Both absent → default_fn IS invoked (variant default), then f32_clamped applies.
+    let called = Cell::new(false);
+    assert_eq!(
+        resolve_advanced_or_manifest_f32_with(
+            &request(json!({ "projectId": "p" })),
+            "guidanceScale",
+            || {
+                called.set(true);
+                3.5
+            },
+            0.0..=30.0,
+        ),
+        3.5
+    );
+    assert!(
+        called.get(),
+        "default_fn must fire when advanced and manifest are both absent"
+    );
+
+    // Un-parseable advanced → the f32 reader falls back to the (default_fn) fallback, then clamps.
+    let called = Cell::new(false);
+    assert_eq!(
+        resolve_advanced_or_manifest_f32_with(
+            &request(json!({ "projectId": "p", "advanced": { "guidanceScale": "abc" } })),
+            "guidanceScale",
+            || {
+                called.set(true);
+                3.5
+            },
+            0.0..=30.0,
+        ),
+        3.5
+    );
+    assert!(called.get(), "garbage advanced falls through to default_fn");
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn mlx_model_table_maps_known_families() {
@@ -208,13 +529,25 @@ fn mlx_model_table_maps_known_families() {
         mlx_model("flux2_klein_9b_true_v2").unwrap().default_steps(),
         24
     );
+    // The two distilled turnkeys resolve their weights from the SceneWorks q4/q8/bf16 re-host
+    // (sc-8711) — `default_repo` MUST match the manifest `downloads[].repo`, else `model_repo`
+    // probes a stale gated BFL cache dir and the MLX/candle load fails "weights not found".
+    // true_v2 is the convert-at-install variant and legitimately keeps its `wikeeyang` source.
+    assert_eq!(
+        mlx_model("flux2_klein_9b").unwrap().default_repo(),
+        "SceneWorks/flux2-klein-9b-mlx"
+    );
+    assert_eq!(
+        mlx_model("flux2_klein_9b_kv").unwrap().default_repo(),
+        "SceneWorks/flux2-klein-9b-kv-mlx"
+    );
     // FLUX.2-dev (epic 5914): its OWN engine model (not a klein weight variant), embedded
     // distilled guidance (guidance scalar, no negative prompt — like klein but ~28 steps /
     // guidance 4.0). Shares the `mlx_flux2` adapter.
     let dev = mlx_model("flux2_dev").unwrap();
     assert_eq!(dev.engine_id(), "flux2_dev");
     assert_eq!(dev.adapter_label(), "mlx_flux2");
-    assert_eq!(dev.default_repo(), "black-forest-labs/FLUX.2-dev");
+    assert_eq!(dev.default_repo(), "SceneWorks/flux2-dev-mlx");
     assert_eq!(dev.default_steps(), 28);
     assert_eq!(dev.default_guidance(), 4.0);
     assert!(dev.supports_guidance() && !dev.supports_negative_prompt());
@@ -679,6 +1012,34 @@ fn bernini_image_i2i_real_weights_generates_one_image() {
     );
 }
 
+/// sc-8827 (F-025): the worker feeds the PuLID-FLUX engine its adapter / EVA / face-stack paths on
+/// `LoadSpec::identity` instead of mutating the process-global `PULID_*` env vars at job time. This
+/// asserts the mapping `PulidWeights -> IdentityWeights` (encoder=File(adapter), eva=File(eva),
+/// face_dir=Dir(face_dir)) so the paths now travel via config, not env. Non-ignored (no weights /
+/// device needed).
+#[cfg(target_os = "macos")]
+#[test]
+fn pulid_identity_weights_maps_paths_onto_loadspec_not_env() {
+    let weights = PulidWeights {
+        adapter: PathBuf::from("/cache/pulid-flux-mlx/pulid_flux_v0.9.1.safetensors"),
+        eva: PathBuf::from("/cache/pulid-flux-mlx/eva02_clip_l_336.safetensors"),
+        face_dir: PathBuf::from("/cache/pulid-flux-mlx"),
+    };
+    let id = pulid_identity_weights(&weights);
+    assert!(
+        matches!(id.encoder, Some(WeightsSource::File(ref p)) if *p == weights.adapter),
+        "adapter path rides identity.encoder as a File source"
+    );
+    assert!(
+        matches!(id.eva, Some(WeightsSource::File(ref p)) if *p == weights.eva),
+        "eva path rides identity.eva as a File source"
+    );
+    assert!(
+        matches!(id.face_dir, Some(WeightsSource::Dir(ref p)) if *p == weights.face_dir),
+        "face_dir rides identity.face_dir as a Dir source"
+    );
+}
+
 /// sc-3344 parity gate (worker path): drive the native `pulid_flux` registry generator through the
 /// SAME load seam the worker uses (`load_engine` → `gen_core::load("pulid_flux")` with the engine's
 /// env-var weight resolution filled from local caches) and confirm it produces an identity-preserving
@@ -1132,16 +1493,17 @@ fn lens_real_weights_generates_one_image() {
 }
 
 /// Real-weights smoke: Lens-Turbo (the distilled 4-step / guidance 1.0 variant, ≈ no CFG) — same
-/// architecture/weights tree as base Lens, different defaults. Loads the `microsoft/Lens-Turbo`
-/// snapshot at the Q8 default. Needs the HF cache + a Metal device; run on demand:
+/// architecture/weights tree as base Lens, different defaults. Loads the `SceneWorks/lens-turbo-mlx`
+/// `bf16/` tier subdir (mirrors the base `lens` smoke; the dead flat `microsoft/Lens-Turbo` repo was
+/// retired, sc-8797/sc-8965). Needs the HF cache + a Metal device; run on demand:
 /// `cargo test -p sceneworks-worker --lib -- --ignored lens_turbo_real_weights`.
 #[cfg(target_os = "macos")]
 #[test]
-#[ignore = "needs real microsoft/Lens-Turbo weights + Metal device"]
+#[ignore = "needs real SceneWorks/lens-turbo-mlx weights + Metal device"]
 fn lens_turbo_real_weights_generates_one_image() {
     smoke_generate_one(
         "lens_turbo",
-        hf_snapshot("models--microsoft--Lens-Turbo"),
+        hf_snapshot("models--SceneWorks--lens-turbo-mlx").join("bf16"),
         Some(1.0),
         None,
     );
@@ -1154,12 +1516,12 @@ fn lens_turbo_real_weights_generates_one_image() {
 /// `cargo test -p sceneworks-worker --lib -- --ignored lens_turbo_real_weights_bucket`.
 #[cfg(target_os = "macos")]
 #[test]
-#[ignore = "needs real microsoft/Lens-Turbo weights + Metal device"]
+#[ignore = "needs real SceneWorks/lens-turbo-mlx weights + Metal device"]
 fn lens_turbo_real_weights_bucket_resolution() {
     let model = mlx_model("lens_turbo").unwrap();
     let generator = load_engine(
         model.engine_id(),
-        hf_snapshot("models--microsoft--Lens-Turbo"),
+        hf_snapshot("models--SceneWorks--lens-turbo-mlx").join("bf16"),
         Some(gen_core::Quant::Q8),
         Vec::new(),
         None,
@@ -1961,7 +2323,7 @@ fn kolors_real_weights_pose_generates_one_image() {
             Conditioning::Control {
                 image: skeleton,
                 kind: ControlKind::Pose,
-                scale: 0.7,
+                scale: Some(0.7),
             },
             Conditioning::Reference {
                 image: reference,
@@ -2629,8 +2991,9 @@ fn sc3031_ab_dump_pose() {
     let weights = resolve_weights_dir(&req, &settings)
         .expect("z-image weights resolve")
         .expect("z-image weights in HF cache");
-    let control_weights =
-        resolve_control_weights(&req, &settings).expect("Fun-Controlnet-Union weights");
+    let control_weights = resolve_control_weights(&req, &settings)
+        .expect("control-weights filename resolves")
+        .expect("Fun-Controlnet-Union weights");
     let (quant, _bits) = resolve_quant(&req);
     let zimage = mlx_model("z_image_turbo").expect("z-image model row");
     let steps = resolve_steps(&req, &zimage);
@@ -2731,7 +3094,7 @@ fn zimage_identity_strength_gate_and_clamp() {
         if !asset.is_null() {
             obj.insert("referenceAssetId".to_owned(), asset);
         }
-        zimage_identity_strength(&request(payload))
+        identity_strength(&request(payload))
     };
     let approx = |got: Option<f32>, want: f32| match got {
         Some(value) => assert!((value - want).abs() < 1e-6, "got {value}, want {want}"),
@@ -2983,7 +3346,9 @@ fn zimage_base_control_real_weights_generates_per_mode() {
 #[ignore = "needs real Qwen-Image + 2512-Fun-Controlnet-Union weights + Metal device"]
 fn qwen_control_real_weights_generates_one_pose() {
     let base = hf_snapshot("models--Qwen--Qwen-Image");
-    let control = hf_snapshot("models--alibaba-pai--Qwen-Image-2512-Fun-Controlnet-Union")
+    // sc-9870: packed control tier — the Q8 base pairs with the q8/ overlay subdir.
+    let control = hf_snapshot("models--SceneWorks--qwen-image-2512-fun-controlnet-union")
+        .join("q8")
         .join(super::QWEN_CONTROL_FILE);
     assert!(
         control.exists(),
@@ -3185,7 +3550,8 @@ fn flux2_control_scale_defaults_and_clamps() {
 #[cfg(target_os = "macos")]
 #[test]
 fn flux2_control_repo_file_defaults_and_overrides() {
-    let (repo, file) = flux2_control_repo_file(&request(json!({ "projectId": "p" })));
+    let (repo, file) =
+        flux2_control_repo_file(&request(json!({ "projectId": "p" }))).expect("defaults resolve");
     // The default repo now comes from the shared strict-control table (single source of truth).
     assert_eq!(
         repo,
@@ -3197,9 +3563,64 @@ fn flux2_control_repo_file_defaults_and_overrides() {
     let (repo, file) = flux2_control_repo_file(&request(json!({
         "projectId": "p",
         "advanced": { "controlWeights": { "repo": "me/custom", "filename": "x.safetensors" } }
-    })));
+    })))
+    .expect("plain override filename resolves");
     assert_eq!(repo, "me/custom");
     assert_eq!(file, "x.safetensors");
+}
+
+/// sc-8821 / F-019: a payload `controlWeights.filename` that is not a plain component (traversal,
+/// absolute, sub-path) is REJECTED with an `InvalidPayload` pointing at the field — never joined
+/// under the HF snapshot / app cache — on every MLX control resolver (the shared
+/// `resolve_control_weights_for` behind the Z-Image/Qwen wrappers, plus the FLUX.1/FLUX.2
+/// `*_control_repo_file` pair).
+#[cfg(target_os = "macos")]
+#[test]
+fn mlx_control_weight_filenames_reject_traversal() {
+    let settings = Settings::from_env();
+    for filename in ["../../etc/hosts", "/etc/hosts", "sub/x.safetensors", ".."] {
+        let req = request(json!({
+            "projectId": "p",
+            "advanced": { "controlWeights": { "filename": filename } }
+        }));
+        for (label, error) in [
+            (
+                "z-image turbo",
+                resolve_control_weights(&req, &settings).expect_err("z-image turbo rejects"),
+            ),
+            (
+                "z-image base",
+                resolve_base_control_weights(&req, &settings).expect_err("z-image base rejects"),
+            ),
+            (
+                "qwen",
+                resolve_qwen_control_weights(&req, &settings).expect_err("qwen rejects"),
+            ),
+            (
+                "flux2",
+                flux2_control_repo_file(&req).expect_err("flux2 rejects"),
+            ),
+            (
+                "flux1",
+                flux1_control_repo_file(&req).expect_err("flux1 rejects"),
+            ),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("advanced.controlWeights.filename"),
+                "{label} error should point at the offending field for {filename:?}: {error}"
+            );
+        }
+    }
+    // A plain filename still passes validation on the Option-returning resolvers (whether it maps to
+    // Some or None then depends only on the local HF cache, not on confinement).
+    let plain = request(json!({
+        "projectId": "p",
+        "advanced": { "controlWeights": { "filename": "custom.safetensors" } }
+    }));
+    assert!(resolve_control_weights(&plain, &settings).is_ok());
+    assert!(resolve_qwen_control_weights(&plain, &settings).is_ok());
 }
 
 #[cfg(target_os = "macos")]
@@ -3231,38 +3652,10 @@ fn flux2_control_raw_settings_records_control_recipe() {
     assert_eq!(raw.get("realModelInference"), Some(&json!(true)));
 }
 
-#[cfg(target_os = "macos")]
-#[test]
-fn flux2_identity_strength_gates_on_strength_and_asset() {
-    // Off by default (no referenceStrength) — the pose-only tier.
-    assert_eq!(
-        flux2_identity_strength(&request(
-            json!({ "projectId": "p", "referenceAssetId": "r" })
-        )),
-        None
-    );
-    // referenceStrength set but no asset → None.
-    assert_eq!(
-        flux2_identity_strength(&request(
-            json!({ "projectId": "p", "advanced": { "referenceStrength": 0.5 } })
-        )),
-        None
-    );
-    // Both present → clamped strength (the opt-in img2img-init).
-    assert_eq!(
-        flux2_identity_strength(&request(json!({
-            "projectId": "p", "referenceAssetId": "r", "advanced": { "referenceStrength": 0.5 }
-        }))),
-        Some(0.5)
-    );
-    // Clamp to [0.05, 1.0].
-    assert_eq!(
-        flux2_identity_strength(&request(json!({
-            "projectId": "p", "referenceAssetId": "r", "advanced": { "referenceStrength": 2.0 }
-        }))),
-        Some(1.0)
-    );
-}
+// sc-8946: the former `identity_strength_gates_on_strength_and_asset` was folded away — after the
+// rename it near-duplicated `zimage_identity_strength_gate_and_clamp` above, which is a strict superset
+// (same off-by-default / no-asset / clamp-to-1.0 cases PLUS verbatim forwarding, string coercion, and
+// the 0.05 floor) over the same `identity_strength(&request(..))` gate.
 
 /// Real-weights smoke: FLUX.2-dev strict-pose Fun-Controlnet-Union (sc-6055; engine sc-2292). Loads
 /// the converted Q4 dev snapshot (`models/mlx/flux2_dev`, assembled by the `flux2_dev_quant` convert
@@ -3431,36 +3824,36 @@ fn flux1_dev_control_real_weights_generates_each_mode() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn flux2_edit_reference_ids_prefers_reference_then_source() {
+fn edit_reference_ids_prefers_reference_then_source() {
     // referenceAssetId (character flow) wins.
     assert_eq!(
-        flux2_edit_reference_ids(&request(json!({
+        edit_reference_ids(&request(json!({
             "projectId": "p", "referenceAssetId": "ref_1", "sourceAssetId": "src_1"
         }))),
         vec!["ref_1".to_owned()]
     );
     // sourceAssetId only in edit_image mode.
     assert_eq!(
-        flux2_edit_reference_ids(&request(json!({
+        edit_reference_ids(&request(json!({
             "projectId": "p", "mode": "edit_image", "sourceAssetId": "src_1"
         }))),
         vec!["src_1".to_owned()]
     );
     // sourceAssetId without edit_image mode is ignored (it's the txt2img path).
-    assert!(flux2_edit_reference_ids(&request(json!({
+    assert!(edit_reference_ids(&request(json!({
         "projectId": "p", "sourceAssetId": "src_1"
     })))
     .is_empty());
-    assert!(flux2_edit_reference_ids(&request(json!({ "projectId": "p" }))).is_empty());
+    assert!(edit_reference_ids(&request(json!({ "projectId": "p" }))).is_empty());
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn flux2_edit_reference_ids_takes_plural_multi_reference_set() {
+fn edit_reference_ids_takes_plural_multi_reference_set() {
     // sc-6211: the multi-image picker sends `referenceAssetIds` — all of them, in order, win over the
     // singular fields.
     assert_eq!(
-        flux2_edit_reference_ids(&request(json!({
+        edit_reference_ids(&request(json!({
             "projectId": "p",
             "referenceAssetIds": ["a", "b", "c"],
             "referenceAssetId": "singular_ignored"
@@ -3469,7 +3862,7 @@ fn flux2_edit_reference_ids_takes_plural_multi_reference_set() {
     );
     // Capped at MAX_EDIT_REFERENCES (4) — a 6-image pick keeps the first four.
     assert_eq!(
-        flux2_edit_reference_ids(&request(json!({
+        edit_reference_ids(&request(json!({
             "projectId": "p",
             "referenceAssetIds": ["a", "b", "c", "d", "e", "f"]
         })))
@@ -3478,14 +3871,14 @@ fn flux2_edit_reference_ids_takes_plural_multi_reference_set() {
     );
     // A single pick in the plural picker reduces to the single-reference path.
     assert_eq!(
-        flux2_edit_reference_ids(&request(json!({
+        edit_reference_ids(&request(json!({
             "projectId": "p", "referenceAssetIds": ["only"]
         }))),
         vec!["only".to_owned()]
     );
     // Empty plural list falls back to the singular reference flow.
     assert_eq!(
-        flux2_edit_reference_ids(&request(json!({
+        edit_reference_ids(&request(json!({
             "projectId": "p", "referenceAssetIds": [], "referenceAssetId": "ref_1"
         }))),
         vec!["ref_1".to_owned()]
@@ -3702,30 +4095,96 @@ fn augment_prompt_for_pose_appends_cue() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn flux2_grouping_poses_over_angles_over_plain() {
+fn edit_grouping_poses_over_angles_over_plain() {
     // Pose set wins even when angleSet is also set.
     let poses = request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
         "advanced": { "angleSet": true, "poses": [{ "id": "a" }, { "id": "b" }] }
     }));
-    assert!(matches!(flux2_grouping(&poses), Flux2Grouping::Poses(2)));
+    assert!(matches!(edit_grouping(&poses), EditGrouping::Poses(2)));
     // angleSet without poses → the 11-angle set.
     let angles = request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
         "advanced": { "angleSet": true }
     }));
-    assert!(matches!(flux2_grouping(&angles), Flux2Grouping::Angles));
+    assert!(matches!(edit_grouping(&angles), EditGrouping::Angles));
     // character_image with neither → plain.
     let plain = request(json!({
         "projectId": "p", "mode": "character_image", "referenceAssetId": "ref"
     }));
-    assert!(matches!(flux2_grouping(&plain), Flux2Grouping::Plain));
+    assert!(matches!(edit_grouping(&plain), EditGrouping::Plain));
     // edit_image never groups, even with angleSet (mode gate).
     let edit = request(json!({
         "projectId": "p", "mode": "edit_image", "sourceAssetId": "src",
         "advanced": { "angleSet": true }
     }));
-    assert!(matches!(flux2_grouping(&edit), Flux2Grouping::Plain));
+    assert!(matches!(edit_grouping(&edit), EditGrouping::Plain));
+}
+
+/// `plan_edit_batch` (F-024 sc-8826) is the shared grouping/stamping/gating builder for the FLUX.2 /
+/// Qwen / SenseNova edit streams. Angles → 11 shared-seed per-angle prompts, no poses, `angleSet`
+/// stamped, scored. Pose set → n shared-seed pose prompts WITH `PoseInput`s, `poseLibrary` stamped,
+/// scored. Plain `character_image` → per-image seeds, no stamp, scored (sc-4411). Plain `edit_image`
+/// → per-image seeds, no stamp, NOT scored (the `Plain` grouping that carries a `sourceAssetId`, not
+/// an identity reference). The lane's base `raw_settings` pass through untouched.
+#[cfg(target_os = "macos")]
+#[test]
+fn plan_edit_batch_expands_and_gates_per_grouping() {
+    let base_settings = || {
+        let mut map = JsonObject::new();
+        map.insert("laneKey".to_owned(), json!("kept"));
+        map
+    };
+
+    // Angles: 11 shared seeds, per-angle prompts, no pose inputs, angleSet stamped, scored.
+    let angles = request(json!({
+        "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
+        "advanced": { "angleSet": true, "seed": 7 }
+    }));
+    let batch = plan_edit_batch(&angles, &edit_grouping(&angles), base_settings());
+    assert_eq!(batch.seeds.len(), CHARACTER_ANGLE_SET_ORDER.len());
+    assert_eq!(batch.prompts.len(), CHARACTER_ANGLE_SET_ORDER.len());
+    assert!(batch.seeds.iter().all(|&s| s == batch.seeds[0]));
+    assert!(batch.pose_inputs.is_none());
+    assert_eq!(batch.raw_settings.get("angleSet"), Some(&Value::Bool(true)));
+    assert!(batch.raw_settings.get("poseLibrary").is_none());
+    assert_eq!(batch.raw_settings.get("laneKey"), Some(&json!("kept")));
+    assert!(batch.score_likeness);
+
+    // Pose set: n shared seeds, pose inputs present, poseLibrary stamped, scored.
+    let poses = request(json!({
+        "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
+        "advanced": { "seed": 7, "poses": [{ "id": "a" }, { "id": "b" }] }
+    }));
+    let batch = plan_edit_batch(&poses, &edit_grouping(&poses), base_settings());
+    assert_eq!(batch.seeds.len(), 2);
+    assert!(batch.seeds.iter().all(|&s| s == batch.seeds[0]));
+    assert_eq!(batch.pose_inputs.as_ref().map(Vec::len), Some(2));
+    assert_eq!(
+        batch.raw_settings.get("poseLibrary"),
+        Some(&Value::Bool(true))
+    );
+    assert!(batch.raw_settings.get("angleSet").is_none());
+    assert!(batch.score_likeness);
+
+    // Plain character_image: per-image seeds, no stamp, scored (sc-4411 plain With-Character).
+    let plain_char = request(json!({
+        "projectId": "p", "mode": "character_image", "referenceAssetId": "ref", "count": 3
+    }));
+    let batch = plan_edit_batch(&plain_char, &edit_grouping(&plain_char), base_settings());
+    assert_eq!(batch.seeds.len(), 3);
+    assert!(batch.pose_inputs.is_none());
+    assert!(batch.raw_settings.get("angleSet").is_none());
+    assert!(batch.raw_settings.get("poseLibrary").is_none());
+    assert!(batch.score_likeness);
+
+    // Plain edit_image: per-image seeds, NOT scored (Plain grouping without an identity reference).
+    let plain_edit = request(json!({
+        "projectId": "p", "mode": "edit_image", "sourceAssetId": "src", "count": 2
+    }));
+    let batch = plan_edit_batch(&plain_edit, &edit_grouping(&plain_edit), base_settings());
+    assert_eq!(batch.seeds.len(), 2);
+    assert!(!batch.score_likeness);
 }
 
 /// Minimal valid safetensors (8-byte LE header length + JSON header). No `networkType`, so
@@ -3822,6 +4281,80 @@ fn instantid_resolves_user_loras_into_adapters() {
         adapters[0].path.file_name().and_then(|n| n.to_str()),
         Some("style.safetensors"),
         "the confined LoRA path resolves to the on-disk file"
+    );
+}
+
+/// sc-10117: the inline Image Studio "Upscale" variant must carry the SAME lineage keys the
+/// standalone `image_upscale` job writes (`sourceAssetId` / `parents` / `extra.upscaledFromAssetId`),
+/// or the Library / Recent-Batches fold and the Original↔Upscaled toggle can't pair it with its
+/// original. The old bare `upscaledFrom` field was read by nothing (web `assetVariants.js`,
+/// `project_store`) and dropped at sidecar-build time, so inline upscales never folded.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn inline_upscaled_asset_links_back_to_base_for_library_fold() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path();
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let req = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "prompt": "Mist over hills",
+        "count": 1, "width": 320, "height": 256, "seed": 7,
+        "modelManifestEntry": { "family": "z-image" }
+    }));
+    let plan = ImagePlan::new(&req);
+
+    // A real base image asset (its fresh assetId lives inside the returned fact).
+    let seed = resolve_seed(&req, 0);
+    let pixels = stub_rgb8(req.width, req.height, seed);
+    let base_fact = write_image_asset(
+        &plan,
+        0,
+        seed,
+        req.width,
+        req.height,
+        pixels,
+        STUB_ADAPTER,
+        stub_raw_settings(&req),
+        project_path,
+    )
+    .unwrap();
+    let base_id = base_fact
+        .get("assetId")
+        .and_then(Value::as_str)
+        .unwrap()
+        .to_owned();
+
+    // Upscale it 2x — a solid buffer is fine; we only assert the lineage metadata here.
+    let upscaled =
+        image::RgbImage::from_pixel(req.width * 2, req.height * 2, image::Rgb([10, 20, 30]));
+    let fact = write_upscaled_asset(
+        &plan,
+        &base_fact,
+        &upscaled,
+        "seedvr2",
+        2,
+        0.5,
+        project_path,
+    )
+    .unwrap();
+
+    // A fresh id, but linked back to the base by EVERY key the fold reads.
+    assert_ne!(
+        fact["assetId"], base_fact["assetId"],
+        "upscaled variant gets its own id"
+    );
+    assert_eq!(fact["sourceAssetId"], json!(base_id));
+    assert_eq!(fact["parents"], json!([base_id]));
+    assert_eq!(fact["extra"]["isUpscaled"], json!(true));
+    assert_eq!(fact["extra"]["upscaledFromAssetId"], json!(base_id));
+    assert_eq!(fact["extra"]["factor"], json!(2));
+    assert_eq!(fact["extra"]["engine"], json!("seedvr2"));
+    // The dead field that never folded must be gone.
+    assert!(
+        !fact.contains_key("upscaledFrom"),
+        "the unread `upscaledFrom` field must not be written"
     );
 }
 
@@ -3947,6 +4480,79 @@ fn image_route_count_follows_dispatch_order() {
     let route = resolve_image_route(&zimage_base_t2i, &settings).unwrap();
     assert_eq!(route, ImageRoute::Mlx);
     assert_eq!(route.image_count(&zimage_base_t2i, &settings), 4);
+}
+
+// sc-8828 (F-026): `resolve_candle_image_route` is the extracted candle dispatch decision — the
+// `else if settings.backend_candle_enabled && <predicate>` ladder pulled out of `run_image_generate_job`
+// into a table (the candle sibling of `resolve_image_route`/`ImageRoute`). Locks the flag gate + the
+// no-pose-lane reject + the plain txt2img arm (the branches that route on model id, not staged weights).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_image_route_gates_on_flag_then_pose_reject_then_txt2img() {
+    let mut settings = Settings::from_env();
+
+    // Candle disabled (default) → None (the job stubs), regardless of model.
+    settings.backend_candle_enabled = false;
+    let sdxl_t2i = request(json!({ "projectId": "p", "model": "sdxl", "count": 1 }));
+    assert_eq!(resolve_candle_image_route(&sdxl_t2i, &settings), None);
+
+    settings.backend_candle_enabled = true;
+    // Plain sdxl t2i (no reference / no poses / no edit) → the generic candle txt2img lane.
+    assert_eq!(
+        resolve_candle_image_route(&sdxl_t2i, &settings),
+        Some(CandleImageRoute::CandleTxt2Img),
+    );
+
+    // A strict-pose job on sdxl (a candle engine with NO pose lane) → the loud reject, never silent T2I.
+    let sdxl_pose = request(json!({
+        "projectId": "p", "model": "sdxl", "count": 1,
+        "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&sdxl_pose, &settings),
+        Some(CandleImageRoute::PoseReject),
+    );
+
+    // A non-candle model → None (stubs / MLX-only elsewhere).
+    let unknown = request(json!({ "projectId": "p", "model": "not_a_candle_engine", "count": 1 }));
+    assert_eq!(resolve_candle_image_route(&unknown, &settings), None);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn generic_lane_conditioning_defaults_when_no_reference() {
+    // The generic MLX lane's per-family conditioning resolver (sc-8828, F-026): a plain t2i job (no
+    // reference, no edit source) resolves to the all-`None` default for every family that reaches the
+    // generic lane — the Z-Image arm (via `resolve_zimage_identity_init` returning `None`), the Kolors
+    // arm, the Krea img2img arm (sc-8591, gated on `has_reference`), and the final Boogu/plain
+    // fall-through. No disk access; just proves the dispatch order picks the right arm and each yields
+    // the empty conditioning when its reference precondition is absent.
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+    let project_path = dir.path();
+
+    for model in [
+        "z_image_turbo",
+        "kolors",
+        "sdxl",
+        "flux_dev",
+        "krea_2_turbo",
+    ] {
+        let req = request(json!({
+            "projectId": "p", "model": model, "count": 1,
+        }));
+        // `has_reference == false` — the reference/IP-Adapter arms are all gated on it (or on an
+        // edit source), so every model falls through to the empty default.
+        let cond = resolve_generic_lane_conditioning(&req, &settings, project_path, false).unwrap();
+        assert!(
+            cond.identity_init.is_none()
+                && cond.flux_ip_dir.is_none()
+                && cond.flux_true_cfg.is_none()
+                && cond.ideogram_edit_mask.is_none(),
+            "plain t2i for '{model}' must resolve to the empty generic-lane conditioning"
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -4076,7 +4682,9 @@ fn character_image_likeness_source_gates_to_plain_with_character() {
     );
 }
 
-#[cfg(target_os = "macos")]
+// Asserts against `gen_core::imageops::contain_box` directly (not a macOS-only symbol), so it runs
+// on the candle lane too where the same letterbox geometry is shared (sc-9420).
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 #[test]
 fn contain_box_centers_the_contained_rect() {
     // `fit_rgb`'s pad arm now rides the engine's `contain_box` (sc-8824), the same geometry the
@@ -5052,6 +5660,27 @@ fn ideogram_subdir_prefers_q4_and_opts_into_q8() {
     );
 }
 
+/// `ideogram_tier_subdir` (sc-9607) maps a `mlxQuantize` bit count to the tier that needs an ON-DEMAND
+/// fetch: `> 4` → `q8` (the catalog ships only q4, so q8 is pulled by `ensure_ideogram_tier_present`),
+/// everything else → `None`. The default q4 ships in the catalog download (no fetch), and bf16 (`<= 0`)
+/// lives in a separate catalog repo the user opts into on the Models page — so both map to `None` here.
+/// `ideogram_model_subdir` and the fetch share this fn so the load target and the fetch target agree.
+/// Gated to the lanes where `base.rs` (and thus `ideogram_tier_subdir`) is compiled — the same cfg as
+/// its `include!`; the default/Linux no-candle `parity` build excludes base.rs, so this must too.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn ideogram_tier_subdir_maps_q8_optin() {
+    assert_eq!(ideogram_tier_subdir(None), None);
+    assert_eq!(ideogram_tier_subdir(Some(8)), Some("q8"));
+    assert_eq!(ideogram_tier_subdir(Some(5)), Some("q8"));
+    assert_eq!(ideogram_tier_subdir(Some(4)), None);
+    assert_eq!(ideogram_tier_subdir(Some(0)), None);
+    assert_eq!(ideogram_tier_subdir(Some(-1)), None);
+}
+
 /// Boogu (epic 6387) resolves each of its three ids to its own engine + the reference defaults, and
 /// quant resolution returns Q8 — the catalog declares `mlx.quantize: 8` (the pre-packed Q8 turnkey
 /// default). Turbo is CFG-free so `resolve_guidance` returns None. Runs in CI on Mac (no weights).
@@ -5956,10 +6585,9 @@ fn strict_control_table_is_the_authority() {
 
     let qwen = strict_control_engine("qwen_image_control").expect("qwen row");
     // sc-8267 source swap: InstantX → alibaba-pai 2512-Fun-Controlnet-Union (input-agnostic VACE branch).
-    assert_eq!(
-        qwen.repo,
-        "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union"
-    );
+    // sc-9870: repointed to the SceneWorks PACKED tier (per-quant q4/q8/bf16 subdirs) — the row stays
+    // consistent across the MLX (`qwen.rs`) and candle (`qwen_control.rs`) drivers.
+    assert_eq!(qwen.repo, "SceneWorks/qwen-image-2512-fun-controlnet-union");
     // sc-8250 exposure: the 2512-Fun Union admits pose + canny + depth.
     assert_eq!(
         qwen.supported_kinds,
@@ -6146,7 +6774,8 @@ fn build_control_conditioning_matches_legacy_shape() {
         Conditioning::Control { image, kind, scale } => {
             assert_eq!(image.pixels, control.pixels);
             assert_eq!(*kind, ControlKind::Pose);
-            assert!((*scale - 0.9).abs() < 1e-6);
+            // gen-core drift (sc-9940): scale is now Option<f32>.
+            assert!((scale.expect("control scale") - 0.9).abs() < 1e-6);
         }
         other => panic!("expected Control, got {other:?}"),
     }
@@ -6208,6 +6837,69 @@ fn resolve_control_identity_source_is_none_without_reference() {
     assert!(
         resolve_control_identity_source(&blank, &settings, project_path).is_none(),
         "blank referenceAssetId ⇒ treated as absent"
+    );
+}
+
+/// sc-8822 base-lane positive coverage: WITH a real identity `referenceAssetId`,
+/// `resolve_control_identity_source` — the source resolver the BASE Z-Image strict-control stream
+/// (`generate_zimage_base_control_stream`) now calls before it builds the scorer + drives
+/// `drive_gen_items_scored` — decodes the reference and returns `Some((image, assetId))`. This
+/// exercises the with-reference *decode-success* branch the `_is_none_` test above never touches, and
+/// pins the sc-4411/sc-8822 contract that the returned source id is the CURRENT job's reference (so the
+/// base lane scores against the reference the user picked, not a cached/hardcoded one). Runs in CI on
+/// Mac — no model weights, just a project + an imported PNG.
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_control_identity_source_decodes_present_reference_for_base_zimage() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = data_dir.path().to_path_buf();
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let project = store.create_project("sc8822-base").unwrap();
+    let project_path = std::path::PathBuf::from(&project.path);
+
+    // A real, decodable reference image on disk (distinct dims catch a width/height transpose).
+    let source_file = data_dir.path().join("reference.png");
+    image::RgbImage::from_pixel(48, 32, image::Rgb([180, 40, 90]))
+        .save(&source_file)
+        .unwrap();
+    let asset = store
+        .import_asset(
+            &project.id,
+            sceneworks_core::project_store::UploadAsset {
+                filename: "reference.png".to_owned(),
+                content_type: Some("image/png".to_owned()),
+                source_path: source_file,
+                source_asset_id: None,
+                provenance: None,
+            },
+        )
+        .unwrap();
+    let asset_id = asset["id"].as_str().unwrap().to_owned();
+
+    // BASE `z_image` pose set that carries that character identity reference → the base scored lane
+    // resolves a real likeness source (the inverse of the reference-less None gate above).
+    let base_with_reference = request(json!({
+        "projectId": project.id,
+        "model": "z_image",
+        "referenceAssetId": asset_id,
+        "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    let (image, resolved_id) =
+        resolve_control_identity_source(&base_with_reference, &settings, &project_path)
+            .expect("present reference on the base z_image lane ⇒ decoded likeness source");
+    assert_eq!(
+        resolved_id, asset_id,
+        "the scored source id is the CURRENT job's referenceAssetId (sc-4411/sc-8822 contract)"
+    );
+    assert_eq!(
+        (image.width, image.height),
+        (48, 32),
+        "reference decoded at its true dims"
+    );
+    assert!(
+        !image.pixels.is_empty(),
+        "decoded reference carries pixels for the scorer to embed"
     );
 }
 
@@ -7073,7 +7765,11 @@ fn real_weight_matrix_zimage_base_depth() {
 #[cfg(target_os = "macos")]
 fn matrix_qwen_paths() -> (std::path::PathBuf, std::path::PathBuf) {
     let base = hf_snapshot("models--Qwen--Qwen-Image");
-    let control = hf_snapshot("models--alibaba-pai--Qwen-Image-2512-Fun-Controlnet-Union")
+    // sc-9870: the packed control tier (`SceneWorks/qwen-image-2512-fun-controlnet-union`) ships one
+    // `model.safetensors` per q4/q8/bf16 subdir. This smoke loads the Q8 base, so pair it with the q8/
+    // control overlay subdir.
+    let control = hf_snapshot("models--SceneWorks--qwen-image-2512-fun-controlnet-union")
+        .join("q8")
         .join(super::QWEN_CONTROL_FILE);
     assert!(
         control.exists(),
@@ -7344,7 +8040,7 @@ fn candle_control_providers_resolve_models_and_repos() {
     assert!(!is_flux1_control_model("flux_schnell"));
     assert!(!is_flux1_control_model("flux2_dev"));
     let flux1 = request(json!({ "projectId": "p", "model": "flux_dev" }));
-    let (f1_repo, f1_file) = flux1_control_candle_repo_file(&flux1);
+    let (f1_repo, f1_file) = flux1_control_candle_repo_file(&flux1).expect("defaults resolve");
     assert_eq!(f1_repo, "Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro-2.0");
     assert_eq!(f1_file, "diffusion_pytorch_model.safetensors");
     assert_eq!(
@@ -7352,13 +8048,32 @@ fn candle_control_providers_resolve_models_and_repos() {
         "black-forest-labs/FLUX.1-dev"
     );
 
-    // sc-8350 — qwen InstantX → 2512-Fun: the default control repo + base repo are the 2512-Fun row, NOT
-    // the retired InstantX `Qwen-Image-ControlNet-Union`.
+    // sc-8350 — qwen InstantX → 2512-Fun. sc-9870 — repointed to the SceneWorks PACKED tier: the default
+    // control repo is the per-quant `SceneWorks/qwen-image-2512-fun-controlnet-union` matrix (NOT the dense
+    // alibaba-pai overlay, and NOT the retired InstantX repo), and the default file is the q4 tier subdir's
+    // single `model.safetensors` when no `mlxQuantize` is requested. The base repo is unchanged (2512 base).
     let qwen = request(json!({ "projectId": "p", "model": "qwen_image" }));
-    let (q_repo, _q_file) = qwen_control_repo_file(&qwen);
-    assert_eq!(q_repo, "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union");
+    let (q_repo, q_file) = qwen_control_repo_file(&qwen).expect("defaults resolve");
+    assert_eq!(q_repo, "SceneWorks/qwen-image-2512-fun-controlnet-union");
+    assert_eq!(q_file, "q4/model.safetensors");
     assert_eq!(QWEN_CONTROL_DEFAULT_REPO, "Qwen/Qwen-Image-2512");
+    assert_ne!(q_repo, "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union");
     assert_ne!(q_repo, "InstantX/Qwen-Image-ControlNet-Union");
+    // Tier tracks `advanced.mlxQuantize`: q8 selects the q8 subdir, bf16 opt-out selects the bf16 subdir.
+    let qwen_q8 = request(
+        json!({ "projectId": "p", "model": "qwen_image", "advanced": { "mlxQuantize": 8 } }),
+    );
+    assert_eq!(
+        qwen_control_repo_file(&qwen_q8).unwrap().1,
+        "q8/model.safetensors"
+    );
+    let qwen_bf16 = request(
+        json!({ "projectId": "p", "model": "qwen_image", "advanced": { "mlxQuantize": 0 } }),
+    );
+    assert_eq!(
+        qwen_control_repo_file(&qwen_bf16).unwrap().1,
+        "bf16/model.safetensors"
+    );
 
     // sc-8379 — z-image base: both Turbo and base are recognized; the base selects the base repos + the
     // ~50-step default + the `z_image_control` engine-id row.
@@ -7376,8 +8091,8 @@ fn candle_control_providers_resolve_models_and_repos() {
         zimage_control_base_default_repo(&base.model),
         "Tongyi-MAI/Z-Image"
     );
-    let (turbo_ctrl_repo, _) = zimage_control_repo_file(&turbo);
-    let (base_ctrl_repo, _) = zimage_control_repo_file(&base);
+    let (turbo_ctrl_repo, _) = zimage_control_repo_file(&turbo).expect("defaults resolve");
+    let (base_ctrl_repo, _) = zimage_control_repo_file(&base).expect("defaults resolve");
     assert_eq!(
         turbo_ctrl_repo,
         "alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1"
@@ -7402,6 +8117,57 @@ fn candle_control_providers_resolve_models_and_repos() {
     assert_eq!(zimage_control_guidance(&base_g), 6.5);
 }
 
+/// sc-8821 / F-019: a payload `controlWeights.filename` that is not a plain component (traversal,
+/// absolute, sub-path) is REJECTED with an `InvalidPayload` pointing at the field — never joined
+/// under the HF snapshot / app cache — on every candle control resolver. A plain override filename
+/// still resolves.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_control_weight_filenames_reject_traversal() {
+    for filename in ["../../etc/hosts", "/etc/hosts", "sub/x.safetensors", ".."] {
+        let req = request(json!({
+            "projectId": "p",
+            "advanced": { "controlWeights": { "filename": filename } }
+        }));
+        for (label, error) in [
+            (
+                "qwen",
+                qwen_control_repo_file(&req).expect_err("qwen rejects"),
+            ),
+            (
+                "kolors",
+                kolors_control_repo_file(&req).expect_err("kolors rejects"),
+            ),
+            (
+                "z-image",
+                zimage_control_repo_file(&req).expect_err("z-image rejects"),
+            ),
+            (
+                "flux2",
+                flux2_control_candle_repo_file(&req).expect_err("flux2 rejects"),
+            ),
+            (
+                "flux1",
+                flux1_control_candle_repo_file(&req).expect_err("flux1 rejects"),
+            ),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("advanced.controlWeights.filename"),
+                "{label} error should point at the offending field for {filename:?}: {error}"
+            );
+        }
+    }
+    let plain = request(json!({
+        "projectId": "p",
+        "advanced": { "controlWeights": { "repo": "me/custom", "filename": "x.safetensors" } }
+    }));
+    let (repo, file) = kolors_control_repo_file(&plain).expect("plain override filename resolves");
+    assert_eq!(repo, "me/custom");
+    assert_eq!(file, "x.safetensors");
+}
+
 /// The trait routes each provider: each lane's `CandleStrictControl` impl reports the right engine id
 /// (the validation key), engine label (the asset/telemetry tag), and stream tag. Constructed with dummy
 /// paths — only the routing metadata is asserted, no load. This is the seam the shared driver dispatches
@@ -7424,6 +8190,7 @@ fn candle_strict_control_trait_routes_each_provider() {
         guidance: 0.0,
         negative_prompt: String::new(),
         engine_id: ZIMAGE_CTRL_ENGINE_ID,
+        pid: None,
     };
     assert_eq!(zimage.engine_id(), ZIMAGE_CTRL_ENGINE_ID);
     assert_eq!(zimage.engine_label(), ZIMAGE_CTRL_ENGINE);
@@ -7444,6 +8211,7 @@ fn candle_strict_control_trait_routes_each_provider() {
         guidance: 4.0,
         negative_prompt: "blurry".to_owned(),
         engine_id: ZIMAGE_CTRL_BASE_ENGINE_ID,
+        pid: None,
     };
     assert_eq!(zimage_base.engine_id(), ZIMAGE_CTRL_BASE_ENGINE_ID);
     assert_eq!(zimage_base.engine_label(), ZIMAGE_CTRL_ENGINE);
@@ -7477,6 +8245,7 @@ fn candle_strict_control_trait_routes_each_provider() {
         steps: 28,
         guidance: 4.0,
         control_scale: 0.75,
+        pid: None,
     };
     assert_eq!(flux2.engine_id(), FLUX2_CONTROL_CANDLE_ENGINE_ID);
     assert_eq!(flux2.engine_label(), FLUX2_CONTROL_CANDLE_ENGINE);
@@ -7511,6 +8280,7 @@ fn candle_strict_control_trait_routes_each_provider() {
         control_scale: 1.0,
         sampler: None,
         scheduler: None,
+        pid: None,
     };
     assert_eq!(kolors.engine_id(), KOLORS_CONTROL_ENGINE_ID);
     assert_eq!(kolors.engine_label(), KOLORS_CONTROL_ENGINE);
@@ -7718,4 +8488,133 @@ fn candle_preprocess_depth_requires_source_and_weights() {
         None
     )
     .is_err());
+}
+
+// ---------------------------------------------------------------------------
+// sc-9879 (F-077 follow-up): every worker HF runtime-weight fetch pins a fixed commit revision, never
+// the mutable `main` branch, so a re-push (or a compromised token) can't silently swap the weights we
+// load. Each `_REVISION` const below is locked to a real 40-hex lowercase commit sha (mirrors the
+// sc-9682 `onnx_revision_is_pinned_commit_not_main` format tests). Grouped per lane so each assertion
+// only compiles where its const does (MLX-only files vs candle-only include!s vs both-lane).
+// ---------------------------------------------------------------------------
+
+/// Assert a pinned HF revision is a real 40-hex lowercase commit sha (never `main`). Referenced on
+/// BOTH lanes (the depth + InstantID pins compile everywhere), so no cfg gating on the helper itself.
+fn assert_pinned_revision(name: &str, revision: &str) {
+    assert_ne!(revision, "main", "{name} must pin a fixed revision");
+    assert_eq!(
+        revision.len(),
+        40,
+        "{name}: a pinned HF revision is a 40-char commit sha"
+    );
+    assert!(
+        revision
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "{name}: the pinned revision must be lowercase hex"
+    );
+}
+
+/// The Depth-Anything-V2 estimator pin (`strict_control.rs`) — resolved on both lanes.
+#[test]
+fn depth_anything_revision_is_pinned_commit_not_main() {
+    assert_pinned_revision(
+        "DEPTH_ANYTHING_V2_REVISION",
+        crate::depth::DEPTH_ANYTHING_V2_REVISION,
+    );
+}
+
+/// The InstantID download pins (`instantid.rs`) — compiled on macOS AND the candle lane.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn instantid_revisions_are_pinned_commits_not_main() {
+    assert_pinned_revision("INSTANTID_MLX_REVISION", INSTANTID_MLX_REVISION);
+    assert_pinned_revision(
+        "INSTANTID_CONTROLNET_REVISION",
+        INSTANTID_CONTROLNET_REVISION,
+    );
+    assert_pinned_revision("INSTANTID_OPENPOSE_REVISION", INSTANTID_OPENPOSE_REVISION);
+    // `instantid_revision` returns the pin for a known repo and falls back to `main` otherwise.
+    assert_eq!(
+        instantid_revision(INSTANTID_MLX_REPO),
+        INSTANTID_MLX_REVISION
+    );
+    assert_eq!(instantid_revision("some/override-repo"), "main");
+}
+
+/// The MLX-only strict-control pins (`flux1_control.rs` / `flux2.rs`) + the MLX Qwen distill-LoRA pin
+/// (`qwen.rs`). These files are `#[cfg(target_os = "macos")]`-gated `include!`s.
+#[cfg(target_os = "macos")]
+#[test]
+fn mlx_control_and_distill_revisions_are_pinned_commits_not_main() {
+    assert_pinned_revision("FLUX1_CONTROL_REVISION", FLUX1_CONTROL_REVISION);
+    assert_pinned_revision("FLUX2_CONTROL_REVISION", FLUX2_CONTROL_REVISION);
+    assert_pinned_revision("QWEN_LIGHTNING_LORA_REVISION", QWEN_LIGHTNING_LORA_REVISION);
+}
+
+/// The candle-only strict-control pins (qwen / kolors / zimage / flux1 / flux2 control branches). These
+/// files are `#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]`-gated `include!`s.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_control_revisions_are_pinned_commits_not_main() {
+    assert_pinned_revision("QWEN_CONTROL_REVISION", QWEN_CONTROL_REVISION);
+    assert_pinned_revision("KOLORS_CONTROL_REVISION", KOLORS_CONTROL_REVISION);
+    assert_pinned_revision("ZIMAGE_CTRL_REVISION", ZIMAGE_CTRL_REVISION);
+    assert_pinned_revision("ZIMAGE_CTRL_BASE_REVISION", ZIMAGE_CTRL_BASE_REVISION);
+    assert_pinned_revision(
+        "FLUX1_CONTROL_CANDLE_REVISION",
+        FLUX1_CONTROL_CANDLE_REVISION,
+    );
+    assert_pinned_revision(
+        "FLUX2_CONTROL_CANDLE_REVISION",
+        FLUX2_CONTROL_CANDLE_REVISION,
+    );
+}
+
+/// The candle-only IP-Adapter / PuLID / Qwen-edit distill pins. Candle-lane `include!`s.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_ipadapter_and_pulid_revisions_are_pinned_commits_not_main() {
+    assert_pinned_revision(
+        "FLUX_IPADAPTER_ADAPTER_REVISION",
+        FLUX_IPADAPTER_ADAPTER_REVISION,
+    );
+    assert_pinned_revision(
+        "FLUX_IPADAPTER_ENCODER_REVISION",
+        FLUX_IPADAPTER_ENCODER_REVISION,
+    );
+    assert_pinned_revision("SDXL_IPADAPTER_REVISION", SDXL_IPADAPTER_REVISION);
+    assert_pinned_revision(
+        "PULID_CANDLE_ADAPTER_REVISION",
+        PULID_CANDLE_ADAPTER_REVISION,
+    );
+    assert_pinned_revision("PULID_CANDLE_MLX_REVISION", PULID_CANDLE_MLX_REVISION);
+    assert_pinned_revision("PULID_CANDLE_FACE_REVISION", PULID_CANDLE_FACE_REVISION);
+    assert_pinned_revision(
+        "QWEN_EDIT_CANDLE_LIGHTNING_LORA_REVISION",
+        QWEN_EDIT_CANDLE_LIGHTNING_LORA_REVISION,
+    );
+    // The PuLID face-stack repo IS `SceneWorks/instantid-mlx`, so its pin must match the InstantID pin.
+    assert_eq!(
+        PULID_CANDLE_FACE_REVISION, INSTANTID_MLX_REVISION,
+        "PuLID + InstantID fetch the same SceneWorks/instantid-mlx repo; pins must agree"
+    );
+    // `pulid_candle_revision` returns the pin for a known repo and falls back to `main` otherwise.
+    assert_eq!(
+        pulid_candle_revision(PULID_CANDLE_FACE_REPO),
+        PULID_CANDLE_FACE_REVISION
+    );
+    assert_eq!(pulid_candle_revision("some/override-repo"), "main");
+}
+
+/// The candle-only Krea 2 ConvRot bf16-base pin (`base.rs`, sc-9300 tier). Fetches the fixed
+/// `SceneWorks/krea-2-turbo-mlx` turnkey const on-demand; the repo is non-overridable here, so it must
+/// pin an exact commit rather than the mutable `main` branch (sc-9879, F-077 follow-up).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn krea_convrot_base_revision_is_pinned_commit_not_main() {
+    assert_pinned_revision("KREA_MLX_TURNKEY_REVISION", KREA_MLX_TURNKEY_REVISION);
 }

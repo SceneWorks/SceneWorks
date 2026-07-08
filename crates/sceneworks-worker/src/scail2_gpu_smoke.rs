@@ -23,6 +23,8 @@ use gen_core::{
     ReplacementMode, WeightsSource,
 };
 
+use super::smoke_support::{env_or, DEGENERATE_STD_FLOOR_DEFAULT};
+
 fn env_path(key: &str) -> PathBuf {
     // Trim: a cmd `set VAR=value && ...` keeps the trailing space before `&&`.
     PathBuf::from(
@@ -30,12 +32,6 @@ fn env_path(key: &str) -> PathBuf {
             .unwrap_or_else(|_| panic!("set ${key}"))
             .trim(),
     )
-}
-
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .map(|v| v.trim().to_string())
-        .unwrap_or_else(|_| default.to_string())
 }
 
 fn load_rgb(path: &Path) -> Image {
@@ -116,6 +112,7 @@ fn scail2_candle_gpu_smoke() {
         &sam3_tok,
         std::slice::from_ref(&ref_rgb),
         None,
+        None,
     )
     .expect("sam3 reference segmentation");
     let ref_bg = if replacement {
@@ -145,6 +142,7 @@ fn scail2_candle_gpu_smoke() {
         &sam3_tok,
         &driving_rgb,
         None,
+        None,
     )
     .expect("sam3 driving segmentation");
     let drive_bg = if replacement {
@@ -152,7 +150,8 @@ fn scail2_candle_gpu_smoke() {
     } else {
         crate::scail2_masks::BG_BLACK
     };
-    let driving_masks = crate::scail2_masks::paint_driving_masks(&drive_masks, drive_bg);
+    let driving_masks = crate::scail2_masks::paint_driving_masks(&drive_masks, drive_bg)
+        .expect("scail2 driving mask paint");
     assert_eq!(
         driving_masks.len(),
         driving.len(),
@@ -257,7 +256,7 @@ fn scail2_candle_gpu_smoke() {
         avg_std
     );
     assert!(
-        avg_std > 5.0,
+        avg_std > DEGENERATE_STD_FLOOR_DEFAULT,
         "output frames look degenerate (avg std {avg_std:.2}) — possible NaN / all-black decode"
     );
 }

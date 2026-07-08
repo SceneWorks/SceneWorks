@@ -14,24 +14,22 @@
 //! Setup — point at the published turnkey `SceneWorks/lens-mlx` (the worker default). With the q4 tier
 //! already in the HF cache, no env is needed: the smoke auto-resolves the cached snapshot's `q4/` subdir
 //! (the same selection `image_jobs::base::standard_tier_subdir` makes for `mlxQuantize: 4`). Override
-//! `LENS_BASE_Q4_DIR` to point at a snapshot root or a `q4/`-bearing dir directly.
+//! `LENS_BASE_Q4_DIR` to point at a snapshot root or a `q4/`-bearing dir directly. Env keys are
+//! `LENS_BASE_*`-prefixed so this smoke and `lens_turbo_q4_mlx_smoke` (its `LENS_TURBO_*` sibling) can
+//! share one `--ignored` run without bleeding each other's step count / out dir (sc-8924).
 //! ```text
 //! # optional: LENS_BASE_Q4_DIR=/path/to/lens-mlx  (root containing q4/, or the q4/ dir itself)
-//! # optional: LENS_STEPS=20 LENS_W=1024 LENS_H=1024 LENS_PROMPT="..." LENS_OUT_DIR=/tmp/lens_base_q4_smoke
+//! # optional: LENS_BASE_STEPS=20 LENS_BASE_W=1024 LENS_BASE_H=1024 LENS_BASE_PROMPT="..." LENS_BASE_OUT_DIR=/tmp/lens_base_q4_smoke
 //! cargo test -p sceneworks-worker --release lens_base_q4_mlx_gpu_smoke -- --ignored --nocapture
 //! ```
 
 use std::path::{Path, PathBuf};
 
-use gen_core::{GenerationOutput, GenerationRequest, Image, LoadSpec, Quant, WeightsSource};
+use gen_core::{GenerationOutput, GenerationRequest, LoadSpec, Quant, WeightsSource};
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_string())
-}
+use super::smoke_support::{
+    env_or, image_mean, image_std, is_all_zero, save_png, DEGENERATE_STD_FLOOR_TIGHT,
+};
 
 /// The engine-complete packed subdir to load: mirror `image_jobs::base::standard_tier_subdir`'s q4
 /// selection — prefer `<root>/q4` (lens turnkeys pack the backbone under `transformer/`), else `root`
@@ -73,45 +71,6 @@ fn cached_turnkey_root() -> Option<PathBuf> {
         })
 }
 
-/// Per-pixel mean over the RGB buffer — the "is it black?" floor check, reported for the record.
-fn image_mean(img: &Image) -> f64 {
-    let n = img.pixels.len() as f64;
-    if n == 0.0 {
-        return 0.0;
-    }
-    img.pixels.iter().map(|&p| p as f64).sum::<f64>() / n
-}
-
-/// Mean per-pixel std-dev across the RGB channels — a cheap "is the image non-degenerate" check. A
-/// NaN / all-black / flat decode collapses the std toward 0; this guards that degenerate floor. The real
-/// quality call is the saved-PNG eyeball.
-fn image_std(img: &Image) -> f64 {
-    let n = img.pixels.len() as f64;
-    if n == 0.0 {
-        return 0.0;
-    }
-    let mean = image_mean(img);
-    let var = img
-        .pixels
-        .iter()
-        .map(|&p| (p as f64 - mean).powi(2))
-        .sum::<f64>()
-        / n;
-    var.sqrt()
-}
-
-/// Whether EVERY pixel byte is exactly 0 — the precise degenerate signature of a broken decode.
-fn is_all_zero(img: &Image) -> bool {
-    !img.pixels.is_empty() && img.pixels.iter().all(|&p| p == 0)
-}
-
-fn save_png(img: &Image, path: &Path) {
-    image::RgbImage::from_raw(img.width, img.height, img.pixels.clone())
-        .expect("rgb buffer")
-        .save(path)
-        .unwrap_or_else(|e| panic!("save {}: {e}", path.display()));
-}
-
 #[test]
 #[ignore = "real-weight MLX smoke; needs the SceneWorks/lens-mlx q4 turnkey cached + an Apple-Silicon Mac"]
 fn lens_base_q4_mlx_gpu_smoke() {
@@ -127,14 +86,19 @@ fn lens_base_q4_mlx_gpu_smoke() {
     };
     let q4_dir = resolve_q4_dir(&root);
 
-    let out_dir = PathBuf::from(env_or("LENS_OUT_DIR", "/tmp/lens_base_q4_smoke"));
+    // Per-test env prefix `LENS_BASE_*` (sc-8924): previously this smoke and lens_turbo_q4 shared the
+    // bare `LENS_OUT_DIR` / `LENS_STEPS` / `LENS_W` / `LENS_H` / `LENS_PROMPT` keys, so co-running both
+    // under one `--ignored` invocation bled the turbo smoke's 4-step config into this 20-step base run.
+    let out_dir = PathBuf::from(env_or("LENS_BASE_OUT_DIR", "/tmp/lens_base_q4_smoke"));
     std::fs::create_dir_all(&out_dir).expect("create out dir");
 
-    let steps: u32 = env_or("LENS_STEPS", "20").parse().expect("LENS_STEPS");
-    let w: u32 = env_or("LENS_W", "1024").parse().expect("LENS_W");
-    let h: u32 = env_or("LENS_H", "1024").parse().expect("LENS_H");
+    let steps: u32 = env_or("LENS_BASE_STEPS", "20")
+        .parse()
+        .expect("LENS_BASE_STEPS");
+    let w: u32 = env_or("LENS_BASE_W", "1024").parse().expect("LENS_BASE_W");
+    let h: u32 = env_or("LENS_BASE_H", "1024").parse().expect("LENS_BASE_H");
     let prompt = env_or(
-        "LENS_PROMPT",
+        "LENS_BASE_PROMPT",
         "a photorealistic portrait of a red fox sitting in a sunlit autumn forest, sharp focus, \
          shallow depth of field",
     );
@@ -201,7 +165,7 @@ fn lens_base_q4_mlx_gpu_smoke() {
         "lens (base) Q4 decode is ALL-ZERO — a broken packed load/decode"
     );
     assert!(
-        std > 20.0,
+        std > DEGENERATE_STD_FLOOR_TIGHT,
         "lens (base) Q4 render looks degenerate (std {std:.2}) — possible NaN / all-black / flat decode"
     );
     println!(

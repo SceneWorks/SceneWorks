@@ -4,10 +4,8 @@ import atexit
 import json
 import os
 import re
-import socket
 import sqlite3
 import subprocess
-import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +13,11 @@ from typing import Any
 
 import httpx
 import pytest
+
+# Shared, corruption-free fixtures (sc-8934 / F-132): the PNG + safetensors
+# builder and the API-spawn helpers used to be copy-pasted (and had drifted)
+# between this file and test_rust_api_worker_smoke.py.
+from rust_api_harness import PNG_1X1, free_port, safetensors_bytes, wait_for_health
 
 
 pytestmark = pytest.mark.parity
@@ -30,17 +33,6 @@ UPDATE_SNAPSHOTS = os.getenv(
     "yes",
 }
 UPDATED_SNAPSHOTS: dict[str, Any] = {}
-PNG_1X1 = (
-    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
-    b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x01\x90wS\xde"
-    b"\x00\x00\x00\x0cIDAT\x08\xd7c\xf8\xff\xff?\x00\x05\xfe"
-    b"\x02\xfeA\xe2&\x9b\x00\x00\x00\x00IEND\xaeB`\x82"
-)
-
-
-def safetensors_bytes() -> bytes:
-    header = json.dumps({"__metadata__": {"format": "pt"}}, separators=(",", ":")).encode("utf-8")
-    return len(header).to_bytes(8, "little") + header + b"tensor-bytes"
 
 
 TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z")
@@ -56,20 +48,26 @@ CLAIM_WORKER_RE = re.compile(r"\bclaim-worker-[a-z]\b")
 def write_updated_snapshots() -> None:
     if not UPDATE_SNAPSHOTS:
         return
+    # Merge into the existing on-disk snapshots rather than serializing only the
+    # labels touched this run. Otherwise a filtered update (e.g.
+    # `UPDATE_SNAPSHOTS=1 pytest -k character`) would clobber every untouched
+    # snapshot, since UPDATED_SNAPSHOTS only accumulates labels asserted during
+    # this run (sc-8862). snapshots() returns {} when the file does not yet
+    # exist, so first-ever generation still works.
+    #
+    # Note: because this merge preserves all pre-existing labels, intentionally
+    # REMOVING a snapshot must be done by editing snapshots.json manually — a
+    # filtered UPDATE_SNAPSHOTS run will never delete stale entries.
+    merged = snapshots()
+    merged.update(UPDATED_SNAPSHOTS)
     SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
     SNAPSHOT_PATH.write_text(
-        json.dumps(UPDATED_SNAPSHOTS, indent=2, sort_keys=True) + "\n",
+        json.dumps(merged, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
 
 
 atexit.register(write_updated_snapshots)
-
-
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 def write_contract_manifests(config_dir: Path) -> None:
@@ -161,23 +159,6 @@ def write_contract_manifests(config_dir: Path) -> None:
         '{ "schemaVersion": 1, "loras": [] }\n',
         encoding="utf-8",
     )
-
-
-def wait_for_health(base_url: str, process: subprocess.Popen[str], runtime: str) -> None:
-    deadline = time.monotonic() + 30
-    last_error: Exception | None = None
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            stderr = process.stderr.read() if process.stderr else ""
-            raise AssertionError(f"{runtime} API exited early with code {process.returncode}: {stderr}")
-        try:
-            response = httpx.get(f"{base_url}/api/v1/health", timeout=1)
-            if response.status_code == 200:
-                return
-        except httpx.HTTPError as exc:
-            last_error = exc
-        time.sleep(0.25)
-    raise AssertionError(f"{runtime} API did not become healthy within 30s: {last_error}")
 
 
 def parse_response_body(response: httpx.Response) -> Any:

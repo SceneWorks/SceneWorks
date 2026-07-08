@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "./api.js";
 import { assetUrl } from "./components/assetMedia.jsx";
-import { useAppContext } from "./context/AppContext.js";
+import { useAppStatic } from "./context/AppContext.js";
 
 // The reserved global project that holds user-created pose assets (epic 2282). Mirrors
 // crates/sceneworks-core::GLOBAL_POSES_PROJECT_ID. Hidden from the project switcher;
@@ -98,7 +98,7 @@ export async function loadPoseLibrary({ loadUserPoses } = {}) {
 // `PoseLibraryPicker` (so it appears in the grid). Best-effort: any fetch failure
 // is swallowed by `loadPoseLibrary`, degrading to the built-in library (sc-2287).
 export function useUserPoseLoader() {
-  const { token } = useAppContext();
+  const { token } = useAppStatic();
   return useCallback(async () => {
     const items = await apiFetch(`/api/v1/projects/${GLOBAL_POSES_PROJECT_ID}/assets`, token);
     return (Array.isArray(items) ? items : [])

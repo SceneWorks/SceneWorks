@@ -204,12 +204,16 @@ pub(crate) async fn run_face_likeness_compare_job(
     )
     .await?;
 
-    let (source, candidate) = load_compare_images(settings, job)?;
     let source_ref = required_asset_id(&job.payload, "sourceAssetId")?.to_owned();
 
     // Stage the SCRFD + ArcFace bundle (download-on-first-use; a prior InstantID / kps / dataset-face
     // run leaves it cached). The same dir the candle stack loads and the MLX path joins file names in.
     let weights_dir = crate::image_jobs::ensure_face_stack_dir(api, settings, job).await?;
+
+    // The two source reads + full image decodes are folded into the blocking compare task below
+    // (sc-8909 / F-107) so they never stall the async runtime thread (protecting the heartbeat).
+    let settings_for_task = settings.clone();
+    let job_for_task = job.clone();
 
     update_job(
         api,
@@ -227,9 +231,11 @@ pub(crate) async fn run_face_likeness_compare_job(
     .await?;
 
     // Keep the worker heartbeat alive across the blocking face stack load + two forwards (a cold weight
-    // load can run long) so a slow compare never trips the API's 90s stale-sweep (sc-8390). Not
-    // cancelable. A hard error here (e.g. missing weights) propagates and fails the job — but the
-    // *scoring* itself is non-fatal (an N/A result, never an error).
+    // load can run long) so a slow compare never trips the API's 90s stale-sweep (sc-8390). Cancel
+    // stays `None` by explicit per-engine decision (sc-9123): the compare is two bounded ArcFace
+    // forwards — no loop for a flag to interrupt, so the bounded join already gives everything a
+    // cancel flag would. A hard error here (e.g. missing weights) propagates and fails the job — but
+    // the *scoring* itself is non-fatal (an N/A result, never an error).
     let result = run_blocking_with_heartbeat(
         api,
         settings,
@@ -237,7 +243,9 @@ pub(crate) async fn run_face_likeness_compare_job(
         None,
         "",
         "face likeness compare task",
+        crate::no_cancel_ack(),
         tokio::task::spawn_blocking(move || {
+            let (source, candidate) = load_compare_images(&settings_for_task, &job_for_task)?;
             compare(&weights_dir, &source, &candidate, &source_ref)
         }),
     )

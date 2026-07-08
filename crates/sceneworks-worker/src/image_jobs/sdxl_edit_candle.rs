@@ -106,36 +106,15 @@ fn sdxl_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bo
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` → default (30).
 fn sdxl_edit_candle_steps(request: &ImageRequest) -> u32 {
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    request
-        .advanced
-        .get("steps")
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
-        .map(|steps| steps.clamp(1, 80) as u32)
-        .unwrap_or(SDXL_EDIT_CANDLE_DEFAULT_STEPS)
+    resolve_advanced_or_manifest_u32(request, "steps", SDXL_EDIT_CANDLE_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → default (5.0), clamped.
 fn sdxl_edit_candle_guidance(request: &ImageRequest) -> f32 {
-    let manifest_default = request
-        .model_manifest_entry
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(SDXL_EDIT_CANDLE_DEFAULT_GUIDANCE);
-    advanced::f32_clamped(
-        &request.advanced,
+    resolve_advanced_or_manifest_f32(
+        request,
         "guidanceScale",
-        manifest_default,
+        SDXL_EDIT_CANDLE_DEFAULT_GUIDANCE,
         0.0..=30.0,
     )
 }
@@ -216,7 +195,13 @@ async fn generate_candle_sdxl_edit_stream(
             "SDXL edit requires edit_image mode + a source image".to_owned(),
         )
     })?;
-    let (width, height) = (request.width, request.height);
+    // Per-generation PiD decode (epic 7840, sc-8044) + output tier (sc-10054), resolved BEFORE the
+    // source/mask fit so a 2K tier sizes the effective base and the edit source + mask are fit to THAT
+    // base (source, mask, and latent stay aligned). `use_pid`/`with_pid` stay paired at the load below.
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+    let (width, height) =
+        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
     let source = load_sdxl_edit_source(request, project_path, settings)?;
 
     let is_inpaint = matches!(
@@ -299,8 +284,16 @@ async fn generate_candle_sdxl_edit_stream(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| sdxl_edit_candle_default_repo(&request.model))
         .to_owned();
-    let raw_settings =
+    // `pid_weights`/`use_pid`/`width`/`height` were resolved above (ahead of the source+mask fit) so the
+    // PiD output tier (sc-10054) could size the effective base. SDXL edit composes the SDXL VAE, so it
+    // shares the one `sdxl` student; the inpaint/outpaint mask blend ends in a single decode, so PiD sees
+    // the same final latent as the VAE path — the output is just the tier's 2K/4K.
+    let mut raw_settings =
         sdxl_edit_candle_raw_settings(request, &repo, steps, guidance, strength, mode_tag);
+    // Mark PiD output on the sidecar (epic 7840): the NSCLv1 non-commercial restriction flows to PiD-
+    // decoded output. Record whether PiD ACTUALLY ran (not merely whether it was requested) — a request
+    // that opted in but has no cached snapshots decodes on the native VAE.
+    raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
     // Per-image work items: (seed, prompt) — `request.count` edits of the same source.
     let work: Vec<(i64, String)> = (0..request.count as usize)
@@ -316,6 +309,14 @@ async fn generate_candle_sdxl_edit_stream(
         move || {
             let model = SdxlEdit::load(&SdxlEditPaths { sdxl_base })
                 .map_err(|error| WorkerError::Engine(format!("SDXL edit load failed: {error}")))?;
+            // Attach the optional PiD decoder (sc-8044): `Some` only when this generation opted in AND the
+            // snapshots are cached, so a native-VAE edit is a no-op here.
+            let model = match &pid_weights {
+                Some(pid) => model.with_pid(pid).map_err(|error| {
+                    WorkerError::Engine(format!("SDXL edit PiD decoder load failed: {error}"))
+                })?,
+                None => model,
+            };
             Ok((model, gen_source, gen_mask))
         },
         move |(model, source, mask), tx, cancel| {
@@ -332,6 +333,9 @@ async fn generate_candle_sdxl_edit_stream(
                     guidance,
                     strength,
                     seed: seed as u64,
+                    // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above — the engine errors
+                    // if set without a loaded student, so `use_pid` is `pid_weights.is_some()`.
+                    use_pid,
                     cancel: cancel.clone(),
                 };
                 let result = match &mask {

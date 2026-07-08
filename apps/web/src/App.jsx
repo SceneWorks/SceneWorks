@@ -1,9 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { apiFetch, eventUrl, isAbortError, setMediaTicket } from "./api.js";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { apiFetch, isAbortError } from "./api.js";
+import { pollJobToCompletion } from "./pollJob.js";
+import { AccentPicker } from "./components/AccentPicker.jsx";
 import { Icon } from "./components/Icons.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
-import { FullscreenPreview } from "./components/assetPanels.jsx";
+import { FullscreenPreview, assetSeed } from "./components/assetPanels.jsx";
 import { fallbackModels, terminalStatuses } from "./constants.js";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 import { PoseLibraryScreen } from "./screens/PoseLibraryScreen.jsx";
@@ -22,16 +24,19 @@ import { LogsScreen } from "./screens/LogsScreen.jsx";
 import { LicensesScreen } from "./screens/LicensesScreen.jsx";
 import { SetupWizard } from "./screens/SetupWizard.jsx";
 import { editModelForAsset } from "./presetUtils.js";
-import { capTerminalJobs, sortNewest, sortOldest, sortWorkers, upsertJobNewest } from "./sorters.js";
+import { sortNewest, sortWorkers, upsertJobNewest } from "./sorters.js";
 import { useCharacters } from "./hooks/useCharacters.js";
 import { usePresets } from "./hooks/usePresets.js";
+import { usePromptBatches } from "./hooks/usePromptBatches.js";
 import { useTraining } from "./hooks/useTraining.js";
 import { useModelsAndLoras } from "./hooks/useModelsAndLoras.js";
 import { usePersonTracks } from "./hooks/usePersonTracks.js";
 import { useTimelines } from "./hooks/useTimelines.js";
-import { AppContext } from "./context/AppContext.js";
+import { useAccessGate } from "./hooks/useAccessGate.js";
+import { useJobEvents } from "./hooks/useJobEvents.js";
+import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
-import { ACCENTS, DEFAULT_ACCENT, isAccentId } from "./accents.js";
+import { isAccentId } from "./accents.js";
 import {
   dropUpscaledVariants,
   findFoldedAssetById,
@@ -41,147 +46,25 @@ import {
 import { buildWorkersById } from "./workers.js";
 import { createEditorScratchRegistry } from "./editorScratch.js";
 import { isDesktop as isDesktopShell, tauriInvoke } from "./runtime.js";
+import {
+  buildLocalJobStack,
+  isActiveWorker,
+  isImageGenerationJob,
+  isInterleaveJob,
+  isPlaceholderOnlyGpuWorker,
+  isSelectableGpuWorker,
+  isVideoGenerationJob,
+  localJobStackLimit,
+  mergeFreshJobs,
+  readStoredAccent,
+  readStoredTheme,
+} from "./appHelpers.js";
 
 // Desktop (Tauri) shell detection (unified helper, epic 4484 story 6). The first-run
 // setup wizard is desktop-only; web/Docker (and a remote LAN browser) keep the
 // existing first-run project gate. Tauri commands persist the wizard state (the API
 // binds a random port each launch, so localStorage — keyed to the origin — can't be
 // relied on across launches).
-
-function isActiveWorker(worker) {
-  return worker.status !== "offline";
-}
-
-function hasCapability(worker, capability) {
-  return Array.isArray(worker.capabilities) && worker.capabilities.includes(capability);
-}
-
-function isPlaceholderOnlyGpuWorker(worker) {
-  if (!hasCapability(worker, "gpu")) {
-    return false;
-  }
-  const capabilities = Array.isArray(worker.capabilities) ? worker.capabilities : [];
-  return capabilities.every((capability) => ["placeholder", "gpu", "nvidia"].includes(capability));
-}
-
-function isSelectableGpuWorker(worker) {
-  return worker.gpuId && worker.gpuId !== "cpu" && hasCapability(worker, "gpu") && !isPlaceholderOnlyGpuWorker(worker);
-}
-
-function failedJobNotice(job) {
-  const label = String(job.type ?? "job").replaceAll("_", " ");
-  const detail = job.error || job.message || "Failed without additional worker detail.";
-  return `${label}: ${detail}`;
-}
-
-function isImageGenerationJob(job) {
-  return ["image_generate", "image_edit"].includes(job.type);
-}
-
-function isVideoGenerationJob(job) {
-  return ["video_generate", "video_extend", "video_bridge"].includes(job.type);
-}
-
-function isInterleaveJob(job) {
-  return job.type === "image_interleave";
-}
-
-function parseSseJson(event, label) {
-  try {
-    return JSON.parse(event.data);
-  } catch (err) {
-    console.warn(`Ignoring malformed ${label} SSE event`, err);
-    return null;
-  }
-}
-
-function abortableDelay(ms, signal) {
-  if (signal?.aborted) {
-    return Promise.reject(new DOMException("Aborted", "AbortError"));
-  }
-  return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        window.clearTimeout(timer);
-        reject(new DOMException("Aborted", "AbortError"));
-      },
-      { once: true },
-    );
-  });
-}
-
-// sc-4198: notice kind for a job-failure banner. LoRA import/train failures get
-// their own kind so the matching job's later completion dismisses exactly that
-// banner (replacing the old "lora import:"/"lora training:" startsWith protocol);
-// everything else is a general error.
-function noticeKindForJob(job) {
-  if (job?.type === "lora_import") return "lora-import";
-  if (job?.type === "lora_train") return "lora-train";
-  return "general";
-}
-
-function jobFreshnessMs(job) {
-  const timestamp = job?.updatedAt ?? job?.completedAt ?? job?.canceledAt ?? job?.startedAt ?? job?.createdAt;
-  const parsed = Date.parse(timestamp ?? "");
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function mergeFreshJobs(currentJobs, serverJobs) {
-  const merged = new Map();
-  for (const job of serverJobs) {
-    merged.set(job.id, job);
-  }
-  for (const current of currentJobs) {
-    const server = merged.get(current.id);
-    if (!server || jobFreshnessMs(current) > jobFreshnessMs(server)) {
-      merged.set(current.id, current);
-    }
-  }
-  // sc-8860 (F-058): this deliberately keeps client-side entries the server no
-  // longer returns, so without a cap a long session grows unbounded. Cap the
-  // retained terminal-job tail (active jobs are never dropped) so a refresh can't
-  // monotonically grow `jobs`.
-  return capTerminalJobs([...merged.values()].sort(sortNewest));
-}
-
-function generatedResultAssetCount(job) {
-  if (Array.isArray(job.result?.assetIds)) {
-    return job.result.assetIds.length;
-  }
-  if (Array.isArray(job.result?.assets)) {
-    return job.result.assets.length;
-  }
-  return 0;
-}
-
-// Studios stack every running and queued run (plus the most recent finished run
-// until its successor starts), so a new submission no longer evicts the prior
-// progress card. Capped so a long session can't grow the visible stack unbounded.
-const localJobStackLimit = 25;
-
-// Build a studio's local-job stack: the runs it explicitly remembered plus any
-// still-active generation jobs for the open project, de-duped and ordered
-// oldest-first (running run on top, queued runs following in execution order),
-// keeping only the most recent `localJobStackLimit` entries.
-function buildLocalJobStack(rememberedIds, jobs, activeProjectId, isGenerationJob) {
-  const remembered = rememberedIds.map((id) => jobs.find((job) => job.id === id)).filter(Boolean);
-  const projectJobs = jobs.filter(
-    (job) =>
-      activeProjectId &&
-      job.projectId === activeProjectId &&
-      isGenerationJob(job) &&
-      !terminalStatuses.has(job.status),
-  );
-  const byId = new Map();
-  [...remembered, ...projectJobs].forEach((job) => {
-    if (job?.id && !byId.has(job.id)) {
-      byId.set(job.id, job);
-    }
-  });
-  return Array.from(byId.values()).sort(sortOldest).slice(-localJobStackLimit);
-}
 
 // Lazy-load the canvas editor so Konva (canvas-based, heavy) stays out of the
 // initial bundle and the jsdom test path — it only loads when the view is opened.
@@ -251,30 +134,6 @@ const viewTitles = {
     blurb: "Third-party components bundled with SceneWorks and their license notices.",
   },
 };
-
-function readStoredTheme() {
-  if (typeof window === "undefined") {
-    return "light";
-  }
-  try {
-    const saved = window.localStorage.getItem("sceneworks-theme");
-    return saved === "dark" || saved === "light" ? saved : "light";
-  } catch {
-    return "light";
-  }
-}
-
-function readStoredAccent() {
-  if (typeof window === "undefined") {
-    return DEFAULT_ACCENT;
-  }
-  try {
-    const saved = window.localStorage.getItem("sceneworks-accent");
-    return isAccentId(saved) ? saved : DEFAULT_ACCENT;
-  } catch {
-    return DEFAULT_ACCENT;
-  }
-}
 
 function ProjectSwitcher({ activeProject, projects, onSelect, onCreate, disabled }) {
   const [open, setOpen] = useState(false);
@@ -467,19 +326,6 @@ function FirstRunProjectGate({ onCreate, disabled }) {
 
 export function App() {
   const [health, setHealth] = useState(null);
-  const [access, setAccess] = useState({ authRequired: false });
-  // Whether GET /api/v1/access has answered yet. Until it does we don't know if a
-  // password is required, so a remote browser must hold its protected data loads —
-  // otherwise they fire optimistically, 401, and bury the password prompt under a band
-  // of "access token required" errors (epic 4484).
-  const [accessResolved, setAccessResolved] = useState(false);
-  const [token, setToken] = useState(() => window.localStorage.getItem("sceneworks-token") ?? "");
-  // What the user is typing into the login gate (sc-8808). Kept separate from the
-  // live `token` so keystrokes never flip `authenticated` or churn the data/SSE
-  // effects; `token` only changes once /api/v1/auth/verify accepts the draft.
-  const [passwordDraft, setPasswordDraft] = useState("");
-  // Wrong-password feedback for the remote-browser login gate (epic 4484 story 7).
-  const [authError, setAuthError] = useState("");
   const [projects, setProjects] = useState([]);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   // Desktop first-run wizard gate: null = unknown (still reading on desktop),
@@ -555,23 +401,47 @@ export function App() {
     });
   }, []);
   const dismissNoticeKind = useCallback((kind) => {
-    setNotices((current) => current.filter((notice) => notice.kind !== kind));
+    setNotices((current) => {
+      // Bail to the same array when nothing matches — callers run this on hot
+      // paths (e.g. every media-ticket refresh), and returning a fresh array
+      // would force a no-op re-render of the whole app each time.
+      const next = current.filter((notice) => notice.kind !== kind);
+      return next.length === current.length ? current : next;
+    });
   }, []);
   // Back-compat: the existing setError(msg)/setError("") call sites map onto the
   // "general" notice kind — a truthy message replaces it, "" dismisses only it.
   const setError = useCallback((message) => pushNotice("general", message), [pushNotice]);
+  // Remote-access gate (epic 4484), extracted to a hook (sc-9750): owns access probe,
+  // host password/token, login-gate draft + error, and the media-ticket mint that must
+  // settle before protected data loads. `authenticated`/`ready` gate the data + SSE
+  // effects below; `token` threads through the data hooks and every apiFetch call site.
+  const {
+    access,
+    token,
+    passwordDraft,
+    setPasswordDraft,
+    authError,
+    authenticated,
+    ready,
+    saveToken,
+    lockRemote,
+  } = useAccessGate({ setError, pushNotice, dismissNoticeKind });
   const [theme, setTheme] = useState(readStoredTheme);
   // Apply a theme and persist it through the API. localStorage gives an instant
   // initial paint, but on the desktop shell the UI runs at the API's per-launch
   // http://127.0.0.1:<port> origin, where both localStorage and Tauri IPC are
   // unreliable across launches — so the durable copy lives server-side.
-  const changeTheme = (next) => {
+  // Stable across renders (sc-10244): it flows through the static app context to the
+  // Image Editor top-bar theme toggle, so a fresh identity each render would bust the
+  // static-context memo every tick.
+  const changeTheme = useCallback((next) => {
     setTheme(next);
     apiFetch("/api/v1/ui-preferences", "", {
       method: "PUT",
       body: JSON.stringify({ theme: next }),
     }).catch(() => {});
-  };
+  }, []);
   const [accent, setAccent] = useState(readStoredAccent);
   // Same persistence contract as theme: instant localStorage cache + durable
   // server copy. The PUT sends only the changed field, so the endpoint must
@@ -595,6 +465,7 @@ export function App() {
   const refreshCharactersRef = useRef(null);
   const refreshLorasRef = useRef(null);
   const refreshPresetsRef = useRef(null);
+  const refreshPromptBatchesRef = useRef(null);
   const refreshTrainingDatasetsRef = useRef(null);
   const refreshPersonTracksRef = useRef(null);
   const refreshTimelinesRef = useRef(null);
@@ -709,6 +580,16 @@ export function App() {
   } = usePresets({ token, activeProject, setError });
 
   const {
+    promptBatches,
+    setPromptBatches,
+    refreshPromptBatches,
+    createPromptBatch,
+    updatePromptBatch,
+    duplicatePromptBatch,
+    deletePromptBatch,
+  } = usePromptBatches({ token, activeProject, setError });
+
+  const {
     trainingDatasets,
     setTrainingDatasets,
     trainingDatasetsProjectId,
@@ -757,6 +638,8 @@ export function App() {
     refreshLoras,
     deleteModel,
     deleteLora,
+    updateLora,
+    fetchLoraEmbeddedTags,
     createModelImportJob,
     createLoraImportJob,
     createModelDownloadJob,
@@ -807,68 +690,6 @@ export function App() {
     createVideoJob,
   });
 
-  // The desktop shell reaches its own API over loopback, which the API trusts
-  // (SCENEWORKS_TRUST_LOOPBACK), so it's authenticated without a password — never prompt
-  // for one locally (epic 4484). A remote browser must wait for GET /api/v1/access before
-  // it knows whether a password is needed; until then it holds its protected loads rather
-  // than firing them unauthenticated.
-  const authenticated = useMemo(
-    () =>
-      isDesktopShell ||
-      (accessResolved && (!access.authRequired || token.length > 0)),
-    [accessResolved, access, token],
-  );
-  // sc-8810: whether media URLs are renderable yet. When auth is on, element-driven
-  // requests (<img>/<video>) can't send the token header, so every media URL needs
-  // the query-param ticket minted below. Data loads hold until the first ticket is
-  // stored (mediaReady), otherwise thumbnails rendered in the gap would 401 and
-  // stick as "deleted" placeholders. When auth is off this resolves immediately.
-  const [mediaReady, setMediaReady] = useState(false);
-  const ready = authenticated && mediaReady;
-
-  useEffect(() => {
-    if (!authenticated || !accessResolved) {
-      return undefined;
-    }
-    if (!access.authRequired) {
-      setMediaTicket("");
-      setMediaReady(true);
-      return undefined;
-    }
-    let closed = false;
-    let timer = null;
-    let attempt = 0;
-    async function acquire() {
-      try {
-        // Header-authenticated mint (loopback-trusted desktop sends no token and
-        // still passes). The server keeps re-arming the same sliding ticket, so
-        // already-rendered media URLs stay valid across refreshes.
-        const response = await apiFetch("/api/v1/files/ticket", token, { method: "POST" });
-        if (closed) {
-          return;
-        }
-        setMediaTicket(response.ticket);
-        setMediaReady(true);
-        attempt = 0;
-        const ttlMs = Math.max(15, Number(response.expiresInSeconds) || 0) * 1000;
-        timer = window.setTimeout(acquire, Math.max(5000, Math.floor(ttlMs / 3)));
-      } catch {
-        if (closed) {
-          return;
-        }
-        const delay = Math.min(30000, 1000 * 2 ** attempt);
-        attempt += 1;
-        timer = window.setTimeout(acquire, delay);
-      }
-    }
-    acquire();
-    return () => {
-      closed = true;
-      if (timer) {
-        window.clearTimeout(timer);
-      }
-    };
-  }, [access.authRequired, accessResolved, authenticated, token]);
   const imageModels = useMemo(() => {
     const items = models.filter((model) => model.type === "image" && model.installState !== "missing");
     return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "image");
@@ -1070,13 +891,7 @@ export function App() {
     apiFetch("/api/v1/health", "")
       .then(setHealth)
       .catch((err) => setError(err.message));
-
-    apiFetch("/api/v1/access", "")
-      .then(setAccess)
-      .catch((err) => setError(err.message))
-      // Either way the auth state is now as resolved as it'll get; release the gate so
-      // an authenticated client (or one not requiring auth) can load its data.
-      .finally(() => setAccessResolved(true));
+    // The /api/v1/access probe (+ accessResolved release) lives in useAccessGate now (sc-9750).
   }, []);
 
   useEffect(() => {
@@ -1226,155 +1041,36 @@ export function App() {
     refreshCharactersRef.current?.(activeProject.id, { signal });
     refreshLorasRef.current?.(activeProject.id, { signal });
     refreshPresetsRef.current?.(activeProject.id, { signal });
+    refreshPromptBatchesRef.current?.(activeProject.id, { signal });
     refreshTrainingDatasetsRef.current?.(activeProject.id, { signal });
     refreshPersonTracksRef.current?.(activeProject.id, { signal });
     refreshTimelinesRef.current?.(activeProject.id, { signal });
     return () => controller.abort();
   }, [activeProject?.id, ready, token]);
 
-  useEffect(() => {
-    // Gated on `ready` (not just `authenticated`): SSE job updates carry assets whose
-    // thumbnails render immediately, so the media ticket must exist first (sc-8810).
-    if (!ready) {
-      return undefined;
-    }
-
-    let events = null;
-    let reconnectTimer = null;
-    let reconnectAttempt = 0;
-    let closed = false;
-
-    function handleJobUpdated(event) {
-      const job = parseSseJson(event, "job");
-      if (!job) {
-        return;
-      }
-      const hasGeneratedAssets = Boolean(job.result?.generationSetId || job.result?.assetIds?.length || job.result?.assets?.length);
-      const resultAssetCount = generatedResultAssetCount(job);
-      const generationSetId = job.result?.generationSetId ?? "";
-      const refreshKey = job.id ?? generationSetId;
-      const previousRefresh = generatedAssetRefreshesRef.current.get(refreshKey) ?? { assetCount: 0, generationSetId: "" };
-      const shouldRefreshGeneratedAssets =
-        Boolean(job.projectId) &&
-        hasGeneratedAssets &&
-        (resultAssetCount > previousRefresh.assetCount ||
-          (resultAssetCount === 0 && generationSetId && generationSetId !== previousRefresh.generationSetId));
-      setJobs((items) => upsertJobNewest(items, job));
-      if (hasGeneratedAssets) {
-        if (job.result?.generationSetId) {
-          setLatestGenerationSetId(job.result.generationSetId);
-        }
-        generatedAssetRefreshesRef.current.set(refreshKey, {
-          assetCount: Math.max(resultAssetCount, previousRefresh.assetCount),
-          generationSetId: generationSetId || previousRefresh.generationSetId,
-        });
-        if (shouldRefreshGeneratedAssets) {
-          refreshAssetsRef.current?.(job.projectId);
-        }
-      }
-      if (job.status === "completed" && hasGeneratedAssets) {
-        enqueueTimelineGenerationApply(job);
-      }
-      if (job.status === "completed" && job.projectId && job.type === "person_track") {
-        refreshPersonTracksRef.current?.(job.projectId);
-      }
-      if (job.status === "completed" && job.projectId && job.type === "person_detect") {
-        refreshAssetsRef.current?.(job.projectId);
-      }
-      if (job.status === "completed" && job.type === "model_download") {
-        refreshDataRef.current?.();
-      }
-      // A completed built-in LoRA download (sc-5944) flips the catalog entry to
-      // installed; refresh models+loras so the Models row and any Studio gate update.
-      if (job.status === "completed" && job.type === "lora_download") {
-        refreshDataWithLoraOverlayRef.current?.(job.projectId ?? activeProjectRef.current?.id);
-      }
-      if (job.status === "completed" && job.type === "lora_import") {
-        dismissNoticeKind("lora-import");
-        refreshDataWithLoraOverlayRef.current?.(job.projectId ?? activeProjectRef.current?.id);
-      }
-      if (job.status === "completed" && job.type === "lora_train" && job.payload?.dryRun === false) {
-        if (job.result?.loraRegistered === false) {
-          pushNotice("lora-train", `lora training: ${job.result?.loraRegistrationError ?? "Completed training but could not register the LoRA."}`);
-        } else {
-          dismissNoticeKind("lora-train");
-          refreshDataWithLoraOverlayRef.current?.(job.projectId ?? activeProjectRef.current?.id);
-        }
-      }
-      if (job.status === "failed" && !hasVisibleLocalFailure(job)) {
-        pushNotice(noticeKindForJob(job), failedJobNotice(job));
-      }
-    }
-
-    function handleWorkerUpdated(event) {
-      const worker = parseSseJson(event, "worker");
-      if (!worker) {
-        return;
-      }
-      setWorkers((items) => [worker, ...items.filter((item) => item.id !== worker.id)].sort(sortWorkers));
-    }
-
-    function handleQueueUpdated(event) {
-      const summary = parseSseJson(event, "queue");
-      if (!summary) {
-        return;
-      }
-      setQueueSummary(summary);
-      if (Array.isArray(summary.workers)) {
-        setWorkers(summary.workers.sort(sortWorkers));
-      }
-    }
-
-    async function connect() {
-      let ticket = "";
-      try {
-        if (access.authRequired) {
-          const response = await apiFetch("/api/v1/jobs/events/ticket", token, { method: "POST" });
-          ticket = response.ticket;
-        }
-      } catch (err) {
-        setError(err.message);
-        if (!closed) {
-          const delay = Math.min(30000, 1000 * 2 ** reconnectAttempt);
-          reconnectAttempt += 1;
-          reconnectTimer = window.setTimeout(connect, delay);
-        }
-        return;
-      }
-
-      if (closed) {
-        return;
-      }
-
-      const source = new EventSource(eventUrl("/api/v1/jobs/events", ticket));
-      events = source;
-      source.addEventListener("job.updated", handleJobUpdated);
-      source.addEventListener("worker.updated", handleWorkerUpdated);
-      source.addEventListener("queue.updated", handleQueueUpdated);
-      source.onopen = () => {
-        reconnectAttempt = 0;
-      };
-      source.onerror = () => {
-        source.close();
-        if (closed) {
-          return;
-        }
-        const delay = Math.min(30000, 1000 * 2 ** reconnectAttempt);
-        reconnectAttempt += 1;
-        reconnectTimer = window.setTimeout(connect, delay);
-      };
-    }
-
-    connect();
-
-    return () => {
-      closed = true;
-      if (reconnectTimer) {
-        window.clearTimeout(reconnectTimer);
-      }
-      events?.close();
-    };
-  }, [access.authRequired, ready, token]);
+  // Live job/worker/queue SSE stream, extracted to a hook (sc-9750). The handlers reach
+  // back into App state through the identity-stable setters/refs/callbacks passed here;
+  // the hook re-subscribes only on [access.authRequired, ready, token] (see useJobEvents).
+  useJobEvents({
+    access,
+    ready,
+    token,
+    setJobs,
+    setWorkers,
+    setQueueSummary,
+    setLatestGenerationSetId,
+    setError,
+    pushNotice,
+    dismissNoticeKind,
+    generatedAssetRefreshesRef,
+    refreshAssetsRef,
+    refreshDataRef,
+    refreshDataWithLoraOverlayRef,
+    refreshPersonTracksRef,
+    activeProjectRef,
+    enqueueTimelineGenerationApply,
+    hasVisibleLocalFailure,
+  });
 
   // Survivor sweep for orphaned Image-Editor scratch ops (sc-8850). Runs on every `jobs`
   // change (SSE ticks, initial load, etc.): purges the scratch + result assets of any
@@ -1403,6 +1099,7 @@ export function App() {
       presetsResult,
       trainingTargetsResult,
       trainingPresetsResult,
+      promptBatchesResult,
     ] =
       await Promise.all([
         fetchInitial("Projects", "/api/v1/projects", []),
@@ -1413,6 +1110,7 @@ export function App() {
         fetchInitial("Presets", "/api/v1/recipe-presets", [], true),
         fetchInitial("Training targets", "/api/v1/training/targets", { schemaVersion: 1, targets: [] }),
         fetchInitial("Training presets", "/api/v1/training/presets", { schemaVersion: 1, presets: [] }),
+        fetchInitial("Prompt batches", "/api/v1/prompt-batches", [], true),
       ]);
     // Mac UI gating (sc-3486): optional + non-fatal — a fetch failure leaves gating inert.
     fetchInitial("Mac capabilities", "/api/v1/capabilities/mac", DEFAULT_MAC_CAPABILITIES, true)
@@ -1428,6 +1126,7 @@ export function App() {
     setModels(modelsResult.value);
     setLoras(lorasResult.value);
     setPresets(presetsResult.value);
+    setPromptBatches(promptBatchesResult.value);
     setTrainingTargets(trainingTargetsResult.value);
     setTrainingTargetsError(trainingTargetsResult.error);
     setTrainingPresets(trainingPresetsResult.value);
@@ -1482,58 +1181,31 @@ export function App() {
       .catch(() => {});
   }
 
-  refreshDataRef.current = refreshData;
-  refreshAssetsRef.current = refreshAssets;
-  refreshCharactersRef.current = refreshCharacters;
-  refreshLorasRef.current = refreshLoras;
-  refreshPresetsRef.current = refreshPresets;
-  refreshTrainingDatasetsRef.current = refreshTrainingDatasets;
-  refreshPersonTracksRef.current = refreshPersonTracks;
-  refreshTimelinesRef.current = refreshTimelines;
-  refreshDataWithLoraOverlayRef.current = refreshDataWithLoraOverlay;
+  // sc-8940: Publish the latest refresh closures into their refs from a post-commit
+  // effect rather than the render body — React documents render-body ref mutation as
+  // unsafe (a discarded concurrent/StrictMode render could leave a ref pointing at an
+  // uncommitted closure). No dep array means this runs on every commit, so the refs
+  // always hold the newest *committed* body (fresh token / activeProject). We use
+  // useLayoutEffect (not useEffect) so the assignment flushes before every passive
+  // effect on the same commit: the consumers of these refs (the [ready,token] load
+  // effect, the project-switch effect, the SSE handler) are all plain useEffects/event
+  // handlers, and React runs all layout effects before any passive effect — preserving
+  // the original ordering where consumers saw the fresh closure.
+  useLayoutEffect(() => {
+    refreshDataRef.current = refreshData;
+    refreshAssetsRef.current = refreshAssets;
+    refreshCharactersRef.current = refreshCharacters;
+    refreshLorasRef.current = refreshLoras;
+    refreshPresetsRef.current = refreshPresets;
+    refreshPromptBatchesRef.current = refreshPromptBatches;
+    refreshTrainingDatasetsRef.current = refreshTrainingDatasets;
+    refreshPersonTracksRef.current = refreshPersonTracks;
+    refreshTimelinesRef.current = refreshTimelines;
+    refreshDataWithLoraOverlayRef.current = refreshDataWithLoraOverlay;
+  });
 
-
-  // Remote-browser login (epic 4484 story 7): the password IS the API access token.
-  // Verify the typed draft against the public /api/v1/auth/verify endpoint BEFORE
-  // promoting it to the live `token`, so a wrong password keeps the gate up with an
-  // inline error (instead of saving a bad token and silently failing every subsequent
-  // request). A correct password is stored to localStorage and unlocks the app; it
-  // persists across reloads. Promoting the token here flips `authenticated`, and the
-  // [authenticated, token] effects perform the initial data load and SSE connect
-  // exactly once — no explicit refreshData() call, or it would double-fetch (sc-8808).
-  async function saveToken(event) {
-    event.preventDefault();
-    const candidate = passwordDraft.trim();
-    if (!candidate) {
-      setAuthError("Enter the password.");
-      return;
-    }
-    try {
-      const result = await apiFetch("/api/v1/auth/verify", candidate, { method: "POST" });
-      if (!result?.ok) {
-        setAuthError("Incorrect password. Try again.");
-        return;
-      }
-    } catch {
-      setAuthError("Couldn't reach the host to verify the password.");
-      return;
-    }
-    window.localStorage.setItem("sceneworks-token", candidate);
-    setToken(candidate);
-    setPasswordDraft("");
-    setAuthError("");
-    setError("");
-  }
-
-  // Clear the stored password and re-show the login gate ("lock"/forget affordance,
-  // epic 4484 story 7). Setting the token state to "" re-renders the gate, which
-  // keys off the token state (sc-8808).
-  function lockRemote() {
-    window.localStorage.removeItem("sceneworks-token");
-    setToken("");
-    setPasswordDraft("");
-    setAuthError("");
-  }
+  // saveToken / lockRemote (the remote-browser login + lock affordances, epic 4484
+  // story 7) live in useAccessGate now (sc-9750) and are destructured above.
 
   async function completeSetupWizard() {
     try {
@@ -1655,33 +1327,24 @@ export function App() {
   // independent (no activeProject gate); throws on failure so the studio can surface
   // the message inline without clobbering the original prompt.
   const refinePrompt = useCallback(
-    async ({ prompt, modelId, workflow, guide, signal }) => {
-      const created = await apiFetch("/api/v1/prompts/refine", token, {
-        method: "POST",
-        signal,
-        body: JSON.stringify({ prompt, modelId, workflow, guide }),
-      });
-      const jobId = created?.id;
-      if (!jobId) {
-        throw new Error("Could not start prompt refinement.");
-      }
-      const deadline = Date.now() + 120000;
-      while (Date.now() < deadline) {
-        await abortableDelay(1000, signal);
-        const job = await apiFetch(`/api/v1/jobs/${jobId}`, token, { signal });
-        if (job.status === "completed") {
+    ({ prompt, modelId, workflow, guide, signal }) =>
+      pollJobToCompletion({
+        createPath: "/api/v1/prompts/refine",
+        body: { prompt, modelId, workflow, guide },
+        deadlineMs: 120000,
+        resolveResult: (job) => {
           const refined = job.result?.refinedPrompt;
           if (!refined) {
             throw new Error("Refinement returned an empty prompt.");
           }
           return refined;
-        }
-        if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
-          throw new Error(job.message || job.error || "Prompt refinement failed.");
-        }
-      }
-      throw new Error("Prompt refinement timed out. Is the refinement runtime running?");
-    },
+        },
+        signal,
+        token,
+        startError: "Could not start prompt refinement.",
+        failureError: "Prompt refinement failed.",
+        timeoutError: "Prompt refinement timed out. Is the refinement runtime running?",
+      }),
     [token],
   );
 
@@ -1690,33 +1353,24 @@ export function App() {
   // returns a JSON caption string (the caller parses + validates it). Reuses the refine job's
   // poll-to-completion contract; captions can take longer, so the deadline is generous.
   const magicPrompt = useCallback(
-    async ({ prompt, modelId, aspectRatio, guide, signal }) => {
-      const created = await apiFetch("/api/v1/prompts/refine", token, {
-        method: "POST",
-        signal,
-        body: JSON.stringify({ prompt, modelId, task: "magic_prompt", aspectRatio, guide }),
-      });
-      const jobId = created?.id;
-      if (!jobId) {
-        throw new Error("Could not start magic-prompt.");
-      }
-      const deadline = Date.now() + 180000;
-      while (Date.now() < deadline) {
-        await abortableDelay(1000, signal);
-        const job = await apiFetch(`/api/v1/jobs/${jobId}`, token, { signal });
-        if (job.status === "completed") {
+    ({ prompt, modelId, aspectRatio, guide, signal }) =>
+      pollJobToCompletion({
+        createPath: "/api/v1/prompts/refine",
+        body: { prompt, modelId, task: "magic_prompt", aspectRatio, guide },
+        deadlineMs: 180000,
+        resolveResult: (job) => {
           const caption = job.result?.refinedPrompt;
           if (!caption) {
             throw new Error("Magic-prompt returned an empty caption.");
           }
           return caption;
-        }
-        if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
-          throw new Error(job.message || job.error || "Magic-prompt failed.");
-        }
-      }
-      throw new Error("Magic-prompt timed out. Is the refinement runtime running?");
-    },
+        },
+        signal,
+        token,
+        startError: "Could not start magic-prompt.",
+        failureError: "Magic-prompt failed.",
+        timeoutError: "Magic-prompt timed out. Is the refinement runtime running?",
+      }),
     [token],
   );
 
@@ -1728,33 +1382,26 @@ export function App() {
   // the returned JSON with `parseVisionCaption` (aspect_ratio stripped, bboxes KEPT). C1: the image is
   // consumed only to produce the caption — it is NEVER passed to generation as img2img conditioning.
   const imageCaption = useCallback(
-    async ({ sourceAssetId, projectId, model, signal }) => {
-      const created = await apiFetch("/api/v1/prompts/refine", token, {
-        method: "POST",
-        signal,
-        body: JSON.stringify({ task: "image_caption", sourceAssetId, projectId, model }),
-      });
-      const jobId = created?.id;
-      if (!jobId) {
-        throw new Error("Could not start image captioning.");
-      }
-      const deadline = Date.now() + 180000;
-      while (Date.now() < deadline) {
-        await abortableDelay(1000, signal);
-        const job = await apiFetch(`/api/v1/jobs/${jobId}`, token, { signal });
-        if (job.status === "completed") {
+    ({ sourceAssetId, sourceAssetIds, projectId, model, signal }) =>
+      pollJobToCompletion({
+        createPath: "/api/v1/prompts/refine",
+        // A mood board (epic 8588, sc-8595) sends `sourceAssetIds` (plural); the API synthesizes ONE
+        // caption from the shared aesthetic. A single reference keeps the scalar `sourceAssetId`.
+        body: { task: "image_caption", sourceAssetId, sourceAssetIds, projectId, model },
+        deadlineMs: 180000,
+        resolveResult: (job) => {
           const caption = job.result?.refinedPrompt;
           if (!caption) {
             throw new Error("Image captioning returned an empty caption.");
           }
           return caption;
-        }
-        if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
-          throw new Error(job.message || job.error || "Image captioning failed.");
-        }
-      }
-      throw new Error("Image captioning timed out. Is the captioning runtime running?");
-    },
+        },
+        signal,
+        token,
+        startError: "Could not start image captioning.",
+        failureError: "Image captioning failed.",
+        timeoutError: "Image captioning timed out. Is the captioning runtime running?",
+      }),
     [token],
   );
 
@@ -1765,39 +1412,26 @@ export function App() {
   // text the caller drops into the prompt box. C1: the image is consumed only to produce the prompt — it
   // is NEVER passed to generation as img2img conditioning.
   const imageDescribe = useCallback(
-    async ({ sourceAssetId, projectId, model, captionStyle, signal }) => {
-      const created = await apiFetch("/api/v1/prompts/refine", token, {
-        method: "POST",
-        signal,
-        body: JSON.stringify({
-          task: "image_describe",
-          sourceAssetId,
-          projectId,
-          model,
-          captionStyle,
-        }),
-      });
-      const jobId = created?.id;
-      if (!jobId) {
-        throw new Error("Could not start image description.");
-      }
-      const deadline = Date.now() + 180000;
-      while (Date.now() < deadline) {
-        await abortableDelay(1000, signal);
-        const job = await apiFetch(`/api/v1/jobs/${jobId}`, token, { signal });
-        if (job.status === "completed") {
+    ({ sourceAssetId, sourceAssetIds, projectId, model, captionStyle, signal }) =>
+      pollJobToCompletion({
+        createPath: "/api/v1/prompts/refine",
+        // A mood board (epic 8588, sc-8595) sends `sourceAssetIds` (plural); the API synthesizes ONE
+        // prompt from the aesthetic they share. A single reference keeps the scalar `sourceAssetId`.
+        body: { task: "image_describe", sourceAssetId, sourceAssetIds, projectId, model, captionStyle },
+        deadlineMs: 180000,
+        resolveResult: (job) => {
           const description = job.result?.refinedPrompt;
           if (!description) {
             throw new Error("Image description returned empty text.");
           }
           return description;
-        }
-        if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
-          throw new Error(job.message || job.error || "Image description failed.");
-        }
-      }
-      throw new Error("Image description timed out. Is the captioning runtime running?");
-    },
+        },
+        signal,
+        token,
+        startError: "Could not start image description.",
+        failureError: "Image description failed.",
+        timeoutError: "Image description timed out. Is the captioning runtime running?",
+      }),
     [token],
   );
 
@@ -1809,34 +1443,25 @@ export function App() {
   // via `classifyLikeness` / `LikenessBadge`. Non-fatal end to end: a no-face / non-frontal candidate
   // is an honest detected:false result (NOT an error); only a hard failure throws.
   const compareFaceLikeness = useCallback(
-    async ({ sourceAssetId, candidateAssetId, projectId, signal }) => {
-      const created = await apiFetch("/api/v1/face-likeness/compare", token, {
-        method: "POST",
-        signal,
-        body: JSON.stringify({ sourceAssetId, candidateAssetId, projectId }),
-      });
-      const jobId = created?.id;
-      if (!jobId) {
-        throw new Error("Could not start the likeness compare.");
-      }
-      const deadline = Date.now() + 180000;
-      while (Date.now() < deadline) {
-        await abortableDelay(1000, signal);
-        const job = await apiFetch(`/api/v1/jobs/${jobId}`, token, { signal });
-        if (job.status === "completed") {
+    ({ sourceAssetId, candidateAssetId, projectId, signal }) =>
+      pollJobToCompletion({
+        createPath: "/api/v1/face-likeness/compare",
+        body: { sourceAssetId, candidateAssetId, projectId },
+        deadlineMs: 180000,
+        resolveResult: (job) => {
           // A completed compare always carries a result block (a detected:false N/A is a valid,
           // non-error outcome). Surface the whole block so the UI can band/N-A it.
           if (!job.result) {
             throw new Error("Likeness compare returned no result.");
           }
           return job.result;
-        }
-        if (job.status === "failed" || job.status === "canceled" || job.status === "interrupted") {
-          throw new Error(job.message || job.error || "Likeness compare failed.");
-        }
-      }
-      throw new Error("Likeness compare timed out. Is the worker running?");
-    },
+        },
+        signal,
+        token,
+        startError: "Could not start the likeness compare.",
+        failureError: "Likeness compare failed.",
+        timeoutError: "Likeness compare timed out. Is the worker running?",
+      }),
     [token],
   );
 
@@ -1974,11 +1599,17 @@ export function App() {
     return asset?.generationSet?.recipe ?? asset?.recipe ?? null;
   }
 
-  function sendAssetRecipeToImage(asset) {
+  function sendAssetRecipeToImage(asset, options = {}) {
     const recipe = recipeForAsset(asset);
     if (!asset || !recipe) {
       return;
     }
+    // Keep-seed replays THIS image's own seed for a byte-for-byte rerun (e.g. to
+    // reproduce and upscale with PiD). assetSeed prefers the per-asset recipe over the
+    // set's shared base seed, so reuse honors the exact image the user is viewing.
+    // Null → Image Studio leaves the seed random (a close variation), the default.
+    const seed = assetSeed(asset);
+    const replaySeed = options.keepSeed && seed != null && seed !== "" ? seed : null;
     setSelectedAssetId(asset.id);
     closePreview();
     setStudioLaunch({
@@ -1987,6 +1618,7 @@ export function App() {
       assetId: asset.id,
       sourceAssetId: asset.lineage?.sourceAssetId ?? null,
       recipe,
+      replaySeed,
     });
     setActiveView("Image");
   }
@@ -2067,15 +1699,25 @@ export function App() {
     [token],
   );
 
+  // A move endpoint returns the whole moved upscale-fold group (sc-10205) as an
+  // array, requested asset first — merge every member into state or the hidden
+  // fold-mate lingers with a stale origin until the next full refresh.
+  const mergeMovedAssets = useCallback((moved) => {
+    const list = Array.isArray(moved) ? moved : [moved];
+    const byId = new Map(list.map((item) => [item.id, item]));
+    setAssets((items) => items.map((item) => byId.get(item.id) ?? item));
+    return list[0];
+  }, []);
+
   // Promote a character asset into the Main Asset Library (sc-8341): a true move —
   // the backend flips origin + detaches the character, so refresh characters too.
   const moveAssetToLibrary = useCallback(
     async (asset) => {
       try {
-        const updated = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/move-to-library`, token, {
+        const moved = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/move-to-library`, token, {
           method: "POST",
         });
-        setAssets((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+        const updated = mergeMovedAssets(moved);
         refreshCharactersRef.current?.(asset.projectId);
         setError("");
         return updated;
@@ -2084,7 +1726,31 @@ export function App() {
         throw err;
       }
     },
-    [token],
+    [token, mergeMovedAssets],
+  );
+
+  // Move an asset into a character's assets (sc-10200): the true-move twin of
+  // moveAssetToLibrary, NOT a link — the backend flips origin to character_studio
+  // (so the asset leaves the Library) and re-anchors the character association
+  // without touching the curated references[] ("Approved set"). Refresh characters
+  // so any curated reference the move detached drops out of their panels too.
+  const moveAssetToCharacter = useCallback(
+    async (asset, characterId) => {
+      try {
+        const moved = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/move-to-character`, token, {
+          method: "POST",
+          body: JSON.stringify({ characterId }),
+        });
+        const updated = mergeMovedAssets(moved);
+        refreshCharactersRef.current?.(asset.projectId);
+        setError("");
+        return updated;
+      } catch (err) {
+        setError(err.message);
+        throw err;
+      }
+    },
+    [token, mergeMovedAssets],
   );
 
   const deleteAsset = useCallback(
@@ -2107,7 +1773,18 @@ export function App() {
   const purgeAsset = useCallback(
     async (asset) => {
       try {
-        await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/purge`, token, { method: "DELETE" });
+        let result = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/purge`, token, { method: "DELETE" });
+        // The purge first tries the OS trash (recoverable). If that fails nothing was
+        // removed; confirm before falling back to a permanent delete.
+        if (result?.status === "trash_unavailable") {
+          const proceed = typeof window.confirm !== "function" ||
+            window.confirm("Cannot move to trash. Continue to permanently delete.");
+          if (!proceed) {
+            setError("");
+            return;
+          }
+          result = await apiFetch(`/api/v1/projects/${asset.projectId}/assets/${asset.id}/purge?permanent=true`, token, { method: "DELETE" });
+        }
         setAssets((items) => items.filter((item) => item.id !== asset.id));
         setSelectedAssetId((current) => (current === asset.id ? null : current));
         setError("");
@@ -2118,9 +1795,18 @@ export function App() {
     [token],
   );
   // Keep the ref current for the App-level scratch-op survivor (sc-8850), which purges
-  // from the SSE/sweep path without re-subscribing. Assigned here (after purgeAsset is
-  // defined) rather than in the hoisted ref block above, which runs before this const.
-  purgeAssetRef.current = purgeAsset;
+  // from the SSE/sweep path without re-subscribing. Published from a post-commit effect
+  // rather than the render body (sc-9641, following sc-8940): render-body ref mutation is
+  // unsafe because a discarded concurrent/StrictMode render could leave the ref pointing
+  // at an uncommitted closure. useLayoutEffect (no dep array) mirrors the sc-8940 refresh
+  // block above so the ref always holds the newest *committed* purgeAsset, and flushes
+  // before any passive effect on the same commit. `purgeAsset` is a useCallback([token]),
+  // so this only rewrites when the token changes. It lives here (not in the sc-8940 block)
+  // because purgeAsset is defined after it; the sole read site (the scratch registry's
+  // purge callback) fires from the SSE/sweep path — post-commit — never during render.
+  useLayoutEffect(() => {
+    purgeAssetRef.current = purgeAsset;
+  });
 
   const importAsset = useCallback(
     async (file, options = {}) => {
@@ -2198,9 +1884,35 @@ export function App() {
   // entries actually changes, instead of being a fresh ~120-key literal on every App
   // render (SSE job/worker/queue ticks re-render App continuously). The actions above
   // and the data-hook actions are useCallback-stable, so this holds across renders
-  // that don't change data. NOTE: this dependency array must mirror the object below —
-  // every value referenced here is a dependency.
-  const appContextValue = useMemo(() => ({
+  // that don't change data.
+  //
+  // sc-8855 (F-053): split into TWO memoized values behind two providers.
+  //   - appLiveValue: the high-churn fields derived from the SSE-updated jobs/workers
+  //     state (jobs/filteredJobs/*LocalJobs/visibleWorkers/workersById/personReadiness/
+  //     gpuOptions). These change identity on nearly every tick.
+  //   - appStaticValue: everything else (actions/catalogs/project/presets/characters/
+  //     training/timelines/models). Its dependency array MUST NOT reference jobs or
+  //     workersById (or anything derived from them) — that exclusion is the whole point:
+  //     cold-only consumers reading via useAppStatic() no longer re-render on job ticks.
+  // NOTE: each dependency array must mirror the corresponding object below.
+  const appLiveValue = useMemo(() => ({
+    // Jobs / queue (high-churn — new identity per SSE tick)
+    jobs,
+    filteredJobs,
+    imageLocalJobs,
+    videoLocalJobs,
+    documentLocalJobs,
+    // Workers / GPU (high-churn — new identity per worker SSE tick)
+    visibleWorkers,
+    workersById,
+    personReadiness,
+    gpuOptions,
+  }), [
+    jobs, filteredJobs, imageLocalJobs, videoLocalJobs, documentLocalJobs,
+    visibleWorkers, workersById, personReadiness, gpuOptions,
+  ]);
+
+  const appStaticValue = useMemo(() => ({
     activeProject,
     mediaAssets,
     setPreviewAsset: openPreview,
@@ -2223,25 +1935,22 @@ export function App() {
     deleteAsset,
     purgeAsset,
     moveAssetToLibrary,
+    moveAssetToCharacter,
     importAsset,
     updateAssetStatus,
     updateAssetTags,
     latestImageAssets,
-    // Jobs / queue
-    jobs,
+    // Job actions (creation/control — stable callbacks, NOT the churning jobs list)
     jobAction,
     createVqaJob,
     createInterleaveJob,
     // Queue screen (sc-1651 Phase B batch 2)
     createPlaceholderJob,
-    filteredJobs,
     jobPrompt,
     setJobPrompt,
     projectFilter,
     setProjectFilter,
     projects,
-    visibleWorkers,
-    workersById,
     // Generation studios (sc-1651 Phase B batch 3)
     createVideoJob,
     createVideoUpscaleJob,
@@ -2254,9 +1963,6 @@ export function App() {
     latestVideoAssets,
     recentImageAssets,
     recentVideoAssets,
-    videoLocalJobs,
-    imageLocalJobs,
-    documentLocalJobs,
     studioLaunch,
     // sc-8730: Image Editor launch channel + the two Edit paths. sendAssetToImageEditor
     // routes to the editor canvas (FullscreenPreview Edit button); sendAssetToImageEdit
@@ -2268,7 +1974,6 @@ export function App() {
     rememberLocalGenerationJob,
     // Person tracks (Video Studio + Replace Person)
     personTracks,
-    personReadiness,
     createPersonDetectionJob,
     createPersonTrackJob,
     saveTrackCorrections,
@@ -2280,13 +1985,14 @@ export function App() {
     macCapabilities,
     loras,
     deleteLora,
+    updateLora,
+    fetchLoraEmbeddedTags,
     deleteModel,
     createModelDownloadJob,
     createLoraDownloadJob,
     createModelConvertJob,
     createLoraImportJob,
     createModelImportJob,
-    gpuOptions,
     requestedGpu,
     setRequestedGpu,
     // Presets
@@ -2295,6 +2001,12 @@ export function App() {
     updatePreset,
     deletePreset,
     duplicatePreset,
+    // Prompt batches (sc-9954, epic 9952)
+    promptBatches,
+    createPromptBatch,
+    updatePromptBatch,
+    deletePromptBatch,
+    duplicatePromptBatch,
     // Auth (sc-4168): pairing token for screens that call apiFetch directly
     // (Image Editor, Logs, Pose Library, useUserPoseLoader). Empty string when
     // the deployment doesn't require auth.
@@ -2352,22 +2064,27 @@ export function App() {
     sendCharacterToImage,
     sendCharacterToVideo,
     openDatasetInLibrary,
+    // Global theme (sc-10244): exposed so the Image Editor's top-bar toggle
+    // drives the app-wide data-theme rather than a screen-local override.
+    theme,
+    changeTheme,
   }), [
     activeProject, mediaAssets, openPreview, sendAssetToImage, sendAssetToVideo,
     activeTimeline, timelines, selectedTimelineId, setSelectedTimelineId, setActiveTimeline,
     createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
-    assets, selectedAsset, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, importAsset,
+    assets, selectedAsset, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
-    jobs, jobAction, createVqaJob, createInterleaveJob, createPlaceholderJob, filteredJobs,
-    jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects, visibleWorkers, workersById,
+    jobAction, createVqaJob, createInterleaveJob, createPlaceholderJob,
+    jobPrompt, setJobPrompt, projectFilter, setProjectFilter, projects,
     createVideoJob, createVideoUpscaleJob, createImageJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
-    recentVideoAssets, videoLocalJobs, imageLocalJobs, documentLocalJobs, studioLaunch,
+    recentVideoAssets, studioLaunch,
     editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,
-    rememberLocalGenerationJob, personTracks, personReadiness, createPersonDetectionJob,
+    rememberLocalGenerationJob, personTracks, createPersonDetectionJob,
     createPersonTrackJob, saveTrackCorrections, imageModels, videoModels, models, macCapabilities,
-    loras, deleteLora, deleteModel, createModelDownloadJob, createLoraDownloadJob, createModelConvertJob,
-    createLoraImportJob, createModelImportJob, gpuOptions, requestedGpu, setRequestedGpu,
+    loras, deleteLora, updateLora, fetchLoraEmbeddedTags, deleteModel, createModelDownloadJob, createLoraDownloadJob, createModelConvertJob,
+    createLoraImportJob, createModelImportJob, requestedGpu, setRequestedGpu,
     presets, createPreset, updatePreset, deletePreset, duplicatePreset, token, authenticated,
+    promptBatches, createPromptBatch, updatePromptBatch, deletePromptBatch, duplicatePromptBatch,
     trainingDatasets, trainingDatasetsProjectId, trainingDatasetsError, loadingTrainingDatasets,
     refreshTrainingDatasets, loadTrainingDataset, loadTrainingDatasetReadiness, setTrainingDatasetItemQualityAck, createTrainingDataset, uploadTrainingDatasetItem,
     updateTrainingDataset, batchRenameTrainingDataset, writeTrainingDatasetCaptionSidecars,
@@ -2378,11 +2095,12 @@ export function App() {
     addCharacterReference, updateCharacterReference,
     removeCharacterReference, createCharacterLook, updateCharacterLook, deleteCharacterLook,
     attachCharacterLora, updateCharacterLora, detachCharacterLora, createCharacterTestJob,
-    sendCharacterToImage, sendCharacterToVideo, openDatasetInLibrary,
+    sendCharacterToImage, sendCharacterToVideo, openDatasetInLibrary, theme, changeTheme,
   ]);
 
   return (
-    <AppContext.Provider value={appContextValue}>
+    <AppStaticContext.Provider value={appStaticValue}>
+    <AppLiveContext.Provider value={appLiveValue}>
     <main className="app">
       <aside className="sidebar" aria-label="Primary">
         <div className="brand">
@@ -2439,38 +2157,31 @@ export function App() {
           </div>
           <span className="topbar-spacer" />
           <div className="topbar-status">
-            <span className={health?.status === "ok" ? "status-pill" : "status-pill warning"}>
+            {/* Status collapses to one summary pill (UI-refinement 1d): API health · workers · GPU.
+                Clicking through opens the Queue, where the per-worker/job detail lives. */}
+            <button
+              className={health?.status === "ok" ? "status-pill status-summary" : "status-pill status-summary warning"}
+              onClick={() => setActiveView("Queue")}
+              title="Workers and GPU activity — open the Queue for detail"
+              type="button"
+            >
               <StatusDot ok={health?.status === "ok"} />
-              {health?.status === "ok" ? "API ready" : "API offline"}
-            </span>
-            <span className="status-pill">
-              <span className={visibleWorkers.length ? "dot" : "dot idle"} />
-              {visibleWorkers.length ? `${visibleWorkers.length} worker${visibleWorkers.length === 1 ? "" : "s"}` : "No workers"}
-            </span>
-            <span className="status-pill">
-              {gpuOptions.length > 1 ? `${gpuOptions.length - 1} GPU slot${gpuOptions.length === 2 ? "" : "s"}` : "GPU auto"}
-            </span>
+              {health?.status === "ok" ? "Ready" : "API offline"}
+              <span className="status-summary-sep">·</span>
+              {visibleWorkers.length} worker{visibleWorkers.length === 1 ? "" : "s"}
+              <span className="status-summary-sep">·</span>
+              {gpuOptions.length > 1 ? `${gpuOptions.length - 1} GPU` : "GPU auto"}
+              <Icon.ChevDown className="status-summary-caret" size={13} />
+            </button>
             <button className="queue-chip" onClick={() => setActiveView("Queue")} type="button">
               Queue {queueCounts.active}
             </button>
           </div>
+          <span className="topbar-divider" aria-hidden="true" />
           <button className="icon-btn" title="Notifications" type="button">
             <Icon.Bell />
           </button>
-          <div className="accent-picker" role="group" aria-label="Accent color">
-            {ACCENTS.map((option) => (
-              <button
-                aria-label={option.name}
-                aria-pressed={accent === option.id}
-                className={accent === option.id ? "accent-swatch active" : "accent-swatch"}
-                key={option.id}
-                onClick={() => changeAccent(option.id)}
-                style={{ "--sw": option.swatch }}
-                title={option.name}
-                type="button"
-              />
-            ))}
-          </div>
+          <AccentPicker accent={accent} onChange={changeAccent} />
           <button
             className="icon-btn"
             onClick={() => changeTheme(theme === "light" ? "dark" : "light")}
@@ -2635,6 +2346,7 @@ export function App() {
         />
       ) : null}
     </main>
-    </AppContext.Provider>
+    </AppLiveContext.Provider>
+    </AppStaticContext.Provider>
   );
 }

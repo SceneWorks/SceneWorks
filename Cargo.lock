@@ -412,8 +412,35 @@ version = "0.10.2"
 source = "git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343#65ecb58c11d2244a7e60c71bdcdb19b15b0a4343"
 dependencies = [
  "byteorder",
- "candle-kernels",
- "candle-ug",
+ "candle-kernels 0.10.2 (git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343)",
+ "candle-ug 0.10.2 (git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343)",
+ "cudarc 0.19.7",
+ "float8",
+ "gemm 0.19.0",
+ "half",
+ "libc",
+ "libm",
+ "memmap2",
+ "num-traits",
+ "num_cpus",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "rayon",
+ "safetensors 0.7.0",
+ "thiserror 2.0.18",
+ "tokenizers 0.22.2",
+ "yoke 0.8.2",
+ "zip 8.6.0",
+]
+
+[[package]]
+name = "candle-core"
+version = "0.10.2"
+source = "git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87#c1e6756a89faefa888ea57b056394a0619925b87"
+dependencies = [
+ "byteorder",
+ "candle-kernels 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
+ "candle-ug 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "cudarc 0.19.7",
  "float8",
  "gemm 0.19.0",
@@ -436,10 +463,12 @@ dependencies = [
 [[package]]
 name = "candle-gen"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
- "candle-core",
- "candle-nn",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
+ "float8",
+ "half",
  "image",
  "rand 0.9.4",
  "rand_distr 0.5.1",
@@ -452,9 +481,10 @@ dependencies = [
 [[package]]
 name = "candle-gen-boogu"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
  "candle-gen",
+ "candle-gen-pid",
  "candle-transformers",
  "inventory",
  "rand 0.9.4",
@@ -465,9 +495,10 @@ dependencies = [
 [[package]]
 name = "candle-gen-chroma"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
  "candle-gen",
+ "candle-gen-pid",
  "candle-transformers",
  "inventory",
  "rand 0.9.4",
@@ -479,12 +510,12 @@ dependencies = [
 [[package]]
 name = "candle-gen-clip"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
  "candle-gen-sdxl",
- "candle-nn",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-transformers",
  "inventory",
  "tokenizers 0.22.2",
@@ -493,32 +524,33 @@ dependencies = [
 [[package]]
 name = "candle-gen-depth"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
- "candle-nn",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
 ]
 
 [[package]]
 name = "candle-gen-face"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
- "candle-nn",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
 ]
 
 [[package]]
 name = "candle-gen-flux"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
+ "candle-gen-pid",
  "candle-gen-sdxl",
- "candle-nn",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-transformers",
  "inventory",
  "rand 0.9.4",
@@ -530,9 +562,10 @@ dependencies = [
 [[package]]
 name = "candle-gen-flux2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
  "candle-gen",
+ "candle-gen-pid",
  "candle-transformers",
  "inventory",
  "rand 0.9.4",
@@ -544,26 +577,26 @@ dependencies = [
 [[package]]
 name = "candle-gen-ideogram"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
  "candle-gen",
  "candle-gen-flux2",
- "candle-transformers",
+ "candle-gen-pid",
  "inventory",
  "rand 0.9.4",
  "rand_distr 0.5.1",
  "safetensors 0.7.0",
  "serde_json",
- "tokenizers 0.22.2",
 ]
 
 [[package]]
 name = "candle-gen-instantid"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
  "candle-gen",
  "candle-gen-face",
+ "candle-gen-pid",
  "candle-gen-sdxl",
  "image",
  "rand 0.9.4",
@@ -572,19 +605,20 @@ dependencies = [
 [[package]]
 name = "candle-gen-joycaption"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
  "candle-gen",
- "candle-llm",
+ "candle-llm 0.0.0 (git+https://github.com/SceneWorks/candle-llm?rev=3d9fdf04047bf3b1fbf323ab56c919f3a03f0794)",
  "inventory",
 ]
 
 [[package]]
 name = "candle-gen-kolors"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
  "candle-gen",
+ "candle-gen-pid",
  "candle-gen-sdxl",
  "candle-transformers",
  "inventory",
@@ -596,11 +630,11 @@ dependencies = [
 [[package]]
 name = "candle-gen-krea"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
  "candle-gen",
+ "candle-gen-pid",
  "candle-gen-qwen-image",
- "candle-transformers",
  "inventory",
  "rand 0.9.4",
  "rand_distr 0.5.1",
@@ -611,39 +645,52 @@ dependencies = [
 [[package]]
 name = "candle-gen-lens"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
  "candle-gen",
  "candle-gen-flux2",
+ "candle-gen-pid",
  "inventory",
  "rand 0.9.4",
  "rand_distr 0.5.1",
  "safetensors 0.7.0",
+ "serde_json",
 ]
 
 [[package]]
 name = "candle-gen-ltx"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
  "candle-gen",
  "inventory",
  "rand 0.9.4",
  "rand_distr 0.5.1",
+ "serde_json",
  "tokenizers 0.22.2",
+]
+
+[[package]]
+name = "candle-gen-pid"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
+dependencies = [
+ "candle-gen",
+ "image",
+ "rand 0.9.4",
 ]
 
 [[package]]
 name = "candle-gen-pulid"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
  "candle-gen-face",
  "candle-gen-flux",
- "candle-gen-sdxl",
- "candle-nn",
+ "candle-gen-pid",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-transformers",
  "rand 0.9.4",
  "rand_distr 0.5.1",
@@ -653,33 +700,32 @@ dependencies = [
 [[package]]
 name = "candle-gen-qwen-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
  "candle-gen",
- "candle-transformers",
+ "candle-gen-pid",
  "inventory",
  "rand 0.9.4",
  "rand_distr 0.5.1",
  "safetensors 0.7.0",
  "serde_json",
- "tokenizers 0.22.2",
 ]
 
 [[package]]
 name = "candle-gen-sam3"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
- "candle-nn",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "tokenizers 0.22.2",
 ]
 
 [[package]]
 name = "candle-gen-scail2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
  "candle-gen",
  "candle-gen-wan",
@@ -694,11 +740,11 @@ dependencies = [
 [[package]]
 name = "candle-gen-sd3"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
- "candle-nn",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-transformers",
  "inventory",
  "rand 0.9.4",
@@ -711,17 +757,19 @@ dependencies = [
 [[package]]
 name = "candle-gen-sdxl"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
- "candle-nn",
+ "candle-gen-pid",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-transformers",
  "hf-hub",
  "inventory",
  "rand 0.9.4",
  "rand_distr 0.5.1",
  "safetensors 0.7.0",
+ "serde_json",
  "tokenizers 0.22.2",
  "tracing",
 ]
@@ -729,7 +777,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-seedvr2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
  "candle-gen",
  "inventory",
@@ -740,7 +788,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-sensenova"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
  "candle-gen",
  "inventory",
@@ -753,7 +801,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-svd"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
  "candle-gen",
  "inventory",
@@ -764,7 +812,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-wan"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
  "candle-gen",
  "inventory",
@@ -777,16 +825,18 @@ dependencies = [
 [[package]]
 name = "candle-gen-z-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=376b1ef657045afe5e37926591f05afd72a8650c#376b1ef657045afe5e37926591f05afd72a8650c"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=c5560540be6f77919f30e890dcc839383b4f655d#c5560540be6f77919f30e890dcc839383b4f655d"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
- "candle-nn",
+ "candle-gen-pid",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-transformers",
  "inventory",
  "rand 0.9.4",
  "rand_distr 0.5.1",
  "safetensors 0.7.0",
+ "serde_json",
  "tokenizers 0.22.2",
 ]
 
@@ -799,12 +849,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-kernels"
+version = "0.10.2"
+source = "git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87#c1e6756a89faefa888ea57b056394a0619925b87"
+dependencies = [
+ "cudaforge",
+]
+
+[[package]]
+name = "candle-llm"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/candle-llm?rev=3d9fdf04047bf3b1fbf323ab56c919f3a03f0794#3d9fdf04047bf3b1fbf323ab56c919f3a03f0794"
+dependencies = [
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
+ "core-llm",
+ "inventory",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "candle-llm"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/candle-llm?rev=d0ba3e66b4d53420bb0b0745a185b975822089be#d0ba3e66b4d53420bb0b0745a185b975822089be"
 dependencies = [
- "candle-core",
- "candle-nn",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343)",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343)",
  "core-llm",
  "inventory",
  "serde_json",
@@ -816,7 +887,22 @@ name = "candle-nn"
 version = "0.10.2"
 source = "git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343#65ecb58c11d2244a7e60c71bdcdb19b15b0a4343"
 dependencies = [
- "candle-core",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343)",
+ "half",
+ "libc",
+ "num-traits",
+ "rayon",
+ "safetensors 0.7.0",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "candle-nn"
+version = "0.10.2"
+source = "git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87#c1e6756a89faefa888ea57b056394a0619925b87"
+dependencies = [
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "half",
  "libc",
  "num-traits",
@@ -829,11 +915,11 @@ dependencies = [
 [[package]]
 name = "candle-transformers"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343#65ecb58c11d2244a7e60c71bdcdb19b15b0a4343"
+source = "git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87#c1e6756a89faefa888ea57b056394a0619925b87"
 dependencies = [
  "byteorder",
- "candle-core",
- "candle-nn",
+ "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
+ "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "fancy-regex",
  "num-traits",
  "rand 0.9.4",
@@ -848,6 +934,15 @@ dependencies = [
 name = "candle-ug"
 version = "0.10.2"
 source = "git+https://github.com/huggingface/candle?rev=65ecb58c11d2244a7e60c71bdcdb19b15b0a4343#65ecb58c11d2244a7e60c71bdcdb19b15b0a4343"
+dependencies = [
+ "ug",
+ "ug-cuda",
+]
+
+[[package]]
+name = "candle-ug"
+version = "0.10.2"
+source = "git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87#c1e6756a89faefa888ea57b056394a0619925b87"
 dependencies = [
  "ug",
  "ug-cuda",
@@ -952,6 +1047,17 @@ name = "cfg_aliases"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
+
+[[package]]
+name = "chacha20"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "rand_core 0.10.1",
+]
 
 [[package]]
 name = "chrono"
@@ -1101,6 +1207,15 @@ name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "cpufeatures"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
 dependencies = [
  "libc",
 ]
@@ -1898,12 +2013,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "futures"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b147ee9d1f6d097cef9ce628cd2ee62288d963e16fb287bd9286455b241382d"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "futures-executor",
+ "futures-io",
+ "futures-sink",
+ "futures-task",
+ "futures-util",
+]
+
+[[package]]
 name = "futures-channel"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d"
 dependencies = [
  "futures-core",
+ "futures-sink",
 ]
 
 [[package]]
@@ -1958,6 +2089,7 @@ version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
 dependencies = [
+ "futures-channel",
  "futures-core",
  "futures-io",
  "futures-macro",
@@ -2351,6 +2483,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
+ "rand_core 0.10.1",
  "wasip2",
  "wasip3",
 ]
@@ -3528,12 +3661,13 @@ dependencies = [
 [[package]]
 name = "mlx-gen"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "inventory",
  "pmetal-mlx-rs",
  "pmetal-mlx-sys",
  "sceneworks-gen-core",
+ "serde_json",
  "thiserror 2.0.18",
  "tokenizers 0.21.4",
 ]
@@ -3541,7 +3675,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-bernini"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "image",
  "inventory",
@@ -3555,7 +3689,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-boogu"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "image",
  "inventory",
@@ -3569,7 +3703,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-chroma"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3583,7 +3717,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-clip"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3594,7 +3728,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-depth"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "mlx-gen",
  "pmetal-mlx-rs",
@@ -3603,7 +3737,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-face"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "mlx-gen",
  "pmetal-mlx-rs",
@@ -3612,7 +3746,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-flux"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3626,7 +3760,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-flux2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3639,7 +3773,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-ideogram"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3652,7 +3786,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-instantid"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "mlx-gen",
  "mlx-gen-face",
@@ -3664,7 +3798,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-joycaption"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3674,7 +3808,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-kolors"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "image",
  "inventory",
@@ -3687,7 +3821,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-krea"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "image",
  "inventory",
@@ -3701,7 +3835,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-lens"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "image",
  "inventory",
@@ -3715,7 +3849,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-ltx"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "image",
  "inventory",
@@ -3727,7 +3861,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-pid"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "image",
  "mlx-gen",
@@ -3738,7 +3872,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-pulid"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3750,7 +3884,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-qwen-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3762,7 +3896,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-sam2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "mlx-gen",
  "pmetal-mlx-rs",
@@ -3771,7 +3905,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-sam3"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "mlx-gen",
  "pmetal-mlx-rs",
@@ -3780,7 +3914,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-sana"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "mlx-gen",
  "mlx-gen-pid",
@@ -3790,7 +3924,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-scail2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3802,7 +3936,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-sd3"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "image",
  "inventory",
@@ -3817,7 +3951,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-sdxl"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "image",
  "inventory",
@@ -3831,7 +3965,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-seedvr2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3842,7 +3976,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-sensenova"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3854,7 +3988,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-svd"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3865,7 +3999,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-wan"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "image",
  "inventory",
@@ -3879,7 +4013,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-z-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "image",
  "inventory",
@@ -4210,7 +4344,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 2.0.2",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -4551,7 +4685,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.45.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4630,6 +4764,12 @@ name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
+name = "pastey"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "pathdiff"
@@ -5062,6 +5202,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
+dependencies = [
+ "chacha20",
+ "getrandom 0.4.2",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "rand_chacha"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5098,6 +5249,12 @@ checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
 ]
+
+[[package]]
+name = "rand_core"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "rand_distr"
@@ -5376,6 +5533,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "rmcp"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f00a32c3b81b7b254076a65abd5ab2551209146713ba38f73818657e865e9433"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "futures",
+ "http",
+ "http-body",
+ "http-body-util",
+ "pastey",
+ "pin-project-lite",
+ "rand 0.10.2",
+ "reqwest 0.13.3",
+ "rmcp-macros",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "sse-stream",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tower-service",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "rmcp-macros"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ee70afb7956da9f30d5348a2539b5eb90d9038f834463657ab717076ac3b1ad"
+dependencies = [
+ "darling 0.23.0",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "rusqlite"
 version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5616,6 +5818,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "tracing-subscriber",
+ "trash",
  "url",
 ]
 
@@ -5623,6 +5826,7 @@ dependencies = [
 name = "sceneworks-desktop"
 version = "0.2.0"
 dependencies = [
+ "futures-util",
  "if-addrs",
  "keyring",
  "nix",
@@ -5643,7 +5847,7 @@ dependencies = [
 [[package]]
 name = "sceneworks-gen-core"
 version = "0.1.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d#cc9a8c12ac32e966dfb92fe1f678dd9a16766e4d"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=fcf07df9a9687c6db66e4f88806b024703e41a1d#fcf07df9a9687c6db66e4f88806b024703e41a1d"
 dependencies = [
  "core-llm",
  "inventory",
@@ -5665,6 +5869,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "sceneworks-mcp"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "http",
+ "percent-encoding",
+ "reqwest 0.12.28",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "sceneworks-rust-api"
 version = "0.2.0"
 dependencies = [
@@ -5677,9 +5897,11 @@ dependencies = [
  "nix",
  "parking_lot",
  "reqwest 0.12.28",
+ "rmcp",
  "rust-embed",
  "sceneworks-core",
  "sceneworks-image-quality",
+ "sceneworks-mcp",
  "sceneworks-worker",
  "serde",
  "serde_json",
@@ -5690,6 +5912,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "trash",
  "uuid",
 ]
 
@@ -5732,7 +5955,7 @@ dependencies = [
  "candle-gen-svd",
  "candle-gen-wan",
  "candle-gen-z-image",
- "candle-llm",
+ "candle-llm 0.0.0 (git+https://github.com/SceneWorks/candle-llm?rev=d0ba3e66b4d53420bb0b0745a185b975822089be)",
  "fs2",
  "futures-util",
  "glob",
@@ -5804,7 +6027,7 @@ checksum = "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
 dependencies = [
  "dyn-clone",
  "indexmap 1.9.3",
- "schemars_derive",
+ "schemars_derive 0.8.22",
  "serde",
  "serde_json",
  "url",
@@ -5829,8 +6052,10 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2b42f36aa1cd011945615b92222f6bf73c599a102a300334cd7f8dbeec726cc"
 dependencies = [
+ "chrono",
  "dyn-clone",
  "ref-cast",
+ "schemars_derive 1.2.1",
  "serde",
  "serde_json",
 ]
@@ -5840,6 +6065,18 @@ name = "schemars_derive"
 version = "0.8.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32e265784ad618884abaea0600a9adf15393368d840e0222d101a072f3f7534d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "schemars_derive"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d115b50f4aaeea07e79c1912f645c7513d81715d0420f8bc77a18c6260b307f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6122,7 +6359,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
- "cpufeatures",
+ "cpufeatures 0.2.17",
  "digest",
 ]
 
@@ -6324,6 +6561,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sse-stream"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39f24a9b78c40b90817bbcd1821c74ddfd74916aadd29403d001532a9195532d"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body",
+ "http-body-util",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6511,7 +6761,7 @@ dependencies = [
  "tao-macros",
  "unicode-segmentation",
  "url",
- "windows",
+ "windows 0.61.3",
  "windows-core 0.61.2",
  "windows-version",
  "x11-dl",
@@ -6593,7 +6843,7 @@ dependencies = [
  "webkit2gtk",
  "webview2-com",
  "window-vibrancy",
- "windows",
+ "windows 0.61.3",
 ]
 
 [[package]]
@@ -6792,7 +7042,7 @@ dependencies = [
  "url",
  "webkit2gtk",
  "webview2-com",
- "windows",
+ "windows 0.61.3",
 ]
 
 [[package]]
@@ -6817,7 +7067,7 @@ dependencies = [
  "url",
  "webkit2gtk",
  "webview2-com",
- "windows",
+ "windows 0.61.3",
  "wry",
 ]
 
@@ -7366,6 +7616,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "trash"
+version = "5.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7602e0c7d66ec2d92a8c917219fbc7894039efa2063b9064260110828a356f46"
+dependencies = [
+ "chrono",
+ "libc",
+ "log",
+ "objc2",
+ "objc2-foundation",
+ "once_cell",
+ "percent-encoding",
+ "scopeguard",
+ "urlencoding",
+ "windows 0.56.0",
+]
+
+[[package]]
 name = "tray-icon"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7613,6 +7881,12 @@ dependencies = [
  "serde",
  "serde_derive",
 ]
+
+[[package]]
+name = "urlencoding"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "urlpattern"
@@ -7969,10 +8243,10 @@ checksum = "7130243a7a5b33c54a444e54842e6a9e133de08b5ad7b5861cd8ed9a6a5bc96a"
 dependencies = [
  "webview2-com-macros",
  "webview2-com-sys",
- "windows",
+ "windows 0.61.3",
  "windows-core 0.61.2",
- "windows-implement",
- "windows-interface",
+ "windows-implement 0.60.2",
+ "windows-interface 0.59.3",
 ]
 
 [[package]]
@@ -7993,7 +8267,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "381336cfffd772377d291702245447a5251a2ffa5bad679c99e61bc48bacbf9c"
 dependencies = [
  "thiserror 2.0.18",
- "windows",
+ "windows 0.61.3",
  "windows-core 0.61.2",
 ]
 
@@ -8067,6 +8341,16 @@ dependencies = [
 
 [[package]]
 name = "windows"
+version = "0.56.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1de69df01bdf1ead2f4ac895dc77c9351aefff65b2f3db429a343f9cbf05e132"
+dependencies = [
+ "windows-core 0.56.0",
+ "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows"
 version = "0.61.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9babd3a767a4c1aef6900409f85f5d53ce2544ccdfaa86dad48c91782c6d6893"
@@ -8089,12 +8373,24 @@ dependencies = [
 
 [[package]]
 name = "windows-core"
+version = "0.56.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4698e52ed2d08f8658ab0c39512a7c00ee5fe2688c65f8c0a4f06750d729f2a6"
+dependencies = [
+ "windows-implement 0.56.0",
+ "windows-interface 0.56.0",
+ "windows-result 0.1.2",
+ "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows-core"
 version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0fdd3ddb90610c7638aa2b3a3ab2904fb9e5cdbecc643ddb3647212781c4ae3"
 dependencies = [
- "windows-implement",
- "windows-interface",
+ "windows-implement 0.60.2",
+ "windows-interface 0.59.3",
  "windows-link 0.1.3",
  "windows-result 0.3.4",
  "windows-strings 0.4.2",
@@ -8106,8 +8402,8 @@ version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
 dependencies = [
- "windows-implement",
- "windows-interface",
+ "windows-implement 0.60.2",
+ "windows-interface 0.59.3",
  "windows-link 0.2.1",
  "windows-result 0.4.1",
  "windows-strings 0.5.1",
@@ -8126,9 +8422,31 @@ dependencies = [
 
 [[package]]
 name = "windows-implement"
+version = "0.56.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6fc35f58ecd95a9b71c4f2329b911016e6bec66b3f2e6a4aad86bd2e99e2f9b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "windows-implement"
 version = "0.60.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "windows-interface"
+version = "0.56.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08990546bf4edef8f431fa6326e032865f27138718c587dc21bc0265bbcb57cc"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8166,6 +8484,15 @@ checksum = "9150af68066c4c5c07ddc0ce30421554771e528bde427614c61038bc2c92c2b1"
 dependencies = [
  "windows-core 0.61.2",
  "windows-link 0.1.3",
+]
+
+[[package]]
+name = "windows-result"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e383302e8ec8515204254685643de10811af0ed97ea37210dc26fb0032647f8"
+dependencies = [
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -8694,7 +9021,7 @@ dependencies = [
  "webkit2gtk",
  "webkit2gtk-sys",
  "webview2-com",
- "windows",
+ "windows 0.61.3",
  "windows-core 0.61.2",
  "windows-version",
  "x11-dl",

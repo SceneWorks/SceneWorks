@@ -178,7 +178,36 @@ Compose to the LAN; control access with `SCENEWORKS_ACCESS_TOKEN` and extend
 `SCENEWORKS_CORS_ORIGINS` with LAN hostnames or IP origins when the web app is opened
 from another machine.
 
+### Loopback trust and the multi-user-machine caveat
+
+When LAN remote access is on, the desktop launcher binds `0.0.0.0` and uses the
+pairing password as the API's access token, but the embedded desktop UI and the
+local GPU worker(s) reach the API over loopback (`127.0.0.1`/`::1`) with no password
+to send. To keep local use password-free while still gating LAN callers, the desktop
+sets `SCENEWORKS_TRUST_LOOPBACK`, which **trusts any loopback peer to bypass the
+access token** (epic 4484). Docker/server deployments never set it, so a
+reverse-proxied install — where every request appears to come from loopback — stays
+fail-closed.
+
+**Caveat (deliberate tradeoff):** loopback trust is per-connection, not per-OS-user.
+On a **shared/multi-user machine**, *any* local OS user or local process — not just
+the account running SceneWorks — can reach the API over `127.0.0.1` and inherit the
+same token-free access (project file reads, credential writes, job creation, model
+uploads). This is intentional for the single-user desktop it targets. If you run
+SceneWorks in remote-access mode on a machine other users can log into, either do not
+set `SCENEWORKS_TRUST_LOOPBACK` (so even loopback callers must present the token), or
+treat every local user on that host as fully trusted.
+
 For offline development or deterministic Rust API tests, set `SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE=1` to skip live Hugging Face model size lookups. The catalog still returns the same fields with unknown sizes.
+
+## MCP server (agent access)
+
+The API embeds a Model Context Protocol server at `/mcp` (epic 10231): Claude
+Code, Cursor, or any MCP client can list projects and the model/LoRA catalog,
+generate images, and submit/poll video jobs — locally or from another machine
+on the LAN using the same access token described above. Setup, copy-paste
+client config snippets, and the LAN security posture are documented in
+[docs/mcp-server.md](docs/mcp-server.md).
 
 ## Service Credentials (API tokens)
 
@@ -229,8 +258,8 @@ mixture-of-experts denoisers (high/low-noise) as a per-expert LoRA pair.
 See [documents/TRAINING_QUICKSTART.md](documents/TRAINING_QUICKSTART.md) for a
 step-by-step first run, per-target notes, recommended dataset sizes and captions,
 VRAM/disk notes, where outputs live, and troubleshooting. Training contracts live
-in `crates/sceneworks-core/src/training.rs`; the execution kernel is
-`apps/worker/scene_worker/training_adapters.py`.
+in `crates/sceneworks-core/src/training.rs`; the execution kernel is the native
+Rust trainer in `crates/sceneworks-worker/src/training_jobs.rs`.
 
 ## Structure
 
@@ -301,6 +330,3 @@ some non-commercial (e.g. FLUX.1 [dev], FLUX.2 [klein] 9B), some permissive
 (Apache-2.0 / OpenRAIL). You are responsible for complying with each model's
 license when you download and use it; the SceneWorks license here applies only
 to SceneWorks' own code, not to the weights it runs.
-
-Bundled third-party source under `apps/*/scene_worker/_vendor/` is covered by
-its own `LICENSE` files (Apache-2.0 / MIT), retained alongside that code.

@@ -34,8 +34,10 @@ const FLUX2_EDIT_CANDLE_DEFAULT_REPO: &str = "black-forest-labs/FLUX.2-klein-9B"
 /// diffusers snapshot and Q4-quantizes it at load (no install-time packed convert off-Mac).
 const FLUX2_EDIT_CANDLE_DEV_REPO: &str = "black-forest-labs/FLUX.2-dev";
 /// Cap on references fed to a single FLUX.2 edit (the multi-image picker, sc-6211): the dev edit is
-/// activation-bound, so cap at the engine's validated native fan-out (parity with the MLX
-/// `MAX_EDIT_REFERENCES`).
+/// activation-bound, so cap at the engine's validated native fan-out. This deliberately differs from
+/// the MLX `MAX_EDIT_REFERENCES` (4): that bound is set by the 96 GB Apple-Silicon unified-memory
+/// floor (5 refs at 1024² exceed it), which does not apply to this off-Mac CUDA lane — so it admits
+/// the engine's full 5-reference fan-out (sc-8936: was mislabeled "parity with the MLX const").
 const FLUX2_EDIT_CANDLE_MAX_REFERENCES: usize = 5;
 
 /// True when this is the FLUX.2 **dev** edit variant (`flux2_dev`): the 32B flagship that loads via the
@@ -115,45 +117,19 @@ fn flux2_edit_candle_available(request: &ImageRequest, settings: &Settings) -> b
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → the family default
 /// (klein 4 / dev 28).
 fn flux2_edit_candle_steps(request: &ImageRequest, default: u32) -> u32 {
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    request
-        .advanced
-        .get("steps")
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
-        .map(|steps| steps.clamp(1, 50) as u32)
-        .unwrap_or(default)
+    resolve_advanced_or_manifest_u32(request, "steps", default, 1..=50)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → the family default
 /// (klein 1.0 / dev 4.0), clamped.
 fn flux2_edit_candle_guidance(request: &ImageRequest, default: f32) -> f32 {
-    let manifest_default = request
-        .model_manifest_entry
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(default);
-    advanced::f32_clamped(
-        &request.advanced,
-        "guidanceScale",
-        manifest_default,
-        0.0..=30.0,
-    )
+    resolve_advanced_or_manifest_f32(request, "guidanceScale", default, 0.0..=30.0)
 }
 
 /// Reference asset ids for a FLUX.2 edit, in order. The multi-image picker (sc-6211) sends the plural
 /// `referenceAssetIds` — take all of them, capped at [`FLUX2_EDIT_CANDLE_MAX_REFERENCES`]; with no plural
 /// list it falls back to the single Image-Edit `sourceAssetId` (`edit_image` mode). Mirrors the MLX
-/// `flux2_edit_reference_ids` (multi) + `boogu_edit_reference_ids`.
+/// `edit_reference_ids` (multi) + `boogu_edit_reference_ids`.
 fn flux2_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
     if !request.reference_asset_ids.is_empty() {
         // The parsed list is already trimmed + non-empty (sceneworks-core `string_list`).
@@ -261,7 +237,13 @@ async fn generate_candle_flux2_edit_stream(
         ));
     }
     let is_dev = is_flux2_edit_candle_dev(&request.model);
-    let (width, height) = (request.width, request.height);
+    // Per-generation PiD decode (epic 7840, sc-8044) + output tier (sc-10054), resolved BEFORE the
+    // references are loaded/fit so a 2K tier sizes the effective base and the edit references land at THAT
+    // base (references + latent stay aligned). `use_pid`/`with_pid` stay paired below.
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+    let (width, height) =
+        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
     let references = load_flux2_edit_references(request, project_path, settings, width, height)?;
 
     // dev (32B) loads Q4 (manifest `mlx.quantize: 4` → `resolve_quant`); klein loads dense. The dev
@@ -290,8 +272,12 @@ async fn generate_candle_flux2_edit_stream(
         },
     );
     let repo = flux2_edit_candle_repo(request);
-    let raw_settings =
+    // `pid_weights`/`use_pid`/`width`/`height` were resolved above (ahead of the reference fit) so the
+    // PiD output tier (sc-10054) could size the effective base; `use_pid`/`with_pid` stay in lockstep.
+    let mut raw_settings =
         flux2_edit_candle_raw_settings(request, &repo, steps, guidance, quant_bits, references.len());
+    // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
+    raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
     // Per-image work items: (seed, prompt) — `request.count` edits of the same reference set.
     let work: Vec<(i64, String)> = (0..request.count as usize)
@@ -312,6 +298,13 @@ async fn generate_candle_flux2_edit_stream(
                 Flux2Edit::load(&paths)
             }
             .map_err(|error| WorkerError::Engine(format!("FLUX.2 edit load failed: {error}")))?;
+            // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND snapshots cached.
+            let model = match &pid_weights {
+                Some(pid) => model.with_pid(pid).map_err(|error| {
+                    WorkerError::Engine(format!("FLUX.2 edit PiD decoder load failed: {error}"))
+                })?,
+                None => model,
+            };
             Ok((model, references))
         },
         move |(model, references), tx, cancel| {
@@ -327,6 +320,8 @@ async fn generate_candle_flux2_edit_stream(
                     steps: steps as usize,
                     guidance,
                     seed: seed as u64,
+                    // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
+                    use_pid,
                     cancel: cancel.clone(),
                 };
                 let result = model.generate(&req, &references, &mut *on_progress);

@@ -1232,11 +1232,15 @@ fn lens_turbo_lora_target() -> TrainingTarget {
 /// mlx-only markers are therefore omitted (matching the candle-capable z-image/lens targets);
 /// `MacTrainingSupport::supported_kernels` already lists `krea_lora` and is inert off-Mac.
 ///
-/// `base_model_repo` points the plan's `baseModelPath` at the ungated public `krea/Krea-2-Raw`
-/// diffusers tree (Krea 2 Community License), independent of the served `krea_2_turbo` model. The
-/// single-stream DiT uses separate `to_q`/`to_k`/`to_v` attention projections plus the joint-attention
-/// output projection (`to_out` is an `nn.ModuleList([Linear, Identity])`, so the trainable Linear is
-/// `to_out.0`), matching the engine trainer's `DEFAULT_TARGET_MODULES`.
+/// `base_model_repo` points the plan's `baseModelPath` at the `SceneWorks/krea-2-raw-mlx` turnkey — the
+/// SAME re-host that serves `krea_2_raw` GENERATION (epic 9992 Path 1). Training reads the DENSE `bf16/`
+/// tier (`resolve_base_model_path` descends into it for a tiered turnkey), which is byte-identical to the
+/// retired `krea/Krea-2-Raw` diffusers tree (the turnkey's bf16 tier was built from those exact files),
+/// so training behavior is unchanged — but generation + training now share one download instead of two.
+/// Krea 2 Community License. The single-stream DiT uses separate `to_q`/`to_k`/`to_v` attention
+/// projections plus the joint-attention output projection (`to_out` is an `nn.ModuleList([Linear,
+/// Identity])`, so the trainable Linear is `to_out.0`), matching the engine trainer's
+/// `DEFAULT_TARGET_MODULES`.
 fn krea_raw_lora_target() -> TrainingTarget {
     TrainingTarget {
         id: "krea_2_raw_lora".to_owned(),
@@ -1245,7 +1249,7 @@ fn krea_raw_lora_target() -> TrainingTarget {
         output_kind: TrainingOutputKind::Lora,
         family: "krea_2".to_owned(),
         base_model: "krea_2_raw".to_owned(),
-        base_model_repo: Some("krea/Krea-2-Raw".to_owned()),
+        base_model_repo: Some("SceneWorks/krea-2-raw-mlx".to_owned()),
         kernel: "krea_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
@@ -2112,7 +2116,12 @@ fn combined_trigger_words(item_words: &[String], output_words: &[String]) -> Vec
     words
 }
 
-fn caption_with_trigger_words(caption: &str, trigger_words: &[String]) -> String {
+/// Compose a caption with its trigger words prepended (deduped case-insensitively
+/// against words already present in the caption, order-preserving). Shared by the
+/// training plan (this module) and the on-disk `.txt` caption sidecars
+/// (`training_store::write_dataset_caption_sidecars`) so the captions the trainer
+/// consumes and the sidecars a user inspects can never drift apart (sc-8892 / F-090).
+pub(crate) fn caption_with_trigger_words(caption: &str, trigger_words: &[String]) -> String {
     let cleaned = caption.split_whitespace().collect::<Vec<_>>().join(" ");
     let lower = cleaned.to_lowercase();
     let mut parts = trigger_words
@@ -2241,5 +2250,30 @@ mod tests {
             resolve_item_path(root, "images/photo.png").expect("safe path"),
             expected.display().to_string()
         );
+    }
+
+    /// sc-8892 / F-090: the single shared composer prepends trigger words that are
+    /// not already present (case-insensitive), preserves order, collapses whitespace,
+    /// and drops empties. This is the one function feeding both the training plan and
+    /// the `.txt` caption sidecars, so this contract is what keeps them in lockstep.
+    #[test]
+    fn caption_with_trigger_words_dedups_and_prepends() {
+        // Trigger words prepend, order preserved, caption appended.
+        assert_eq!(
+            caption_with_trigger_words("a photo", &["tok1".to_owned(), "tok2".to_owned()]),
+            "tok1, tok2, a photo"
+        );
+        // A trigger already present in the caption (case-insensitive) is not repeated.
+        assert_eq!(
+            caption_with_trigger_words("A TOK1 pose", &["tok1".to_owned()]),
+            "A TOK1 pose"
+        );
+        // Whitespace collapses and empty/blank trigger words are dropped.
+        assert_eq!(
+            caption_with_trigger_words("  a   photo ", &["".to_owned(), "  ".to_owned()]),
+            "a photo"
+        );
+        // Empty caption yields just the (unique) trigger words.
+        assert_eq!(caption_with_trigger_words("", &["tok1".to_owned()]), "tok1");
     }
 }

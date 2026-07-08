@@ -15,9 +15,11 @@
 //! cargo test -p sceneworks-worker --features backend-candle --release realvisxl_lightning_candle_gpu_smoke -- --ignored --nocapture
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use gen_core::{GenerationOutput, GenerationRequest, Image, LoadSpec, WeightsSource};
+
+use super::smoke_support::{env_or, image_std, save_png, DEGENERATE_STD_FLOOR_DEFAULT};
 
 fn env_path(key: &str) -> PathBuf {
     // Trim: a cmd `set VAR=value && ...` keeps the trailing space before `&&`.
@@ -28,39 +30,8 @@ fn env_path(key: &str) -> PathBuf {
     )
 }
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .map(|v| v.trim().to_string())
-        .unwrap_or_else(|_| default.to_string())
-}
-
-/// Mean per-pixel std-dev across the RGB channels — a cheap "is the image non-degenerate" check (an
-/// all-black / NaN-clamped decode collapses toward 0; a noisy wrong-schedule render is HIGH, so this
-/// only guards the degenerate floor — the real lightning-vs-ddim quality call is the saved-PNG eyeball).
-fn image_std(img: &Image) -> f64 {
-    let n = img.pixels.len() as f64;
-    if n == 0.0 {
-        return 0.0;
-    }
-    let mean = img.pixels.iter().map(|&p| p as f64).sum::<f64>() / n;
-    let var = img
-        .pixels
-        .iter()
-        .map(|&p| (p as f64 - mean).powi(2))
-        .sum::<f64>()
-        / n;
-    var.sqrt()
-}
-
-fn save_png(img: &Image, path: &Path) {
-    image::RgbImage::from_raw(img.width, img.height, img.pixels.clone())
-        .expect("rgb buffer")
-        .save(path)
-        .unwrap_or_else(|e| panic!("save {}: {e}", path.display()));
-}
-
 fn render(
-    weights_dir: &Path,
+    generator: &dyn gen_core::Generator,
     prompt: &str,
     w: u32,
     h: u32,
@@ -68,10 +39,9 @@ fn render(
     guidance: f32,
     sampler: Option<&str>,
 ) -> Image {
-    // Same seam as `generate_candle_stream`: registry load of the candle `sdxl` engine + a dense
-    // (no-quant, no-adapter) LoadSpec pointed at the RealVisXL Lightning diffusers components.
-    let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.to_path_buf()));
-    let generator = gen_core::load("sdxl", &spec).expect("load candle sdxl provider");
+    // The generator is loaded ONCE by the caller and reused across the lightning + optional ddim
+    // contrast render (sc-8925): the SDXL snapshot is multi-GB, so re-loading it per render() (as the
+    // old per-call `gen_core::load` did) doubled the load wall-clock + VRAM on the RVXL_CONTRAST=1 run.
     let req = GenerationRequest {
         prompt: prompt.to_owned(),
         width: w,
@@ -108,7 +78,7 @@ fn realvisxl_lightning_candle_gpu_smoke() {
         "REALVISXL_LIGHTNING_DIR must point at the diffusers snapshot (model_index.json missing): {}",
         weights_dir.display()
     );
-    let out_dir = PathBuf::from(env_or("RVXL_OUT_DIR", "rvxl-lightning-out"));
+    let out_dir = PathBuf::from(env_or("RVXL_OUT_DIR", "/tmp/rvxl_lightning_smoke"));
     std::fs::create_dir_all(&out_dir).expect("create out dir");
 
     let steps: u32 = env_or("RVXL_STEPS", "5").parse().expect("RVXL_STEPS");
@@ -119,10 +89,17 @@ fn realvisxl_lightning_candle_gpu_smoke() {
         "a photorealistic portrait of a red fox in a snowy forest, golden hour, sharp focus",
     );
 
+    // Same seam as `generate_candle_stream`: registry load of the candle `sdxl` engine + a dense
+    // (no-quant, no-adapter) LoadSpec pointed at the RealVisXL Lightning diffusers components. Loaded
+    // ONCE here and reused across both renders (sc-8925) — the multi-GB snapshot is not re-loaded for
+    // the RVXL_CONTRAST=1 ddim run.
+    let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.to_path_buf()));
+    let generator = gen_core::load("sdxl", &spec).expect("load candle sdxl provider");
+
     // The shipped behavior: realvisxl_lightning forces the few-step `lightning` sampler, CFG-off
     // (guidance 1.0 — the distilled checkpoint is trained CFG-free).
     println!("[smoke] rendering lightning @ {steps} steps ({w}x{h}) ...");
-    let lightning = render(&weights_dir, &prompt, w, h, steps, 1.0, Some("lightning"));
+    let lightning = render(&*generator, &prompt, w, h, steps, 1.0, Some("lightning"));
     let lightning_std = image_std(&lightning);
     save_png(
         &lightning,
@@ -142,7 +119,7 @@ fn realvisxl_lightning_candle_gpu_smoke() {
     // so render it at the base SDXL default 7.5. Saved for the eyeball only.
     if env_or("RVXL_CONTRAST", "0") == "1" {
         println!("[smoke] rendering ddim @ {steps} steps (contrast) ...");
-        let ddim = render(&weights_dir, &prompt, w, h, steps, 7.5, Some("ddim"));
+        let ddim = render(&*generator, &prompt, w, h, steps, 7.5, Some("ddim"));
         save_png(&ddim, &out_dir.join(format!("ddim_{steps}step.png")));
         println!(
             "[smoke] ddim contrast std {:.2} -> {}",
@@ -152,7 +129,7 @@ fn realvisxl_lightning_candle_gpu_smoke() {
     }
 
     assert!(
-        lightning_std > 5.0,
+        lightning_std > DEGENERATE_STD_FLOOR_DEFAULT,
         "lightning render looks degenerate (std {lightning_std:.2}) — possible NaN / all-black decode"
     );
     println!("[smoke] DONE: lightning render coherent at {steps} steps");

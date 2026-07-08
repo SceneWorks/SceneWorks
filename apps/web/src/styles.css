@@ -1,3 +1,52 @@
+/* ---------- Self-hosted web fonts (sc-8956) ----------
+   Vendored from Google Fonts (both OFL-1.1) so the shell has no runtime
+   dependency on fonts.googleapis.com / fonts.gstatic.com — see
+   public/fonts/LICENSE.md. Both families are variable fonts, so one file per
+   Latin subset covers the full weight range the app uses:
+     Plus Jakarta Sans  400/500/600/700
+     JetBrains Mono     400/500
+   `font-display: swap` matches the previous Google Fonts `&display=swap`. */
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/plus-jakarta-sans-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/plus-jakarta-sans-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url("/fonts/jetbrains-mono-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url("/fonts/jetbrains-mono-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
 /* ---------- SceneWorks design tokens ---------- */
 :root {
   /* Type */
@@ -813,6 +862,36 @@ button:focus-visible {
   color: var(--text);
 }
 
+/* One summary status pill (UI-refinement 1d) — a clickable button that folds API health,
+   worker count and GPU count into a single chip with a chevron. */
+.topbar-status button.status-summary {
+  gap: 6px;
+  font-family: var(--font-ui);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.topbar-status button.status-summary:hover {
+  background: var(--surface-hover);
+}
+
+.status-summary-sep {
+  color: var(--text-faint);
+}
+
+.status-summary-caret {
+  opacity: 0.5;
+  margin-left: 2px;
+}
+
+/* Divider between the system-status group and the personal controls (bell · accent · theme). */
+.topbar-divider {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 22px;
+  background: var(--border);
+}
+
 .queue-chip {
   display: inline-flex;
   align-items: center;
@@ -858,12 +937,28 @@ button:focus-visible {
   color: var(--accent);
 }
 
-/* Accent picker — topbar swatch row */
+/* Accent picker — topbar trigger swatch + dropdown */
 .accent-picker {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
   padding: 0 4px;
+}
+
+/* 2x3 grid of the remaining accents, anchored under the trigger swatch. */
+.accent-picker-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 40;
+  display: grid;
+  grid-template-columns: repeat(3, auto);
+  gap: 8px;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg, 0 8px 24px rgba(0, 0, 0, 0.18));
 }
 
 .accent-swatch {
@@ -1489,6 +1584,250 @@ label {
   flex-wrap: wrap;
 }
 
+/* Mode tabs (UI-refinement 1a): flat underline tabs replacing the segmented pill for the
+   Text / Edit / With-character switch. A shared class so Video/Character studios can adopt
+   the same treatment. Sits on a shared 1px baseline; the active tab carries a 2px accent
+   underline + heavier weight. */
+.mode-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+}
+
+.mode-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 0;
+  padding: 11px 2px;
+  margin-right: 26px;
+  margin-bottom: -1px;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color var(--t-fast);
+}
+
+.mode-tab:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.mode-tab.active {
+  color: var(--text);
+  font-weight: 700;
+  border-bottom-color: var(--accent);
+}
+
+.mode-tab:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Prompt tools (UI-refinement 1b): one framed strip of two equally-weighted toggle tiles;
+   the active tile lights up in accent and reveals its panel inline below. */
+.prompt-tools {
+  display: grid;
+  gap: 8px;
+}
+
+.prompt-tools-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.prompt-tools-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.prompt-tools-head .hairline {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.prompt-tools-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.prompt-tool {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+
+.prompt-tool:hover {
+  border-color: var(--border-strong);
+}
+
+.prompt-tool.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.prompt-tool-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.prompt-tool-desc {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+/* The inline panel a prompt-tool tile reveals (UI-refinement 1b) — a bordered surface-2 card.
+   It wraps the reused ReferenceCaptionPicker / RefinePromptControl, so normalize their internal
+   spacing and flatten the refine-review so it's not a card inside a card. */
+.prompt-tool-panel {
+  margin-top: 2px;
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.prompt-tool-panel .structured-reference,
+.prompt-tool-panel .refine-control {
+  display: grid;
+  gap: 10px;
+}
+
+/* Flatten the nested review card — the panel already provides the surface + border. */
+.prompt-tool-panel .refine-review {
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+/* Primary "Describe image" action reads as accent inside the panel (matches the design). Scoped
+   to the reference flow so the refine Apply/Keep buttons keep their neutral treatment. */
+.prompt-tool-panel .structured-reference .secondary-action {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: transparent;
+}
+
+.prompt-tool-panel .structured-reference .secondary-action:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+/* Apply (the primary action in the rewrite review) reads as accent; Keep original stays neutral. */
+.prompt-tool-panel .refine-review-actions .secondary-action:first-child {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: transparent;
+}
+
+.prompt-tool-panel .refine-review-actions .secondary-action:first-child:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.refine-status {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+/* Settings bar (UI-refinement 2b): the everyday knobs (Model / Aspect / Variations, then a
+   Style-preset row) in a bordered strip directly under the composer. Advanced holds the
+   power-user knobs. */
+.settings-bar {
+  display: grid;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.settings-bar-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: flex-end;
+}
+
+.settings-field {
+  display: grid;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.settings-field-model {
+  flex: 2 1 200px;
+  min-width: 160px;
+}
+
+.settings-field-aspect {
+  flex: 1 1 130px;
+  min-width: 120px;
+}
+
+.settings-field-count {
+  flex: 0 1 96px;
+  min-width: 82px;
+}
+
+.settings-field select,
+.settings-field input {
+  width: 100%;
+  height: 36px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  color: var(--text);
+  font: 400 13px var(--font-ui);
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.settings-bar-styles {
+  display: grid;
+  gap: 7px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.settings-bar-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
 .refine-control {
   display: grid;
   gap: 8px;
@@ -2077,17 +2416,13 @@ label {
 }
 
 /* ---------- Studio results: latest batch + preset rail ---------- */
+/* Single column (UI-refinement 2b): the generation settings moved into the composer, so the
+   results area reclaims the full width the preset rail used to take. */
 .studio-results {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+  grid-template-columns: 1fr;
   gap: 16px;
   align-items: start;
-}
-
-@media (max-width: 1100px) {
-  .studio-results {
-    grid-template-columns: 1fr;
-  }
 }
 
 /* Document Studio (interleaved text-image) — sc-1607/1608. The screen wraps in
@@ -2178,6 +2513,26 @@ label {
 }
 
 .control-panel-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+
+.control-panel-caret {
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+
+.control-panel-headings {
   display: grid;
   gap: 2px;
 }
@@ -3370,6 +3725,12 @@ label {
   transform: rotate(180deg);
 }
 
+/* The video upscale sub-panel folds into Advanced; span the full 2-column grid so its
+   own fields aren't squeezed into a single cell. */
+.advanced-panel .upscale-card {
+  grid-column: 1 / -1;
+}
+
 /* ---------- Video Studio hero variants ---------- */
 /* Hero contains: mode tabs row, prompt + render CTA row, motion chips row. */
 .prompt-source-thumb {
@@ -4123,10 +4484,12 @@ label {
 }
 
 /* ---------- Model + LoRA panels ---------- */
+/* Model catalog is a single-column list of expandable rows (UI-refinement 1c), the same
+   rhythm as the LoRA rows — no longer a dense card grid. */
 .model-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: var(--gap-3);
+  grid-template-columns: 1fr;
+  gap: 8px;
 }
 
 /* Type-grouped model sections (Image / Video / Utility) + family-grouped LoRAs. */
@@ -4283,7 +4646,7 @@ details[open] > summary.lora-scope-group-heading::before,
   font-variant-numeric: tabular-nums;
 }
 
-.model-card,
+.model-row,
 .lora-panel,
 .lora-row,
 .preset-list,
@@ -4352,43 +4715,109 @@ details[open] > summary.lora-scope-group-heading::before,
   white-space: nowrap;
 }
 
-.model-card {
+/* Expandable model rows (UI-refinement 1c): a collapsed summary line (caret · name ·
+   family/capability · status · size) over an expandable body of details + actions. */
+.model-row {
+  overflow: hidden;
+}
+
+.model-row-summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 11px 14px;
+  background: none;
+  border: 0;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.model-row-summary:hover {
+  background: var(--surface-hover);
+}
+
+.model-row-caret {
+  flex: 0 0 auto;
+  width: 10px;
+  font-size: 10px;
+  color: var(--text-faint);
+  transition: transform var(--t-fast);
+}
+
+.model-row-caret.open {
+  transform: rotate(90deg);
+}
+
+.model-row-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.model-row-heading strong {
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-row-heading small {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.model-row-size {
+  flex: 0 0 auto;
+  min-width: 64px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.model-row-body {
   display: grid;
   gap: 12px;
   align-content: start;
-  padding: 14px;
+  padding: 12px 16px 14px 36px;
+  border-top: 1px solid var(--border);
 }
 
-.model-card h3,
-.model-card p,
-.model-card dl {
+.model-row-body[hidden] {
+  display: none;
+}
+
+.model-row-body h3,
+.model-row-body p,
+.model-row-body dl {
   margin: 0;
 }
 
-.model-card h3 {
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.model-card p {
+.model-row-body p {
   color: var(--text-muted);
   line-height: 1.5;
   font-size: 13px;
 }
 
-.model-card dl {
+.model-row-body dl {
   display: grid;
   gap: 8px;
 }
 
-.model-card dt {
+.model-row-body dt {
   color: var(--text-faint);
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
 
-.model-card dd {
+.model-row-body dd {
   margin: 0;
   font-family: var(--font-mono);
   font-size: 12px;
@@ -4481,6 +4910,21 @@ details[open] > summary.lora-scope-group-heading::before,
   border-radius: 999px;
   background: var(--accent, var(--border));
   color: var(--accent-contrast, var(--text));
+}
+
+/* Per-tier RAM advisory (sc-10042): a tier whose estimated peak exceeds the host budget. Advisory
+   pill only — the tier stays installable (SUGGEST-NEVER-WITHHOLD). Distinct from `.status-badge` so
+   it does not collide with the per-tier install-state badge. */
+.model-tier-memory-warning {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklch, var(--danger) 45%, transparent);
+  background: var(--danger-soft);
+  color: color-mix(in oklch, var(--danger) 85%, var(--text));
+  white-space: nowrap;
 }
 
 .model-tier-size {
@@ -4634,6 +5078,13 @@ details[open] > summary.lora-scope-group-heading::before,
   align-items: end;
 }
 
+/* Full-width trigger-keyword + notes fields below the import grid (epic 10328). */
+.lora-import-metadata {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 .lora-import-progress {
   display: grid;
   gap: 8px;
@@ -4662,6 +5113,158 @@ details[open] > summary.lora-scope-group-heading::before,
 
 .lora-row-progress {
   grid-column: 1 / -1;
+}
+
+/* Keyword tag editor (epic 10328) — shared by the LoRA import form and the
+   Model Manager metadata editor. */
+.kw-editor {
+  display: grid;
+  gap: 6px;
+}
+
+.kw-editor-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  cursor: text;
+  min-height: 34px;
+}
+
+.kw-editor-field.disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.kw-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 9px;
+  border-radius: var(--r-pill);
+  font-size: 11.5px;
+  font-weight: 500;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  white-space: nowrap;
+}
+
+.kw-chip button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.kw-chip button:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--accent) 22%, transparent);
+}
+
+.kw-input {
+  flex: 1 1 90px;
+  min-width: 90px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  padding: 2px;
+  outline: none;
+}
+
+.kw-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.kw-suggestions-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.kw-suggestion {
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  border: 1px dashed var(--border);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.kw-suggestion:hover:not(:disabled) {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+}
+
+/* Read-only keyword/notes summary + inline editor inside a LoRA row (epic 10328). */
+.lora-row-meta,
+.lora-row-editor {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+}
+
+.lora-keywords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.lora-keywords .kw-chip {
+  cursor: default;
+}
+
+.lora-notes {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.lora-row-editor label {
+  display: grid;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.lora-row-editor textarea {
+  resize: vertical;
+  min-height: 48px;
+}
+
+.lora-row-editor-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
+/* Read-only keyword chips + notes shown between family and weight in every
+   generation LoRA picker (epic 10328). Spans full width in flex-row and grid
+   rows alike so it wraps below the family line. */
+.lora-keyword-summary {
+  display: grid;
+  gap: 4px;
+  margin: 2px 0;
+  flex-basis: 100%;
+  width: 100%;
+  grid-column: 1 / -1;
+  min-width: 0;
 }
 
 /* Per-Studio model-availability gate (sc-5947): shown in place of a Studio body when no
@@ -4745,6 +5348,368 @@ details[open] > summary.lora-scope-group-heading::before,
 .lora-row.warning {
   border-color: color-mix(in oklch, var(--warm) 45%, var(--border));
   background: var(--warm-soft);
+}
+
+/* User LoRA that's registered but has no local files (installState "missing"): a
+   danger-tinted border marks it as broken/unavailable, distinct from a built-in that
+   is simply "not installed" (neutral). Design: LoraRow handoff (epic 10309). */
+.lora-row.unavailable {
+  border-color: color-mix(in oklch, var(--danger) 30%, var(--border));
+}
+
+/* ============================================================================
+   Model Manager — tabbed interface (epic 10309)
+   Replaces the single scrolling page of collapsible <details> groups + collapsed
+   model rows with four flat-underline tabs (Image / Video / Utility / LoRAs), a
+   persistent search + family filter on the tab bar, a transient Search Results
+   tab, a Recommended band per tab, and always-open model cards. Reuses .mode-tabs
+   / .mode-tab, .status-badge, .chip / .model-capabilities, .model-tier-panel,
+   .model-gated-notice, .lora-row, .segmented-control, .models-import-grid,
+   .danger-action — this block adds only the genuinely new primitives.
+   ============================================================================ */
+
+/* Tab-bar row: the .mode-tabs tablist on the left, search + family on the right,
+   sharing one baseline. The row owns the 1px underline; the nested .mode-tabs
+   drops its own border so the two don't double up. */
+.models-tabbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+}
+
+.models-tabbar .mode-tabs {
+  border-bottom: 0;
+}
+
+/* Count badge trailing each tab label. Active tab = accent pill; inactive = muted. */
+.models-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  padding: 1px 7px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  background: var(--surface-2);
+  color: var(--text-faint);
+}
+
+.mode-tab.active .models-tab-count {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+[data-theme="dark"] .mode-tab.active .models-tab-count {
+  color: var(--accent);
+}
+
+/* Search + family controls, nudged up so they sit above the shared baseline. */
+.models-tabbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 9px;
+  flex-wrap: wrap;
+}
+
+.models-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.models-search-glyph {
+  position: absolute;
+  left: 11px;
+  font-size: 14px;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+/* Explicit width: the global `input { width: 100% }` reset would otherwise blow the
+   search box out to fill the flex row. */
+.models-search input {
+  width: 220px;
+  max-width: 100%;
+  height: 34px;
+  padding: 0 12px 0 31px;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+}
+
+.models-family-select {
+  width: auto;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* One tab's panel: a vertical stack of bands/sections. */
+.models-tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+/* Card grid shared by every model section (recommended band, all-models, search groups). */
+.models-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(302px, 1fr));
+  gap: 14px;
+}
+
+/* Accent band: the Recommended header container + the Import-LoRA form banner. */
+.models-accent-band {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 16px;
+  border-radius: 14px;
+  background: color-mix(in oklch, var(--accent) 5%, var(--surface));
+  border: 1px solid color-mix(in oklch, var(--accent) 22%, var(--border));
+}
+
+.models-accent-band-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.models-accent-band-head .eyebrow {
+  color: var(--accent-strong);
+}
+
+/* Accent dot with a soft ring, marking a band header. */
+.models-accent-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 22%, transparent);
+  flex: 0 0 auto;
+}
+
+.models-accent-band-count {
+  font-size: 12px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.models-accent-band-caption {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+/* The Import-LoRA form adopts .models-accent-band (flex column); keep its URL/Upload
+   segmented control compact rather than stretched to the band width. */
+.models-accent-band > .segmented-control {
+  align-self: flex-start;
+}
+
+/* Plain section (All {type} models, Built-In LoRAs, a User family group, a Search group). */
+.models-section {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+
+.models-subgroups {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.models-subsection {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.models-section-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.models-section-heading h3,
+.models-section-heading h4 {
+  margin: 0;
+  color: var(--text);
+}
+
+.models-section-heading h3 {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.models-section-heading h4 {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.models-section-heading > span {
+  font-size: 12px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Always-open model card (replaces the collapsed .model-row summary/body). */
+.model-card {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.model-card.recommended {
+  border-color: color-mix(in oklch, var(--accent) 45%, var(--border));
+}
+
+.model-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+/* Header right column: the install-status badge plus any attention badges
+   (needs family / not on Mac), wrapping right-aligned. */
+.model-card-status {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+}
+
+.model-card-title {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.model-card-title strong {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.model-card-title small {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* ★ Recommended chip. */
+.model-card-rec-chip {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+[data-theme="dark"] .model-card-rec-chip {
+  color: var(--accent);
+}
+
+.model-card-description {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* Footer: download size (mono) left, primary + delete right. */
+.model-card-footer {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.model-card-size {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.model-card-footer-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Card primary action: accent-filled when actionable, muted when disabled. Uses
+   --accent-fg for the label so it reads on the (light-in-dark-mode) accent fill. */
+.model-card-primary {
+  min-height: 34px;
+  padding: 0 15px;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--accent-strong);
+  color: var(--accent-fg);
+  border: 1px solid var(--accent-strong);
+}
+
+.model-card-primary:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.model-card-primary:disabled {
+  background: var(--surface-2);
+  color: var(--text-faint);
+  border-color: var(--border);
+}
+
+/* Empty-state dashed box shared by the model + search panels. */
+.models-empty {
+  padding: 44px;
+  text-align: center;
+  color: var(--text-muted);
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
+  font-size: 14px;
+}
+
+/* Incomplete / attention status badge — warn tones. No such rule existed before;
+   the design's incomplete state and the pre-existing `needs family` / `not on Mac`
+   badges (which used `status-badge warning` with no matching rule) both adopt it. */
+.status-badge.warning {
+  border-color: color-mix(in oklch, var(--warn) 45%, transparent);
+  background: var(--warn-soft);
+  color: color-mix(in oklch, var(--warn) 80%, var(--text));
+}
+
+/* Danger status badge — an unavailable (broken) user LoRA. */
+.status-badge.danger {
+  border-color: color-mix(in oklch, var(--danger) 45%, transparent);
+  background: var(--danger-soft);
+  color: color-mix(in oklch, var(--danger) 85%, var(--text));
 }
 
 /* ---------- Characters / presets ---------- */
@@ -5394,10 +6359,21 @@ details[open] > summary.lora-scope-group-heading::before,
 }
 
 .lora-slot-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
   min-width: 0;
+}
+
+.lora-slot-meta strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lora-slot-meta small {
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 .lora-slot-remove {
@@ -5515,12 +6491,37 @@ details[open] > summary.lora-scope-group-heading::before,
   transition: border-color var(--t-fast);
 }
 
-.lora-pick-row:hover {
+.lora-pick-row:hover:not(:disabled) {
   border-color: var(--accent);
+  background: var(--surface-hover);
+}
+
+.lora-pick-row:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .lora-pick-row strong {
   font-weight: 600;
+}
+
+/* Accent "Add" affordance on the right of each dropdown row (UI-refinement 3b). */
+.lora-pick-add {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.lora-pick-row:disabled .lora-pick-add {
+  color: var(--text-faint);
+}
+
+/* Mono weight readout in an added LoRA slot's Weight header row. */
+.lora-slot-weight-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
 }
 
 .lora-pick-empty {
@@ -5948,6 +6949,15 @@ details[open] > summary.lora-scope-group-heading::before,
   background: var(--surface-2);
   border-radius: var(--r-md);
   border: 1px solid var(--border);
+}
+
+/* Uniform control height so every select and number/text field in the panel lines up
+   on one baseline (the intrinsic heights of <select> and <input type=number> differ
+   otherwise). Excludes the negative-prompt textarea, checkbox toggles, and range sliders. */
+.advanced-panel select,
+.advanced-panel input:not([type="checkbox"]):not([type="range"]) {
+  height: 38px;
+  box-sizing: border-box;
 }
 
 /* Checkbox toggles are single-line rows (checkbox + label + any badge), not the
@@ -6412,6 +7422,435 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 16px;
 }
 
+/* ══ Image Editor redesign — grid shell + accordion (epic 10243) ══════════════
+   Presentation-only overhaul. The `--ie-*` names mirror the design handoff but
+   alias the app's existing global tokens, so light/dark (`[data-theme]`) and
+   accent (`[data-accent]`) theming apply automatically — do NOT hardcode values.
+   The shell fills the editor surface (not `position:fixed`) so it respects the
+   app nav. Old `.image-editor-*` rules below are removed in Slice I. */
+/* Compound selector so grid `display` wins over `.image-editor-surface` (kept on
+   the section for the workspace full-bleed rule, later in the file). */
+.image-editor-surface.ie-shell {
+  --ie-bg: var(--bg);
+  --ie-bg2: var(--bg-2);
+  --ie-surface: var(--surface);
+  --ie-surface2: var(--surface-2);
+  --ie-surface-hover: var(--surface-hover);
+  --ie-border: var(--border);
+  --ie-border-strong: var(--border-strong);
+  --ie-text: var(--text);
+  --ie-muted: var(--text-muted);
+  --ie-faint: var(--text-faint);
+  --ie-accent: var(--accent);
+  --ie-accent-fg: var(--accent-fg);
+  --ie-accent-strong: var(--accent-strong);
+  --ie-accent-soft: var(--accent-soft);
+  --ie-danger: var(--danger);
+  --ie-warn: var(--warn);
+  --ie-shadow: var(--shadow-md);
+  --ie-shadow-lg: var(--shadow-lg);
+  --ie-mono: var(--font-mono);
+  --ie-rail: 78px;
+  --ie-insp: 336px;
+  --ie-layers: 300px;
+
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--ie-insp);
+  grid-template-rows: 54px minmax(0, 1fr) auto 32px;
+  grid-template-areas:
+    "top    top"
+    "canvas insp"
+    "canvas layers"
+    "status status";
+  min-height: 0;
+  background: var(--ie-bg);
+  color: var(--ie-text);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Layout variants ── */
+.ie-shell[data-ie-layout="right"] {
+  grid-template-columns: var(--ie-rail) minmax(0, 1fr) var(--ie-insp);
+  grid-template-rows: 54px minmax(0, 1fr) minmax(184px, 236px) 32px;
+  grid-template-areas:
+    "top    top    top"
+    "rail   canvas insp"
+    "rail   canvas layers"
+    "status status status";
+}
+.ie-shell[data-ie-layout="left"] {
+  grid-template-columns: var(--ie-insp) minmax(0, 1fr) var(--ie-layers);
+  grid-template-rows: 54px auto minmax(0, 1fr) 32px;
+  grid-template-areas:
+    "top    top    top"
+    "rail   canvas layers"
+    "insp   canvas layers"
+    "status status status";
+}
+.ie-shell[data-ie-layout="left"] .ie-rail {
+  flex-direction: row;
+  flex-wrap: wrap;
+  width: auto;
+  padding: 10px 12px;
+  gap: 6px;
+  border-right: 1px solid var(--ie-border);
+  border-bottom: none;
+}
+.ie-shell[data-ie-layout="left"] .ie-tool { flex: 0 0 auto; width: 62px; }
+.ie-shell[data-ie-layout="bottom"] {
+  grid-template-columns: var(--ie-rail) minmax(0, 1fr) var(--ie-layers);
+  grid-template-rows: 54px minmax(0, 1fr) auto 32px;
+  grid-template-areas:
+    "top    top    top"
+    "rail   canvas layers"
+    "insp   insp   insp"
+    "status status status";
+}
+.ie-shell[data-ie-layout="bottom"] .ie-inspector {
+  flex-direction: row;
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-height: 230px;
+  align-items: stretch;
+  border-left: none;
+  border-top: 1px solid var(--ie-border);
+}
+.ie-shell[data-ie-layout="bottom"] .ie-insp-head { display: none; }
+.ie-shell[data-ie-layout="bottom"] .ie-insp-body { flex-direction: row; overflow: visible; padding: 14px; gap: 14px; }
+.ie-shell[data-ie-layout="bottom"] .ie-section {
+  flex: 0 0 auto;
+  width: 268px;
+  border-bottom: none;
+  border-right: 1px solid var(--ie-border);
+  padding: 0 16px 0 0;
+}
+.ie-shell[data-ie-layout="bottom"] .ie-section:last-child { border-right: none; }
+
+/* Accordion (default): tools live as collapsible headers in the sidebar */
+.ie-shell[data-ie-layout="accordion"] .ie-rail { display: none; }
+.ie-shell[data-ie-layout="accordion"] .ie-insp-head { display: none; }
+.ie-shell[data-ie-layout="accordion"] .ie-inspector { border-left: 1px solid var(--ie-border); }
+.ie-shell[data-ie-layout="accordion"] .ie-insp-body { padding-bottom: 6px; }
+.ie-shell[data-ie-layout="accordion"] .ie-layers { border-top: none; max-height: 46vh; }
+.ie-shell[data-ie-layout="accordion"] .ie-layers-list { max-height: 240px; }
+
+.ie-acc-head { display: none; }
+.ie-shell[data-ie-layout="accordion"] .ie-acc-head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 13px 16px;
+  border: 0;
+  border-bottom: 1px solid var(--ie-border);
+  background: var(--ie-surface);
+  color: var(--ie-text);
+  cursor: pointer;
+  font: 600 13.5px var(--font-ui);
+  text-align: left;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.ie-shell[data-ie-layout="accordion"] .ie-acc-head:hover { background: var(--ie-surface-hover); }
+.ie-shell[data-ie-layout="accordion"] .ie-acc-head[data-active="true"] { color: var(--ie-accent); background: var(--ie-accent-soft); }
+.ie-acc-ic { display: grid; color: var(--ie-muted); }
+.ie-acc-ic svg { width: 18px; height: 18px; display: block; }
+.ie-acc-head[data-active="true"] .ie-acc-ic { color: var(--ie-accent); }
+.ie-acc-label { flex: 1; }
+.ie-acc-chev { display: grid; color: var(--ie-faint); transition: transform var(--t-med) ease; }
+.ie-acc-chev[data-open="true"] { transform: rotate(180deg); }
+.ie-acc-head[data-active="true"] .ie-acc-chev { color: var(--ie-accent); }
+.ie-shell[data-ie-layout="accordion"] .ie-insp-body > .ie-section { background: var(--ie-surface); }
+
+/* Grid areas */
+.ie-topbar { grid-area: top; }
+.ie-rail { grid-area: rail; }
+.ie-canvas { grid-area: canvas; }
+.ie-inspector { grid-area: insp; }
+.ie-layers { grid-area: layers; }
+.ie-statusbar { grid-area: status; }
+
+/* ── Top bar ── */
+.ie-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  background: var(--ie-surface);
+  border-bottom: 1px solid var(--ie-border);
+}
+.ie-brand { display: flex; align-items: center; gap: 9px; padding-right: 14px; margin-right: 2px; border-right: 1px solid var(--ie-border); }
+.ie-brand-mark { width: 26px; height: 26px; border-radius: 7px; background: var(--ie-accent); display: grid; place-items: center; color: var(--ie-accent-fg); }
+.ie-doc { display: flex; flex-direction: column; min-width: 0; }
+.ie-doc-name { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.ie-doc-sub { font-size: 11.5px; color: var(--ie-faint); font-family: var(--ie-mono); margin-top: 1px; }
+.ie-spacer { flex: 1; }
+.ie-topgroup { display: flex; align-items: center; gap: 7px; }
+.ie-divider { width: 1px; height: 24px; background: var(--ie-border); margin: 0 3px; }
+
+/* ── Buttons ── */
+.ie-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 13px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--ie-border);
+  background: var(--ie-surface);
+  color: var(--ie-text);
+  font: 500 13px var(--font-ui);
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+  transition: background var(--t-fast), border-color var(--t-fast), color var(--t-fast), transform 60ms;
+}
+.ie-btn:hover { background: var(--ie-surface-hover); border-color: var(--ie-border-strong); }
+.ie-btn:active { transform: translateY(1px); }
+.ie-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.ie-btn:disabled:hover { background: var(--ie-surface); border-color: var(--ie-border); transform: none; }
+.ie-btn.sm { height: 28px; padding: 0 10px; font-size: 12px; border-radius: var(--r-xs); gap: 5px; }
+.ie-btn.icon { width: 34px; padding: 0; }
+.ie-btn.icon.sm { width: 28px; }
+.ie-btn.ghost { background: transparent; border-color: transparent; }
+.ie-btn.ghost:hover { background: var(--ie-surface-hover); border-color: transparent; }
+.ie-btn.primary {
+  background: var(--ie-accent);
+  color: var(--ie-accent-fg);
+  border-color: transparent;
+  font-weight: 600;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ie-accent) 40%, transparent), 0 6px 16px color-mix(in srgb, var(--ie-accent) 22%, transparent);
+}
+.ie-btn.primary:hover { background: var(--ie-accent-strong); border-color: transparent; }
+.ie-btn.danger:hover { color: var(--ie-danger); border-color: color-mix(in srgb, var(--ie-danger) 45%, var(--ie-border)); }
+.ie-btn.block { width: 100%; height: 40px; font-size: 13.5px; }
+.ie-btn.on { border-color: var(--ie-accent); color: var(--ie-accent); background: var(--ie-accent-soft); }
+
+/* ── Tool rail ── */
+.ie-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  background: var(--ie-surface);
+  border-right: 1px solid var(--ie-border);
+  overflow-y: auto;
+}
+.ie-rail-cap { font: 700 9.5px var(--font-ui); letter-spacing: 0.09em; text-transform: uppercase; color: var(--ie-faint); padding: 4px 4px 2px; }
+.ie-shell[data-ie-layout="left"] .ie-rail-cap { display: none; }
+.ie-tool {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 9px 4px 7px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ie-muted);
+  cursor: pointer;
+  font: 600 10.5px var(--font-ui);
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.ie-tool:hover { background: var(--ie-surface-hover); color: var(--ie-text); }
+.ie-tool:disabled { opacity: 0.4; cursor: not-allowed; }
+.ie-tool[data-active="true"] { background: var(--ie-accent-soft); color: var(--ie-accent); border-color: color-mix(in srgb, var(--ie-accent) 40%, transparent); }
+.ie-tool svg { width: 21px; height: 21px; }
+
+/* ── Canvas ── */
+.ie-canvas {
+  position: relative;
+  overflow: hidden;
+  background:
+    linear-gradient(45deg, color-mix(in srgb, var(--ie-bg2) 60%, transparent) 25%, transparent 25%, transparent 75%, color-mix(in srgb, var(--ie-bg2) 60%, transparent) 75%),
+    linear-gradient(45deg, color-mix(in srgb, var(--ie-bg2) 60%, transparent) 25%, var(--ie-bg) 25%, var(--ie-bg) 75%, color-mix(in srgb, var(--ie-bg2) 60%, transparent) 75%);
+  background-size: 22px 22px;
+  background-position: 0 0, 11px 11px;
+}
+.ie-canvas-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--ie-muted); text-align: center; padding: 24px; }
+.ie-canvas-empty-title { font-weight: 600; color: var(--ie-text); }
+.ie-linkbtn { background: none; border: 0; color: var(--ie-accent); cursor: pointer; padding: 0; font: inherit; text-decoration: underline; }
+
+.ie-viewbar {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 7px;
+  background: var(--ie-surface);
+  border: 1px solid var(--ie-border);
+  border-radius: var(--r-md);
+  box-shadow: var(--ie-shadow);
+  z-index: 4;
+}
+.ie-zoom { min-width: 46px; text-align: center; font: 600 12px var(--ie-mono); }
+.ie-hint {
+  position: absolute;
+  left: 16px;
+  top: 14px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  background: var(--ie-surface);
+  border: 1px solid var(--ie-border);
+  border-radius: 9px;
+  box-shadow: var(--ie-shadow);
+  font-size: 12.5px;
+  color: var(--ie-muted);
+  max-width: 320px;
+}
+.ie-hint svg { width: 15px; height: 15px; flex: 0 0 auto; }
+.ie-hint b { color: var(--ie-text); font-weight: 600; }
+
+.ie-busy { position: absolute; inset: 0; display: grid; place-items: center; background: color-mix(in srgb, var(--ie-bg) 55%, transparent); backdrop-filter: blur(2px); z-index: 6; }
+.ie-busy-card { width: 300px; padding: 20px; background: var(--ie-surface); border: 1px solid var(--ie-border); border-radius: 14px; box-shadow: var(--ie-shadow-lg); text-align: center; }
+.ie-busy-title { font-weight: 600; margin: 0 0 4px; }
+.ie-busy-msg { font-size: 12.5px; color: var(--ie-muted); margin: 0 0 14px; }
+.ie-busy-track { height: 6px; border-radius: var(--r-pill); background: var(--ie-surface-hover); overflow: hidden; }
+.ie-busy-fill { height: 100%; border-radius: var(--r-pill); background: var(--ie-accent); animation: ie-busy 1.4s ease infinite; width: 40%; }
+.ie-busy-fill.determinate { animation: none; }
+@keyframes ie-busy { 0% { transform: translateX(-120%); } 100% { transform: translateX(320%); } }
+
+/* ── Inspector ── */
+.ie-inspector { display: flex; flex-direction: column; background: var(--ie-surface); border-left: 1px solid var(--ie-border); min-height: 0; }
+.ie-insp-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px 12px; border-bottom: 1px solid var(--ie-border); }
+.ie-insp-icon { width: 30px; height: 30px; border-radius: var(--r-sm); background: var(--ie-accent-soft); color: var(--ie-accent); display: grid; place-items: center; }
+.ie-insp-icon svg { width: 17px; height: 17px; }
+.ie-insp-title { font-weight: 700; font-size: 15px; }
+.ie-insp-desc { font-size: 11.5px; color: var(--ie-faint); margin-top: 1px; }
+.ie-insp-body { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
+.ie-section { padding: 15px 16px; border-bottom: 1px solid var(--ie-border); display: flex; flex-direction: column; gap: 12px; }
+.ie-section:last-child { border-bottom: none; }
+.ie-sec-title { font: 700 10.5px var(--font-ui); letter-spacing: 0.07em; text-transform: uppercase; color: var(--ie-faint); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
+/* Field / slider */
+.ie-field { display: flex; flex-direction: column; gap: 7px; }
+.ie-field-top { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.ie-field-label { font-size: 12.5px; font-weight: 500; color: var(--ie-text); }
+.ie-field-val { font: 600 12px var(--ie-mono); color: var(--ie-muted); font-variant-numeric: tabular-nums; }
+.ie-range { -webkit-appearance: none; appearance: none; width: 100%; height: 5px; border-radius: var(--r-pill); background: var(--ie-surface-hover); accent-color: var(--ie-accent); cursor: pointer; }
+.ie-range::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: var(--ie-surface); border: 2px solid var(--ie-accent); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); cursor: grab; margin-top: -6px; }
+.ie-range::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: var(--ie-surface); border: 2px solid var(--ie-accent); }
+.ie-range::-webkit-slider-runnable-track { height: 5px; border-radius: var(--r-pill); }
+.ie-input, .ie-select, .ie-textarea {
+  width: 100%;
+  background: var(--ie-surface);
+  border: 1px solid var(--ie-border);
+  border-radius: var(--r-sm);
+  padding: 9px 11px;
+  color: var(--ie-text);
+  font: 500 13px var(--font-ui);
+}
+.ie-select {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2.5'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 11px center;
+  padding-right: 30px;
+  cursor: pointer;
+}
+.ie-textarea { min-height: 78px; resize: vertical; line-height: 1.5; }
+.ie-input:focus, .ie-select:focus, .ie-textarea:focus { outline: none; border-color: var(--ie-accent); box-shadow: 0 0 0 3px var(--ie-accent-soft); }
+.ie-numfield { text-align: right; font-family: var(--ie-mono); font-weight: 600; padding: 7px 9px; }
+
+/* Segmented control */
+.ie-seg { display: inline-flex; background: var(--ie-surface2); border: 1px solid var(--ie-border); border-radius: 9px; padding: 3px; gap: 2px; }
+.ie-seg.wrap { display: grid; grid-template-columns: repeat(3, 1fr); width: 100%; }
+.ie-seg.two { grid-template-columns: repeat(2, 1fr); }
+.ie-seg.four { grid-template-columns: repeat(4, 1fr); }
+.ie-seg-btn { flex: 1; min-height: 28px; padding: 0 11px; border: 0; border-radius: var(--r-xs); background: transparent; color: var(--ie-muted); font: 600 12px var(--font-ui); cursor: pointer; transition: background var(--t-fast), color var(--t-fast); white-space: nowrap; }
+.ie-seg-btn:hover { color: var(--ie-text); }
+.ie-seg-btn[data-active="true"] { background: var(--ie-surface); color: var(--ie-text); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12); }
+[data-theme="dark"] .ie-seg-btn[data-active="true"] { color: var(--ie-accent); }
+.ie-seg-icon svg { width: 15px; height: 15px; }
+
+/* Radio cards */
+.ie-cards { display: flex; flex-direction: column; gap: 8px; }
+.ie-card { display: flex; gap: 11px; padding: 11px 12px; border: 1px solid var(--ie-border); border-radius: var(--r-md); background: var(--ie-surface); cursor: pointer; transition: border-color var(--t-fast), background var(--t-fast); text-align: left; }
+.ie-card:hover { border-color: var(--ie-border-strong); }
+.ie-card[data-active="true"] { border-color: var(--ie-accent); background: var(--ie-accent-soft); }
+.ie-radio { flex: 0 0 auto; width: 17px; height: 17px; border-radius: 50%; border: 2px solid var(--ie-border-strong); margin-top: 1px; display: grid; place-items: center; }
+.ie-card[data-active="true"] .ie-radio { border-color: var(--ie-accent); }
+.ie-card[data-active="true"] .ie-radio::after { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--ie-accent); }
+.ie-card-name { font-weight: 600; font-size: 13px; display: block; }
+.ie-card-desc { font-size: 11.5px; color: var(--ie-muted); margin-top: 2px; line-height: 1.4; display: block; }
+
+/* Readout chip / note */
+.ie-readout { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 11px 13px; background: var(--ie-surface2); border: 1px solid var(--ie-border); border-radius: var(--r-md); }
+.ie-readout-k { font-size: 12px; color: var(--ie-muted); }
+.ie-readout-v { font: 700 14px var(--ie-mono); color: var(--ie-text); }
+.ie-note { font-size: 11.5px; line-height: 1.5; color: var(--ie-muted); margin: 0; }
+
+/* Swatches / chips */
+.ie-swatches { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+.ie-swatch { width: 26px; height: 26px; border-radius: 7px; border: 1px solid rgba(0, 0, 0, 0.12); cursor: pointer; padding: 0; position: relative; }
+.ie-swatch[data-active="true"] { box-shadow: 0 0 0 2px var(--ie-surface), 0 0 0 4px var(--ie-accent); }
+.ie-swatch-custom { display: grid; place-items: center; overflow: hidden; }
+.ie-swatch-custom input { position: absolute; inset: -4px; width: calc(100% + 8px); height: calc(100% + 8px); border: 0; padding: 0; background: none; cursor: pointer; }
+.ie-chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.ie-chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: var(--r-pill); border: 1px solid var(--ie-border); background: var(--ie-surface); font: 600 12px var(--font-ui); color: var(--ie-text); cursor: pointer; }
+.ie-chip:hover { background: var(--ie-surface-hover); }
+.ie-chip[data-active="true"] { border-color: var(--ie-accent); color: var(--ie-accent); background: var(--ie-accent-soft); }
+.ie-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+.ie-chip .warn { color: var(--ie-warn); font-weight: 800; }
+
+/* LoRA / reference rows */
+.ie-lora { display: flex; flex-direction: column; gap: 8px; padding: 10px 11px; border: 1px solid var(--ie-border); border-radius: var(--r-md); background: var(--ie-surface2); }
+.ie-lora-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ie-lora-name { font-weight: 600; font-size: 12.5px; }
+.ie-refs { display: flex; gap: 8px; flex-wrap: wrap; }
+.ie-ref { width: 52px; height: 52px; border-radius: 9px; border: 1px solid var(--ie-border); position: relative; overflow: hidden; display: grid; place-items: center; color: var(--ie-faint); background: repeating-linear-gradient(45deg, var(--ie-surface2), var(--ie-surface2) 6px, var(--ie-surface-hover) 6px, var(--ie-surface-hover) 12px); }
+.ie-ref img { width: 100%; height: 100%; object-fit: cover; }
+.ie-ref-remove { position: absolute; top: -8px; right: -8px; width: 20px; height: 20px; background: var(--ie-surface); border: 1px solid var(--ie-border); border-radius: 50%; color: var(--ie-text); cursor: pointer; display: grid; place-items: center; font-size: 11px; z-index: 1; }
+.ie-ref-add { width: 52px; height: 52px; border-radius: 9px; border: 1px dashed var(--ie-border-strong); background: transparent; color: var(--ie-muted); cursor: pointer; display: grid; place-items: center; font-size: 20px; }
+.ie-histo { width: 100%; height: 58px; border: 1px solid var(--ie-border); border-radius: var(--r-sm); background: var(--ie-surface2); display: block; }
+
+/* Curve editor container tweak (reuse CurveEditor component) */
+.ie-curvewrap :is(canvas, svg) { width: 100%; border: 1px solid var(--ie-border); border-radius: var(--r-sm); background: var(--ie-surface2); display: block; }
+
+/* ── Layers ── */
+.ie-layers { display: flex; flex-direction: column; background: var(--ie-surface); border-left: 1px solid var(--ie-border); border-top: 1px solid var(--ie-border); min-height: 0; }
+.ie-shell[data-ie-layout="left"] .ie-layers, .ie-shell[data-ie-layout="bottom"] .ie-layers { border-top: none; }
+.ie-layers-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px 10px; border-bottom: 1px solid var(--ie-border); }
+.ie-layers-title { font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 8px; background: none; border: 0; color: var(--ie-text); cursor: pointer; padding: 4px 2px; margin: -4px -2px; border-radius: var(--r-xs); font-family: var(--font-ui); }
+.ie-layers-title:hover { color: var(--ie-accent); }
+.ie-layers-title:hover .ie-acc-chev { color: var(--ie-accent); }
+.ie-layers-count { font: 600 11px var(--ie-mono); color: var(--ie-faint); background: var(--ie-surface2); border: 1px solid var(--ie-border); border-radius: var(--r-pill); padding: 1px 7px; }
+.ie-layers-list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.ie-layer { border: 1px solid var(--ie-border); border-radius: var(--r-md); padding: 9px 10px; background: var(--ie-surface); cursor: pointer; transition: border-color var(--t-fast), background var(--t-fast); }
+.ie-layer:hover { background: var(--ie-surface-hover); }
+.ie-layer[data-active="true"] { border-color: var(--ie-accent); background: var(--ie-accent-soft); }
+.ie-layer-row { display: flex; align-items: center; gap: 9px; }
+.ie-layer-vis { flex: 0 0 auto; width: 24px; height: 24px; border-radius: var(--r-xs); border: 0; background: transparent; color: var(--ie-muted); cursor: pointer; display: grid; place-items: center; }
+.ie-layer-vis:hover { background: var(--ie-surface2); color: var(--ie-text); }
+.ie-layer-vis .ie-vis-off { opacity: 0.38; }
+.ie-layer-thumb { width: 36px; height: 30px; border-radius: var(--r-xs); border: 1px solid var(--ie-border); flex: 0 0 auto; object-fit: cover; }
+.ie-layer-name { flex: 1; font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ie-layer-blend { font: 500 10.5px var(--ie-mono); color: var(--ie-faint); text-transform: uppercase; }
+.ie-layer-op { margin-top: 9px; display: flex; align-items: center; gap: 10px; }
+.ie-layer-op .ie-range { flex: 1; }
+.ie-layer-opnum { width: 56px; }
+.ie-layer-opnum .ie-input { text-align: right; font: 600 12px var(--ie-mono); padding: 5px 7px; }
+.ie-layer-blendsel { margin-top: 8px; }
+.ie-layer-blendsel .ie-select { padding: 6px 28px 6px 9px; font-size: 12px; }
+
+/* ── Status bar ── */
+.ie-statusbar { display: flex; align-items: center; gap: 16px; padding: 0 16px; background: var(--ie-surface); border-top: 1px solid var(--ie-border); font-size: 11.5px; color: var(--ie-muted); }
+.ie-statusbar .ie-mono { font-family: var(--ie-mono); }
+.ie-status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ie-accent); flex: 0 0 auto; }
+
+
+/* ── Image Editor — non-redesigned surfaces kept after epic 10243 ──────────
+   The grid-shell redesign moved every tool/panel to the `.ie-*` design system
+   (above). What remains here: the full-bleed `.image-editor-surface` base (the
+   section also carries `.ie-shell`), the keyboard-shortcut overlay, and the
+   New-layout modal — surfaces the handoff did not respec. */
 /* ── Image Editor (epic 2427) ───────────────────────────────────────────── */
 .image-editor-surface {
   display: flex;
@@ -6432,281 +7871,7 @@ details[open] > summary.lora-scope-group-heading::before,
   background: transparent;
 }
 
-/* Thin bar under the page header: image title + Open / Source. */
-.image-editor-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
-}
-
-.image-editor-title {
-  font-weight: 600;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.image-editor-bar-actions {
-  display: flex;
-  align-items: center;
-  flex-shrink: 0;
-  gap: 8px;
-}
-
-/* "Saved ✓" hint shown after a successful Save, until the next edit (sc-2434). */
-.image-editor-saved {
-  font-size: 12px;
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-/* Inline hint shown in place of the brush controls when smart-select (box) is active. */
-.image-editor-hint {
-  font-size: 12px;
-  color: var(--muted);
-  white-space: nowrap;
-  align-self: center;
-}
-
-.image-editor-notice {
-  margin: 8px 16px 0;
-}
-
-/* The tool palette floats over the canvas on the right, like the zoom bar. It
-   scrolls within itself if it ever outgrows the canvas height (more tools/panels). */
-.image-editor-toolbar {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  max-height: calc(100% - 24px);
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--surface);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
-}
-
-.image-editor-tool {
-  min-width: 88px;
-  text-align: left;
-}
-
-.image-editor-tool.active {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-/* Layers panel (sc-6118): floating top-left, mirroring the tool palette. */
-.image-editor-layers {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  width: 232px;
-  max-height: calc(100% - 24px);
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--surface);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
-  overflow: hidden;
-}
-
-.image-editor-layers-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
-}
-
-.image-editor-layers-title {
-  font-weight: 600;
-  font-size: 13px;
-}
-
-.image-editor-layers-add {
-  font-size: 12px;
-  padding: 2px 8px;
-}
-
-.image-editor-layers-list {
-  overflow-y: auto;
-  padding: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.image-editor-layer {
-  display: grid;
-  grid-template-columns: auto 36px 1fr auto;
-  align-items: center;
-  gap: 6px;
-  padding: 4px;
-  border: 1px solid transparent;
-  border-radius: var(--r-sm);
-  cursor: pointer;
-}
-
-.image-editor-layer:hover {
-  background: var(--surface-2);
-}
-
-.image-editor-layer.active {
-  border-color: var(--accent);
-  background: var(--surface-2);
-}
-
-.image-editor-layer-vis {
-  min-width: 24px;
-  padding: 2px 4px;
-  line-height: 1;
-}
-
-.image-editor-layer-thumb {
-  width: 36px;
-  height: 36px;
-  object-fit: contain;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  /* Checkerboard so a transparent layer reads as transparent, not blank. */
-  background: repeating-conic-gradient(var(--surface-2) 0% 25%, var(--surface) 0% 50%) 50% / 10px 10px;
-}
-
-.image-editor-layer-body {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.image-editor-layer-name {
-  font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.image-editor-layer-rename {
-  font-size: 12px;
-  width: 100%;
-}
-
-.image-editor-layer-opacity {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.image-editor-layer-opacity input[type="range"] {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.image-editor-layer-opacity-val {
-  font-size: 11px;
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
-  min-width: 30px;
-  text-align: right;
-}
-
-.image-editor-layer-blend {
-  width: 100%;
-  font-size: 11px;
-  padding: 1px 4px;
-}
-
-.image-editor-layer-ops {
-  display: grid;
-  grid-template-columns: auto auto;
-  gap: 2px;
-}
-
-.image-editor-layer-op {
-  min-width: 22px;
-  padding: 2px 4px;
-  font-size: 11px;
-  line-height: 1;
-}
-
-.image-editor-canvas-wrap {
-  position: relative;
-  flex: 1 1 auto;
-  /* Fills the surface via flex; the floor keeps the canvas from collapsing if the
-     flex chain ever resolves to zero height (e.g. a 0-height ancestor). */
-  min-height: 420px;
-  background: repeating-conic-gradient(var(--surface-2) 0% 25%, var(--surface) 0% 50%) 50% / 24px 24px;
-  overflow: hidden;
-}
-
-.image-editor-empty {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 24px;
-  text-align: center;
-  color: var(--text-muted);
-  pointer-events: none;
-}
-
-.image-editor-empty-title {
-  font-weight: 600;
-  color: var(--text);
-}
-
-.image-editor-viewbar {
-  position: absolute;
-  left: 50%;
-  bottom: 12px;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--surface);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
-}
-
-.image-editor-viewbar button {
-  min-width: 32px;
-}
-
-.image-editor-zoom {
-  min-width: 48px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-
-.image-editor-dims {
-  color: var(--text-muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-/* Keyboard-shortcut help button + quick-reference panel (sc-6111). */
-.image-editor-help {
-  min-width: 32px;
-  font-size: 15px;
-  line-height: 1;
-}
-
+/* Keyboard-shortcut quick-reference overlay (sc-6111). */
 .image-editor-shortcuts {
   position: absolute;
   top: 12px;
@@ -6784,344 +7949,14 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--text);
 }
 
-.image-editor-cropbar {
-  position: absolute;
-  left: 50%;
-  top: 12px;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  max-width: calc(100% - 24px);
-  flex-wrap: wrap;
-  justify-content: center;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--surface);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
-}
-
+/* Aspect-ratio button row — still used by the New-layout modal. */
 .image-editor-ratios {
   display: flex;
   gap: 4px;
 }
 
-.image-editor-ratios button.active,
-.image-editor-cropbar > button.active {
+.image-editor-ratios button.active {
   border-color: var(--accent);
-  color: var(--accent);
-}
-
-.image-editor-cropdims {
-  min-width: 76px;
-  text-align: center;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-/* Color-grade bar (sc-2439): a row of compact slider columns + actions. */
-.image-editor-slider {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-}
-
-.image-editor-slider-label {
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.image-editor-slider input[type="range"] {
-  width: 96px;
-}
-
-.image-editor-slider-value {
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-muted);
-}
-
-/* Color tool (sc-6109): a vertical panel with Adjust / Levels / Curves modes. */
-.image-editor-colorbar {
-  flex-direction: column;
-  align-items: stretch;
-  gap: 8px;
-  max-width: 260px;
-}
-
-.image-editor-colorbar .image-editor-slider {
-  flex-direction: row;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.image-editor-colorbar .image-editor-slider input[type="range"] {
-  flex: 1 1 auto;
-  width: auto;
-}
-
-.image-editor-color-modes {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 4px;
-}
-
-.image-editor-color-modes button.active {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.image-editor-histogram {
-  width: 100%;
-  height: 56px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--surface-2);
-}
-
-.image-editor-curve {
-  width: 100%;
-  height: auto;
-  aspect-ratio: 1 / 1;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  touch-action: none;
-}
-
-.image-editor-curve-bg {
-  fill: var(--surface-2);
-}
-
-.image-editor-curve-grid {
-  stroke: var(--border);
-  stroke-width: 1;
-  vector-effect: non-scaling-stroke;
-}
-
-.image-editor-curve-diagonal {
-  stroke: var(--text-muted);
-  stroke-dasharray: 4 4;
-  stroke-width: 1;
-  vector-effect: non-scaling-stroke;
-  opacity: 0.5;
-}
-
-.image-editor-curve-handle {
-  fill: var(--surface);
-  stroke-width: 2;
-  cursor: grab;
-}
-
-/* AI prompt-edit bar (sc-2435): model picker + prompt + seed inline. */
-.image-editor-editbar .image-editor-editprompt {
-  min-width: 260px;
-  flex: 1 1 260px;
-}
-
-.image-editor-editbar .image-editor-editseed {
-  width: 80px;
-}
-
-.image-editor-editbar .image-editor-editmodel {
-  max-width: 200px;
-}
-
-/* Reference-image conditioning (sc-6107): a compact row of reference thumbnails + an add button,
-   shown only for a FLUX.2 multiReference edit model. */
-.image-editor-refs {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.image-editor-ref-chip {
-  position: relative;
-  width: 30px;
-  height: 30px;
-  border-radius: var(--r-sm);
-  overflow: hidden;
-  border: 1px solid var(--border);
-  background: var(--surface-2, var(--surface));
-}
-
-.image-editor-ref-chip img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.image-editor-ref-chip > span {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  height: 100%;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.image-editor-ref-chip > button {
-  position: absolute;
-  top: -2px;
-  right: -2px;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  line-height: 14px;
-  border-radius: 50%;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-/* Detail-enhance bar (sc-2438): backbone picker + strength/structure sliders. */
-.image-editor-detailbar .image-editor-editmodel {
-  max-width: 200px;
-}
-
-/* Box layout bar (sc-6090): color palette + custom swatch + box chips + actions. */
-.image-editor-box-palette {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.image-editor-swatch {
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  cursor: pointer;
-}
-
-.image-editor-swatch.active {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-.image-editor-swatch-custom {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-}
-
-.image-editor-swatch-custom input[type="color"] {
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: none;
-  background: none;
-  cursor: pointer;
-}
-
-.image-editor-box-list {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px;
-  max-width: 320px;
-}
-
-.image-editor-box-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-variant-numeric: tabular-nums;
-}
-
-.image-editor-box-chip.active {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.image-editor-box-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  border: 1px solid rgba(0, 0, 0, 0.25);
-}
-
-.image-editor-box-chip.incomplete {
-  border-color: var(--warm, var(--border-strong));
-}
-
-.image-editor-boxbar .image-editor-editmodel {
-  max-width: 180px;
-}
-
-.image-editor-boxbar .image-editor-editprompt {
-  min-width: 220px;
-  flex: 1 1 220px;
-}
-
-.image-editor-box-chip-flag {
-  color: var(--warm, var(--text-muted));
-  font-weight: 700;
-}
-
-/* Per-box metadata panel (sc-6091): an inspector for the selected box. */
-.image-editor-boxmeta {
-  position: absolute;
-  right: 12px;
-  top: 12px;
-  z-index: 2;
-  width: 220px;
-  max-height: calc(100% - 24px);
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--surface);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
-}
-
-.image-editor-boxmeta-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 600;
-}
-
-.image-editor-boxmeta-types {
-  display: flex;
-  gap: 4px;
-}
-
-.image-editor-boxmeta-types button.active {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.image-editor-boxmeta-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.image-editor-boxmeta-field input[type="text"] {
-  width: 100%;
-}
-
-.image-editor-boxmeta-hint {
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.image-editor-boxmeta-ready {
-  font-size: 11px;
   color: var(--accent);
 }
 
@@ -7174,64 +8009,6 @@ details[open] > summary.lora-scope-group-heading::before,
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-}
-
-.image-editor-linkbtn {
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--accent);
-  text-decoration: underline;
-  cursor: pointer;
-  font: inherit;
-}
-
-/* In-flight AI op (upscale, later edit/detail): a blocking overlay over the canvas. */
-.image-editor-busy {
-  position: absolute;
-  inset: 0;
-  z-index: 3;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.35);
-}
-
-.image-editor-busy-card {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 260px;
-  max-width: 80%;
-  padding: 16px 20px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--surface);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
-  text-align: center;
-}
-
-.image-editor-busy-title {
-  font-weight: 600;
-}
-
-.image-editor-busy-msg {
-  color: var(--text-muted);
-  font-size: 13px;
-}
-
-.image-editor-busy-bar {
-  height: 4px;
-  border-radius: 999px;
-  background: var(--surface-2);
-  overflow: hidden;
-}
-
-.image-editor-busy-bar span {
-  display: block;
-  height: 100%;
-  background: var(--accent);
-  transition: width 0.2s ease;
 }
 
 .timeline-create {
@@ -7622,8 +8399,16 @@ details[open] > summary.lora-scope-group-heading::before,
   cursor: grabbing;
 }
 
+/* Do NOT add `will-change: transform` here. It promotes the wrapper to a
+   compositor layer whose backing store is rasterized once at the fit (layout)
+   size; the zoom `scale()` then GPU-stretches that low-res texture, so zooming
+   in pixelates the full-resolution image (it never resamples from the decoded
+   source). Leaving the transform un-hinted lets the compositor re-rasterize the
+   static scaled layer at on-screen resolution — sharp up to the image's native
+   pixels. Pan is driven by per-pointermove React state, not a CSS animation, so
+   the hint bought no smoothness anyway. */
 .preview-zoom-inner {
-  will-change: transform;
+  transform-origin: 0 0;
 }
 
 .preview-zoom-inner img {
@@ -7699,6 +8484,11 @@ details[open] > summary.lora-scope-group-heading::before,
   white-space: nowrap;
 }
 
+/* Keep-seed toggle sits inline with the preview action buttons. */
+.preview-keep-seed {
+  white-space: nowrap;
+}
+
 .preview-variant-toggle {
   min-width: 188px;
 }
@@ -7716,6 +8506,102 @@ details[open] > summary.lora-scope-group-heading::before,
 
 .modal-close {
   justify-self: end;
+}
+
+/* Top bar holding the enter-fullscreen affordance beside Close. Hidden entirely in
+   fullscreen — Esc (desktop) or the right-click menu exits from there. */
+.preview-modal-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.preview-fullscreen-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+/* True-fullscreen viewer. The modal escapes its centered backdrop to cover the whole
+   (already OS-fullscreen) viewport; all chrome except nav + zoom is hidden. The
+   zoom/pan viewport itself is untouched so the sc-8728 pan math still holds. */
+.preview-modal.is-fullscreen {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  gap: 0;
+  border: 0;
+  border-radius: 0;
+  background: #000;
+  grid-template-rows: 1fr;
+}
+
+.preview-modal.is-fullscreen .preview-modal-topbar,
+.preview-modal.is-fullscreen > footer {
+  display: none;
+}
+
+.preview-modal.is-fullscreen .likeness-badge {
+  display: none;
+}
+
+.preview-modal.is-fullscreen .preview-modal-stage {
+  height: 100vh;
+  padding: 0 8px;
+}
+
+.preview-modal.is-fullscreen .preview-modal-stage img,
+.preview-modal.is-fullscreen .preview-modal-stage video {
+  max-height: 100vh;
+}
+
+/* Auto-fading "Press Esc to exit" hint shown on entering fullscreen. */
+.preview-fullscreen-hint {
+  position: absolute;
+  bottom: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: color-mix(in oklch, #000 62%, transparent);
+  color: #fff;
+  font-size: 12.5px;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+  animation: previewHintFade 0.5s ease 3.2s forwards;
+}
+
+.preview-fullscreen-hint kbd {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.16);
+  font: inherit;
+  font-weight: 700;
+}
+
+@keyframes previewHintFade {
+  to {
+    opacity: 0;
+    visibility: hidden;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .preview-fullscreen-hint {
+    animation-delay: 5s;
+    animation-duration: 0.01s;
+  }
 }
 
 /* Batch operations modal (sc-6112). */
@@ -10347,4 +11233,337 @@ details[open] > summary.lora-scope-group-heading::before,
   right: 12px;
   font-size: 12px;
   padding: 3px 9px;
+}
+
+/* ── Batch Prompt Processing (epic 9952) ─────────────────────────────────────
+   The Batch toggle sits by the mode tabs; when on, the single prompt is swapped
+   for the two-column authoring panel (prompt list + variables | save/load/io). */
+.batch-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.batch-toggle:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.batch-toggle.active {
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.prompt-input-row.batch {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  align-items: stretch;
+}
+.batch-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 264px;
+  gap: 18px;
+}
+@media (max-width: 900px) {
+  .batch-panel {
+    grid-template-columns: 1fr;
+  }
+}
+.batch-panel-main,
+.batch-panel-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.batch-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.batch-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.batch-prompts {
+  min-height: 132px;
+  resize: vertical;
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.batch-prompts:focus {
+  outline: 2px solid var(--accent);
+  border-color: var(--accent);
+}
+.batch-vars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.batch-var {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 8px 10px;
+  background: var(--surface-2);
+}
+.batch-var-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.batch-var-key {
+  font-size: 12.5px;
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+.batch-var-count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.batch-var-values {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.batch-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.batch-var-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  padding: 6px 9px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.batch-var-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.batch-value-remove {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+.batch-value-remove:hover {
+  color: var(--danger);
+}
+.batch-hint {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.batch-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.batch-preview-text {
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  white-space: pre-wrap;
+}
+.batch-preview-res {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.batch-total {
+  font-size: 14px;
+  color: var(--text);
+}
+.batch-total strong {
+  font-size: 18px;
+  color: var(--accent-strong);
+}
+.batch-total-detail {
+  display: block;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.batch-warning {
+  font-size: 12.5px;
+  color: var(--warn);
+}
+.batch-save,
+.batch-load {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.batch-name {
+  width: 100%;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  padding: 7px 10px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.batch-scope {
+  display: flex;
+  gap: 14px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.batch-scope label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+.batch-scope-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.batch-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 12px;
+  border-radius: var(--r-sm);
+  border: 0;
+  cursor: pointer;
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.batch-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.batch-btn.ghost {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.batch-io {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+}
+.batch-io .batch-btn {
+  flex: 1;
+}
+.batch-file-input {
+  display: none;
+}
+.batch-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 184px;
+  overflow-y: auto;
+}
+.batch-list-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.batch-list-load {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  padding: 6px 8px;
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  cursor: pointer;
+}
+.batch-list-item.active .batch-list-load {
+  border-color: var(--accent);
+}
+.batch-list-scope {
+  margin-left: auto;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+.batch-list-delete {
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+.batch-list-delete:hover {
+  color: var(--danger);
+}
+.batch-run {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+}
+.batch-run .prompt-cta {
+  min-width: 184px;
+}
+.batch-run-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.batch-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--text);
 }

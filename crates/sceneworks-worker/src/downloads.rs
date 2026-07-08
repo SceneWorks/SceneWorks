@@ -1,6 +1,171 @@
 use super::*;
 use std::net::SocketAddr;
 
+// The cross-process download lock (F-098 / sc-8900) is only reachable from
+// `ensure_cached_file_verified`, which is gated to the macOS MLX runtime and the
+// off-Mac candle InstantID lane; gate the whole apparatus the same way so the bare
+// (non-macOS, non-candle) lib build — which still compiles `download_source_url` —
+// doesn't drag in an unused `fs2` import or dead lock helpers.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use download_lock::DownloadLock;
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod download_lock {
+    use super::{task_join_error, WorkerError, WorkerResult};
+    use fs2::FileExt as _;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    /// Max time to block waiting for the cross-process download lock before giving up.
+    /// A peer legitimately holding it is streaming a (potentially multi-GB) weight
+    /// file, so this is far longer than the manifest lock's timeout — long enough to
+    /// outlast a real download, short enough that a crashed/stuck peer surfaces a
+    /// clear error rather than hanging the job forever (sc-8900).
+    const DOWNLOAD_LOCK_TIMEOUT: Duration = Duration::from_secs(3600);
+    /// Poll cadence while spin-waiting on `try_lock_exclusive` (fs2 has no timed
+    /// blocking-lock API, so we retry rather than block indefinitely). Coarser than
+    /// the manifest poll because a download hold is seconds-to-minutes, not sub-ms.
+    const DOWNLOAD_LOCK_POLL: Duration = Duration::from_millis(200);
+
+    /// RAII holder for a cross-process advisory *exclusive* lock on a `<target>.lock`
+    /// sibling, serializing the download of one cache target across the separate
+    /// utility-worker processes (F-098 / sc-8900). The default utility pool is 4
+    /// SEPARATE PROCESSES, so an in-process mutex cannot serialize them — two jobs
+    /// resolving the same runtime-weight file would each open the target and
+    /// interleave/append their writes, producing a corrupt file that can slip past
+    /// the size check when no sha256 is available. The lock releases when the
+    /// underlying handle drops. Mirrors `manifest::ManifestLock`.
+    pub(crate) struct DownloadLock {
+        _file: std::fs::File,
+    }
+
+    impl DownloadLock {
+        /// Acquire the exclusive lock for `target`, creating the parent dir and the
+        /// `.lock` sibling as needed. Blocking (spin-waits on the advisory lock), so
+        /// the caller runs it on the blocking pool.
+        pub(crate) fn acquire(target: &Path) -> WorkerResult<Self> {
+            let lock_path = download_lock_path(target);
+            if let Some(parent) = lock_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)?;
+            let deadline = Instant::now() + DOWNLOAD_LOCK_TIMEOUT;
+            // fs2 signals contention with a platform-specific error (`EWOULDBLOCK` on
+            // Unix, `ERROR_LOCK_VIOLATION` on Windows); compare by RAW OS CODE against
+            // fs2's own contention error so retry-vs-fail is correct on every platform
+            // (same posture as `manifest::ManifestLock`, sc-8843).
+            let contended = fs2::lock_contended_error().raw_os_error();
+            loop {
+                match file.try_lock_exclusive() {
+                    Ok(()) => return Ok(Self { _file: file }),
+                    Err(error) if error.raw_os_error() == contended => {
+                        if Instant::now() >= deadline {
+                            return Err(WorkerError::Io(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                format!(
+                                    "timed out after {DOWNLOAD_LOCK_TIMEOUT:?} waiting for download lock {}",
+                                    lock_path.display()
+                                ),
+                            )));
+                        }
+                        std::thread::sleep(DOWNLOAD_LOCK_POLL);
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+
+        /// Acquire the lock on the blocking pool (the spin-wait must not stall the
+        /// async runtime), then hold the guard across the async download. The
+        /// `std::fs::File` handle is `Send`, so the guard lives across `.await` and
+        /// the advisory lock is held for the whole transfer.
+        pub(crate) async fn acquire_async(target: &Path) -> WorkerResult<Self> {
+            let target = target.to_path_buf();
+            tokio::task::spawn_blocking(move || DownloadLock::acquire(&target))
+                .await
+                .map_err(|error| task_join_error("download lock", error))?
+        }
+    }
+
+    /// The `.lock` sibling path for a download target. Kept alongside the target so
+    /// the lock scope is the exact file being written (per-file, not global), and two
+    /// downloads of *different* files never contend.
+    fn download_lock_path(target: &Path) -> PathBuf {
+        let mut name = target
+            .file_name()
+            .map(std::ffi::OsString::from)
+            .unwrap_or_default();
+        name.push(".download.lock");
+        target.with_file_name(name)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// sc-8900 / F-098: two holders of the same target's download lock are
+        /// mutually exclusive — the second `try_lock_exclusive` sees contention while
+        /// the first guard is alive, then succeeds once it drops. This is the
+        /// cross-process serialization primitive the utility-worker pool relies on
+        /// (exercised here across handles within one process).
+        #[test]
+        fn download_lock_is_exclusive_per_target_and_releases_on_drop() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let target = dir.path().join("weights").join("model.safetensors");
+
+            let first = DownloadLock::acquire(&target).expect("first lock acquires");
+
+            // A second exclusive lock on the SAME target's lock file must be contended
+            // while the first is held. Probe the raw fs2 primitive directly so the test
+            // doesn't block on the (1 hour) acquire timeout.
+            let lock_path = download_lock_path(&target);
+            let probe = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+                .expect("probe opens lock file");
+            let contended = fs2::lock_contended_error().raw_os_error();
+            let held = probe.try_lock_exclusive();
+            assert_eq!(
+                held.as_ref().err().and_then(|e| e.raw_os_error()),
+                contended,
+                "second exclusive lock must be contended while the first is held"
+            );
+
+            // Once the first guard drops, the same target locks cleanly again.
+            drop(first);
+            DownloadLock::acquire(&target).expect("lock re-acquires after release");
+
+            // A DIFFERENT target never contends with the first.
+            let other = dir.path().join("weights").join("other.safetensors");
+            let _first_other = DownloadLock::acquire(&other).expect("distinct target locks");
+        }
+
+        /// The lock file is a `.download.lock` sibling of the target (per-file scope),
+        /// so distinct targets get distinct lock paths.
+        #[test]
+        fn download_lock_path_is_per_file_sibling() {
+            let a = download_lock_path(Path::new("/data/models/a.safetensors"));
+            let b = download_lock_path(Path::new("/data/models/b.safetensors"));
+            assert_eq!(a, Path::new("/data/models/a.safetensors.download.lock"));
+            assert_ne!(a, b);
+        }
+    }
+}
+
 /// Download `url` to `target` on first use. Existing complete files are reused;
 /// partial files resume with HTTP Range when the caller can provide `expected_size`.
 /// The transfer shares model-download progress/cancel plumbing instead of buffering
@@ -20,6 +185,31 @@ pub(crate) async fn ensure_cached_file(
     label: &str,
     expected_size: Option<u64>,
 ) -> WorkerResult<PathBuf> {
+    ensure_cached_file_verified(context, url, target, label, expected_size, None).await
+}
+
+/// [`ensure_cached_file`] that additionally verifies the completed file against an
+/// `expected_sha256` (a content digest — e.g. an HF `lfs.oid`) before returning
+/// (sc-8879). A malformed/absent digest is skipped by `verify_file_sha256`, so callers
+/// can pass whatever the source advertises; a mismatch removes the file and errors.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) async fn ensure_cached_file_verified(
+    context: &DownloadContext<'_>,
+    url: &str,
+    target: &Path,
+    label: &str,
+    expected_size: Option<u64>,
+    expected_sha256: Option<&str>,
+) -> WorkerResult<PathBuf> {
+    // Serialize the whole cache-check + transfer for this target across the separate
+    // utility-worker processes so two jobs can't interleave/append writes to the same
+    // partial file and leave a corrupt result (F-098 / sc-8900). The cache-hit
+    // short-circuit lives inside the lock too, so a peer mid-transfer can't be read as
+    // "already complete". The guard is held for the whole function.
+    let _lock = DownloadLock::acquire_async(target).await?;
     let expected_size = match expected_size {
         Some(size) => Some(size),
         None => remote_content_length(context.client, url).await?,
@@ -29,10 +219,18 @@ pub(crate) async fn ensure_cached_file(
             .map(|expected| metadata.len() == expected)
             .unwrap_or(true)
         {
+            // A cached file that already matches the expected length still gets its
+            // digest checked so a size-colliding tampered artifact can't be reused.
+            if let Some(expected) = expected_sha256 {
+                verify_file_sha256(target, expected, label).await?;
+            }
             return Ok(target.to_path_buf());
         }
     }
     if expected_size.is_none() && target.exists() {
+        if let Some(expected) = expected_sha256 {
+            verify_file_sha256(target, expected, label).await?;
+        }
         return Ok(target.to_path_buf());
     }
     if let Some(parent) = target.parent() {
@@ -50,7 +248,7 @@ pub(crate) async fn ensure_cached_file(
         url,
         target,
         expected_size,
-        None,
+        expected_sha256,
         label,
         &mut progress,
     )
@@ -108,12 +306,16 @@ pub(crate) async fn ensure_hf_cached_file(
             "Hugging Face file {file} not found in {repo}."
         )));
     };
-    ensure_cached_file(
+    ensure_cached_file_verified(
         context,
         &snapshot_file.download_url,
         target,
         &snapshot_file.path,
         snapshot_file.size,
+        // Verify the content against HF's `lfs.oid` (present for the LFS-tracked
+        // weights) so a pinned-revision download is integrity-checked, not just
+        // length-checked (sc-8879).
+        snapshot_file.sha256.as_deref(),
     )
     .await
 }
@@ -143,32 +345,45 @@ impl HuggingFaceSnapshot {
         files: &[String],
     ) -> WorkerResult<Self> {
         let base_url = settings.huggingface_base_url.trim_end_matches('/');
-        let tree_url = format!(
+        // The HF tree API paginates the `expand=1` listing (default limit 50) and returns the next
+        // page as a `Link: <…?cursor=…>; rel="next"` header. A single request therefore sees only the
+        // first ~50 files, so for a multi-tier repo (bf16/q4/q8 subdirs) the later tiers' files fall
+        // past page 1 and go MISSING — a q8 download then resolves zero files and silently produces an
+        // empty cache (sc-9909). Follow `rel="next"` until exhausted so every file is seen. The page
+        // cap is a runaway backstop far above any real repo's file count.
+        let mut next_url = Some(format!(
             "{base_url}/api/models/{}/tree/{}?recursive=1&expand=1",
             quote_path(repo),
             quote_path(revision)
-        );
-        let payload = with_hf_auth(settings, client.get(tree_url))
-            .await
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<Value>()
-            .await?;
-        let entries = if let Some(entries) = payload.as_array() {
-            entries.clone()
-        } else {
-            payload
-                .get("siblings")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default()
-        };
-        let snapshot_files = entries
-            .iter()
-            .filter_map(|entry| snapshot_file_from_entry(base_url, repo, revision, entry))
-            .filter(|file| allow_pattern_matches(&file.path, files))
-            .collect();
+        ));
+        let mut snapshot_files = Vec::new();
+        for _ in 0..10_000 {
+            let Some(url) = next_url.take() else {
+                break;
+            };
+            let response = with_hf_auth(settings, client.get(&url))
+                .await
+                .send()
+                .await?
+                .error_for_status()?;
+            next_url = next_page_url(response.headers());
+            let payload = response.json::<Value>().await?;
+            let entries = if let Some(entries) = payload.as_array() {
+                entries.clone()
+            } else {
+                payload
+                    .get("siblings")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            snapshot_files.extend(
+                entries
+                    .iter()
+                    .filter_map(|entry| snapshot_file_from_entry(base_url, repo, revision, entry))
+                    .filter(|file| allow_pattern_matches(&file.path, files)),
+            );
+        }
         Ok(Self {
             files: snapshot_files,
         })
@@ -179,6 +394,35 @@ impl HuggingFaceSnapshot {
             .iter()
             .try_fold(0_u64, |total, file| Some(total.saturating_add(file.size?)))
     }
+}
+
+/// Extract the `rel="next"` target from an RFC 5988 `Link` header, if present. The HF tree API
+/// paginates its `expand=1` listing this way — the header looks like
+/// `<https://…/tree/main?expand=true&recursive=true&limit=50&cursor=…>; rel="next"`. Returns the
+/// absolute next-page URL (the server preserves the `expand`/`recursive` params in it).
+fn next_page_url(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let link = headers.get(reqwest::header::LINK)?.to_str().ok()?;
+    for part in link.split(',') {
+        let mut segments = part.split(';');
+        let Some(url) = segments.next() else {
+            continue;
+        };
+        let is_next = segments.any(|attribute| {
+            let attribute = attribute.trim();
+            attribute == "rel=\"next\"" || attribute == "rel=next"
+        });
+        if is_next {
+            let url = url
+                .trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .trim();
+            if !url.is_empty() {
+                return Some(url.to_owned());
+            }
+        }
+    }
+    None
 }
 
 pub(crate) fn snapshot_file_from_entry(

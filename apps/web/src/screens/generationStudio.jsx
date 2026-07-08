@@ -1,15 +1,22 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { LoraKeywordSummary } from "../components/LoraKeywordSummary.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import {
+  MAX_USER_JOB_LORAS,
+  applyPresetDefault,
+  buildStudioPresetPayload,
+  clearPresetDefault,
   loraMatchesModel,
   loraWeight,
   noPresetId,
   presetLoraDetails as buildPresetLoraDetails,
   presetMatchesModel,
   presetMatchesWorkflow,
+  presetNameTaken,
   presetPromptParts as buildPresetPromptParts,
   presetValidation,
+  slugifyPresetId,
 } from "../presetUtils.js";
 
 const completedResultFallbackMs = 30000;
@@ -256,7 +263,7 @@ export function useGenerationStudio({
       }
       const selected = ids.map((id) => compatibleLoras.find((item) => item.id === id)).filter(Boolean);
       const userCount = selected.filter((item) => item.scope !== "builtin").length;
-      if (lora.scope !== "builtin" && userCount >= 4) {
+      if (lora.scope !== "builtin" && userCount >= MAX_USER_JOB_LORAS) {
         return ids;
       }
       return [...ids, lora.id];
@@ -303,6 +310,140 @@ export function useGenerationStudio({
   };
 }
 
+// Save-as-Preset + preset-default hydrate machinery shared by the Image and Video
+// studios (sc-8937). Owns the save panel's state (name/scope/saving/message) and the
+// remember/restore snapshot ref, runs the one preset-default hydrate effect, and
+// exposes the save handler. The studios differ only in:
+//   - `presetDefaultFields`: the [key, setter] pairs the studio hydrates,
+//   - `buildDefaults()`: the raw defaults snapshot the save payload carries,
+//   - `modeIsPresetable(mode)`: which sub-modes a saved preset may restore ("type"),
+//   - `onApplyDefaults(defaults)`: optional per-studio side effect after hydrate
+//     (Image marks the prompt box edited so the character-mode default can't clobber
+//     the restored prompt),
+//   - `extraSaveGuard()`: optional pre-save gate (Video blocks non-video modes),
+// so those are passed in. Behavior (validation order, UX, saved/hydrated fields) is
+// identical to the per-studio copies this replaced.
+export function useSavePreset({
+  saved,
+  selectedPreset,
+  setSelectedPresetId,
+  presets,
+  mode,
+  model,
+  selectedLoras,
+  effectiveLoraWeight,
+  createPreset,
+  activeProject,
+  presetDefaultFields,
+  buildDefaults,
+  modeIsPresetable,
+  setMode,
+  onApplyDefaults = () => {},
+  extraSaveGuard = () => null,
+}) {
+  const [presetName, setPresetName] = useState("");
+  const [presetScope, setPresetScope] = useState(activeProject ? "project" : "global");
+  const [savingPreset, setSavingPreset] = useState(false);
+  const [presetSaveMessage, setPresetSaveMessage] = useState({ tone: "neutral", text: "" });
+  const presetDefaultSnapshots = useRef({});
+
+  // When restoring a snapshot, the saved knob values already reflect the user's last
+  // state — skip the one preset-default pass that fires as the restored preset resolves
+  // so it doesn't overwrite them. "None" applies no defaults, so no guard is needed there.
+  const skipPresetDefaultsOnHydrate = useRef(
+    Object.keys(saved).length > 0 && saved.selectedPresetId !== noPresetId,
+  );
+
+  useEffect(() => {
+    if (skipPresetDefaultsOnHydrate.current && selectedPreset) {
+      skipPresetDefaultsOnHydrate.current = false;
+      return;
+    }
+    if (!selectedPreset) {
+      for (const [key, setter] of presetDefaultFields) {
+        clearPresetDefault(setter, presetDefaultSnapshots, key);
+      }
+      return;
+    }
+    const defaults = selectedPreset.defaults ?? {};
+    for (const [key, setter] of presetDefaultFields) {
+      if (Object.prototype.hasOwnProperty.call(defaults, key)) {
+        applyPresetDefault(presetDefaultSnapshots, key, setter, defaults[key]);
+      }
+    }
+    onApplyDefaults(defaults);
+    // Restore the saved sub-mode ("type") when it's a presetable workflow.
+    if (modeIsPresetable(defaults.mode)) {
+      setMode(defaults.mode);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPreset?.id]);
+
+  // Snapshot the current working config into a named recipe preset in the workspace
+  // library. Captures the literal prompt + every visible knob + the selected LoRAs
+  // with their weights; the seed is intentionally left out so the preset stays
+  // reusable. The backend additionally enforces id uniqueness and model/workflow +
+  // LoRA compatibility, surfaced here via err.message.
+  async function handleSaveAsPreset() {
+    const trimmed = presetName.trim();
+    if (!trimmed) {
+      setPresetSaveMessage({ tone: "error", text: "Name the preset before saving." });
+      return;
+    }
+    if (!slugifyPresetId(trimmed)) {
+      setPresetSaveMessage({ tone: "error", text: "Use letters or numbers in the preset name." });
+      return;
+    }
+    const guardMessage = extraSaveGuard();
+    if (guardMessage) {
+      setPresetSaveMessage({ tone: "error", text: guardMessage });
+      return;
+    }
+    if (presetScope === "project" && !activeProject) {
+      setPresetSaveMessage({ tone: "error", text: "Open a project first, or save to all projects." });
+      return;
+    }
+    if (presetNameTaken(trimmed, presets)) {
+      setPresetSaveMessage({ tone: "error", text: `"${trimmed}" already exists — pick a unique name.` });
+      return;
+    }
+    const payload = buildStudioPresetPayload({
+      name: trimmed,
+      scope: presetScope,
+      mode,
+      model,
+      loras: selectedLoras.map((lora) => ({ id: lora.id, weight: effectiveLoraWeight(lora) })),
+      defaults: buildDefaults(),
+    });
+    setSavingPreset(true);
+    setPresetSaveMessage({ tone: "neutral", text: "" });
+    try {
+      const created = await createPreset(payload);
+      setSelectedPresetId(created?.id ?? payload.id);
+      setPresetName("");
+      setPresetSaveMessage({
+        tone: "success",
+        text: `Saved "${trimmed}" to ${presetScope === "project" ? "this project" : "all projects"}.`,
+      });
+    } catch (err) {
+      setPresetSaveMessage({ tone: "error", text: err.message });
+    } finally {
+      setSavingPreset(false);
+    }
+  }
+
+  return {
+    presetName,
+    setPresetName,
+    presetScope,
+    setPresetScope,
+    savingPreset,
+    presetSaveMessage,
+    setPresetSaveMessage,
+    handleSaveAsPreset,
+  };
+}
+
 // The LoRA picker shared by both studios (sc-4196): the compatible-LoRA checklist
 // with per-LoRA weight sliders, the "Show incompatible" toggle, and the empty state.
 // All state lives in useGenerationStudio; this is a pure presentation of its bundle.
@@ -319,11 +460,31 @@ export function LoraPickerSection({
   setLoraWeight,
   loraEmptyMessage,
 }) {
+  // Add-on-demand picker (UI-refinement 3b): only the LoRAs you've added render as
+  // slots; everything else lives behind the "Add LoRA" dropdown. This replaces the
+  // checkbox-per-LoRA wall so a large library no longer floods the panel. "Show
+  // incompatible" now filters the dropdown (through compatibleLoras) instead of an
+  // always-visible list. Slot styles (.lora-stack/.lora-slot/.lora-add/
+  // .lora-picker-panel/.lora-pick-row) already live in styles.css.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const availableLoras = compatibleLoras.filter((lora) => !selectedLoraIds.includes(lora.id));
+  const atUserLimit = userSelectedLoraCount >= MAX_USER_JOB_LORAS;
+  const loraMeta = (lora) => {
+    const scope = lora.scope ?? "global";
+    return lora.family ? `${scope} · ${lora.family}` : scope;
+  };
+
   return (
     <section className="lora-picker" aria-label="LoRA selection">
       <div>
         <strong>LoRAs</strong>
-        <span>{selectedLoras.length ? `${selectedLoras.length} selected` : selectedModel ? "Installed and compatible" : "Choose a model"}</span>
+        <span>
+          {selectedLoras.length
+            ? `${selectedLoras.length} selected`
+            : selectedModel
+              ? "Installed and compatible"
+              : "Choose a model"}
+        </span>
       </div>
       <label className="checkline">
         <input
@@ -333,49 +494,93 @@ export function LoraPickerSection({
         />
         Show incompatible
       </label>
-      {compatibleLoras.length ? (
-        <div className="lora-choice-list">
-          {compatibleLoras.map((lora) => {
-            const checked = selectedLoraIds.includes(lora.id);
-            const userLimitReached = lora.scope !== "builtin" && !checked && userSelectedLoraCount >= 4;
-            const weight = effectiveLoraWeight(lora);
-            return (
-              <div className="lora-choice-item" key={lora.id}>
-                <label className={checked ? "lora-choice active" : "lora-choice"}>
-                  <input
-                    checked={checked}
-                    disabled={userLimitReached}
-                    onChange={() => toggleLora(lora)}
-                    type="checkbox"
-                  />
-                  <span>
-                    <strong>{lora.name ?? lora.id}</strong>
-                    <small>
-                      {lora.scope ?? "global"} {lora.family ? `| ${lora.family}` : ""}
-                    </small>
-                  </span>
-                </label>
-                {checked ? (
-                  <div className="lora-weight-row">
-                    <span>Weight</span>
-                    <input
-                      aria-label={`${lora.name ?? lora.id} weight`}
-                      max="2"
-                      min="0"
-                      onChange={(event) => setLoraWeight(lora.id, Number(event.target.value))}
-                      step="0.05"
-                      type="range"
-                      value={weight}
-                    />
-                    <span className="lora-weight-value">{weight.toFixed(2)}</span>
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
-        </div>
-      ) : (
+
+      {!selectedLoras.length && !availableLoras.length ? (
         <div className="empty-panel compact-panel">{loraEmptyMessage}</div>
+      ) : (
+        <>
+          {selectedLoras.length ? (
+            <div className="lora-stack">
+              {selectedLoras.map((lora) => {
+                const weight = effectiveLoraWeight(lora);
+                return (
+                  <div className="lora-slot" key={lora.id}>
+                    <div className="lora-slot-head">
+                      <span className="lora-slot-meta">
+                        <strong>{lora.name ?? lora.id}</strong>
+                        <small>{loraMeta(lora)}</small>
+                      </span>
+                      <button
+                        aria-label={`Remove ${lora.name ?? lora.id}`}
+                        className="lora-slot-remove"
+                        onClick={() => toggleLora(lora)}
+                        title="Remove"
+                        type="button"
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <LoraKeywordSummary lora={lora} />
+                    <div className="lora-slot-weight">
+                      <label>
+                        <span>Weight</span>
+                        <span className="lora-slot-weight-value">{weight.toFixed(2)}</span>
+                      </label>
+                      <input
+                        aria-label={`${lora.name ?? lora.id} weight`}
+                        max="2"
+                        min="0"
+                        onChange={(event) => setLoraWeight(lora.id, Number(event.target.value))}
+                        step="0.05"
+                        type="range"
+                        value={weight}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+
+          <button
+            className="lora-add"
+            data-count={`· ${availableLoras.length} available`}
+            disabled={!availableLoras.length}
+            onClick={() => setPickerOpen((open) => !open)}
+            type="button"
+          >
+            <Icon.Plus size={15} />
+            <span>Add LoRA</span>
+          </button>
+
+          {pickerOpen && availableLoras.length ? (
+            <div className="lora-picker-panel">
+              <div className="lora-picker-list">
+                {availableLoras.map((lora) => {
+                  const disabled = lora.scope !== "builtin" && atUserLimit;
+                  return (
+                    <button
+                      className="lora-pick-row"
+                      disabled={disabled}
+                      key={lora.id}
+                      onClick={() => {
+                        toggleLora(lora);
+                        setPickerOpen(false);
+                      }}
+                      type="button"
+                    >
+                      <span className="lora-slot-meta">
+                        <strong>{lora.name ?? lora.id}</strong>
+                        <small>{loraMeta(lora)}</small>
+                      </span>
+                      <span className="lora-pick-add">{disabled ? "Limit reached" : "Add"}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+        </>
       )}
     </section>
   );
@@ -462,14 +667,10 @@ export function SavePresetPanel({
 }
 
 // The "what this preset adds" strip shown under the preset picker in both studios.
-export function PresetGuidanceStrip({ selectedPreset, presetPromptParts, presetLoraDetails, noPresetHint }) {
+export function PresetGuidanceStrip({ selectedPreset, presetPromptParts, presetLoraDetails }) {
+  // Nothing to say when no preset is active — the visible controls already describe the run.
   if (!selectedPreset) {
-    return (
-      <div className="guidance-strip">
-        <strong>No preset selected</strong>
-        <span>{noPresetHint}</span>
-      </div>
-    );
+    return null;
   }
   return (
     <div className="guidance-strip">

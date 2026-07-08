@@ -96,14 +96,21 @@ pub(crate) async fn run_frame_extract_job(
     Ok(())
 }
 
-pub(crate) async fn run_frame_extract(
-    api: &ApiClient,
-    settings: &Settings,
-    job: &JobSnapshot,
-) -> WorkerResult<JsonObject> {
+/// The resolved source of a frame-extract / person-detect job: the project store + path, the source
+/// asset JSON, and the on-disk media path (existence-checked). Shared prologue of both frame handlers
+/// (sc-8914 / F-112) — they resolve the same `projectId` + `sourceAssetId` identically.
+struct FrameSource {
+    store: ProjectStore,
+    project_path: PathBuf,
+    source_asset: Value,
+    source_media_path: PathBuf,
+}
+
+/// Resolve the `projectId` + `sourceAssetId` a frame job carries into a [`FrameSource`], confining the
+/// source media path with `safe_project_path` and erroring if it is missing.
+fn resolve_frame_source(settings: &Settings, job: &JobSnapshot) -> WorkerResult<FrameSource> {
     let project_id = required_payload_string(&job.payload, "projectId")?;
     let source_asset_id = required_payload_string(&job.payload, "sourceAssetId")?;
-    let timestamp = payload_f64(&job.payload, "sourceTimestamp", 0.0).clamp(0.0, 3600.0);
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
     let project = store.get_project(project_id)?;
     let project_path = PathBuf::from(project.path);
@@ -121,14 +128,62 @@ pub(crate) async fn run_frame_extract(
             source_media_path.display()
         )));
     }
+    Ok(FrameSource {
+        store,
+        project_path,
+        source_asset,
+        source_media_path,
+    })
+}
 
-    let frames_dir = project_path.join("assets").join("frames");
-    tokio::fs::create_dir_all(&frames_dir).await?;
+/// The per-frame identity handed to the asset-builder closure of [`render_frame_asset`]: the freshly
+/// rendered frame's on-disk media path, its ids, and the source path relative to the project — enough
+/// for the closure to build the `"type":"frame"` asset JSON (its recipe/lineage/detection payload).
+struct RenderedFrame {
+    asset_id: String,
+    created_at: String,
+    media_rel: String,
+    media_path: PathBuf,
+    source_rel: String,
+}
+
+/// The single resolve→render→tmp-rename→asset-JSON→sidecar+recipe→index flow shared by both frame
+/// handlers (sc-8914 / F-112). Renders one frame at `timestamp` (dims `width×height`) into
+/// `assets/frames/{date}_{filename_kind}_{suffix}.png`, promotes it out of its `.tmp.png`, posts the
+/// `Saving` progress update, guards the promotion with a cancel check that cleans up the frame on
+/// cancel, then lets `build_asset` produce the full asset JSON (it runs *after* the frame exists, so
+/// person-detect can run its detector on the rendered PNG). Writes the sidecar + recipe and indexes
+/// the asset. Returns the asset id, the built asset JSON, and any per-handler `extra` the builder
+/// produced alongside it (the detection payload for person-detect, `()` for frame-extract) — passed
+/// back through the return value rather than stashed in an interior-mutability cell, so the handler
+/// future stays `Send` for the job dispatcher's `tokio::spawn`.
+#[allow(clippy::too_many_arguments)]
+async fn render_frame_asset<F, Fut, T>(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    source: &FrameSource,
+    timestamp: f64,
+    width: u32,
+    height: u32,
+    filename_kind: &str,
+    ffmpeg_cancel_message: &str,
+    saving_progress: f64,
+    saving_message: &str,
+    promotion_cancel_message: &str,
+    build_asset: F,
+) -> WorkerResult<(String, Value, T)>
+where
+    F: FnOnce(RenderedFrame) -> Fut,
+    Fut: std::future::Future<Output = WorkerResult<(Value, T)>>,
+{
+    let project_path = &source.project_path;
+    tokio::fs::create_dir_all(project_path.join("assets").join("frames")).await?;
     tokio::fs::create_dir_all(project_path.join("recipes")).await?;
     let asset_id = fresh_asset_id();
     let created_at = now_rfc3339();
     let filename = format!(
-        "{}_frame_{}.png",
+        "{}_{filename_kind}_{}.png",
         &created_at[..10],
         asset_suffix(&asset_id)
     );
@@ -140,115 +195,50 @@ pub(crate) async fn run_frame_extract(
         api,
         settings,
         job_id: &job.id,
-        cancel_message: "Frame extraction canceled by user.",
+        cancel_message: ffmpeg_cancel_message,
     };
     render_frame_png(
         "ffmpeg",
-        &source_media_path,
+        &source.source_media_path,
         &temp_path,
         timestamp,
-        1920,
-        1080,
+        width,
+        height,
         Some(ffmpeg_context),
     )
     .await?;
     tokio::fs::rename(&temp_path, &media_path).await?;
+
+    let source_rel = relative_path(project_path, &source.source_media_path)?;
+    // Build the asset JSON now that the frame exists on disk (person-detect runs its detector here).
+    let (asset, extra) = build_asset(RenderedFrame {
+        asset_id: asset_id.clone(),
+        created_at,
+        media_rel,
+        media_path: media_path.clone(),
+        source_rel,
+    })
+    .await?;
+
     update_job(
         api,
         &job.id,
         progress_payload(
             JobStatus::Saving,
             ProgressStage::Saving,
-            0.85,
-            "Saving extracted frame asset.",
+            saving_progress,
+            saving_message,
             None,
             None,
             None,
         ),
     )
     .await?;
-    if let Err(error) = check_cancel(
-        api,
-        &job.id,
-        "Frame extraction canceled before asset promotion.",
-    )
-    .await
-    {
+    if let Err(error) = check_cancel(api, &job.id, promotion_cancel_message).await {
         let _ = tokio::fs::remove_file(&media_path).await;
         return Err(error);
     }
 
-    let timeline_id = job
-        .payload
-        .get("timelineId")
-        .cloned()
-        .unwrap_or(Value::Null);
-    let timeline_item_id = job
-        .payload
-        .get("timelineItemId")
-        .cloned()
-        .unwrap_or(Value::Null);
-    let playhead_seconds = job
-        .payload
-        .get("playheadSeconds")
-        .cloned()
-        .unwrap_or(Value::Null);
-    let intended_use = optional_payload_string(&job.payload, "intendedUse").unwrap_or("reuse");
-    let source_display_name = source_asset
-        .get("displayName")
-        .and_then(Value::as_str)
-        .unwrap_or("clip");
-    let source_rel = relative_path(&project_path, &source_media_path)?;
-    let asset = json!({
-        "schemaVersion": 1,
-        "id": asset_id.clone(),
-        "projectId": project_id,
-        "generationSetId": Value::Null,
-        "type": "frame",
-        "displayName": format!("Frame {timestamp:.2}s from {source_display_name}"),
-        "createdAt": created_at,
-        "file": {
-            "path": media_rel,
-            "mimeType": "image/png",
-            "width": 1920,
-            "height": 1080,
-            "duration": Value::Null,
-            "fps": Value::Null
-        },
-        "status": {
-            "favorite": false,
-            "rating": 0,
-            "rejected": false,
-            "trashed": false
-        },
-        "recipe": {
-            "mode": "frame_extract",
-            "model": "timeline-frame-extract",
-            "adapter": "ffmpeg-frame-extract",
-            "prompt": format!("Extract frame at {timestamp:.2}s"),
-            "negativePrompt": "",
-            "seed": 0,
-            "loras": [],
-            "stylePreset": "none",
-            "normalizedSettings": {
-                "timelineId": timeline_id,
-                "timelineItemId": timeline_item_id,
-                "playheadSeconds": playhead_seconds,
-                "sourceTimestamp": timestamp,
-                "intendedUse": intended_use
-            },
-            "rawAdapterSettings": { "sourcePath": source_rel }
-        },
-        "lineage": {
-            "parents": [source_asset_id],
-            "sourceAssetId": source_asset_id,
-            "sourceTimestamp": timestamp,
-            "timelineId": job.payload.get("timelineId").cloned().unwrap_or(Value::Null),
-            "timelineItemId": job.payload.get("timelineItemId").cloned().unwrap_or(Value::Null),
-            "intendedUse": intended_use,
-            "jobId": job.id
-        }
-    });
     let sidecar_path = media_path.with_extension("sceneworks.json");
     write_json_value(&sidecar_path, &asset).await?;
     write_json_value(
@@ -258,7 +248,116 @@ pub(crate) async fn run_frame_extract(
         &asset["recipe"],
     )
     .await?;
-    store.index_asset_sidecar(project_id, &sidecar_path)?;
+    let project_id = required_payload_string(&job.payload, "projectId")?;
+    source
+        .store
+        .index_asset_sidecar(project_id, &sidecar_path)?;
+
+    Ok((asset_id, asset, extra))
+}
+
+pub(crate) async fn run_frame_extract(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<JsonObject> {
+    let project_id = required_payload_string(&job.payload, "projectId")?;
+    let source_asset_id = required_payload_string(&job.payload, "sourceAssetId")?;
+    let timestamp = payload_f64(&job.payload, "sourceTimestamp", 0.0).clamp(0.0, 3600.0);
+    let source = resolve_frame_source(settings, job)?;
+
+    let intended_use = optional_payload_string(&job.payload, "intendedUse").unwrap_or("reuse");
+    let source_display_name = source
+        .source_asset
+        .get("displayName")
+        .and_then(Value::as_str)
+        .unwrap_or("clip")
+        .to_owned();
+    let (asset_id, asset, ()) = render_frame_asset(
+        api,
+        settings,
+        job,
+        &source,
+        timestamp,
+        1920,
+        1080,
+        "frame",
+        "Frame extraction canceled by user.",
+        0.85,
+        "Saving extracted frame asset.",
+        "Frame extraction canceled before asset promotion.",
+        |frame| async move {
+            let timeline_id = job
+                .payload
+                .get("timelineId")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let timeline_item_id = job
+                .payload
+                .get("timelineItemId")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let playhead_seconds = job
+                .payload
+                .get("playheadSeconds")
+                .cloned()
+                .unwrap_or(Value::Null);
+            Ok((
+                json!({
+                "schemaVersion": 1,
+                "id": frame.asset_id,
+                "projectId": project_id,
+                "generationSetId": Value::Null,
+                "type": "frame",
+                "displayName": format!("Frame {timestamp:.2}s from {source_display_name}"),
+                "createdAt": frame.created_at,
+                "file": {
+                    "path": frame.media_rel,
+                    "mimeType": "image/png",
+                    "width": 1920,
+                    "height": 1080,
+                    "duration": Value::Null,
+                    "fps": Value::Null
+                },
+                "status": {
+                    "favorite": false,
+                    "rating": 0,
+                    "rejected": false,
+                    "trashed": false
+                },
+                "recipe": {
+                    "mode": "frame_extract",
+                    "model": "timeline-frame-extract",
+                    "adapter": "ffmpeg-frame-extract",
+                    "prompt": format!("Extract frame at {timestamp:.2}s"),
+                    "negativePrompt": "",
+                    "seed": 0,
+                    "loras": [],
+                    "stylePreset": "none",
+                    "normalizedSettings": {
+                        "timelineId": timeline_id,
+                        "timelineItemId": timeline_item_id,
+                        "playheadSeconds": playhead_seconds,
+                        "sourceTimestamp": timestamp,
+                        "intendedUse": intended_use
+                    },
+                    "rawAdapterSettings": { "sourcePath": frame.source_rel }
+                },
+                "lineage": {
+                    "parents": [source_asset_id],
+                    "sourceAssetId": source_asset_id,
+                    "sourceTimestamp": timestamp,
+                    "timelineId": job.payload.get("timelineId").cloned().unwrap_or(Value::Null),
+                    "timelineItemId": job.payload.get("timelineItemId").cloned().unwrap_or(Value::Null),
+                    "intendedUse": intended_use,
+                    "jobId": job.id
+                }
+                }),
+                (),
+            ))
+        },
+    )
+    .await?;
 
     let mut result = JsonObject::new();
     result.insert("assetIds".to_owned(), json!([asset_id]));
@@ -366,24 +465,12 @@ pub(crate) async fn run_person_detect(
 ) -> WorkerResult<JsonObject> {
     let project_id = required_payload_string(&job.payload, "projectId")?;
     let source_asset_id = required_payload_string(&job.payload, "sourceAssetId")?;
-    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
-    let project = store.get_project(project_id)?;
-    let project_path = PathBuf::from(project.path);
-    let source_asset = store.get_asset(project_id, source_asset_id)?;
-    let source_file = source_asset
-        .get("file")
-        .ok_or_else(|| WorkerError::InvalidPayload("Source asset file is missing.".to_owned()))?;
-    let source_media_rel = required_value_str(source_file, "path")?;
-    let source_media_path = safe_project_path(&project_path, source_media_rel)?;
-    if !source_media_path.exists() {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Source media not found: {}",
-            source_media_path.display()
-        )));
-    }
+    let source = resolve_frame_source(settings, job)?;
 
-    let duration = source_file
-        .get("duration")
+    let duration = source
+        .source_asset
+        .get("file")
+        .and_then(|file| file.get("duration"))
         .map_or(6.0, |value| value_f64(value, 6.0))
         .clamp(0.0, 3600.0);
     let timestamp = person_detect_source_timestamp(
@@ -394,38 +481,6 @@ pub(crate) async fn run_person_detect(
         ),
         duration,
     );
-
-    let frames_dir = project_path.join("assets").join("frames");
-    tokio::fs::create_dir_all(&frames_dir).await?;
-    tokio::fs::create_dir_all(project_path.join("recipes")).await?;
-    let asset_id = fresh_asset_id();
-    let created_at = now_rfc3339();
-    let filename = format!(
-        "{}_person-frame_{}.png",
-        &created_at[..10],
-        asset_suffix(&asset_id)
-    );
-    let media_rel = format!("assets/frames/{filename}");
-    let media_path = project_path.join(&media_rel);
-    let temp_path = media_path.with_extension("tmp.png");
-
-    let ffmpeg_context = FfmpegContext {
-        api,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Person detection canceled by user.",
-    };
-    render_frame_png(
-        "ffmpeg",
-        &source_media_path,
-        &temp_path,
-        timestamp,
-        1280,
-        720,
-        Some(ffmpeg_context),
-    )
-    .await?;
-    tokio::fs::rename(&temp_path, &media_path).await?;
 
     // Preview jobs (`preview: true`, claimed via the CPU worker's
     // person_detect_preview capability) keep the procedural placeholder. Real
@@ -444,120 +499,108 @@ pub(crate) async fn run_person_detect(
         .or_else(|| job.payload.get("confidence"))
         .map_or(0.25, |value| value_f64(value, 0.25))
         .clamp(0.01, 1.0);
-    let (detections, detector_model, detector_adapter, detection_active, detector_meta) =
-        if is_preview {
-            (
-                candidate_people(1280, 720, source_asset_id, timestamp),
-                "procedural-person-detector".to_owned(),
-                "procedural_person_tracking",
-                false,
-                Value::Null,
-            )
-        } else {
-            let (boxes, device) = run_yolo11_person_detect(
-                api,
-                settings,
-                http_client,
-                job,
-                media_path.clone(),
-                confidence,
-            )
-            .await?;
-            (
-                boxes,
-                "yolo11m".to_owned(),
-                "yolo11_mlx",
-                true,
-                json!({ "backend": "mlx", "device": device, "model": "yolo11m" }),
-            )
-        };
-    let source_display_name = source_asset
+    let source_display_name = source
+        .source_asset
         .get("displayName")
         .and_then(Value::as_str)
-        .unwrap_or("clip");
-    let source_rel = relative_path(&project_path, &source_media_path)?;
-    let asset = json!({
-        "schemaVersion": 1,
-        "id": asset_id.clone(),
-        "projectId": project_id,
-        "generationSetId": Value::Null,
-        "type": "frame",
-        "displayName": format!("Person selection frame from {source_display_name}"),
-        "createdAt": created_at,
-        "file": {
-            "path": media_rel,
-            "mimeType": "image/png",
-            "width": 1280,
-            "height": 720,
-            "duration": Value::Null,
-            "fps": Value::Null
-        },
-        "status": {
-            "favorite": false,
-            "rating": 0,
-            "rejected": false,
-            "trashed": false
-        },
-        "recipe": {
-            "mode": "person_detect",
-            "model": detector_model,
-            "adapter": detector_adapter,
-            "prompt": "Detect selectable people in representative frame",
-            "negativePrompt": "",
-            "seed": 0,
-            "loras": [],
-            "stylePreset": "none",
-            "normalizedSettings": {
-                "sourceTimestamp": timestamp,
-                "detectionCount": detections.len(),
-                "confidence": confidence,
-                "personDetectionActive": detection_active,
-                "detector": detector_meta
-            },
-            "rawAdapterSettings": { "sourcePath": source_rel }
-        },
-        "lineage": {
-            "parents": [source_asset_id],
-            "sourceAssetId": source_asset_id,
-            "sourceTimestamp": timestamp,
-            "jobId": job.id
-        }
-    });
+        .unwrap_or("clip")
+        .to_owned();
 
-    update_job(
+    // The detector runs inside the asset-builder (it needs the rendered frame on disk); its outputs
+    // also feed the outer result payload, so the builder returns them as the `extra` tuple alongside
+    // the asset JSON (keeping the handler future `Send` for the dispatcher's `tokio::spawn`).
+    let (asset_id, asset, (detections, detection_active)) = render_frame_asset(
         api,
-        &job.id,
-        progress_payload(
-            JobStatus::Saving,
-            ProgressStage::Saving,
-            0.78,
-            "Saving representative frame and candidate boxes.",
-            None,
-            None,
-            None,
-        ),
-    )
-    .await?;
-    if let Err(error) = check_cancel(
-        api,
-        &job.id,
+        settings,
+        job,
+        &source,
+        timestamp,
+        1280,
+        720,
+        "person-frame",
+        "Person detection canceled by user.",
+        0.78,
+        "Saving representative frame and candidate boxes.",
         "Person detection canceled before asset promotion.",
-    )
-    .await
-    {
-        let _ = tokio::fs::remove_file(&media_path).await;
-        return Err(error);
-    }
-    let sidecar_path = media_path.with_extension("sceneworks.json");
-    write_json_value(&sidecar_path, &asset).await?;
-    write_json_value(
-        &project_path
-            .join("recipes")
-            .join(format!("{asset_id}.recipe.json")),
-        &asset["recipe"],
+        |frame| async move {
+            let (detections, detector_model, detector_adapter, detection_active, detector_meta) =
+                if is_preview {
+                    (
+                        candidate_people(1280, 720, source_asset_id, timestamp),
+                        "procedural-person-detector".to_owned(),
+                        "procedural_person_tracking",
+                        false,
+                        Value::Null,
+                    )
+                } else {
+                    let (boxes, device) = run_yolo11_person_detect(
+                        api,
+                        settings,
+                        http_client,
+                        job,
+                        frame.media_path.clone(),
+                        confidence,
+                    )
+                    .await?;
+                    (
+                        boxes,
+                        "yolo11m".to_owned(),
+                        "yolo11_mlx",
+                        true,
+                        json!({ "backend": "mlx", "device": device, "model": "yolo11m" }),
+                    )
+                };
+            let asset = json!({
+                "schemaVersion": 1,
+                "id": frame.asset_id,
+                "projectId": project_id,
+                "generationSetId": Value::Null,
+                "type": "frame",
+                "displayName": format!("Person selection frame from {source_display_name}"),
+                "createdAt": frame.created_at,
+                "file": {
+                    "path": frame.media_rel,
+                    "mimeType": "image/png",
+                    "width": 1280,
+                    "height": 720,
+                    "duration": Value::Null,
+                    "fps": Value::Null
+                },
+                "status": {
+                    "favorite": false,
+                    "rating": 0,
+                    "rejected": false,
+                    "trashed": false
+                },
+                "recipe": {
+                    "mode": "person_detect",
+                    "model": detector_model,
+                    "adapter": detector_adapter,
+                    "prompt": "Detect selectable people in representative frame",
+                    "negativePrompt": "",
+                    "seed": 0,
+                    "loras": [],
+                    "stylePreset": "none",
+                    "normalizedSettings": {
+                        "sourceTimestamp": timestamp,
+                        "detectionCount": detections.len(),
+                        "confidence": confidence,
+                        "personDetectionActive": detection_active,
+                        "detector": detector_meta
+                    },
+                    "rawAdapterSettings": { "sourcePath": frame.source_rel }
+                },
+                "lineage": {
+                    "parents": [source_asset_id],
+                    "sourceAssetId": source_asset_id,
+                    "sourceTimestamp": timestamp,
+                    "jobId": job.id
+                }
+            });
+            Ok((asset, (detections, detection_active)))
+        },
     )
     .await?;
-    store.index_asset_sidecar(project_id, &sidecar_path)?;
 
     let mut result = JsonObject::new();
     result.insert("frameAssetId".to_owned(), Value::String(asset_id));
@@ -610,8 +653,10 @@ async fn run_yolo11_person_detect(
     let weights = crate::person_jobs::ensure_detector_weights(settings, &download_context).await?;
     let conf = confidence as f32;
     // Keep the worker heartbeat alive across the blocking YOLO11 detect (cold weight load +
-    // inference) so a slow detection never trips the API's 90s stale-sweep (sc-8390). Not
-    // cancelable mid-inference.
+    // inference) so a slow detection never trips the API's 90s stale-sweep (sc-8390). Cancel stays
+    // `None` by explicit per-engine decision (sc-9123): YOLO11 person-detect is one bounded forward
+    // pass on one frame — no loop for a flag to interrupt, so the bounded join already gives
+    // everything a cancel flag would.
     let result = run_blocking_with_heartbeat(
         api,
         settings,
@@ -619,6 +664,7 @@ async fn run_yolo11_person_detect(
         None,
         "",
         "person detect task",
+        crate::no_cancel_ack(),
         tokio::task::spawn_blocking(move || {
             crate::person_jobs::detect_people_blocking(weights, frame_path, conf)
         }),
@@ -711,13 +757,64 @@ struct RealPersonTrack {
     tracker_meta: Value,
 }
 
+/// The resolved person-track fields the sidecar assembly consumes, produced by ONE of the two tracking
+/// paths — the procedural CPU-preview placeholder or the real native detector+tracker run. Replaces the
+/// 8-tuple `run_person_track` used to bind out of its preview/real `if/else` (sc-8921, F-119): every
+/// consumer now reads a named field, and the two paths must fill the same shape rather than agreeing on
+/// positional order. `person_active` distinguishes the paths (false = preview placeholder).
+struct PersonTrackOutcome {
+    frames: Vec<Value>,
+    average_confidence: f64,
+    /// Sidecar `maskState` (`active` / `generated` / `degraded` / `missing`, or `deferred` for preview).
+    mask_state: &'static str,
+    /// Whether a real detector/tracker ran (`true`) vs the procedural preview placeholder (`false`).
+    person_active: bool,
+    /// `recipe.model` provenance label (e.g. `yolo11m` / `procedural-person-tracker`).
+    tracker_model: String,
+    /// `recipe.adapter` provenance label (e.g. `yolo11_bytetrack` / `procedural_person_tracking`).
+    tracker_adapter: &'static str,
+    /// `status.quality` payload (real run only; `Null` for preview).
+    quality: Value,
+    /// `status.tracker` / `recipe.normalizedSettings.tracker` payload (real run only; `Null` for preview).
+    tracker_meta: Value,
+}
+
+/// The per-backend seam of [`assemble_real_person_track`] (sc-8833): everything the shared
+/// orchestrator can't infer from the tracking result. `device_default` is the fallback device label
+/// used only if no frame reports one (zero-frame case); every frame's real device overrides it.
+/// `backend_label` / `segmenter_label` populate `tracker_meta`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct PersonTrackBackend {
+    /// Fallback `tracker_meta.device` (macOS = `"mlx"`, off-Mac candle = `"cuda"`), overridden by
+    /// the detector's real per-frame device.
+    device_default: &'static str,
+    /// `tracker_meta.backend` (`"mlx"` / `"candle"`).
+    backend_label: &'static str,
+    /// `tracker_meta.segmenter` when segmentation is enabled (macOS = active SAM2/SAM3 id, off-Mac =
+    /// `"sam3"`); `"disabled"` is substituted by the orchestrator when `segment_enabled` is false.
+    segmenter_label: fn() -> &'static str,
+}
+
 /// Track the selected person through real source content: sample frames at the 2-FPS cadence, run
-/// the native-MLX YOLO11 detector (sc-3633) on each, associate the boxes into track identities with
-/// the SORT/ByteTrack tracker, and resample the chosen identity onto the sample cadence (sc-3634).
-/// macOS-only (MLX detector); the Python Ultralytics path serves Windows/Linux.
-#[cfg(target_os = "macos")]
+/// the YOLO11 detector (native-MLX on Mac sc-3633 / `ort`-CUDA off-Mac sc-5498) on each, associate
+/// the boxes into track identities with the pure-Rust SORT/ByteTrack tracker, resample the chosen
+/// identity onto the sample cadence (sc-3634), then fill per-frame masks with the SAM segmenter.
+///
+/// One cfg-free orchestrator shared by the macOS (native-MLX) and off-Mac candle lanes (sc-8833);
+/// the Python Ultralytics path is the fallback on a candle-disabled box. The only per-backend seams
+/// are the `backend` descriptor (device/backend/segmenter labels) and the `run_segmenter` closure —
+/// every rendered frame's real device overrides `device_default`, so the default only shows through
+/// in the (unreachable) zero-frame case. The work dir is cleaned up on both the not-found error path
+/// and the success path.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[allow(clippy::too_many_arguments)]
-async fn assemble_real_person_track(
+async fn assemble_real_person_track_shared<F, Fut>(
     api: &ApiClient,
     settings: &Settings,
     http_client: &reqwest::Client,
@@ -730,7 +827,13 @@ async fn assemble_real_person_track(
     duration: f64,
     confidence: f64,
     segment_enabled: bool,
-) -> WorkerResult<RealPersonTrack> {
+    backend: PersonTrackBackend,
+    run_segmenter: F,
+) -> WorkerResult<RealPersonTrack>
+where
+    F: FnOnce(SegmentClip) -> Fut,
+    Fut: std::future::Future<Output = SegmentOutcome>,
+{
     use crate::person_track as pt;
 
     let selected_box = pt::NormalizedBox::from_json(detection.get("box").unwrap_or(&Value::Null));
@@ -746,36 +849,106 @@ async fn assemble_real_person_track(
     let conf = confidence as f32;
     let timestamps = pt::sample_timestamps(duration);
 
-    let work_dir = std::env::temp_dir().join(format!("sw-person-track-{}", job.id));
+    // Sanitize the job id before it becomes a temp-dir path component (F-111): a hostile id
+    // (`../…`, absolute, separators) would otherwise escape `temp_dir()` and stage frames at an
+    // attacker-chosen path. `safe_download_dir` slugs every non-`[A-Za-z0-9_.-]` char, matching
+    // the timeline-export convention (`sceneworks_export_{safe_download_dir(job.id)}` above).
+    let work_dir =
+        std::env::temp_dir().join(format!("sw-person-track-{}", safe_download_dir(&job.id)));
     tokio::fs::create_dir_all(&work_dir).await?;
 
-    let mut device = "mlx";
-    // Keep each rendered frame (don't delete in-loop): the segmentation pass re-reads
-    // the detected target frames by the same sample index. They share the cadence, so
-    // assembly frame `i` ↔ `timestamps[i]` ↔ `frame_paths[i]`.
-    let mut frame_paths: Vec<PathBuf> = Vec::with_capacity(timestamps.len());
-    let mut per_frame: Vec<(f64, Vec<(pt::NormalizedBox, f64)>)> =
-        Vec::with_capacity(timestamps.len());
-    for (index, &timestamp) in timestamps.iter().enumerate() {
-        check_cancel(api, &job.id, "Person tracking canceled during sampling.").await?;
-        let frame_path = work_dir.join(format!("frame_{index:04}.png"));
-        let ffmpeg_context = FfmpegContext {
+    // Run the fallible sampling/assembly/segmentation body, then remove `work_dir` on EVERY
+    // outcome — success, the not-found error, a cancel, or a render/detect failure (sc-8912).
+    // Previously the cleanup lived only on the not-found and success paths, so an intervening
+    // `?` leaked the staged frame PNGs in the system temp dir. The body borrows the outer locals
+    // and consumes the `run_segmenter` FnOnce, so it's an inline `async` block whose result is
+    // captured before cleanup.
+    let outcome = assemble_real_person_track_body(
+        api,
+        settings,
+        job,
+        source_media_path,
+        project_path,
+        track_id,
+        &weights,
+        conf,
+        &timestamps,
+        selected_box,
+        selected_timestamp,
+        duration,
+        segment_enabled,
+        &backend,
+        run_segmenter,
+        &work_dir,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    outcome
+}
+
+/// The fallible body of [`assemble_real_person_track_shared`], factored out so the caller can
+/// remove the staged-frame `work_dir` on every exit path (success or error, sc-8912). Returns the
+/// assembled track; the not-found case is still a typed `InvalidPayload` error (cleanup now happens
+/// in the caller, so this no longer removes the dir itself).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[allow(clippy::too_many_arguments)]
+async fn assemble_real_person_track_body<F, Fut>(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    source_media_path: &std::path::Path,
+    project_path: &std::path::Path,
+    track_id: &str,
+    weights: &std::path::Path,
+    conf: f32,
+    timestamps: &[f64],
+    selected_box: crate::person_track::NormalizedBox,
+    selected_timestamp: f64,
+    duration: f64,
+    segment_enabled: bool,
+    backend: &PersonTrackBackend,
+    run_segmenter: F,
+    work_dir: &std::path::Path,
+) -> WorkerResult<RealPersonTrack>
+where
+    F: FnOnce(SegmentClip) -> Fut,
+    Fut: std::future::Future<Output = SegmentOutcome>,
+{
+    use crate::person_track as pt;
+
+    // Extract every sample frame in ONE ffmpeg pass (sc-8915 / F-113) rather than spawning a
+    // process per sample. `frame_paths[i]` ↔ `timestamps[i]` ↔ the segmentation pass's sample index,
+    // exactly as the prior per-frame loop produced. The frames are kept (not deleted in-loop): the
+    // segmentation pass re-reads the detected target frames by the same index.
+    let (track_frame_width, track_frame_height) = TRACK_FRAME_SIZE;
+    let frame_paths = render_track_frames(
+        "ffmpeg",
+        source_media_path,
+        work_dir,
+        timestamps,
+        duration,
+        track_frame_width,
+        track_frame_height,
+        FfmpegContext {
             api,
             settings,
             job_id: &job.id,
             cancel_message: "Person tracking canceled by user.",
-        };
-        render_frame_png(
-            "ffmpeg",
-            source_media_path,
-            &frame_path,
-            frame_seek_timestamp(timestamp, duration),
-            1280,
-            720,
-            Some(ffmpeg_context),
-        )
-        .await?;
-        let weights_for_frame = weights.clone();
+        },
+    )
+    .await?;
+
+    // The detector reports its real execution device per frame; `device_default` is the fallback for
+    // the zero-frame case. Detection stays per-frame (each is one `spawn_blocking` YOLO11 forward).
+    let mut device = backend.device_default;
+    let mut per_frame: Vec<(f64, Vec<(pt::NormalizedBox, f64)>)> =
+        Vec::with_capacity(timestamps.len());
+    for (&timestamp, frame_path) in timestamps.iter().zip(&frame_paths) {
+        check_cancel(api, &job.id, "Person tracking canceled during sampling.").await?;
+        let weights_for_frame = weights.to_path_buf();
         let frame_for_task = frame_path.clone();
         let result = tokio::task::spawn_blocking(move || {
             crate::person_jobs::detect_people_blocking(weights_for_frame, frame_for_task, conf)
@@ -801,38 +974,35 @@ async fn assemble_real_person_track(
             })
             .collect::<Vec<_>>();
         per_frame.push((timestamp, boxes));
-        frame_paths.push(frame_path);
     }
 
     let observations = pt::observe(per_frame);
-    let assembly = pt::assemble_track(&observations, selected_box, selected_timestamp, &timestamps);
+    let assembly = pt::assemble_track(&observations, selected_box, selected_timestamp, timestamps);
     if assembly.target_track_id.is_none() || assembly.detected_frames == 0 {
-        let _ = tokio::fs::remove_dir_all(&work_dir).await;
+        // `work_dir` is removed by the caller on this (and every) exit path (sc-8912).
         return Err(WorkerError::InvalidPayload(
             "Selected person was not found in the source video. Re-run detection or adjust the selection."
                 .to_owned(),
         ));
     }
 
-    // SAM2 segmentation pass (sc-3709): write a per-frame mask for each detected target
+    // SAM2/SAM3 segmentation pass (sc-3709): write a per-frame mask for each detected target
     // frame and fold the result into `maskState`. Any segmenter unavailability degrades
     // gracefully to box-derived masks (handled by the replacement loader), never failing
     // a track that already located the person.
     let mut frames_json = pt::frames_to_json(&assembly.frames);
     let mask_state = segment_assembly_frames(
         api,
-        settings,
-        http_client,
-        job,
         project_path,
+        job,
         track_id,
         &assembly.frames,
         &frame_paths,
         &mut frames_json,
         segment_enabled,
+        run_segmenter,
     )
     .await?;
-    let _ = tokio::fs::remove_dir_all(&work_dir).await;
 
     Ok(RealPersonTrack {
         frames: frames_json,
@@ -840,11 +1010,11 @@ async fn assemble_real_person_track(
         mask_state,
         quality: assembly.quality,
         tracker_meta: json!({
-            "backend": "mlx",
+            "backend": backend.backend_label,
             "device": device,
             "model": "yolo11m",
             "tracker": "sort_bytetrack",
-            "segmenter": if segment_enabled { person_segmenter_kind().meta_label() } else { "disabled" },
+            "segmenter": if segment_enabled { (backend.segmenter_label)() } else { "disabled" },
         }),
     })
 }
@@ -858,44 +1028,103 @@ async fn assemble_real_person_track(
 ))]
 const TRACK_FRAME_SIZE: (u32, u32) = (1280, 720);
 
-/// Generate the selected person's track masks with the native-MLX SAM2 **video predictor**
-/// (sc-3715): prompt once on the first detected frame and propagate temporally-consistent masks
-/// across the `first..=last` detected span via the memory bank, so non-detected gap frames inside
-/// the span still get a mask (the "survives weak-detection frames" win). Masks are written under
-/// `person-tracks/{track_id}/masks/frame_{index:06}.png`, the frame's `mask` is set, and the
-/// outcome rolls up into a `maskState` (Python `segment_track`): `missing` (disabled / no detected
-/// frame), `degraded` (weights unavailable / propagation failed → box-mask fallback at replacement
-/// time), `generated` (some detected frames masked), `active` (all detected frames masked). The
-/// `generated`/`detected_total` rollup counts only detected frames, keeping the contract identical
-/// to the per-frame path; gap-frame masks are additive coverage.
-#[cfg(target_os = "macos")]
+/// The clip a segmenter backend is asked to mask: the `first..=last` detected-span frame paths and
+/// their per-frame ByteTrack box anchors (`None` on the gap frames a video predictor fills from its
+/// memory bank). Handed to the backend closure so it can drive its own model without knowing the
+/// span math, sidecar layout, or PNG contract.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) struct SegmentClip {
+    /// Rendered frame paths for `first..=last`, index-aligned with `anchors`.
+    pub(crate) clip_paths: Vec<PathBuf>,
+    /// `Some(x, y, width, height)` on detected frames, `None` on gap frames.
+    pub(crate) anchors: Vec<Option<(f64, f64, f64, f64)>>,
+}
+
+/// What a segmenter backend returns for a clip. Kept separate from `WorkerResult<Vec<_>>` so the
+/// shared orchestrator can distinguish the three outcomes without overloading `Ok(vec![])`:
+/// a user cancel is terminal for the whole job, a weights/engine failure degrades to box masks, and
+/// masks are the success path.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) enum SegmentOutcome {
+    /// One binary mask per clip frame (detected + gap), index-aligned with `SegmentClip::clip_paths`.
+    Masks(Vec<Vec<u8>>),
+    /// Segmenter unavailable / failed → fall back to box-derived masks at replacement time.
+    Degraded,
+    /// The user canceled the job mid-segmentation; terminal for the whole person-track job.
+    Canceled(String),
+}
+
+/// Roll the per-frame segmentation outcome into the sidecar `maskState` (Python `segment_track`):
+/// `generated` masks out of `detected_total` detected target frames → `degraded` (none written →
+/// box-mask fallback), `active` (every detected frame segmented), or `generated` (a partial subset).
+/// Kept cfg-free next to the shared orchestrator so both lanes roll up identically without reaching
+/// into a per-backend, per-lane segmenter module (`person_segment` is Mac-only; the candle rollup
+/// lives in `person_segment_sam3_candle`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn mask_rollup_state(generated: usize, detected_total: usize) -> &'static str {
+    if generated == 0 {
+        "degraded"
+    } else if generated >= detected_total {
+        "active"
+    } else {
+        "generated"
+    }
+}
+
+/// Generate the selected person's track masks, then roll the outcome into a sidecar `maskState`
+/// (Python `segment_track`): prompt/propagate across the `first..=last` detected span so non-detected
+/// gap frames inside the span still get a mask (the "survives weak-detection frames" win). Masks are
+/// written under `person-tracks/{track_id}/masks/frame_{index:06}.png`, each frame's `mask` is set,
+/// and the outcome rolls up to `missing` (disabled / no detected frame), `degraded` (segmenter
+/// unavailable / failed → box-mask fallback at replacement time), `generated` (some detected frames
+/// masked), or `active` (all detected frames masked). The `generated`/`detected_total` rollup counts
+/// only detected frames, keeping the contract identical to the per-frame path; gap-frame masks are
+/// additive coverage.
+///
+/// This is the single cfg-free orchestrator shared by the macOS (native-MLX SAM2/SAM3) and off-Mac
+/// candle (SAM3) person-track masking passes (sc-8833). Everything but the model call — span math,
+/// bounds guard, clip/anchor assembly, cancel checks, the `p > 127` mask threshold, the PNG-write
+/// dispatch, and the rollup — lives here exactly once. The `run_segmenter` closure is the only
+/// per-backend seam: it resolves that backend's weights and drives the blocking segment step under
+/// `run_blocking_with_heartbeat`, returning a [`SegmentOutcome`]. A cold-start propagate (multi-GB
+/// checkpoint parse + quantize + per-frame 1008² propagation) can exceed the API's 90s stale-sweep,
+/// so the keepalive inside the closure pings `Busy` every interval AND polls for a user cancel;
+/// that cancel is terminal for the whole job (never a degrade), any other failure keeps the degrade
+/// contract.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[allow(clippy::too_many_arguments)]
-async fn segment_assembly_frames(
+pub(crate) async fn segment_assembly_frames<F, Fut>(
     api: &ApiClient,
-    settings: &Settings,
-    http_client: &reqwest::Client,
-    job: &JobSnapshot,
     project_path: &std::path::Path,
+    job: &JobSnapshot,
     track_id: &str,
     frames: &[crate::person_track::TrackFrame],
     frame_paths: &[PathBuf],
     frames_json: &mut [Value],
     segment_enabled: bool,
-) -> WorkerResult<&'static str> {
+    run_segmenter: F,
+) -> WorkerResult<&'static str>
+where
+    F: FnOnce(SegmentClip) -> Fut,
+    Fut: std::future::Future<Output = SegmentOutcome>,
+{
     let detected_total = frames.iter().filter(|frame| frame.detected).count();
     if detected_total == 0 || !segment_enabled {
         return Ok("missing");
     }
 
-    // Resolve/download the segmenter weights once; any failure degrades to box masks.
-    let download_context = DownloadContext {
-        api,
-        client: http_client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Person segmentation canceled while fetching segmenter weights.",
-        fresh_download: false,
-    };
     let masks_dir = project_path
         .join("person-tracks")
         .join(track_id)
@@ -913,6 +1142,8 @@ async fn segment_assembly_frames(
 
     // Clip frame paths + per-frame ByteTrack box anchors (None on the gap frames the predictor
     // fills from memory). The shared sample index ties frame `i` ↔ `frame_paths[i]` ↔ mask `i + 1`.
+    // The bounds guard is load-bearing: a short `frame_paths` (fewer rendered frames than detected
+    // assembly frames) would otherwise slice past the end and panic (OOB).
     if frame_paths.len() <= last {
         return Ok("degraded");
     }
@@ -935,95 +1166,21 @@ async fn segment_assembly_frames(
     )
     .await?;
 
-    // Dispatch to the active segmenter (sc-4926): SAM3 text-concept PCS by default, the legacy
-    // SAM2 box-prompt path under `SCENEWORKS_PERSON_SEGMENTER=sam2` (kept for A/B parity +
-    // fallback during the cutover). Both return one binary mask per clip frame; either path's
+    // The only per-backend seam: resolve weights + drive the blocking segment step (macOS = native
+    // MLX SAM2/SAM3 per `SCENEWORKS_PERSON_SEGMENTER`; off-Mac = candle SAM3, sc-6247). Either path's
     // failure degrades to box masks (handled by the replacement loader) — a track that already
     // located the person is never failed by the mask pass.
-    //
-    // The blocking segment step runs under `run_blocking_with_heartbeat` (sc-8390 / sc-8807): a
-    // cold-start propagate (multi-GB checkpoint parse + quantize + per-frame 1008² propagation)
-    // can exceed the API's 90s stale-sweep, so the keepalive pings `Busy` every interval AND
-    // polls for a user cancel, tripping `cancel` — which the engine's per-frame propagate
-    // contract (gen-core d8038beb) observes between frames. A user cancel is terminal for the
-    // whole person-track job (never a degrade); any other failure keeps the degrade contract.
-    let cancel = gen_core::CancelFlag::new();
-    let cancel_message = "Person tracking canceled during segmentation.";
-    let outcome = match person_segmenter_kind() {
-        PersonSegmenter::Sam3 => {
-            let (model, tokenizer) = match crate::person_segment_sam3::ensure_segmenter_weights(
-                settings,
-                &download_context,
-            )
-            .await
-            {
-                Ok(pair) => pair,
-                Err(WorkerError::Canceled(message)) => return Err(WorkerError::Canceled(message)),
-                Err(_) => return Ok("degraded"),
-            };
-            let flag = cancel.clone();
-            run_blocking_with_heartbeat(
-                api,
-                settings,
-                &job.id,
-                Some(cancel),
-                cancel_message,
-                "person segment task",
-                tokio::task::spawn_blocking(move || {
-                    crate::person_segment_sam3::segment_track_blocking(
-                        model,
-                        tokenizer,
-                        clip_paths,
-                        anchors,
-                        Some(flag),
-                        Some(Box::new(|frame, total| {
-                            tracing::debug!(event = "sam3_propagate_progress", frame, total);
-                        })),
-                    )
-                }),
-            )
-            .await
-        }
-        PersonSegmenter::Sam2 => {
-            let weights =
-                match crate::person_segment::ensure_segmenter_weights(settings, &download_context)
-                    .await
-                {
-                    Ok(path) => path,
-                    Err(WorkerError::Canceled(message)) => {
-                        return Err(WorkerError::Canceled(message))
-                    }
-                    Err(_) => return Ok("degraded"),
-                };
-            let flag = cancel.clone();
-            run_blocking_with_heartbeat(
-                api,
-                settings,
-                &job.id,
-                Some(cancel),
-                cancel_message,
-                "person segment task",
-                tokio::task::spawn_blocking(move || {
-                    crate::person_segment::propagate_track_blocking(
-                        weights,
-                        clip_paths,
-                        anchors,
-                        Some(flag),
-                        Some(Box::new(|frame, total| {
-                            tracing::debug!(event = "sam2_propagate_progress", frame, total);
-                        })),
-                    )
-                }),
-            )
-            .await
-        }
-    };
-    let masks = match outcome {
-        Ok(masks) => masks,
+    let masks = match run_segmenter(SegmentClip {
+        clip_paths,
+        anchors,
+    })
+    .await
+    {
+        SegmentOutcome::Masks(masks) => masks,
         // The keepalive posted the terminal `Canceled` already; propagate it (job canceled).
-        Err(WorkerError::Canceled(message)) => return Err(WorkerError::Canceled(message)),
-        // Any other failure (engine error, task join) degrades to box masks, as before.
-        Err(_) => return Ok("degraded"),
+        SegmentOutcome::Canceled(message) => return Err(WorkerError::Canceled(message)),
+        // Any other failure (weights unavailable, engine error, task join) degrades to box masks.
+        SegmentOutcome::Degraded => return Ok("degraded"),
     };
 
     // Write every clip frame's non-empty mask (detected + gap) and set its sidecar `mask`. All the
@@ -1065,10 +1222,179 @@ async fn segment_assembly_frames(
         }
     }
 
-    Ok(crate::person_segment::rollup_mask_state(
-        generated,
-        detected_total,
-    ))
+    Ok(mask_rollup_state(generated, detected_total))
+}
+
+/// The native-MLX person-segmenter closure (sc-8833): dispatch to the active backend (SAM3 text-
+/// concept PCS by default, the legacy SAM2 box-prompt path under `SCENEWORKS_PERSON_SEGMENTER=sam2`,
+/// kept for A/B parity + fallback during the cutover, sc-4926) and drive the blocking segment step
+/// under `run_blocking_with_heartbeat` (sc-8390 / sc-8807). Both return one binary mask per clip
+/// frame; a user cancel is terminal, any other failure degrades to box masks.
+#[cfg(target_os = "macos")]
+async fn run_macos_segmenter(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+    clip: SegmentClip,
+) -> SegmentOutcome {
+    let download_context = DownloadContext {
+        api,
+        client: http_client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "Person segmentation canceled while fetching segmenter weights.",
+        fresh_download: false,
+    };
+    let SegmentClip {
+        clip_paths,
+        anchors,
+    } = clip;
+    let cancel = gen_core::CancelFlag::new();
+    let cancel_message = "Person tracking canceled during segmentation.";
+    let outcome = match person_segmenter_kind() {
+        PersonSegmenter::Sam3 => {
+            let (model, tokenizer) = match crate::person_segment_sam3::ensure_segmenter_weights(
+                settings,
+                &download_context,
+            )
+            .await
+            {
+                Ok(pair) => pair,
+                Err(WorkerError::Canceled(message)) => return SegmentOutcome::Canceled(message),
+                Err(_) => return SegmentOutcome::Degraded,
+            };
+            let flag = cancel.clone();
+            run_blocking_with_heartbeat(
+                api,
+                settings,
+                &job.id,
+                Some(cancel),
+                cancel_message,
+                "person segment task",
+                crate::no_cancel_ack(),
+                tokio::task::spawn_blocking(move || {
+                    crate::person_segment_sam3::segment_track_blocking(
+                        model,
+                        tokenizer,
+                        clip_paths,
+                        anchors,
+                        Some(flag),
+                        Some(Box::new(|frame, total| {
+                            tracing::debug!(event = "sam3_propagate_progress", frame, total);
+                        })),
+                    )
+                }),
+            )
+            .await
+        }
+        PersonSegmenter::Sam2 => {
+            let weights =
+                match crate::person_segment::ensure_segmenter_weights(settings, &download_context)
+                    .await
+                {
+                    Ok(path) => path,
+                    Err(WorkerError::Canceled(message)) => {
+                        return SegmentOutcome::Canceled(message)
+                    }
+                    Err(_) => return SegmentOutcome::Degraded,
+                };
+            let flag = cancel.clone();
+            run_blocking_with_heartbeat(
+                api,
+                settings,
+                &job.id,
+                Some(cancel),
+                cancel_message,
+                "person segment task",
+                crate::no_cancel_ack(),
+                tokio::task::spawn_blocking(move || {
+                    crate::person_segment::propagate_track_blocking(
+                        weights,
+                        clip_paths,
+                        anchors,
+                        Some(flag),
+                        Some(Box::new(|frame, total| {
+                            tracing::debug!(event = "sam2_propagate_progress", frame, total);
+                        })),
+                    )
+                }),
+            )
+            .await
+        }
+    };
+    match outcome {
+        Ok(masks) => SegmentOutcome::Masks(masks),
+        Err(WorkerError::Canceled(message)) => SegmentOutcome::Canceled(message),
+        Err(_) => SegmentOutcome::Degraded,
+    }
+}
+
+/// The off-Mac candle SAM3 person-segmenter closure (sc-6247 / sc-8833): SAM3 is the only off-Mac
+/// segmenter (no SAM2 box-prompt fallback — that's the native-MLX `mlx-gen-sam2`). Resolves the
+/// candle SAM3 weights and drives the blocking segment step under `run_blocking_with_heartbeat`
+/// (sc-8390 / sc-8807), mirroring the macOS closure: the keepalive's cancel poll trips `cancel`,
+/// which the engine's per-frame propagate contract (sc-8972, the candle sibling of gen-core
+/// d8038beb) observes between frames — not just at the coarse seams (cold parse / model build).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn run_candle_segmenter(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+    clip: SegmentClip,
+) -> SegmentOutcome {
+    let download_context = DownloadContext {
+        api,
+        client: http_client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "Person segmentation canceled while fetching segmenter weights.",
+        fresh_download: false,
+    };
+    let SegmentClip {
+        clip_paths,
+        anchors,
+    } = clip;
+    let (model, tokenizer) = match crate::person_segment_sam3_candle::ensure_segmenter_weights(
+        settings,
+        &download_context,
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(WorkerError::Canceled(message)) => return SegmentOutcome::Canceled(message),
+        Err(_) => return SegmentOutcome::Degraded,
+    };
+    let cancel = gen_core::CancelFlag::new();
+    let flag = cancel.clone();
+    let outcome = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        "Person tracking canceled during segmentation.",
+        "person segment task",
+        crate::no_cancel_ack(),
+        tokio::task::spawn_blocking(move || {
+            crate::person_segment_sam3_candle::segment_track_blocking(
+                model,
+                tokenizer,
+                clip_paths,
+                anchors,
+                Some(flag),
+                Some(Box::new(|frame, total| {
+                    tracing::debug!(event = "sam3_propagate_progress", frame, total);
+                })),
+            )
+        }),
+    )
+    .await;
+    match outcome {
+        Ok(masks) => SegmentOutcome::Masks(masks),
+        Err(WorkerError::Canceled(message)) => SegmentOutcome::Canceled(message),
+        Err(_) => SegmentOutcome::Degraded,
+    }
 }
 
 /// Encode each `(assembly_idx, rel, out_path, pixels)` mask as an `L` (8-bit grayscale) PNG,
@@ -1096,165 +1422,51 @@ fn write_track_mask_pngs(
     written
 }
 
-/// Off-Mac candle SAM3 segmentation pass (sc-6247): the Windows/CUDA sibling of the macOS
-/// [`segment_assembly_frames`], driving `candle-gen-sam3`'s text-concept (PCS) video pipeline to
-/// write a per-frame mask for each detected target frame. SAM3 is the only off-Mac segmenter (no
-/// SAM2 box-prompt fallback — that's the native-MLX `mlx-gen-sam2`); any unavailability degrades to
-/// box-derived masks (handled by the replacement loader), never failing a track that already located
-/// the person. Mirrors the macOS orchestration exactly.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+/// macOS entry point for [`assemble_real_person_track_shared`] (sc-8833): supplies the native-MLX
+/// backend descriptor (device `mlx`, active SAM2/SAM3 segmenter id) and the MLX segmenter closure.
+#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
-async fn segment_assembly_frames(
+async fn assemble_real_person_track(
     api: &ApiClient,
     settings: &Settings,
     http_client: &reqwest::Client,
     job: &JobSnapshot,
     project_path: &std::path::Path,
+    source_media_path: &std::path::Path,
+    detection: &Value,
     track_id: &str,
-    frames: &[crate::person_track::TrackFrame],
-    frame_paths: &[PathBuf],
-    frames_json: &mut [Value],
+    selected_timestamp: f64,
+    duration: f64,
+    confidence: f64,
     segment_enabled: bool,
-) -> WorkerResult<&'static str> {
-    let detected_total = frames.iter().filter(|frame| frame.detected).count();
-    if detected_total == 0 || !segment_enabled {
-        return Ok("missing");
-    }
-
-    let download_context = DownloadContext {
+) -> WorkerResult<RealPersonTrack> {
+    assemble_real_person_track_shared(
         api,
-        client: http_client,
         settings,
-        job_id: &job.id,
-        cancel_message: "Person segmentation canceled while fetching segmenter weights.",
-        fresh_download: false,
-    };
-    let masks_dir = project_path
-        .join("person-tracks")
-        .join(track_id)
-        .join("masks");
-    if tokio::fs::create_dir_all(&masks_dir).await.is_err() {
-        return Ok("degraded");
-    }
-
-    let Some(first) = frames.iter().position(|f| f.detected) else {
-        return Ok("missing");
-    };
-    let last = frames.iter().rposition(|f| f.detected).unwrap_or(first);
-    if frame_paths.len() <= last {
-        return Ok("degraded");
-    }
-    let mut clip_paths = Vec::with_capacity(last - first + 1);
-    let mut anchors = Vec::with_capacity(last - first + 1);
-    for (frame, path) in frames[first..=last].iter().zip(&frame_paths[first..=last]) {
-        clip_paths.push(path.clone());
-        anchors.push(frame.detected.then_some((
-            frame.box_.x,
-            frame.box_.y,
-            frame.box_.width,
-            frame.box_.height,
-        )));
-    }
-
-    check_cancel(
-        api,
-        &job.id,
-        "Person tracking canceled during segmentation.",
-    )
-    .await?;
-
-    let (model, tokenizer) = match crate::person_segment_sam3_candle::ensure_segmenter_weights(
-        settings,
-        &download_context,
+        http_client,
+        job,
+        project_path,
+        source_media_path,
+        detection,
+        track_id,
+        selected_timestamp,
+        duration,
+        confidence,
+        segment_enabled,
+        PersonTrackBackend {
+            device_default: "mlx",
+            backend_label: "mlx",
+            segmenter_label: || person_segmenter_kind().meta_label(),
+        },
+        |clip| run_macos_segmenter(api, settings, http_client, job, clip),
     )
     .await
-    {
-        Ok(pair) => pair,
-        Err(WorkerError::Canceled(message)) => return Err(WorkerError::Canceled(message)),
-        Err(_) => return Ok("degraded"),
-    };
-    // Keepalive + user cancel across the blocking segment step (sc-8390 / sc-8807), mirroring the
-    // macOS twin. The pinned candle-gen-sam3 propagate takes no cancel/progress params yet
-    // (sc-8972), so the tripped flag stops at the coarse seams (cold parse / model build) only.
-    let cancel = gen_core::CancelFlag::new();
-    let flag = cancel.clone();
-    let outcome = run_blocking_with_heartbeat(
-        api,
-        settings,
-        &job.id,
-        Some(cancel),
-        "Person tracking canceled during segmentation.",
-        "person segment task",
-        tokio::task::spawn_blocking(move || {
-            crate::person_segment_sam3_candle::segment_track_blocking(
-                model,
-                tokenizer,
-                clip_paths,
-                anchors,
-                Some(flag),
-            )
-        }),
-    )
-    .await;
-    let masks = match outcome {
-        Ok(masks) => masks,
-        // The keepalive posted the terminal `Canceled` already; propagate it (job canceled).
-        Err(WorkerError::Canceled(message)) => return Err(WorkerError::Canceled(message)),
-        // Any other failure (engine error, task join) degrades to box masks, as before.
-        Err(_) => return Ok("degraded"),
-    };
-
-    // Write every clip frame's non-empty mask (detected + gap) and set its sidecar `mask`.
-    let pending: Vec<(usize, String, PathBuf, Vec<u8>)> = masks
-        .into_iter()
-        .enumerate()
-        .filter(|(_, pixels)| pixels.iter().any(|&p| p > 127))
-        .map(|(clip_idx, pixels)| {
-            let assembly_idx = first + clip_idx;
-            let rel = format!(
-                "person-tracks/{track_id}/masks/frame_{:06}.png",
-                assembly_idx + 1
-            );
-            let out_path = project_path.join(&rel);
-            (assembly_idx, rel, out_path, pixels)
-        })
-        .collect();
-    let (width, height) = TRACK_FRAME_SIZE;
-    let written =
-        match tokio::task::spawn_blocking(move || write_track_mask_pngs(width, height, pending))
-            .await
-        {
-            Ok(written) => written,
-            Err(_) => return Ok("degraded"),
-        };
-
-    let mut generated = 0usize;
-    for (assembly_idx, rel) in written {
-        if let Some(entry) = frames_json.get_mut(assembly_idx) {
-            entry["mask"] = Value::String(rel);
-        }
-        if frames
-            .get(assembly_idx)
-            .map(|f| f.detected)
-            .unwrap_or(false)
-        {
-            generated += 1;
-        }
-    }
-
-    Ok(crate::person_segment_sam3_candle::rollup_mask_state(
-        generated,
-        detected_total,
-    ))
 }
 
-/// Track the selected person through real source content on the off-Mac candle GPU-worker lane
-/// (sc-5498): sample frames at the 2-FPS cadence, run the `ort`/CUDA YOLO11 detector on each,
-/// associate the boxes into track identities with the pure-Rust SORT/ByteTrack tracker
-/// (sc-3634, `person_track`), and resample the chosen identity onto the sample cadence. The candle
-/// SAM3 text-concept segmenter then fills per-frame masks (sc-6247) — at parity with the macOS SAM3
-/// path — so off-Mac tracks are no longer box-only. Mirrors the macOS `assemble_real_person_track`;
-/// the Python Ultralytics path is the fallback on a candle-disabled box.
+/// Off-Mac candle GPU-worker entry point for [`assemble_real_person_track_shared`] (sc-5498 /
+/// sc-8833): supplies the candle backend descriptor (device `cuda`, SAM3-only segmenter, sc-6247)
+/// and the candle SAM3 segmenter closure. The Python Ultralytics path is the fallback on a
+/// candle-disabled box.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[allow(clippy::too_many_arguments)]
 async fn assemble_real_person_track(
@@ -1271,122 +1483,27 @@ async fn assemble_real_person_track(
     confidence: f64,
     segment_enabled: bool,
 ) -> WorkerResult<RealPersonTrack> {
-    use crate::person_track as pt;
-
-    let selected_box = pt::NormalizedBox::from_json(detection.get("box").unwrap_or(&Value::Null));
-    let download_context = DownloadContext {
-        api,
-        client: http_client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Person tracking canceled while fetching detector weights.",
-        fresh_download: false,
-    };
-    let weights = crate::person_jobs::ensure_detector_weights(settings, &download_context).await?;
-    let conf = confidence as f32;
-    let timestamps = pt::sample_timestamps(duration);
-
-    let work_dir = std::env::temp_dir().join(format!("sw-person-track-{}", job.id));
-    tokio::fs::create_dir_all(&work_dir).await?;
-
-    // The detector reports its real execution device per frame (cuda / cpu, per the `ort` EP).
-    // Keep each rendered frame (don't delete in-loop): the SAM3 segmentation pass re-reads them by
-    // the same sample index (assembly frame `i` ↔ `timestamps[i]` ↔ `frame_paths[i]`).
-    let mut device = "cuda";
-    let mut frame_paths: Vec<PathBuf> = Vec::with_capacity(timestamps.len());
-    let mut per_frame: Vec<(f64, Vec<(pt::NormalizedBox, f64)>)> =
-        Vec::with_capacity(timestamps.len());
-    for (index, &timestamp) in timestamps.iter().enumerate() {
-        check_cancel(api, &job.id, "Person tracking canceled during sampling.").await?;
-        let frame_path = work_dir.join(format!("frame_{index:04}.png"));
-        let ffmpeg_context = FfmpegContext {
-            api,
-            settings,
-            job_id: &job.id,
-            cancel_message: "Person tracking canceled by user.",
-        };
-        render_frame_png(
-            "ffmpeg",
-            source_media_path,
-            &frame_path,
-            frame_seek_timestamp(timestamp, duration),
-            1280,
-            720,
-            Some(ffmpeg_context),
-        )
-        .await?;
-        let weights_for_frame = weights.clone();
-        let frame_for_task = frame_path.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            crate::person_jobs::detect_people_blocking(weights_for_frame, frame_for_task, conf)
-        })
-        .await
-        .map_err(|error| task_join_error("person track detect task", error))??;
-        device = result.device;
-        let boxes = result
-            .detections
-            .iter()
-            .map(|d| {
-                (
-                    pt::xyxy_to_normalized(
-                        d.x1 as f64,
-                        d.y1 as f64,
-                        d.x2 as f64,
-                        d.y2 as f64,
-                        result.width,
-                        result.height,
-                    ),
-                    d.score as f64,
-                )
-            })
-            .collect::<Vec<_>>();
-        per_frame.push((timestamp, boxes));
-        frame_paths.push(frame_path);
-    }
-
-    let observations = pt::observe(per_frame);
-    let assembly = pt::assemble_track(&observations, selected_box, selected_timestamp, &timestamps);
-    if assembly.target_track_id.is_none() || assembly.detected_frames == 0 {
-        let _ = tokio::fs::remove_dir_all(&work_dir).await;
-        return Err(WorkerError::InvalidPayload(
-            "Selected person was not found in the source video. Re-run detection or adjust the selection."
-                .to_owned(),
-        ));
-    }
-
-    // Candle SAM3 segmentation pass (sc-6247): write a per-frame mask for each detected target frame
-    // and fold the result into `maskState`. Any segmenter unavailability degrades gracefully to
-    // box-derived masks (handled by the replacement loader), never failing a track that already
-    // located the person.
-    let mut frames_json = pt::frames_to_json(&assembly.frames);
-    let mask_state = segment_assembly_frames(
+    assemble_real_person_track_shared(
         api,
         settings,
         http_client,
         job,
         project_path,
+        source_media_path,
+        detection,
         track_id,
-        &assembly.frames,
-        &frame_paths,
-        &mut frames_json,
+        selected_timestamp,
+        duration,
+        confidence,
         segment_enabled,
+        PersonTrackBackend {
+            device_default: "cuda",
+            backend_label: "candle",
+            segmenter_label: || "sam3",
+        },
+        |clip| run_candle_segmenter(api, settings, http_client, job, clip),
     )
-    .await?;
-    let _ = tokio::fs::remove_dir_all(&work_dir).await;
-
-    Ok(RealPersonTrack {
-        frames: frames_json,
-        average_confidence: pt::average_confidence(&assembly.frames),
-        mask_state,
-        quality: assembly.quality,
-        tracker_meta: json!({
-            "backend": "candle",
-            "device": device,
-            "model": "yolo11m",
-            "tracker": "sort_bytetrack",
-            "segmenter": if segment_enabled { "sam3" } else { "disabled" },
-        }),
-    })
+    .await
 }
 
 #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
@@ -1543,16 +1660,7 @@ pub(crate) async fn run_person_track(
     // YOLO11 detector (sc-3633) per sampled frame + the SORT/ByteTrack tracker (sc-3634), then
     // segment each detected frame with the native-MLX SAM2 segmenter (sc-3709) → maskState
     // active / generated / degraded / missing.
-    let (
-        frames,
-        average_confidence,
-        mask_state,
-        person_active,
-        tracker_model,
-        tracker_adapter,
-        quality_value,
-        tracker_meta,
-    ): (Vec<Value>, f64, &str, bool, String, &str, Value, Value) = if is_preview {
+    let outcome: PersonTrackOutcome = if is_preview {
         let frames = track_frames_from_detection(&detection, duration);
         let avg = frames
             .iter()
@@ -1563,16 +1671,16 @@ pub(crate) async fn run_person_track(
             })
             .sum::<f64>()
             / (frames.len().max(1) as f64);
-        (
+        PersonTrackOutcome {
             frames,
-            avg,
-            "deferred",
-            false,
-            "procedural-person-tracker".to_owned(),
-            "procedural_person_tracking",
-            Value::Null,
-            Value::Null,
-        )
+            average_confidence: avg,
+            mask_state: "deferred",
+            person_active: false,
+            tracker_model: "procedural-person-tracker".to_owned(),
+            tracker_adapter: "procedural_person_tracking",
+            quality: Value::Null,
+            tracker_meta: Value::Null,
+        }
     } else {
         let source_media_rel = required_value_str(source_file, "path")?;
         let source_media_path = safe_project_path(&project_path, source_media_rel)?;
@@ -1597,17 +1705,27 @@ pub(crate) async fn run_person_track(
             segment_enabled,
         )
         .await?;
-        (
-            real.frames,
-            real.average_confidence,
-            real.mask_state,
-            true,
-            "yolo11m".to_owned(),
-            "yolo11_bytetrack",
-            real.quality,
-            real.tracker_meta,
-        )
+        PersonTrackOutcome {
+            frames: real.frames,
+            average_confidence: real.average_confidence,
+            mask_state: real.mask_state,
+            person_active: true,
+            tracker_model: "yolo11m".to_owned(),
+            tracker_adapter: "yolo11_bytetrack",
+            quality: real.quality,
+            tracker_meta: real.tracker_meta,
+        }
     };
+    let PersonTrackOutcome {
+        frames,
+        average_confidence,
+        mask_state,
+        person_active,
+        tracker_model,
+        tracker_adapter,
+        quality: quality_value,
+        tracker_meta,
+    } = outcome;
 
     let track_name =
         optional_payload_string(&job.payload, "trackName").unwrap_or("Selected person");
@@ -2125,6 +2243,432 @@ pub(crate) fn export_request_from_job(job: &JobSnapshot) -> WorkerResult<Timelin
     })
 }
 
+/// The scale→pad→rgb24 filter chain every person-track / frame-extract sample shares. Downscales
+/// into `width×height` preserving aspect (letterboxed on the app ink color), then forces rgb24 so
+/// the detector always sees a 3-channel frame. Shared by the single-frame `render_frame_png` and the
+/// single-pass `render_track_frames` so both produce identical frame geometry for a given source
+/// frame (the two paths can still pick DIFFERENT source frames — see `render_track_frames`).
+fn frame_scale_pad_filter(width: u32, height: u32) -> String {
+    format!(
+        "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=0x12110f,format=rgb24"
+    )
+}
+
+/// Count the decodable video frames in `source_path` with a single ffmpeg null-mux pass, so the
+/// caller can decide whether the single-pass `select` optimization is provably equivalent to the
+/// old per-frame accurate-seek loop (sc-8915 / F-113). Returns `Ok(Some(n))` on a clean probe,
+/// `Ok(None)` when the frame count can't be parsed from ffmpeg's stderr (unknown → the caller must
+/// take the SAFE per-frame path). We deliberately probe with `ffmpeg` and not `ffprobe`: the desktop
+/// app ships only the imageio-ffmpeg binary (no `ffprobe`), so `ffprobe` is not guaranteed present.
+///
+/// `-c copy -f null -` walks every packet without re-encoding and prints the running `frame=<N>`
+/// counter to stderr; the last value is the exact decodable frame count. This is VFR-safe (it counts
+/// real frames rather than trusting an `avg_frame_rate` metadata field that lies on VFR/screen-record
+/// sources). Probe failures are non-fatal: `None` simply routes to the accurate-seek fallback.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn probe_source_frame_count(ffmpeg: &str, source_path: &Path) -> Option<usize> {
+    let configured = match std::env::var("SCENEWORKS_FFMPEG") {
+        Ok(path) if ffmpeg == "ffmpeg" && !path.trim().is_empty() => path,
+        _ => ffmpeg.to_owned(),
+    };
+    let program = sceneworks_core::media_convert::resolve_ffmpeg_program(&configured);
+    let output = Command::new(program.as_ref())
+        .args([
+            "-hide_banner",
+            "-i",
+            &source_path.display().to_string(),
+            "-map",
+            "0:v:0",
+            "-c",
+            "copy",
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .ok()?;
+    // ffmpeg writes `frame=<N>` progress lines to stderr; the last one is the final decoded count.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    parse_ffmpeg_frame_count(&stderr)
+}
+
+/// Extract the last `frame=<N>` counter ffmpeg prints to stderr (the progress token may be padded
+/// with spaces, e.g. `frame=  12`). Split into its own pure fn so it is unit-testable without ffmpeg.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn parse_ffmpeg_frame_count(stderr: &str) -> Option<usize> {
+    stderr.rmatch_indices("frame=").find_map(|(idx, _)| {
+        stderr[idx + "frame=".len()..]
+            .trim_start()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .filter(|digits| !digits.is_empty())
+            .and_then(|digits| digits.parse::<usize>().ok())
+    })
+}
+
+/// Extract the person-track sample frames in ONE ffmpeg pass (sc-8915 / F-113) — replacing up to
+/// `MAX_SAMPLES` (24) per-sample accurate-seek spawns — WHENEVER that single pass is provably
+/// equivalent to the old per-sample loop, and FALLING BACK to the per-frame accurate seeks when it
+/// is not.
+///
+/// `sample_timestamps` is a uniform cadence — evenly spaced `duration·i/(count-1)` for the interior
+/// samples, with only the final inclusive-end sample pulled inside the clip by
+/// `FRAME_SEEK_GUARD_SECONDS`. A single `select` filter over that same grid picks, for the
+/// `selected_n`-th output frame, the first source frame whose `pts ≥ TH(selected_n)`, where
+/// `TH(n) = format!("{:.3}", frame_seek_timestamp(timestamps[n], duration).max(0.0))` is the byte-
+/// identical seek STRING the per-frame accurate path passes to `-ss` for sample `n` (same formatting,
+/// no separate pre-round — see [`render_track_frames_single_pass`] for why a pre-round diverged at
+/// `{:.3}` tie points). Feeding the filter that per-sample threshold lookup (rather than a
+/// `min(selected_n·interval, last_seek)` recurrence) is what makes the single pass byte-identical,
+/// sample-for-sample, to the accurate-seek path over its whole regime.
+///
+/// GUARANTEE (what this function actually delivers):
+/// - **High-fps / frame-dense sources** (`source_frame_count ≥ count`): the single pass is taken and
+///   is BYTE-IDENTICAL to the per-frame accurate-seek reference. Both mechanisms compare `pts` against
+///   the identical `{:.3}` threshold, so both select the identical frame — including at grid points
+///   that align to a source frame's pts, which an earlier `{:.6}`-truncated `selected_n·interval`
+///   recurrence got wrong by an adjacent (±1) source frame (e.g. 5/16 samples off on 30fps@8s).
+/// - **Sub-cadence-fps / frame-starved sources** (`source_frame_count < count`, or an unknown probe):
+///   the forward-only single `select` would exhaust the clip early (two close grid points with no
+///   distinct source frame between them collapse to one forward frame, whereas `-ss` re-selects the
+///   same earlier frame independently), diverging grossly — reproduced with real ffmpeg at 19–21/24
+///   frames wrong on a 12s@1fps clip. So we DO NOT run the single pass there: we fall back to
+///   per-frame accurate seeks, which reproduce the exact pre-PR frames by construction.
+///
+/// We probe the real decodable frame count with [`probe_source_frame_count`] (an ffmpeg null-mux
+/// count, VFR-safe, no `ffprobe` dependency). Single pass ONLY when the probe succeeds AND
+/// `frame_count ≥ count`; otherwise (including an unknown/failed probe) fall back to per-frame
+/// accurate seeks. Either way the person-detector sees the same frames the pre-optimization code did.
+///
+/// In the single-pass path the frames land as a 1-based `seq_%04d.png` image2 sequence, then are
+/// renamed to the 0-based `frame_{index:04}.png` names the segmentation pass re-reads by sample
+/// index. A single-sample cadence (`count ≤ 1`, i.e. `duration ≤ 0`) has no interval, so it always
+/// takes one accurate-seek `render_frame_png` — the exact frame the old loop's sole iteration
+/// produced. In the single-pass path, if the source is shorter than the grid implies and ffmpeg
+/// emits fewer than `count` frames, the last real frame is cloned forward so every sample index has
+/// a readable frame (the tracker records the logical `timestamps[i]` regardless).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[allow(clippy::too_many_arguments)]
+async fn render_track_frames(
+    ffmpeg: &str,
+    source_path: &Path,
+    work_dir: &Path,
+    timestamps: &[f64],
+    duration: f64,
+    width: u32,
+    height: u32,
+    context: FfmpegContext<'_>,
+) -> WorkerResult<Vec<PathBuf>> {
+    let count = timestamps.len();
+    let frame_path = |index: usize| work_dir.join(format!("frame_{index:04}.png"));
+
+    // Degenerate single-frame cadence: no interval → one accurate-seek frame (the old loop's only
+    // iteration). `frame_seek_timestamp` keeps the seek inside the clip exactly as before.
+    if count <= 1 {
+        let path = frame_path(0);
+        render_frame_png(
+            ffmpeg,
+            source_path,
+            &path,
+            frame_seek_timestamp(timestamps.first().copied().unwrap_or(0.0), duration),
+            width,
+            height,
+            Some(context),
+        )
+        .await?;
+        return Ok(vec![path]);
+    }
+
+    // Gate the single-pass optimization on the equivalence condition above: only when the source has
+    // at least `count` decodable frames does each grid point map to a distinct forward frame that
+    // matches the independent accurate seek. An unknown probe (`None`) is treated as unsafe and also
+    // routes to the fallback. This is what keeps the perf win for well-behaved clips while
+    // guaranteeing correctness for sub-cadence-fps / frame-starved sources.
+    let source_frame_count = probe_source_frame_count(ffmpeg, source_path).await;
+    let single_pass_equivalent = source_frame_count.is_some_and(|frames| frames >= count);
+    if !single_pass_equivalent {
+        return render_track_frames_per_frame(
+            ffmpeg,
+            source_path,
+            work_dir,
+            timestamps,
+            duration,
+            width,
+            height,
+            context,
+        )
+        .await;
+    }
+
+    // The single pass is an OPTIMIZATION, not a correctness dependency: if this ffmpeg build rejects the
+    // long `select` filter (or the pass fails for any other reason), degrade gracefully to the exact
+    // per-frame accurate-seek path rather than hard-failing the job. That path produces the identical
+    // frame selection (it is the reference the single pass is gated against), so the fallback is safe and
+    // lossless — it just spends more ffmpeg spawns. We log a warn so the degradation is observable.
+    match render_track_frames_single_pass(
+        ffmpeg,
+        source_path,
+        work_dir,
+        timestamps,
+        duration,
+        width,
+        height,
+        context,
+    )
+    .await
+    {
+        Ok(frames) => Ok(frames),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                source = %source_path.display(),
+                "single-pass person-track frame sampling failed; falling back to per-frame accurate seeks"
+            );
+            render_track_frames_per_frame(
+                ffmpeg,
+                source_path,
+                work_dir,
+                timestamps,
+                duration,
+                width,
+                height,
+                context,
+            )
+            .await
+        }
+    }
+}
+
+/// The single ffmpeg-pass sampling path — the perf win. Split out from [`render_track_frames`] (which
+/// owns the frame-count gate) so the byte-identity of this path can be exercised directly AND so a test
+/// can drive it UNGATED on a low-fps clip to prove the gate is load-bearing (gross divergence there).
+///
+/// Builds the select predicate so the single pass lands on the SAME source frame the per-sample
+/// accurate-seek path ([`render_track_frames_per_frame`]) would, for every sample — byte-identically.
+/// The accurate path pulls sample `i` with `-ss {frame_seek_timestamp(timestamps[i], duration):.3}`
+/// (i.e. `format!("{:.3}", seek.max(0.0))`), snapping to the first frame whose `pts ≥` that rendered
+/// threshold STRING. The single `select` filter increments `selected_n` (0-based output-frame counter)
+/// each time it fires, so we drive it off a per-sample threshold LOOKUP keyed on `selected_n` —
+/// `gte(t, TH(selected_n))` where `TH(n)` is the byte-identical `format!("{:.3}", seek.max(0.0))` string
+/// interpolated verbatim into the filter — instead of a `min(selected_n·interval, last_seek)` recurrence.
+///
+/// Why interpolate the rendered string and not a re-derived number: the round-1 recurrence fed the filter
+/// a `{:.6}`-truncated `selected_n·interval`, a DIFFERENT number than the `-ss` threshold, so at grid
+/// points that align to a source frame's pts the two mechanisms landed on ADJACENT frames (swept: 30fps@8s
+/// picked +1 source frame on 5/16 samples). Round 2 pre-rounded the threshold `f64` with
+/// `(x*1000.0).round()/1000.0` before formatting — but `f64::round` is round-half-AWAY-from-zero while
+/// `{:.3}` is round-half-to-EVEN, so the two disagreed at `{:.3}` tie points (a `…5` third-decimal seek,
+/// e.g. duration 2.25s → sample[1] seek 0.5625 → `-ss 0.562` vs pre-round `0.563`) and again picked
+/// ADJACENT frames (swept: 66/660 tie durations diverged). Round 3 drops the pre-round and formats the raw
+/// seek ONCE with the exact `{:.3}` the accurate path uses, then compares against that identical string, so
+/// both select the identical frame. Verified byte-identical across the high-fps sweep (30/24/60/25/29.97
+/// fps), at the 24-sample cap, and at the 2.25s `{:.3}` tie point (0/660 divergences).
+///
+/// NOTE: byte-identity here holds ONLY for frame-dense sources (`source_frame_count ≥ count`); on
+/// sub-cadence-fps sources the forward-only `select` exhausts the clip early and diverges grossly, which
+/// is exactly why [`render_track_frames`] gates this path behind the probe. Callers other than the gated
+/// wrapper (i.e. tests) must respect that.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[allow(clippy::too_many_arguments)]
+async fn render_track_frames_single_pass(
+    ffmpeg: &str,
+    source_path: &Path,
+    work_dir: &Path,
+    timestamps: &[f64],
+    duration: f64,
+    width: u32,
+    height: u32,
+    context: FfmpegContext<'_>,
+) -> WorkerResult<Vec<PathBuf>> {
+    let count = timestamps.len();
+    let frame_path = |index: usize| work_dir.join(format!("frame_{index:04}.png"));
+    // Render each per-sample seek threshold to a string with the EXACT SAME `{:.3}` formatting the
+    // accurate path applies to `-ss` (`try_render_frame_png`/`render_frame_png`:
+    // `format!("{:.3}", timestamp.max(0.0))`). We interpolate these rendered strings verbatim into the
+    // `select` predicate so the filter compares `pts` against the byte-identical seek the accurate path
+    // seeks to. Do NOT pre-round the f64 first (e.g. `(x*1000.0).round()/1000.0`): that is round-half-
+    // AWAY-from-zero, whereas Rust's `{:.3}` is round-half-to-EVEN, so the two disagree at `{:.3}` tie
+    // points (a `…5` third-decimal-boundary seek) and pick ADJACENT source frames (swept: 66/660 tie
+    // durations diverged byte-for-byte). Formatting the raw seek once, the same way, is bit-for-bit
+    // identical to the accurate seek.
+    let thresholds: Vec<String> = timestamps
+        .iter()
+        .map(|&t| format!("{:.3}", frame_seek_timestamp(t, duration).max(0.0)))
+        .collect();
+    // No shell here (`run_ffmpeg` execs the binary directly), so the select expression carries no
+    // wrapping quotes — only the intra-expression commas are backslash-escaped so ffmpeg does not
+    // read them as `-vf` filter-chain separators. The lookup is a nested `if(eq(selected_n,n), th_n, …)`
+    // chain with the final threshold as the default tail (already selected once `selected_n == count-1`).
+    let mut lookup = thresholds[count - 1].clone();
+    for n in (0..count - 1).rev() {
+        lookup = format!(
+            "if(eq(selected_n\\,{n})\\,{th}\\,{lookup})",
+            th = thresholds[n]
+        );
+    }
+    let select = format!("select=gte(t\\,{lookup})");
+    let filters = format!(
+        "{select},{scale_pad}",
+        scale_pad = frame_scale_pad_filter(width, height)
+    );
+    let seq_pattern = work_dir.join("seq_%04d.png");
+    run_ffmpeg(
+        vec![
+            ffmpeg.to_owned(),
+            "-y".to_owned(),
+            "-i".to_owned(),
+            source_path.display().to_string(),
+            "-vf".to_owned(),
+            filters,
+            "-frames:v".to_owned(),
+            count.to_string(),
+            "-fps_mode".to_owned(),
+            "passthrough".to_owned(),
+            "-f".to_owned(),
+            "image2".to_owned(),
+            seq_pattern.display().to_string(),
+        ],
+        Some(context),
+    )
+    .await?;
+
+    // Rename the 1-based sequence into the 0-based sample-index names, cloning the last real frame
+    // forward for any tail index ffmpeg didn't reach (short source).
+    let mut frame_paths = Vec::with_capacity(count);
+    let mut last_written: Option<PathBuf> = None;
+    for index in 0..count {
+        let seq_path = work_dir.join(format!("seq_{:04}.png", index + 1));
+        let dest = frame_path(index);
+        if tokio::fs::try_exists(&seq_path).await? {
+            tokio::fs::rename(&seq_path, &dest).await?;
+            last_written = Some(dest.clone());
+        } else if let Some(previous) = &last_written {
+            tokio::fs::copy(previous, &dest).await?;
+        } else {
+            return Err(WorkerError::InvalidPayload(format!(
+                "FFmpeg produced no sampled frames for {}",
+                source_path.display()
+            )));
+        }
+        frame_paths.push(dest);
+    }
+    Ok(frame_paths)
+}
+
+/// The pre-PR person-track sampling path (sc-8915 / F-113 fallback): one `-ss T` accurate-seek
+/// spawn per sample. This is the correctness reference the single-pass path is gated against — for
+/// sub-cadence-fps / frame-starved sources it selects the exact frames the code shipped before the
+/// single-pass optimization, including re-SELECTING the same earlier frame for close grid points
+/// (which the forward-only single pass cannot). `frame_paths[i]` ↔ `timestamps[i]`, the same 0-based
+/// `frame_{index:04}.png` names the segmentation pass re-reads.
+///
+/// One robustness improvement over the literal pre-PR loop: when a tail sample's seek lands past the
+/// last real frame (the `FRAME_SEEK_GUARD_SECONDS` guard assumes ~5fps-dense frames, so a very
+/// low-fps clip can seek past EOF and some ffmpeg builds then emit NO frame), the last successfully
+/// rendered frame is cloned forward instead of hard-erroring. That mirrors the single-pass path's own
+/// short-source tail handling and matches pre-PR frame *selection* for every sample pre-PR produced,
+/// while never failing the job on a short clip (the tracker still records the logical `timestamps[i]`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[allow(clippy::too_many_arguments)]
+async fn render_track_frames_per_frame(
+    ffmpeg: &str,
+    source_path: &Path,
+    work_dir: &Path,
+    timestamps: &[f64],
+    duration: f64,
+    width: u32,
+    height: u32,
+    context: FfmpegContext<'_>,
+) -> WorkerResult<Vec<PathBuf>> {
+    let mut frame_paths = Vec::with_capacity(timestamps.len());
+    let mut last_written: Option<PathBuf> = None;
+    for (index, &timestamp) in timestamps.iter().enumerate() {
+        let path = work_dir.join(format!("frame_{index:04}.png"));
+        let produced = try_render_frame_png(
+            ffmpeg,
+            source_path,
+            &path,
+            frame_seek_timestamp(timestamp, duration),
+            width,
+            height,
+            Some(context),
+        )
+        .await?;
+        if produced {
+            last_written = Some(path.clone());
+        } else if let Some(previous) = &last_written {
+            // Seek landed past the last real frame on a short/low-fps clip → clone the last frame
+            // forward rather than erroring, matching the single-pass tail behavior.
+            tokio::fs::copy(previous, &path).await?;
+        } else {
+            return Err(WorkerError::InvalidPayload(format!(
+                "FFmpeg produced no sampled frames for {}",
+                source_path.display()
+            )));
+        }
+        frame_paths.push(path);
+    }
+    Ok(frame_paths)
+}
+
+/// Accurate-seek one frame like [`render_frame_png`], but instead of erroring when ffmpeg emits no
+/// output (a seek past the last real frame on a short/low-fps clip), return `Ok(false)` so the caller
+/// can decide whether to clone the previous frame forward. `Ok(true)` means the frame was written.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn try_render_frame_png(
+    ffmpeg: &str,
+    source_path: &Path,
+    output_path: &Path,
+    timestamp: f64,
+    width: u32,
+    height: u32,
+    context: Option<FfmpegContext<'_>>,
+) -> WorkerResult<bool> {
+    let filters = frame_scale_pad_filter(width, height);
+    run_ffmpeg(
+        vec![
+            ffmpeg.to_owned(),
+            "-y".to_owned(),
+            "-ss".to_owned(),
+            format!("{:.3}", timestamp.max(0.0)),
+            "-i".to_owned(),
+            source_path.display().to_string(),
+            "-frames:v".to_owned(),
+            "1".to_owned(),
+            "-vf".to_owned(),
+            filters,
+            "-f".to_owned(),
+            "image2".to_owned(),
+            output_path.display().to_string(),
+        ],
+        context,
+    )
+    .await?;
+    Ok(tokio::fs::try_exists(output_path).await?)
+}
+
 pub(crate) async fn render_frame_png(
     ffmpeg: &str,
     source_path: &Path,
@@ -2134,9 +2678,7 @@ pub(crate) async fn render_frame_png(
     height: u32,
     context: Option<FfmpegContext<'_>>,
 ) -> WorkerResult<()> {
-    let filters = format!(
-        "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=0x12110f,format=rgb24"
-    );
+    let filters = frame_scale_pad_filter(width, height);
     run_ffmpeg(
         vec![
             ffmpeg.to_owned(),
@@ -2339,30 +2881,60 @@ pub(crate) async fn render_item_segment(
         return Ok(duration);
     }
 
+    let args = video_segment_args(
+        ffmpeg,
+        &media_path,
+        output_path,
+        source_in,
+        speed,
+        duration,
+        vf,
+    );
+    run_ffmpeg(args, context).await?;
+    Ok(duration)
+}
+
+/// Builds the ffmpeg args for the slow/fast video branch of [`render_item_segment`].
+///
+/// The `setpts={1/speed}*PTS` filter rescales the source timeline so the output
+/// length becomes `source_duration / speed`, which is exactly the timeline
+/// `duration` the function returns and that `crossfade_filter_complex` uses to
+/// compute xfade offsets. The `-t` output limit MUST therefore be `duration`
+/// (the declared timeline length), not the pre-rescale `source_duration`.
+///
+/// - speed < 1 (slow-mo): duration > source_duration; `-t source_duration` would
+///   truncate the stretched output and desync every later crossfade (sc-8832).
+/// - speed > 1 (fast): duration < source_duration; `-t duration` correctly caps
+///   the shortened output.
+/// - speed == 1: duration == source_duration; unchanged.
+fn video_segment_args(
+    ffmpeg: &str,
+    media_path: &Path,
+    output_path: &Path,
+    source_in: f64,
+    speed: f64,
+    duration: f64,
+    vf: Vec<String>,
+) -> Vec<String> {
     let setpts = format!("setpts={:.6}*PTS", 1.0 / speed);
     let filters = std::iter::once(setpts)
         .chain(vf)
         .collect::<Vec<_>>()
         .join(",");
-    run_ffmpeg(
-        vec![
-            ffmpeg.to_owned(),
-            "-y".to_owned(),
-            "-ss".to_owned(),
-            format!("{source_in:.3}"),
-            "-i".to_owned(),
-            media_path.display().to_string(),
-            "-t".to_owned(),
-            format!("{source_duration:.3}"),
-            "-vf".to_owned(),
-            filters,
-            "-an".to_owned(),
-            output_path.display().to_string(),
-        ],
-        context,
-    )
-    .await?;
-    Ok(duration)
+    vec![
+        ffmpeg.to_owned(),
+        "-y".to_owned(),
+        "-ss".to_owned(),
+        format!("{source_in:.3}"),
+        "-i".to_owned(),
+        media_path.display().to_string(),
+        "-t".to_owned(),
+        format!("{duration:.3}"),
+        "-vf".to_owned(),
+        filters,
+        "-an".to_owned(),
+        output_path.display().to_string(),
+    ]
 }
 
 pub(crate) async fn mux_segments(
@@ -2377,7 +2949,7 @@ pub(crate) async fn mux_segments(
         .skip(1)
         .any(|segment| segment.transition.as_deref() == Some("crossfade"))
     {
-        return mux_with_crossfades(ffmpeg, segments, tmp_path, output_path, context).await;
+        return mux_with_crossfades(ffmpeg, segments, output_path, context).await;
     }
     let list_path = tmp_path.join("concat.txt");
     tokio::fs::write(
@@ -2404,10 +2976,12 @@ pub(crate) async fn mux_segments(
     .await
 }
 
+/// Mux crossfade timelines in one `xfade`/`concat` filter graph (sc-8955 / F-153: dropped the unused
+/// `_tmp_path` — the crossfade path builds no intermediate concat list, unlike the plain `mux_segments`
+/// copy path, so it never needed the scratch dir).
 pub(crate) async fn mux_with_crossfades(
     ffmpeg: &str,
     segments: &[TimelineSegment],
-    _tmp_path: &Path,
     output_path: &Path,
     context: Option<FfmpegContext<'_>>,
 ) -> WorkerResult<()> {
@@ -2696,6 +3270,23 @@ mod frame_seek_tests {
         assert_eq!(frame_seek_timestamp(0.1, 0.1), 0.0);
         assert_eq!(frame_seek_timestamp(0.0, 0.0), 0.0);
     }
+
+    /// F-112 (sc-8914): the sidecar sample-rate the media handlers record and the cadence the
+    /// `person_track` sampler uses are ONE value. The `PERSON_TRACK_*` crate constants must stay
+    /// aliases of the `person_track` module constants so the two can never drift out of sync.
+    #[test]
+    fn person_track_sample_constants_are_a_single_source_of_truth() {
+        assert_eq!(
+            PERSON_TRACK_SAMPLE_RATE_FPS,
+            crate::person_track::SAMPLE_RATE_FPS,
+            "sidecar sampleRateFps must equal the sampler cadence"
+        );
+        assert_eq!(
+            PERSON_TRACK_MAX_SAMPLES,
+            crate::person_track::MAX_SAMPLES,
+            "the placeholder-track sample cap must equal the sampler cap"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2781,6 +3372,159 @@ mod person_track_e2e_tests {
             .clamp(1.0, 3600.0)
     }
 
+    /// The assembled, ready-to-segment clip both segmenter E2E tests share (sc-8955 / F-153): the
+    /// YOLO11 detect → ByteTrack assemble result plus the `first..=last` detected-span clip paths and
+    /// per-frame box anchors the SAM2 / SAM3 propagation calls consume.
+    struct AssembledClip {
+        detected_total: usize,
+        first: usize,
+        last: usize,
+        clip_paths: Vec<PathBuf>,
+        anchors: Vec<Option<(f64, f64, f64, f64)>>,
+    }
+
+    /// Provision the real YOLO11 detector, sample + detect every cadence frame exactly as
+    /// `assemble_real_person_track` does, select the single highest-confidence detection (the clear
+    /// person a user would click), and assemble the ByteTrack identity. Returns the `first..=last`
+    /// detected-span clip paths + anchors ready to hand to a segmenter. Extracted from the ~100
+    /// identical setup lines the SAM2 and SAM3 E2E tests each carried (sc-8955 / F-153).
+    async fn detect_and_assemble(
+        settings: &crate::Settings,
+        download_context: &DownloadContext<'_>,
+        video: &std::path::Path,
+        duration: f64,
+        timestamps: &[f64],
+    ) -> AssembledClip {
+        let det_weights = crate::person_jobs::ensure_detector_weights(settings, download_context)
+            .await
+            .expect("yolo11 weights provisioned");
+        let mut per_frame: Vec<(f64, Vec<(crate::person_track::NormalizedBox, f64)>)> =
+            Vec::with_capacity(timestamps.len());
+        let mut frame_paths: Vec<PathBuf> = Vec::with_capacity(timestamps.len());
+        let frames_dir = download_context.settings.data_dir.join("person-e2e-frames");
+        std::fs::create_dir_all(&frames_dir).expect("frames dir");
+        for (index, &timestamp) in timestamps.iter().enumerate() {
+            let frame_path = frames_dir.join(format!("frame_{index:04}.png"));
+            render_frame_png(
+                "ffmpeg",
+                video,
+                &frame_path,
+                frame_seek_timestamp(timestamp, duration),
+                1280,
+                720,
+                None,
+            )
+            .await
+            .expect("ffmpeg renders the sample frame");
+            let weights_for_frame = det_weights.clone();
+            let frame_for_task = frame_path.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::person_jobs::detect_people_blocking(weights_for_frame, frame_for_task, 0.25)
+            })
+            .await
+            .expect("detect task joins")
+            .expect("yolo11 detection runs");
+            let boxes = result
+                .detections
+                .iter()
+                .map(|d| {
+                    (
+                        crate::person_track::xyxy_to_normalized(
+                            d.x1 as f64,
+                            d.y1 as f64,
+                            d.x2 as f64,
+                            d.y2 as f64,
+                            result.width,
+                            result.height,
+                        ),
+                        d.score as f64,
+                    )
+                })
+                .collect::<Vec<_>>();
+            per_frame.push((timestamp, boxes));
+            frame_paths.push(frame_path);
+        }
+
+        // Per-frame detection summary, so a failed lock is legible.
+        for (timestamp, boxes) in &per_frame {
+            let max_conf = boxes.iter().map(|b| b.1).fold(0.0_f64, f64::max);
+            eprintln!(
+                "  t={timestamp:>6.3}s  detections={}  maxConf={max_conf:.3}",
+                boxes.len()
+            );
+        }
+        let total_detections: usize = per_frame.iter().map(|(_, boxes)| boxes.len()).sum();
+        assert!(
+            total_detections > 0,
+            "YOLO11 found no people in any sampled frame — is the clip a person video?"
+        );
+
+        // The single highest-confidence detection across all frames — the tracker only confirms a
+        // new identity from a high-confidence box, so the selection must be one.
+        let (selected_timestamp, selected_box, selected_conf) = per_frame
+            .iter()
+            .flat_map(|(timestamp, boxes)| boxes.iter().map(move |b| (*timestamp, b.0, b.1)))
+            .max_by(|a, b| {
+                a.2.partial_cmp(&b.2)
+                    .expect("detection confidence is finite")
+            })
+            .expect("at least one detection exists");
+        eprintln!(
+            "selection: t={selected_timestamp:.3}s conf={selected_conf:.3} \
+             box=({:.3},{:.3},{:.3},{:.3})",
+            selected_box.x, selected_box.y, selected_box.width, selected_box.height
+        );
+        assert!(
+            selected_conf >= 0.5,
+            "best detection conf {selected_conf:.3} is below the tracker's high-confidence \
+             floor (0.5) — the clip never yields a confidently-trackable person"
+        );
+
+        let observations = crate::person_track::observe(per_frame);
+        let assembly = crate::person_track::assemble_track(
+            &observations,
+            selected_box,
+            selected_timestamp,
+            timestamps,
+        );
+        assert!(
+            assembly.target_track_id.is_some(),
+            "tracker failed to lock onto the selected person"
+        );
+        let detected_total = assembly.frames.iter().filter(|f| f.detected).count();
+        assert!(detected_total > 0, "no detected target frames to segment");
+
+        let first = assembly
+            .frames
+            .iter()
+            .position(|f| f.detected)
+            .expect("a detected frame exists");
+        let last = assembly
+            .frames
+            .iter()
+            .rposition(|f| f.detected)
+            .unwrap_or(first);
+        let mut clip_paths = Vec::new();
+        let mut anchors = Vec::new();
+        for (frame, path) in assembly.frames[first..=last]
+            .iter()
+            .zip(&frame_paths[first..=last])
+        {
+            clip_paths.push(path.clone());
+            anchors.push(frame.detected.then(|| {
+                let b = &frame.box_;
+                (b.x, b.y, b.width, b.height)
+            }));
+        }
+        AssembledClip {
+            detected_total,
+            first,
+            last,
+            clip_paths,
+            anchors,
+        }
+    }
+
     #[test]
     #[ignore = "real Mac E2E: set SCENEWORKS_PERSON_E2E_VIDEO to a person clip; downloads YOLO11 + SAM2 weights; Apple Silicon only"]
     fn person_track_e2e_detect_track_segment_writes_masks_and_active_state() {
@@ -2791,179 +3535,52 @@ mod person_track_e2e_tests {
             return;
         };
 
-        // Isolated scratch: a throwaway data dir (weights cache) + a fake project root the
-        // segmentation pass writes masks into, exactly as `run_person_track` would.
+        // Isolated scratch: a throwaway data dir (weights + frame cache resolve under it).
         let scratch = std::env::temp_dir().join("sw-person-track-e2e");
         let _ = std::fs::remove_dir_all(&scratch);
-        let data_dir = scratch.join("data");
-        let project_path = scratch.join("project");
-        let frames_dir = scratch.join("frames");
-        std::fs::create_dir_all(&project_path).expect("project dir");
-        std::fs::create_dir_all(&frames_dir).expect("frames dir");
         // `ensure_*_weights` resolve their cache under `settings.data_dir`.
-        std::env::set_var("SCENEWORKS_DATA_DIR", &data_dir);
+        std::env::set_var("SCENEWORKS_DATA_DIR", scratch.join("data"));
         let settings = crate::Settings::from_env();
 
-        let timestamps = crate::person_track::sample_timestamps(staged_duration());
+        let duration = staged_duration();
+        let timestamps = crate::person_track::sample_timestamps(duration);
         assert!(!timestamps.is_empty(), "sample cadence produced no frames");
 
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async {
             let http = reqwest::Client::new();
             let api = ApiClient::new(&settings);
-            let job_id = "person-track-e2e";
             let download_context = DownloadContext {
                 api: &api,
                 client: &http,
                 settings: &settings,
-                job_id,
+                job_id: "person-track-e2e",
                 cancel_message: "person track e2e canceled while fetching weights",
                 fresh_download: false,
             };
 
-            // 1. Provision the real detector weights (download-on-first-use), then sample +
-            //    detect each frame exactly as `assemble_real_person_track` does.
-            let det_weights =
-                crate::person_jobs::ensure_detector_weights(&settings, &download_context)
-                    .await
-                    .expect("yolo11 weights provisioned");
-            let mut per_frame: Vec<(f64, Vec<(crate::person_track::NormalizedBox, f64)>)> =
-                Vec::with_capacity(timestamps.len());
-            let mut frame_paths: Vec<PathBuf> = Vec::with_capacity(timestamps.len());
-            for (index, &timestamp) in timestamps.iter().enumerate() {
-                let frame_path = frames_dir.join(format!("frame_{index:04}.png"));
-                render_frame_png(
-                    "ffmpeg",
-                    &video,
-                    &frame_path,
-                    frame_seek_timestamp(timestamp, staged_duration()),
-                    1280,
-                    720,
-                    None,
-                )
-                .await
-                .expect("ffmpeg renders the sample frame");
-                let weights_for_frame = det_weights.clone();
-                let frame_for_task = frame_path.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    crate::person_jobs::detect_people_blocking(
-                        weights_for_frame,
-                        frame_for_task,
-                        0.25,
-                    )
-                })
-                .await
-                .expect("detect task joins")
-                .expect("yolo11 detection runs");
-                let boxes = result
-                    .detections
-                    .iter()
-                    .map(|d| {
-                        (
-                            crate::person_track::xyxy_to_normalized(
-                                d.x1 as f64,
-                                d.y1 as f64,
-                                d.x2 as f64,
-                                d.y2 as f64,
-                                result.width,
-                                result.height,
-                            ),
-                            d.score as f64,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                per_frame.push((timestamp, boxes));
-                frame_paths.push(frame_path);
-            }
-
-            // Per-frame detection summary, so a failed lock is legible (e.g. a person who
-            // never clears the tracker's high-confidence threshold).
-            for (timestamp, boxes) in &per_frame {
-                let max_conf = boxes.iter().map(|b| b.1).fold(0.0_f64, f64::max);
-                eprintln!(
-                    "  t={timestamp:>6.3}s  detections={}  maxConf={max_conf:.3}",
-                    boxes.len()
-                );
-            }
-            let total_detections: usize = per_frame.iter().map(|(_, boxes)| boxes.len()).sum();
-            assert!(
-                total_detections > 0,
-                "YOLO11 found no people in any sampled frame — is the clip a person video?"
-            );
-
-            // 2. Select the single highest-confidence detection across all frames — the
-            //    clear, lockable person a user would click (robust to early low-confidence
-            //    false positives on textured scenes like waves). The tracker only confirms a
-            //    new identity from a high-confidence box, so the selection must be one.
-            let (selected_timestamp, selected_box, selected_conf) = per_frame
-                .iter()
-                .flat_map(|(timestamp, boxes)| boxes.iter().map(move |b| (*timestamp, b.0, b.1)))
-                .max_by(|a, b| {
-                    a.2.partial_cmp(&b.2)
-                        .expect("detection confidence is finite")
-                })
-                .expect("at least one detection exists");
-            eprintln!(
-                "selection: t={selected_timestamp:.3}s conf={selected_conf:.3} \
-                 box=({:.3},{:.3},{:.3},{:.3})",
-                selected_box.x, selected_box.y, selected_box.width, selected_box.height
-            );
-            assert!(
-                selected_conf >= 0.5,
-                "best detection conf {selected_conf:.3} is below the tracker's high-confidence \
-                 floor (0.5) — the clip never yields a confidently-trackable person"
-            );
-
-            let observations = crate::person_track::observe(per_frame);
-            let assembly = crate::person_track::assemble_track(
-                &observations,
-                selected_box,
-                selected_timestamp,
-                &timestamps,
-            );
-            assert!(
-                assembly.target_track_id.is_some(),
-                "tracker failed to lock onto the selected person"
-            );
-            let detected_total = assembly
-                .frames
-                .iter()
-                .filter(|frame| frame.detected)
-                .count();
-            assert!(detected_total > 0, "no detected target frames to segment");
+            // 1-2. Detect + assemble the selected person (shared with the SAM3 E2E, sc-8955).
+            let clip =
+                detect_and_assemble(&settings, &download_context, &video, duration, &timestamps)
+                    .await;
+            let AssembledClip {
+                detected_total,
+                first,
+                last,
+                clip_paths,
+                anchors,
+            } = clip;
+            // Which clip frames are detected (Some anchor) — used to count the rollup after the
+            // anchors move into the propagate task.
+            let clip_detected: Vec<bool> = anchors.iter().map(Option::is_some).collect();
+            let gap_frames = clip_detected.iter().filter(|d| !**d).count();
 
             // 3. Provision the real SAM2 weights and propagate the person's mask across the
-            //    detected span with the video predictor (sc-3715), writing masks under
-            //    `person-tracks/{track_id}/masks/` (the production layout).
+            //    detected span with the video predictor (sc-3715).
             let seg_weights =
                 crate::person_segment::ensure_segmenter_weights(&settings, &download_context)
                     .await
                     .expect("sam2 weights provisioned");
-
-            let first = assembly
-                .frames
-                .iter()
-                .position(|f| f.detected)
-                .expect("a detected frame exists");
-            let last = assembly
-                .frames
-                .iter()
-                .rposition(|f| f.detected)
-                .unwrap_or(first);
-            let mut clip_paths = Vec::new();
-            let mut anchors = Vec::new();
-            for (frame, path) in assembly.frames[first..=last]
-                .iter()
-                .zip(&frame_paths[first..=last])
-            {
-                clip_paths.push(path.clone());
-                anchors.push(frame.detected.then(|| {
-                    let b = &frame.box_;
-                    (b.x, b.y, b.width, b.height)
-                }));
-            }
-            let gap_frames = anchors.iter().filter(|a| a.is_none()).count();
-
             let masks = tokio::task::spawn_blocking(move || {
                 crate::person_segment::propagate_track_blocking(
                     seg_weights,
@@ -2982,34 +3599,26 @@ mod person_track_e2e_tests {
             // person, not a blank map); count detected frames masked for the rollup.
             let mut generated = 0usize;
             for (clip_idx, pixels) in masks.iter().enumerate() {
-                let assembly_idx = first + clip_idx;
                 let foreground = pixels.iter().filter(|&&p| p > 127).count();
                 assert_eq!(
                     pixels.len(),
                     (1280 * 720) as usize,
                     "mask must match the rendered frame size"
                 );
-                if assembly.frames[assembly_idx].detected {
+                if clip_detected[clip_idx] {
                     assert!(
                         foreground > 0,
-                        "frame {assembly_idx} mask has no foreground — propagation lost the person"
+                        "clip frame {clip_idx} mask has no foreground — propagation lost the person"
                     );
                     generated += 1;
                 }
             }
 
-            // 4. The maskState rollup must report `active` — every detected frame masked — which
-            //    is the success signal `run_person_track` writes to the sidecar.
-            let mask_state = crate::person_segment::rollup_mask_state(generated, detected_total);
+            // 4. The maskState rollup must report `active` — every detected frame masked.
+            let mask_state = mask_rollup_state(generated, detected_total);
             eprintln!(
-                "person-track E2E: sampled={} detected={} span={}..={} gapFrames={} segmented={} maskState={}",
-                timestamps.len(),
-                detected_total,
-                first,
-                last,
-                gap_frames,
-                generated,
-                mask_state
+                "person-track E2E: detected={} span={}..={} gapFrames={} segmented={} maskState={}",
+                detected_total, first, last, gap_frames, generated, mask_state
             );
             assert_eq!(
                 generated, detected_total,
@@ -3048,12 +3657,10 @@ mod person_track_e2e_tests {
         };
         let scratch = std::env::temp_dir().join("sw-person-track-e2e-sam3");
         let _ = std::fs::remove_dir_all(&scratch);
-        let data_dir = scratch.join("data");
-        let frames_dir = scratch.join("frames");
-        std::fs::create_dir_all(&frames_dir).expect("frames dir");
-        std::env::set_var("SCENEWORKS_DATA_DIR", &data_dir);
+        std::env::set_var("SCENEWORKS_DATA_DIR", scratch.join("data"));
         let settings = crate::Settings::from_env();
-        let timestamps = crate::person_track::sample_timestamps(staged_duration());
+        let duration = staged_duration();
+        let timestamps = crate::person_track::sample_timestamps(duration);
         assert!(!timestamps.is_empty(), "sample cadence produced no frames");
 
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -3069,96 +3676,16 @@ mod person_track_e2e_tests {
                 fresh_download: false,
             };
 
-            // detect → track → assemble (identical to the SAM2 E2E above).
-            let det_weights =
-                crate::person_jobs::ensure_detector_weights(&settings, &download_context)
-                    .await
-                    .expect("yolo11 weights provisioned");
-            let mut per_frame: Vec<(f64, Vec<(crate::person_track::NormalizedBox, f64)>)> =
-                Vec::with_capacity(timestamps.len());
-            let mut frame_paths: Vec<PathBuf> = Vec::with_capacity(timestamps.len());
-            for (index, &timestamp) in timestamps.iter().enumerate() {
-                let frame_path = frames_dir.join(format!("frame_{index:04}.png"));
-                render_frame_png(
-                    "ffmpeg",
-                    &video,
-                    &frame_path,
-                    frame_seek_timestamp(timestamp, staged_duration()),
-                    1280,
-                    720,
-                    None,
-                )
-                .await
-                .expect("ffmpeg renders the sample frame");
-                let w = det_weights.clone();
-                let f = frame_path.clone();
-                let result =
-                    tokio::task::spawn_blocking(move || {
-                        crate::person_jobs::detect_people_blocking(w, f, 0.25)
-                    })
-                    .await
-                    .expect("detect task joins")
-                    .expect("yolo11 detection runs");
-                let boxes = result
-                    .detections
-                    .iter()
-                    .map(|d| {
-                        (
-                            crate::person_track::xyxy_to_normalized(
-                                d.x1 as f64,
-                                d.y1 as f64,
-                                d.x2 as f64,
-                                d.y2 as f64,
-                                result.width,
-                                result.height,
-                            ),
-                            d.score as f64,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                per_frame.push((timestamp, boxes));
-                frame_paths.push(frame_path);
-            }
-            let (selected_timestamp, selected_box, _) = per_frame
-                .iter()
-                .flat_map(|(t, boxes)| boxes.iter().map(move |b| (*t, b.0, b.1)))
-                .max_by(|a, b| a.2.partial_cmp(&b.2).expect("finite conf"))
-                .expect("at least one detection");
-            let observations = crate::person_track::observe(per_frame);
-            let assembly = crate::person_track::assemble_track(
-                &observations,
-                selected_box,
-                selected_timestamp,
-                &timestamps,
-            );
-            assert!(
-                assembly.target_track_id.is_some(),
-                "tracker failed to lock onto the selected person"
-            );
-            let detected_total = assembly.frames.iter().filter(|f| f.detected).count();
-            assert!(detected_total > 0, "no detected target frames to segment");
-            let first = assembly
-                .frames
-                .iter()
-                .position(|f| f.detected)
-                .expect("a detected frame exists");
-            let last = assembly
-                .frames
-                .iter()
-                .rposition(|f| f.detected)
-                .unwrap_or(first);
-            let mut clip_paths = Vec::new();
-            let mut anchors = Vec::new();
-            for (frame, path) in assembly.frames[first..=last]
-                .iter()
-                .zip(&frame_paths[first..=last])
-            {
-                clip_paths.push(path.clone());
-                anchors.push(frame.detected.then(|| {
-                    let b = &frame.box_;
-                    (b.x, b.y, b.width, b.height)
-                }));
-            }
+            // detect → track → assemble (shared with the SAM2 E2E, sc-8955).
+            let AssembledClip {
+                detected_total,
+                first,
+                last,
+                clip_paths,
+                anchors,
+            } = detect_and_assemble(&settings, &download_context, &video, duration, &timestamps)
+                .await;
+            let clip_detected: Vec<bool> = anchors.iter().map(Option::is_some).collect();
 
             // SAM3 text-concept segmentation (no box prompt) — the path under test.
             let (sam3_model, sam3_tok) =
@@ -3177,17 +3704,16 @@ mod person_track_e2e_tests {
             assert_eq!(sam3.len(), last - first + 1, "one SAM3 mask per clip frame");
             let mut sam3_generated = 0usize;
             for (i, px) in sam3.iter().enumerate() {
-                let idx = first + i;
                 assert_eq!(px.len(), 1280 * 720, "SAM3 mask must match the frame size");
-                if assembly.frames[idx].detected {
+                if clip_detected[i] {
                     assert!(
                         px.iter().any(|&p| p > 127),
-                        "SAM3 frame {idx} has no foreground — concept segmentation lost the person"
+                        "SAM3 clip frame {i} has no foreground — concept segmentation lost the person"
                     );
                     sam3_generated += 1;
                 }
             }
-            let sam3_state = crate::person_segment::rollup_mask_state(sam3_generated, detected_total);
+            let sam3_state = mask_rollup_state(sam3_generated, detected_total);
             // SAM3 masking every detected frame is the hard acceptance gate for the cutover.
             assert_eq!(
                 sam3_state, "active",
@@ -3222,7 +3748,7 @@ mod person_track_e2e_tests {
             // Per-detected-frame mask IoU between the two segmenters.
             let mut ious = Vec::new();
             for i in 0..sam3.len() {
-                if !assembly.frames[first + i].detected {
+                if !clip_detected[i] {
                     continue;
                 }
                 let (a, b) = (&sam3[i], &sam2[i]);
@@ -3262,6 +3788,478 @@ mod person_track_e2e_tests {
         });
 
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// Extract every `timestamps[i]` two ways for one synthetic `rate`fps × `duration`s clip and
+    /// return `(gated_frames, accurate_seek_reference_frames)` as raw PNG bytes, so a caller can assert
+    /// they match. The first element is the SHIPPED `render_track_frames` (probe-gated: single-pass
+    /// where the source is frame-dense, per-frame accurate-seek fallback otherwise); the reference is
+    /// the pre-PR per-frame path built directly with `try_render_frame_png`. Byte-identity is the honest
+    /// expectation for BOTH regimes here — the gate routes each to a mechanism that lands on the same
+    /// source frame the reference does (see `render_track_frames_single_pass`). Returns `None` when
+    /// ffmpeg can't build the fixture (so the test degrades to a skip rather than a false failure).
+    async fn extract_both_ways(
+        scratch: &std::path::Path,
+        label: &str,
+        rate: &str,
+        duration: f64,
+    ) -> Option<(Vec<Vec<u8>>, Vec<Vec<u8>>)> {
+        use crate::person_track::sample_timestamps;
+
+        let case_dir = scratch.join(label);
+        let cut_dir = case_dir.join("cut"); // code under test (render_track_frames)
+        let ref_dir = case_dir.join("ref"); // per-frame accurate-seek reference
+        std::fs::create_dir_all(&cut_dir).expect("cut dir");
+        std::fs::create_dir_all(&ref_dir).expect("ref dir");
+
+        // A deterministic testsrc2 clip at the requested cadence. `render_frame_png` accurate seek
+        // needs a real container, so materialize the file first.
+        let src = case_dir.join("src.mp4");
+        let make = run_ffmpeg(
+            vec![
+                "ffmpeg".to_owned(),
+                "-y".to_owned(),
+                "-f".to_owned(),
+                "lavfi".to_owned(),
+                "-i".to_owned(),
+                format!("testsrc2=size=320x240:rate={rate}:duration={duration}"),
+                "-pix_fmt".to_owned(),
+                "yuv420p".to_owned(),
+                src.display().to_string(),
+            ],
+            None,
+        )
+        .await;
+        if make.is_err() {
+            eprintln!("skipping {label}: ffmpeg unavailable to build the fixture");
+            return None;
+        }
+
+        let timestamps = sample_timestamps(duration);
+        assert!(
+            timestamps.len() > 1,
+            "{label}: fixture yields a multi-sample cadence"
+        );
+
+        let cut_paths = render_track_frames(
+            "ffmpeg",
+            &src,
+            &cut_dir,
+            &timestamps,
+            duration,
+            1280,
+            720,
+            FfmpegContext {
+                api: &ApiClient::new(&crate::Settings::from_env()),
+                settings: &crate::Settings::from_env(),
+                job_id: "render-track-frames-verify",
+                cancel_message: "",
+            },
+        )
+        .await
+        .expect("render_track_frames extraction");
+        assert_eq!(
+            cut_paths.len(),
+            timestamps.len(),
+            "{label}: one frame per sample"
+        );
+
+        // Build the accurate-seek reference the SAME way the fallback does: one independent `-ss`
+        // seek per sample, cloning the last produced frame forward for any tail sample whose seek
+        // lands past EOF on a low-fps clip. This is exactly the pre-PR frame *selection*, made robust
+        // against the short-clip tail. `render_track_frames` must match it byte-for-byte.
+        let mut cut_bytes = Vec::with_capacity(timestamps.len());
+        let mut ref_bytes = Vec::with_capacity(timestamps.len());
+        let mut last_ref: Option<Vec<u8>> = None;
+        for (index, &timestamp) in timestamps.iter().enumerate() {
+            let ref_path = ref_dir.join(format!("frame_{index:04}.png"));
+            let produced = try_render_frame_png(
+                "ffmpeg",
+                &src,
+                &ref_path,
+                frame_seek_timestamp(timestamp, duration),
+                1280,
+                720,
+                None,
+            )
+            .await
+            .expect("per-frame reference extraction");
+            let bytes = if produced {
+                let b = std::fs::read(&ref_path).expect("read reference frame");
+                last_ref = Some(b.clone());
+                b
+            } else {
+                last_ref
+                    .clone()
+                    .expect("a reference frame exists before any EOF tail sample")
+            };
+            ref_bytes.push(bytes);
+            cut_bytes.push(std::fs::read(&cut_paths[index]).expect("read code-under-test frame"));
+        }
+        Some((cut_bytes, ref_bytes))
+    }
+
+    /// Run the UNGATED single-pass path ([`render_track_frames_single_pass`], no frame-count probe)
+    /// against the accurate-seek reference for one synthetic clip, returning `(single_pass, reference)`
+    /// PNG bytes. This is how the test proves the frame-count gate in [`render_track_frames`] is
+    /// load-bearing: on a low-fps clip the ungated single pass diverges grossly from the reference, so
+    /// deleting the gate would ship wrong frames. `None` on fixture-build failure (ffmpeg missing).
+    async fn single_pass_ungated_vs_reference(
+        scratch: &std::path::Path,
+        label: &str,
+        rate: &str,
+        duration: f64,
+    ) -> Option<(Vec<Vec<u8>>, Vec<Vec<u8>>)> {
+        use crate::person_track::sample_timestamps;
+
+        let case_dir = scratch.join(format!("{label}_ungated"));
+        let cut_dir = case_dir.join("cut");
+        std::fs::create_dir_all(&cut_dir).expect("cut dir");
+        let src = case_dir.join("src.mp4");
+        let make = run_ffmpeg(
+            vec![
+                "ffmpeg".to_owned(),
+                "-y".to_owned(),
+                "-f".to_owned(),
+                "lavfi".to_owned(),
+                "-i".to_owned(),
+                format!("testsrc2=size=320x240:rate={rate}:duration={duration}"),
+                "-pix_fmt".to_owned(),
+                "yuv420p".to_owned(),
+                src.display().to_string(),
+            ],
+            None,
+        )
+        .await;
+        if make.is_err() {
+            eprintln!("skipping {label}: ffmpeg unavailable to build the fixture");
+            return None;
+        }
+
+        let timestamps = sample_timestamps(duration);
+        // Drive the single-pass path DIRECTLY, skipping `render_track_frames`'s probe gate — this is the
+        // "single-pass always" behavior the gate exists to prevent on sub-cadence-fps sources.
+        let cut_paths = render_track_frames_single_pass(
+            "ffmpeg",
+            &src,
+            &cut_dir,
+            &timestamps,
+            duration,
+            1280,
+            720,
+            FfmpegContext {
+                api: &ApiClient::new(&crate::Settings::from_env()),
+                settings: &crate::Settings::from_env(),
+                job_id: "render-track-frames-ungated",
+                cancel_message: "",
+            },
+        )
+        .await
+        .expect("ungated single-pass extraction");
+
+        let mut cut_bytes = Vec::with_capacity(timestamps.len());
+        let mut ref_bytes = Vec::with_capacity(timestamps.len());
+        let mut last_ref: Option<Vec<u8>> = None;
+        for (index, &timestamp) in timestamps.iter().enumerate() {
+            let ref_path = case_dir.join(format!("ref_{index:04}.png"));
+            let produced = try_render_frame_png(
+                "ffmpeg",
+                &src,
+                &ref_path,
+                frame_seek_timestamp(timestamp, duration),
+                1280,
+                720,
+                None,
+            )
+            .await
+            .expect("per-frame reference extraction");
+            let bytes = if produced {
+                let b = std::fs::read(&ref_path).expect("read reference frame");
+                last_ref = Some(b.clone());
+                b
+            } else {
+                last_ref
+                    .clone()
+                    .expect("a reference frame exists before any EOF tail sample")
+            };
+            ref_bytes.push(bytes);
+            cut_bytes
+                .push(std::fs::read(&cut_paths[index]).expect("read ungated single-pass frame"));
+        }
+        Some((cut_bytes, ref_bytes))
+    }
+
+    /// F-113 (sc-8915) — the HONEST guarantee this PR ships, verified against real ffmpeg. There is no
+    /// "byte-identical across all inputs" claim: `-ss` input-seek and decode-side `select` are different
+    /// mechanisms, so this test proves exactly what the code delivers, regime by regime:
+    ///
+    /// 1. SINGLE-PASS REGIME (source fps ≥ sample cadence): the gated `render_track_frames` takes the
+    ///    single pass and is BYTE-IDENTICAL to the per-frame accurate-seek reference. We build the
+    ///    `select` predicate from the SAME `{:.3}`-rounded per-sample seeks the accurate path passes to
+    ///    `-ss`, so both mechanisms land on the identical source frame — including at grid points that
+    ///    ALIGN to a source frame's pts, the boundary case the round-1 recurrence got wrong.
+    ///      - `hi_30fps_4s`: high-fps, grid points do NOT align → round-1 shipped this green by luck.
+    ///      - `aligned_30fps_8s`: 16 samples on a 30fps clip, interval 8/15 s, grid points DO align to
+    ///        source pts. Under the round-1 `{:.6}`-truncated `selected_n·interval` recurrence this was
+    ///        5/16 samples off by one ADJACENT source frame (PSNR ~12–21 dB); the per-sample rounded
+    ///        threshold lookup makes it byte-identical. This case is the whole point of round-2.
+    ///      - `tie_2_25s_48fps`: 5 samples, sample[1] seek 0.5625 is a `{:.3}` round-half boundary. The
+    ///        round-2 pre-round (`(x*1000.0).round()/1000.0`, round-half-AWAY-from-zero) rendered the
+    ///        threshold `0.563` while the accurate `-ss` (`{:.3}`, round-half-to-EVEN) renders `0.562`.
+    ///        48fps is chosen so a real source frame (frame 27, pts `27/48 = 0.5625`) sits inside that
+    ///        `[0.562, 0.563)` gap: `-ss 0.562` lands on it, `select=gte(t,0.563)` skips it, so the two
+    ///        select ADJACENT frames and this sample diverged byte-for-byte (60/90/120fps have no frame
+    ///        in the gap — why the round-2 sweep missed it). Round-3 formats the raw seek once with the
+    ///        same `{:.3}` and interpolates that exact string, so both compare `pts` against `0.562` and
+    ///        match. This case FAILS under the pre-round, PASSES after; it is the whole point of round-3
+    ///        (the 4/8/12/3s durations coincidentally dodge every tie point).
+    ///
+    /// 2. FALLBACK REGIME (source fps < sample cadence, frame-starved): the single pass is NOT safe
+    ///    here — a forward-only `select` exhausts the clip early and diverges grossly — so the gate
+    ///    routes to per-frame accurate seeks, which reproduce the pre-PR frames by construction and are
+    ///    byte-identical to the reference.
+    ///      - `lo_1fps_12s`, `lo_1_5fps_12s`: 12 / 18 real frames < 24 samples.
+    ///      - `starved_1fps_3s`: 3 real frames, 6 samples.
+    ///
+    /// 3. GATE IS LOAD-BEARING: on a low-fps clip the UNGATED single pass (bypassing the probe) must
+    ///    diverge grossly from the accurate-seek reference. We assert a large fraction of samples differ
+    ///    — so if someone deletes the frame-count gate and lets single-pass run everywhere, THIS test
+    ///    fails. That is the regression guard the round-1 gate needs and this test now enforces directly
+    ///    (round 1 only proved the gated path matches, never that the gate itself was necessary).
+    ///
+    /// `#[ignore]` because it needs an ffmpeg binary (unset on CI runners); run with the bundled or a
+    /// system ffmpeg:
+    ///
+    /// ```text
+    /// SCENEWORKS_FFMPEG=apps/desktop/ffmpeg/ffmpeg \
+    ///   cargo test -p sceneworks-worker --lib render_track_frames -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs an ffmpeg binary (SCENEWORKS_FFMPEG or ffmpeg on PATH)"]
+    fn render_track_frames_honest_guarantee_across_fps_regimes() {
+        let scratch = std::env::temp_dir().join("sw-render-track-frames-verify");
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).expect("scratch dir");
+
+        // (label, rate, duration): the non-aligned AND frame-ALIGNED high-fps single-pass cases, plus
+        // the sub-cadence-fps and frame-starved fallback regimes. `aligned_30fps_8s` is the boundary
+        // case the round-1 test missed (grid points land on source frame pts).
+        let gated_cases: &[(&str, &str, f64)] = &[
+            ("hi_30fps_4s", "30", 4.0),
+            ("aligned_30fps_8s", "30", 8.0),
+            // `{:.3}` TIE-POINT case (round-3): duration 2.25s → 5 samples → sample[1] seek 0.5625, a
+            // third-decimal round-half boundary. The round-2 `(x*1000.0).round()/1000.0` pre-round
+            // (round-half-AWAY-from-zero) rendered the threshold `0.563`, while the accurate `-ss`
+            // (`{:.3}`, round-half-to-EVEN) renders `0.562`. That 1ms gap only mis-selects a frame when a
+            // SOURCE frame's pts lands inside `[0.562, 0.563)`, so the fps must be chosen deliberately:
+            // 48fps has frame 27 at exactly `27/48 = 0.5625` s, dead in the gap → `select=gte(t,0.563)`
+            // skips it but `-ss 0.562` lands on it, so the pre-round diverges byte-for-byte here (60/90/
+            // 120fps happen to have NO frame in that gap, which is why the round-2 sweep missed this).
+            // At 48fps × 2.25s the source has 108 frames (≥ 5), so the gate takes the single pass; this
+            // case FAILS under the round-2 pre-round and PASSES once the threshold is the raw seek
+            // formatted with the same `{:.3}` (verified with real ffmpeg: fixed `select=gte(t,0.562)` ==
+            // `-ss 0.562`; buggy `select=gte(t,0.563)` != `-ss 0.562`). The existing 4/8/12/3s durations
+            // coincidentally dodge every tie point, so without this case the divergence shipped green.
+            ("tie_2_25s_48fps", "48", 2.25),
+            ("lo_1fps_12s", "1", 12.0),
+            ("lo_1_5fps_12s", "1.5", 12.0),
+            ("starved_1fps_3s", "1", 3.0),
+        ];
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        rt.block_on(async {
+            // (1)+(2): the shipped, gated path is byte-identical to the accurate-seek reference in every
+            // regime (single-pass where dense, per-frame fallback where sparse).
+            for &(label, rate, duration) in gated_cases {
+                let Some((cut, reference)) =
+                    extract_both_ways(&scratch, label, rate, duration).await
+                else {
+                    return; // ffmpeg missing → skip the whole test
+                };
+                assert_eq!(cut.len(), reference.len(), "{label}: one frame per sample");
+                for (index, (cut_frame, ref_frame)) in cut.iter().zip(&reference).enumerate() {
+                    assert_eq!(
+                        cut_frame, ref_frame,
+                        "{label}: gated render_track_frames sample {index} differs from the \
+                         accurate-seek reference (sc-8915). For the single-pass regime this is the \
+                         adjacent-frame boundary bug; for the low-fps regime it means the fallback gate \
+                         regressed."
+                    );
+                }
+            }
+
+            // (3): prove the gate is load-bearing. UNGATED single-pass on a low-fps clip must diverge
+            // grossly from the reference — otherwise the gate would be pointless and its removal would
+            // go unnoticed. 1fps@12s is 12 real frames for 24 samples; the forward-only select exhausts
+            // the clip and mis-selects the large majority of samples.
+            let Some((ungated, reference)) =
+                single_pass_ungated_vs_reference(&scratch, "gate_proof_1fps_12s", "1", 12.0).await
+            else {
+                return;
+            };
+            let differing = ungated
+                .iter()
+                .zip(&reference)
+                .filter(|(u, r)| u != r)
+                .count();
+            assert!(
+                differing >= reference.len() / 2,
+                "ungated single-pass on 1fps@12s must diverge grossly from accurate-seek to prove the \
+                 frame-count gate is necessary, but only {differing}/{} samples differed — if this drops \
+                 to ~0 the gate has become a no-op and low-fps sources would silently regress (sc-8915)",
+                reference.len()
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// The single pass is an OPTIMIZATION, not a correctness dependency: if this ffmpeg build rejects
+    /// the long `select` filter, `render_track_frames` must degrade to the exact per-frame accurate-seek
+    /// path rather than hard-failing the job (sc-8915, reviewer [minor]). This test forces the single
+    /// pass to fail on an otherwise frame-DENSE clip (so the frame-count gate passes and the runtime
+    /// reaches the single pass) and asserts the job still succeeds AND lands on the byte-identical frames
+    /// the per-frame path would — i.e. graceful, lossless degradation.
+    ///
+    /// The failure is injected with a tiny wrapper "ffmpeg" that exits non-zero whenever it sees the
+    /// single-pass `select=gte` filter and otherwise `exec`s the real ffmpeg. Passing this wrapper as the
+    /// `ffmpeg` argument (an absolute path, NOT the literal `"ffmpeg"`) bypasses the `SCENEWORKS_FFMPEG`
+    /// override, so the probe and every per-frame seek run the real binary while only the single pass is
+    /// sabotaged. `#[ignore]` because it needs a real ffmpeg (via `SCENEWORKS_FFMPEG` or on PATH).
+    #[test]
+    #[ignore = "needs an ffmpeg binary (SCENEWORKS_FFMPEG or ffmpeg on PATH)"]
+    fn render_track_frames_falls_back_to_per_frame_when_single_pass_fails() {
+        use crate::person_track::sample_timestamps;
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = std::env::temp_dir().join("sw-render-track-frames-fallback");
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).expect("scratch dir");
+
+        // Resolve the real ffmpeg the wrapper should delegate to (bundled override or PATH default).
+        let real_ffmpeg = std::env::var("SCENEWORKS_FFMPEG")
+            .ok()
+            .filter(|p| !p.trim().is_empty())
+            .unwrap_or_else(|| "ffmpeg".to_owned());
+
+        // Wrapper "ffmpeg": fail on the single-pass `select=gte` filter, otherwise exec the real binary.
+        let wrapper = scratch.join("fake-ffmpeg.sh");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nfor a in \"$@\"; do\n  case \"$a\" in\n    *select=gte*)\n      echo 'fake-ffmpeg: single-pass filter rejected' 1>&2\n      exit 1\n      ;;\n  esac\ndone\nexec \"{real_ffmpeg}\" \"$@\"\n"
+            ),
+        )
+        .expect("write wrapper ffmpeg");
+        let mut perms = std::fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, perms).expect("chmod wrapper");
+        let wrapper_str = wrapper.display().to_string();
+
+        let duration = 4.0_f64; // 30fps → 120 frames, gate passes → runtime reaches the single pass
+        let src = scratch.join("src.mp4");
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        rt.block_on(async {
+            // Build a dense fixture with the REAL ffmpeg (wrapper would allow it too, but keep it simple).
+            let make = run_ffmpeg(
+                vec![
+                    real_ffmpeg.clone(),
+                    "-y".to_owned(),
+                    "-f".to_owned(),
+                    "lavfi".to_owned(),
+                    "-i".to_owned(),
+                    format!("testsrc2=size=320x240:rate=30:duration={duration}"),
+                    "-pix_fmt".to_owned(),
+                    "yuv420p".to_owned(),
+                    src.display().to_string(),
+                ],
+                None,
+            )
+            .await;
+            if make.is_err() {
+                eprintln!("skipping fallback test: ffmpeg unavailable to build the fixture");
+                return;
+            }
+
+            let timestamps = sample_timestamps(duration);
+
+            // (a) The gated wrapper: single pass fails (wrapper rejects `select=gte`) → runtime fallback.
+            let fb_dir = scratch.join("fallback");
+            std::fs::create_dir_all(&fb_dir).expect("fallback dir");
+            let fb_paths = render_track_frames(
+                &wrapper_str,
+                &src,
+                &fb_dir,
+                &timestamps,
+                duration,
+                1280,
+                720,
+                FfmpegContext {
+                    api: &ApiClient::new(&crate::Settings::from_env()),
+                    settings: &crate::Settings::from_env(),
+                    job_id: "render-track-frames-fallback",
+                    cancel_message: "",
+                },
+            )
+            .await
+            .expect("render_track_frames must SUCCEED via the per-frame fallback when single-pass fails");
+            assert_eq!(fb_paths.len(), timestamps.len(), "one frame per sample after fallback");
+
+            // (b) The per-frame path run DIRECTLY with the real ffmpeg — the byte reference the fallback
+            // must reproduce (the fallback simply calls this same fn on single-pass Err).
+            let ref_dir = scratch.join("per_frame_ref");
+            std::fs::create_dir_all(&ref_dir).expect("ref dir");
+            let ref_paths = render_track_frames_per_frame(
+                &real_ffmpeg,
+                &src,
+                &ref_dir,
+                &timestamps,
+                duration,
+                1280,
+                720,
+                FfmpegContext {
+                    api: &ApiClient::new(&crate::Settings::from_env()),
+                    settings: &crate::Settings::from_env(),
+                    job_id: "render-track-frames-fallback-ref",
+                    cancel_message: "",
+                },
+            )
+            .await
+            .expect("per-frame reference extraction");
+
+            for (index, (fb, reference)) in fb_paths.iter().zip(&ref_paths).enumerate() {
+                let fb_bytes = std::fs::read(fb).expect("read fallback frame");
+                let ref_bytes = std::fs::read(reference).expect("read per-frame reference");
+                assert_eq!(
+                    fb_bytes, ref_bytes,
+                    "sample {index}: single-pass-failure fallback must be byte-identical to the \
+                     per-frame accurate-seek path (sc-8915 graceful degradation)"
+                );
+            }
+        });
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod render_track_frame_probe_tests {
+    use super::*;
+
+    #[test]
+    fn parse_ffmpeg_frame_count_reads_the_last_padded_progress_token() {
+        // ffmpeg pads the counter and prints many progress lines; the LAST frame= wins.
+        let stderr = "frame=    1 fps=0.0 q=-1.0 size=N/A\nframe=   12 fps=0.0 q=-1.0 Lsize=N/A\n";
+        assert_eq!(parse_ffmpeg_frame_count(stderr), Some(12));
+    }
+
+    #[test]
+    fn parse_ffmpeg_frame_count_handles_no_space_and_missing_token() {
+        assert_eq!(parse_ffmpeg_frame_count("frame=120 other"), Some(120));
+        assert_eq!(parse_ffmpeg_frame_count("no counter here"), None);
     }
 }
 
@@ -3322,5 +4320,92 @@ mod crossfade_mux_tests {
         assert!(error
             .to_string()
             .contains("Timeline has no rendered segments"));
+    }
+
+    fn t_value(args: &[String]) -> f64 {
+        let idx = args.iter().position(|arg| arg == "-t").expect("-t present") + 1;
+        args[idx].parse().expect("-t is a number")
+    }
+
+    #[test]
+    fn slow_motion_segment_output_limit_matches_timeline_duration() {
+        // speed=0.5 stretches a 2s source to a 4s timeline via setpts=2.0*PTS.
+        // -t must be the 4s timeline duration, NOT the 2s source_duration, or the
+        // stretched output is truncated and every later crossfade desyncs (sc-8832).
+        let source_duration = 2.0_f64;
+        let speed = 0.5_f64;
+        let duration = source_duration / speed; // 4.0
+
+        let args = video_segment_args(
+            "ffmpeg",
+            Path::new("in.mp4"),
+            Path::new("out.mp4"),
+            0.0,
+            speed,
+            duration,
+            vec!["format=yuv420p".to_owned()],
+        );
+
+        assert!(
+            (t_value(&args) - duration).abs() < 1e-6,
+            "-t must equal timeline duration {duration}, got {}",
+            t_value(&args)
+        );
+        assert!(
+            (t_value(&args) - source_duration).abs() > 1e-6,
+            "-t must NOT be the truncating source_duration {source_duration}"
+        );
+        // setpts stretches: 1/0.5 = 2.0
+        assert!(args.iter().any(|arg| arg.contains("setpts=2.000000*PTS")));
+    }
+
+    #[test]
+    fn fast_motion_segment_output_limit_matches_timeline_duration() {
+        // speed=2.0 compresses a 2s source to a 1s timeline via setpts=0.5*PTS.
+        // -t must be the 1s timeline duration (source_duration/speed).
+        let source_duration = 2.0_f64;
+        let speed = 2.0_f64;
+        let duration = source_duration / speed; // 1.0
+
+        let args = video_segment_args(
+            "ffmpeg",
+            Path::new("in.mp4"),
+            Path::new("out.mp4"),
+            0.0,
+            speed,
+            duration,
+            vec!["format=yuv420p".to_owned()],
+        );
+
+        assert!(
+            (t_value(&args) - duration).abs() < 1e-6,
+            "-t must equal timeline duration {duration}, got {}",
+            t_value(&args)
+        );
+        assert!(args.iter().any(|arg| arg.contains("setpts=0.500000*PTS")));
+    }
+
+    #[test]
+    fn unit_speed_segment_output_limit_equals_source_duration() {
+        // speed=1.0: duration == source_duration; behaviour unchanged.
+        let source_duration = 3.0_f64;
+        let speed = 1.0_f64;
+        let duration = source_duration / speed; // 3.0
+
+        let args = video_segment_args(
+            "ffmpeg",
+            Path::new("in.mp4"),
+            Path::new("out.mp4"),
+            0.5,
+            speed,
+            duration,
+            vec!["format=yuv420p".to_owned()],
+        );
+
+        assert!((t_value(&args) - duration).abs() < 1e-6);
+        assert!((t_value(&args) - source_duration).abs() < 1e-6);
+        // source_in preserved as -ss.
+        let ss_idx = args.iter().position(|arg| arg == "-ss").unwrap() + 1;
+        assert_eq!(args[ss_idx], "0.500");
     }
 }

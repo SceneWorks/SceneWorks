@@ -19,8 +19,9 @@
 //! FLUX1_CONTROL=~/.cache/huggingface/.../diffusion_pytorch_model.safetensors \
 //! cargo test -p sceneworks-worker --release flux1_dev_control_mlx_smoke -- --ignored --nocapture
 //! ```
-
-#![cfg(all(test, target_os = "macos"))]
+//!
+//! The `mod flux1_control_mlx_smoke;` declaration in `lib.rs` already carries the same
+//! `#[cfg(all(test, target_os = "macos"))]`, so no inner `#![cfg]` is needed here (sc-8952).
 
 use std::path::PathBuf;
 
@@ -28,20 +29,14 @@ use gen_core::{
     Conditioning, ControlKind, GenerationOutput, GenerationRequest, Image, LoadSpec, WeightsSource,
 };
 
+use super::smoke_support::{env_or, image_std, DEGENERATE_STD_FLOOR_DEFAULT};
+
 fn env_path(key: &str) -> PathBuf {
     PathBuf::from(
         std::env::var(key)
             .unwrap_or_else(|_| panic!("set ${key}"))
             .trim(),
     )
-}
-
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_string())
 }
 
 /// A synthetic single-channel-ish control fixture (a smooth top-to-bottom luminance ramp broadcast to
@@ -84,22 +79,6 @@ fn mean_abs_delta(a: &Image, b: &Image) -> f64 {
         .map(|(&x, &y)| (x as f64 - y as f64).abs())
         .sum::<f64>()
         / a.pixels.len() as f64
-}
-
-/// Mean per-pixel std-dev — a cheap "is the decode non-degenerate (not all-black/NaN)" floor.
-fn image_std(img: &Image) -> f64 {
-    let n = img.pixels.len() as f64;
-    if n == 0.0 {
-        return 0.0;
-    }
-    let mean = img.pixels.iter().map(|&p| p as f64).sum::<f64>() / n;
-    let var = img
-        .pixels
-        .iter()
-        .map(|&p| (p as f64 - mean).powi(2))
-        .sum::<f64>()
-        / n;
-    var.sqrt()
 }
 
 /// Render one image through the loaded `flux1_dev_control` generator with the given conditioning (empty =
@@ -149,7 +128,7 @@ fn flux1_dev_control_mlx_smoke() {
         "FLUX1_DEV_DIR must point at the dense FLUX.1-dev diffusers snapshot: {}",
         weights_dir.display()
     );
-    let out_dir = PathBuf::from(env_or("FLUX1_OUT_DIR", "flux1-control-smoke"));
+    let out_dir = PathBuf::from(env_or("FLUX1_OUT_DIR", "/tmp/flux1_control_smoke"));
     std::fs::create_dir_all(&out_dir).expect("create out dir");
     let w: u32 = env_or("FLUX1_W", "768").parse().expect("FLUX1_W");
     let h: u32 = env_or("FLUX1_H", "768").parse().expect("FLUX1_H");
@@ -179,7 +158,7 @@ fn flux1_dev_control_mlx_smoke() {
         .save(out_dir.join("flux1_control_baseline.png"))
         .expect("save baseline");
     assert!(
-        base_std > 5.0,
+        base_std > DEGENERATE_STD_FLOOR_DEFAULT,
         "control-free baseline looks degenerate (std {base_std:.2})"
     );
 
@@ -200,7 +179,7 @@ fn flux1_dev_control_mlx_smoke() {
             kind => vec![Conditioning::Control {
                 image: control_map.clone(),
                 kind,
-                scale: control_scale,
+                scale: Some(control_scale),
             }],
         };
         let image = render(&*generator, &prompt, w, h, steps, guidance, conditioning);
@@ -213,7 +192,7 @@ fn flux1_dev_control_mlx_smoke() {
         println!("[smoke] flux1 {label}: std {std:.2}, steer(meanAbsΔ vs control-free) {steer:.2}");
         assert_eq!((image.width, image.height), (w, h));
         assert!(
-            std > 5.0,
+            std > DEGENERATE_STD_FLOOR_DEFAULT,
             "flux1 {label} control render looks degenerate (std {std:.2})"
         );
         assert!(

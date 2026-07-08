@@ -149,7 +149,11 @@ services:
     environment:
       VITE_API_BASE_URL: http://localhost:${SCENEWORKS_API_PORT:-8010}
     ports:
-      - "${SCENEWORKS_WEB_PORT:-5173}:5173"
+      # Bind to loopback by default so a plain `docker compose up` never exposes
+      # the Vite dev server (with /@fs/ file serving) to the LAN — mirrors the
+      # api service's publish-host pattern (sc-8864). Set SCENEWORKS_WEB_PUBLISH_HOST=0.0.0.0
+      # to opt into LAN access deliberately.
+      - "${SCENEWORKS_WEB_PUBLISH_HOST:-127.0.0.1}:${SCENEWORKS_WEB_PORT:-5173}:5173"
     volumes:
       - ./apps/web:/app
       - /app/node_modules

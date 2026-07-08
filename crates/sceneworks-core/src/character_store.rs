@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
@@ -7,8 +8,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::asset_index::{
-    find_asset_sidecar_path_on_connection, index_asset_on_connection, normalize_asset,
+    find_asset_sidecar_path_on_connection, index_asset_on_connection, normalize_asset_cached,
+    GenerationSetCache,
 };
+use crate::contracts;
 use crate::project_store::{apply_project_migrations, ProjectStoreError, ProjectStoreResult};
 use crate::store_util::{
     atomic_write, is_safe_id, optional_bool, optional_f64, optional_str, random_hex, read_json,
@@ -118,6 +121,10 @@ impl<'a> CharacterStore<'a> {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
 
+        // One connection + asset-summary memo shared across the whole listing, so
+        // an asset referenced by several characters is resolved once rather than
+        // once per (character, reference) pair (sc-8894 / F-092).
+        let mut cache = CharacterHydrationCache::new(&self.project_path)?;
         let mut characters = Vec::new();
         for sidecar_rel in rows {
             let sidecar_path = self.project_path.join(sidecar_rel);
@@ -135,10 +142,11 @@ impl<'a> CharacterStore<'a> {
             {
                 continue;
             }
-            characters.push(hydrate_character(
+            characters.push(hydrate_character_cached(
                 project_id,
                 &self.project_path,
                 character,
+                &mut cache,
             )?);
         }
         characters.sort_by(|left, right| {
@@ -1088,7 +1096,67 @@ fn write_character(
 fn hydrate_character(
     project_id: &str,
     project_path: &Path,
+    character: Value,
+) -> ProjectStoreResult<Value> {
+    // A single connection + caches shared across every reference of this
+    // character, and (via `list_characters`, which threads the same maps)
+    // across every character in a listing. `character_asset_summary`
+    // previously opened a fresh SQLite connection (+ ran migrations) and
+    // re-read the sidecar per reference, so a Character Studio listing was
+    // O(characters x references) connections and sidecar reads (sc-8894 /
+    // F-092).
+    let mut cache = CharacterHydrationCache::new(project_path)?;
+    hydrate_character_cached(project_id, project_path, character, &mut cache)
+}
+
+/// Per-listing caches shared by every `hydrate_character` call so a batch
+/// listing opens the project DB once, applies migrations once, and reads each
+/// referenced asset's sidecar at most once regardless of how many characters or
+/// references point at it (sc-8894 / F-092).
+struct CharacterHydrationCache {
+    connection: Connection,
+    generation_sets: GenerationSetCache,
+    /// asset id -> resolved summary (`None` when the asset has no sidecar), so a
+    /// repeated asset id across references/characters is resolved once.
+    asset_summaries: HashMap<String, Option<Value>>,
+}
+
+impl CharacterHydrationCache {
+    fn new(project_path: &Path) -> ProjectStoreResult<Self> {
+        Ok(Self {
+            connection: connect_project_db(project_path)?,
+            generation_sets: GenerationSetCache::default(),
+            asset_summaries: HashMap::new(),
+        })
+    }
+
+    fn asset_summary(
+        &mut self,
+        project_id: &str,
+        project_path: &Path,
+        asset_id: &str,
+    ) -> ProjectStoreResult<Option<Value>> {
+        if let Some(summary) = self.asset_summaries.get(asset_id) {
+            return Ok(summary.clone());
+        }
+        let summary = character_asset_summary(
+            &self.connection,
+            &mut self.generation_sets,
+            project_id,
+            project_path,
+            asset_id,
+        )?;
+        self.asset_summaries
+            .insert(asset_id.to_owned(), summary.clone());
+        Ok(summary)
+    }
+}
+
+fn hydrate_character_cached(
+    project_id: &str,
+    project_path: &Path,
     mut character: Value,
+    cache: &mut CharacterHydrationCache,
 ) -> ProjectStoreResult<Value> {
     let references = character
         .get("references")
@@ -1101,7 +1169,8 @@ fn hydrate_character(
                 .get("assetId")
                 .and_then(Value::as_str)
                 .and_then(|asset_id| {
-                    character_asset_summary(project_id, project_path, asset_id)
+                    cache
+                        .asset_summary(project_id, project_path, asset_id)
                         .ok()
                         .flatten()
                 })
@@ -1132,14 +1201,18 @@ fn hydrate_character(
 }
 
 fn character_asset_summary(
+    connection: &Connection,
+    generation_sets: &mut GenerationSetCache,
     project_id: &str,
     project_path: &Path,
     asset_id: &str,
 ) -> ProjectStoreResult<Option<Value>> {
-    let Some(sidecar_path) = find_asset_sidecar_path(project_path, asset_id)? else {
+    let Some(sidecar_path) =
+        find_asset_sidecar_path_on_connection(connection, project_path, asset_id)?
+    else {
         return Ok(None);
     };
-    let asset = normalize_asset(project_id, project_path, &sidecar_path)?;
+    let asset = normalize_asset_cached(project_id, project_path, &sidecar_path, generation_sets)?;
     Ok(Some(json!({
         "id": asset.get("id").cloned().unwrap_or(Value::Null),
         "type": asset.get("type").cloned().unwrap_or(Value::Null),
@@ -1183,7 +1256,20 @@ fn update_asset_character_link(
         .and_then(|value| value.as_array().cloned())
         .unwrap_or_default()
         .into_iter()
-        .filter(|item| item.get("characterId").and_then(Value::as_str) != Some(character_id))
+        .filter(|item| {
+            if item.get("characterId").and_then(Value::as_str) != Some(character_id) {
+                return true;
+            }
+            // Only rebuild this function's own mirror entries. A "library-move"
+            // anchor (move_asset_to_character, sc-10200) must survive curated
+            // reference add/remove cycles — dropping it would orphan the moved
+            // asset (origin `character_studio`, no character association left).
+            // Entries without a `source` predate the distinction and were all
+            // written here, so they count as sidecar-managed.
+            item.get("source")
+                .and_then(Value::as_str)
+                .is_some_and(|source| source != "character-sidecar")
+        })
         .collect::<Vec<_>>();
     if !remove {
         links.push(json!({
@@ -1236,16 +1322,6 @@ fn remove_asset_references_from_character(
     }
 
     Ok(changed)
-}
-
-/// Thin DB-prep wrapper over the shared resolver in `asset_index` (sc-4272).
-fn find_asset_sidecar_path(
-    project_path: &Path,
-    asset_id: &str,
-) -> ProjectStoreResult<Option<PathBuf>> {
-    let connection = connect_project_db(project_path)?;
-    apply_project_migrations(&connection)?;
-    find_asset_sidecar_path_on_connection(&connection, project_path, asset_id)
 }
 
 fn copy_lora_into_project(
@@ -1336,177 +1412,28 @@ fn prepend_array_field(payload: &mut Value, field: &str, item: Value) -> Project
     Ok(())
 }
 
+/// Serialize a character sidecar deterministically.
+///
+/// The `payload` is the untyped `serde_json::Value` the store mutates in place.
+/// We round-trip it through the typed [`contracts::Character`] before writing so
+/// the on-disk key order comes from the struct's field-declaration order rather
+/// than a heuristic that guessed an object's "type" from which keys it contained
+/// (sc-8893 / F-091). Field-declaration order is deterministic: the same
+/// `Character` serializes to byte-identical output on every write, which is the
+/// diff-stability guarantee this function exists to provide.
+///
+/// The character enums (`CharacterType`, `CharacterReferenceRole`, ...) are
+/// forward-compatible `string_enum!`s that deserialize unknown strings into an
+/// `Unknown(String)` variant and serialize them back verbatim, so an unrecognized
+/// value never fails the round-trip. Unknown top-level/nested keys are captured by
+/// the structs' `#[serde(flatten)] extra: ExtraFields` and re-emitted after the
+/// declared fields, matching the previous writer (which appended unrecognized keys
+/// after the preferred ones).
 fn write_character_json(path: &Path, payload: &Value) -> ProjectStoreResult<()> {
-    let mut output = String::new();
-    write_character_value(payload, 0, None, &mut output)?;
+    let character: contracts::Character = serde_json::from_value(payload.clone())?;
+    let mut output = serde_json::to_string_pretty(&character)?;
     output.push('\n');
     atomic_write(path, output.as_bytes())
-}
-
-fn write_character_value(
-    value: &Value,
-    indent: usize,
-    key_hint: Option<&str>,
-    output: &mut String,
-) -> ProjectStoreResult<()> {
-    match value {
-        Value::Object(object) if should_inline_object(key_hint) => {
-            write_inline_value(&Value::Object(object.clone()), output)?;
-        }
-        Value::Object(object) => {
-            if object.is_empty() {
-                output.push_str("{}");
-                return Ok(());
-            }
-            output.push_str("{\n");
-            let keys = ordered_character_keys(object);
-            for (index, key) in keys.iter().enumerate() {
-                output.push_str(&" ".repeat(indent + 2));
-                output.push_str(&serde_json::to_string(key)?);
-                output.push_str(": ");
-                write_character_value(&object[*key], indent + 2, Some(key), output)?;
-                if index + 1 != keys.len() {
-                    output.push(',');
-                }
-                output.push('\n');
-            }
-            output.push_str(&" ".repeat(indent));
-            output.push('}');
-        }
-        Value::Array(items) if items.is_empty() || items.iter().all(is_inline_json_value) => {
-            write_inline_value(value, output)?;
-        }
-        Value::Array(items) => {
-            output.push_str("[\n");
-            for (index, item) in items.iter().enumerate() {
-                output.push_str(&" ".repeat(indent + 2));
-                write_character_value(item, indent + 2, key_hint, output)?;
-                if index + 1 != items.len() {
-                    output.push(',');
-                }
-                output.push('\n');
-            }
-            output.push_str(&" ".repeat(indent));
-            output.push(']');
-        }
-        _ => write_inline_value(value, output)?,
-    }
-    Ok(())
-}
-
-fn should_inline_object(key_hint: Option<&str>) -> bool {
-    matches!(key_hint, Some("recipeSettings" | "compatibility"))
-}
-
-fn is_inline_json_value(value: &Value) -> bool {
-    matches!(
-        value,
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
-    )
-}
-
-fn write_inline_value(value: &Value, output: &mut String) -> ProjectStoreResult<()> {
-    match value {
-        Value::Object(object) => {
-            output.push_str("{ ");
-            let keys = ordered_character_keys(object);
-            for (index, key) in keys.iter().enumerate() {
-                output.push_str(&serde_json::to_string(key)?);
-                output.push_str(": ");
-                write_inline_value(&object[*key], output)?;
-                if index + 1 != keys.len() {
-                    output.push_str(", ");
-                }
-            }
-            output.push_str(" }");
-        }
-        Value::Array(items) => {
-            output.push('[');
-            for (index, item) in items.iter().enumerate() {
-                write_inline_value(item, output)?;
-                if index + 1 != items.len() {
-                    output.push_str(", ");
-                }
-            }
-            output.push(']');
-        }
-        _ => output.push_str(&serde_json::to_string(value)?),
-    }
-    Ok(())
-}
-
-fn ordered_character_keys(object: &Map<String, Value>) -> Vec<&str> {
-    let preferred: &[&str] =
-        if object.contains_key("schemaVersion") && object.contains_key("trainedLoras") {
-            &[
-                "schemaVersion",
-                "id",
-                "projectId",
-                "name",
-                "type",
-                "description",
-                "createdAt",
-                "updatedAt",
-                "status",
-                "references",
-                "looks",
-                "loras",
-                "trainedLoras",
-            ]
-        } else if object.contains_key("assetId") && object.contains_key("addedAt") {
-            &[
-                "assetId",
-                "approved",
-                "role",
-                "notes",
-                "addedAt",
-                "approvedAt",
-                "asset",
-            ]
-        } else if object.contains_key("approvedReferenceIds") {
-            &[
-                "id",
-                "name",
-                "description",
-                "approvedReferenceIds",
-                "recipeSettings",
-                "createdAt",
-                "updatedAt",
-            ]
-        } else if object.contains_key("loraId") || object.contains_key("copiedIntoProject") {
-            &[
-                "id",
-                "loraId",
-                "name",
-                "sourcePath",
-                "projectPath",
-                "copiedIntoProject",
-                "category",
-                "scope",
-                "triggerWords",
-                "defaultWeight",
-                "compatibility",
-                "createdAt",
-                "updatedAt",
-            ]
-        } else if object.contains_key("archived") {
-            &["archived"]
-        } else {
-            &[]
-        };
-
-    let mut keys = Vec::new();
-    for key in preferred {
-        if object.contains_key(*key) {
-            keys.push(*key);
-        }
-    }
-    for key in object.keys() {
-        if !keys.iter().any(|existing| existing == key) {
-            keys.push(key.as_str());
-        }
-    }
-    keys
 }
 
 fn to_json_string(value: &Value) -> ProjectStoreResult<String> {
@@ -1605,4 +1532,333 @@ fn camel_to_title(value: &str) -> Option<String> {
     let mut characters = output.chars();
     let first = characters.next()?.to_uppercase().collect::<String>();
     Some(format!("{first}{}", characters.as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A representative, fully populated character sidecar: nested `status`,
+    /// populated `references` / `looks` / `loras` (including optional fields such
+    /// as `approvedAt`, `loraId`, `sourcePath`, `projectPath`), the nested
+    /// `recipeSettings` / `compatibility` objects, plus an unknown top-level key
+    /// (`legacyFlag`) and an unknown enum value (`role: "villain"`) to exercise the
+    /// `#[serde(flatten)] extra` capture and the `string_enum!` `Unknown` fallback.
+    fn sample_character() -> Value {
+        json!({
+            "schemaVersion": 1,
+            "id": "character_abc123",
+            "projectId": "project_xyz",
+            "name": "Ada",
+            "type": "person",
+            "description": "A protagonist.",
+            "createdAt": "2026-07-03T00:00:00Z",
+            "updatedAt": "2026-07-03T00:00:01Z",
+            "status": { "archived": false },
+            "references": [
+                {
+                    "assetId": "asset_1",
+                    "approved": true,
+                    "role": "hero",
+                    "notes": "front",
+                    "addedAt": "2026-07-03T00:00:02Z",
+                    "approvedAt": "2026-07-03T00:00:03Z"
+                },
+                {
+                    "assetId": "asset_2",
+                    "approved": false,
+                    "role": "villain",
+                    "notes": "",
+                    "addedAt": "2026-07-03T00:00:04Z",
+                    "approvedAt": null
+                }
+            ],
+            "looks": [
+                {
+                    "id": "look_1",
+                    "name": "Default",
+                    "description": "",
+                    "approvedReferenceIds": ["asset_1"],
+                    "recipeSettings": { "steps": 30, "cfg": 4.5 },
+                    "createdAt": "2026-07-03T00:00:05Z",
+                    "updatedAt": "2026-07-03T00:00:06Z"
+                }
+            ],
+            "loras": [
+                {
+                    "id": "clora_1",
+                    "loraId": "lora_9",
+                    "name": "Ada LoRA",
+                    "sourcePath": "/data/loras/ada.safetensors",
+                    "projectPath": "loras/ada.safetensors",
+                    "copiedIntoProject": true,
+                    "category": "character",
+                    "scope": "project",
+                    "triggerWords": ["ada"],
+                    "defaultWeight": 1.0,
+                    "compatibility": { "base": "flux" },
+                    "createdAt": "2026-07-03T00:00:07Z",
+                    "updatedAt": "2026-07-03T00:00:08Z"
+                }
+            ],
+            "trainedLoras": [],
+            "legacyFlag": "keep-me"
+        })
+    }
+
+    fn serialize(payload: &Value) -> String {
+        let character: contracts::Character = serde_json::from_value(payload.clone()).unwrap();
+        let mut output = serde_json::to_string_pretty(&character).unwrap();
+        output.push('\n');
+        output
+    }
+
+    #[test]
+    fn character_serialization_round_trips() {
+        let payload = sample_character();
+        let character: contracts::Character = serde_json::from_value(payload.clone()).unwrap();
+        let text = serialize(&payload);
+        // serialize -> deserialize -> equal (typed equality, incl. extras/enums).
+        let reparsed: contracts::Character = serde_json::from_str(&text).unwrap();
+        assert_eq!(character, reparsed);
+        // The unknown top-level key survives via `#[serde(flatten)] extra`.
+        assert_eq!(
+            character.extra.get("legacyFlag"),
+            Some(&Value::String("keep-me".to_owned()))
+        );
+        // The unknown enum value survives via the `string_enum!` `Unknown` fallback.
+        assert_eq!(
+            character.references[1].role,
+            contracts::CharacterReferenceRole::Unknown("villain".to_owned())
+        );
+    }
+
+    #[test]
+    fn character_serialization_is_deterministic() {
+        let payload = sample_character();
+        // Same character -> byte-identical output on every write (diff-stability).
+        assert_eq!(serialize(&payload), serialize(&payload));
+    }
+
+    #[test]
+    fn character_serialization_uses_field_declaration_key_order() {
+        let text = serialize(&sample_character());
+        // Valid pretty JSON with 2-space indentation and a trailing newline.
+        assert!(text.ends_with("}\n"), "must end with a trailing newline");
+        assert!(text.contains("\n  \"id\": "), "must be pretty-printed");
+        serde_json::from_str::<Value>(&text).expect("output must be valid JSON");
+
+        // Top-level keys appear in `contracts::Character` field-declaration order,
+        // then the flattened `extra` key, deterministically -- not alphabetically
+        // (which is what a raw `Value` pretty-print would produce) and not via the
+        // old key-guessing heuristic.
+        let expected_order = [
+            "\"schemaVersion\"",
+            "\"id\"",
+            "\"projectId\"",
+            "\"name\"",
+            "\"type\"",
+            "\"description\"",
+            "\"createdAt\"",
+            "\"updatedAt\"",
+            "\"status\"",
+            "\"references\"",
+            "\"looks\"",
+            "\"loras\"",
+            "\"trainedLoras\"",
+            "\"legacyFlag\"",
+        ];
+        let mut cursor = 0usize;
+        for key in expected_order {
+            let found = text[cursor..]
+                .find(key)
+                .unwrap_or_else(|| panic!("missing top-level key {key} after position {cursor}"));
+            cursor += found + key.len();
+        }
+    }
+
+    /// sc-8894 (F-092): the per-listing cache resolves an asset summary once and
+    /// serves every later lookup of the same id (across references and
+    /// characters) from memory instead of re-opening the DB + re-reading the
+    /// sidecar. Both a present asset and a missing one (cached as `None`) hit the
+    /// memo on the second lookup.
+    #[test]
+    fn hydration_cache_memoizes_repeated_asset_summaries() {
+        use crate::project_store::ProjectStore;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let store = ProjectStore::new(&data_dir, "test-version");
+        let project = store.create_project("Cache").expect("project creates");
+        let project_path = PathBuf::from(&project.path);
+
+        let asset = store
+            .persist_generated_asset(
+                &project.id,
+                "job-1",
+                "genset_x",
+                &json!({
+                    "assetId": "asset_shared1",
+                    "mediaPath": "assets/images/genset_x/asset_shared1.png",
+                    "mimeType": "image/png",
+                    "width": 64,
+                    "height": 64,
+                    "normalizedWidth": 64,
+                    "normalizedHeight": 64,
+                    "count": 1,
+                    "family": "z-image",
+                    "seed": 1,
+                    "index": 0,
+                    "displayName": "shared #1",
+                    "createdAt": "2026-07-03T00:00:00Z",
+                    "mode": "text_to_image",
+                    "model": "z_image_turbo",
+                    "adapter": "z_image_diffusers",
+                    "prompt": "x",
+                    "loras": [],
+                }),
+            )
+            .expect("asset persists");
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+
+        let mut cache = CharacterHydrationCache::new(&project_path).expect("cache opens");
+
+        // First lookup resolves + memoizes; the summary carries the sidecar facts.
+        let first = cache
+            .asset_summary(&project.id, &project_path, &asset_id)
+            .expect("first lookup")
+            .expect("asset resolves to a summary");
+        assert_eq!(first["id"], json!(asset_id));
+        assert_eq!(first["type"], json!("image"));
+        assert_eq!(first["displayName"], json!("shared #1"));
+        assert_eq!(cache.asset_summaries.len(), 1);
+
+        // Second lookup of the same id is served from the memo, byte-identical.
+        let second = cache
+            .asset_summary(&project.id, &project_path, &asset_id)
+            .expect("second lookup")
+            .expect("asset still resolves");
+        assert_eq!(first, second);
+        assert_eq!(
+            cache.asset_summaries.len(),
+            1,
+            "no new memo entry on a repeat"
+        );
+
+        // A missing asset caches its `None` so a repeated miss is also memoized.
+        assert!(cache
+            .asset_summary(&project.id, &project_path, "asset_absent")
+            .expect("miss lookup")
+            .is_none());
+        assert_eq!(cache.asset_summaries.len(), 2);
+        assert!(cache
+            .asset_summary(&project.id, &project_path, "asset_absent")
+            .expect("repeat miss lookup")
+            .is_none());
+        assert_eq!(
+            cache.asset_summaries.len(),
+            2,
+            "no new memo entry on a repeat miss"
+        );
+    }
+
+    /// sc-8894 (F-092): the caching refactor is behavior-preserving — two
+    /// characters referencing the SAME asset each get the identical hydrated
+    /// `asset` summary through the public `list_characters` (which now shares one
+    /// cache), and `get_character` produces the same summary.
+    #[test]
+    fn list_characters_hydrates_shared_asset_reference_consistently() {
+        use crate::project_store::ProjectStore;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let store = ProjectStore::new(&data_dir, "test-version");
+        let project = store.create_project("Shared Ref").expect("project creates");
+        let project_path = PathBuf::from(&project.path);
+
+        let asset = store
+            .persist_generated_asset(
+                &project.id,
+                "job-1",
+                "genset_x",
+                &json!({
+                    "assetId": "asset_shared2",
+                    "mediaPath": "assets/images/genset_x/asset_shared2.png",
+                    "mimeType": "image/png",
+                    "width": 64,
+                    "height": 64,
+                    "normalizedWidth": 64,
+                    "normalizedHeight": 64,
+                    "count": 1,
+                    "family": "z-image",
+                    "seed": 1,
+                    "index": 0,
+                    "displayName": "shared #2",
+                    "createdAt": "2026-07-03T00:00:00Z",
+                    "mode": "text_to_image",
+                    "model": "z_image_turbo",
+                    "adapter": "z_image_diffusers",
+                    "prompt": "x",
+                    "loras": [],
+                }),
+            )
+            .expect("asset persists");
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+
+        let characters = CharacterStore::new(&data_dir, &project_path);
+        let mut ids = Vec::new();
+        for name in ["Ada", "Bea"] {
+            let created = characters
+                .create_character(
+                    &project.id,
+                    CharacterCreateInput {
+                        name: name.to_owned(),
+                        character_type: "person".to_owned(),
+                        description: String::new(),
+                    },
+                )
+                .expect("character creates");
+            let character_id = created["id"].as_str().expect("character id").to_owned();
+            characters
+                .add_reference(
+                    &project.id,
+                    &character_id,
+                    CharacterReferenceInput {
+                        asset_id: asset_id.clone(),
+                        approved: true,
+                        role: "hero".to_owned(),
+                        notes: String::new(),
+                    },
+                )
+                .expect("reference attaches");
+            ids.push(character_id);
+        }
+
+        let listed = characters
+            .list_characters(&project.id, false)
+            .expect("list hydrates");
+        assert_eq!(listed.len(), 2);
+        for character in &listed {
+            let reference = &character["references"][0];
+            assert_eq!(reference["assetId"], json!(asset_id));
+            let summary = &reference["asset"];
+            assert_eq!(summary["id"], json!(asset_id));
+            assert_eq!(summary["type"], json!("image"));
+            assert_eq!(summary["displayName"], json!("shared #2"));
+        }
+        // Both characters resolved the SAME shared asset to an identical summary.
+        assert_eq!(
+            listed[0]["references"][0]["asset"],
+            listed[1]["references"][0]["asset"]
+        );
+
+        // `get_character` (single-character path) yields the same summary.
+        let single = characters
+            .get_character(&project.id, &ids[0])
+            .expect("get hydrates");
+        assert_eq!(
+            single["references"][0]["asset"],
+            listed[0]["references"][0]["asset"]
+        );
+    }
 }

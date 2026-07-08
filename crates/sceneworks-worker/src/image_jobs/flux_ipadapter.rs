@@ -20,8 +20,14 @@ const FLUX_IPADAPTER_ADAPTER_FILE: &str = "ip_adapter.safetensors";
 /// pooled image embeds) + the weight file the provider's `resolve_image_encoder` looks for in the dir.
 const FLUX_IPADAPTER_ENCODER_REPO: &str = "openai/clip-vit-large-patch14";
 const FLUX_IPADAPTER_ENCODER_FILE: &str = "model.safetensors";
-/// Both repos ship the safetensors on `main` (unlike the Kolors `refs/pr/4`).
-const FLUX_IPADAPTER_REVISION: &str = "main";
+/// Pinned revisions for the two IP-Adapter repos (sc-9879, F-077 follow-up). Both are fixed,
+/// non-overridable consts, so fetching the mutable `main` branch means an upstream re-push could silently
+/// swap the adapter / CLIP-image-encoder weights we load. Pin each to its exact commit for
+/// defense-in-depth (mirrors sc-8879/sc-9682). HF's tree API still reports each file's `lfs.oid`, which
+/// `ensure_hf_cached_file` verifies the downloaded content against. (Split per repo because a single sha
+/// cannot address two different repos.)
+const FLUX_IPADAPTER_ADAPTER_REVISION: &str = "18f6940238ab5dc3744df7a8e30315892279d5f9";
+const FLUX_IPADAPTER_ENCODER_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
 /// IP-Adapter scale default — the XLabs resemblance tier 0.7 (matches `base.rs` `FLUX_IP_SCALE`, the MLX
 /// path, and the candle `IpAdapterFlux::DEFAULT_IP_SCALE`).
 const FLUX_IPADAPTER_IP_SCALE: f32 = 0.7;
@@ -102,36 +108,20 @@ fn flux_ipadapter_available(request: &ImageRequest, settings: &Settings) -> bool
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=100) → manifest `steps` → variant default.
 fn flux_ipadapter_steps(request: &ImageRequest) -> u32 {
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    request
-        .advanced
-        .get("steps")
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
-        .map(|steps| steps.clamp(1, 100) as u32)
-        .unwrap_or_else(|| flux_ipadapter_default_steps(&request.model))
+    resolve_advanced_or_manifest_u32_with(
+        request,
+        "steps",
+        || flux_ipadapter_default_steps(&request.model),
+        1..=100,
+    )
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → variant default, clamped.
 fn flux_ipadapter_guidance(request: &ImageRequest) -> f32 {
-    let manifest_default = request
-        .model_manifest_entry
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or_else(|| flux_ipadapter_default_guidance(&request.model));
-    advanced::f32_clamped(
-        &request.advanced,
+    resolve_advanced_or_manifest_f32_with(
+        request,
         "guidanceScale",
-        manifest_default,
+        || flux_ipadapter_default_guidance(&request.model),
         0.0..=30.0,
     )
 }
@@ -179,7 +169,7 @@ async fn ensure_flux_ipadapter_weights(
             ensure_hf_cached_file(
                 &context,
                 FLUX_IPADAPTER_ADAPTER_REPO,
-                FLUX_IPADAPTER_REVISION,
+                FLUX_IPADAPTER_ADAPTER_REVISION,
                 FLUX_IPADAPTER_ADAPTER_FILE,
                 &dst,
             )
@@ -198,7 +188,7 @@ async fn ensure_flux_ipadapter_weights(
             ensure_hf_cached_file(
                 &context,
                 FLUX_IPADAPTER_ENCODER_REPO,
-                FLUX_IPADAPTER_REVISION,
+                FLUX_IPADAPTER_ENCODER_REVISION,
                 FLUX_IPADAPTER_ENCODER_FILE,
                 &dir.join(FLUX_IPADAPTER_ENCODER_FILE),
             )
@@ -278,17 +268,14 @@ async fn generate_candle_flux_ipadapter_stream(
     // reused across the N outputs (source embedded once). Staging is non-fatal (failure → scores omitted).
     let score_likeness =
         resolve_character_image_likeness_source(request, settings, project_path).is_some();
-    let face_stack_dir = if score_likeness {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        score_likeness,
+        "character_image face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     let likeness_source = face_stack_dir.as_ref().map(|_| reference.clone());
     let likeness_source_ref = reference_id.to_owned();
 

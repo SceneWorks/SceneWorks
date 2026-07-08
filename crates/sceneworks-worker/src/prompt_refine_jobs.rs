@@ -5,9 +5,9 @@
 //! (Anubis-Mini-8B, sc-6550), so the dispatch body is one backend-agnostic path: macOS (sc-7158) picks
 //! mlx-llm's `mlx-llama`, the Windows/CUDA candle build (sc-7404) picks candle-llm's `candle-llama`.
 //! Both retired their bespoke hand-rolled Llama decoders (`mlx-gen-prompt-refine` /
-//! `candle-gen-prompt-refine`). The Python torch `PromptRefiner`
-//! (`apps/worker/scene_worker/prompt_refine.py`) stays the fallback only on platforms with neither
-//! native provider (e.g. the candle-less Desktop installer).
+//! `candle-gen-prompt-refine`). Every shipping platform now has a native provider; a build with
+//! neither (e.g. a candle-less Linux worker) simply never advertises the `prompt_refine`
+//! capability, so the job is never dispatched to it.
 //!
 //! The `TextLlm` contract is generic (`system` + `prompt` + sampling → text), so the
 //! prompt-refinement PRODUCT logic that lived in `prompt_refine.py` moves here caller-side: the
@@ -97,12 +97,105 @@ fn resolve_max_new_tokens(
             DEFAULT_REFINE_MAX_NEW_TOKENS
         })
 }
+
+/// The `prompt_refine` job multiplexed FOUR tasks through five scattered booleans
+/// (`is_magic`/`is_image_caption`/`is_image_describe`/`is_vision_task`/`is_caption_task`) re-derived in
+/// six ladders — a shape where incoherent combinations were representable and which hid the F-003
+/// cancel bug (sc-8921, F-119). This enum makes the task ONE value classified once from the payload's
+/// `task` discriminator; every per-task property below is a method on it, so the dispatch body reads a
+/// single `match` instead of re-testing booleans. The four variants are exactly the four real tasks:
+/// - [`Rewrite`](RefineTask::Rewrite): the default free-text "refine my prompt" rewrite (warmer sampling).
+/// - [`MagicPrompt`](RefineTask::MagicPrompt): a text idea → JSON Ideogram caption (sc-5997).
+/// - [`ImageCaption`](RefineTask::ImageCaption): a reference image → JSON Ideogram caption (sc-8105).
+/// - [`ImageDescribe`](RefineTask::ImageDescribe): a reference image → NL prose/tags description (sc-8204).
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RefineTask {
+    Rewrite,
+    MagicPrompt,
+    ImageCaption,
+    ImageDescribe,
+}
+
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl RefineTask {
+    /// Classify the payload's `task` discriminator (case-insensitive). Any unknown/absent value is the
+    /// default free-text [`Rewrite`](RefineTask::Rewrite) — the pre-refactor behavior.
+    pub(crate) fn from_payload(task: Option<&str>) -> Self {
+        match task.map(str::trim).unwrap_or_default() {
+            t if t.eq_ignore_ascii_case("magic_prompt") => RefineTask::MagicPrompt,
+            t if t.eq_ignore_ascii_case("image_caption") => RefineTask::ImageCaption,
+            t if t.eq_ignore_ascii_case("image_describe") => RefineTask::ImageDescribe,
+            _ => RefineTask::Rewrite,
+        }
+    }
+
+    /// A vision task is driven by a reference image (`Content::Image` user block), not a text prompt —
+    /// so it requires an `imagePath`/`referencePath` and no `prompt`.
+    pub(crate) fn is_vision(self) -> bool {
+        matches!(self, RefineTask::ImageCaption | RefineTask::ImageDescribe)
+    }
+
+    /// A caption task emits a JSON-constrained Ideogram caption (the decode is grammar-masked) and is
+    /// validated as a schema-valid caption. `image_describe` is a vision task but NOT a caption task
+    /// (it emits unconstrained prose/tags).
+    pub(crate) fn is_caption(self) -> bool {
+        matches!(self, RefineTask::MagicPrompt | RefineTask::ImageCaption)
+    }
+
+    /// Sampling temperature: the caption tasks and the prose describe sample cool for a faithful,
+    /// steady description; the free-text rewrite stays warmer for creative variation.
+    pub(crate) fn temperature(self) -> f32 {
+        match self {
+            RefineTask::Rewrite => 0.7,
+            RefineTask::MagicPrompt | RefineTask::ImageCaption | RefineTask::ImageDescribe => 0.4,
+        }
+    }
+
+    /// The running-progress message shown while the model decodes.
+    pub(crate) fn work_message(self) -> &'static str {
+        match self {
+            RefineTask::ImageCaption => "Captioning image…",
+            RefineTask::ImageDescribe => "Describing image…",
+            RefineTask::MagicPrompt => "Expanding to a caption…",
+            RefineTask::Rewrite => "Refining prompt…",
+        }
+    }
+
+    /// The terminal completion message.
+    pub(crate) fn done_message(self) -> &'static str {
+        match self {
+            RefineTask::MagicPrompt | RefineTask::ImageCaption => "Caption ready.",
+            RefineTask::ImageDescribe => "Description ready.",
+            RefineTask::Rewrite => "Prompt refined.",
+        }
+    }
+}
 // Architecture-pill label for the streamed progress (mirrors the candle image/video paths): the MLX
 // twin on macOS, candle on the Windows candle build.
 #[cfg(target_os = "macos")]
 const REFINE_BACKEND: &str = "mlx";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const REFINE_BACKEND: &str = "candle";
+
+// Coalesced progress-post cadence (sc-8840, F-038). The token callback publishes every token into a
+// latest-wins watch channel (never blocking generation); the job loop drains only the newest value on
+// this tick, so a 4096-token caption emits at most a handful of `update_job` POSTs per second instead
+// of thousands of sequential per-token POSTs. 250 ms keeps the progress bar visibly smooth while
+// bounding API load and fully decoupling decode speed from API latency (worse over epic-4484 LAN).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const PROGRESS_POST_INTERVAL: Duration = Duration::from_millis(250);
 
 // ----------------------------------------------------------------------------------------------
 // Product logic (pure, platform-independent) — ported from `prompt_refine.py` so the native worker
@@ -175,15 +268,17 @@ fn build_refine_system_prompt(guide: Option<&str>, workflow: Option<&str>) -> St
     }
 }
 
-/// Strip `<think>…</think>` reasoning blocks, a wrapping code fence, and matching surrounding quotes
-/// from the model reply. Port of the Python `clean_output` (regex-free: the tags are ASCII, matched
-/// case-insensitively without lowercasing the whole — Unicode-safe — string).
+/// Shared prelude for cleaning a model reply: strip `<think>…</think>` reasoning blocks, drop the
+/// text before an orphan closing tag, and unwrap a single wrapping ```…``` code fence. Both
+/// [`clean_refine_output`] (which then strips surrounding quotes) and [`clean_json_output`] (which
+/// then isolates the outermost `{ … }` span) build on this identical prelude, so it lives in one
+/// place (F-116).
 #[cfg(any(
     test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn clean_refine_output(text: &str) -> String {
+fn strip_reasoning_and_fence(text: &str) -> String {
     let mut text = strip_think_blocks(text.trim()).trim().to_owned();
     // An orphan closing tag (no matching open): keep only what follows the last one.
     if let Some(pos) = last_ci(&text, "</think>") {
@@ -196,6 +291,19 @@ fn clean_refine_output(text: &str) -> String {
             text = lines[1..lines.len() - 1].join("\n").trim().to_owned();
         }
     }
+    text
+}
+
+/// Strip `<think>…</think>` reasoning blocks, a wrapping code fence, and matching surrounding quotes
+/// from the model reply. Port of the Python `clean_output` (regex-free: the tags are ASCII, matched
+/// case-insensitively without lowercasing the whole — Unicode-safe — string).
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn clean_refine_output(text: &str) -> String {
+    let mut text = strip_reasoning_and_fence(text);
     // Matching surrounding single/double quotes.
     let chars: Vec<char> = text.chars().collect();
     if chars.len() >= 2 {
@@ -330,6 +438,41 @@ const IMAGE_DESCRIBE_V1: &str = include_str!("image_describe_v1.txt");
 ))]
 const IMAGE_DESCRIBE_TAGS_V1: &str = include_str!("image_describe_tags_v1.txt");
 
+/// Multi-image "mood board" PROSE synthesis system prompt (epic 8588, sc-8595) — the N>1 sibling of
+/// [`IMAGE_DESCRIBE_V1`]. When a describe job carries MORE THAN ONE reference image, the model examines
+/// them together and synthesizes ONE prose prompt capturing the mood/style/composition they SHARE
+/// (rather than describing a single picture). Same `core_llm` vision path, same unconstrained-prose
+/// cleanup; only the instruction differs. Selected by [`build_image_describe_messages`] when `multi`.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const IMAGE_DESCRIBE_MOODBOARD_V1: &str = include_str!("image_describe_moodboard_v1.txt");
+
+/// Multi-image "mood board" TAG-STYLE synthesis system prompt (epic 8588, sc-8595) — the N>1, booru
+/// sibling of [`IMAGE_DESCRIBE_TAGS_V1`]. Synthesizes the SHARED style across several references into
+/// one comma-separated tag list for an anime/booru SDXL checkpoint. Selected by
+/// [`build_image_describe_messages`] when `multi` and the style is [`DescribeStyle::Tags`].
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const IMAGE_DESCRIBE_MOODBOARD_TAGS_V1: &str = include_str!("image_describe_moodboard_tags_v1.txt");
+
+/// Multi-image "mood board" Ideogram JSON synthesis system prompt (epic 8588, sc-8595) — the N>1
+/// sibling of [`IMAGE_CAPTION_V1`]. Grounds `style_description` in the look several references SHARE and
+/// composes a coherent NEW scene in that style (the composition is synthesized, like `magic_prompt` from
+/// a text idea — so the caption stays schema-valid without per-image grounded bboxes). Same JSON
+/// constraint + `is_caption` validation. Selected by [`build_image_caption_messages`] when `multi`.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const IMAGE_CAPTION_MOODBOARD_V1: &str = include_str!("ideogram_image_caption_moodboard_v1.txt");
+
 /// Body of a `[NAME]` section in the magic-prompt file (port of the reference `_load_sections`):
 /// section markers are a bracketed single word alone on a line. Returns the trimmed body, or empty.
 #[cfg(any(
@@ -420,13 +563,26 @@ pub(crate) fn build_magic_prompt_messages(prompt: &str, aspect_ratio: &str) -> (
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(crate) fn build_image_caption_messages() -> (String, String) {
-    let system = magic_section_from(IMAGE_CAPTION_V1, "SYSTEM");
-    let mut user = magic_section_from(IMAGE_CAPTION_V1, "USER");
+pub(crate) fn build_image_caption_messages(multi: bool) -> (String, String) {
+    // With more than one reference image the model synthesizes ONE caption for a new image in the
+    // aesthetic the board SHARES (mood board, sc-8595); the single-image asset is unchanged for N==1.
+    let asset = if multi {
+        IMAGE_CAPTION_MOODBOARD_V1
+    } else {
+        IMAGE_CAPTION_V1
+    };
+    let system = magic_section_from(asset, "SYSTEM");
+    let mut user = magic_section_from(asset, "USER");
     if user.is_empty() {
-        user = "Examine the reference image attached to this message and emit the single JSON \
-                caption object as specified. Describe only what is visible in the image."
-            .to_owned();
+        user = if multi {
+            "Examine the reference images attached to this message as a single mood board and emit \
+             the single JSON caption object as specified, grounding the style in the look they share \
+             and composing a coherent new scene in that style."
+        } else {
+            "Examine the reference image attached to this message and emit the single JSON \
+             caption object as specified. Describe only what is visible in the image."
+        }
+        .to_owned();
     }
     (system, user)
 }
@@ -471,23 +627,38 @@ impl DescribeStyle {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(crate) fn build_image_describe_messages(style: DescribeStyle) -> (String, String) {
-    let asset = match style {
-        DescribeStyle::Prose => IMAGE_DESCRIBE_V1,
-        DescribeStyle::Tags => IMAGE_DESCRIBE_TAGS_V1,
+pub(crate) fn build_image_describe_messages(style: DescribeStyle, multi: bool) -> (String, String) {
+    // With more than one reference image the model synthesizes ONE prompt from the mood/style the board
+    // SHARES (mood board, sc-8595) instead of describing a single picture; N==1 keeps the sc-8204/8205
+    // single-image assets byte-for-byte.
+    let asset = match (style, multi) {
+        (DescribeStyle::Prose, false) => IMAGE_DESCRIBE_V1,
+        (DescribeStyle::Prose, true) => IMAGE_DESCRIBE_MOODBOARD_V1,
+        (DescribeStyle::Tags, false) => IMAGE_DESCRIBE_TAGS_V1,
+        (DescribeStyle::Tags, true) => IMAGE_DESCRIBE_MOODBOARD_TAGS_V1,
     };
     let system = magic_section_from(asset, "SYSTEM");
     let mut user = magic_section_from(asset, "USER");
     if user.is_empty() {
-        user = match style {
-            DescribeStyle::Prose => {
+        user = match (style, multi) {
+            (DescribeStyle::Prose, false) => {
                 "Examine the reference image attached to this message and write the single detailed \
                  plain-text description as specified. Describe only what is visible in the image."
             }
-            DescribeStyle::Tags => {
+            (DescribeStyle::Prose, true) => {
+                "Examine the reference images attached to this message as a single mood board and \
+                 write ONE detailed plain-text prompt as specified, capturing the mood, style, \
+                 palette, lighting, and composition they share."
+            }
+            (DescribeStyle::Tags, false) => {
                 "Examine the reference image attached to this message and emit the single \
                  comma-separated booru-style tag list as specified. Tag only what is visible in the \
                  image."
+            }
+            (DescribeStyle::Tags, true) => {
+                "Examine the reference images attached to this message as a single mood board and \
+                 emit ONE comma-separated booru-style tag list as specified, capturing the style, \
+                 mood, palette, and composition they share."
             }
         }
         .to_owned();
@@ -570,16 +741,7 @@ fn load_caption_image_ref(path: &Path) -> WorkerResult<gen_core::core_llm::Image
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) fn clean_json_output(text: &str) -> String {
-    let mut text = strip_think_blocks(text.trim()).trim().to_owned();
-    if let Some(pos) = last_ci(&text, "</think>") {
-        text = text[pos + "</think>".len()..].trim().to_owned();
-    }
-    if text.starts_with("```") && text.ends_with("```") {
-        let lines: Vec<&str> = text.lines().collect();
-        if lines.len() >= 2 {
-            text = lines[1..lines.len() - 1].join("\n").trim().to_owned();
-        }
-    }
+    let text = strip_reasoning_and_fence(text);
     match (text.find('{'), text.rfind('}')) {
         (Some(start), Some(end)) if end > start => text[start..=end].to_owned(),
         _ => text,
@@ -590,7 +752,7 @@ pub(crate) fn clean_json_output(text: &str) -> String {
 // Job handler — native MLX on macOS (sc-5552 / sc-7158) and candle on the Windows candle build
 // (sc-5525 / sc-7404). The body is backend-agnostic: `core_llm::load_for_model` resolves whichever
 // provider is force-linked above (mlx-llama on macOS, candle-llama on the candle build) model-first.
-// The Python torch `PromptRefiner` remains the fallback on other platforms.
+// A build with neither native provider never advertises the capability, so the job never arrives.
 // ----------------------------------------------------------------------------------------------
 
 #[cfg(any(
@@ -613,19 +775,11 @@ pub(crate) async fn run_prompt_refine_job(
     // sc-5997), `image_caption` (reference image → JSON caption, sc-8105 — the `core_llm` VISION path),
     // or the default free-text rewrite. The two caption tasks both emit a JSON-constrained Ideogram
     // caption; `image_caption` additionally carries an image and needs no text prompt.
-    let task = payload
-        .get("task")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    let is_magic = task.eq_ignore_ascii_case("magic_prompt");
-    let is_image_caption = task.eq_ignore_ascii_case("image_caption");
-    // sc-8204 (epic 8203): `image_describe` is the plain-text sibling of `image_caption` — the SAME
-    // `core_llm` vision path, but for NON-structured t2i models it emits a natural-language PROSE
-    // description (no JSON constraint, no `is_caption` validation). Both vision tasks carry a reference
-    // image and need no text prompt.
-    let is_image_describe = task.eq_ignore_ascii_case("image_describe");
-    let is_vision_task = is_image_caption || is_image_describe;
+    // Classify the job into ONE `RefineTask` value from the `task` discriminator, instead of the five
+    // scattered booleans re-derived per ladder that this refactor replaced (sc-8921, F-119). Every
+    // per-task property (vision? caption? temperature, messages) is now a method on the enum or a single
+    // `match` below, so no incoherent boolean combination is representable.
+    let task = RefineTask::from_payload(payload.get("task").and_then(Value::as_str));
     let original_prompt = payload
         .get("prompt")
         .and_then(Value::as_str)
@@ -634,48 +788,63 @@ pub(crate) async fn run_prompt_refine_job(
         .to_owned();
     // The vision tasks (image_caption / image_describe) are driven by the reference image, not a text
     // prompt, so they do not require a `prompt`; every other task does.
-    if original_prompt.is_empty() && !is_vision_task {
+    if original_prompt.is_empty() && !task.is_vision() {
         return Err(WorkerError::InvalidPayload(
             "Prompt refinement requires a non-empty prompt.".to_owned(),
         ));
     }
-    // The image-caption task resolves + decodes a reference image (the JoyCaption `load_caption_image`
-    // pattern → RGB8) into the vision contract's `ImageRef`. Accept either `imagePath` or `referencePath`.
-    // The path is UNTRUSTED (it arrives on the job payload over the LAN-remote API boundary, epic 4484),
-    // so — like every other on-disk image/model input (JoyCaption via `resolve_dataset_item_path`, the
+    // The vision tasks resolve + decode a reference image (the JoyCaption `load_caption_image` pattern →
+    // RGB8) into the vision contract's `ImageRef`. Accept either `imagePath` or `referencePath`. The path
+    // is UNTRUSTED (it arrives on the job payload over the LAN-remote API boundary, epic 4484), so — like
+    // every other on-disk image/model input (JoyCaption via `resolve_dataset_item_path`, the
     // InstantID/captioner reference reads, the LoRA load path) — confine it to an app-managed root via
     // `normalize_app_managed_model_path` BEFORE opening it. That rejects `..` traversal and any absolute
     // path outside the app data dir / HF hub cache, closing the arbitrary-file-read gap.
-    let image_ref = if is_vision_task {
-        let image_path = payload
-            .get("imagePath")
-            .or_else(|| payload.get("referencePath"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(
-                    "This task requires a non-empty `imagePath` reference image.".to_owned(),
-                )
-            })?;
-        let safe_path =
-            normalize_app_managed_model_path(settings, image_path, "Vision reference image")?;
-        Some(load_caption_image_ref(&safe_path)?)
+    // A vision task carries one OR MORE reference images. The plural `imagePaths` array (a mood board,
+    // sc-8595) takes precedence; otherwise the single `imagePath`/`referencePath` (unchanged single-image
+    // path). Every path is UNTRUSTED (it arrives on the job payload over the LAN-remote API boundary,
+    // epic 4484), so each is confined to an app-managed root via `normalize_app_managed_model_path`
+    // BEFORE opening it — rejecting `..` traversal and any absolute path outside the app data dir / HF
+    // hub cache. The order of `imagePaths` is preserved so the model reads the board in the order the
+    // user assembled it. N is bounded API-side (`MAX_MOOD_BOARD_IMAGES`).
+    let image_refs: Vec<gen_core::core_llm::ImageRef> = if task.is_vision() {
+        let paths: Vec<String> = match payload.get("imagePaths").and_then(Value::as_array) {
+            Some(items) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            None => payload
+                .get("imagePath")
+                .or_else(|| payload.get("referencePath"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+        };
+        if paths.is_empty() {
+            return Err(WorkerError::InvalidPayload(
+                "This task requires at least one non-empty `imagePath`/`imagePaths` reference image."
+                    .to_owned(),
+            ));
+        }
+        let mut refs = Vec::with_capacity(paths.len());
+        for path in &paths {
+            let safe_path =
+                normalize_app_managed_model_path(settings, path, "Vision reference image")?;
+            refs.push(load_caption_image_ref(&safe_path)?);
+        }
+        refs
     } else {
-        None
+        Vec::new()
     };
-    let guide = payload
-        .get("guide")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let workflow = payload
-        .get("workflow")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    // A caption task (magic-prompt OR image-caption) drives the same TextLlm seam with Ideogram's
-    // caption system prompt instead of the rewrite rules; captions run longer than a one-line prompt,
-    // so allow more tokens and sample cooler for steadier JSON.
-    let is_caption_task = is_magic || is_image_caption;
+    // More than one reference image switches the vision instruction to mood-board SYNTHESIS (one prompt
+    // capturing the shared aesthetic) rather than describing a single picture.
+    let multi_reference = image_refs.len() > 1;
     let model = payload
         .get("model")
         .and_then(Value::as_str)
@@ -683,52 +852,50 @@ pub(crate) async fn run_prompt_refine_job(
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_REFINE_MODEL)
         .to_owned();
-    let max_new_tokens = resolve_max_new_tokens(payload, is_caption_task, is_image_describe);
-    // Both the JSON caption tasks and the prose-describe task sample cool for a faithful, steady
-    // description; the free-text rewrite stays warmer for creative variation.
-    let temperature = if is_caption_task || is_image_describe {
-        0.4
-    } else {
-        0.7
-    };
-    let work_message = if is_image_caption {
-        "Captioning image…"
-    } else if is_image_describe {
-        "Describing image…"
-    } else if is_magic {
-        "Expanding to a caption…"
-    } else {
-        "Refining prompt…"
-    };
-    let done_message = if is_caption_task {
-        "Caption ready."
-    } else if is_image_describe {
-        "Description ready."
-    } else {
-        "Prompt refined."
-    };
+    let max_new_tokens = resolve_max_new_tokens(
+        payload,
+        task.is_caption(),
+        task == RefineTask::ImageDescribe,
+    );
+    let temperature = task.temperature();
+    let work_message = task.work_message();
+    let done_message = task.done_message();
 
-    let (system, user_message) = if is_image_caption {
-        build_image_caption_messages()
-    } else if is_image_describe {
-        // sc-8205: the describe style (prose vs booru tags) is selected per-model by the `captionStyle`
-        // payload field the web forwards from the catalog; absent/unknown → prose.
-        let style =
-            DescribeStyle::from_payload(payload.get("captionStyle").and_then(Value::as_str));
-        build_image_describe_messages(style)
-    } else if is_magic {
-        let aspect_ratio = payload
-            .get("aspectRatio")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("1:1");
-        build_magic_prompt_messages(&original_prompt, aspect_ratio)
-    } else {
-        (
-            build_refine_system_prompt(guide.as_deref(), workflow.as_deref()),
-            original_prompt.clone(),
-        )
+    // Build the `(system, user)` chat text per task: the caption tasks swap Ideogram's caption system
+    // prompt in for the rewrite rules, describe supplies the prose/tags describe asset, and the default
+    // rewrite assembles its guide/workflow system prompt with the user's prompt as the turn.
+    let (system, user_message) = match task {
+        RefineTask::ImageCaption => build_image_caption_messages(multi_reference),
+        RefineTask::ImageDescribe => {
+            // sc-8205: the describe style (prose vs booru tags) is selected per-model by the
+            // `captionStyle` payload field the web forwards from the catalog; absent/unknown → prose.
+            let style =
+                DescribeStyle::from_payload(payload.get("captionStyle").and_then(Value::as_str));
+            build_image_describe_messages(style, multi_reference)
+        }
+        RefineTask::MagicPrompt => {
+            let aspect_ratio = payload
+                .get("aspectRatio")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("1:1");
+            build_magic_prompt_messages(&original_prompt, aspect_ratio)
+        }
+        RefineTask::Rewrite => {
+            let guide = payload
+                .get("guide")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let workflow = payload
+                .get("workflow")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            (
+                build_refine_system_prompt(guide.as_deref(), workflow.as_deref()),
+                original_prompt.clone(),
+            )
+        }
     };
     let weights_dir = resolve_app_managed_model_dir(settings, &model, "prompt-refine model path")?;
     // Attribute the run to the active backend (MLX on macOS, candle off-Mac) on the streamed progress
@@ -752,129 +919,160 @@ pub(crate) async fn run_prompt_refine_job(
     check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
 
     let cancel = CancelFlag::new();
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<(u32, u32)>(64);
+    // Coalesced per-token progress (sc-8840, F-038). A native caption decodes up to 4096 tokens; the
+    // old path sent EVERY token on a bounded(64) channel and fired a full `update_job` POST per token
+    // — thousands of sequential POSTs, with `blocking_send` back-pressuring generation on API latency
+    // (worse over epic-4484 LAN). Instead the token callback writes the latest `(current, total)` into
+    // a **watch** channel (latest-wins, non-blocking — `send` never blocks the sender and never drops
+    // the LATEST value), and the loop below posts only the newest snapshot on a fixed tick. Generation
+    // is fully decoupled from API latency, intermediate ticks are coalesced away, and the FINAL token
+    // count is always the watch's resident value so the terminal progress is never lost.
+    let (progress_tx, progress_rx) = tokio::sync::watch::channel::<(u32, u32)>((0, max_new_tokens));
     let blocking_cancel = cancel.clone();
     let job_id = job.id.clone();
     let prompt = user_message;
     let engine_label = model.clone();
-    let blocking = tokio::task::spawn_blocking(move || -> WorkerResult<String> {
-        emit_event(
-            "prompt_refine_load_start",
-            json!({ "jobId": job_id, "engine": engine_label }),
-        );
-
-        // Resolve the native provider model-first (no provider id) and stream through the
-        // `core_llm::TextLlm` contract. One backend-agnostic path: the force-linked provider
-        // (mlx-llama on macOS, candle-llama on the Windows candle build) wins resolution. The provider
-        // renders the model's own chat template, so the worker supplies only the system + user turns
-        // (the product policy stays caller-side).
-        //
-        // sc-8105 resolution note: `core-llm`'s `select`/`meets` filters on each provider's STATIC
-        // (weightless) descriptor BEFORE any `load` runs. `mlx-llama` statically advertises
-        // `supports_vision:false` + `[Constraint::Json]` — it loads a Qwen-VL (`qwen3_5`) snapshot and
-        // flips `supports_vision` on only at LOAD time (mlx-llm provider.rs:267). `mlx-joycaption`
-        // statically advertises vision but NO constraints and only `can_load`s LLaVA (not Qwen-VL).
-        // So NO provider statically satisfies BOTH vision AND Json for a Qwen-VL snapshot: demanding
-        // `vision:true` at resolution (what `ModelRequirements::from_request` derives from the image
-        // block) would make `select` return `Error::Unsupported` and never reach `load`. The image is
-        // what drives the multimodal generate path at GENERATE time (LlamaProvider::generate gates on
-        // its loaded `vision` tower), NOT what must be matched at resolution. So the image_caption path
-        // resolves on the JSON constraint ALONE (no vision filter): that selects `mlx-llama`, which then
-        // loads the Qwen-VL snapshot, flips to vision, and examines the `Content::Image`. (The other
-        // tasks carry no image, so their `from_request` reqs never set the vision filter anyway.)
-        let text = {
-            use gen_core::core_llm::{
-                load_for_model_with, Constraint, Content, LoadSpec, Message, ModelRequirements,
-                Role, Sampling, StreamEvent, TextLlmRequest,
-            };
-            let mut messages = Vec::with_capacity(2);
-            if !system.trim().is_empty() {
-                messages.push(Message::system(system));
-            }
-            // A vision task (image_caption / image_describe) user turn carries the reference image (a
-            // `Content::Image` block) alongside the instruction text, so the loaded provider examines the
-            // picture at generate time. Every other task is a plain text user turn.
-            let carries_image = image_ref.is_some();
-            match image_ref {
-                Some(image) => messages.push(Message {
-                    role: Role::User,
-                    content: vec![Content::Image(image), Content::text(prompt)],
-                    thinking: None,
-                    tool_calls: Vec::new(),
-                }),
-                None => messages.push(Message::user(prompt)),
-            }
-            let request = TextLlmRequest {
-                messages,
-                // The bespoke prompt-refine samplers were plain temperature/top-p (no repetition
-                // penalty / top-k); core-llm's defaults match (top_k 0, repetition_penalty 1.0).
-                sampling: Sampling {
-                    temperature,
-                    top_p: 0.9,
-                    ..Sampling::default()
-                },
-                max_new_tokens,
-                seed: None,
-                // sc-6585 / sc-8105: a caption task (magic-prompt OR image-caption) must emit a
-                // structurally-valid JSON caption, so constrain its decode to the JSON grammar; the
-                // free-text rewrite is unconstrained. (On the candle lane this constraint actually
-                // steers + masks the decode — the sc-7404 parity gain over `candle-gen-prompt-refine`.)
-                constraint: is_caption_task.then_some(Constraint::Json),
-                cancel: blocking_cancel.clone(),
-                ..Default::default()
-            };
-            // Build the resolution requirements WITHOUT the auto-vision `from_request` derives from an
-            // image block (see the resolution note above): a Qwen-VL snapshot has no statically
-            // vision+Json provider, so demanding vision here would fail `select` before `load`. Require
-            // only the request's output constraint — the JSON grammar for a caption task; NONE for the
-            // prose `image_describe` task (sc-8204), which therefore resolves on architecture `can_load`
-            // ALONE. That still admits `mlx-llama` (the only provider that `can_load`s a Qwen-VL wrapper —
-            // `mlx-joycaption` only loads LLaVA), which loads the snapshot and flips to vision at load.
-            // (`carries_image` is asserted so the unused-binding lint stays satisfied and the intent —
-            // "an image is present, yet we deliberately do NOT set the vision filter" — is explicit.)
-            debug_assert!(carries_image == is_vision_task);
-            let mut reqs = ModelRequirements::default();
-            for constraint in request.constraint.iter().copied() {
-                reqs = reqs.with_constraint(constraint);
-            }
-            let refiner = load_for_model_with(
-                &LoadSpec {
-                    source: weights_dir.to_string_lossy().into_owned(),
-                    quantize: None,
-                },
-                &reqs,
-            )
-            .map_err(|error| WorkerError::Engine(format!("prompt-refine load failed: {error}")))?;
+    // Run the load+generate on the shared refine-model cache thread (sc-8840, F-038): a resident model
+    // keyed by weights dir is reused across interactive refine clicks instead of cold-loading the
+    // ~16 GB snapshot every time, and is idle-evicted so memory stays bounded (mirrors the image/video
+    // `generator_cache`). `with_cached_refiner` runs the closure ON that thread, so the `!Send`
+    // provider never crosses a thread boundary; only the `String` result comes back. Wrapping it in a
+    // `tokio::spawn` keeps the existing `CancelJoinGuard` teardown seam (sc-8804, F-003) unchanged.
+    let refine_spec = gen_core::core_llm::LoadSpec {
+        source: weights_dir.to_string_lossy().into_owned(),
+        quantize: None,
+    };
+    // Whether the decode is JSON-grammar-constrained (the caption tasks) and whether a reference image
+    // rides the user turn (the vision tasks) — copied out of the `Copy` `RefineTask` into plain bools so
+    // the blocking closure below names no enum, keeping its capture set minimal.
+    let is_caption_task = task.is_caption();
+    let is_vision_task = task.is_vision();
+    // Resolution requirements (see the sc-8105 note below): only the request's output constraint —
+    // the JSON grammar for a caption task, NONE for the prose `image_describe`/rewrite tasks. Built
+    // out here so it doubles as the cache key alongside the weights dir.
+    let mut refine_reqs = gen_core::core_llm::ModelRequirements::default();
+    if is_caption_task {
+        refine_reqs = refine_reqs.with_constraint(gen_core::core_llm::Constraint::Json);
+    }
+    let blocking = tokio::spawn(crate::refine_model_cache::with_cached_refiner(
+        refine_spec,
+        refine_reqs,
+        "prompt-refine load failed",
+        move |refiner| -> WorkerResult<String> {
             emit_event(
-                "prompt_refine_load_complete",
+                "prompt_refine_load_start",
                 json!({ "jobId": job_id, "engine": engine_label }),
             );
-            if blocking_cancel.is_cancelled() {
-                return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
-            }
-            // Drive the (current, total) progress channel the shared loop below reads, counting
-            // generated tokens against the max-new-tokens budget.
-            let mut on_event = |event: StreamEvent| {
-                if let StreamEvent::Token { index, .. } = event {
-                    // A closed channel means the consumer loop returned early (POST failure / 409);
-                    // trip the engine flag so generation bails instead of running unheard (sc-8804,
-                    // F-003 — the swallowed-closed-channel leak).
-                    if tx
-                        .blocking_send((index as u32 + 1, max_new_tokens))
-                        .is_err()
-                    {
-                        blocking_cancel.cancel();
-                    }
-                }
-            };
-            let output = refiner.generate(&request, &mut on_event).map_err(|error| {
-                WorkerError::Engine(format!("prompt-refine generation failed: {error}"))
-            })?;
-            output.text
-        };
 
-        Ok(text)
-    });
+            // Resolve the native provider model-first (no provider id) and stream through the
+            // `core_llm::TextLlm` contract. One backend-agnostic path: the force-linked provider
+            // (mlx-llama on macOS, candle-llama on the Windows candle build) wins resolution. The provider
+            // renders the model's own chat template, so the worker supplies only the system + user turns
+            // (the product policy stays caller-side).
+            //
+            // sc-8105 resolution note: `core-llm`'s `select`/`meets` filters on each provider's STATIC
+            // (weightless) descriptor BEFORE any `load` runs. `mlx-llama` statically advertises
+            // `supports_vision:false` + `[Constraint::Json]` — it loads a Qwen-VL (`qwen3_5`) snapshot and
+            // flips `supports_vision` on only at LOAD time (mlx-llm provider.rs:267). `mlx-joycaption`
+            // statically advertises vision but NO constraints and only `can_load`s LLaVA (not Qwen-VL).
+            // So NO provider statically satisfies BOTH vision AND Json for a Qwen-VL snapshot: demanding
+            // `vision:true` at resolution (what `ModelRequirements::from_request` derives from the image
+            // block) would make `select` return `Error::Unsupported` and never reach `load`. The image is
+            // what drives the multimodal generate path at GENERATE time (LlamaProvider::generate gates on
+            // its loaded `vision` tower), NOT what must be matched at resolution. So the image_caption path
+            // resolves on the JSON constraint ALONE (no vision filter): that selects `mlx-llama`, which then
+            // loads the Qwen-VL snapshot, flips to vision, and examines the `Content::Image`. (The other
+            // tasks carry no image, so their `from_request` reqs never set the vision filter anyway.)
+            let text = {
+                use gen_core::core_llm::{
+                    Constraint, Content, Message, Role, Sampling, StreamEvent, TextLlmRequest,
+                };
+                let mut messages = Vec::with_capacity(2);
+                if !system.trim().is_empty() {
+                    messages.push(Message::system(system));
+                }
+                // A vision task (image_caption / image_describe) user turn carries the reference image(s)
+                // as `Content::Image` block(s) BEFORE the instruction text, so the loaded provider examines
+                // the picture(s) at generate time. The provider collects every `Content::Image` in the turn
+                // and expands per-image vision tokens (mlx-llama + candle-llama both loop over all images),
+                // so a mood board of N references (sc-8595) rides one generate call. Every other task is a
+                // plain text user turn.
+                let carries_image = !image_refs.is_empty();
+                if carries_image {
+                    let mut content: Vec<Content> =
+                        image_refs.into_iter().map(Content::Image).collect();
+                    content.push(Content::text(prompt));
+                    messages.push(Message {
+                        role: Role::User,
+                        content,
+                        thinking: None,
+                        tool_calls: Vec::new(),
+                    });
+                } else {
+                    messages.push(Message::user(prompt));
+                }
+                let request = TextLlmRequest {
+                    messages,
+                    // The bespoke prompt-refine samplers were plain temperature/top-p (no repetition
+                    // penalty / top-k); core-llm's defaults match (top_k 0, repetition_penalty 1.0).
+                    sampling: Sampling {
+                        temperature,
+                        top_p: 0.9,
+                        ..Sampling::default()
+                    },
+                    max_new_tokens,
+                    seed: None,
+                    // sc-6585 / sc-8105: a caption task (magic-prompt OR image-caption) must emit a
+                    // structurally-valid JSON caption, so constrain its decode to the JSON grammar; the
+                    // free-text rewrite is unconstrained. (On the candle lane this constraint actually
+                    // steers + masks the decode — the sc-7404 parity gain over `candle-gen-prompt-refine`.)
+                    constraint: is_caption_task.then_some(Constraint::Json),
+                    cancel: blocking_cancel.clone(),
+                    ..Default::default()
+                };
+                // The resolution requirements (WITHOUT the auto-vision `from_request` derives from an image
+                // block) were built by the caller and folded into the cache key: only the request's output
+                // constraint — the JSON grammar for a caption task; NONE for the prose `image_describe` task
+                // (sc-8204), which resolves on architecture `can_load` ALONE. A Qwen-VL snapshot has no
+                // statically vision+Json provider, so demanding vision here would fail `select` before
+                // `load`; that still admits `mlx-llama` (the only provider that `can_load`s a Qwen-VL wrapper
+                // — `mlx-joycaption` only loads LLaVA), which loads the snapshot and flips to vision at load.
+                // (`carries_image` is asserted so the unused-binding lint stays satisfied and the intent —
+                // "an image is present, yet we deliberately do NOT set the vision filter" — is explicit.)
+                debug_assert!(carries_image == is_vision_task);
+                emit_event(
+                    "prompt_refine_load_complete",
+                    json!({ "jobId": job_id, "engine": engine_label }),
+                );
+                if blocking_cancel.is_cancelled() {
+                    return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+                }
+                // Publish the latest `(current, total)` token count into the coalescing watch channel the
+                // loop below reads. `send` is non-blocking and latest-wins — generation is NEVER
+                // back-pressured by API latency (the F-038 fix), and the terminal count stays resident so
+                // the final progress snapshot is never dropped. A send error means every receiver was
+                // dropped (the consumer loop returned early on a POST failure / 409): trip the engine flag
+                // so generation bails instead of running unheard (sc-8804, F-003 — the swallowed
+                // closed-channel leak, preserved verbatim from the old bounded-channel behavior).
+                let mut on_event = |event: StreamEvent| {
+                    if let StreamEvent::Token { index, .. } = event {
+                        if progress_tx
+                            .send((index as u32 + 1, max_new_tokens))
+                            .is_err()
+                        {
+                            blocking_cancel.cancel();
+                        }
+                    }
+                };
+                let output = refiner.generate(&request, &mut on_event).map_err(|error| {
+                    WorkerError::Engine(format!("prompt-refine generation failed: {error}"))
+                })?;
+                output.text
+            };
+
+            Ok(text)
+        },
+    ));
 
     // Bind the blocking LLM task to its cancel flag (sc-8804, F-003): every `update_job`/
     // `heartbeat` `?` below returns early on a transient POST failure or a 409 (stale-sweep
@@ -882,61 +1080,86 @@ pub(crate) async fn run_prompt_refine_job(
     // instead of leaving it running on a job nobody is consuming. `cancel` is kept alongside (it's
     // `Clone`) for the in-loop cancel poll; the guard drives only the drop-time teardown.
     let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
-    let mut interval = tokio::time::interval(progress_report_interval(settings));
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Heartbeat + poll-cancel cadence (the shared 5–15 s worker interval).
+    let mut heartbeat_interval = tokio::time::interval(progress_report_interval(settings));
+    heartbeat_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Progress-post cadence (sc-8840, F-038): a fixed short tick that COALESCES the per-token watch
+    // channel down to at most ~4 posts/sec regardless of decode speed — thousands of per-token POSTs
+    // collapse to a few, and generation is never back-pressured by API latency. Decoupled from the
+    // (coarser) heartbeat interval so progress stays smooth without the token stream driving the API.
+    let mut progress_interval = tokio::time::interval(PROGRESS_POST_INTERVAL);
+    progress_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Skip a redundant post when the token count has not advanced since the last one (the watch holds
+    // the same value between decode ticks), so a stalled decode does not re-POST identical progress.
+    let mut last_posted: Option<(u32, u32)> = None;
     // Run the stream loop capturing its Result so any `?`-error path performs the explicit awaited
-    // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
-    let loop_result: WorkerResult<()> = async {
+    // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003). The loop
+    // yields the raw model output on clean completion.
+    let loop_result: WorkerResult<String> = async {
         loop {
             tokio::select! {
-                event = rx.recv() => {
-                    match event {
-                        Some((current, total)) => {
-                            let within = if total > 0 {
-                                (current as f64 / total as f64).clamp(0.0, 1.0)
-                            } else {
-                                0.0
-                            };
-                            update_job(
-                                api,
-                                &job.id,
-                                refine_progress(
-                                    JobStatus::Running,
-                                    ProgressStage::Running,
-                                    0.4 + 0.5 * within,
-                                    work_message,
-                                    None,
-                                    backend,
-                                ),
-                            )
+                // Generation finished (the shared cache thread replied). Disarm the guard before any
+                // `?` so a task/join error never drops an armed guard, then post the FINAL coalesced
+                // progress snapshot (the watch's resident terminal value — never dropped) before
+                // handing the raw output to the post-loop cleanup.
+                result = &mut *guard.handle_mut() => {
+                    guard.disarm();
+                    let raw = result
+                        .map_err(|error| task_join_error("prompt refine task join", error))??;
+                    // Deliver the FINAL coalesced snapshot (the watch's resident terminal value — the
+                    // last token count, never dropped) so the terminal progress is always correct even
+                    // if it landed between ticks. Copy the `(u32, u32)` out of the borrow into a plain
+                    // value FIRST so the non-`Send` `watch::Ref` guard is dropped before the `.await`
+                    // (holding it across the await would make `run_worker_loop`'s future `!Send` and
+                    // break the `tokio::spawn` in rust-api — build-windows caught this).
+                    let latest = *progress_rx.borrow();
+                    if let Some((current, total)) = next_progress_post(latest, last_posted) {
+                        post_refine_progress(api, &job.id, current, total, work_message, backend)
                             .await?;
-                        }
-                        None => break,
+                    }
+                    return Ok(raw);
+                }
+                _ = progress_interval.tick() => {
+                    // Coalesced progress: post ONLY the latest token count, and only if it moved since
+                    // the last post (a stalled decode holds the same value → no redundant re-POST).
+                    // Copy out of the borrow first so the non-`Send` `watch::Ref` is not held across
+                    // the `.await` (keeps `run_worker_loop`'s future `Send` for `tokio::spawn`).
+                    let latest = *progress_rx.borrow();
+                    if let Some((current, total)) = next_progress_post(latest, last_posted) {
+                        post_refine_progress(api, &job.id, current, total, work_message, backend)
+                            .await?;
+                        last_posted = Some((current, total));
                     }
                 }
-                _ = interval.tick() => {
+                _ = heartbeat_interval.tick() => {
                     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                    match check_cancel(api, &job.id, CANCEL_MESSAGE).await {
-                        Ok(()) => {}
-                        Err(WorkerError::Canceled(_)) => cancel.cancel(),
-                        Err(error) => return Err(error),
+                    // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
+                    // `check_cancel` poll (a local flag read) so a quit trips the decode flag at its
+                    // next per-token check instead of waiting out the grace window, exactly like a
+                    // user cancel does. `check_cancel` posts the terminal `Canceled` itself; on
+                    // shutdown the bounded-wait teardown in `run_job_with_shutdown` owns the terminal,
+                    // so here we just trip the engine flag to stop the decode mid-generation.
+                    if shutdown_requested() {
+                        cancel.cancel();
+                    } else {
+                        match check_cancel(api, &job.id, CANCEL_MESSAGE).await {
+                            Ok(()) => {}
+                            Err(WorkerError::Canceled(_)) => cancel.cancel(),
+                            Err(error) => return Err(error),
+                        }
                     }
                 }
             }
         }
-        Ok(())
     }
     .await;
-    if let Err(error) = loop_result {
-        guard.cancel_and_join().await;
-        return Err(error);
-    }
-
-    // Loop exited cleanly (channel closed) — reclaim the handle (disarming the drop-guard) and join.
-    let raw = guard
-        .into_handle()
-        .await
-        .map_err(|error| task_join_error("prompt refine task join", error))??;
+    let raw = match loop_result {
+        Ok(raw) => raw,
+        Err(error) => {
+            guard.cancel_and_join().await;
+            return Err(error);
+        }
+    };
     // A caption task isolates the JSON object (the web parses + validates it; image_caption validates
     // here too); the free-text rewrite cleans to prose.
     let refined = if is_caption_task {
@@ -953,7 +1176,7 @@ pub(crate) async fn run_prompt_refine_job(
     // (carries `compositional_deconstruction`) and KEEPS the element bboxes (no stripping). A malformed
     // reply is handled like an empty one — a clear engine error the caller surfaces (mirroring the
     // magic-prompt malformed-output handling, where a non-caption reply also fails downstream).
-    if is_image_caption {
+    if task == RefineTask::ImageCaption {
         let parsed = serde_json::from_str::<Value>(&refined).map_err(|error| {
             WorkerError::Engine(format!(
                 "The image-caption model returned output that is not valid JSON: {error}"
@@ -984,9 +1207,9 @@ pub(crate) async fn run_prompt_refine_job(
 }
 
 /// On platforms with no native prompt-refine provider (neither the macOS MLX twin nor the Windows
-/// candle build — e.g. Linux, or the candle-less Desktop installer), the capability is never
-/// advertised and this arm is unreachable in practice — the Python torch `PromptRefiner` serves
-/// `prompt_refine`. Kept so the `run_utility_job` dispatch compiles on all targets.
+/// candle build — e.g. a candle-less Linux worker), the `prompt_refine` capability is never
+/// advertised, so this arm is unreachable in practice. Kept so the `run_utility_job` dispatch
+/// compiles on all targets.
 #[cfg(not(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -997,10 +1220,61 @@ pub(crate) async fn run_prompt_refine_job(
     _job: &JobSnapshot,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
-        "Native prompt refinement needs the macOS MLX worker or the Windows candle backend; use the \
-         Python torch prompt refiner on this platform."
+        "Native prompt refinement needs the macOS MLX worker or the Windows candle backend; it is \
+         not supported on this platform."
             .to_owned(),
     ))
+}
+
+/// The coalescing decision (sc-8840, F-038): given the LATEST `(current, total)` token count from
+/// the watch channel and the value already posted, return `Some(latest)` when it should be posted
+/// (it moved) or `None` when it is a redundant repeat (a stalled decode holds the same value between
+/// ticks, so we don't re-POST identical progress). Pure so the coalescing invariant — intermediate
+/// repeats dropped, every distinct value (including the terminal one) posted exactly once — is unit
+/// testable without an API or real weights.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn next_progress_post(latest: (u32, u32), last_posted: Option<(u32, u32)>) -> Option<(u32, u32)> {
+    (last_posted != Some(latest)).then_some(latest)
+}
+
+/// Post one coalesced running-progress update (sc-8840, F-038). Maps a `(current, total)` token
+/// count to the same `0.4 + 0.5 * within` fraction the old per-token loop used, so the only behavior
+/// change is HOW OFTEN it fires (coalesced tick vs. per token), not the reported value.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn post_refine_progress(
+    api: &ApiClient,
+    job_id: &str,
+    current: u32,
+    total: u32,
+    work_message: &str,
+    backend: &str,
+) -> WorkerResult<()> {
+    let within = if total > 0 {
+        (f64::from(current) / f64::from(total)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    update_job(
+        api,
+        job_id,
+        refine_progress(
+            JobStatus::Running,
+            ProgressStage::Running,
+            0.4 + 0.5 * within,
+            work_message,
+            None,
+            backend,
+        ),
+    )
+    .await?;
+    Ok(())
 }
 
 #[cfg(any(
@@ -1069,6 +1343,67 @@ mod tests {
         let small = image::DynamicImage::new_rgb8(640, 480);
         let kept = downscale_to_pixel_budget(small, VISION_REFERENCE_MAX_PIXELS);
         assert_eq!((kept.width(), kept.height()), (640, 480));
+    }
+
+    #[test]
+    fn refine_task_classifies_the_discriminator_and_derives_properties() {
+        // Classification is case-insensitive and trims; anything unknown/absent is the default rewrite.
+        assert_eq!(RefineTask::from_payload(None), RefineTask::Rewrite);
+        assert_eq!(RefineTask::from_payload(Some("")), RefineTask::Rewrite);
+        assert_eq!(RefineTask::from_payload(Some("bogus")), RefineTask::Rewrite);
+        assert_eq!(
+            RefineTask::from_payload(Some("  Magic_Prompt ")),
+            RefineTask::MagicPrompt
+        );
+        assert_eq!(
+            RefineTask::from_payload(Some("IMAGE_CAPTION")),
+            RefineTask::ImageCaption
+        );
+        assert_eq!(
+            RefineTask::from_payload(Some("image_describe")),
+            RefineTask::ImageDescribe
+        );
+
+        // is_vision: the two image tasks are reference-image driven; the text tasks are not.
+        assert!(!RefineTask::Rewrite.is_vision());
+        assert!(!RefineTask::MagicPrompt.is_vision());
+        assert!(RefineTask::ImageCaption.is_vision());
+        assert!(RefineTask::ImageDescribe.is_vision());
+
+        // is_caption: magic-prompt AND image_caption emit JSON captions; describe (vision, prose) does not.
+        assert!(RefineTask::MagicPrompt.is_caption());
+        assert!(RefineTask::ImageCaption.is_caption());
+        assert!(!RefineTask::ImageDescribe.is_caption());
+        assert!(!RefineTask::Rewrite.is_caption());
+
+        // Temperature: only the free-text rewrite samples warm (0.7); everything else is cool (0.4).
+        assert_eq!(RefineTask::Rewrite.temperature(), 0.7);
+        for task in [
+            RefineTask::MagicPrompt,
+            RefineTask::ImageCaption,
+            RefineTask::ImageDescribe,
+        ] {
+            assert_eq!(task.temperature(), 0.4, "{task:?} should sample cool");
+        }
+
+        // Messages match the pre-refactor ladder exactly.
+        assert_eq!(RefineTask::ImageCaption.work_message(), "Captioning image…");
+        assert_eq!(
+            RefineTask::ImageDescribe.work_message(),
+            "Describing image…"
+        );
+        assert_eq!(
+            RefineTask::MagicPrompt.work_message(),
+            "Expanding to a caption…"
+        );
+        assert_eq!(RefineTask::Rewrite.work_message(), "Refining prompt…");
+        assert_eq!(RefineTask::MagicPrompt.done_message(), "Caption ready.");
+        assert_eq!(RefineTask::ImageCaption.done_message(), "Caption ready.");
+        assert_eq!(
+            RefineTask::ImageDescribe.done_message(),
+            "Description ready."
+        );
+        assert_eq!(RefineTask::Rewrite.done_message(), "Prompt refined.");
     }
 
     #[test]
@@ -1222,6 +1557,73 @@ mod tests {
         assert_eq!(clean_json_output("{\"a\": [1, 2]}"), "{\"a\": [1, 2]}");
     }
 
+    // ── sc-8840 (F-038): per-token progress coalescing ─────────────────────────────────────────
+
+    // The coalescing decision: a value that MOVED is posted; a repeat of the last-posted value is
+    // dropped (a stalled decode between ticks does not re-POST identical progress).
+    #[test]
+    fn next_progress_post_drops_repeats_and_emits_movement() {
+        // First observation (nothing posted yet) is always emitted.
+        assert_eq!(next_progress_post((5, 4096), None), Some((5, 4096)));
+        // An unchanged value after it was posted is a redundant repeat → dropped.
+        assert_eq!(next_progress_post((5, 4096), Some((5, 4096))), None);
+        // Any movement (current advanced) is emitted.
+        assert_eq!(
+            next_progress_post((6, 4096), Some((5, 4096))),
+            Some((6, 4096))
+        );
+        // A changed total (e.g. a different budget) also counts as movement.
+        assert_eq!(
+            next_progress_post((6, 2048), Some((6, 4096))),
+            Some((6, 2048))
+        );
+    }
+
+    // The watch channel is latest-wins and non-blocking (the F-038 core): a fast producer that writes
+    // thousands of token counts NEVER blocks, the consumer reading on a tick sees only the newest
+    // value (intermediate ticks coalesced away), and the FINAL value is always readable after the
+    // producer finishes — so the terminal progress can never be lost.
+    #[test]
+    fn watch_channel_coalesces_and_preserves_final_value() {
+        let (tx, rx) = tokio::sync::watch::channel::<(u32, u32)>((0, 4096));
+        // Simulate the token callback: publish every token. `send` is non-blocking and never drops
+        // the LATEST value, so a burst faster than any consumer cannot back-pressure the producer.
+        for index in 1..=4096u32 {
+            tx.send((index, 4096))
+                .expect("receiver alive → send never errors");
+        }
+        // A consumer reading between bursts sees only the newest value, not each intermediate one.
+        assert_eq!(*rx.borrow(), (4096, 4096));
+
+        // The final value survives the producer dropping (generation finished): the terminal snapshot
+        // the completion arm posts is always the true last token count.
+        drop(tx);
+        assert_eq!(*rx.borrow(), (4096, 4096));
+
+        // Feeding the resident value through the coalescing gate emits it once, then drops the repeat
+        // — the terminal post fires exactly once and is never lost.
+        let final_value = *rx.borrow();
+        assert_eq!(next_progress_post(final_value, None), Some((4096, 4096)));
+        assert_eq!(next_progress_post(final_value, Some(final_value)), None);
+    }
+
+    // `send` signals a closed consumer (all receivers dropped): the token callback maps this to
+    // tripping the engine cancel flag (sc-8804, F-003 — generation must not run unheard). Prove the
+    // error surfaces when the receiver is gone, which is exactly the condition the callback keys on.
+    #[test]
+    fn watch_send_errors_when_all_receivers_dropped() {
+        let (tx, rx) = tokio::sync::watch::channel::<(u32, u32)>((0, 4096));
+        assert!(
+            tx.send((1, 4096)).is_ok(),
+            "send succeeds while a receiver lives"
+        );
+        drop(rx);
+        assert!(
+            tx.send((2, 4096)).is_err(),
+            "send must error once every receiver is dropped (the consumer-gone signal)"
+        );
+    }
+
     // ── sc-8105: image_caption task (reference image → Ideogram JSON caption, core_llm vision path) ──
 
     #[test]
@@ -1304,7 +1706,7 @@ mod tests {
 
     #[test]
     fn build_image_caption_messages_returns_system_and_user() {
-        let (system, user) = build_image_caption_messages();
+        let (system, user) = build_image_caption_messages(false);
         assert!(!system.trim().is_empty(), "system block is non-empty");
         assert!(system.contains("compositional_deconstruction"));
         assert!(!user.trim().is_empty(), "user block is non-empty");
@@ -1350,7 +1752,7 @@ mod tests {
 
     #[test]
     fn build_image_describe_messages_returns_prose_system_and_user() {
-        let (system, user) = build_image_describe_messages(DescribeStyle::Prose);
+        let (system, user) = build_image_describe_messages(DescribeStyle::Prose, false);
         assert!(!system.trim().is_empty(), "system block is non-empty");
         assert!(
             !system.contains("compositional_deconstruction"),
@@ -1414,8 +1816,8 @@ mod tests {
 
     #[test]
     fn build_image_describe_messages_selects_the_style_asset() {
-        let (prose_sys, _) = build_image_describe_messages(DescribeStyle::Prose);
-        let (tags_sys, tags_user) = build_image_describe_messages(DescribeStyle::Tags);
+        let (prose_sys, _) = build_image_describe_messages(DescribeStyle::Prose, false);
+        let (tags_sys, tags_user) = build_image_describe_messages(DescribeStyle::Tags, false);
         assert_ne!(
             prose_sys, tags_sys,
             "prose and tags select DIFFERENT system prompts"
@@ -1428,6 +1830,75 @@ mod tests {
             tags_user.to_lowercase().contains("tag"),
             "tags user turn instructs tagging"
         );
+    }
+
+    // ── sc-8595 (epic 8588): multi-image "mood board" synthesis variants ──
+
+    #[test]
+    fn build_image_describe_messages_multi_selects_the_mood_board_asset() {
+        // N>1 swaps in the mood-board synthesis asset for BOTH styles; N==1 keeps the single-image asset.
+        let (prose_single, _) = build_image_describe_messages(DescribeStyle::Prose, false);
+        let (prose_multi, prose_multi_user) =
+            build_image_describe_messages(DescribeStyle::Prose, true);
+        assert_ne!(
+            prose_single, prose_multi,
+            "a mood board selects a DIFFERENT prose system prompt than single-image describe"
+        );
+        assert!(
+            prose_multi.to_lowercase().contains("mood board")
+                || prose_multi.to_lowercase().contains("mood-board"),
+            "the multi-image prose system prompt frames the task as a mood board"
+        );
+        assert!(
+            prose_multi.to_lowercase().contains("share")
+                || prose_multi.to_lowercase().contains("shared"),
+            "the mood-board prose prompt instructs synthesizing the SHARED aesthetic"
+        );
+        // Still prose — never the JSON caption schema.
+        assert!(!prose_multi.contains("compositional_deconstruction"));
+        assert!(prose_multi_user.to_lowercase().contains("mood board"));
+
+        let (tags_single, _) = build_image_describe_messages(DescribeStyle::Tags, false);
+        let (tags_multi, _) = build_image_describe_messages(DescribeStyle::Tags, true);
+        assert_ne!(
+            tags_single, tags_multi,
+            "a mood board selects a DIFFERENT tags system prompt than single-image tagging"
+        );
+        assert!(
+            tags_multi.contains("comma-separated"),
+            "the multi-image tags prompt still pins a comma-separated tag list"
+        );
+        assert!(
+            tags_multi.to_lowercase().contains("mood board")
+                || tags_multi.to_lowercase().contains("mood-board"),
+            "the multi-image tags system prompt frames the task as a mood board"
+        );
+    }
+
+    #[test]
+    fn build_image_caption_messages_multi_selects_the_mood_board_json_asset() {
+        // N>1 swaps in the mood-board JSON asset; it STILL carries the Ideogram caption schema so the
+        // reply validates as a caption, but grounds the style in the shared look + synthesizes the scene.
+        let (single_sys, _) = build_image_caption_messages(false);
+        let (multi_sys, multi_user) = build_image_caption_messages(true);
+        assert_ne!(
+            single_sys, multi_sys,
+            "a mood board selects a DIFFERENT caption system prompt than single-image caption"
+        );
+        assert!(
+            multi_sys.contains("compositional_deconstruction"),
+            "the mood-board caption prompt still emits the Ideogram JSON schema"
+        );
+        assert!(
+            multi_sys.contains("style_description"),
+            "the mood-board caption prompt still requires style_description"
+        );
+        assert!(
+            multi_sys.to_lowercase().contains("mood board")
+                || multi_sys.to_lowercase().contains("mood-board"),
+            "the mood-board caption prompt frames the task as a mood board"
+        );
+        assert!(!multi_user.contains("{{"), "no template placeholders");
     }
 
     #[test]
@@ -1519,7 +1990,14 @@ mod tests {
             "Image caption reference image",
         )
         .expect("an in-root reference path is accepted");
-        assert!(resolved.starts_with(dir.path()), "stays under the data dir");
+        // sc-9812: confinement canonicalizes the deepest existing ancestor before
+        // re-appending the not-yet-created tail, so the resolved path is under the
+        // canonical data-dir root (on macOS `/var` -> `/private/var`).
+        let canonical_root = dir.path().canonicalize().expect("tempdir canonicalizes");
+        assert!(
+            resolved.starts_with(&canonical_root),
+            "stays under the data dir"
+        );
 
         // Out-of-root absolute path: rejected.
         let outside_dir = tempfile::tempdir().expect("tempdir2");
@@ -1565,7 +2043,7 @@ mod tests {
             TextLlmRequest,
         };
 
-        let (system, user) = build_image_caption_messages();
+        let (system, user) = build_image_caption_messages(false);
         let image = ImageRef::new(2, 2, vec![0u8; 12]).expect("image ref");
         let request = TextLlmRequest {
             messages: vec![
@@ -1949,7 +2427,7 @@ mod tests {
 
         let image =
             load_caption_image_ref(std::path::Path::new(&ref_path)).expect("decode ref image");
-        let (system, user) = build_image_caption_messages();
+        let (system, user) = build_image_caption_messages(false);
         let request = TextLlmRequest {
             messages: vec![
                 Message::system(system),
@@ -2025,7 +2503,7 @@ mod tests {
 
         let image =
             load_caption_image_ref(std::path::Path::new(&ref_path)).expect("decode ref image");
-        let (system, user) = build_image_caption_messages();
+        let (system, user) = build_image_caption_messages(false);
         let request = TextLlmRequest {
             messages: vec![
                 Message::system(system),
@@ -2099,7 +2577,7 @@ mod tests {
 
         let image =
             load_caption_image_ref(std::path::Path::new(&ref_path)).expect("decode ref image");
-        let (system, user) = build_image_describe_messages(DescribeStyle::Prose);
+        let (system, user) = build_image_describe_messages(DescribeStyle::Prose, false);
         let request = TextLlmRequest {
             messages: vec![
                 Message::system(system),

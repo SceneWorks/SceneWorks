@@ -23,12 +23,15 @@ pub(crate) async fn create_image_job(
     // job-create instead of 2–3× (sc-8819, F-017).
     let catalogs = JobCatalogSnapshot::default();
     apply_recipe_preset_to_image_payload(&state, &payload, &mut job_payload, &catalogs).await?;
-    // Ideogram 4 headless/API parity (sc-6519): auto-expand a plain prompt into a rich JSON caption
-    // via the magic-prompt utility model — the same separate prompt_refine job the web runs (sc-6501)
-    // — and rewrite the job's prompt before it dispatches, so a direct/headless plain-text job escapes
-    // the "Image blocked by safety filter" placeholder instead of relying on the worker reseed net. A
-    // no-op for every other model, an already-structured caption, or when the expander is unavailable.
-    crate::ideogram::rich_auto_caption_for_ideogram(&state, &mut job_payload).await;
+    // Ideogram 4 headless/API parity (sc-6519, fully async per sc-9120): a plain-text Ideogram 4 job
+    // needs its prompt expanded into a rich JSON caption via the magic-prompt utility model — the same
+    // separate prompt_refine job the web runs (sc-6501) — or it stochastically renders the safety-filter
+    // placeholder. Rather than block the POST on that expansion, we detect the need here, create the
+    // image job IMMEDIATELY in a non-claimable `pending_caption` status, and let a background task run
+    // the expansion and rewrite the prompt before promoting the job to `queued`. A no-op (→ normal
+    // `queued` create) for every other model, an already-structured caption, or an image-conditioned
+    // edit. The worker's format-guard + reseed net remains the fallback if the expansion is unavailable.
+    let caption_request = crate::ideogram::caption_request_for_ideogram(&job_payload);
     let model_manifest_entry = resolve_model_manifest_entry(&state, &payload.model).await?;
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     validate_job_lora_compatibility_with(
@@ -47,15 +50,25 @@ pub(crate) async fn create_image_job(
             .unwrap_or(payload.count);
         job_payload.insert("seeds".to_owned(), random_image_seeds(count));
     }
-    let job = create_generation_job(
-        state,
+    // Create in `pending_caption` when an async caption is pending, else the default `queued`. The
+    // POST returns 201 immediately either way — it never waits on the expansion (sc-9120).
+    let initial_status = caption_request.as_ref().map(|_| JobStatus::PendingCaption);
+    let job = create_generation_job_with_status(
+        state.clone(),
         job_type,
         project_id,
         project_name,
         job_payload,
         requested_gpu,
+        initial_status,
     )
     .await?;
+    // Kick off the async expansion + promotion AFTER the job row exists. The watcher always leaves the
+    // job claimable (rewritten to the rich caption, or degraded to the original prompt), and recovers to
+    // `queued` on an API restart if it is lost mid-flight, so the job can never sit un-claimable.
+    if let Some(caption_request) = caption_request {
+        crate::ideogram::spawn_ideogram_caption_watcher(state, job.id.clone(), caption_request);
+    }
     Ok((StatusCode::CREATED, Json(job)))
 }
 
