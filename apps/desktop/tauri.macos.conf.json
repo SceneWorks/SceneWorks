@@ -5,6 +5,6 @@
   },
   "bundle": {
     "externalBin": ["binaries/sceneworks-api"],
-    "resources": ["onnxruntime/**/*", "ffmpeg/**/*"]
+    "resources": ["onnxruntime/**/*", "ffmpeg/**/*", "mlx/**/*"]
   }
 }

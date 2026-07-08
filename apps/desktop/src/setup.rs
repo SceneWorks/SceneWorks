@@ -375,6 +375,29 @@ fn resolve_bundled_onnxruntime(app: &AppHandle) -> Option<String> {
     None
 }
 
+/// Resolve MLX's compiled Metal shader library (`mlx.metallib`), which the
+/// in-process MLX worker loads at runtime. It is NOT embedded in the binary: the
+/// pmetal-mlx-rs fork's resolver (sc-7898) searches `PMETAL_METALLIB_PATH`, then a
+/// path into the *build machine's* target dir baked into the binary, then
+/// `~/.cache/pmetal` — none of which exist on a clean end-user Mac (the cache is
+/// only populated as a side effect of a local `cargo build`), so a packaged app must
+/// ship the file and point the worker at it or MLX fails on first use with "Failed
+/// to load the default metallib. library not found" (sc-10349). Prefers the copy
+/// bundled next to the app (staged by build-sidecar.mjs into the `mlx` resource
+/// dir); returns None in dev/pre-bundle, where the fork's own build-tree / cache
+/// resolution applies (caller then leaves `PMETAL_METALLIB_PATH` unset). macOS-only —
+/// MLX is the macOS inference backend.
+#[cfg(target_os = "macos")]
+fn resolve_bundled_metallib(app: &AppHandle) -> Option<String> {
+    if let Ok(resources) = app.path().resource_dir() {
+        let bundled = resources.join("mlx").join("mlx.metallib");
+        if bundled.exists() {
+            return Some(bundled.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
 /// Resolve the CUDA-enabled onnxruntime DLL the candle worker's `ort` paths (DWPose
 /// pose_detect sc-5496, + YOLO/Real-ESRGAN, epic 5482) dlopen at runtime via
 /// `ORT_DYLIB_PATH` (the `load-dynamic` feature). The Windows/CUDA analogue of the
@@ -571,6 +594,16 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     if let Some(ort_dylib) = resolve_bundled_onnxruntime(app) {
         command = command.env("ORT_DYLIB_PATH", ort_dylib);
+    }
+    // MLX loads its Metal shader library (mlx.metallib) at runtime; point the pmetal
+    // resolver at the bundled copy so a packaged Mac (no build tree, no
+    // ~/.cache/pmetal) finds it instead of failing "Failed to load the default
+    // metallib" (sc-10349). The API sidecar's in-process utility worker touches MLX
+    // too (e.g. the native YOLO11 person detector), so it needs this — not just the
+    // separately-spawned MLX GPU worker below.
+    #[cfg(target_os = "macos")]
+    if let Some(metallib) = resolve_bundled_metallib(app) {
+        command = command.env("PMETAL_METALLIB_PATH", metallib);
     }
     // The candle (Windows/CUDA) worker's cudarc dynamic-linking `LoadLibrary`s the
     // CUDA runtime DLLs by name; prepend the bundled redist dir to the sidecar's
@@ -926,6 +959,13 @@ fn supervise_mlx_worker(app: AppHandle, api_port: u16) {
             // point `ort` at the bundled CoreML onnxruntime dylib it dlopens.
             if let Some(ort_dylib) = resolve_bundled_onnxruntime(&app) {
                 command = command.env("ORT_DYLIB_PATH", ort_dylib);
+            }
+            // This is the process that runs MLX generation; point the pmetal resolver
+            // at the bundled Metal shader library so a packaged Mac (no build tree, no
+            // ~/.cache/pmetal) finds it instead of failing "Failed to load the default
+            // metallib" on first MLX use (sc-10349, as spawn_api does).
+            if let Some(metallib) = resolve_bundled_metallib(&app) {
+                command = command.env("PMETAL_METALLIB_PATH", metallib);
             }
             // Lazy credentials (sc-5891): instead of reading the keychain here and
             // injecting HF_TOKEN/SCENEWORKS_CREDENTIALS (which prompted at launch),

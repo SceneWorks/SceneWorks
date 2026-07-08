@@ -2,7 +2,7 @@
 
 SceneWorks Desktop packages the full SceneWorks AI image and video studio as a
 single native application — no Docker, no terminal, no Python to install. It is a
-[Tauri](https://tauri.app) shell (`net.trefry.sceneworks`, v0.7.1) that bundles
+[Tauri](https://tauri.app) shell (`net.trefry.sceneworks`, v0.7.2) that bundles
 the SceneWorks API and runs generation on a native, platform-specific engine:
 
 - **macOS** runs on Apple's **MLX** engine (Apple Silicon only).

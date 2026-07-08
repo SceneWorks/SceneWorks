@@ -222,6 +222,8 @@ apps/desktop/python-src/
 apps/desktop/onnxruntime/
 # static ffmpeg staged by build-sidecar.mjs for the Rust worker (sc-3767)
 apps/desktop/ffmpeg/
+# MLX Metal shader library staged by build-sidecar.mjs for the in-process MLX worker (sc-10349)
+apps/desktop/mlx/
 # CUDA runtime redist DLLs staged by build-sidecar.mjs for the candle worker (sc-5560)
 apps/desktop/cuda/
 
