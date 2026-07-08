@@ -1,0 +1,51 @@
+name: Feature request
+description: Suggest an idea or improvement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea! Please search
+        [existing issues](https://github.com/SceneWorks/SceneWorks/issues) first
+        in case it's already been suggested.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: What are you trying to do that's hard or impossible today?
+      placeholder: I'm always frustrated when…
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like to see happen?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of SceneWorks does this relate to?
+      options:
+        - Image Studio
+        - Video Studio
+        - Character Studio
+        - Document Studio
+        - Training Studio
+        - Image / Video Editor
+        - Model Manager / models
+        - Assets / Data Sets / libraries
+        - Server / Docker / API
+        - MCP server
+        - Other / not sure
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any workarounds you're using today, or other approaches you thought about.
+    validations:
+      required: false
