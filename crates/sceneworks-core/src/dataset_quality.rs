@@ -99,12 +99,20 @@ string_enum! {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Tier0Scalars {
-    /// Variance of the Laplacian on the bucket-resized grayscale crop. Higher = sharper.
+    /// Peak-tile Laplacian focus on the bucket-resized grayscale crop — the sharpest region's
+    /// variance, not the whole-image average (sc-8563). Higher = sharper. Measuring the sharpest
+    /// region keeps a sharp subject on a flat/dark background from reading as blurry.
     pub blur_variance: f64,
     /// Fraction of pixels crushed to black (luma ≤ cutoff), in `[0, 1]`.
     pub shadow_clip: f64,
     /// Fraction of pixels blown to white (luma ≥ cutoff), in `[0, 1]`.
     pub highlight_clip: f64,
+    /// Fraction of pixels in a healthy midtone band — neither crushed nor blown (sc-8563), in
+    /// `[0, 1]`. Gates the exposure flag: a low-key frame with a lit subject keeps a healthy band
+    /// even when the backdrop clips, so it is not mistaken for genuine under/over-exposure. Absent
+    /// (`0.0`) on records written before this metric existed — see [`TIER0_METRICS_VERSION`].
+    #[serde(default)]
+    pub well_exposed_fraction: f64,
     /// Perceptual-hash bytes from the one pinned `HasherConfig` (fixed length). Hamming distance
     /// over these drives near-duplicate clustering.
     pub phash: Vec<u8>,
@@ -182,10 +190,23 @@ pub struct Tier0Thresholds {
     pub crop_loss_fraction: f64,
     /// Absolute Laplacian-variance floor: below this is "soft" regardless of the dataset.
     pub blur_floor: f64,
-    /// An image below `blur_relative_factor × dataset_median` is a soft outlier within a sharp set.
+    /// An image below `blur_relative_factor × dataset_median` is a soft outlier within a sharp set —
+    /// but only if it is *also* below `blur_relative_ceiling` (an objectively-sharp image is never a
+    /// "soft outlier" no matter how sharp its peers are).
     pub blur_relative_factor: f64,
-    /// More than this fraction of pixels clipped at black or white ⇒ exposure warning.
+    /// Ceiling that gates the relative-blur rule (sc-8563). Peak-tile focus rewards *any* high-
+    /// frequency region, so a busy-background or highly-detailed set pushes the median up and drags a
+    /// `0.5 × median` ratio across images that are themselves plainly sharp (a tack-sharp face on a
+    /// smooth backdrop, a clean shot of a smooth object). Above this absolute value an image is sharp
+    /// enough that peer sharpness is irrelevant, so the relative rule does not fire.
+    pub blur_relative_ceiling: f64,
+    /// More than this fraction of pixels clipped at black or white ⇒ *candidate* for the exposure
+    /// warning (gated by `well_exposed_min`, so a low-key subject on a clipping backdrop is spared).
     pub exposure_clip_fraction: f64,
+    /// The exposure warning only fires when the well-exposed (healthy midtone) fraction is **below**
+    /// this — i.e. clipping *and* no properly-exposed subject to fall back on (sc-8563). A lit
+    /// subject on a dark/blown backdrop clears this bar and is not flagged.
+    pub well_exposed_min: f64,
     /// pHash Hamming distance ≤ this ⇒ near-duplicate.
     pub near_dup_hamming: u32,
 }
@@ -193,17 +214,30 @@ pub struct Tier0Thresholds {
 impl Tier0Thresholds {
     /// Spike defaults, tuned per kind. Style tolerates softer images (texture/bokeh); person and
     /// object are stricter on sharpness.
+    ///
+    /// The floor is on the **peak-tile focus** scale (sc-8563), not the old whole-image variance —
+    /// calibrated against real photos so it sits in the safe window between genuine blur and sharp
+    /// content. On the sc-8563 repro (a sharp subject on a dark backdrop) the peak reads ~294 at
+    /// bucket 1024; the sharpest-region measure only drops below ~40 once the subject itself is
+    /// softened (a σ≥1.5 blur of that image, or an upscaled-to-mush frame), while genuine sharp
+    /// photos bottom out around ~48. Lowering it from the old 100/60 also stops real-but-modestly-
+    /// detailed photos (peak 48–100) from false-flagging on the new scale.
     pub fn for_kind(kind: &DatasetKind) -> Self {
         let blur_floor = match kind {
-            DatasetKind::Style => 60.0,
-            _ => 100.0,
+            DatasetKind::Style => 25.0,
+            _ => 40.0,
         };
         Self {
             min_resolution_ratio: 0.75,
             crop_loss_fraction: 0.35,
             blur_floor,
             blur_relative_factor: 0.5,
+            // 4× the floor: an image this sharp is never a "soft outlier". Keeps the relative rule
+            // for genuinely-soft images (well below this) while sparing plainly-sharp ones in high-
+            // median object/style sets, where peak-tile focus otherwise over-fires (sc-8563).
+            blur_relative_ceiling: blur_floor * 4.0,
             exposure_clip_fraction: 0.05,
+            well_exposed_min: 0.15,
             near_dup_hamming: 6,
         }
     }
@@ -413,10 +447,14 @@ fn push_scalar_flags(
     };
 
     // Soft if below the absolute floor OR a clear outlier below the dataset median (the spike's
-    // "floor AND relative" rule — relative alone would pass a uniformly-soft set).
+    // "floor AND relative" rule — relative alone would pass a uniformly-soft set). The relative arm
+    // also requires the image be below `blur_relative_ceiling`: on the peak-tile scale a high-median
+    // (busy-background / detailed) set would otherwise drag the `0.5 × median` ratio across images
+    // that are themselves plainly sharp — a false positive this story exists to avoid (sc-8563).
     let below_floor = scalars.blur_variance < thresholds.blur_floor;
-    let below_relative = blur_median
-        .is_some_and(|median| scalars.blur_variance < thresholds.blur_relative_factor * median);
+    let below_relative = scalars.blur_variance < thresholds.blur_relative_ceiling
+        && blur_median
+            .is_some_and(|median| scalars.blur_variance < thresholds.blur_relative_factor * median);
     if below_floor || below_relative {
         flags.push(QualityFlag {
             check: QualityCheck::Blur,
@@ -428,8 +466,14 @@ fn push_scalar_flags(
         });
     }
 
+    // Exposure fires on clipping only when there is *also* no well-exposed subject to fall back on
+    // (sc-8563). A low-key portrait — a lit face on a dark backdrop — clips shadows heavily but
+    // keeps a healthy midtone band, so it clears the gate and is not flagged; a genuinely under- or
+    // over-exposed frame clips *and* has little in the healthy band.
     let clip = scalars.shadow_clip.max(scalars.highlight_clip);
-    if clip > thresholds.exposure_clip_fraction {
+    if clip > thresholds.exposure_clip_fraction
+        && scalars.well_exposed_fraction < thresholds.well_exposed_min
+    {
         flags.push(QualityFlag {
             check: QualityCheck::Exposure,
             severity: Severity::Warn,
@@ -593,24 +637,40 @@ impl UnionFind {
 // Readiness report (sc-6533) — the dataset-level rollup the training screens read.
 // ---------------------------------------------------------------------------
 
+/// Metric-definition version stamped on every [`CachedTier0Scalars`]. Bump whenever a Tier-0 pixel
+/// metric changes meaning so persisted caches from an older definition are treated invalid and
+/// recomputed rather than judged under the new firing logic. `1` = sc-8563 (blur became peak-tile
+/// focus; `well_exposed_fraction` added). Records written before versioning deserialize to `0` and
+/// so recompute. The extractor in `sceneworks-image-quality` must be kept in lockstep with this.
+pub const TIER0_METRICS_VERSION: u32 = 1;
+
 /// A cached Tier-0 extraction stored on a dataset item. Keyed by **both** the content hash and the
 /// bucket edge: blur + exposure are measured on the center-crop→bucket-resize, so the same image at
-/// a different training resolution has different scalars. Reuse only when both still match (sc-6533).
+/// a different training resolution has different scalars. Reuse only when both still match (sc-6533)
+/// **and** the metrics version matches (sc-8563).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CachedTier0Scalars {
     pub content_hash: String,
     pub bucket_edge: u32,
+    /// The [`TIER0_METRICS_VERSION`] these scalars were computed under. A mismatch voids the cache
+    /// (the metrics changed meaning). Defaults to `0` for records written before versioning existed,
+    /// so they recompute rather than being fed to the current firing logic.
+    #[serde(default)]
+    pub metrics_version: u32,
     pub scalars: Tier0Scalars,
 }
 
 impl CachedTier0Scalars {
-    /// True when this cache entry still applies to an item: same image bytes (content hash) **and**
-    /// same bucket edge (blur/exposure are measured at the bucket, so a resolution change
-    /// invalidates them). The single source of truth for cache reuse — kept here, pure and tested,
-    /// rather than in the API layer.
+    /// True when this cache entry still applies to an item: same image bytes (content hash), same
+    /// bucket edge (blur/exposure are measured at the bucket, so a resolution change invalidates
+    /// them), **and** the current metrics version (a metric redefinition invalidates it, sc-8563).
+    /// The single source of truth for cache reuse — kept here, pure and tested, rather than in the
+    /// API layer.
     pub fn valid_for(&self, content_hash: Option<&str>, bucket_edge: u32) -> bool {
-        self.bucket_edge == bucket_edge && content_hash == Some(self.content_hash.as_str())
+        self.metrics_version == TIER0_METRICS_VERSION
+            && self.bucket_edge == bucket_edge
+            && content_hash == Some(self.content_hash.as_str())
     }
 }
 
@@ -2008,11 +2068,15 @@ mod tests {
         }
     }
 
+    // Defaults `well_exposed_fraction` to 0.0 — "no healthy midtone content" — so a clipping value
+    // still fires exposure (a genuinely under/over-exposed frame). Tests that exercise the low-key
+    // exemption set the field explicitly.
     fn scalars(blur: f64, shadow: f64, highlight: f64, phash: Vec<u8>) -> Tier0Scalars {
         Tier0Scalars {
             blur_variance: blur,
             shadow_clip: shadow,
             highlight_clip: highlight,
+            well_exposed_fraction: 0.0,
             phash,
         }
     }
@@ -2086,6 +2150,62 @@ mod tests {
     }
 
     #[test]
+    fn relative_blur_spares_an_objectively_sharp_image_in_a_very_sharp_set() {
+        // sc-8563: on the peak-tile scale a busy / highly-detailed set has a high median, so
+        // `0.5 × median` can exceed an image that is itself plainly sharp. The relative-blur ceiling
+        // must spare such an image while still catching a genuinely-soft outlier below the ceiling.
+        let th = thresholds(); // Person: floor 40, relative_ceiling 160.
+        let sharp = |id: &str, v: f64| {
+            let mut it = item(id);
+            it.scalars = Some(scalars(v, 0.0, 0.0, vec![0; 8]));
+            it
+        };
+        // Median 1900 ⇒ 0.5 × median = 950. Both the 300 and 120 images sit below that ratio, but
+        // 300 is above the 160 ceiling (objectively sharp) while 120 is below it (genuinely soft).
+        let items = [
+            sharp("a", 2000.0),
+            sharp("b", 2100.0),
+            sharp("c", 1900.0),
+            sharp("objectively_sharp", 300.0),
+            sharp("genuinely_soft", 120.0),
+        ];
+        let eval = evaluate_tier0(&items, 512, 1, &th);
+        assert!(
+            !has(&eval, "objectively_sharp", QualityCheck::Blur),
+            "an image above the relative ceiling is not a soft outlier, however sharp its peers are"
+        );
+        assert!(
+            has(&eval, "genuinely_soft", QualityCheck::Blur),
+            "an image below the ceiling and below 0.5×median is still a genuine soft outlier"
+        );
+    }
+
+    #[test]
+    fn real_repro_scalars_flag_neither_blur_nor_exposure() {
+        // The exact scalars measured on the sc-8563 repro photo at bucket 1024 (a sharp subject on a
+        // dark backdrop). Locks the real-image decision against future threshold drift — license-
+        // clean (the numbers, not the third-party photo). blurPeak 293.8 clears the floor and sits
+        // above the relative ceiling; well_exposed 0.503 clears the gate despite shadow_clip 0.315.
+        let mut repro = item("repro");
+        repro.scalars = Some(Tier0Scalars {
+            blur_variance: 293.8,
+            shadow_clip: 0.315,
+            highlight_clip: 0.0,
+            well_exposed_fraction: 0.503,
+            phash: vec![0; 8],
+        });
+        let eval = evaluate_tier0(std::slice::from_ref(&repro), 1024, 1, &thresholds());
+        assert!(
+            !has(&eval, "repro", QualityCheck::Blur),
+            "the real repro's sharp subject must not flag blur"
+        );
+        assert!(
+            !has(&eval, "repro", QualityCheck::Exposure),
+            "the real repro's lit subject must not flag exposure"
+        );
+    }
+
+    #[test]
     fn uniformly_soft_set_still_flags_via_floor() {
         // Every image is soft, so the median is soft too — the absolute floor must still catch it.
         let soft = |id: &str| {
@@ -2107,6 +2227,43 @@ mod tests {
             .find(|f| f.check == QualityCheck::Exposure)
             .expect("exposure flag");
         assert_eq!(flag.value, Some(0.4));
+    }
+
+    #[test]
+    fn low_key_subject_on_dark_backdrop_does_not_flag_exposure() {
+        // The sc-8563 repro shape: shadows clip heavily (0.4 of the frame ≤ cutoff) but a healthy
+        // fraction sits in the well-exposed midtone band (0.30 ≥ well_exposed_min 0.15). That is an
+        // intentional low-key frame with a lit subject, not under-exposure — no flag.
+        let mut low_key = item("low_key");
+        low_key.scalars = Some(Tier0Scalars {
+            blur_variance: 5000.0,
+            shadow_clip: 0.4,
+            highlight_clip: 0.0,
+            well_exposed_fraction: 0.30,
+            phash: vec![2; 8],
+        });
+        let eval = evaluate_tier0(std::slice::from_ref(&low_key), 512, 1, &thresholds());
+        assert!(
+            !has(&eval, "low_key", QualityCheck::Exposure),
+            "a lit subject on a dark backdrop keeps a healthy midtone band and is not flagged"
+        );
+
+        // Same clipping, but the healthy content collapses below the floor (even the subject is
+        // crushed) ⇒ genuine under-exposure, still flags. Proves the *gate* — not the clip check —
+        // is what spares the low-key frame, so the exemption can't silently swallow real cases.
+        let mut crushed = item("crushed");
+        crushed.scalars = Some(Tier0Scalars {
+            blur_variance: 5000.0,
+            shadow_clip: 0.4,
+            highlight_clip: 0.0,
+            well_exposed_fraction: 0.05,
+            phash: vec![3; 8],
+        });
+        let eval = evaluate_tier0(std::slice::from_ref(&crushed), 512, 1, &thresholds());
+        assert!(
+            has(&eval, "crushed", QualityCheck::Exposure),
+            "clipping with little healthy content is genuine under-exposure and still flags"
+        );
     }
 
     #[test]
@@ -2417,6 +2574,7 @@ mod tests {
         let cache = CachedTier0Scalars {
             content_hash: "abc".to_owned(),
             bucket_edge: 512,
+            metrics_version: TIER0_METRICS_VERSION,
             scalars: scalars(5000.0, 0.0, 0.0, vec![0; 8]),
         };
         assert!(cache.valid_for(Some("abc"), 512));
@@ -2429,6 +2587,38 @@ mod tests {
             "content change invalidates"
         );
         assert!(!cache.valid_for(None, 512), "missing hash invalidates");
+    }
+
+    #[test]
+    fn cached_scalars_from_an_older_metrics_version_are_invalid() {
+        // A cache written under an older metric definition (here: the pre-versioning default 0, what
+        // a record persisted before sc-8563 deserializes to) must NOT be reused — the scalars mean
+        // something different now (blur is peak-tile focus; well_exposed_fraction did not exist), so
+        // it has to recompute rather than be judged against the new firing logic.
+        let stale = CachedTier0Scalars {
+            content_hash: "abc".to_owned(),
+            bucket_edge: 512,
+            metrics_version: TIER0_METRICS_VERSION.wrapping_sub(1),
+            scalars: scalars(5000.0, 0.0, 0.0, vec![0; 8]),
+        };
+        assert!(
+            !stale.valid_for(Some("abc"), 512),
+            "a metrics-version mismatch invalidates the cache even when hash + bucket match"
+        );
+
+        // And a record with the field absent (old JSON) deserializes to version 0 ⇒ invalid.
+        let legacy_json = r#"{"contentHash":"abc","bucketEdge":512,"scalars":{"blurVariance":5000.0,"shadowClip":0.0,"highlightClip":0.0,"phash":[0,0,0,0,0,0,0,0]}}"#;
+        let legacy: CachedTier0Scalars =
+            serde_json::from_str(legacy_json).expect("legacy cache without metricsVersion parses");
+        assert_eq!(legacy.metrics_version, 0, "absent version defaults to 0");
+        assert_eq!(
+            legacy.scalars.well_exposed_fraction, 0.0,
+            "absent well_exposed_fraction defaults to 0"
+        );
+        assert!(
+            !legacy.valid_for(Some("abc"), 512),
+            "a pre-versioning cache recomputes"
+        );
     }
 
     #[test]

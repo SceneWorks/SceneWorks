@@ -5078,6 +5078,13 @@ details[open] > summary.lora-scope-group-heading::before,
   align-items: end;
 }
 
+/* Full-width trigger-keyword + notes fields below the import grid (epic 10328). */
+.lora-import-metadata {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 .lora-import-progress {
   display: grid;
   gap: 8px;
@@ -5106,6 +5113,158 @@ details[open] > summary.lora-scope-group-heading::before,
 
 .lora-row-progress {
   grid-column: 1 / -1;
+}
+
+/* Keyword tag editor (epic 10328) — shared by the LoRA import form and the
+   Model Manager metadata editor. */
+.kw-editor {
+  display: grid;
+  gap: 6px;
+}
+
+.kw-editor-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  cursor: text;
+  min-height: 34px;
+}
+
+.kw-editor-field.disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.kw-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 9px;
+  border-radius: var(--r-pill);
+  font-size: 11.5px;
+  font-weight: 500;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  white-space: nowrap;
+}
+
+.kw-chip button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.kw-chip button:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--accent) 22%, transparent);
+}
+
+.kw-input {
+  flex: 1 1 90px;
+  min-width: 90px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  padding: 2px;
+  outline: none;
+}
+
+.kw-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.kw-suggestions-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.kw-suggestion {
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  border: 1px dashed var(--border);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.kw-suggestion:hover:not(:disabled) {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+}
+
+/* Read-only keyword/notes summary + inline editor inside a LoRA row (epic 10328). */
+.lora-row-meta,
+.lora-row-editor {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+}
+
+.lora-keywords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.lora-keywords .kw-chip {
+  cursor: default;
+}
+
+.lora-notes {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.lora-row-editor label {
+  display: grid;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.lora-row-editor textarea {
+  resize: vertical;
+  min-height: 48px;
+}
+
+.lora-row-editor-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
+/* Read-only keyword chips + notes shown between family and weight in every
+   generation LoRA picker (epic 10328). Spans full width in flex-row and grid
+   rows alike so it wraps below the family line. */
+.lora-keyword-summary {
+  display: grid;
+  gap: 4px;
+  margin: 2px 0;
+  flex-basis: 100%;
+  width: 100%;
+  grid-column: 1 / -1;
+  min-width: 0;
 }
 
 /* Per-Studio model-availability gate (sc-5947): shown in place of a Studio body when no

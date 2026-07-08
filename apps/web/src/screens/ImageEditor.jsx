@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { LoraKeywordSummary } from "../components/LoraKeywordSummary.jsx";
 import { createPortal } from "react-dom";
 import { Stage, Layer, Image as KonvaImage, Line, Rect, Transformer } from "react-konva";
 import { apiFetch } from "../api.js";
@@ -2850,6 +2851,7 @@ export function ImageEditor() {
                     ✕
                   </button>
                 </div>
+                <LoraKeywordSummary lora={lora} />
                 <div className="ie-field">
                   <div className="ie-field-top">
                     <span className="ie-field-label" style={{ fontSize: "11.5px", color: "var(--ie-muted)" }}>

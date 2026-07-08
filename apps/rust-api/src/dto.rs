@@ -869,6 +869,15 @@ pub(crate) struct LoraImportRequest {
     pub(crate) source_path: Option<String>,
     #[serde(default)]
     pub(crate) files: Vec<String>,
+    /// Activation keywords collected at import so the catalog entry carries them
+    /// from the start. JSON imports send an array; multipart uploads send a
+    /// comma-delimited string that the import handler splits.
+    #[serde(default)]
+    pub(crate) trigger_words: Vec<String>,
+    /// Free-text usage guidance (how to combine keywords, recommended weights,
+    /// etc.) persisted onto the manifest entry's `notes` field.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) notes: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) family: Option<String>,
     /// Specific base model the LoRA targets (e.g. `wan_2_2_t2v_14b`). Recorded on
@@ -891,4 +900,26 @@ pub(crate) struct LoraImportRequest {
     /// client JSON. Its presence flags the import as a paired MoE write.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub(crate) secondary_source_path: Option<String>,
+}
+
+/// PATCH body for editing a catalog LoRA's user-facing metadata after import.
+/// Only the fields present are changed (absent field = left untouched), so the UI
+/// can send just the keywords, just the notes, or both.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LoraUpdateRequest {
+    #[serde(default)]
+    pub(crate) trigger_words: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) notes: Option<String>,
+}
+
+/// Query params identifying a single catalog LoRA across scopes, shared by the
+/// metadata PATCH and the embedded-tags lookup. Mirrors `CatalogDeleteQuery`'s
+/// scope/project routing without the delete-only `permanent` flag.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LoraCatalogItemQuery {
+    pub(crate) project_id: Option<String>,
+    pub(crate) scope: Option<String>,
 }

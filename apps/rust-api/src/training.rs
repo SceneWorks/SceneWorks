@@ -353,6 +353,7 @@ fn dataset_readiness_report(
                     CachedTier0Scalars {
                         content_hash,
                         bucket_edge: context.bucket_edge,
+                        metrics_version: sceneworks_core::dataset_quality::TIER0_METRICS_VERSION,
                         scalars,
                     },
                 ))

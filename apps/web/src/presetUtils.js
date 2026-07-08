@@ -264,6 +264,7 @@ export function serializeLora(lora, override = {}) {
     scope: lora.scope ?? "global",
     weight: Number.isFinite(Number(override.weight)) ? Number(override.weight) : loraWeight(lora),
     triggerWords: lora.triggerWords ?? [],
+    notes: lora.notes ?? "",
     compatibility: lora.compatibility ?? {},
     family: lora.family ?? null,
     families: lora.families ?? null,
