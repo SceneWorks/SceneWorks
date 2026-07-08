@@ -110,9 +110,10 @@ impl Settings {
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(8000);
+        let host = env_string("SCENEWORKS_API_HOST", DEFAULT_API_HOST);
         Self {
             app_version: env_string("SCENEWORKS_APP_VERSION", "0.2.0"),
-            host: env_string("SCENEWORKS_API_HOST", DEFAULT_API_HOST),
+            host: host.clone(),
             port,
             data_dir,
             config_dir: env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir),
@@ -149,15 +150,45 @@ impl Settings {
             trust_loopback: std::env::var("SCENEWORKS_TRUST_LOOPBACK")
                 .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
                 .unwrap_or(false),
-            // Loopback (not `host`, which may be 0.0.0.0) — the MCP self-calls
-            // originate on this machine by definition.
-            mcp_api_url: env_string("SCENEWORKS_API_URL", &format!("http://127.0.0.1:{port}")),
+            // The MCP self-calls originate on this machine; derive a base URL that
+            // resolves to an interface this API actually binds (sc-10260).
+            // `SCENEWORKS_API_URL` still overrides for reverse-proxy/container setups.
+            mcp_api_url: env_string("SCENEWORKS_API_URL", &default_mcp_api_url(&host, port)),
         }
     }
 
     pub fn projects_dir(&self) -> PathBuf {
         self.data_dir.join("projects")
     }
+}
+
+/// The self-call base URL the embedded MCP client uses when `SCENEWORKS_API_URL`
+/// is unset (sc-10260). The MCP tools call back into THIS process's `/api/v1/*`,
+/// so the URL must resolve to an interface this API is actually listening on:
+///   - a wildcard bind (`0.0.0.0`/`::`) or an explicit loopback host → dial
+///     loopback (`127.0.0.1`), which a wildcard socket also accepts;
+///   - a specific interface IP (e.g. `192.168.4.97`) → dial THAT host, because a
+///     socket bound only to it never accepts a `127.0.0.1` connection (the old
+///     hardcoded loopback default failed every catalog tool call in that setup).
+fn default_mcp_api_url(host: &str, port: u16) -> String {
+    let host = host.trim();
+    let is_wildcard_or_loopback = host.is_empty()
+        || host == "0.0.0.0"
+        || host == "::"
+        || host == "[::]"
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
+        || host.eq_ignore_ascii_case("localhost");
+    let dial_host = if is_wildcard_or_loopback {
+        "127.0.0.1".to_owned()
+    } else if host.contains(':') && !host.starts_with('[') {
+        // Bare IPv6 literal (e.g. `fe80::1`) needs bracketing in a URL authority.
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    format!("http://{dial_host}:{port}")
 }
 
 #[derive(Clone)]
@@ -334,4 +365,58 @@ pub async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod server_tests {
+    use super::default_mcp_api_url;
+
+    #[test]
+    fn default_mcp_api_url_dials_loopback_for_wildcard_and_loopback_hosts() {
+        for host in [
+            "0.0.0.0",
+            "::",
+            "[::]",
+            "127.0.0.1",
+            "::1",
+            "[::1]",
+            "localhost",
+            "LocalHost",
+            "",
+        ] {
+            assert_eq!(
+                default_mcp_api_url(host, 8000),
+                "http://127.0.0.1:8000",
+                "host {host:?} should self-dial loopback"
+            );
+        }
+    }
+
+    #[test]
+    fn default_mcp_api_url_dials_a_specific_interface_ip() {
+        // A socket bound only to this IP never accepts a 127.0.0.1 connection, so
+        // the self-call must target the bound interface (sc-10260).
+        assert_eq!(
+            default_mcp_api_url("192.168.4.97", 8000),
+            "http://192.168.4.97:8000"
+        );
+        assert_eq!(
+            default_mcp_api_url("  10.0.0.5  ", 9001),
+            "http://10.0.0.5:9001",
+            "surrounding whitespace is trimmed"
+        );
+    }
+
+    #[test]
+    fn default_mcp_api_url_brackets_a_bare_ipv6_literal() {
+        assert_eq!(
+            default_mcp_api_url("fe80::1", 8000),
+            "http://[fe80::1]:8000"
+        );
+        // An already-bracketed literal is left as-is.
+        assert_eq!(
+            default_mcp_api_url("[fe80::1]", 8000),
+            "http://[fe80::1]:8000"
+        );
+    }
 }

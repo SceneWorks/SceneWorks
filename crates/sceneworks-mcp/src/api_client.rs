@@ -11,10 +11,29 @@ use serde_json::Value;
 /// `SCENEWORKS_API_URL` (the same variable the Rust worker uses) and the token is
 /// the API's own `SCENEWORKS_ACCESS_TOKEN` — sent as `X-SceneWorks-Token`, the
 /// header `access_control` accepts.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ApiClientConfig {
     pub base_url: String,
     pub access_token: Option<String>,
+}
+
+// Manual `Debug` that never prints the token (sc-10260): the config is a plausible
+// argument to a future `tracing::debug!(?config)`, and this type is the one place
+// the secret is held in the clear (the crate-internal `ApiClient` deliberately does
+// not derive `Debug`). Presence — not value — is all a log needs.
+impl std::fmt::Debug for ApiClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiClientConfig")
+            .field("base_url", &self.base_url)
+            .field(
+                "access_token",
+                match &self.access_token {
+                    Some(_) => &"Some(<redacted>)",
+                    None => &"None",
+                },
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -144,5 +163,32 @@ impl ApiClient {
             return Err(ApiClientError::Api { status, detail });
         }
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_config_redacts_the_access_token() {
+        let config = ApiClientConfig {
+            base_url: "http://127.0.0.1:8000".to_owned(),
+            access_token: Some("super-secret-token".to_owned()),
+        };
+        let rendered = format!("{config:?}");
+        assert!(
+            !rendered.contains("super-secret-token"),
+            "Debug must never print the token: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(rendered.contains("http://127.0.0.1:8000"), "{rendered}");
+
+        // Auth-off configs are distinguishable without leaking anything.
+        let no_token = ApiClientConfig {
+            base_url: "http://127.0.0.1:8000".to_owned(),
+            access_token: None,
+        };
+        assert!(format!("{no_token:?}").contains("None"));
     }
 }
