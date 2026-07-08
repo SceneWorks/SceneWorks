@@ -12,6 +12,7 @@ import {
 import { useAppContext } from "../context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../macGating.js";
 import { apiFetch } from "../api.js";
+import { KeywordTagEditor } from "../components/KeywordTagEditor.jsx";
 import { isDesktop, tauriInvoke } from "../runtime.js";
 import { tierLabel } from "../quantTier.js";
 import { suggestTier, tierFits } from "../tierSuggestion.js";
@@ -489,6 +490,8 @@ export function ModelManagerScreen() {
     createLoraDownloadJob,
     createModelConvertJob,
     createLoraImportJob,
+    updateLora,
+    fetchLoraEmbeddedTags,
     createModelImportJob,
     presets: recipePresets = [],
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
@@ -507,6 +510,8 @@ export function ModelManagerScreen() {
   const onDownloadVariant = (model, variant) => createModelDownloadJob(model, { variant });
   const onDownloadLora = createLoraDownloadJob;
   const onImportLora = createLoraImportJob;
+  const onUpdateLora = updateLora;
+  const onFetchLoraEmbeddedTags = fetchLoraEmbeddedTags;
   const onImportModel = createModelImportJob;
   const onOpenQueue = () => setActiveView("Queue");
   // LoRA families come from each model's LoRA-compatibility set — NOT its model
@@ -528,8 +533,18 @@ export function ModelManagerScreen() {
     scope: "global",
     family: "",
     baseModel: "",
+    triggerKeywords: [],
+    notes: "",
   });
   const [fileInputKey, setFileInputKey] = useState(0);
+  // Inline trigger-keyword / notes editor for a LoRA row (epic 10328). editingLora keys
+  // the open row by scope:id; the draft holds the working keywords + notes; suggestions
+  // come from the LoRA's embedded ss_tag_frequency metadata (fetched on open).
+  const [editingLora, setEditingLora] = useState("");
+  const [loraEditDraft, setLoraEditDraft] = useState({ triggerWords: [], notes: "" });
+  const [loraEditSuggestions, setLoraEditSuggestions] = useState([]);
+  const [savingLora, setSavingLora] = useState(false);
+  const [loraEditError, setLoraEditError] = useState("");
   const [importingModel, setImportingModel] = useState(false);
   const [modelImportMessage, setModelImportMessage] = useState({ tone: "neutral", text: "" });
   const [modelImportForm, setModelImportForm] = useState({
@@ -781,6 +796,8 @@ export function ModelManagerScreen() {
         ...(isFileImport ? { file: importForm.file } : { sourceUrl: importForm.sourceUrl.trim() }),
         name: importForm.name.trim() || undefined,
         scope: importForm.scope,
+        triggerWords: importForm.triggerKeywords,
+        notes: importForm.notes.trim() || undefined,
         ...familyOverride,
         ...baseModelOverride,
         ...secondaryOverride,
@@ -794,7 +811,15 @@ export function ModelManagerScreen() {
         !importForm.family && resolvedFamily
           ? ` Detected family: ${normalizeLoraFamily(resolvedFamily)}.`
           : "";
-      setImportForm((current) => ({ ...current, sourceUrl: "", file: null, secondaryFile: null, name: "" }));
+      setImportForm((current) => ({
+        ...current,
+        sourceUrl: "",
+        file: null,
+        secondaryFile: null,
+        name: "",
+        triggerKeywords: [],
+        notes: "",
+      }));
       // Force a re-mount so choosing the same file again still emits a change event.
       setFileInputKey((current) => current + 1);
       setImportMessage({
@@ -1152,6 +1177,47 @@ export function ModelManagerScreen() {
     );
   }
 
+  const loraEditKey = (lora) => `${lora.scope ?? "global"}:${lora.id}`;
+
+  function startEditLora(lora) {
+    setEditingLora(loraEditKey(lora));
+    setLoraEditDraft({
+      triggerWords: Array.isArray(lora.triggerWords) ? lora.triggerWords : [],
+      notes: typeof lora.notes === "string" ? lora.notes : "",
+    });
+    setLoraEditSuggestions([]);
+    setLoraEditError("");
+    if (onFetchLoraEmbeddedTags) {
+      onFetchLoraEmbeddedTags(lora)
+        .then((tags) => setLoraEditSuggestions(Array.isArray(tags) ? tags : []))
+        .catch(() => setLoraEditSuggestions([]));
+    }
+  }
+
+  function cancelEditLora() {
+    setEditingLora("");
+    setLoraEditError("");
+  }
+
+  async function saveEditLora(lora) {
+    if (!onUpdateLora) {
+      return;
+    }
+    setSavingLora(true);
+    setLoraEditError("");
+    try {
+      await onUpdateLora(lora, {
+        triggerWords: loraEditDraft.triggerWords,
+        notes: loraEditDraft.notes.trim(),
+      });
+      setEditingLora("");
+    } catch (error) {
+      setLoraEditError(error?.message ?? "Failed to save LoRA metadata.");
+    } finally {
+      setSavingLora(false);
+    }
+  }
+
   function renderLoraRow(lora) {
     const installed = lora.installState === "installed";
     const missing = lora.installState === "missing";
@@ -1168,6 +1234,12 @@ export function ModelManagerScreen() {
     const hfSource = (lora.source?.provider ?? lora.provider) === "huggingface";
     const canDownload = Boolean(onDownloadLora) && lora.scope === "builtin" && !installed && hfSource;
     const downloadJob = loraDownloadJobsFor(lora).find((job) => !terminalStatuses.has(job.status));
+    const keywords = Array.isArray(lora.triggerWords) ? lora.triggerWords : [];
+    const notes = typeof lora.notes === "string" ? lora.notes : "";
+    const isEditing = editingLora === loraEditKey(lora);
+    // Built-in entries are read-only (their manifest is compiled in); the backend
+    // rejects PATCH on them, so no Edit affordance is offered.
+    const canEdit = Boolean(onUpdateLora) && lora.scope !== "builtin";
     return (
       <article className={rowClass} key={lora.id ?? lora.name}>
         <span>
@@ -1181,6 +1253,11 @@ export function ModelManagerScreen() {
               {downloadJob ? downloadJob.status : "Download"}
             </button>
           ) : null}
+          {canEdit && !isEditing ? (
+            <button onClick={() => startEditLora(lora)} type="button">
+              Edit
+            </button>
+          ) : null}
           <button
             className="danger-action"
             disabled={!onDeleteLora || lora.removable === false || deletingItem === deleteKey}
@@ -1190,6 +1267,52 @@ export function ModelManagerScreen() {
             {lora.removable === false ? "Protected" : deletingItem === deleteKey ? "Deleting" : "Delete"}
           </button>
         </span>
+        {!isEditing && (keywords.length || notes) ? (
+          <div className="lora-row-meta">
+            {keywords.length ? (
+              <div className="lora-keywords">
+                {keywords.map((keyword) => (
+                  <span className="kw-chip" key={keyword}>
+                    {keyword}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            {notes ? <p className="lora-notes">{notes}</p> : null}
+          </div>
+        ) : null}
+        {isEditing ? (
+          <div className="lora-row-editor">
+            <label>
+              Trigger keywords
+              <KeywordTagEditor
+                disabled={savingLora}
+                onChange={(triggerWords) => setLoraEditDraft((current) => ({ ...current, triggerWords }))}
+                suggestions={loraEditSuggestions}
+                value={loraEditDraft.triggerWords}
+              />
+            </label>
+            <label>
+              Notes
+              <textarea
+                disabled={savingLora}
+                onChange={(event) => setLoraEditDraft((current) => ({ ...current, notes: event.target.value }))}
+                placeholder="How to use this LoRA — keyword combinations, recommended weight, and other tips."
+                rows={2}
+                value={loraEditDraft.notes}
+              />
+            </label>
+            <div className="lora-row-editor-actions">
+              <button disabled={savingLora} onClick={() => saveEditLora(lora)} type="button">
+                {savingLora ? "Saving…" : "Save"}
+              </button>
+              <button disabled={savingLora} onClick={cancelEditLora} type="button">
+                Cancel
+              </button>
+            </div>
+            {loraEditError ? <p className="inline-warning">{loraEditError}</p> : null}
+          </div>
+        ) : null}
         {downloadJob ? (
           <div className="lora-row-progress">
             <WorkerProgressCard job={downloadJob} onCancel={onCancelJob} onOpenQueue={onOpenQueue} />
@@ -1521,6 +1644,29 @@ export function ModelManagerScreen() {
               <button disabled={importDisabled} type="submit">
                 {importingLora ? (isFileImport ? "Uploading" : "Queueing...") : "Queue Import"}
               </button>
+            </div>
+            <div className="lora-import-metadata">
+              <label>
+                Trigger keywords
+                <KeywordTagEditor
+                  disabled={importingLora}
+                  onChange={(triggerKeywords) =>
+                    setImportForm((current) => ({ ...current, triggerKeywords }))
+                  }
+                  placeholder="e.g. sksStyle — press Enter or comma to add"
+                  value={importForm.triggerKeywords}
+                />
+              </label>
+              <label>
+                Notes
+                <textarea
+                  disabled={importingLora}
+                  onChange={(event) => setImportForm((current) => ({ ...current, notes: event.target.value }))}
+                  placeholder="How to use this LoRA — keyword combinations, recommended weight, and other tips."
+                  rows={2}
+                  value={importForm.notes}
+                />
+              </label>
             </div>
             {showSecondaryFileSlot ? (
               <p className="helper-copy">

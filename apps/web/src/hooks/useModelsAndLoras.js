@@ -125,6 +125,50 @@ export function useModelsAndLoras({
     [token, activeProject, setError, refreshDataWithLoraOverlay],
   );
 
+  // Edit a catalog LoRA's trigger keywords / notes after import (epic 10328). Only
+  // the fields present are sent; the backend leaves the rest untouched.
+  const updateLora = useCallback(
+    async (lora, updates) => {
+      const params = new URLSearchParams();
+      if (lora.scope) {
+        params.set("scope", lora.scope);
+      }
+      if (lora.scope === "project" && activeProject?.id) {
+        params.set("projectId", activeProject.id);
+      }
+      const query = params.toString() ? `?${params.toString()}` : "";
+      const updated = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}${query}`, token, {
+        method: "PATCH",
+        body: JSON.stringify(updates),
+      });
+      setError("");
+      await refreshDataWithLoraOverlay(activeProject?.id);
+      return updated;
+    },
+    [token, activeProject, setError, refreshDataWithLoraOverlay],
+  );
+
+  // Best-effort trigger-keyword suggestions read from the installed LoRA's embedded
+  // ss_tag_frequency metadata; returns [] when unavailable (epic 10328).
+  const fetchLoraEmbeddedTags = useCallback(
+    async (lora) => {
+      const params = new URLSearchParams();
+      if (lora.scope) {
+        params.set("scope", lora.scope);
+      }
+      if (lora.scope === "project" && activeProject?.id) {
+        params.set("projectId", activeProject.id);
+      }
+      const query = params.toString() ? `?${params.toString()}` : "";
+      const result = await apiFetch(
+        `/api/v1/loras/${encodeURIComponent(lora.id)}/embedded-tags${query}`,
+        token,
+      );
+      return Array.isArray(result?.tags) ? result.tags : [];
+    },
+    [token, activeProject],
+  );
+
   const createModelImportJob = useCallback(
     async (payload, options = {}) => {
     const { file, ...metadata } = payload;
@@ -280,6 +324,8 @@ export function useModelsAndLoras({
     refreshLoras,
     deleteModel,
     deleteLora,
+    updateLora,
+    fetchLoraEmbeddedTags,
     createModelImportJob,
     createLoraImportJob,
     createModelDownloadJob,

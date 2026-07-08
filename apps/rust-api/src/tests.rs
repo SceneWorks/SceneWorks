@@ -12680,3 +12680,88 @@ async fn mcp_client_round_trips_with_access_token_and_no_loopback_trust() {
 
     let _ = client.cancel().await;
 }
+
+#[tokio::test]
+async fn lora_import_records_trigger_words_and_notes() {
+    // epic 10328: the import request carries trigger keywords + usage notes, and both
+    // land on the queued manifest entry the worker later persists.
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/loras/import",
+        json!({
+            "repo": "owner/lora",
+            "name": "Keyworded LoRA",
+            "files": ["adapter.safetensors"],
+            "triggerWords": ["sksStyle", "neon"],
+            "notes": "Combine sksStyle with neon; keep weight <= 0.7."
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let entry = &job["payload"]["manifestEntry"];
+    assert_eq!(entry["triggerWords"], json!(["sksStyle", "neon"]));
+    assert_eq!(
+        entry["notes"],
+        "Combine sksStyle with neon; keep weight <= 0.7."
+    );
+}
+
+#[tokio::test]
+async fn update_lora_edits_trigger_words_and_notes() {
+    // epic 10328: PATCH /api/v1/loras/:id edits keywords/notes after import, supports
+    // partial updates, and the edit surfaces in the catalog listing.
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let settings = test_settings(&temp_dir);
+    let manifest_dir = settings.config_dir.join("manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir");
+    std::fs::write(
+        manifest_dir.join("user.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [
+            { "id": "my_lora", "name": "My LoRA", "family": "z-image",
+              "triggerWords": ["old"], "notes": "",
+              "source": { "provider": "local", "path": "loras/my_lora.safetensors" } }
+        ] }"#,
+    )
+    .expect("seed manifest");
+
+    let app = create_app(settings).expect("app creates");
+
+    // Full update.
+    let (status, updated) = request(
+        app.clone(),
+        "PATCH",
+        "/api/v1/loras/my_lora?scope=global",
+        json!({ "triggerWords": ["fresh", "tokens"], "notes": "use at 0.8" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["triggerWords"], json!(["fresh", "tokens"]));
+    assert_eq!(updated["notes"], "use at 0.8");
+
+    // Partial update (only notes) leaves the keywords untouched.
+    let (status, updated) = request(
+        app.clone(),
+        "PATCH",
+        "/api/v1/loras/my_lora?scope=global",
+        json!({ "notes": "revised note" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["triggerWords"], json!(["fresh", "tokens"]));
+    assert_eq!(updated["notes"], "revised note");
+
+    // The edit is reflected in GET /api/v1/loras.
+    let (status, loras) = request(app, "GET", "/api/v1/loras", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = loras
+        .as_array()
+        .expect("catalog is an array")
+        .iter()
+        .find(|item| item["id"] == "my_lora")
+        .expect("seeded LoRA present");
+    assert_eq!(entry["triggerWords"], json!(["fresh", "tokens"]));
+    assert_eq!(entry["notes"], "revised note");
+}

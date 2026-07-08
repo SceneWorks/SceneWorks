@@ -145,12 +145,13 @@ use dto::{
     DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest, DatasetFaceRecordsBody,
     DatasetImageFixBody, DatasetRepointBody, DatasetUpscaleJobRequest, DirectoriesResponse,
     EventsQuery, FaceLikenessCompareRequest, FrameExtractRequest, HealthResponse,
-    HostCapabilitiesResponse, ImageJobRequest, InterleaveJobRequest, JobsQuery, LoraImportRequest,
-    LorasQuery, ModelConvertRequest, ModelDownloadRequest, ModelImportRequest,
-    PersonDetectionJobRequest, PersonTrackCorrectionsRequest, PersonTrackJobRequest,
-    ProjectCreateRequest, PromptBatchesQuery, PromptRefineRequest, QualityAckBody, ReadinessQuery,
-    RecipePresetsQuery, TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest,
-    TrainingCaptionJobRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
+    HostCapabilitiesResponse, ImageJobRequest, InterleaveJobRequest, JobsQuery,
+    LoraCatalogItemQuery, LoraImportRequest, LoraUpdateRequest, LorasQuery, ModelConvertRequest,
+    ModelDownloadRequest, ModelImportRequest, PersonDetectionJobRequest,
+    PersonTrackCorrectionsRequest, PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery,
+    PromptRefineRequest, QualityAckBody, ReadinessQuery, RecipePresetsQuery, TimelineCreateRequest,
+    TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest, VerifyResponse,
+    VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
 use manifest::{
@@ -173,8 +174,9 @@ use models::{
 mod loras;
 use loras::{
     create_lora_download_job, create_lora_import_job, delete_lora, list_loras, lora_catalog,
-    lora_url_error_message, sweep_stale_lora_uploads, validate_job_lora_compatibility,
-    validate_job_lora_compatibility_with, validate_lora_specs_for_model,
+    lora_embedded_tags, lora_url_error_message, sweep_stale_lora_uploads, update_lora,
+    validate_job_lora_compatibility, validate_job_lora_compatibility_with,
+    validate_lora_specs_for_model,
 };
 #[cfg(test)]
 use loras::{lora_artifact_paths, lora_families, sweep_stale_lora_uploads_before};
@@ -1131,7 +1133,14 @@ pub(crate) fn create_app_with_state(
                 .layer(DefaultBodyLimit::max(MAX_MODEL_MULTIPART_BODY_BYTES)),
         )
         .route("/api/v1/loras", get(list_loras))
-        .route("/api/v1/loras/:lora_id", delete(delete_lora))
+        .route(
+            "/api/v1/loras/:lora_id",
+            delete(delete_lora).patch(update_lora),
+        )
+        .route(
+            "/api/v1/loras/:lora_id/embedded-tags",
+            get(lora_embedded_tags),
+        )
         .route(
             "/api/v1/loras/:lora_id/download",
             post(create_lora_download_job),
