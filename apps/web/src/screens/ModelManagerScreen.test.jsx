@@ -389,6 +389,14 @@ describe("ModelManagerScreen Wan A14B MoE LoRA import (sc-1991)", () => {
     await change(familySelect, "wan-video");
   }
 
+  it("defaults the LoRA import to Upload mode", async () => {
+    await render();
+    // Most LoRAs are a file the user already downloaded (e.g. from civit.ai), so the
+    // form opens on Upload: the file input is shown and Source URL is not.
+    expect(labelStartingWith("LoRA File")).toBeTruthy();
+    expect(labelStartingWith("Source URL")).toBeUndefined();
+  });
+
   it("reveals the base-model selector only after the wan-video family is chosen", async () => {
     await render();
     expect(labelStartingWith("Base model")).toBeUndefined();
@@ -417,6 +425,9 @@ describe("ModelManagerScreen Wan A14B MoE LoRA import (sc-1991)", () => {
     await render();
     await selectWanVideoFamily();
     await change(labelStartingWith("Base model").querySelector("select"), "wan_2_2_t2v_14b");
+    await act(async () => {
+      [...loraForm().querySelectorAll("button")].find((button) => button.textContent === "URL").click();
+    });
     await change(labelStartingWith("Source URL").querySelector("input"), "https://example.com/wan-moe.safetensors");
     const form = container.querySelector('form[aria-label="Import LoRA"]');
     await act(async () => {
