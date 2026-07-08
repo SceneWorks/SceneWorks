@@ -15,6 +15,8 @@ import {
   itemBadge,
   lowResolutionFlaggedItemIds,
   metadataStrippableItemIds,
+  nearDuplicateClusterLabel,
+  nearDuplicateClusters,
   primaryReason,
   technicalPercent,
 } from "../../training/datasetReadiness.js";
@@ -100,6 +102,50 @@ export function ReadinessFlagDetails({ entry, onToggle }) {
         );
       })}
     </ul>
+  );
+}
+
+// Near-duplicate cluster view (sc-8564): each "similar to other photos" warning becomes a named
+// group — the specific other photos it refers to, shown as thumbnails with a similarity label —
+// instead of an anonymous count, so the user can decide which to keep. `renderThumbnail(itemId)` is
+// a render-prop: the parent owns image URLs (this file stays presentational, like the rest of it).
+// `onRemoveDuplicates` reuses the one-tap dedupe action, scoped to the cluster's removable subset
+// (exact/pHash copies); a pure-CLIP cluster is legitimate variety and carries no remove button.
+export function NearDuplicateClusters({ report, renderThumbnail, onRemoveDuplicates }) {
+  const clusters = nearDuplicateClusters(report);
+  if (!clusters.length) {
+    return null;
+  }
+  return (
+    <div className="dataset-doctor-nearups" aria-label="Near-duplicate groups">
+      {clusters.map((cluster, index) => (
+        <div
+          className={`dataset-doctor-nearup kind-${cluster.kind}`}
+          key={cluster.itemIds.join("+") || index}
+        >
+          <div className="dataset-doctor-nearup-head">
+            <span className="dataset-doctor-nearup-label">{nearDuplicateClusterLabel(cluster)}</span>
+            {cluster.removableItemIds.length && typeof onRemoveDuplicates === "function" ? (
+              <button
+                type="button"
+                className="secondary-action"
+                onClick={() => onRemoveDuplicates(cluster.removableItemIds)}
+              >
+                Remove {cluster.removableItemIds.length}{" "}
+                {cluster.removableItemIds.length === 1 ? "extra" : "extras"} (keeps the sharpest)
+              </button>
+            ) : null}
+          </div>
+          <div className="dataset-doctor-nearup-thumbs">
+            {cluster.itemIds.map((itemId) => (
+              <span className="dataset-doctor-nearup-thumb" key={itemId} title={itemId}>
+                {typeof renderThumbnail === "function" ? renderThumbnail(itemId) : null}
+              </span>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
