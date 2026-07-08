@@ -133,9 +133,11 @@ revisit (and it lives in one place).
 ## Licensing note — antelopev2 (ArcFace / SCRFD) is non-commercial
 
 The face detection + recognition models here come from the InsightFace **antelopev2** pack, which
-is licensed for **non-commercial / research use only**. SceneWorks is an **open-source,
-non-commercial project** (PolyForm Noncommercial for its own code), so this is in-scope and
-acceptable — the same posture under which the project already ships non-commercial model weights.
+is licensed for **non-commercial / research use only**. SceneWorks' own code is licensed under
+**AGPL-3.0** (which permits commercial use of the software), but model weights are not covered by
+that license — each keeps its own terms, and the user is responsible for complying with them. The
+antelopev2 pack's non-commercial restriction therefore flows to the end user, the same posture
+under which the project already ships other non-commercial model weights.
 
 Precedent and posture:
 
