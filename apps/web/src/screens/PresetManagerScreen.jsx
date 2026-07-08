@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { LoraKeywordSummary } from "../components/LoraKeywordSummary.jsx";
 import { Icon } from "../components/Icons.jsx";
 import {
   MAX_PRESET_LORAS,
@@ -773,6 +774,7 @@ export function PresetManagerScreen() {
                                       : loraLabel(lora)}
                                 </small>
                               </span>
+                              <LoraKeywordSummary lora={lora} />
                               <div className="lora-selection-actions">
                                 <label>
                                   Weight

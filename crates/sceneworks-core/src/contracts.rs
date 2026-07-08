@@ -1462,6 +1462,11 @@ pub struct LoraManifestEntry {
     pub name: String,
     pub family: String,
     pub trigger_words: Vec<String>,
+    /// Free-text usage guidance a comma-delimited trigger-word list can't capture
+    /// (how to combine keywords, recommended weight ranges, etc.). Optional on disk:
+    /// entries predating this field deserialize to an empty string.
+    #[serde(default)]
+    pub notes: String,
     pub compatibility: JsonObject,
     pub source: JsonObject,
     #[serde(flatten)]

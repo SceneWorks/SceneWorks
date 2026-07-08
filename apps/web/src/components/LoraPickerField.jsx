@@ -1,4 +1,5 @@
 import React from "react";
+import { LoraKeywordSummary } from "./LoraKeywordSummary.jsx";
 import { MAX_JOB_LORAS_TOTAL, loraMatchesModel, loraWeight, serializeLora } from "../presetUtils.js";
 
 // The per-job total cap (sc-8936): this Character Studio picker doesn't distinguish
@@ -88,6 +89,7 @@ export function LoraPickerField({ selection, label = "Style LoRAs (optional)" })
                   </small>
                 </span>
               </label>
+              <LoraKeywordSummary lora={lora} />
               {checked ? (
                 <div className="lora-weight-row">
                   <span>Weight</span>

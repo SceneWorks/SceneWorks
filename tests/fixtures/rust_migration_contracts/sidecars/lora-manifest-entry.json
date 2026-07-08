@@ -3,6 +3,7 @@
   "name": "Mira Character LoRA",
   "family": "z-image",
   "triggerWords": ["mira_person"],
+  "notes": "Trigger with `mira_person`. Pairs well with a style LoRA; keep weight around 0.8.",
   "compatibility": {
     "families": ["z-image", "wan-video"]
   },

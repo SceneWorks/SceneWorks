@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { LoraKeywordSummary } from "../components/LoraKeywordSummary.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import {
@@ -519,6 +520,7 @@ export function LoraPickerSection({
                         ×
                       </button>
                     </div>
+                    <LoraKeywordSummary lora={lora} />
                     <div className="lora-slot-weight">
                       <label>
                         <span>Weight</span>
