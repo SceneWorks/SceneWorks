@@ -37,8 +37,11 @@ for (const name of ["sceneworks-api"]) {
 // Only the bundled resource dirs (tauri.conf.json `bundle.resources`) need a
 // placeholder for the build-script resource validation. The CUDA/onnxruntime GPU
 // runtime is no longer bundled — it's downloaded on first run (cuda_provision.rs) —
-// so there's no `cuda` resource glob to satisfy.
-for (const dir of ["onnxruntime", "ffmpeg"]) {
+// so there's no `cuda` resource glob to satisfy. `mlx` holds the MLX metallib on
+// macOS (a placeholder elsewhere, sc-10349) but is a declared resource glob on
+// every platform, so it needs a placeholder here too or Tauri's build.rs panics
+// ("glob pattern mlx/**/* … didn't match any files") during the desktop tests/lints.
+for (const dir of ["onnxruntime", "ffmpeg", "mlx"]) {
   const path = join(desktopDir, dir);
   mkdirSync(path, { recursive: true });
   writeFileSync(
