@@ -243,6 +243,7 @@ describe("SceneWorks app shell", () => {
     await settle();
     await selectModelTab("LoRAs");
     const panel = loraPanel(container);
+    await act(async () => buttonInside(panel, "URL").click());
     await changeField(field(panel, "Source URL"), "https://example.com/loras/detail.safetensors");
     await act(async () => {
       buttonInside(panel, "Queue Import").click();
@@ -648,6 +649,7 @@ describe("SceneWorks app shell", () => {
 
     await selectModelTab("LoRAs");
     const panel = loraPanel(container);
+    await act(async () => buttonInside(panel, "URL").click());
     await changeField(field(panel, "Source URL"), "https://example.com/loras/detail.safetensors");
     await changeField(field(panel, "Name"), "Detail LoRA");
     await act(async () => {
@@ -689,6 +691,7 @@ describe("SceneWorks app shell", () => {
     expect(familyFilter(container).value).toBe("all");
     await changeField(familyFilter(container), "qwen-image");
     const panel = loraPanel(container);
+    await act(async () => buttonInside(panel, "URL").click());
     await changeField(field(panel, "Source URL"), "https://example.com/loras/detail.safetensors");
     await act(async () => {
       buttonInside(panel, "Queue Import").click();
@@ -919,6 +922,7 @@ describe("SceneWorks app shell", () => {
 
     await selectModelTab("LoRAs");
     const panel = () => loraPanel(container);
+    await act(async () => buttonInside(panel(), "URL").click());
     await changeField(field(panel(), "Source URL"), "https://example.com/loras/one.safetensors");
     await changeField(field(panel(), "Name"), "First Detail");
     await act(async () => {
@@ -1085,6 +1089,7 @@ describe("SceneWorks app shell", () => {
 
     await selectModelTab("LoRAs");
     const panel = loraPanel(container);
+    await act(async () => buttonInside(panel, "URL").click());
     await changeField(field(panel, "Source URL"), "file:///tmp/detail.safetensors");
     await act(async () => {
       buttonInside(panel, "Queue Import").click();

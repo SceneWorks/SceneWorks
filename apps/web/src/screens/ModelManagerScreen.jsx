@@ -525,7 +525,9 @@ export function ModelManagerScreen() {
   const [importingLora, setImportingLora] = useState(false);
   const [importMessage, setImportMessage] = useState({ tone: "neutral", text: "" });
   const [importForm, setImportForm] = useState({
-    mode: "url",
+    // Default to file upload: most LoRAs are a file the user already downloaded
+    // (e.g. from civit.ai); the URL tab remains one click away.
+    mode: "file",
     sourceUrl: "",
     file: null,
     secondaryFile: null,
