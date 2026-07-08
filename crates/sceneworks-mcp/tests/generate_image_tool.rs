@@ -16,10 +16,10 @@ use axum::{Json, Router};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{
-    CallToolRequestParams, ClientInfo, Meta, NumberOrString, ProgressNotificationParam,
-    ProgressToken,
+    CallToolRequestParams, ClientInfo, ClientRequest, Meta, NumberOrString,
+    ProgressNotificationParam, ProgressToken, Request,
 };
-use rmcp::service::{NotificationContext, RoleClient};
+use rmcp::service::{NotificationContext, PeerRequestOptions, RoleClient};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::ServiceExt;
@@ -39,6 +39,8 @@ struct StubState {
     submitted: Arc<Mutex<Vec<Value>>>,
     polls: Arc<Mutex<usize>>,
     snapshots: Arc<Vec<Value>>,
+    /// Job ids the tool asked to cancel via `POST /jobs/:id/cancel` (sc-10276).
+    cancels: Arc<Mutex<Vec<String>>>,
 }
 
 fn snapshot(status: &str, progress: f64, stage: &str, extra: Value) -> Value {
@@ -101,6 +103,15 @@ fn stub_api_router(state: StubState) -> Router {
             ),
         )
         .route(
+            "/api/v1/jobs/:job_id/cancel",
+            post(
+                |State(state): State<StubState>, Path(job_id): Path<String>| async move {
+                    state.cancels.lock().unwrap().push(job_id);
+                    Json(json!({ "status": "canceled" }))
+                },
+            ),
+        )
+        .route(
             "/api/v1/projects/:project_id/files/*relative_path",
             get(
                 |Path((_project_id, relative_path)): Path<(String, String)>| async move {
@@ -156,6 +167,7 @@ struct Harness {
     submitted: Arc<Mutex<Vec<Value>>>,
     polls: Arc<Mutex<usize>>,
     progress: Arc<Mutex<Vec<ProgressNotificationParam>>>,
+    cancels: Arc<Mutex<Vec<String>>>,
 }
 
 /// Stub API + mounted MCP service (fast 10ms polls) + connected recording client.
@@ -164,9 +176,11 @@ async fn harness(snapshots: Vec<Value>) -> Harness {
         submitted: Arc::new(Mutex::new(Vec::new())),
         polls: Arc::new(Mutex::new(0)),
         snapshots: Arc::new(snapshots),
+        cancels: Arc::new(Mutex::new(Vec::new())),
     };
     let submitted = state.submitted.clone();
     let polls = state.polls.clone();
+    let cancels = state.cancels.clone();
     let api_base = spawn(stub_api_router(state)).await;
     let mcp_service = sceneworks_mcp::streamable_http_service_with(
         ApiClientConfig {
@@ -194,6 +208,7 @@ async fn harness(snapshots: Vec<Value>) -> Harness {
         submitted,
         polls,
         progress,
+        cancels,
     }
 }
 
@@ -223,6 +238,18 @@ fn error_text(result: &rmcp::model::CallToolResult) -> String {
         .map(|text| text.text.clone())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Poll `condition` until it holds, failing (never hanging) if it never does.
+async fn wait_until(mut condition: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !condition() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "condition was not met within 5s"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 #[tokio::test]
@@ -421,6 +448,56 @@ async fn canceled_job_surfaces_clearly_not_as_a_hang() {
 }
 
 #[tokio::test]
+async fn client_cancellation_propagates_to_the_job_cancel_route() {
+    // The script never leaves "running", so the job would run forever on its own;
+    // the ONLY way the tool returns is the client canceling the in-flight request
+    // (sc-10276). That cancellation must reach POST /api/v1/jobs/:id/cancel.
+    let harness = harness(vec![snapshot("running", 0.4, "generating", json!({}))]).await;
+
+    let handle = harness
+        .client
+        .send_cancellable_request(
+            ClientRequest::CallToolRequest(Request::new(
+                CallToolRequestParams::new("generate_image")
+                    .with_arguments(generate_args(json!({}))),
+            )),
+            PeerRequestOptions::no_options(),
+        )
+        .await
+        .expect("cancellable generate_image request is sent");
+
+    // Let the tool get past submit and into its poll loop, so the cancellation
+    // lands mid-wait (the case the story is about), not before the job exists.
+    wait_until(|| {
+        !harness.submitted.lock().unwrap().is_empty() && *harness.polls.lock().unwrap() >= 1
+    })
+    .await;
+    assert!(
+        harness.cancels.lock().unwrap().is_empty(),
+        "no cancel before the client asks for one"
+    );
+
+    // Client cancels the in-flight request (MCP notifications/cancelled).
+    handle
+        .cancel(Some("user canceled".to_owned()))
+        .await
+        .expect("cancel notification is sent");
+
+    // The tool forwards it to the job cancel route, freeing the worker/GPU.
+    wait_until(|| {
+        harness
+            .cancels
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|id| id == "job-1")
+    })
+    .await;
+
+    let _ = harness.client.cancel().await;
+}
+
+#[tokio::test]
 async fn stuck_job_times_out_with_a_clear_error_instead_of_hanging() {
     // The script never leaves `running`; the (test-shortened) overall deadline
     // must turn that into a clear tool error, not an endless poll.
@@ -428,7 +505,9 @@ async fn stuck_job_times_out_with_a_clear_error_instead_of_hanging() {
         submitted: Arc::new(Mutex::new(Vec::new())),
         polls: Arc::new(Mutex::new(0)),
         snapshots: Arc::new(vec![snapshot("running", 0.5, "generating", json!({}))]),
+        cancels: Arc::new(Mutex::new(Vec::new())),
     };
+    let cancels = state.cancels.clone();
     let api_base = spawn(stub_api_router(state)).await;
     let mcp_service = sceneworks_mcp::streamable_http_service_with(
         ApiClientConfig {
@@ -464,6 +543,11 @@ async fn stuck_job_times_out_with_a_clear_error_instead_of_hanging() {
     assert!(
         text.contains("did not reach a terminal state"),
         "timeout must be explicit: {text}"
+    );
+    // A timeout is NOT a cancellation — the job is left running (sc-10276).
+    assert!(
+        cancels.lock().unwrap().is_empty(),
+        "the timeout path must not cancel the job"
     );
 
     let _ = client.cancel().await;

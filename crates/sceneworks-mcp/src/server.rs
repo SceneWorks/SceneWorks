@@ -31,11 +31,11 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, Meta, ProgressNotificationParam, ProgressToken, Resource,
+        CallToolResult, ContentBlock, ProgressNotificationParam, ProgressToken, Resource,
         ServerCapabilities, ServerInfo,
     },
     schemars,
-    service::RoleServer,
+    service::{RequestContext, RoleServer},
     tool, tool_handler, tool_router, ErrorData, Peer, ServerHandler,
 };
 use serde_json::{json, Map, Value};
@@ -296,8 +296,7 @@ impl SceneWorksMcp {
     async fn generate_image(
         &self,
         Parameters(args): Parameters<GenerateImageArgs>,
-        meta: Meta,
-        peer: Peer<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let body =
             image_job_body(&args).map_err(|message| ErrorData::invalid_params(message, None))?;
@@ -316,13 +315,33 @@ impl SceneWorksMcp {
 
         // Progress notifications ride the client-supplied progressToken; without
         // one we just poll silently (the spec forbids inventing a token).
-        let progress_token = meta.get_progress_token();
-        let mut reporter = ProgressReporter::new(peer, progress_token);
+        let progress_token = ctx.meta.get_progress_token();
+        let mut reporter = ProgressReporter::new(ctx.peer.clone(), progress_token);
         reporter.report(&submitted).await;
 
         let started = tokio::time::Instant::now();
         let job = loop {
-            tokio::time::sleep(self.job_wait.poll_interval).await;
+            // Cooperative cancellation (sc-10276): rmcp cancels `ctx.ct` when the
+            // client sends `notifications/cancelled` (it does NOT abort the tool
+            // future, so a drop-guard would never fire). Catch it at the top of the
+            // wait and ask the job to stop, freeing the worker/GPU instead of
+            // letting a canceled render run to completion.
+            tokio::select! {
+                biased;
+                () = ctx.ct.cancelled() => {
+                    // Best-effort: the job may already be terminal, in which case the
+                    // cancel route is a harmless no-op.
+                    let _ = self
+                        .api
+                        .post_json(&format!("/api/v1/jobs/{job_id}/cancel"), &json!({}))
+                        .await;
+                    return tool_error(format!(
+                        "Image job {job_id} was canceled: the client canceled the \
+                         request, so the job was asked to stop."
+                    ));
+                }
+                () = tokio::time::sleep(self.job_wait.poll_interval) => {}
+            }
             let job = self
                 .api
                 .get_json(&format!("/api/v1/jobs/{job_id}"), &[])
