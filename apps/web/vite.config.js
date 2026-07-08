@@ -1,8 +1,18 @@
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { defineConfig, searchForWorkspaceRoot } from "vite";
 
 import themeInitPlugin from "./vite-plugin-theme-init.js";
+
+// Expose the product version (kept in lockstep across the repo's package.json /
+// tauri.conf.json by scripts/sync-version.mjs) to the frontend as a build-time
+// constant. Reading package.json here works in both the desktop shell and the
+// remote-LAN browser (epic 4484), where window.__TAURI__ / getVersion() is
+// unavailable — see the sidebar footer in App.jsx.
+const pkg = JSON.parse(
+  readFileSync(fileURLToPath(new URL("./package.json", import.meta.url)), "utf8"),
+);
 
 // The About → Licenses screen (sc-3778) imports the bundled-license corpus
 // directly from apps/desktop/licenses/ (single source of truth, no second copy).
@@ -15,6 +25,11 @@ export default defineConfig({
   // Generate the pre-paint /theme-init.js from src/accents.js at dev/build time
   // (single source of truth for the accent-id list). See vite-plugin-theme-init.js.
   plugins: [themeInitPlugin()],
+  // Matches the existing import.meta.env.VITE_* convention (see api.js). Defining
+  // the specific key keeps it lint-safe (no bare global) under no-undef.
+  define: {
+    "import.meta.env.VITE_APP_VERSION": JSON.stringify(pkg.version),
+  },
   // react-konva pulls its own react-reconciler; without deduping, Vite's dep
   // optimizer can hand it a second React copy, tripping "Invalid hook call /
   // cannot read useRef of null" when the canvas <Stage> mounts. Force a single

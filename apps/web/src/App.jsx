@@ -72,6 +72,10 @@ const ImageEditor = React.lazy(() =>
   import("./screens/ImageEditor.jsx").then((module) => ({ default: module.ImageEditor })),
 );
 
+// Product version, injected at build time from package.json (see vite.config.js).
+// Empty in unconfigured contexts (e.g. some test paths); the footer is hidden then.
+const APP_VERSION = import.meta.env.VITE_APP_VERSION ?? "";
+
 const navSections = [
   {
     label: "Workspace",
@@ -2147,6 +2151,13 @@ export function App() {
           </div>
         ))}
 
+        {APP_VERSION ? (
+          <div className="sidebar-footer">
+            <span className="app-version" title={`SceneWorks ${APP_VERSION}`}>
+              v{APP_VERSION}
+            </span>
+          </div>
+        ) : null}
       </aside>
 
       <section className="workspace">
