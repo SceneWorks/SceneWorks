@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -495,6 +496,116 @@ async fn client_cancellation_propagates_to_the_job_cancel_route() {
     .await;
 
     let _ = harness.client.cancel().await;
+}
+
+#[tokio::test]
+async fn transient_poll_failures_are_tolerated_until_the_job_completes() {
+    // The first two `GET /jobs/:id` polls fail (500) — a transient blip — before
+    // the job reports completed. The tool must ride through, not abort the render
+    // (sc-10279).
+    #[derive(Clone)]
+    struct FlakyState {
+        polls: Arc<Mutex<usize>>,
+    }
+    let state = FlakyState {
+        polls: Arc::new(Mutex::new(0)),
+    };
+    let polls = state.polls.clone();
+    let router = Router::new()
+        .route(
+            "/api/v1/image/jobs",
+            post(|| async {
+                (
+                    StatusCode::CREATED,
+                    Json(json!({
+                        "id": "job-1", "status": "queued", "projectId": "p1",
+                        "progress": 0.0, "stage": "queued"
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/api/v1/jobs/:job_id",
+            get(
+                |State(state): State<FlakyState>, Path(_job_id): Path<String>| async move {
+                    let n = {
+                        let mut polls = state.polls.lock().unwrap();
+                        let n = *polls;
+                        *polls += 1;
+                        n
+                    };
+                    if n < 2 {
+                        // Two consecutive transient failures (< the tolerance).
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({ "detail": "temporary glitch" })),
+                        )
+                            .into_response();
+                    }
+                    Json(json!({
+                        "id": "job-1", "status": "completed", "projectId": "p1",
+                        "progress": 1.0, "stage": "completed",
+                        "result": { "assets": [image_asset("asset_1", PNG_PATH, "image/png")] }
+                    }))
+                    .into_response()
+                },
+            ),
+        )
+        .route(
+            "/api/v1/projects/:project_id/files/*relative_path",
+            get(
+                |Path((_project_id, relative_path)): Path<(String, String)>| async move {
+                    if relative_path == PNG_PATH {
+                        let mut headers = HeaderMap::new();
+                        headers.insert(header::CONTENT_TYPE, "image/png".parse().unwrap());
+                        (headers, PNG_BYTES.to_vec()).into_response()
+                    } else {
+                        StatusCode::NOT_FOUND.into_response()
+                    }
+                },
+            ),
+        )
+        .with_state(state);
+    let api_base = spawn(router).await;
+    let mcp_service = sceneworks_mcp::streamable_http_service_with(
+        ApiClientConfig {
+            base_url: api_base,
+            access_token: None,
+        },
+        JobWaitConfig {
+            poll_interval: Duration::from_millis(10),
+            timeout: Duration::from_secs(10),
+        },
+    );
+    let mcp_base = spawn(Router::new().nest_service("/mcp", mcp_service)).await;
+    let transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(format!("{mcp_base}/mcp")),
+    );
+    let client = RecordingClient::default()
+        .serve(transport)
+        .await
+        .expect("MCP client initializes");
+
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("generate_image").with_arguments(generate_args(json!({}))),
+        )
+        .await
+        .expect("generate_image succeeds despite the transient poll failures");
+    assert_ne!(result.is_error, Some(true), "unexpected error: {result:?}");
+    let images: Vec<_> = result
+        .content
+        .iter()
+        .filter_map(|block| block.as_image())
+        .collect();
+    assert_eq!(images.len(), 1, "the render survived the blips: {result:?}");
+    // It really did fail twice and recover, not skip the failures.
+    assert!(
+        *polls.lock().unwrap() >= 3,
+        "expected 2 failed polls + a successful one"
+    );
+
+    let _ = client.cancel().await;
 }
 
 #[tokio::test]

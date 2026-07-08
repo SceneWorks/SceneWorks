@@ -42,6 +42,12 @@ use serde_json::{json, Map, Value};
 
 use crate::api_client::{ApiClient, ApiClientError};
 
+/// How many consecutive `GET /api/v1/jobs/:id` failures the blocking poll loop
+/// tolerates before giving up (sc-10279). A single network blip / brief API
+/// restart must not throw away a possibly-20-minute render that is still running
+/// server-side; only a sustained failure streak surfaces as an error.
+const MAX_CONSECUTIVE_POLL_ERRORS: u32 = 5;
+
 /// How the blocking job tools (generate_image) wait for a terminal JobSnapshot:
 /// poll `GET /api/v1/jobs/:id` every `poll_interval` until terminal, and give up
 /// with a clear tool error after `timeout` so a stuck job can never hang the MCP
@@ -320,6 +326,7 @@ impl SceneWorksMcp {
         reporter.report(&submitted).await;
 
         let started = tokio::time::Instant::now();
+        let mut consecutive_poll_errors: u32 = 0;
         let job = loop {
             // Cooperative cancellation (sc-10276): rmcp cancels `ctx.ct` when the
             // client sends `notifications/cancelled` (it does NOT abort the tool
@@ -342,11 +349,33 @@ impl SceneWorksMcp {
                 }
                 () = tokio::time::sleep(self.job_wait.poll_interval) => {}
             }
-            let job = self
+            // Tolerate transient poll failures (sc-10279): the render keeps running
+            // server-side, so a single blip must not abort the whole tool call.
+            let job = match self
                 .api
                 .get_json(&format!("/api/v1/jobs/{job_id}"), &[])
                 .await
-                .map_err(api_error)?;
+            {
+                Ok(job) => {
+                    consecutive_poll_errors = 0;
+                    job
+                }
+                Err(error) => {
+                    consecutive_poll_errors += 1;
+                    if consecutive_poll_errors >= MAX_CONSECUTIVE_POLL_ERRORS {
+                        return Err(api_error(error));
+                    }
+                    if started.elapsed() >= self.job_wait.timeout {
+                        return tool_error(format!(
+                            "Image job {job_id} status polling kept failing (last error: \
+                             {error}) and the {}s deadline elapsed. The job may still be \
+                             running; it was not canceled.",
+                            self.job_wait.timeout.as_secs()
+                        ));
+                    }
+                    continue;
+                }
+            };
             reporter.report(&job).await;
             let status = job.get("status").and_then(Value::as_str).unwrap_or("");
             match status {
@@ -408,7 +437,10 @@ impl SceneWorksMcp {
             };
             let (bytes, header_mime) = self
                 .api
-                .get_bytes(&format!("/api/v1/projects/{project_id}/files/{media_path}"))
+                .get_bytes(&format!(
+                    "/api/v1/projects/{project_id}/files/{}",
+                    encode_media_path(&media_path)
+                ))
                 .await
                 .map_err(api_error)?;
             let mime_type = image_mime_type(
@@ -582,8 +614,10 @@ impl SceneWorksMcp {
         let mut blocks = Vec::with_capacity(assets.len() + 1);
         let mut summary_assets = Vec::with_capacity(assets.len());
         for (asset, media_path) in assets {
-            let relative_url =
-                format!("/api/v1/projects/{project_id}/files/{media_path}?ticket={ticket}");
+            let relative_url = format!(
+                "/api/v1/projects/{project_id}/files/{}?ticket={ticket}",
+                encode_media_path(&media_path)
+            );
             let url = format!("{}{relative_url}", self.api.base_url());
             let mime_type = media_mime_type(
                 &media_path,
@@ -983,6 +1017,31 @@ fn is_image_asset(asset: &Value) -> bool {
         Some(media_type) => media_type == "image",
         None => true,
     }
+}
+
+/// Percent-encode each segment of a project-relative media path for splicing into
+/// a `/files/*relative_path` URL, preserving the `/` separators (sc-10279).
+/// Generated media paths are slug-safe today, so this is byte-identical for them;
+/// it defends a future path segment containing a space, `%`, `#`, or `?` from
+/// silently mis-resolving. The set is the URL path percent-encode set plus `%`
+/// itself (the input is a raw filesystem path, not an already-escaped URL).
+pub(crate) fn encode_media_path(path: &str) -> String {
+    use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+    const SEGMENT: &AsciiSet = &CONTROLS
+        .add(b' ')
+        .add(b'"')
+        .add(b'#')
+        .add(b'%')
+        .add(b'<')
+        .add(b'>')
+        .add(b'?')
+        .add(b'`')
+        .add(b'{')
+        .add(b'}');
+    path.split('/')
+        .map(|segment| utf8_percent_encode(segment, SEGMENT).to_string())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// The project-relative media path of a result asset, normalized for the
@@ -1639,6 +1698,22 @@ mod tests {
         assert!(valid_job_id("../secrets").is_err());
         assert!(valid_job_id("job_1?x=1").is_err());
         assert!(valid_job_id("job 1").is_err());
+    }
+
+    #[test]
+    fn encode_media_path_encodes_unsafe_segments_but_keeps_separators() {
+        // The common case: slug-safe generated paths are byte-identical.
+        assert_eq!(
+            encode_media_path("assets/images/g1/img_0001.png"),
+            "assets/images/g1/img_0001.png"
+        );
+        // Separators survive; space/#/% inside a segment are encoded.
+        assert_eq!(
+            encode_media_path("assets/my folder/a#b%c.png"),
+            "assets/my%20folder/a%23b%25c.png"
+        );
+        // A '?' in a segment can't be mistaken for the query string.
+        assert_eq!(encode_media_path("a/b?c.png"), "a/b%3Fc.png");
     }
 
     #[test]
