@@ -4577,6 +4577,42 @@ fn should_fit_edit_source_only_for_off_aspect_edit_image() {
     }))));
 }
 
+/// sc-8253: `fit_edit_references` fits EVERY reference (the character `referenceAssetId` and the
+/// edit source alike) to the conditioning W×H, unlike the edit-*source*-only `should_fit_edit_source`
+/// gate that excludes character references. A landscape 2400×1744 character reference on a
+/// `character_image` angle job is therefore crop-fit to the square 1024² conditioning instead of
+/// being squished by the klein/qwen/sensenova engine (the −0.13 ArcFace bug). Revert-sensitive:
+/// re-excluding the character reference leaves it at native 2400×1744. `stretch` keeps it native.
+#[cfg(target_os = "macos")]
+#[test]
+fn fit_edit_references_squares_a_landscape_character_reference() {
+    let landscape = || synthetic_rgb(2400, 1744, |_, _| [128, 64, 32]);
+    // Character-Studio angle job: a character referenceAssetId, default (crop) fit. Previously the
+    // reference stayed native (should_fit_edit_source excludes it) and was squished; now it is a
+    // square crop matching the output.
+    let char_req = request(json!({
+        "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
+        "advanced": { "angleSet": true }
+    }));
+    let fitted = fit_edit_references(vec![landscape()], &char_req, 1024, 1024).unwrap();
+    assert_eq!((fitted[0].width, fitted[0].height), (1024, 1024));
+
+    // stretch keeps the reference native (the engine's legacy non-aspect resize).
+    let stretch_req = request(json!({
+        "projectId": "p", "mode": "character_image", "referenceAssetId": "ref",
+        "fitMode": "stretch", "advanced": { "angleSet": true }
+    }));
+    let native = fit_edit_references(vec![landscape()], &stretch_req, 1024, 1024).unwrap();
+    assert_eq!((native[0].width, native[0].height), (2400, 1744));
+
+    // A non-square output aspect crops the reference to that aspect, not always square.
+    let src_req = request(json!({
+        "projectId": "p", "mode": "edit_image", "sourceAssetId": "src", "fitMode": "crop"
+    }));
+    let src_fitted = fit_edit_references(vec![landscape()], &src_req, 768, 1024).unwrap();
+    assert_eq!((src_fitted[0].width, src_fitted[0].height), (768, 1024));
+}
+
 /// sc-4411: the With-Character likeness-source resolver gates scoring to a PLAIN `character_image`
 /// generation with a character `referenceAssetId`, and EXCLUDES angle sets / pose sets (already scored
 /// by sc-4409/4410 through the same seam) and non-character modes — the no-double-attach guard. Here the

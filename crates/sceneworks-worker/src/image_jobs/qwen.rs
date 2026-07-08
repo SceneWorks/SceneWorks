@@ -700,22 +700,19 @@ async fn generate_qwen_edit_stream(
         ));
     }
     // Per-generation PiD decode (epic 7840, sc-7849) + output tier (sc-10054). Resolved here, ahead of
-    // the source pre-fit and generation, so a 2K tier sizes the effective base and the Image-Edit source
-    // is fit to THAT base — source and latent stay in lockstep. `use_pid`/`spec.pid` stay paired below.
+    // the reference pre-fit and generation, so a 2K tier sizes the effective base and the references are
+    // fit to THAT base — reference and latent stay in lockstep. `use_pid`/`spec.pid` stay paired below.
     let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
     let use_pid = pid_weights.is_some();
     let (width, height) =
         pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
 
-    // sc-3030 fit_image: pre-fit the Image-Edit source to the (effective) output W×H (crop / pad /
-    // outpaint→pad) so an off-aspect edit doesn't stretch. Character-Studio references
-    // stay native (the `should_fit_edit_source` gate excludes them).
-    if should_fit_edit_source(request) {
-        references = references
-            .into_iter()
-            .map(|reference| fit_engine_image(reference, width, height, &request.fit_mode))
-            .collect::<WorkerResult<Vec<_>>>()?;
-    }
+    // sc-3030 / sc-8253 fit_image: pre-fit every reference (the Image-Edit source AND the
+    // Character-Studio character reference) to the (effective) output W×H (crop / pad / outpaint→pad)
+    // so an off-aspect reference isn't squished into the square latent. `stretch` keeps the legacy
+    // resize. Fit to the PiD-effective dims (not the raw request) so reference and latent stay in
+    // lockstep at a 2K tier.
+    references = fit_edit_references(references, request, width, height)?;
 
     // Per-iteration grouping (shared with the FLUX.2 edit path via `plan_edit_batch`, F-024
     // sc-8826): a Character-Studio angle set (11 shared-seed, per-angle prompt) / best-effort pose

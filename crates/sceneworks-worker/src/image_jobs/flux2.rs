@@ -96,10 +96,11 @@ fn plan_edit_batch(
     }
 }
 
-/// True when the FLUX.2 Image-Edit source should be pre-fitted to W×H (parity with the
-/// `MlxFlux2Adapter` fit gate): `edit_image` mode, a source asset, no character
-/// `referenceAssetId`, and a non-`stretch` fit mode. The Character-Studio reference
-/// path stays at native resolution.
+/// True when an Image-Edit *source* (`sourceAssetId`) should be pre-fitted to W×H: `edit_image`
+/// mode, a source asset, no character `referenceAssetId`, and a non-`stretch` fit mode. Used by the
+/// img2img-init edit resolvers (`zimage`/`kolors` `resolve_*_edit_init`) that fit only the edit
+/// source. The character-reference / multi-reference edit path is fitted by [`fit_edit_references`]
+/// instead — which, unlike this gate, does NOT exclude the character reference (sc-8253).
 fn should_fit_edit_source(request: &ImageRequest) -> bool {
     let has_source = request
         .source_asset_id
@@ -111,6 +112,34 @@ fn should_fit_edit_source(request: &ImageRequest) -> bool {
         .as_deref()
         .is_some_and(|id| !id.trim().is_empty());
     request.mode == "edit_image" && has_source && no_reference && request.fit_mode != "stretch"
+}
+
+/// Pre-fit every resolved edit reference — the character `referenceAssetId`, the multi-image
+/// `referenceAssetIds`, or the Image-Edit `sourceAssetId` alike — to the conditioning `width`×
+/// `height` before it reaches the engine, unless the fit mode is `stretch` (which keeps the legacy
+/// non-aspect resize). Mirrors the candle edit lane (`load_flux2_edit_references`), which fits every
+/// reference the same way.
+///
+/// Unlike [`should_fit_edit_source`] — the edit-*source* gate that deliberately excludes character
+/// references — this fits the character reference too. sc-8253: a non-square character reference was
+/// previously left at native aspect and squished into the square (e.g. 1024²) latent by the
+/// klein/qwen/sensenova edit engines, distorting face geometry and losing identity (measured on
+/// klein: a 2400×1744 landscape reference → ArcFace 0.47 vs a square crop of the same photo → 0.60,
+/// ≈ −0.13). Crop/pad-fitting the reference to the output aspect (cover+center-crop for `crop`,
+/// letterbox for `pad`/`outpaint`) lets the engine's 1:1 latent mapping preserve the face.
+fn fit_edit_references(
+    references: Vec<Image>,
+    request: &ImageRequest,
+    width: u32,
+    height: u32,
+) -> WorkerResult<Vec<Image>> {
+    if request.fit_mode == "stretch" {
+        return Ok(references);
+    }
+    references
+        .into_iter()
+        .map(|reference| fit_engine_image(reference, width, height, &request.fit_mode))
+        .collect()
 }
 
 // `contain_box` / `fit_rgb` / `fit_engine_image` moved to image_jobs/base.rs (sc-6231) so they
@@ -380,17 +409,10 @@ async fn generate_flux2_edit_stream(
             "FLUX.2 edit requires a reference image".to_owned(),
         ));
     }
-    // sc-3030 fit_image: pre-fit the Image-Edit source to the output W×H (crop / pad /
-    // outpaint→pad) so an off-aspect edit doesn't stretch. Character-Studio references
-    // stay native (the `should_fit_edit_source` gate excludes them).
-    if should_fit_edit_source(request) {
-        references = references
-            .into_iter()
-            .map(|reference| {
-                fit_engine_image(reference, request.width, request.height, &request.fit_mode)
-            })
-            .collect::<WorkerResult<Vec<_>>>()?;
-    }
+    // sc-3030 / sc-8253 fit_image: pre-fit every reference (the Image-Edit source AND the
+    // Character-Studio character reference) to the output W×H (crop / pad / outpaint→pad) so an
+    // off-aspect reference isn't squished into the square latent. `stretch` keeps the legacy resize.
+    references = fit_edit_references(references, request, request.width, request.height)?;
 
     // sc-6124: guard the activation-bound FLUX.2-dev *multi-reference* edit against a silent OOM on
     // machines below its real requirement. The reachable surface (txt2img + single-reference edit)
