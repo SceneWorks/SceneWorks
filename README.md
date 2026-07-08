@@ -200,6 +200,15 @@ treat every local user on that host as fully trusted.
 
 For offline development or deterministic Rust API tests, set `SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE=1` to skip live Hugging Face model size lookups. The catalog still returns the same fields with unknown sizes.
 
+## MCP server (agent access)
+
+The API embeds a Model Context Protocol server at `/mcp` (epic 10231): Claude
+Code, Cursor, or any MCP client can list projects and the model/LoRA catalog,
+generate images, and submit/poll video jobs — locally or from another machine
+on the LAN using the same access token described above. Setup, copy-paste
+client config snippets, and the LAN security posture are documented in
+[docs/mcp-server.md](docs/mcp-server.md).
+
 ## Service Credentials (API tokens)
 
 Some model and LoRA downloads need an API token: gated Hugging Face repos (e.g.
