@@ -362,12 +362,15 @@ npm run check
 
 ## Licensing
 
-SceneWorks is a non-commercial, **source-available** project. Its own source code
-is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE): you may
-use, modify, and share it freely for any **noncommercial** purpose, but commercial
-use is not granted. (This is a source-available license, not an OSI-approved "open
-source" license, because it restricts commercial use.) For commercial licensing,
-contact the copyright holder.
+SceneWorks is free, **open-source software**. Its own source code is licensed under
+the [GNU Affero General Public License v3.0 or later](LICENSE) (`AGPL-3.0-or-later`),
+copyright © 2026 Michael Trefry and the SceneWorks contributors. You may use, run,
+modify, and redistribute it — **including commercially** — under the terms of the
+AGPL. In short: the software, and anything you create with it, is yours to use for
+any purpose. But if you distribute a modified version, or run one as a network
+service that other people interact with, you must make your modified source
+available to them under the same license. That's what keeps SceneWorks open — nobody
+can take it, make a few tweaks, and ship it as closed, proprietary software.
 
 **Model weights are not covered by this license.** SceneWorks downloads
 third-party model weights at runtime, and each model keeps its own license — some
