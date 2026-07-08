@@ -63,6 +63,25 @@ impl Default for JobWaitConfig {
     }
 }
 
+impl JobWaitConfig {
+    /// Build a config from deployment-supplied values (sc-10277), enforcing the
+    /// invariants the poll loop relies on: a zero/absent poll interval would spin
+    /// the CPU (or, as a `sleep(0)`, hammer the API), and a timeout below the
+    /// interval would fire before the first poll. A zero interval falls back to
+    /// the default cadence; the timeout is raised to at least one interval.
+    pub fn clamped(poll_interval: Duration, timeout: Duration) -> Self {
+        let poll_interval = if poll_interval.is_zero() {
+            Self::default().poll_interval
+        } else {
+            poll_interval
+        };
+        Self {
+            poll_interval,
+            timeout: timeout.max(poll_interval),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SceneWorksMcp {
     api: ApiClient,
@@ -1619,6 +1638,24 @@ mod tests {
         );
         // Unknown extension + no sidecar → omit rather than guess.
         assert_eq!(media_mime_type("clips/c.bin", Some("")), None);
+    }
+
+    #[test]
+    fn job_wait_config_clamped_enforces_invariants() {
+        // Normal values pass through untouched.
+        let c = JobWaitConfig::clamped(Duration::from_secs(2), Duration::from_secs(600));
+        assert_eq!(c.poll_interval, Duration::from_secs(2));
+        assert_eq!(c.timeout, Duration::from_secs(600));
+
+        // A zero interval falls back to the default cadence (never sleep(0)).
+        let c = JobWaitConfig::clamped(Duration::ZERO, Duration::from_secs(600));
+        assert_eq!(c.poll_interval, JobWaitConfig::default().poll_interval);
+        assert_eq!(c.timeout, Duration::from_secs(600));
+
+        // A timeout below the interval is raised so the loop polls at least once.
+        let c = JobWaitConfig::clamped(Duration::from_secs(10), Duration::from_secs(3));
+        assert_eq!(c.poll_interval, Duration::from_secs(10));
+        assert_eq!(c.timeout, Duration::from_secs(10));
     }
 
     #[test]

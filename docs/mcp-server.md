@@ -57,6 +57,8 @@ All knobs are on the API process (`Settings::from_env` in
 | `SCENEWORKS_API_URL` | `http://127.0.0.1:<port>` | Base URL the MCP server uses to call back into its own API **and the base of the absolute ticketed URLs `get_job_result` returns**. LAN deployments must set this to the LAN-reachable base — see below. |
 | `SCENEWORKS_TRUST_LOOPBACK` | off | `1`/`true` = requests from `127.0.0.1`/`::1` bypass the token. The desktop sets it; never set it behind a reverse proxy or on a shared multi-user machine. |
 | `SCENEWORKS_ALLOW_OPEN_BIND` | off | `1`/`true`/`yes` = allow a non-loopback bind with **no** token (the API refuses to start otherwise). Only for fully trusted networks. |
+| `SCENEWORKS_MCP_JOB_POLL_INTERVAL` | `1` | Seconds between status polls for the blocking `generate_image` tool. A zero value falls back to the default. |
+| `SCENEWORKS_MCP_JOB_TIMEOUT` | `1800` | Seconds the blocking `generate_image` tool waits for a job before returning a timeout error (the job itself keeps running / is not canceled). Clamped to ≥ the poll interval. |
 
 ### `SCENEWORKS_API_URL` on the LAN — read this
 

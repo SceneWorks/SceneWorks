@@ -289,6 +289,8 @@ fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         // Placeholder for oneshot tests (the MCP self-client never dials it);
         // the live-listener MCP tests overwrite it with the bound address.
         mcp_api_url: "http://127.0.0.1:0".to_owned(),
+        mcp_job_poll_interval: sceneworks_mcp::JobWaitConfig::default().poll_interval,
+        mcp_job_timeout: sceneworks_mcp::JobWaitConfig::default().timeout,
     }
 }
 

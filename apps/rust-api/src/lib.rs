@@ -851,10 +851,18 @@ pub(crate) fn create_app_with_state(
     // apply unchanged. Its tools call back into this API over plain HTTP
     // (`settings.mcp_api_url`, i.e. `SCENEWORKS_API_URL` or our own loopback
     // port) carrying the access token, so there is no second engine/DB path.
-    let mcp_service = sceneworks_mcp::streamable_http_service(sceneworks_mcp::ApiClientConfig {
-        base_url: state.settings.mcp_api_url.clone(),
-        access_token: Some(state.settings.access_token.clone()),
-    });
+    // Blocking-job wait policy comes from Settings (sc-10277: SCENEWORKS_MCP_JOB_*
+    // env knobs), clamped to the invariants the poll loop needs.
+    let mcp_service = sceneworks_mcp::streamable_http_service_with(
+        sceneworks_mcp::ApiClientConfig {
+            base_url: state.settings.mcp_api_url.clone(),
+            access_token: Some(state.settings.access_token.clone()),
+        },
+        sceneworks_mcp::JobWaitConfig::clamped(
+            state.settings.mcp_job_poll_interval,
+            state.settings.mcp_job_timeout,
+        ),
+    );
 
     let router = Router::new()
         .nest_service("/mcp", mcp_service)

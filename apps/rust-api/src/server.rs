@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
@@ -95,6 +96,18 @@ pub struct Settings {
     /// sends `access_token` as `X-SceneWorks-Token`, so the self-calls pass the
     /// access-control gate whether or not loopback trust is enabled.
     pub mcp_api_url: String,
+    /// Epic 10231 (sc-10277) — poll cadence for the MCP blocking job tools
+    /// (`generate_image`): how often they re-poll `GET /api/v1/jobs/:id` while
+    /// waiting for a terminal status. Read from `SCENEWORKS_MCP_JOB_POLL_INTERVAL`
+    /// (whole seconds); defaults to the `JobWaitConfig` default. Clamped non-zero
+    /// at the mount point.
+    pub mcp_job_poll_interval: Duration,
+    /// Epic 10231 (sc-10277) — overall deadline for the MCP blocking job tools:
+    /// after this long without a terminal status the tool returns a clear timeout
+    /// error (the job itself is NOT canceled). Read from
+    /// `SCENEWORKS_MCP_JOB_TIMEOUT` (whole seconds); defaults to the
+    /// `JobWaitConfig` default (30 min). Clamped to ≥ the poll interval.
+    pub mcp_job_timeout: Duration,
 }
 
 impl Settings {
@@ -154,6 +167,17 @@ impl Settings {
             // resolves to an interface this API actually binds (sc-10260).
             // `SCENEWORKS_API_URL` still overrides for reverse-proxy/container setups.
             mcp_api_url: env_string("SCENEWORKS_API_URL", &default_mcp_api_url(&host, port)),
+            // MCP blocking-job wait knobs (sc-10277); whole seconds, default from
+            // JobWaitConfig. Invariants are enforced by JobWaitConfig::clamped at
+            // the mount point, so an out-of-range value here can't misbehave.
+            mcp_job_poll_interval: env_secs(
+                "SCENEWORKS_MCP_JOB_POLL_INTERVAL",
+                sceneworks_mcp::JobWaitConfig::default().poll_interval,
+            ),
+            mcp_job_timeout: env_secs(
+                "SCENEWORKS_MCP_JOB_TIMEOUT",
+                sceneworks_mcp::JobWaitConfig::default().timeout,
+            ),
         }
     }
 
@@ -189,6 +213,16 @@ fn default_mcp_api_url(host: &str, port: u16) -> String {
         host.to_owned()
     };
     format!("http://{dial_host}:{port}")
+}
+
+/// Parse a whole-seconds env var into a [`Duration`], keeping `default` when the
+/// variable is unset or not a non-negative integer (sc-10277).
+fn env_secs(name: &str, default: Duration) -> Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(default)
 }
 
 #[derive(Clone)]
@@ -369,7 +403,29 @@ pub async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod server_tests {
-    use super::default_mcp_api_url;
+    use super::{default_mcp_api_url, env_secs};
+    use std::time::Duration;
+
+    #[test]
+    fn env_secs_parses_whole_seconds_and_falls_back() {
+        // A unique name so this never collides with a real SCENEWORKS_* var.
+        let name = "SCENEWORKS_TEST_ENV_SECS_SC10277";
+        let default = Duration::from_secs(1800);
+
+        std::env::remove_var(name);
+        assert_eq!(env_secs(name, default), default, "unset → default");
+
+        std::env::set_var(name, "42");
+        assert_eq!(env_secs(name, default), Duration::from_secs(42));
+
+        std::env::set_var(name, "  7  ");
+        assert_eq!(env_secs(name, default), Duration::from_secs(7), "trimmed");
+
+        std::env::set_var(name, "notanumber");
+        assert_eq!(env_secs(name, default), default, "unparseable → default");
+
+        std::env::remove_var(name);
+    }
 
     #[test]
     fn default_mcp_api_url_dials_loopback_for_wildcard_and_loopback_hosts() {
