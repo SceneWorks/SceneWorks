@@ -1,7 +1,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
-import { useAssetBatch } from "./assetBatch.jsx";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { AssetSelectionBar, useAssetBatch } from "./assetBatch.jsx";
 import { AppStaticContext, AppLiveContext, AppContext } from "./context/AppContext.js";
 
 // sc-9751 (F-052 follow-up): the App renders the split AppStaticContext + AppLiveContext
@@ -90,5 +90,160 @@ describe("useAssetBatch under the split context providers (sc-9751)", () => {
     );
     expect(latest.selectedAssetList.map((a) => a.id)).toEqual(["a1"]);
     expect(latest.availableCharacters.map((c) => c.id)).toEqual(["c1"]);
+  });
+});
+
+// The Assets Library folds an upscale + its source original into one tile keyed by the
+// UPSCALED asset id. A bulk Discard on that tile trashes only the upscaled variant and
+// orphans the source, so discardSelected confirms first whether to also discard the
+// originals. These pin the three outcomes: both / upscaled-only / cancel.
+describe("useAssetBatch discard-upscaled confirmation", () => {
+  let harness;
+
+  afterEach(() => {
+    harness?.cleanup();
+    harness = null;
+  });
+
+  const original = { id: "orig", kind: "image", projectId: "p", file: { path: "orig.png" }, extra: {} };
+  const upscaled = {
+    id: "up",
+    kind: "image",
+    projectId: "p",
+    file: { path: "up.png" },
+    extra: { isUpscaled: true, upscaledFromAssetId: "orig" },
+  };
+  const plain = { id: "plain", kind: "image", projectId: "p", file: { path: "plain.png" }, extra: {} };
+
+  // Mount the hook with a deleteAsset spy; drive it directly through the returned API.
+  function mount(assetList) {
+    const deleted = [];
+    let latest;
+    const deleteAsset = (asset) => {
+      deleted.push(asset.id);
+      return Promise.resolve();
+    };
+    harness = render(
+      <AppContext.Provider value={{ assets: assetList, characters: [], imageModels: [], jobs: [], deleteAsset }}>
+        <AssetBatchProbe onReady={(b) => { latest = b; }} />
+      </AppContext.Provider>,
+    );
+    return { deleted, batch: () => latest };
+  }
+
+  // Overwrite the shared probe's default "select a1" with an explicit selection.
+  async function select(batch, id) {
+    await act(async () => {
+      batch().clearSelection();
+      batch().toggleSelect(id);
+    });
+  }
+
+  const flush = () =>
+    act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+  it("prompts (without deleting) when a selected tile is an upscale with a present source", async () => {
+    const { deleted, batch } = mount([original, upscaled]);
+    await select(batch, "up");
+    await act(async () => {
+      await batch().discardSelected();
+    });
+    expect(batch().discardPrompt).toBeTruthy();
+    expect(batch().discardPrompt.sources.map((a) => a.id)).toEqual(["orig"]);
+    expect(deleted).toEqual([]);
+  });
+
+  it("discards both the upscaled tile and its source original on 'Discard both'", async () => {
+    const { deleted, batch } = mount([original, upscaled]);
+    await select(batch, "up");
+    await act(async () => {
+      await batch().discardSelected();
+    });
+    await act(async () => {
+      batch().resolveDiscardPrompt(true);
+    });
+    await flush();
+    expect([...deleted].sort()).toEqual(["orig", "up"]);
+    expect(batch().discardPrompt).toBeNull();
+  });
+
+  it("discards only the upscaled tile on 'Only the upscaled'", async () => {
+    const { deleted, batch } = mount([original, upscaled]);
+    await select(batch, "up");
+    await act(async () => {
+      await batch().discardSelected();
+    });
+    await act(async () => {
+      batch().resolveDiscardPrompt(false);
+    });
+    await flush();
+    expect(deleted).toEqual(["up"]);
+    expect(batch().discardPrompt).toBeNull();
+  });
+
+  it("discards immediately without a prompt when no upscale/source pair is selected", async () => {
+    const { deleted, batch } = mount([plain]);
+    await select(batch, "plain");
+    await act(async () => {
+      await batch().discardSelected();
+    });
+    expect(batch().discardPrompt).toBeNull();
+    expect(deleted).toEqual(["plain"]);
+  });
+
+  it("does not prompt for a source original that is already trashed (deleteAsset just flags it)", async () => {
+    // The source lingers in `assets` with status.trashed=true; there's nothing new to discard.
+    const trashedOriginal = { ...original, status: { trashed: true } };
+    const { deleted, batch } = mount([trashedOriginal, upscaled]);
+    await select(batch, "up");
+    await act(async () => {
+      await batch().discardSelected();
+    });
+    expect(batch().discardPrompt).toBeNull();
+    expect(deleted).toEqual(["up"]);
+  });
+
+  // Presentational check: AssetSelectionBar actually renders the dialog (Modal portals to
+  // document.body), with pluralized copy and the three wired buttons.
+  it("renders the confirmation dialog with three wired actions and pluralized copy", () => {
+    const resolveDiscardPrompt = vi.fn();
+    const cancelDiscard = vi.fn();
+    const fakeBatch = {
+      selectedAssetIds: new Set(["up1", "up2"]),
+      eligibleSelected: [],
+      movableSelected: [],
+      availableCharacters: [],
+      setBatchOpen() {},
+      bulkAction: null,
+      discardSelected() {},
+      discardPrompt: { targets: [upscaled], sources: [original, { ...original, id: "orig2" }] },
+      resolveDiscardPrompt,
+      cancelDiscard,
+      moveOpen: false,
+      setMoveOpen() {},
+      moveCharacterId: "",
+      setMoveCharacterId() {},
+      moveSelectedToCharacter() {},
+      clearSelection() {},
+    };
+    harness = render(<AssetSelectionBar batch={fakeBatch} />);
+
+    const modal = document.body.querySelector(".discard-confirm-modal");
+    expect(modal).toBeTruthy();
+    // Two source originals → plural copy.
+    expect(modal.querySelector(".discard-confirm-title").textContent).toContain("Discard source images too?");
+    expect(modal.querySelector(".discard-confirm-body").textContent).toContain("2 source originals");
+
+    const buttons = [...modal.querySelectorAll(".discard-confirm-actions button")];
+    expect(buttons.map((b) => b.textContent)).toEqual(["Cancel", "Only the upscaled", "Discard both"]);
+
+    act(() => buttons[2].dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(resolveDiscardPrompt).toHaveBeenCalledWith(true);
+    act(() => buttons[1].dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(resolveDiscardPrompt).toHaveBeenCalledWith(false);
+    act(() => buttons[0].dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(cancelDiscard).toHaveBeenCalled();
   });
 });
