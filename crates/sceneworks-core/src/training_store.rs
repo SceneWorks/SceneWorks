@@ -1726,10 +1726,12 @@ mod tests {
         CachedTier0Scalars {
             content_hash: content_hash.to_owned(),
             bucket_edge,
+            metrics_version: crate::dataset_quality::TIER0_METRICS_VERSION,
             scalars: Tier0Scalars {
                 blur_variance: 1234.0,
                 shadow_clip: 0.0,
                 highlight_clip: 0.0,
+                well_exposed_fraction: 1.0,
                 phash: vec![1, 2, 3, 4, 5, 6, 7, 8],
             },
         }

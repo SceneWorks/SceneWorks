@@ -39,8 +39,8 @@ Per check: axis, the cheap local method, the tier it runs in, and the default ac
 |---|---|---|---|---|---|
 | 1 | **Resolution vs target** | quality | stored `min(w,h)` vs training bucket (6531 dims) | 0 | W (B if ≪ bucket) |
 | 2 | **Crop-loss under center-crop** | quality | aspect ratio vs the real center-crop-to-square the trainer applies | 0 | W → A (smart-crop) |
-| 3 | **Blur / softness** | quality | Laplacian variance (`imageproc`) | 0 | W |
-| 4 | **Exposure clipping** | quality | luminance-histogram tail mass at 0 / 255 | 0 | W |
+| 3 | **Blur / softness** | quality | peak-tile Laplacian focus — sharpest region, not whole-image mean (`imageproc`; sc-8563) | 0 | W |
+| 4 | **Exposure clipping** | quality | histogram tail mass at 0 / 255, gated by a healthy-midtone fraction (sc-8563) | 0 | W |
 | 5 | **Exact duplicate** | quality | SHA-256 of stored bytes (6531 content hash) | 0 | A (dedupe) |
 | 6 | **Near-duplicate (pixel)** | quality | perceptual hash, Hamming distance (`image_hasher`) | 0 | W → A |
 | 7 | **Count vs preset** | usefulness | item count vs preset minimum | 0 | W (B if absurdly low) |
@@ -59,12 +59,20 @@ or score it.
 
 ### Two design decisions inside the catalog
 
-- **Blur uses an absolute floor *and* a relative-to-median band, not relative alone.**
-  Story 6532 phrases blur as "Laplacian variance vs dataset median." Pure relative-to-median
-  silently passes a *uniformly soft* dataset — the median is soft, so nothing deviates. We
-  flag an image if its variance is below a kind-specific **absolute floor** *or* it sits far
-  below the dataset median (an outlier within an otherwise sharp set). Absolute catches "all
-  soft"; relative catches "this one is soft."
+- **Blur is measured per-tile (peak-tile focus), not whole-image (sc-8563).** The whole-image
+  Laplacian variance false-flagged a sharp subject on a flat/dark background as blurry — the
+  background's near-zero response dragged the average under the floor. We now split the image
+  into an 8×8 grid, take each tile's Laplacian variance, and reduce to the 90th-percentile
+  tile ("is *any* region sharp?", robust to a single noisy tile). A sharp subject scores high
+  regardless of its backdrop; a uniformly-soft frame stays low.
+- **Blur uses an absolute floor *and* a ceiling-gated relative band, not relative alone.**
+  Pure relative-to-median silently passes a *uniformly soft* dataset — the median is soft, so
+  nothing deviates. We flag an image if its focus is below a kind-specific **absolute floor**
+  *or* it sits far below the dataset median (a soft outlier in an otherwise sharp set). The
+  relative arm is additionally gated by an **absolute ceiling** (`4 × floor`): peak-tile focus
+  has a wide right-skewed spread, so a high-detail / busy-background set pushes the median up
+  and a bare `0.5 × median` ratio would flag images that are themselves plainly sharp. Above
+  the ceiling an image is never a "soft outlier," however sharp its peers are (sc-8563).
 - **Near-duplicate is two mechanisms that MUST be reconciled into one finding.** Tier-0 pHash
   (check 6) catches *pixel*-near-exact pairs — a resave, a resize, a minor re-crop. Tier-1
   CLIP-cosine (check 8) catches *semantic*-near pairs — the same scene a half-second apart,
@@ -83,8 +91,8 @@ the kind changes what "good" means.
 |---|---|---|
 | Min resolution | warn if `min(w,h) < bucket`; "will upscale" if `< 0.75 × bucket` | none (bucket is the target) |
 | Crop-loss | warn if center-crop drops > **35%** of the longer side | person/object stricter (subject loss matters more) than style |
-| Blur floor | Laplacian var below absolute floor **or** < 0.5 × dataset median | style tolerates softer (texture/bokeh); person/object stricter |
-| Exposure | warn if > **5%** of pixels clipped at 0 or 255 | none |
+| Blur floor | peak-tile focus below absolute floor (**40** person/object, **25** style; sc-8563 recalibrated from 100/60 for the new peak-tile scale) **or** < 0.5 × dataset median **and** below the `4 × floor` ceiling | style tolerates softer (texture/bokeh); person/object stricter |
+| Exposure | warn if > **5%** of pixels clipped at 0 / 255 **and** the healthy-midtone fraction is < **15%** (a lit subject on a clipping backdrop is spared; sc-8563) | none |
 | Near-dup (pHash) | Hamming ≤ **6** of 64 = near-dup; **0** = exact-class | none |
 | Near-dup (CLIP) | cosine ≥ **0.95** = near-dup cluster | none |
 | Count | warn below preset min (person ~**15**, style ~**20**, object ~**10**); block below a hard floor (~**4**) | per-kind minimums |
