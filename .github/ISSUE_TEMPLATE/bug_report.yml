@@ -1,0 +1,70 @@
+name: Bug report
+description: Report something that isn't working the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug! Please search
+        [existing issues](https://github.com/SceneWorks/SceneWorks/issues) first
+        to avoid duplicates.
+
+        **Do not report security vulnerabilities here** — see
+        [SECURITY.md](https://github.com/SceneWorks/SceneWorks/blob/main/SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, and what you expected instead.
+      placeholder: When I click Generate in Image Studio, the app…
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: How can we make it happen?
+      placeholder: |
+        1. Open '…'
+        2. Click '…'
+        3. See error
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: Where did this happen?
+      options:
+        - macOS (Apple Silicon / MLX)
+        - Windows (NVIDIA / candle)
+        - Docker server (candle / CPU)
+        - Other / not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: SceneWorks version
+      description: Shown at the bottom of the left sidebar in the app, or your commit SHA if building from source.
+      placeholder: "0.7.1"
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model / LoRA involved (if any)
+      description: If the bug is generation-related, which model or LoRA were you using?
+      placeholder: e.g. FLUX.1 [dev], Wan 2.2 TI2V-5B
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: |
+        Paste relevant output from the Logs view or console, and attach
+        screenshots if helpful. This will be automatically formatted as code.
+      render: shell
+    validations:
+      required: false
