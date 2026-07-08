@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, eventUrl } from "./main.jsx";
 import { liveElapsedSeconds } from "./formatting.js";
-import { withModelManagerContext, FakeEventSource, response, settle, field, loraPanel, modelImportPanel, buttonInside, changeField, changeFile } from "./main.testSupport.jsx";
+import { withModelManagerContext, FakeEventSource, response, settle, field, loraPanel, modelImportPanel, buttonInside, changeField, changeFile, selectModelTab, familyFilter } from "./main.testSupport.jsx";
 
 describe("SceneWorks app shell", () => {
   let container;
@@ -241,6 +241,7 @@ describe("SceneWorks app shell", () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
     });
     await settle();
+    await selectModelTab("LoRAs");
     const panel = loraPanel(container);
     await changeField(field(panel, "Source URL"), "https://example.com/loras/detail.safetensors");
     await act(async () => {
@@ -375,7 +376,8 @@ describe("SceneWorks app shell", () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
     });
     await settle();
-    await changeField(field(container, "LoRA family"), "z-image");
+    await selectModelTab("LoRAs");
+    await changeField(familyFilter(container), "z-image");
     await act(async () => {
       FakeEventSource.instances[0].listeners["job.updated"]({
         data: JSON.stringify({
@@ -554,6 +556,7 @@ describe("SceneWorks app shell", () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
     });
     await settle();
+    await selectModelTab("LoRAs");
     await act(async () => {
       buttonInside(loraPanel(container), "Upload").click();
     });
@@ -619,6 +622,7 @@ describe("SceneWorks app shell", () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Open Models").click();
     });
     await settle();
+    await selectModelTab("LoRAs");
 
     expect(container.textContent).toContain("Models");
     expect(container.textContent).toContain("Import LoRA");
@@ -642,6 +646,7 @@ describe("SceneWorks app shell", () => {
       );
     });
 
+    await selectModelTab("LoRAs");
     const panel = loraPanel(container);
     await changeField(field(panel, "Source URL"), "https://example.com/loras/detail.safetensors");
     await changeField(field(panel, "Name"), "Detail LoRA");
@@ -680,8 +685,9 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    expect(field(container, "LoRA family").value).toBe("all");
-    await changeField(field(container, "LoRA family"), "qwen-image");
+    await selectModelTab("LoRAs");
+    expect(familyFilter(container).value).toBe("all");
+    await changeField(familyFilter(container), "qwen-image");
     const panel = loraPanel(container);
     await changeField(field(panel, "Source URL"), "https://example.com/loras/detail.safetensors");
     await act(async () => {
@@ -726,6 +732,7 @@ describe("SceneWorks app shell", () => {
       ]);
     });
 
+    await selectModelTab("LoRAs");
     const panel = loraPanel(container);
     await changeField(field(panel, "Family"), "qwen-image");
     expect(field(panel, "Family").value).toBe("qwen-image");
@@ -785,7 +792,7 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    expect(container.textContent).toContain("Download size");
+    // The card footer surfaces each model's download size (the old repo/size <dl> is gone).
     expect(container.textContent).toContain("~30.6 GB");
     expect(container.textContent).toContain("8.0 GB");
     expect(container.textContent).toContain("Unavailable");
@@ -813,15 +820,17 @@ describe("SceneWorks app shell", () => {
       );
     });
 
+    await selectModelTab("LoRAs");
     const rows = [...document.body.querySelectorAll(".lora-row")];
     expect(rows).toHaveLength(2);
     expect(rows[0].textContent).toContain("Ready Style");
     expect(rows[0].textContent).toContain("installed");
-    expect(rows[0].classList.contains("warning")).toBe(false);
+    expect(rows[0].classList.contains("unavailable")).toBe(false);
     expect(rows[1].textContent).toContain("Broken Style");
+    // A registered user LoRA with no local files reads "unavailable" and carries the
+    // danger-tinted row treatment.
     expect(rows[1].textContent).toContain("unavailable");
-    expect(rows[1].classList.contains("warning")).toBe(true);
-    expect(container.textContent).toContain("1 installed · 1 unavailable");
+    expect(rows[1].classList.contains("unavailable")).toBe(true);
   });
 
   it("confirms and deletes models and LoRAs from the Models page", async () => {
@@ -847,7 +856,7 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      document.body.querySelector(".model-row .danger-action").click();
+      document.body.querySelector(".model-card .danger-action").click();
     });
 
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Delete model "Z-Image Turbo"?'));
@@ -855,6 +864,7 @@ describe("SceneWorks app shell", () => {
     expect(onDeleteModel).toHaveBeenCalledWith(expect.objectContaining({ id: "z_image_turbo" }));
     expect(container.textContent).toContain("Removed the registry entry for Z-Image Turbo.");
 
+    await selectModelTab("LoRAs");
     await act(async () => {
       document.body.querySelector(".lora-row .danger-action").click();
     });
@@ -907,6 +917,7 @@ describe("SceneWorks app shell", () => {
       root.render(<Harness />);
     });
 
+    await selectModelTab("LoRAs");
     const panel = () => loraPanel(container);
     await changeField(field(panel(), "Source URL"), "https://example.com/loras/one.safetensors");
     await changeField(field(panel(), "Name"), "First Detail");
@@ -956,6 +967,7 @@ describe("SceneWorks app shell", () => {
       );
     });
 
+    await selectModelTab("LoRAs");
     await act(async () => {
       buttonInside(loraPanel(container), "Upload").click();
     });
@@ -1003,6 +1015,7 @@ describe("SceneWorks app shell", () => {
       );
     });
 
+    await selectModelTab("LoRAs");
     expect(container.textContent).toContain("LoRA imports");
     expect(container.textContent).toContain("broken_detail");
     expect(container.textContent).toContain("Adapter crashed");
@@ -1045,6 +1058,7 @@ describe("SceneWorks app shell", () => {
       );
     });
 
+    await selectModelTab("LoRAs");
     expect(container.textContent).not.toContain("LoRA manifestPath must target");
     expect(container.textContent).not.toContain("LoRA imports");
     expect(container.textContent).toContain("No user LoRAs yet");
@@ -1069,6 +1083,7 @@ describe("SceneWorks app shell", () => {
       );
     });
 
+    await selectModelTab("LoRAs");
     const panel = loraPanel(container);
     await changeField(field(panel, "Source URL"), "file:///tmp/detail.safetensors");
     await act(async () => {
@@ -1101,9 +1116,11 @@ describe("SceneWorks app shell", () => {
 
     expect(modelImportPanel(container)).toBeNull();
     expect(container.textContent).not.toContain("Import model");
-    // LoRA import is unaffected, and the rest of the Models page still renders.
-    expect(loraPanel(container)).not.toBeNull();
+    // The image model's card is on the default (Image) tab.
     expect(container.textContent).toContain("Z-Image Turbo");
+    // LoRA import is unaffected — its form is on the LoRAs tab.
+    await selectModelTab("LoRAs");
+    expect(loraPanel(container)).not.toBeNull();
   });
 
   it("renders unassociated models with a needs-family badge", async () => {
@@ -1153,6 +1170,7 @@ describe("SceneWorks app shell", () => {
       );
     });
 
+    await selectModelTab("LoRAs");
     expect(container.textContent).toContain("Model imports in progress");
     expect(container.textContent).toContain("Model Import");
     expect(container.textContent).toContain("Downloading");
