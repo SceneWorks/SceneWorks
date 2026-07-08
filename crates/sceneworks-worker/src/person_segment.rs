@@ -1,8 +1,9 @@
 //! Native-MLX SAM2 person segmentation on the Rust worker (epic 3704, sc-3709 → sc-3715;
 //! Slice 3 of sc-3488 / epic 3482).
 //!
-//! Ports the Python `scene_worker/person_adapters.py` `segment_track` to Rust so the
-//! Replace-Person mask-generation step runs on a Python-free Mac. **sc-3715** upgrades the
+//! Runs the `segment_track` step natively in Rust (ported from the retired Python
+//! worker's `person_adapters.py`) so the Replace-Person mask-generation step runs on
+//! a Python-free Mac. **sc-3715** upgrades the
 //! per-frame box-prompt segmenter (sc-3709) to the native-MLX SAM2 **video predictor**
 //! (`mlx-gen-sam2` `Sam2VideoPredictor`, sc-3714): prompt SAM2 once on the selected track's
 //! first detected frame, then propagate temporally-consistent masks across the clip via the
@@ -56,6 +57,12 @@ const SEG_FILE: &str = "sam2.1_hiera_large.safetensors";
 /// (sc-3707, uploaded from the official Meta `.pt` via `tools/convert_sam2_to_mlx.py`;
 /// bit-identical to the avbiswas reference).
 const SEG_REPO: &str = "SceneWorks/sam2-mlx";
+/// Pinned SAM2 weights revision (sc-9879, F-077 follow-up). Even though `SEG_REPO` is a
+/// first-party repo, fetching the mutable `main` branch means a re-push (or a compromised
+/// token) could silently swap the segmenter weights we load. Pin the exact commit for
+/// defense-in-depth, mirroring the person-detector pin (sc-9682). HF's tree API still reports
+/// the file's `lfs.oid`, which `ensure_hf_cached_file` verifies the downloaded content against.
+const SEG_REVISION: &str = "fbc86db0dceb8c744e5fc95feadc37572107be69";
 
 /// The SAM2 video predictor is loaded once and cached process-wide (weights load is the
 /// expensive part; the per-clip tracking state is built fresh each call). Holds `None` until
@@ -104,7 +111,7 @@ pub(crate) async fn ensure_segmenter_weights(
         .join("cache")
         .join("person-segment")
         .join(SEG_FILE);
-    ensure_hf_cached_file(context, SEG_REPO, "main", SEG_FILE, &target).await
+    ensure_hf_cached_file(context, SEG_REPO, SEG_REVISION, SEG_FILE, &target).await
 }
 
 /// Scale a normalized `(x, y, width, height)` box to a pixel-space `[x1, y1, x2, y2]`
@@ -123,20 +130,6 @@ pub(crate) fn box_norm_to_pixels(
         ((bx + bw) as f32 * w).clamp(0.0, w),
         ((by + bh) as f32 * h).clamp(0.0, h),
     ]
-}
-
-/// Roll the per-frame segmentation outcome into the sidecar `maskState` (Python
-/// `segment_track`): `generated` masks out of `detected_total` detected target frames →
-/// `degraded` (none written → box-mask fallback at replacement time), `active` (every
-/// detected frame segmented), or `generated` (a partial subset).
-pub(crate) fn rollup_mask_state(generated: usize, detected_total: usize) -> &'static str {
-    if generated == 0 {
-        "degraded"
-    } else if generated >= detected_total {
-        "active"
-    } else {
-        "generated"
-    }
 }
 
 /// Fraction of a binary mask's foreground (`> 127`) that falls inside `box_norm` on a
@@ -191,11 +184,17 @@ pub(crate) fn propagate_track_blocking(
     cancel: Option<CancelFlag>,
     mut progress: Option<SegmentProgress>,
 ) -> WorkerResult<Vec<Vec<u8>>> {
-    assert_eq!(
-        clip_frame_paths.len(),
-        anchors.len(),
-        "frames/anchors mismatch"
-    );
+    // A frames/anchors length mismatch is a caller contract violation. The old `assert_eq!`
+    // panicked inside `spawn_blocking`, which `media_jobs` absorbed as a silent "degraded"
+    // (box-fallback) result rather than a surfaced error — return `InvalidPayload` so the
+    // mismatch fails the job loudly (sc-8903, F-101).
+    if clip_frame_paths.len() != anchors.len() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "propagate clip frames ({}) and anchors ({}) length mismatch",
+            clip_frame_paths.len(),
+            anchors.len()
+        )));
+    }
     check_segment_canceled(cancel.as_ref())?;
     let prompt =
         anchors.first().copied().flatten().ok_or_else(|| {
@@ -277,7 +276,18 @@ pub(crate) fn propagate_track_blocking(
             let mask = predictor
                 .mask_to_video_res(&state, low)
                 .map_err(|e| WorkerError::Engine(format!("sam2 mask resize: {e}")))?;
-            out[*frame_idx as usize] = mask.as_slice::<u8>().to_vec();
+            // Bounds-check the predictor's returned frame index rather than trusting it:
+            // a negative i32 would wrap via `as usize` and an out-of-range index would
+            // panic on `out[..]`, unwinding the blocking task (media_jobs would absorb it
+            // as a silent "degraded"). Surface an `Engine` error instead (sc-8905, F-103).
+            let idx = usize::try_from(*frame_idx).ok().filter(|&i| i < out.len());
+            let Some(idx) = idx else {
+                return Err(WorkerError::Engine(format!(
+                    "sam2 propagate returned frame index {frame_idx} out of range 0..{}",
+                    out.len()
+                )));
+            };
+            out[idx] = mask.as_slice::<u8>().to_vec();
         }
         Ok(out)
     };
@@ -301,6 +311,13 @@ pub(crate) fn propagate_track_blocking(
     }
 
     // Pass 2: re-seed the prompt + every weak frame as box anchors and re-propagate.
+    //
+    // ACCEPTED TRADEOFF (sc-8953 / F-151): `run` rebuilds the tracking state via
+    // `init_state_from_frames` (re-encoding all frames) and re-propagates from scratch. That
+    // repeats pass 1's per-frame encode, but `Sam2VideoPredictor` exposes no way to reset the
+    // prompts on an existing state, so a fresh state is the only correct way to re-seed. It is
+    // bounded (the clip is capped at ≤24 frames) and only runs when pass 1 actually drifted, so
+    // the extra encode is left as-is; revisit only if the engine later exposes state reuse.
     let mut seeds = vec![(0usize, prompt)];
     seeds.extend(weak);
     run(&seeds)
@@ -310,6 +327,25 @@ pub(crate) fn propagate_track_blocking(
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// sc-9879 (F-077 follow-up): the first-party SAM2 weights repo is fetched at a pinned commit,
+    /// never the mutable `main` branch, so a re-push (or a compromised token) can't silently swap the
+    /// segmenter weights we load. Lock the constant to a real 40-hex lowercase commit id.
+    #[test]
+    fn seg_revision_is_pinned_commit_not_main() {
+        assert_ne!(SEG_REVISION, "main", "SAM2 must pin a fixed revision");
+        assert_eq!(
+            SEG_REVISION.len(),
+            40,
+            "a pinned HF revision is a 40-char commit sha"
+        );
+        assert!(
+            SEG_REVISION
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "the pinned revision must be lowercase hex"
+        );
+    }
 
     /// sc-4277 / F-MLXW-13: the model-cache locks recover from poison instead of
     /// `.expect()`-panicking. A prior job panicking while holding the lock must
@@ -359,6 +395,29 @@ mod tests {
         assert!(
             matches!(result, Err(WorkerError::Canceled(ref m)) if m == CANCEL_MESSAGE),
             "expected Canceled, got {result:?}"
+        );
+    }
+
+    /// sc-8903 / F-101: a frames/anchors length mismatch returns `InvalidPayload` (a surfaced
+    /// error) instead of the old `assert_eq!` panic that `media_jobs` absorbed as a silent
+    /// "degraded" box-fallback. The length check runs before any frame decode / weight load, so
+    /// the nonexistent paths are never touched — the returned error is the mismatch, not a
+    /// frame-open error.
+    #[test]
+    fn frames_anchors_length_mismatch_returns_invalid_payload() {
+        let result = propagate_track_blocking(
+            PathBuf::from("/nonexistent/sam2.safetensors"),
+            vec![
+                PathBuf::from("/nonexistent/a.png"),
+                PathBuf::from("/nonexistent/b.png"),
+            ],
+            vec![Some((0.1, 0.1, 0.5, 0.5))], // one anchor for two frames
+            None,
+            None,
+        );
+        assert!(
+            matches!(result, Err(WorkerError::InvalidPayload(ref m)) if m.contains("length mismatch")),
+            "expected InvalidPayload length mismatch, got {result:?}"
         );
     }
 
@@ -413,17 +472,5 @@ mod tests {
         // A box over the left half of the block → ~half the foreground inside.
         let half = mask_box_coverage(&pixels, (0.0, 0.0, 0.4, 1.0), w, h);
         assert!((half - 0.5).abs() < 1e-9, "half coverage was {half}");
-    }
-
-    #[test]
-    fn mask_state_rollup_matches_python_segment_track() {
-        // No masks written → degraded (box-mask fallback).
-        assert_eq!(rollup_mask_state(0, 4), "degraded");
-        // Every detected frame segmented → active.
-        assert_eq!(rollup_mask_state(4, 4), "active");
-        // A partial subset → generated.
-        assert_eq!(rollup_mask_state(2, 4), "generated");
-        // A single detected frame, segmented → active (not generated).
-        assert_eq!(rollup_mask_state(1, 1), "active");
     }
 }

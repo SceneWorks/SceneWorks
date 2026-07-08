@@ -40,6 +40,7 @@ fn image_job(payload: Map<String, Value>) -> CreateJob {
         source_job_id: None,
         duplicate_of_job_id: None,
         attempts: 1,
+        initial_status: None,
     }
 }
 
@@ -97,6 +98,245 @@ fn job_lifecycle_create_claim_complete() {
     assert_eq!(completed.result, object(json!({ "assetIds": ["asset-1"] })));
     assert_eq!(worker.status, WorkerStatus::Idle);
     assert_eq!(worker.current_job_id, None);
+}
+
+/// An Ideogram auto-caption image job (sc-9120). Created NON-claimable in `pending_caption`.
+fn pending_caption_job(payload: Value) -> CreateJob {
+    CreateJob {
+        initial_status: Some(JobStatus::PendingCaption),
+        ..image_job(object(payload))
+    }
+}
+
+/// A `prompt_refine` magic-prompt job, mirroring what the API's caption watcher enqueues.
+fn magic_prompt_job(prompt: &str, aspect_ratio: &str) -> CreateJob {
+    CreateJob {
+        job_type: JobType::PromptRefine,
+        project_id: None,
+        project_name: None,
+        payload: object(json!({
+            "task": "magic_prompt",
+            "prompt": prompt,
+            "aspectRatio": aspect_ratio,
+        })),
+        requested_gpu: "auto".to_owned(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+        initial_status: None,
+    }
+}
+
+/// sc-9120: a job created in `pending_caption` is persisted with that status/stage and is NOT
+/// claimable by a worker (the claim SELECT is hard `where status='queued'`), so the caption can be
+/// produced async without a worker ever seeing the un-rewritten prompt.
+#[test]
+fn pending_caption_job_is_not_claimable() {
+    let store = store("pending-caption-not-claimable");
+    register_image_worker(&store);
+    let created = store
+        .create_job(pending_caption_job(
+            json!({ "prompt": "a fox", "model": "ideogram_4" }),
+        ))
+        .expect("job creates");
+    assert_eq!(created.status, JobStatus::PendingCaption);
+    assert_eq!(created.stage, ProgressStage::PendingCaption);
+
+    // A worker must not be able to claim it while it is pending.
+    assert!(
+        store
+            .claim_next_job("worker-1")
+            .expect("claim runs")
+            .is_none(),
+        "a pending_caption job must never be claimed"
+    );
+
+    // It still counts as an in-flight (non-terminal) job in the queue summary.
+    let summary = store.queue_summary().expect("summary");
+    assert_eq!(
+        summary.counts.get(&JobStatus::PendingCaption).copied(),
+        Some(1)
+    );
+    assert!(summary.active_jobs.iter().any(|job| job.id == created.id));
+}
+
+/// sc-9120: promoting with a rewritten payload flips the job to `queued` (claimable) and replaces the
+/// stored prompt with the rich caption; the worker then claims it normally.
+#[test]
+fn promote_pending_caption_rewrites_prompt_and_queues() {
+    let store = store("promote-caption-rewrite");
+    register_image_worker(&store);
+    let created = store
+        .create_job(pending_caption_job(
+            json!({ "prompt": "a fox", "model": "ideogram_4" }),
+        ))
+        .expect("job creates");
+
+    let mut new_payload = created.payload.clone();
+    new_payload.insert(
+        "prompt".to_owned(),
+        Value::String(r#"{"compositional_deconstruction": {}}"#.to_owned()),
+    );
+    let promotion = store
+        .promote_pending_caption_job(&created.id, Some(new_payload))
+        .expect("promotes");
+    assert!(promotion.promoted, "the pending job should be promoted");
+    assert_eq!(promotion.job.status, JobStatus::Queued);
+    assert_eq!(
+        promotion.job.payload.get("prompt").and_then(Value::as_str),
+        Some(r#"{"compositional_deconstruction": {}}"#)
+    );
+
+    // Now claimable.
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim runs")
+        .expect("promoted job is claimable");
+    assert_eq!(claimed.id, created.id);
+}
+
+/// sc-9120: promoting with `None` (expansion unavailable/timeout) degrades to `queued` with the
+/// ORIGINAL prompt untouched — never leaving a stranded pending_caption row.
+#[test]
+fn promote_pending_caption_degrades_to_original_prompt() {
+    let store = store("promote-caption-degrade");
+    let created = store
+        .create_job(pending_caption_job(
+            json!({ "prompt": "a fox", "model": "ideogram_4" }),
+        ))
+        .expect("job creates");
+    let promotion = store
+        .promote_pending_caption_job(&created.id, None)
+        .expect("promotes");
+    assert!(promotion.promoted);
+    assert_eq!(promotion.job.status, JobStatus::Queued);
+    assert_eq!(
+        promotion.job.payload.get("prompt").and_then(Value::as_str),
+        Some("a fox"),
+        "the original prompt must be preserved on degrade"
+    );
+}
+
+/// sc-9120: the promotion is race-free — a job that was canceled while its caption was expanding is
+/// NOT resurrected. The guarded UPDATE (`where status='pending_caption'`) matches nothing, so the
+/// promotion reports `promoted = false` and the job stays canceled.
+#[test]
+fn promote_pending_caption_does_not_resurrect_a_canceled_job() {
+    let store = store("promote-caption-canceled");
+    let created = store
+        .create_job(pending_caption_job(
+            json!({ "prompt": "a fox", "model": "ideogram_4" }),
+        ))
+        .expect("job creates");
+    // A pending_caption job cancels immediately (no worker to acknowledge), like `queued`.
+    let canceled = store.cancel_job(&created.id).expect("cancels");
+    assert_eq!(canceled.status, JobStatus::Canceled);
+
+    let promotion = store
+        .promote_pending_caption_job(&created.id, None)
+        .expect("promotion runs");
+    assert!(
+        !promotion.promoted,
+        "a canceled job must not be promoted back to queued"
+    );
+    assert_eq!(
+        promotion.job.status,
+        JobStatus::Canceled,
+        "the job must stay canceled"
+    );
+}
+
+/// sc-9120: a mid-flight API restart loses the caption watcher, so the startup recovery must flip any
+/// stranded `pending_caption` row to `queued` (degraded to the original prompt) rather than stranding
+/// it un-claimable. Active jobs still go to `interrupted`; a `queued` job is left alone.
+#[test]
+fn startup_recovers_stranded_pending_caption_to_queued() {
+    let store = store("startup-recover-pending");
+    register_image_worker(&store);
+    let pending = store
+        .create_job(pending_caption_job(
+            json!({ "prompt": "a fox", "model": "ideogram_4" }),
+        ))
+        .expect("pending job creates");
+    // A separate job taken into an ACTIVE status: it must be INTERRUPTED, not degraded — proving the
+    // pending_caption recovery is distinct from (and runs alongside) the active-job interrupt sweep.
+    let active = store
+        .create_job(image_job(object(json!({ "prompt": "active" }))))
+        .expect("active job creates");
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim runs")
+        .expect("the queued job is claimed");
+    assert_eq!(claimed.id, active.id);
+
+    store
+        .mark_interrupted_on_startup()
+        .expect("startup recovery runs");
+
+    let recovered = store.get_job(&pending.id).expect("pending job loads");
+    assert_eq!(
+        recovered.status,
+        JobStatus::Queued,
+        "a stranded pending_caption job must be recovered to queued"
+    );
+    assert_eq!(
+        recovered.payload.get("prompt").and_then(Value::as_str),
+        Some("a fox"),
+        "recovery keeps the original prompt"
+    );
+    // The active job is interrupted by the same sweep.
+    assert_eq!(
+        store.get_job(&active.id).expect("active loads").status,
+        JobStatus::Interrupted
+    );
+}
+
+/// sc-9120: a repeated auto-caption (an impatient client re-POSTing the same image job) reuses an
+/// in-flight refine job instead of stacking a fresh one; a terminal refine job is never reused.
+#[test]
+fn find_reusable_prompt_refine_matches_in_flight_only() {
+    let store = store("reuse-refine-job");
+    let created = store
+        .create_job(magic_prompt_job("a fox on a beach", "16:9"))
+        .expect("refine job creates");
+
+    // An in-flight refine job with the same prompt+aspect is reused.
+    let found = store
+        .find_reusable_prompt_refine_job("a fox on a beach", "16:9")
+        .expect("query runs")
+        .expect("an in-flight refine job matches");
+    assert_eq!(found.id, created.id);
+
+    // A different prompt or aspect does not match.
+    assert!(store
+        .find_reusable_prompt_refine_job("a different scene", "16:9")
+        .expect("query runs")
+        .is_none());
+    assert!(store
+        .find_reusable_prompt_refine_job("a fox on a beach", "1:1")
+        .expect("query runs")
+        .is_none());
+
+    // Once the refine job reaches a terminal state it is no longer reusable.
+    store.cancel_job(&created.id).expect("cancels");
+    assert!(store
+        .find_reusable_prompt_refine_job("a fox on a beach", "16:9")
+        .expect("query runs")
+        .is_none());
+}
+
+/// sc-9120: a job can only be born `queued` or `pending_caption`; any other initial status is a
+/// programmer error and is rejected rather than creating a job mid-lifecycle.
+#[test]
+fn create_job_rejects_illegal_initial_status() {
+    let store = store("illegal-initial-status");
+    let error = store
+        .create_job(CreateJob {
+            initial_status: Some(JobStatus::Running),
+            ..image_job(object(json!({ "prompt": "a fox" })))
+        })
+        .expect_err("running is not a legal initial status");
+    assert!(matches!(error, JobsStoreError::InvalidInitialStatus(_)));
 }
 
 /// sc-2086 — successive progress reports must ratchet the per-job peak GPU
@@ -249,6 +489,7 @@ fn job_snapshot_title_is_derived_from_payload() {
                 source_job_id: None,
                 duplicate_of_job_id: None,
                 attempts: 1,
+                initial_status: None,
             })
             .expect("job creates")
             .id
@@ -357,6 +598,7 @@ fn job_snapshot_title_truncates_long_prompts() {
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
         .expect("job creates")
         .id;
@@ -399,6 +641,7 @@ fn non_gpu_jobs_can_claim_while_gpu_is_busy() {
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
         .expect("download job creates");
 
@@ -452,6 +695,7 @@ fn model_convert_can_claim_while_gpu_is_busy() {
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
         .expect("convert job creates");
 
@@ -500,6 +744,7 @@ fn claim_skips_jobs_not_supported_by_worker_capabilities() {
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
         .expect("download job creates");
 
@@ -548,6 +793,7 @@ fn claim_finds_compatible_job_behind_large_incompatible_prefix() {
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
         .expect("download job creates");
 
@@ -1059,6 +1305,102 @@ fn startup_interrupt_returns_post_update_job_snapshots() {
 }
 
 #[test]
+fn startup_interrupt_collects_every_active_status() {
+    // sc-8896 / F-094: mark_interrupted_on_startup selects the in-flight jobs via
+    // list_jobs_by_status_on_connection(ACTIVE_STATUSES), now a single
+    // `status in (...)` scan instead of a per-status loop. This pins that the fold
+    // still gathers jobs sitting in DIFFERENT active statuses (running vs saving),
+    // not just one, and leaves a queued (non-active) job alone.
+    let store = store("startup-interrupt-all-statuses");
+    register_image_worker(&store);
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-2".to_owned(),
+            gpu_id: "gpu-1".to_owned(),
+            gpu_name: Some("GPU 1".to_owned()),
+            capabilities: vec![WorkerCapability::ImageGenerate],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("second worker registers");
+
+    // Job A -> running (worker-1); Job B -> saving (worker-2). Both are active but
+    // in distinct statuses, so a per-status miss would drop one.
+    let running = store
+        .create_job(image_job(Map::new()))
+        .expect("job A creates");
+    store.claim_next_job("worker-1").expect("worker-1 claims A");
+    store
+        .update_job_progress(
+            &running.id,
+            ProgressUpdate {
+                status: JobStatus::Running,
+                stage: ProgressStage::Running,
+                progress: 0.4,
+                message: "running".to_owned(),
+                error: None,
+                result: None,
+                eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
+                backend: None,
+                worker_id: Some("worker-1".to_owned()),
+            },
+        )
+        .expect("A -> running");
+
+    let saving = store
+        .create_job(image_job(Map::new()))
+        .expect("job B creates");
+    store.claim_next_job("worker-2").expect("worker-2 claims B");
+    store
+        .update_job_progress(
+            &saving.id,
+            ProgressUpdate {
+                status: JobStatus::Saving,
+                stage: ProgressStage::Saving,
+                progress: 0.9,
+                message: "saving".to_owned(),
+                error: None,
+                result: None,
+                eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
+                backend: None,
+                worker_id: Some("worker-2".to_owned()),
+            },
+        )
+        .expect("B -> saving");
+
+    // A third job stays queued (not an active status) and must be left untouched.
+    let queued = store
+        .create_job(image_job(Map::new()))
+        .expect("job C creates");
+
+    let interrupted = store
+        .mark_interrupted_on_startup()
+        .expect("startup interrupt succeeds");
+    let interrupted_ids = interrupted
+        .iter()
+        .map(|job| job.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        interrupted.len(),
+        2,
+        "both active jobs across running+saving are collected, got {interrupted_ids:?}"
+    );
+    assert!(interrupted_ids.contains(&running.id.as_str()));
+    assert!(interrupted_ids.contains(&saving.id.as_str()));
+    for job in &interrupted {
+        assert_eq!(job.status, JobStatus::Interrupted);
+    }
+    // The queued job is untouched — not active, so not swept.
+    let queued = store.get_job(&queued.id).expect("queued job loads");
+    assert_eq!(queued.status, JobStatus::Queued);
+}
+
+#[test]
 fn signal_death_fails_active_job_with_attributed_error() {
     // sc-4881: a worker hard-killed by SIGKILL/OOM can't report its own death, so
     // the supervisor attributes it. The worker's active job must become a real
@@ -1197,6 +1539,119 @@ fn idle_heartbeat_does_not_interrupt_just_claimed_job() {
         job.status
     );
     assert_eq!(job.worker_id.as_deref(), Some("worker-1"));
+}
+
+#[test]
+fn heartbeat_only_refreshes_a_job_the_reporting_worker_owns() {
+    // sc-8873 / F-071: a heartbeat may only refresh the liveness timestamps of a
+    // job the reporting worker actually owns. A stale/second worker that reports
+    // someone else's `current_job_id` must NOT bump last_heartbeat_at — otherwise
+    // it keeps the job looking alive and the time-based stale sweep can never
+    // reclaim it. The owning worker's heartbeat still refreshes the job.
+    let store = store("heartbeat-ownership");
+    register_image_worker(&store);
+    // A second, distinct worker that does not own the claimed job.
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-2".to_owned(),
+            gpu_id: "gpu-1".to_owned(),
+            gpu_name: Some("GPU 1".to_owned()),
+            capabilities: vec![WorkerCapability::ImageGenerate],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("second worker registers");
+
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    assert_eq!(claimed.id, created.id);
+    assert_eq!(claimed.worker_id.as_deref(), Some("worker-1"));
+
+    // The owning worker records a first heartbeat, establishing a baseline
+    // last_heartbeat_at we can watch for (non-)refresh.
+    store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-1".to_owned(),
+            status: WorkerStatus::Busy,
+            current_job_id: Some(created.id.clone()),
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("owner heartbeat succeeds");
+    let baseline = store.get_job(&created.id).expect("job loads");
+    let baseline_heartbeat = baseline
+        .last_heartbeat_at
+        .clone()
+        .expect("owner heartbeat recorded last_heartbeat_at");
+
+    // A NON-owning worker heartbeats the same job id. It must be a no-op on the
+    // job's liveness — the timestamps stay exactly where the owner left them, and
+    // the job keeps its owner. (Timestamps are second-granular, so equality is a
+    // faithful "did not touch" assertion regardless of wall-clock drift.)
+    store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-2".to_owned(),
+            status: WorkerStatus::Busy,
+            current_job_id: Some(created.id.clone()),
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("non-owner heartbeat still returns the worker snapshot");
+    let after_intruder = store.get_job(&created.id).expect("job loads");
+    assert_eq!(
+        after_intruder.last_heartbeat_at.as_deref(),
+        Some(baseline_heartbeat.as_str()),
+        "a non-owning worker must not refresh the job's last_heartbeat_at"
+    );
+    assert_eq!(
+        after_intruder.worker_id.as_deref(),
+        Some("worker-1"),
+        "a non-owning heartbeat must not steal or clear ownership"
+    );
+
+    // The owner can still refresh the job it owns — and the refresh must actually
+    // ADVANCE last_heartbeat_at, not just leave a non-null value (a no-op owner
+    // heartbeat would still read as `is_some()`). Timestamps are second-granular
+    // and the store stamps `utc_now()` with no injectable clock, so a real sleep
+    // would need to cross a whole-second boundary to be observable — flaky and
+    // slow. Instead, deterministically age the stored last_heartbeat_at back to a
+    // known OLD baseline via a test-only UPDATE, then require the owner heartbeat
+    // to stamp a strictly greater (current-wall-clock) value.
+    let old_baseline = "2000-01-01T00:00:00Z";
+    {
+        let connection = Connection::open(store.db_path()).expect("db opens");
+        let updated = connection
+            .execute(
+                "update jobs set last_heartbeat_at = ?1 where id = ?2",
+                params![old_baseline, created.id],
+            )
+            .expect("ages the stored heartbeat to a known baseline");
+        assert_eq!(updated, 1, "exactly the target job's heartbeat is aged");
+    }
+    store
+        .heartbeat_worker(WorkerHeartbeat {
+            worker_id: "worker-1".to_owned(),
+            status: WorkerStatus::Busy,
+            current_job_id: Some(created.id.clone()),
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("owner heartbeat succeeds");
+    let owner_refreshed = store.get_job(&created.id).expect("job loads");
+    let refreshed_heartbeat = owner_refreshed
+        .last_heartbeat_at
+        .as_deref()
+        .expect("the owning worker's heartbeat keeps refreshing the job it owns");
+    assert!(
+        refreshed_heartbeat > old_baseline,
+        "the owning worker's heartbeat must ADVANCE last_heartbeat_at past the \
+         aged baseline, not leave it unchanged: got {refreshed_heartbeat:?}"
+    );
 }
 
 #[test]
@@ -1415,6 +1870,7 @@ fn lora_train_job(requested_gpu: &str, dry_run: bool) -> CreateJob {
         source_job_id: None,
         duplicate_of_job_id: None,
         attempts: 1,
+        initial_status: None,
     }
 }
 
@@ -1559,6 +2015,7 @@ fn image_job_with(payload: Value, requested_gpu: &str) -> CreateJob {
         source_job_id: None,
         duplicate_of_job_id: None,
         attempts: 1,
+        initial_status: None,
     }
 }
 
@@ -1585,6 +2042,7 @@ fn image_edit_job_with(payload: Value, requested_gpu: &str) -> CreateJob {
         source_job_id: None,
         duplicate_of_job_id: None,
         attempts: 1,
+        initial_status: None,
     }
 }
 
@@ -1706,6 +2164,7 @@ fn sensenova_understanding_jobs_defer_to_mlx_worker() {
                 source_job_id: None,
                 duplicate_of_job_id: None,
                 attempts: 1,
+                initial_status: None,
             })
             .expect("job creates");
 
@@ -2239,6 +2698,7 @@ fn job_of(store: &JobsStore, job_type: JobType, payload: Value) -> JobSnapshot {
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
         .expect("job creates")
 }
@@ -3418,6 +3878,7 @@ fn mlx_training_job(
         source_job_id: None,
         duplicate_of_job_id: None,
         attempts: 1,
+        initial_status: None,
     }
 }
 
@@ -3447,6 +3908,7 @@ fn joy_caption_job(requested_gpu: &str) -> CreateJob {
         source_job_id: None,
         duplicate_of_job_id: None,
         attempts: 1,
+        initial_status: None,
     }
 }
 
@@ -3935,6 +4397,7 @@ fn video_job_typed(job_type: JobType, payload: Value, requested_gpu: &str) -> Cr
         source_job_id: None,
         duplicate_of_job_id: None,
         attempts: 1,
+        initial_status: None,
     }
 }
 
@@ -4716,6 +5179,7 @@ fn image_detail_routes_to_mlx_worker() {
         source_job_id: None,
         duplicate_of_job_id: None,
         attempts: 1,
+        initial_status: None,
     };
 
     for model in ["sdxl", "realvisxl"] {
@@ -4975,6 +5439,101 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
     let unique: HashSet<&String> = claimed.iter().collect();
     assert_eq!(claimed.len(), JOBS, "every job claimed (count)");
     assert_eq!(unique.len(), JOBS, "no job claimed twice");
+}
+
+/// sc-8950 / F-148 — read-only methods (list_jobs/get_job/list_workers/
+/// get_worker/queue_summary) no longer take the process-wide write mutex; they
+/// rely on WAL reader isolation instead. This pins the property the change
+/// depends on: a reader returns correct, committed data promptly even while a
+/// writer is mid-transaction holding the SQLite write lock — it takes the WAL
+/// snapshot rather than blocking until the writer commits.
+#[test]
+fn reads_proceed_while_a_writer_holds_the_write_lock() {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let path = temp_db("read-during-write");
+    let store = JobsStore::new(path.clone());
+    store.initialize().expect("store initializes");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(object(json!({ "prompt": "committed" }))))
+        .expect("job creates");
+    // The committed message right after create — the reader must observe this,
+    // never the writer's uncommitted overwrite below.
+    let committed_message = created.message.clone();
+
+    // A separate connection opens a BEGIN IMMEDIATE transaction (acquiring the
+    // SQLite write lock) and holds it open for a beat WITHOUT committing, so its
+    // pending mutation is invisible to snapshots. This models a real in-flight
+    // writer; crucially it does NOT touch our JobsStore mutex, so a mutex-taking
+    // reader could only stall on the SQLite lock — which WAL lets a reader skip.
+    let (holding_tx, holding_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let writer_path = path.clone();
+    let writer_job_id = created.id.clone();
+    let writer = thread::spawn(move || {
+        let connection = Connection::open(&writer_path).expect("writer db opens");
+        connection
+            .busy_timeout(Duration::from_millis(5000))
+            .expect("busy timeout set");
+        connection
+            .execute_batch("begin immediate")
+            .expect("write lock acquired");
+        connection
+            .execute(
+                "update jobs set message = 'uncommitted' where id = ?1",
+                params![writer_job_id],
+            )
+            .expect("uncommitted write applied");
+        holding_tx.send(()).expect("signal holding");
+        // Hold the write lock until the reader has finished.
+        release_rx.recv().expect("await release");
+        connection.execute_batch("rollback").expect("rollback");
+    });
+
+    holding_rx.recv().expect("writer holds the lock");
+
+    // The read must return the COMMITTED snapshot (original message), quickly,
+    // without waiting on the writer to release. A generous bound catches a
+    // regression where a reader serializes behind the writer.
+    let started = Instant::now();
+    let loaded = store
+        .get_job(&created.id)
+        .expect("read while write in flight");
+    let jobs = store
+        .list_jobs(None, None, 100)
+        .expect("list while write in flight");
+    let summary = store
+        .queue_summary()
+        .expect("summary while write in flight");
+    let elapsed = started.elapsed();
+
+    release_tx.send(()).expect("release writer");
+    writer.join().expect("writer thread joins");
+
+    assert_eq!(
+        loaded.message, committed_message,
+        "reader must see the committed snapshot, not the writer's uncommitted change"
+    );
+    assert_ne!(
+        loaded.message, "uncommitted",
+        "reader must never observe the writer's uncommitted overwrite"
+    );
+    assert_eq!(
+        jobs.len(),
+        1,
+        "the one committed job is visible to the reader"
+    );
+    assert!(
+        summary.active_jobs.iter().any(|job| job.id == created.id),
+        "queue summary reflects the committed job"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "reads must not block for the writer's full hold; took {elapsed:?}"
+    );
 }
 
 /// sc-4172 — a zombie worker's late progress report must not resurrect a job

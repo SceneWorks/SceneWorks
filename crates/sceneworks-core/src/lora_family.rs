@@ -146,6 +146,37 @@ fn has_safetensors_extension(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
 }
 
+/// Resolves the adapter file to load from a LoRA record `dir`, preferring `declared`
+/// (the plain filename the record's manifest `files` list names) when it exists,
+/// otherwise falling back to [`first_safetensors_path`] (sc-10221).
+///
+/// A trainer leaves periodic step checkpoints (`<stem>-stepNNN.safetensors`, `save_every`
+/// default 250) in the same folder as the final `<stem>.safetensors`; a bare directory
+/// scan (`first_safetensors_path`, unordered `read_dir`) can therefore load an
+/// under-trained checkpoint — and since `-stepNNN` sorts before `.safetensors`, a
+/// checkpoint is even the likely pick. Honoring the declared final name loads the
+/// intended adapter deterministically.
+///
+/// `declared` is treated as untrusted (it rides the job payload): only a plain in-`dir`
+/// filename — no path separators, not `.`/`..` — is accepted, so a crafted `files` value
+/// cannot redirect the load outside `dir`. Anything else falls through to the scan.
+pub fn resolve_adapter_in_dir(dir: &Path, declared: Option<&str>) -> Option<PathBuf> {
+    if let Some(name) = declared.map(str::trim).filter(|name| !name.is_empty()) {
+        let is_plain = name != "."
+            && name != ".."
+            && !name.contains('/')
+            && !name.contains('\\')
+            && Path::new(name).file_name().and_then(|value| value.to_str()) == Some(name);
+        if is_plain {
+            let candidate = dir.join(name);
+            if candidate.is_file() && has_safetensors_extension(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    first_safetensors_path(dir)
+}
+
 /// Returns the detected family for a base model directory or file.
 ///
 /// Detection strategy, in priority order:
@@ -473,6 +504,7 @@ pub fn detect_lora_family(header: &Value) -> Option<String> {
         Bucket::Flux2 => Some("flux2".to_owned()),
         Bucket::LtxVideo => Some("ltx-video".to_owned()),
         Bucket::Sd3 => Some("sd3".to_owned()),
+        Bucket::Ideogram => Some("ideogram".to_owned()),
         Bucket::Sdxl => Some("sdxl".to_owned()),
         Bucket::Sd15 => Some("sd1.5".to_owned()),
         Bucket::MmDit => disambiguate_mm_dit(&keys),
@@ -533,6 +565,12 @@ enum Bucket {
     /// so SD3.5 community LoRAs are positively recognized rather than falling
     /// into the Qwen/Z-Image block-count disambiguation (sc-7874).
     Sd3,
+    /// Ideogram 4 (epic 4725): a single-stream 34-layer flow-matching DiT with a
+    /// unique `diffusion_model.layers.<n>.` block prefix and fused `attention.qkv`,
+    /// `adaln_modulation`, and `feed_forward.w{1,2,3}` modules — shared with no other
+    /// family we detect. Metadata (`ss_base_model_version: ideogram4`) is the primary
+    /// signal; this bucket catches metadata-less ComfyUI-style exports.
+    Ideogram,
     MmDit,
     Sdxl,
     Sd15,
@@ -707,6 +745,37 @@ const SIGNATURES: &[BucketSignature] = &[
             "diffusion_model.transformer_blocks.",
             ".attn1.",
             ".attn2.",
+        ],
+    },
+    BucketSignature {
+        bucket: Bucket::Ideogram,
+        // Ideogram 4 (epic 4725) native / ComfyUI export. Its single-stream 34-layer
+        // DiT prefixes every block key with `diffusion_model.layers.<n>.` — a segment
+        // no other detected family uses (`blocks`, `transformer_blocks`, `double_blocks`,
+        // `single_blocks` are all block-word forms; the CLIP text encoder uses
+        // `text_model.encoder.layers.`, a different prefix). Its modules are the fused
+        // `attention.qkv` / `attention.o`, `feed_forward.w{1,2,3}`, and `adaln_modulation`
+        // (full-word `attention`, not the `attn`/`self_attn`/`attn1` every other family
+        // uses). Requiring the prefix AND one Ideogram-specific module marker keeps this
+        // from firing on anything else; the block-word disqualifiers are belt-and-braces.
+        require_all_of: &[
+            &["diffusion_model.layers."],
+            &[".attention.qkv", ".adaln_modulation", ".feed_forward.w"],
+        ],
+        disqualifiers: &[
+            "transformer_blocks.",
+            "double_blocks.",
+            "single_blocks",
+            "diffusion_model.blocks.",
+        ],
+        markers: &[
+            "diffusion_model.layers.",
+            ".attention.qkv",
+            ".attention.o.",
+            ".feed_forward.w1",
+            ".feed_forward.w2",
+            ".feed_forward.w3",
+            ".adaln_modulation",
         ],
     },
     BucketSignature {
@@ -1073,6 +1142,14 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     // The label is `krea_2` (underscore) to match the catalog/trainer convention.
     if normalized.contains("krea") {
         return Some("krea_2".to_owned());
+    }
+    // Ideogram 4 (epic 4725): its own MMDiT (`diffusion_model.layers.<n>.attention.qkv`
+    // + `adaln_modulation`), a distinct family from every SD/Flux/Qwen architecture. The
+    // ai-toolkit trainer stamps `ss_base_model_version: "ideogram4"`; no other family's
+    // architecture string contains "ideogram", so match it here. The label is `ideogram`
+    // to match the `ideogram_4` catalog `family` / `loraCompatibility.families`.
+    if normalized.contains("ideogram") {
+        return Some("ideogram".to_owned());
     }
     // Check flux2 before flux: FLUX.2 architecture strings ("flux2", "flux-2",
     // "flux.2", "flux_2") all contain the "flux" substring, so the generic flux
@@ -1538,6 +1615,50 @@ mod tests {
         });
 
         assert_eq!(detect_lora_family(&header).as_deref(), Some("chroma"));
+    }
+
+    #[test]
+    fn ideogram_metadata_detects_ideogram_family() {
+        // An Ideogram 4 LoKr (ai-toolkit) stamps `ss_base_model_version: "ideogram4"`.
+        // Its MMDiT keys (`diffusion_model.layers.<n>.attention.qkv`) match no bucket
+        // signature, so without the metadata branch it detects as `None` — the failure
+        // that let an Ideogram LoRA import into a krea_2 folder. Metadata is read first
+        // and yields the canonical `ideogram` family token.
+        let mut header = header_from_keys(&[
+            "diffusion_model.layers.0.attention.qkv.lokr_w1",
+            "diffusion_model.layers.0.attention.qkv.lokr_w2",
+            "diffusion_model.layers.0.adaln_modulation.lokr_w2",
+        ]);
+        header["__metadata__"] = json!({
+            "ss_base_model_version": "ideogram4"
+        });
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("ideogram"));
+    }
+
+    #[test]
+    fn ideogram_keys_detect_without_metadata() {
+        // A metadata-less Ideogram export (no `ss_base_model_version`) must still
+        // detect from its `diffusion_model.layers.<n>.` MMDiT keys via the bucket
+        // scorer, not fall through to None.
+        let mut keys = Vec::new();
+        for layer in 0..6 {
+            keys.push(format!(
+                "diffusion_model.layers.{layer}.attention.qkv.lokr_w2"
+            ));
+            keys.push(format!(
+                "diffusion_model.layers.{layer}.attention.o.lokr_w2"
+            ));
+            keys.push(format!(
+                "diffusion_model.layers.{layer}.feed_forward.w1.lokr_w2"
+            ));
+            keys.push(format!(
+                "diffusion_model.layers.{layer}.adaln_modulation.lokr_w2"
+            ));
+        }
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("ideogram"));
     }
 
     #[test]
@@ -2705,5 +2826,66 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("sdxllora"), "got: {err}");
+    }
+
+    // sc-10221: resolve_adapter_in_dir prefers the manifest-declared adapter over an
+    // arbitrary directory scan, so a trained LoRA loads its final adapter rather than a
+    // step checkpoint sharing the folder.
+    fn touch(path: &Path) {
+        std::fs::File::create(path).expect("create fixture file");
+    }
+
+    #[test]
+    fn resolve_adapter_in_dir_prefers_declared_over_checkpoint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A trainer folder: the final adapter plus a step checkpoint that sorts BEFORE it
+        // (`-` 0x2D < `.` 0x2E), so an ordered scan would grab the checkpoint.
+        let final_adapter = dir.path().join("my_style.safetensors");
+        touch(&dir.path().join("my_style-step250.safetensors"));
+        touch(&final_adapter);
+        assert_eq!(
+            resolve_adapter_in_dir(dir.path(), Some("my_style.safetensors")),
+            Some(final_adapter)
+        );
+    }
+
+    #[test]
+    fn resolve_adapter_in_dir_falls_back_when_no_or_missing_declared() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let only = dir.path().join("adapter.safetensors");
+        touch(&only);
+        // No declared name → first_safetensors_path fallback.
+        assert_eq!(resolve_adapter_in_dir(dir.path(), None), Some(only.clone()));
+        // Declared name that doesn't exist on disk → fallback (not an error).
+        assert_eq!(
+            resolve_adapter_in_dir(dir.path(), Some("does_not_exist.safetensors")),
+            Some(only)
+        );
+    }
+
+    #[test]
+    fn resolve_adapter_in_dir_rejects_traversal_and_non_safetensors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let final_adapter = dir.path().join("final.safetensors");
+        touch(&final_adapter);
+        // Outside the dir: a real sibling the crafted name tries to reach via `..`.
+        let outside = dir.path().parent().unwrap().join("evil.safetensors");
+        touch(&outside);
+        // Path-separated / traversing declared names are ignored (fall back to the scan),
+        // so a crafted `files` value can't redirect the load outside the record dir.
+        for crafted in ["../evil.safetensors", "sub/final.safetensors", "..", "."] {
+            assert_eq!(
+                resolve_adapter_in_dir(dir.path(), Some(crafted)),
+                Some(final_adapter.clone()),
+                "crafted name {crafted:?} must not escape the dir"
+            );
+        }
+        // A declared non-.safetensors file is not accepted; fall back to the scan.
+        touch(&dir.path().join("notes.txt"));
+        assert_eq!(
+            resolve_adapter_in_dir(dir.path(), Some("notes.txt")),
+            Some(final_adapter)
+        );
+        let _ = std::fs::remove_file(&outside);
     }
 }

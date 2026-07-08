@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { actionStatuses, terminalStatuses } from "../jobTypes.js";
 import { formatSeconds, liveElapsedSeconds, percent } from "../formatting.js";
-import { useAppContext } from "../context/AppContext.js";
+import { useAppLive } from "../context/AppContext.js";
 import { deriveWorkerHardware, findWorkerForJob, liveMeters } from "../workers.js";
 import { AssetMedia, AssetThumbnail, assetUrl, posterUrl, suppressThumbnailContextMenu } from "./assetMedia.jsx";
 import { LikenessBadge } from "./LikenessBadge.jsx";
@@ -65,6 +65,9 @@ function chipModifier(type) {
 // Status badge label per design spec.
 const STATUS_LABEL = {
   queued: "Queued",
+  // Accepted but awaiting the API-side async prompt rewrite (Ideogram 4 auto-caption, sc-9120)
+  // before it becomes claimable. Non-terminal, so the card renders it as an in-flight job.
+  pending_caption: "Preparing prompt",
   running: "Running",
   completed: "Complete",
   canceled: "Cancelled",
@@ -398,7 +401,7 @@ export function WorkerProgressCard({
   expectedThumbnailCount,
   onThumbnailClick,
 }) {
-  const { workersById, visibleWorkers } = useAppContext();
+  const { workersById, visibleWorkers } = useAppLive();
   const worker = useMemo(() => {
     if (job.workerId && workersById?.get) {
       const direct = workersById.get(job.workerId);

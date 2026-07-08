@@ -35,7 +35,17 @@ export function buildEditJobBody({
   width,
   height,
   fitMode = "crop",
+  loras = null,
+  guidanceScale = null,
 }) {
+  // Guidance override (sc-10275): only sent when the user set a finite value —
+  // otherwise omitted so the worker's per-family model default stands. The worker
+  // maps `advanced.guidanceScale` to `guidance` or, for true-CFG edit families
+  // (qwen/sdxl/flux2), `true_cfg` (base.rs resolve_guidance/resolve_true_cfg).
+  const advanced = {};
+  if (Number.isFinite(Number(guidanceScale)) && guidanceScale !== "" && guidanceScale != null) {
+    advanced.guidanceScale = Number(guidanceScale);
+  }
   const body = {
     projectId: project.id,
     projectName: project.name ?? null,
@@ -52,8 +62,11 @@ export function buildEditJobBody({
     fitMode,
     seed: seed == null || seed === "" ? null : Number(seed),
     count: 1,
-    advanced: {},
+    advanced,
   };
+  // Style/subject LoRAs (sc-10254): serialized top-level, same shape + resolver the
+  // generation path uses (serializeLora → worker resolve_adapters). Omitted when empty.
+  if (loras && loras.length) body.loras = loras;
   // Inpaint mask (sc-2436): only sent for inpaint-capable models with a painted
   // region; the worker confines the edit to it. Omitted entirely otherwise.
   if (maskAssetId) body.maskAssetId = maskAssetId;

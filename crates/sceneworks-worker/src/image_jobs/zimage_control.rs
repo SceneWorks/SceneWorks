@@ -15,6 +15,12 @@
 /// `ZIMAGE_CONTROL_FILE`); the candle `ZImageControl::generate` runs the matching 8-step schedule.
 const ZIMAGE_CTRL_REPO: &str = "alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1";
 const ZIMAGE_CTRL_FILE: &str = "Z-Image-Turbo-Fun-Controlnet-Union-2.1-8steps.safetensors";
+/// Pinned revision for the default Turbo `ZIMAGE_CTRL_REPO` (sc-9879, F-077 follow-up). Fetching the
+/// mutable `main` branch means a re-push (or a compromised token) could silently swap the ControlNet
+/// checkpoint we load; pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). Applied ONLY
+/// to the default repo — a manifest `controlWeights.repo` override keeps `main`. HF's tree API still
+/// reports the file's `lfs.oid`, which `ensure_hf_cached_file` verifies against.
+const ZIMAGE_CTRL_REVISION: &str = "5155fc56d17821007d6f62ac192c09e0f0e72016";
 /// The Z-Image-Turbo base diffusers repo when the manifest omits `repo`.
 const ZIMAGE_CTRL_DEFAULT_REPO: &str = "Tongyi-MAI/Z-Image-Turbo";
 /// Base (non-distilled, real-CFG) Z-Image Fun-Controlnet-Union weights (sc-8379) — the same VACE
@@ -24,6 +30,10 @@ const ZIMAGE_CTRL_DEFAULT_REPO: &str = "Tongyi-MAI/Z-Image-Turbo";
 /// single `.safetensors`. Mirrors the MLX `z_image_control` engine repo (`STRICT_CONTROL_ENGINES`).
 const ZIMAGE_CTRL_BASE_REPO: &str = "alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1";
 const ZIMAGE_CTRL_BASE_FILE: &str = "diffusion_pytorch_model.safetensors";
+/// Pinned revision for the default base `ZIMAGE_CTRL_BASE_REPO` (sc-9879, F-077 follow-up). Same
+/// defense-in-depth rationale as `ZIMAGE_CTRL_REVISION`; applied ONLY to the default base repo, an
+/// override keeps `main`, and the `lfs.oid` sha256 verify is retained.
+const ZIMAGE_CTRL_BASE_REVISION: &str = "755999a934909bd5832e20718bb7c639d2a63eb9";
 /// The base Z-Image diffusers repo when the manifest omits `repo` (sc-8379).
 const ZIMAGE_CTRL_BASE_DEFAULT_REPO: &str = "Tongyi-MAI/Z-Image";
 /// ControlNet conditioning-scale default (the strict-pose tier).
@@ -116,23 +126,18 @@ fn zimage_control_available(request: &ImageRequest, settings: &Settings) -> bool
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → model default (Turbo 8,
 /// base 50; sc-8379). The base undistilled model runs the longer schedule for its real-CFG quality.
 fn zimage_control_steps(request: &ImageRequest) -> u32 {
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    let default = if is_zimage_base_model(&request.model) {
-        ZIMAGE_CTRL_BASE_DEFAULT_STEPS
-    } else {
-        ZIMAGE_CTRL_DEFAULT_STEPS
-    };
-    request
-        .advanced
-        .get("steps")
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
-        .map(|steps| steps.clamp(1, 50) as u32)
-        .unwrap_or(default)
+    resolve_advanced_or_manifest_u32_with(
+        request,
+        "steps",
+        || {
+            if is_zimage_base_model(&request.model) {
+                ZIMAGE_CTRL_BASE_DEFAULT_STEPS
+            } else {
+                ZIMAGE_CTRL_DEFAULT_STEPS
+            }
+        },
+        1..=50,
+    )
 }
 
 /// Resolve the base-mode (sc-8680) classifier-free guidance scale: `advanced.guidanceScale` → manifest
@@ -140,23 +145,19 @@ fn zimage_control_steps(request: &ImageRequest) -> u32 {
 /// `z_image` control path (real CFG); Turbo ignores it (guidance-distilled). Mirrors
 /// `kolors_control_guidance`.
 fn zimage_control_guidance(request: &ImageRequest) -> f32 {
-    let manifest_default = request
-        .model_manifest_entry
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE);
-    advanced::f32_clamped(&request.advanced, "guidanceScale", manifest_default, 0.0..=30.0)
+    resolve_advanced_or_manifest_f32(
+        request,
+        "guidanceScale",
+        ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE,
+        0.0..=30.0,
+    )
 }
 
 /// The (repo, filename) of the ControlNet weights — `advanced.controlWeights.{repo,filename}` overrides,
 /// else the model's Fun-Controlnet-Union default: the Turbo 8-step variant, or the base
 /// (full-CFG) variant for the base `z_image` model (sc-8379). Parity with the MLX `resolve_control_weights`.
-fn zimage_control_repo_file(request: &ImageRequest) -> (String, String) {
+/// The payload filename must be a plain component (sc-8821 / F-019).
+fn zimage_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
     let (default_repo, default_file) = if is_zimage_base_model(&request.model) {
         (ZIMAGE_CTRL_BASE_REPO, ZIMAGE_CTRL_BASE_FILE)
     } else {
@@ -171,10 +172,13 @@ fn zimage_control_repo_file(request: &ImageRequest) -> (String, String) {
             .unwrap_or(default)
             .to_owned()
     };
-    (
+    Ok((
         pick("repo", default_repo),
-        pick("filename", default_file),
-    )
+        safe_weight_filename(
+            &pick("filename", default_file),
+            "advanced.controlWeights.filename",
+        )?,
+    ))
 }
 
 /// Resolve the Fun-Controlnet-Union weight **file** the `ZImageControl` provider loads, downloading on
@@ -186,7 +190,7 @@ async fn ensure_zimage_control_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
-    let (repo, file) = zimage_control_repo_file(request);
+    let (repo, file) = zimage_control_repo_file(request)?;
     if let Ok(p) = std::env::var("SCENEWORKS_CONTROLNET_ZIMAGE") {
         let p = PathBuf::from(p);
         if p.is_file() {
@@ -213,7 +217,17 @@ async fn ensure_zimage_control_weights(
         .join("cache")
         .join("controlnet-zimage")
         .join(&file);
-    ensure_hf_cached_file(&context, &repo, "main", &file, &dst).await?;
+    // Pin the exact commit for whichever default control repo (Turbo or base) we resolved so `main`
+    // moving under us can't swap the ControlNet checkpoint (sc-9879). A manifest `controlWeights.repo`
+    // override may carry its own revision layout, so only pin when we're on a default repo.
+    let revision = if repo == ZIMAGE_CTRL_REPO {
+        ZIMAGE_CTRL_REVISION
+    } else if repo == ZIMAGE_CTRL_BASE_REPO {
+        ZIMAGE_CTRL_BASE_REVISION
+    } else {
+        "main"
+    };
+    ensure_hf_cached_file(&context, &repo, revision, &file, &dst).await?;
     Ok(dst)
 }
 
@@ -270,6 +284,10 @@ struct ZImageStrictControl {
     /// The [`STRICT_CONTROL_ENGINES`] catalog id for this job's model — `z_image_turbo_control` (Turbo) or
     /// `z_image_control` (base, sc-8379) — the `advanced.controlMode` validation key.
     engine_id: &'static str,
+    /// Per-generation PiD decoder weights (epic 7840, sc-8044): `Some` only when opted in (`advanced.usePid`)
+    /// AND the PiD + Gemma snapshots are cached (Z-Image is the FLUX.1 latent space → `zimage-turbo` alias).
+    /// Threaded into `with_pid` at load; `use_pid` on the request is `is_some()`. `None` ⇒ native VAE decode.
+    pid: Option<gen_core::PidWeights>,
 }
 
 impl CandleStrictControl for ZImageStrictControl {
@@ -287,6 +305,14 @@ impl CandleStrictControl for ZImageStrictControl {
         "zimage_control"
     }
 
+    fn out_width(&self) -> u32 {
+        self.width
+    }
+
+    fn out_height(&self) -> u32 {
+        self.height
+    }
+
     fn load(&self) -> WorkerResult<Self::Model> {
         let paths = ZImageControlPaths {
             snapshot: self.snapshot.clone(),
@@ -295,9 +321,16 @@ impl CandleStrictControl for ZImageStrictControl {
             // real CFG); `z_image_turbo` → the distilled Turbo path (byte-unchanged).
             base: self.is_base,
         };
-        ZImageControl::load(&paths).map_err(|error| {
+        let model = ZImageControl::load(&paths).map_err(|error| {
             WorkerError::Engine(format!("Z-Image strict-pose control load failed: {error}"))
-        })
+        })?;
+        // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND the snapshots are cached.
+        match &self.pid {
+            Some(pid) => model.with_pid(pid).map_err(|error| {
+                WorkerError::Engine(format!("Z-Image control PiD decoder load failed: {error}"))
+            }),
+            None => Ok(model),
+        }
     }
 
     fn generate_one(
@@ -323,6 +356,8 @@ impl CandleStrictControl for ZImageStrictControl {
                 .then(|| self.negative_prompt.clone())
                 .filter(|value| !value.trim().is_empty()),
             seed,
+            // PiD opt-in (sc-8044): in lockstep with the `with_pid` load — `is_some()` ⇒ decoder loaded.
+            use_pid: self.pid.is_some(),
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {
@@ -383,7 +418,16 @@ async fn generate_candle_zimage_control_stream(
     let negative_prompt = request.negative_prompt.clone();
 
     let pose_count = pose_entries(request).len();
-    let raw_settings = zimage_control_raw_settings(
+    // Per-generation PiD decode (epic 7840, sc-8044): resolve the `zimage-turbo`/`flux` PiD student + Gemma
+    // when `advanced.usePid` is set and the snapshots are cached; else `None` → native Z-Image VAE.
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+    // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
+    // 4K/native leaves the requested dims untouched). The shared driver renders the control map at these
+    // same dims (via `out_width`/`out_height`), keeping control + latent aligned.
+    let (width, height) =
+        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
+    let mut raw_settings = zimage_control_raw_settings(
         request,
         &repo,
         steps,
@@ -392,19 +436,22 @@ async fn generate_candle_zimage_control_stream(
         is_base,
         guidance,
     );
+    // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
+    raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
     let provider = ZImageStrictControl {
         snapshot: base,
         controlnet,
         prompt: request.prompt.clone(),
-        width: request.width,
-        height: request.height,
+        width,
+        height,
         steps,
         control_scale,
         is_base,
         guidance,
         negative_prompt,
         engine_id,
+        pid: pid_weights,
     };
 
     run_candle_strict_control(

@@ -206,6 +206,25 @@ fn onnx_filename_per_factor() {
     assert_eq!(onnx_file(4), "real_esrgan_x4.onnx");
 }
 
+/// F-118 / sc-9794 follow-up: image upscale accepts only 2x and 4x. Any other factor is rejected
+/// with a clear `InvalidPayload` error rather than silently coerced to 2x (which produced a
+/// quietly-different output), mirroring the video path's `resolve_video_upscale_factor`
+/// (F-118 / sc-8920). Both `run_image_upscale_job` and `run_dataset_upscale_job` route through
+/// this guard.
+#[test]
+fn image_upscale_factor_accepts_2_and_4_rejects_others() {
+    assert_eq!(resolve_image_upscale_factor(2).expect("2x"), 2);
+    assert_eq!(resolve_image_upscale_factor(4).expect("4x"), 4);
+    for bad in [0u64, 1, 3, 5, 8, 16] {
+        let err = resolve_image_upscale_factor(bad)
+            .expect_err("unsupported factor must be rejected, not coerced");
+        assert!(
+            matches!(err, WorkerError::InvalidPayload(ref m) if m.contains("factor 2 or 4")),
+            "factor {bad} should yield a clear InvalidPayload error, got {err:?}"
+        );
+    }
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -407,7 +426,10 @@ fn real_esrgan_candle_real_weights_upscales() {
     };
     let (sw, sh) = (src.width(), src.height());
 
-    let out = upscale_blocking(onnx, factor, src, CancelFlag::new()).expect("Real-ESRGAN upscale");
+    // `upscale_blocking` now returns the image plus the `ort` session's execution device
+    // (coreml/cuda/cpu, sc-8923); the smoke only checks the image, so bind the device for the trace.
+    let (out, device) =
+        upscale_blocking(onnx, factor, src, CancelFlag::new()).expect("Real-ESRGAN upscale");
     assert_eq!(
         (out.width(), out.height()),
         (sw * u32::from(factor), sh * u32::from(factor)),
@@ -419,7 +441,7 @@ fn real_esrgan_candle_real_weights_upscales() {
         "upscaled image must not be all-black"
     );
     eprintln!(
-        "Real-ESRGAN x{factor}: {sw}x{sh} -> {}x{}",
+        "Real-ESRGAN x{factor} ({device}): {sw}x{sh} -> {}x{}",
         out.width(),
         out.height()
     );
@@ -427,26 +449,258 @@ fn real_esrgan_candle_real_weights_upscales() {
 
 // --- Dataset Doctor one-tap upscale plumbing (sc-6539), pure + weight-free ---
 
+#[cfg(test)]
+fn upscale_test_settings(data_dir: &std::path::Path) -> crate::Settings {
+    crate::Settings {
+        api_url: "http://127.0.0.1".to_owned(),
+        access_token: None,
+        data_dir: data_dir.to_path_buf(),
+        config_dir: data_dir.join("config"),
+        worker_id: "test-worker".to_owned(),
+        gpu_id: "gpu-0".to_owned(),
+        is_child_worker: false,
+        poll_seconds: 1,
+        heartbeat_seconds: 1,
+        shutdown_timeout_seconds: 1,
+        huggingface_base_url: crate::DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
+        huggingface_token: None,
+        credentials: Vec::new(),
+        max_lora_url_bytes: crate::DEFAULT_MAX_LORA_URL_BYTES,
+        max_model_url_bytes: crate::DEFAULT_MAX_MODEL_URL_BYTES,
+        allow_private_lora_urls: false,
+        utility_workers: 1,
+        backend_mlx_enabled: true,
+        backend_candle_enabled: false,
+        gpu_memory_limit_bytes: 0,
+    }
+}
+
 #[test]
 fn parse_dataset_upscale_items_reads_valid_entries_and_skips_malformed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let settings = upscale_test_settings(dir.path());
+    let dataset_root = dir.path().join("datasets").join("ds-1");
+    let a = dataset_root.join("a.png");
+    let d = dataset_root.join("d.jpg");
     let payload = json!({
+        "datasetRoot": dataset_root.display().to_string(),
         "items": [
-            { "itemId": "a", "imagePath": "/data/a.png", "assetId": "asset_a" },
-            { "itemId": "", "imagePath": "/data/blank.png" }, // empty id → skipped
-            { "itemId": "c" },                                // no imagePath → skipped
-            { "itemId": "d", "imagePath": "/data/d.jpg" },
+            { "itemId": "a", "imagePath": a.display().to_string(), "assetId": "asset_a" },
+            { "itemId": "", "imagePath": dataset_root.join("blank.png").display().to_string() }, // empty id → skipped
+            { "itemId": "c" },                                                                    // no imagePath → skipped
+            { "itemId": "d", "imagePath": d.display().to_string() },
         ],
     });
-    let items = parse_dataset_upscale_items(payload.as_object().unwrap());
+    let items =
+        parse_dataset_upscale_items(&settings, payload.as_object().unwrap()).expect("items parse");
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].item_id, "a");
-    assert_eq!(items[0].image_path, std::path::PathBuf::from("/data/a.png"));
+    // sc-9812: path confinement canonicalizes the deepest existing ancestor before
+    // re-appending the (not-yet-created) tail, so the resolved image path is expressed
+    // via the canonical tempdir root (on macOS `/var` -> `/private/var`).
+    let expected_a = dir
+        .path()
+        .canonicalize()
+        .expect("tempdir canonicalizes")
+        .join("datasets")
+        .join("ds-1")
+        .join("a.png");
+    assert_eq!(items[0].image_path, expected_a);
     assert_eq!(items[1].item_id, "d");
 }
 
 #[test]
 fn parse_dataset_upscale_items_is_empty_without_an_items_array() {
-    assert!(parse_dataset_upscale_items(json!({}).as_object().unwrap()).is_empty());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let settings = upscale_test_settings(dir.path());
+    let dataset_root = dir.path().join("datasets").join("ds-1");
+    let payload = json!({ "datasetRoot": dataset_root.display().to_string() });
+    assert!(
+        parse_dataset_upscale_items(&settings, payload.as_object().unwrap())
+            .expect("empty parse")
+            .is_empty()
+    );
+}
+
+// sc-8842 / F-040: a client-supplied `imagePath` escaping the app-managed dataset root is an
+// arbitrary-file-read/exfil primitive; `resolve_dataset_item_path` must reject it so the job fails
+// rather than reading (and later re-pointing at) an out-of-tree file.
+#[test]
+fn parse_dataset_upscale_items_reject_image_path_outside_dataset_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let settings = upscale_test_settings(dir.path());
+    let dataset_root = dir.path().join("datasets").join("ds-1");
+    let payload = json!({
+        "datasetRoot": dataset_root.display().to_string(),
+        "items": [
+            {
+                "itemId": "item_1",
+                "imagePath": dataset_root.join("../../etc/secret.png").display().to_string(),
+            },
+        ],
+    });
+    let error = parse_dataset_upscale_items(&settings, payload.as_object().unwrap())
+        .expect_err("traversal image path rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("Dataset upscale item item_1 imagePath"),
+        "{error}"
+    );
+}
+
+#[test]
+fn parse_dataset_upscale_items_reject_missing_dataset_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let settings = upscale_test_settings(dir.path());
+    let payload = json!({ "items": [{ "itemId": "a", "imagePath": "a.png" }] });
+    let error = parse_dataset_upscale_items(&settings, payload.as_object().unwrap())
+        .expect_err("missing datasetRoot rejected");
+    assert!(error.to_string().contains("datasetRoot"), "{error}");
+}
+
+// sc-8842 / F-040: the output write path interpolates client-supplied `datasetId`/`itemId`; a
+// traversal component must be rejected by `safe_project_path` before `save_with_format` runs so a
+// crafted id cannot overwrite an arbitrary out-of-tree file with PNG bytes.
+#[test]
+fn dataset_upscale_output_path_rejects_traversal_ids() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let project_path = dir.path().join("project");
+    // itemId traversal
+    let rel = format!("training/datasets/ds-1/upscaled/{}.png", "../../escaped");
+    let error =
+        crate::safe_project_path(&project_path, &rel).expect_err("traversal itemId rejected");
+    assert!(
+        error.to_string().contains("Unsafe project-relative path"),
+        "{error}"
+    );
+    // datasetId traversal
+    let rel = format!("training/datasets/{}/upscaled/a.png", "../../../etc");
+    let error =
+        crate::safe_project_path(&project_path, &rel).expect_err("traversal datasetId rejected");
+    assert!(
+        error.to_string().contains("Unsafe project-relative path"),
+        "{error}"
+    );
+    // valid ids resolve inside the project tree
+    let rel = "training/datasets/ds-1/upscaled/item_1.png";
+    let abs = crate::safe_project_path(&project_path, rel).expect("valid path resolves");
+    assert!(abs.starts_with(&project_path), "{abs:?}");
+    assert!(
+        abs.ends_with("training/datasets/ds-1/upscaled/item_1.png"),
+        "{abs:?}"
+    );
+}
+
+/// sc-8911: a set-but-missing Real-ESRGAN ONNX env pin must error, not silently fall
+/// through to the cache/HF download. Unset → `None`; set + existing → `Some(path)`.
+#[test]
+fn resolve_env_file_pin_errors_on_missing_path() {
+    use std::ffi::OsString;
+
+    assert_eq!(
+        resolve_env_file_pin("SCENEWORKS_REALESRGAN_ONNX", None, "the export").expect("unset ok"),
+        None,
+        "an unset pin must fall through"
+    );
+
+    let missing = resolve_env_file_pin(
+        "SCENEWORKS_REALESRGAN_X4_ONNX",
+        Some(OsString::from("/nonexistent/realesrgan_x4.onnx")),
+        "the local Real-ESRGAN x4 ONNX export",
+    );
+    assert!(
+        matches!(missing, Err(WorkerError::InvalidPayload(ref m)) if m.contains("SCENEWORKS_REALESRGAN_X4_ONNX") && m.contains("does not exist")),
+        "a set-but-missing pin must error, got {missing:?}"
+    );
+
+    let existing = std::env::temp_dir().join(format!(
+        "sw-realesrgan-pin-test-{}.onnx",
+        std::process::id()
+    ));
+    std::fs::write(&existing, b"onnx").expect("write temp onnx");
+    let resolved = resolve_env_file_pin(
+        "SCENEWORKS_REALESRGAN_ONNX",
+        Some(existing.as_os_str().to_owned()),
+        "the export",
+    )
+    .expect("existing pin ok");
+    assert_eq!(resolved.as_deref(), Some(existing.as_path()));
+    let _ = std::fs::remove_file(&existing);
+}
+
+/// sc-8911: a set `SCENEWORKS_SEEDVR2_CHECKPOINT` that is missing either checkpoint file
+/// must error; a complete dir resolves; unset falls through.
+#[test]
+fn resolve_seedvr2_dir_pin_errors_on_incomplete_dir() {
+    use std::ffi::OsString;
+
+    assert_eq!(
+        resolve_seedvr2_dir_pin(None).expect("unset ok"),
+        None,
+        "an unset pin must fall through"
+    );
+
+    // A temp dir missing both files → error.
+    let empty = std::env::temp_dir().join(format!("sw-seedvr2-pin-test-{}", std::process::id()));
+    std::fs::create_dir_all(&empty).expect("mkdir temp");
+    let incomplete = resolve_seedvr2_dir_pin(Some(OsString::from(empty.as_os_str())));
+    assert!(
+        matches!(incomplete, Err(WorkerError::InvalidPayload(ref m)) if m.contains("SCENEWORKS_SEEDVR2_CHECKPOINT") && m.contains("missing")),
+        "an incomplete checkpoint dir must error, got {incomplete:?}"
+    );
+
+    // Populate both canonical files → resolves.
+    std::fs::write(empty.join(SEEDVR2_DIT_FILE), b"dit").expect("write dit");
+    std::fs::write(empty.join(SEEDVR2_VAE_FILE), b"vae").expect("write vae");
+    let resolved =
+        resolve_seedvr2_dir_pin(Some(OsString::from(empty.as_os_str()))).expect("complete dir ok");
+    assert_eq!(resolved.as_deref(), Some(empty.as_path()));
+    let _ = std::fs::remove_dir_all(&empty);
+}
+
+/// sc-8879: the default third-party SeedVR2 mirror is fetched at a pinned commit, never
+/// the mutable `main` branch, so an upstream re-push can't silently swap the weights we
+/// load. Lock the constant to a real 40-hex commit id.
+#[test]
+fn seedvr2_revision_is_pinned_commit_not_main() {
+    assert_ne!(
+        SEEDVR2_REVISION, "main",
+        "SeedVR2 must pin a fixed revision"
+    );
+    assert_eq!(
+        SEEDVR2_REVISION.len(),
+        40,
+        "a pinned HF revision is a 40-char commit sha"
+    );
+    assert!(
+        SEEDVR2_REVISION
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "the pinned revision must be lowercase hex"
+    );
+}
+
+/// sc-9682 (F-077 follow-up): the first-party Real-ESRGAN ONNX repo is fetched at a
+/// pinned commit, never the mutable `main` branch, so a re-push (or a compromised token)
+/// can't silently swap the ONNX graph we load. Lock the constant to a real 40-hex commit id.
+#[test]
+fn onnx_revision_is_pinned_commit_not_main() {
+    assert_ne!(
+        ONNX_REVISION, "main",
+        "Real-ESRGAN ONNX must pin a fixed revision"
+    );
+    assert_eq!(
+        ONNX_REVISION.len(),
+        40,
+        "a pinned HF revision is a 40-char commit sha"
+    );
+    assert!(
+        ONNX_REVISION
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "the pinned revision must be lowercase hex"
+    );
 }
 
 #[test]

@@ -1,8 +1,8 @@
 //! DWPose whole-body pose detection on the Rust worker (epic 3482, sc-3487).
 //!
-//! Ports the Python `scene_worker/pose_adapters.py` `pose_detect` job to Rust so the
-//! Pose Library "create from photo" flow + InstantID pose conditioning keep working
-//! on a Python-free Mac. The detector is rtmlib's performance preset — `yolox_m`
+//! Runs the `pose_detect` job natively in Rust (ported from the retired Python worker's
+//! `pose_adapters.py`) so the Pose Library "create from photo" flow + InstantID pose
+//! conditioning keep working on a Python-free Mac. The detector is rtmlib's performance preset — `yolox_m`
 //! (person boxes) + `rtmw-dw-x-l` (COCO-WholeBody-133 SimCC) — run via `ort`
 //! (onnxruntime) with the CoreML execution provider. The path-selection spike
 //! (`docs/sc-3487/spike-findings.md`) validated sub-pixel keypoint parity + matched
@@ -29,7 +29,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use crate::downloads::{ensure_cached_file, DownloadContext};
+use crate::downloads::{ensure_cached_file, verify_file_sha256, DownloadContext};
 use image::RgbImage;
 #[cfg(not(target_os = "macos"))]
 use ort::execution_providers::CUDAExecutionProvider;
@@ -63,6 +63,14 @@ const DET_FILE: &str = "yolox_m_8xb8-300e_humanart-c2c7a14a.onnx";
 const POSE_FILE: &str = "rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.onnx";
 const DET_URL: &str = "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip";
 const POSE_URL: &str = "https://download.openmmlab.com/mmpose/v1/projects/rtmw/onnx_sdk/rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.zip";
+/// Pinned SHA-256 of the openmmlab .zip bundles (sc-8879). These runtime weights are
+/// fetched over the network from `download.openmmlab.com` with no digest advertised by
+/// the host, so the download is verified against these constants before extraction. A
+/// mismatch (host-side swap, corrupted transfer, MITM) fails the job with the
+/// integrity-check error instead of silently loading tampered weights. Digests were
+/// computed from the published bundles (94,223,081 B / 213,433,855 B respectively).
+const DET_ZIP_SHA256: &str = "a000224fd8ba283202bc62d4a5fcdfe353adb9f468777dbac1ea2ada2093adde";
+const POSE_ZIP_SHA256: &str = "a87e1af41a0a067776dba7d46e1c21c8f6e9f18e247e0e606718dd1f31e96ffd";
 const DETECTOR_ID: &str = "rtmw-dw-x-l/ort";
 
 /// The hardware execution provider this build registers before the CPU fallback:
@@ -78,6 +86,25 @@ const ACCEL_DEVICE: &str = "cuda";
 /// this is a render/threshold knob, not a probability; raw scores are preserved in
 /// the result. Mirrors Python `DEFAULT_POSE_MIN_CONF`.
 const DEFAULT_POSE_MIN_CONF: f64 = 0.3;
+
+/// Terminal cancel message for the pose-detect job. Shared between the
+/// `run_blocking_with_heartbeat` keepalive (which posts it when the blocking task finishes AFTER
+/// the flag tripped) and the in-task between-iteration checks below (whose typed `Canceled`
+/// carries the same message), so the terminal status is identical whichever side observes the trip
+/// first (sc-9123).
+const POSE_CANCEL_MESSAGE: &str = "Pose detection canceled by user.";
+
+/// Between-iteration cooperative cancel check for the two worker-side pose loops (sc-9123): the
+/// DWPose batch-detect loop and the skeleton render loop both live in worker code (not behind an
+/// engine surface), so a user cancel tripped by the keepalive's poll bails between images/persons
+/// with the TYPED `Canceled` — which `run_blocking_with_heartbeat` maps to the terminal `Canceled`
+/// post instead of failing the job.
+fn bail_if_canceled(cancel: &gen_core::CancelFlag) -> WorkerResult<()> {
+    if cancel.is_cancelled() {
+        return Err(WorkerError::Canceled(POSE_CANCEL_MESSAGE.to_owned()));
+    }
+    Ok(())
+}
 
 // COCO-WholeBody-133 (rtmlib raw) → SceneWorks OpenPose-18 body. (op_idx, coco_idx);
 // OpenPose-18 inserts neck(1) = midpoint of shoulders (computed separately).
@@ -169,12 +196,30 @@ fn yolox_preprocess(img: &RgbImage) -> (Vec<f32>, f32) {
 
 /// This YOLOX export bakes in NMS: `dets`(1,N,5)=[xyxy,score]. rtmlib's
 /// `shape[-1]==5` branch: boxes /= ratio, keep score > 0.3.
-fn yolox_decode(dets: &[f32], shape: &[i64], ratio: f32) -> Vec<Box4> {
+///
+/// The shape/length are validated against the `(…, N, 5)` contract before indexing
+/// (F-102): a mis-pinned ONNX export with a rank < 2 shape or a `dets` buffer shorter
+/// than `N*5` would panic on `shape[1]` / `dets[base + 4]` and unwind the async task;
+/// return an `Engine` error instead (sc-8904).
+fn yolox_decode(dets: &[f32], shape: &[i64], ratio: f32) -> WorkerResult<Vec<Box4>> {
     let mut out = Vec::new();
     if shape.last().copied() != Some(5) {
-        return out;
+        return Ok(out);
     }
-    let n = shape[1] as usize;
+    if shape.len() < 2 {
+        return Err(WorkerError::Engine(format!(
+            "yolox output rank {} < 2 (expected (…, N, 5))",
+            shape.len()
+        )));
+    }
+    let n = shape[1].max(0) as usize;
+    if dets.len() < n.saturating_mul(5) {
+        return Err(WorkerError::Engine(format!(
+            "yolox output has {} values but (N={n} × 5) needs {}",
+            dets.len(),
+            n.saturating_mul(5)
+        )));
+    }
     for i in 0..n {
         let base = i * 5;
         if dets[base + 4] > 0.3 {
@@ -186,7 +231,7 @@ fn yolox_decode(dets: &[f32], shape: &[i64], ratio: f32) -> Vec<Box4> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 /// Build the (1,3,PH,PW) BGR-normalized pose input for one bbox + return the
@@ -233,6 +278,12 @@ fn argmax(slice: &[f32]) -> (usize, f32) {
 }
 
 /// Decode SimCC outputs → 133 `[x, y, score]` in original px.
+///
+/// The SimCC-x shape/length are validated against the `(1, K, Wx)` contract before
+/// indexing (F-102): a mis-pinned RTMW export with a rank < 3 shape, `K == 0`, or a
+/// `simcc_x`/`simcc_y` buffer shorter than `K*Wx` / `K*Wy` would panic on `sx_shape[2]`
+/// or the per-keypoint slices and unwind the async task; return an `Engine` error
+/// instead (sc-8904).
 fn pose_decode(
     simcc_x: &[f32],
     sx_shape: &[i64],
@@ -241,13 +292,33 @@ fn pose_decode(
     cy: f32,
     sw: f32,
     sh: f32,
-) -> Vec<[f32; 3]> {
-    let k = sx_shape[1] as usize;
-    let wx = sx_shape[2] as usize;
+) -> WorkerResult<Vec<[f32; 3]>> {
+    if sx_shape.len() < 3 {
+        return Err(WorkerError::Engine(format!(
+            "rtmw simcc_x rank {} < 3 (expected (1, K, Wx))",
+            sx_shape.len()
+        )));
+    }
+    let k = sx_shape[1].max(0) as usize;
+    let wx = sx_shape[2].max(0) as usize;
+    if k == 0 {
+        return Err(WorkerError::Engine(
+            "rtmw simcc_x has 0 keypoints".to_owned(),
+        ));
+    }
     let wy = simcc_y.len() / k;
+    if simcc_x.len() < k.saturating_mul(wx) || simcc_y.len() < k.saturating_mul(wy) {
+        return Err(WorkerError::Engine(format!(
+            "rtmw simcc buffers too short: x has {} (needs {}), y has {} (needs {})",
+            simcc_x.len(),
+            k.saturating_mul(wx),
+            simcc_y.len(),
+            k.saturating_mul(wy)
+        )));
+    }
     let x0 = cx - sw / 2.0;
     let y0 = cy - sh / 2.0;
-    (0..k)
+    Ok((0..k)
         .map(|j| {
             let (xloc, mvx) = argmax(&simcc_x[j * wx..(j + 1) * wx]);
             let (yloc, mvy) = argmax(&simcc_y[j * wy..(j + 1) * wy]);
@@ -261,7 +332,7 @@ fn pose_decode(
             let py = (ly / SPLIT) / PH as f32 * sh + y0;
             [px, py, val]
         })
-        .collect()
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +349,18 @@ struct PoseRecord {
 
 /// Convert one person's raw 133 `[x,y,score]` (original px) into the SceneWorks
 /// OpenPose record, normalized by (w,h). Mirrors `wholebody_to_openpose`.
-fn wholebody_to_openpose(kps: &[[f32; 3]], w: f32, h: f32) -> PoseRecord {
+///
+/// Requires the full COCO-WholeBody-133 keypoint set (F-102): the body/hand/face slices
+/// index `kps` up to 132, so a shorter buffer (a mis-pinned RTMW export with a different
+/// keypoint count) would panic on `kps[i]` and unwind the async task. Return an `Engine`
+/// error instead of indexing OOB (sc-8904).
+fn wholebody_to_openpose(kps: &[[f32; 3]], w: f32, h: f32) -> WorkerResult<PoseRecord> {
+    if kps.len() < 133 {
+        return Err(WorkerError::Engine(format!(
+            "rtmw decode produced {} keypoints, expected 133 (COCO-WholeBody)",
+            kps.len()
+        )));
+    }
     let pt = |i: usize| [kps[i][0] / w, kps[i][1] / h, kps[i][2]];
     let seq = |lo: usize, hi: usize| (lo..hi).map(pt).collect::<Vec<_>>();
     let mut body = vec![[0.0f32; 3]; 18];
@@ -291,11 +373,11 @@ fn wholebody_to_openpose(kps: &[[f32; 3]], w: f32, h: f32) -> PoseRecord {
         (ls[1] + rs[1]) / 2.0 / h,
         ls[2].min(rs[2]),
     ];
-    PoseRecord {
+    Ok(PoseRecord {
         keypoints: body,
         hands: [seq(91, 112), seq(112, 133)],
         face: seq(23, 91),
-    }
+    })
 }
 
 /// Re-normalize a source-aspect pose into a centered `max(w,h)` SQUARE (pad short
@@ -462,16 +544,39 @@ impl Detector {
     /// off-Mac) and falling back to CPU if the provider can't initialise (mirrors
     /// Python `load_pose_detector`).
     fn load(det_path: &Path, pose_path: &Path) -> WorkerResult<Self> {
-        match (
-            build_session(det_path, true),
-            build_session(pose_path, true),
-        ) {
-            (Ok(det), Ok(pose)) => Ok(Self {
+        // Build the det session on the hardware EP first; only try the pose session on the
+        // EP if that succeeded — a failing accel provider fails identically for both, so
+        // building the second is wasted work (F-099). Bind and `warn!` the error before the
+        // CPU fallback so an accel-init failure leaves a breadcrumb instead of an
+        // unexplained "device = cpu" (sc-8901).
+        let accel = match build_session(det_path, true) {
+            Ok(det) => match build_session(pose_path, true) {
+                Ok(pose) => Some((det, pose)),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        provider = ACCEL_DEVICE,
+                        "DWPose pose-model {ACCEL_DEVICE} session build failed; falling back to CPU"
+                    );
+                    None
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    provider = ACCEL_DEVICE,
+                    "DWPose detector {ACCEL_DEVICE} session build failed; falling back to CPU"
+                );
+                None
+            }
+        };
+        match accel {
+            Some((det, pose)) => Ok(Self {
                 det,
                 pose,
                 device: ACCEL_DEVICE,
             }),
-            _ => Ok(Self {
+            None => Ok(Self {
                 det: build_session(det_path, false)?,
                 pose: build_session(pose_path, false)?,
                 device: "cpu",
@@ -484,10 +589,10 @@ impl Detector {
     fn detect(&mut self, img: &RgbImage) -> WorkerResult<Vec<Vec<[f32; 3]>>> {
         let (din, ratio) = yolox_preprocess(img);
         let dout = run(&mut self.det, [1, 3, DET as i64, DET as i64], din)?;
-        let boxes = dout
-            .first()
-            .map(|(shape, data)| yolox_decode(data, shape, ratio))
-            .unwrap_or_default();
+        let boxes = match dout.first() {
+            Some((shape, data)) => yolox_decode(data, shape, ratio)?,
+            None => Vec::new(),
+        };
         let mut people = Vec::new();
         for b in &boxes {
             let (pin, cx, cy, sw, sh) = pose_preprocess(img, b);
@@ -509,7 +614,7 @@ impl Detector {
                 cy,
                 sw,
                 sh,
-            ));
+            )?);
         }
         Ok(people)
     }
@@ -529,7 +634,10 @@ fn detect_batch(
     det_path: PathBuf,
     pose_path: PathBuf,
     images: Vec<Option<PathBuf>>,
+    cancel: &gen_core::CancelFlag,
 ) -> WorkerResult<(Vec<Option<RawSource>>, &'static str)> {
+    // A cancel that lands before the (long) cold detector load starts skips the load entirely.
+    bail_if_canceled(cancel)?;
     let cell = DETECTOR.get_or_init(|| Mutex::new(None));
     let mut guard = cell.lock().unwrap_or_else(|poisoned| {
         let mut guard = poisoned.into_inner();
@@ -543,6 +651,10 @@ fn detect_batch(
     let device = detector.device;
     let mut out = Vec::with_capacity(images.len());
     for path in images {
+        // sc-9123: this multi-image batch loop is worker code, so a user cancel (tripped by the
+        // keepalive's poll) bails between images with the TYPED `Canceled` — each per-image forward
+        // stays a bounded uninterruptible unit, but the batch as a whole is cancellable.
+        bail_if_canceled(cancel)?;
         let Some(path) = path else {
             out.push(None);
             continue;
@@ -592,6 +704,7 @@ async fn ensure_weights(
         "SCENEWORKS_DWPOSE_DET",
         DET_FILE,
         DET_URL,
+        DET_ZIP_SHA256,
         &cache,
         &download_context,
     )
@@ -600,6 +713,7 @@ async fn ensure_weights(
         "SCENEWORKS_DWPOSE_POSE",
         POSE_FILE,
         POSE_URL,
+        POSE_ZIP_SHA256,
         &cache,
         &download_context,
     )
@@ -607,18 +721,43 @@ async fn ensure_weights(
     Ok((det, pose))
 }
 
+/// Resolve an explicit env-pinned weight path (sc-8911). Unset → `Ok(None)` (fall through
+/// to cache/download). Set and existing → `Ok(Some(path))`. Set but missing → an
+/// `InvalidPayload` error, so an operator's typo fails loudly rather than silently
+/// loading whatever the download path resolves. Takes the raw value explicitly so it's
+/// unit-testable without mutating the process environment.
+fn resolve_pinned_weight(
+    env_key: &str,
+    value: Option<std::ffi::OsString>,
+    file: &str,
+) -> WorkerResult<Option<PathBuf>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(&value);
+    if path.exists() {
+        return Ok(Some(path));
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "{env_key} is set to {} but that path does not exist. Point it at the local {file}, or unset it to download on first use.",
+        path.display()
+    )))
+}
+
 async fn ensure_one(
     env_key: &str,
     file: &str,
     url: &str,
+    zip_sha256: &str,
     cache: &Path,
     context: &DownloadContext<'_>,
 ) -> WorkerResult<PathBuf> {
-    if let Ok(pinned) = std::env::var(env_key) {
-        let path = PathBuf::from(pinned);
-        if path.exists() {
-            return Ok(path);
-        }
+    // An explicitly-set env pin must resolve to an existing file. If it's set but the
+    // path is missing, that's an operator error — surface it instead of silently falling
+    // through to the cache/network (sc-8911), which would mask a typo and load different
+    // weights than the operator intended.
+    if let Some(path) = resolve_pinned_weight(env_key, std::env::var_os(env_key), file)? {
+        return Ok(path);
     }
     let target = cache.join(file);
     if target.exists() {
@@ -643,12 +782,21 @@ async fn ensure_one(
         None,
     )
     .await?;
+    // The openmmlab host advertises no digest and `ensure_cached_file` only checks the
+    // transfer length, so verify the fetched bundle against the pinned SHA-256 before
+    // extracting the weights it contains (sc-8879). A mismatch removes the file and
+    // fails the job with the integrity-check error.
+    verify_file_sha256(&zip_path, zip_sha256, &format!("DWPose {file} bundle")).await?;
     // The openmmlab bundle is a .zip containing a single .onnx; extract it.
     let target_clone = target.clone();
+    let zip_for_extract = zip_path.clone();
     let file_owned = file.to_owned();
-    tokio::task::spawn_blocking(move || extract_onnx(&zip_path, &file_owned, &target_clone))
+    tokio::task::spawn_blocking(move || extract_onnx(&zip_for_extract, &file_owned, &target_clone))
         .await
         .map_err(|error| task_join_error("weight extract task", error))??;
+    // Drop the (large — ~90-210 MB) archive now the .onnx is extracted; keeping it just
+    // wastes cache disk (sc-8927). Best-effort: a failure here doesn't fail the job.
+    let _ = tokio::fs::remove_file(&zip_path).await;
     Ok(target)
 }
 
@@ -751,24 +899,43 @@ fn resolve_source(
             });
         }
     }
-    // project-relative path
+    // project-relative path, confined to the project tree: reject any `..`/root/prefix
+    // component so a crafted `../../<anything>` can't escape `proj` (sc-8875). The raw
+    // cwd-relative fallback is dropped for the same reason — an unresolved relative path
+    // would otherwise reach `decode_image_any` resolved against the worker's cwd.
     if let (Some(raw), Some(proj)) = (raw, project_path) {
-        let candidate = proj.join(raw);
-        if candidate.exists() {
-            return Ok(PoseSource {
-                asset_id,
-                display_name,
-                temp,
-                path: Some(candidate),
-            });
+        if let Some(candidate) = join_project_relative(proj, raw) {
+            if candidate.exists() {
+                return Ok(PoseSource {
+                    asset_id,
+                    display_name,
+                    temp,
+                    path: Some(candidate),
+                });
+            }
         }
     }
     Ok(PoseSource {
         asset_id,
         display_name,
         temp,
-        path: raw.map(PathBuf::from),
+        path: None,
     })
+}
+
+/// Join a project-relative source path under `project_path`, accepting only
+/// `Component::Normal` segments so a payload can never traverse out of the project
+/// tree with `..`, an absolute root, or a drive/UNC prefix (sc-8875). Returns `None`
+/// if any component is non-`Normal` (the caller then treats the source as unresolved).
+fn join_project_relative(project_path: &Path, raw: &str) -> Option<PathBuf> {
+    let mut path = project_path.to_path_buf();
+    for component in Path::new(raw).components() {
+        match component {
+            std::path::Component::Normal(value) => path.push(value),
+            _ => return None,
+        }
+    }
+    Some(path)
 }
 
 fn resolve_asset_path(
@@ -843,6 +1010,34 @@ pub(crate) async fn run_pose_detect_job(
         .map(|s| resolve_source(s, &store, settings, project_id, project_path.as_deref()))
         .collect::<WorkerResult<_>>()?;
 
+    // Snapshot the staged File-Upload temp paths up front so cleanup runs on EVERY exit
+    // path — success, cancel, or an intervening error (sc-8912). The old code only cleaned
+    // up after the render finished, so a cancel/detect/render failure leaked the staged
+    // uploads. `resolved` is later moved into the render task, so this list (cheap: just
+    // the temp paths) is what the deferred cleanup keys off, independent of `resolved`.
+    let temp_upload_paths: Vec<PathBuf> = resolved
+        .iter()
+        .filter(|s| s.temp)
+        .filter_map(|s| s.path.clone())
+        .collect();
+
+    // Run the fallible body, then clean up the temp uploads regardless of outcome before
+    // propagating (defer-style). Cleanup is confined to the pose-uploads cache inside
+    // `cleanup_temp_uploads`, so a project asset resolved by id is never touched.
+    let result = run_pose_detect_inner(api, settings, http_client, job, resolved, min_conf).await;
+    cleanup_temp_uploads(settings, &temp_upload_paths).await;
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_pose_detect_inner(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+    resolved: Vec<PoseSource>,
+    min_conf: f64,
+) -> WorkerResult<()> {
     update_job(
         api,
         &job.id,
@@ -876,14 +1071,24 @@ pub(crate) async fn run_pose_detect_job(
     let image_paths: Vec<Option<PathBuf>> = resolved.iter().map(|s| s.path.clone()).collect();
     // Keep the worker heartbeat alive across the blocking batch detect (cold RTMW/onnx load +
     // multi-image inference can run long) so it never trips the API's 90s stale-sweep (sc-8390).
+    // The batch loop is worker code, so it takes a REAL `CancelFlag` (sc-9123): the keepalive's
+    // cancel poll trips it and `detect_batch` bails between images with the typed `Canceled`
+    // instead of running the whole multi-image batch to its natural end. The same flag covers the
+    // skeleton render below — a cancel that lands late in the detect stage still stops the job at
+    // the next checkpoint, whichever stage that is.
+    let cancel = gen_core::CancelFlag::new();
+    let detect_cancel = cancel.clone();
     let (raw, device) = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
-        None,
-        "",
+        Some(cancel.clone()),
+        POSE_CANCEL_MESSAGE,
         "pose detection task",
-        tokio::task::spawn_blocking(move || detect_batch(det_path, pose_path, image_paths)),
+        crate::no_cancel_ack(),
+        tokio::task::spawn_blocking(move || {
+            detect_batch(det_path, pose_path, image_paths, &detect_cancel)
+        }),
     )
     .await?;
 
@@ -900,18 +1105,25 @@ pub(crate) async fn run_pose_detect_job(
     // thread and grows the silent window toward the 90s stale-sweep on large multi-person high-res
     // batches — the same failure class sc-8390 fixed for the inference half. Fold it into a
     // `spawn_blocking` under `run_blocking_with_heartbeat` so it's both off-thread AND heartbeat-
-    // covered (sc-8848). `resolved` is moved in for the render and handed back out so the subsequent
-    // `cleanup_temp_sources` still sees it.
-    let (out_sources, resolved) = run_blocking_with_heartbeat(
+    // covered (sc-8848). `resolved` is moved into the render task (it owns the source paths + asset
+    // ids for the output records); temp-upload cleanup keys off the snapshot the caller took before
+    // this move (sc-8912), so it doesn't need handing back. The render loop is worker code too, so it
+    // shares the detect stage's `CancelFlag` (sc-9123) and bails between sources AND between
+    // per-person rasters (each is a `max(w,h)²` canvas + PNG encode — the expensive unit) with the
+    // typed `Canceled`; any skeleton PNGs already written sit in the job-scoped cache dir and are inert.
+    let render_cancel = cancel.clone();
+    let out_sources = run_blocking_with_heartbeat(
         api,
         settings,
         &job.id,
-        None,
-        "",
+        Some(cancel),
+        POSE_CANCEL_MESSAGE,
         "pose skeleton render task",
+        crate::no_cancel_ack(),
         tokio::task::spawn_blocking(move || {
             let mut out_sources: Vec<Value> = Vec::new();
             for (src, raw_src) in resolved.iter().zip(raw) {
+                bail_if_canceled(&render_cancel)?;
                 let stem = src
                     .path
                     .as_ref()
@@ -935,15 +1147,15 @@ pub(crate) async fn run_pose_detect_job(
                     .people
                     .iter()
                     .map(|kps| {
-                        let rec = squareify(&wholebody_to_openpose(kps, w, h), w, h);
+                        let rec = squareify(&wholebody_to_openpose(kps, w, h)?, w, h);
                         let bb = bbox(
                             &[&rec.keypoints, &rec.hands[0], &rec.hands[1], &rec.face],
                             min_conf,
                         );
                         let area = bb.map_or(0.0, |b| (b[2] - b[0]) * (b[3] - b[1]));
-                        (area, rec, bb)
+                        Ok((area, rec, bb))
                     })
-                    .collect();
+                    .collect::<WorkerResult<Vec<_>>>()?;
                 ordered
                     .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -951,6 +1163,7 @@ pub(crate) async fn run_pose_detect_job(
                 let stick = body_stickwidth(side, side);
                 let mut poses: Vec<Value> = Vec::new();
                 for (person_index, (_area, rec, bb)) in ordered.iter().enumerate() {
+                    bail_if_canceled(&render_cancel)?;
                     let body_t = thresholded(&rec.keypoints, min_conf);
                     let hands_t = [
                         thresholded(&rec.hands[0], min_conf),
@@ -960,8 +1173,11 @@ pub(crate) async fn run_pose_detect_job(
                     let skeleton =
                         draw_wholebody(side, side, &body_t, Some(&hands_t), Some(&face_t), stick);
                     let preview = out_dir.join(format!("{stem}_p{person_index}_skel.png"));
+                    // A failed preview encode/write is an output-side fault, not a bad user
+                    // payload — classify it as `Engine` so it isn't mislabeled as user error
+                    // (sc-8952). `ImageError` is not an `io::Error`, so `Io` doesn't fit.
                     skeleton.save(&preview).map_err(|e| {
-                        WorkerError::InvalidPayload(format!("pose preview write: {e}"))
+                        WorkerError::Engine(format!("pose preview write: {e}"))
                     })?;
 
                     poses.push(json!({
@@ -990,14 +1206,10 @@ pub(crate) async fn run_pose_detect_job(
                     "poses": poses,
                 }));
             }
-            Ok((out_sources, resolved))
+            Ok(out_sources)
         }),
     )
     .await?;
-
-    // Delete File-Upload temp sources now detection is done (guarded to the
-    // pose-uploads cache so a project asset resolved by id is never removed).
-    cleanup_temp_sources(settings, &resolved).await;
 
     let mut result = JsonObject::new();
     result.insert("sources".to_owned(), Value::Array(out_sources));
@@ -1024,16 +1236,20 @@ pub(crate) async fn run_pose_detect_job(
     Ok(())
 }
 
-async fn cleanup_temp_sources(settings: &Settings, sources: &[PoseSource]) {
+/// Delete the staged File-Upload temp sources, confined to the pose-uploads cache so a
+/// project asset resolved by id is never removed. Takes the pre-computed temp paths (the
+/// caller snapshots them before `resolved` is moved into the render task) so this runs on
+/// every exit path — success OR error (sc-8912). Best-effort; a missing/already-removed
+/// file is a no-op.
+async fn cleanup_temp_uploads(settings: &Settings, temp_paths: &[PathBuf]) {
+    if temp_paths.is_empty() {
+        return;
+    }
     let uploads_root = settings.data_dir.join("cache").join("pose-uploads");
     let Ok(uploads_root) = uploads_root.canonicalize() else {
         return;
     };
-    for src in sources {
-        if !src.temp {
-            continue;
-        }
-        let Some(path) = &src.path else { continue };
+    for path in temp_paths {
         if let Ok(resolved) = path.canonicalize() {
             if resolved.starts_with(&uploads_root) {
                 let _ = tokio::fs::remove_file(&resolved).await;

@@ -34,6 +34,10 @@ use gen_core::{
     AdapterKind, AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest,
     Generator, Image, LoadSpec, Progress, Quant, WeightsSource,
 };
+// `IdentityWeights` (the PuLID-FLUX `LoadSpec::identity` seam, sc-8827) is used only by the macOS MLX
+// PuLID path (`image_jobs/pulid.rs`); gate it so the candle lane's `-D warnings` sees no unused import.
+#[cfg(target_os = "macos")]
+use gen_core::IdentityWeights;
 // `AdapterKind` (LoRA/LoKr classification) was MLX-only until sc-5126: the candle Lens lane is the
 // first candle family to take LoRA/LoKr, so it now classifies adapters too and the import moved into
 // the shared block above. `ControlKind` (ControlNet conditioning) was MLX-only until sc-8304: the candle
@@ -310,8 +314,10 @@ const STUB_ADAPTER: &str = "procedural_preview";
 /// so the sidecar + result agree on which backend produced the image.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_ADAPTER: &str = "candle_sdxl";
-// Shared by the MLX path and the candle Lens lane (sc-5126) — both cap a job's user LoRAs at 3
-// (`resolve_adapters`), so the const is available on the Windows candle build too.
+// Shared by the MLX path and the candle Lens lane (sc-5126) — both cap a job's total LoRAs at
+// MAX_JOB_LORAS (`resolve_adapters`), so the const is available on the Windows candle build too.
+// The web pickers enforce a lower user-selectable cap (presetUtils.MAX_USER_JOB_LORAS) that leaves
+// headroom for an auto-applied builtin within this total (sc-8936).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -634,295 +640,253 @@ pub(crate) async fn run_image_generate_job(
     // `ImageRoute::InstantId` arm) — checked first since `instantid_realvisxl` is not an inventory
     // `is_candle_engine` id.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let handled = if settings.backend_candle_enabled && instantid_available(&request, settings) {
-        generate_instantid_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if settings.backend_candle_enabled && sdxl_edit_candle_available(&request, settings) {
-        // SDXL img2img / inpaint / outpaint edit (sc-5487) — checked BEFORE `is_candle_engine` because
-        // `sdxl`/`realvisxl` ARE candle txt2img ids, so without this an `edit_image` job would be caught
-        // by the txt2img branch (which can't honor a source/mask). Disjoint from the IP-Adapter lane
-        // below (that one is reference-only and not `edit_image`).
-        generate_candle_sdxl_edit_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if settings.backend_candle_enabled && flux2_edit_candle_available(&request, settings) {
-        // FLUX.2-klein reference / img2img edit (sc-5487) — checked BEFORE `is_candle_engine` because
-        // `flux2_klein_9b` IS a candle txt2img id, so without this an `edit_image` job would be caught by
-        // the txt2img branch (which can't honor a source reference). FLUX.2-klein has no torch path, so
-        // before this an off-Mac klein edit had no real lane (it deferred to a torch worker that lacks
-        // the model). Disjoint from the IP-Adapter / SDXL-edit lanes (different model family).
-        generate_candle_flux2_edit_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if settings.backend_candle_enabled && qwen_edit_candle_available(&request, settings) {
-        // Qwen-Image-Edit reference / dual-latent edit (sc-5487) — checked BEFORE `is_candle_engine`.
-        // `qwen_image_edit` is its OWN model id (not the `qwen_image` candle txt2img id), so it would
-        // not be caught by the txt2img branch; routed here (grouped with the edit lanes) to the bespoke
-        // candle `QwenEdit` stream. Off-Mac this was a torch fallback; candle now serves it. Disjoint
-        // from the Qwen strict-pose control lane below (that one is `qwen_image` + `advanced.poses`).
-        generate_candle_qwen_edit_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if settings.backend_candle_enabled && zimage_edit_candle_available(&request, settings) {
-        // Z-Image img2img / edit (sc-6595) — checked BEFORE `is_candle_engine` because `z_image_turbo` IS
-        // a candle txt2img id (and `z_image_edit` is a distinct id the txt2img branch doesn't know), so
-        // without this an `edit_image` job would be caught by the txt2img branch (which can't honor a
-        // source) or fall through entirely. Grouped with the other edit lanes; disjoint from the Z-Image
-        // strict-pose control lane below (that one is `advanced.poses`, not `edit_image`).
-        generate_candle_zimage_edit_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if settings.backend_candle_enabled
-        && zimage_identity_candle_available(&request, settings)
-    {
-        // Z-Image identity-init for Image Studio "With Character" (sc-8409, epic 4406) — checked BEFORE
-        // `is_candle_engine` because `z_image_turbo` IS a candle txt2img id, so without this a
-        // `character_image` + `referenceAssetId` (+ `referenceStrength > 0`) job would be caught by the
-        // txt2img branch and silently drop the reference (carrying no identity, hence no score — the gap
-        // this story closes). The off-Mac sibling of the macOS generic lane's Z-Image identity img2img
-        // (`resolve_zimage_identity_init`); reuses the candle `ZImageEdit` engine with the identity
-        // `referenceAssetId` as the source-latent init + wires the sc-4411 face-likeness scorer. Disjoint
-        // from the Z-Image edit lane above (that one is `edit_image` + `sourceAssetId`) and the strict-pose
-        // control lane below (that one is `advanced.poses`, which this gate excludes). Mirrors the router's
-        // `zimage_identity_candle_eligible`.
-        generate_candle_zimage_identity_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if settings.backend_candle_enabled && sdxl_ipadapter_available(&request, settings) {
-        // SDXL IP-Adapter-Plus reference conditioning (sc-5488) — checked BEFORE `is_candle_engine`
-        // because `sdxl`/`realvisxl` ARE candle txt2img ids, so without this a reference job would be
-        // caught by the txt2img branch and silently drop the reference.
-        generate_candle_sdxl_ipadapter_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if settings.backend_candle_enabled && kolors_ipadapter_available(&request, settings) {
-        // Kolors IP-Adapter-Plus reference conditioning (sc-5488) — checked BEFORE `is_candle_engine`
-        // because `kolors` IS a candle txt2img id, so without this a reference job would be caught by
-        // the txt2img branch and silently drop the reference (the SDXL IP reasoning, for Kolors).
-        generate_candle_kolors_ipadapter_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if settings.backend_candle_enabled && flux_ipadapter_available(&request, settings) {
-        // FLUX XLabs IP-Adapter reference conditioning (sc-5872) — checked BEFORE `is_candle_engine`
-        // because `flux_dev`/`flux_schnell` ARE candle txt2img ids, so without this a reference job
-        // would be caught by the txt2img branch and silently drop the reference (the SDXL/Kolors IP
-        // reasoning, for FLUX).
-        generate_candle_flux_ipadapter_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if settings.backend_candle_enabled && pulid_candle_available(&request, settings) {
-        // PuLID-FLUX face identity (sc-5492) — `pulid_flux_dev` is its OWN model id (not a candle
-        // txt2img id), so it would never be caught by the `is_candle_engine` branch below; routed here
-        // (grouped with the reference/identity lanes) to the bespoke candle `PulidFlux` stream. The
-        // distinct model id cleanly disambiguates it from the FLUX XLabs IP-Adapter lane above (both
-        // condition on a reference image, but that lane is `flux_dev`/`flux_schnell`).
-        generate_candle_pulid_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if settings.backend_candle_enabled && qwen_control_available(&request, settings) {
-        // Qwen-Image strict-pose ControlNet (sc-5489) — checked BEFORE `is_candle_engine` because
-        // `qwen_image` IS a candle txt2img id, so without this a `advanced.poses` job would be caught
-        // by the txt2img branch and silently drop the poses (the IP-Adapter reasoning, for poses).
-        generate_candle_qwen_control_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if settings.backend_candle_enabled && kolors_control_available(&request, settings) {
-        // Kolors strict-pose ControlNet (sc-5489) — checked BEFORE `is_candle_engine` because `kolors`
-        // IS a candle txt2img id, so without this a `advanced.poses` job would be caught by the txt2img
-        // branch and silently drop the poses (the Qwen-control reasoning, for the Kolors family).
-        generate_candle_kolors_control_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if settings.backend_candle_enabled && zimage_control_available(&request, settings) {
-        // Z-Image strict-pose Fun-ControlNet (sc-5489) — checked BEFORE `is_candle_engine` because
-        // `z_image_turbo` IS a candle txt2img id, so without this a `advanced.poses` job would be caught
-        // by the txt2img branch and silently drop the poses (the Qwen/Kolors-control reasoning, for the
-        // Z-Image family — the last of the three strict-pose families).
-        generate_candle_zimage_control_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if settings.backend_candle_enabled && flux2_control_candle_available(&request, settings)
-    {
-        // FLUX.2-dev strict-pose Fun-Controlnet-Union (sc-7736, epic 6564) — `flux2_dev` + `advanced.poses`
-        // is the bespoke candle `Flux2Control` lane (`generate_candle_flux2_control_stream`), NOT txt2img —
-        // the `is_candle_engine` txt2img branch below would silently drop the poses, and the no-pose-lane
-        // reject branch would reject them. Branch it out first (the qwen/kolors/z_image-control reasoning,
-        // for the FLUX.2-dev family — the 4th wired strict-pose family). Disjoint from the FLUX.2 edit lane
-        // above (that one is `edit_image` + a source; this is `advanced.poses`, not edit mode). Mirrors the
-        // router's `flux2_dev_control_candle_eligible`.
-        generate_candle_flux2_control_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if settings.backend_candle_enabled && flux1_control_candle_available(&request, settings)
-    {
-        // FLUX.1-dev strict-control Shakker Union-Pro-2.0 (sc-8412, epic 8236) — `flux_dev` +
-        // `advanced.poses` is the bespoke candle `Flux1DevControl` lane
-        // (`generate_candle_flux1_control_stream`), NOT txt2img — the `is_candle_engine` txt2img branch
-        // below would silently drop the poses, and the no-pose-lane reject branch would reject them.
-        // Branch it out first (the qwen/kolors/z_image/flux2-control reasoning, for the FLUX.1-dev family —
-        // the 5th wired strict-control family). Disjoint from the FLUX XLabs IP-Adapter lane above (that
-        // one keys on a `referenceAssetId`; this is `advanced.poses`). Mirrors the router's
-        // `flux1_control_candle_eligible`.
-        generate_candle_flux1_control_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else if settings.backend_candle_enabled
-        && is_candle_engine(&request.model)
-        && !matches!(
-            request.model.as_str(),
-            "qwen_image" | "kolors" | "z_image_turbo" | "z_image" | "flux2_dev" | "flux_dev"
-        )
-        && request.mode != "edit_image"
-        && !pose_entries(&request).is_empty()
-    {
-        // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane (e.g. sdxl)
-        // must be REJECTED with a clear error, not silently rendered as plain txt2img (poses dropped)
-        // and not bounced to torch. The candle worker CLAIMS these (jobs_store
-        // `image_job_candle_pose_reject`) precisely to fail them loudly here, checked BEFORE the
-        // `is_candle_engine` txt2img branch below. SDXL identity-pose ships via InstantID; the wired
-        // candle pose families are qwen_image / kolors / z_image_turbo / z_image / flux2_dev / flux_dev.
-        return Err(WorkerError::InvalidPayload(format!(
-            "strict pose (advanced.poses) is not supported for model '{}' on the candle backend — \
-             refusing rather than silently generating an unconditioned image (wired candle pose \
-             families: qwen_image, kolors, z_image_turbo, z_image, flux2_dev, flux_dev; SDXL \
-             identity-pose runs via InstantID)",
-            request.model
-        )));
-    } else if settings.backend_candle_enabled && is_candle_engine(&request.model) {
-        generate_candle_stream(
-            api,
-            settings,
-            job,
-            &plan,
-            &project_path,
-            backend,
-            &mut asset_writes,
-        )
-        .await?;
-        true
-    } else {
-        false
+    let handled = match resolve_candle_image_route(&request, settings) {
+        Some(route) => {
+            match route {
+                // InstantID (sc-5491, epic 5480): the candle InstantID provider's bespoke path (the
+                // off-Mac sibling of the macOS `ImageRoute::InstantId` arm).
+                CandleImageRoute::InstantId => {
+                    generate_instantid_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // SDXL img2img / inpaint / outpaint edit (sc-5487) — diverted before the txt2img arm
+                // because `sdxl`/`realvisxl` ARE candle txt2img ids (an `edit_image` job would otherwise
+                // be caught there and lose the source/mask). Disjoint from the IP-Adapter lane.
+                CandleImageRoute::SdxlEdit => {
+                    generate_candle_sdxl_edit_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // FLUX.2-klein reference / img2img edit (sc-5487) — `flux2_klein_9b` IS a candle txt2img
+                // id, so an `edit_image` job must divert here first. No torch path for klein edit.
+                CandleImageRoute::Flux2Edit => {
+                    generate_candle_flux2_edit_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // Qwen-Image-Edit reference / dual-latent edit (sc-5487) — `qwen_image_edit` is its own
+                // model id, routed to the bespoke candle QwenEdit stream (disjoint from the qwen control
+                // lane, which is `qwen_image` + `advanced.poses`).
+                CandleImageRoute::QwenEdit => {
+                    generate_candle_qwen_edit_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // Z-Image img2img / edit (sc-6595) — `z_image_turbo` IS a candle txt2img id, so an
+                // `edit_image` job must divert here first (disjoint from the Z-Image control lane).
+                CandleImageRoute::ZimageEdit => {
+                    generate_candle_zimage_edit_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // Z-Image identity-init for Image Studio "With Character" (sc-8409, epic 4406) — the
+                // off-Mac sibling of the macOS generic lane's Z-Image identity img2img; reuses the candle
+                // ZImageEdit engine with the identity `referenceAssetId` as the source-latent init + wires
+                // the sc-4411 face-likeness scorer. Diverted before the txt2img arm (else the reference
+                // silently drops).
+                CandleImageRoute::ZimageIdentity => {
+                    generate_candle_zimage_identity_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // SDXL IP-Adapter-Plus reference conditioning (sc-5488) — diverted before the txt2img arm
+                // (else the reference silently drops on the shared `sdxl`/`realvisxl` txt2img id).
+                CandleImageRoute::SdxlIpAdapter => {
+                    generate_candle_sdxl_ipadapter_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // Kolors IP-Adapter-Plus reference conditioning (sc-5488).
+                CandleImageRoute::KolorsIpAdapter => {
+                    generate_candle_kolors_ipadapter_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // FLUX XLabs IP-Adapter reference conditioning (sc-5872).
+                CandleImageRoute::FluxIpAdapter => {
+                    generate_candle_flux_ipadapter_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // PuLID-FLUX face identity (sc-5492) — `pulid_flux_dev` is its own model id (never an
+                // `is_candle_engine` txt2img id), routed to the bespoke candle PulidFlux stream.
+                CandleImageRoute::Pulid => {
+                    generate_candle_pulid_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // Qwen-Image strict-pose ControlNet (sc-5489) — diverted before the txt2img arm (else the
+                // poses silently drop on the shared `qwen_image` txt2img id).
+                CandleImageRoute::QwenControl => {
+                    generate_candle_qwen_control_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // Kolors strict-pose ControlNet (sc-5489).
+                CandleImageRoute::KolorsControl => {
+                    generate_candle_kolors_control_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // Z-Image strict-pose Fun-ControlNet (sc-5489).
+                CandleImageRoute::ZimageControl => {
+                    generate_candle_zimage_control_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // FLUX.2-dev strict-pose Fun-Controlnet-Union (sc-7736, epic 6564) — `flux2_dev` +
+                // `advanced.poses` is the bespoke candle Flux2Control lane, diverted before the txt2img arm.
+                CandleImageRoute::Flux2Control => {
+                    generate_candle_flux2_control_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // FLUX.1-dev strict-control Shakker Union-Pro-2.0 (sc-8412, epic 8236) — `flux_dev` +
+                // `advanced.poses` is the bespoke candle Flux1DevControl lane, diverted before the txt2img arm.
+                CandleImageRoute::Flux1Control => {
+                    generate_candle_flux1_control_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane (e.g.
+                // sdxl) must be REJECTED with a clear error, not silently rendered as plain txt2img (poses
+                // dropped) and not bounced to torch. The candle worker CLAIMS these (jobs_store
+                // `image_job_candle_pose_reject`) precisely to fail them loudly here. SDXL identity-pose
+                // ships via InstantID; the wired candle pose families are qwen_image / kolors /
+                // z_image_turbo / z_image / flux2_dev / flux_dev.
+                CandleImageRoute::PoseReject => {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "strict pose (advanced.poses) is not supported for model '{}' on the candle backend — \
+                         refusing rather than silently generating an unconditioned image (wired candle pose \
+                         families: qwen_image, kolors, z_image_turbo, z_image, flux2_dev, flux_dev; SDXL \
+                         identity-pose runs via InstantID)",
+                        request.model
+                    )));
+                }
+                // Plain candle txt2img (sc-3675, epic 3672): sdxl/realvisxl on the narrow txt2img lane.
+                CandleImageRoute::CandleTxt2Img => {
+                    generate_candle_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+            }
+            true
+        }
+        // Candle disabled (default) or no candle engine matched → stub exactly as before.
+        None => false,
     };
     #[cfg(not(any(
         target_os = "macos",
@@ -1015,17 +979,26 @@ async fn generate_stub_stream(
         check_cancel(api, &job.id, "Image generation canceled by user.").await?;
         let seed = resolve_seed(request, index);
         let pixels = stub_rgb8(request.width, request.height, seed);
-        let fact = write_image_asset(
-            plan,
-            index,
-            seed,
-            request.width,
-            request.height,
-            pixels,
-            STUB_ADAPTER,
-            stub_raw_settings(request),
-            project_path,
-        )?;
+        // Encode + write the asset PNG off the async runtime thread (sc-8909 / F-107).
+        let plan_for_task = plan.clone();
+        let raw_settings = stub_raw_settings(request);
+        let (width, height) = (request.width, request.height);
+        let project_path_for_task = project_path.to_owned();
+        let fact = tokio::task::spawn_blocking(move || {
+            write_image_asset(
+                &plan_for_task,
+                index,
+                seed,
+                width,
+                height,
+                pixels,
+                STUB_ADAPTER,
+                raw_settings,
+                &project_path_for_task,
+            )
+        })
+        .await
+        .map_err(|error| crate::task_join_error("stub image asset write task", error))??;
         asset_writes.push(Value::Object(fact));
         let progress = 0.1 + 0.85 * ((index + 1) as f64 / request.count as f64);
         update_job(
@@ -1047,6 +1020,11 @@ async fn generate_stub_stream(
 }
 
 /// Per-job invariants shared across every image in the generation set.
+///
+/// `Clone` so the per-image asset writers can move an owned copy into a `spawn_blocking` PNG-encode
+/// task (sc-8909 / F-107) — the plan is a few strings + one small generation-set `Value`, negligible
+/// next to the encode it hands off the async runtime thread.
+#[derive(Clone)]
 pub(crate) struct ImagePlan {
     pub(crate) request: ImageRequest,
     pub(crate) genset_id: String,
@@ -1239,11 +1217,19 @@ async fn apply_inline_upscale(
             .ok_or_else(|| {
                 WorkerError::InvalidPayload("upscale source asset missing mediaPath".to_owned())
             })?;
-        let source = crate::image_decode::decode_image_any(project_path.join(media_rel))
-            .map_err(|error| {
-                WorkerError::InvalidPayload(format!("Upscale source could not be loaded: {error}"))
-            })?
-            .to_rgb8();
+        // Decode the base image off the async runtime thread (sc-8909 / F-107).
+        let source_path = project_path.join(media_rel);
+        let source = tokio::task::spawn_blocking(move || {
+            crate::image_decode::decode_image_any(source_path)
+                .map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "Upscale source could not be loaded: {error}"
+                    ))
+                })
+                .map(|decoded| decoded.to_rgb8())
+        })
+        .await
+        .map_err(|error| crate::task_join_error("upscale source decode task", error))??;
         let seed = base_fact.get("seed").and_then(Value::as_i64).unwrap_or(0);
 
         update_job(
@@ -1278,15 +1264,25 @@ async fn apply_inline_upscale(
         )
         .await?;
 
-        let fact = write_upscaled_asset(
-            plan,
-            base_fact,
-            &upscaled,
-            engine_id,
-            factor,
-            softness,
-            project_path,
-        )?;
+        // Build the upscaled asset (including the blocking PNG encode) off the async runtime thread
+        // (sc-8909 / F-107).
+        let plan_for_task = plan.clone();
+        let base_fact_for_task = base_fact.clone();
+        let engine_for_task = engine_id.to_owned();
+        let project_path_for_task = project_path.to_owned();
+        let fact = tokio::task::spawn_blocking(move || {
+            write_upscaled_asset(
+                &plan_for_task,
+                &base_fact_for_task,
+                &upscaled,
+                &engine_for_task,
+                factor,
+                softness,
+                &project_path_for_task,
+            )
+        })
+        .await
+        .map_err(|error| crate::task_join_error("upscaled asset write task", error))??;
         asset_writes.push(Value::Object(fact));
         heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     }
@@ -1361,15 +1357,37 @@ fn write_upscaled_asset(
     fact.insert("displayName".to_owned(), json!(display_name));
     fact.insert("createdAt".to_owned(), json!(now_rfc3339()));
     fact.insert("rawAdapterSettings".to_owned(), Value::Object(raw_settings));
-    fact.insert(
-        "upscaledFrom".to_owned(),
-        base_fact.get("assetId").cloned().unwrap_or(Value::Null),
-    );
+    // Link the upscaled variant back to its base image using the SAME lineage keys the standalone
+    // `image_upscale` job writes (upscale_jobs.rs), so the Library / Recent-Batches fold and the
+    // Original↔Upscaled A/B toggle collapse the pair (sc-10117). This previously wrote a bare
+    // `upscaledFrom` field that nothing read (not the web `assetVariants.js`, not `project_store`) and
+    // that was dropped at sidecar-build time, so inline upscales never folded with their originals.
+    let source_asset_id = base_fact.get("assetId").cloned().unwrap_or(Value::Null);
+    fact.insert("sourceAssetId".to_owned(), source_asset_id.clone());
+    fact.insert("parents".to_owned(), json!([source_asset_id.clone()]));
+    // Preserve any base `extra` (e.g. character metadata) and layer the upscale markers on top.
+    let mut extra = base_fact
+        .get("extra")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    extra.insert("isUpscaled".to_owned(), json!(true));
+    extra.insert("upscaledFromAssetId".to_owned(), source_asset_id);
+    extra.insert("factor".to_owned(), json!(factor));
+    extra.insert("engine".to_owned(), json!(engine_id));
+    fact.insert("extra".to_owned(), Value::Object(extra));
     Ok(fact)
 }
 
 /// The job-result shape the API streams from: `assetWrites` + the `generationSet`
 /// fact drive `persist_reported_assets` (idempotent per progress update).
+///
+/// ACCEPTED TRADEOFF (sc-8953 / F-151): this deep-clones the whole `asset_writes` vec into the
+/// result on every call, and the generation loop calls it on each `GenEvent::Step` — so the total
+/// serialization work is O(images² · steps) as `asset_writes` grows one entry per finished image.
+/// At current image counts (a handful per set) and step counts this is negligible next to the
+/// generation itself, so it is left as-is; if sets grow large, stream this only on `Image` /
+/// `Decoding` events (where the fact set actually changes) rather than on every step.
 fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
     json!({
         "generationSetId": plan.genset_id,
@@ -1572,8 +1590,14 @@ include!("image_jobs/stream.rs");
 ))]
 // base image routing (MLX) + neutral txt2img generation harness + the candle execution path.
 include!("image_jobs/base.rs");
-#[cfg(target_os = "macos")]
-// Per-generation PiD (pixel-diffusion) super-resolving decoder routing (epic 7840, sc-7849).
+// Per-generation PiD (pixel-diffusion) super-resolving decoder routing (epic 7840, sc-7849). The
+// weight-resolution helper (`resolve_pid_weights`) is backend-neutral, so it compiles on BOTH face
+// backends: the generic MLX lanes (base.rs/qwen.rs `generate*`, macOS-only) AND the candle InstantID
+// Angles/Poses lane (instantid.rs, sc-8373), which now decodes through the `sdxl` PiD student off-Mac.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 include!("image_jobs/pid.rs");
 // Shared strict-control driver (epic 8236, sc-8243): the `(engine_id, control_repo, supported_kinds)`
 // single source of truth + the preprocess (pose/canny/depth/user-passthrough) → `Conditioning::Control`

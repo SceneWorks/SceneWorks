@@ -18,12 +18,18 @@ sceneworks-core = { path = "../../crates/sceneworks-core" }
 # Tier-0 dataset-quality pixel extraction for the readiness endpoint (sc-6533). GPU-free
 # (image/imageproc/image_hasher), so it does not add to the worker/MLX build surface.
 sceneworks-image-quality = { path = "../../crates/sceneworks-image-quality" }
+# MCP server (epic 10231, sc-10233): the streamable-HTTP tower service nested at
+# `/mcp` inside create_app_with_state, behind the same access_control middleware
+# as the /api/v1 routes.
+sceneworks-mcp = { path = "../../crates/sceneworks-mcp" }
 sceneworks-worker = { path = "../../crates/sceneworks-worker" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.40", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = { workspace = true }
+# Move deleted LoRA/model artifacts to the OS trash (recoverable) rather than unlinking them.
+trash = { workspace = true }
 tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.6", features = ["cors"] }
 uuid = { version = "1.11", features = ["v4"] }
@@ -50,6 +56,9 @@ embed-web = ["dep:rust-embed", "dep:mime_guess"]
 backend-candle = ["sceneworks-worker/backend-candle"]
 
 [dev-dependencies]
+# Real MCP streamable-HTTP client for the /mcp round-trip test (sc-10233); same
+# pinned version as crates/sceneworks-mcp — client features are additive.
+rmcp = { version = "=2.1.0", features = ["client", "transport-streamable-http-client-reqwest"] }
 tempfile = "3.13"
 tower = { version = "0.5", features = ["util"] }
 # Encode real test images for the synchronous image-fix round-trips (sc-6539).

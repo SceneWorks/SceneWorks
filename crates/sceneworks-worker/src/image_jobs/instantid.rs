@@ -1,14 +1,31 @@
 /// The SceneWorks model id for native InstantID (production = InstantID on RealVisXL_V5.0).
 const INSTANTID_MODEL: &str = "instantid_realvisxl";
-/// SDXL base for InstantID when the manifest omits `repo` (the photoreal production base).
-const INSTANTID_SDXL_REPO: &str = "SG161222/RealVisXL_V5.0";
+/// SDXL base for InstantID when the manifest omits `repo`: the SceneWorks quant-matrix turnkey
+/// re-host (sc-9965, epic 8506) — the SAME `SceneWorks/realvisxl-mlx` the plain `realvisxl` model
+/// loads, with self-contained `bf16/` (default — the validated fp16 identity envelope) + packed
+/// `q8/` / `q4/` tier subdirs. Was upstream `SG161222/RealVisXL_V5.0` (dense diffusers root, never
+/// tier-aware); `resolve_instantid_sdxl_base` now resolves the selected tier via
+/// [`instantid_tier_subdir`]. The mlx-gen SDXL loaders packed-detect the UNet + both CLIP tiers
+/// (sc-8746), so Q4/Q8 load packed with no install-time convert; the candle lane runs dense f16 and
+/// always loads `bf16/`. The InstantID adapter weights (IdentityNet / ip-adapter / face stack) are
+/// separate on-demand dense loads and stay dense.
+const INSTANTID_SDXL_REPO: &str = "SceneWorks/realvisxl-mlx";
 /// Stock InstantID checkpoint repo — the IdentityNet `ControlNetModel/` lives here.
 const INSTANTID_CONTROLNET_REPO: &str = "InstantX/InstantID";
+/// Pinned revision for the stock InstantX IdentityNet repo (sc-9879, F-077 follow-up).
+const INSTANTID_CONTROLNET_REVISION: &str = "57b32dfee076092ad2930c71fd6d439c2c3b1820";
 /// Converted-weights bundle (download-on-first-use): the MLX `ip-adapter.safetensors`
 /// (`tools/convert_instantid.py`) + the native face stack `scrfd_10g.safetensors`
 /// (`convert_scrfd.py`) + `arcface_iresnet100.safetensors` (`convert_glintr100.py`). Public
 /// repo, mirroring the YOLO11 / SAM2 `SceneWorks/*-mlx` uploads (sc-3633 / sc-3707).
 const INSTANTID_MLX_REPO: &str = "SceneWorks/instantid-mlx";
+/// Pinned revision for the first-party converted InstantID bundle (sc-9879, F-077 follow-up). Even
+/// though `SceneWorks/instantid-mlx` is a first-party repo, fetching the mutable `main` branch means a
+/// re-push (or a compromised token) could silently swap the ip-adapter / SCRFD / ArcFace weights we
+/// load. Pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). HF's tree API still reports
+/// each file's `lfs.oid`, which `ensure_hf_cached_file` verifies against. NOTE: the candle PuLID lane
+/// reuses this SAME repo (`pulid_candle.rs` `PULID_CANDLE_FACE_REPO`); its pin must match this sha.
+const INSTANTID_MLX_REVISION: &str = "bca0cacf8e5e04529bb2b326a521361b02be84fd";
 const INSTANTID_IP_ADAPTER_FILE: &str = "ip-adapter.safetensors";
 // `pub(crate)` so the Dataset Doctor face pass (sc-6538) can join them under the bundle dir that
 // `ensure_face_stack_dir` stages, to load the MLX `FaceAnalysis` (SCRFD + ArcFace) directly.
@@ -33,6 +50,8 @@ const INSTANTID_ANGLE_CONTROLNET_SCALE: f32 = 0.65;
 /// xinsir OpenPose-SDXL ControlNet (the pose-mode second branch, sc-3117). Loads via the stock
 /// `load_controlnet` (no conversion) — `image_adapters.py:615-617` parity.
 const INSTANTID_OPENPOSE_REPO: &str = "xinsir/controlnet-openpose-sdxl-1.0";
+/// Pinned revision for the xinsir OpenPose-SDXL ControlNet (sc-9879, F-077 follow-up).
+const INSTANTID_OPENPOSE_REVISION: &str = "23f966cd5cfdd3f7729c903e243d87152162d2b7";
 /// Torch-parity default OpenPose lock (`instantid_adapter.py::_openpose_scale`, default 0.7).
 const INSTANTID_OPENPOSE_SCALE: f32 = 0.7;
 /// The face-restore re-render side (the engine's production crop size, sc-3380).
@@ -100,9 +119,11 @@ fn pose_to_body_points(keypoints: &[crate::openpose_skeleton::Keypoint]) -> Vec<
 }
 
 /// Resolve the RealVisXL (SDXL) base snapshot for InstantID: an explicit `modelPath` dir
-/// (advanced or manifest) wins, else the HF cache snapshot for the manifest `repo` (default
-/// RealVisXL_V5.0). The big base is staged by the normal model-download flow; `None` here
-/// means it is not present, so the job is not MLX-runnable (falls through to torch).
+/// (advanced or manifest) wins, else the selected quant tier subdir of the HF cache snapshot for the
+/// manifest `repo` (default `SceneWorks/realvisxl-mlx`). The big base is staged by the normal
+/// model-download flow; `None` here means it is not present, so the job is not native-runnable
+/// (falls through to torch). An explicit `modelPath` override loads verbatim (no tier resolution) —
+/// it is a fully-assembled diffusers dir the caller vouches for.
 fn resolve_instantid_sdxl_base(
     request: &ImageRequest,
     settings: &Settings,
@@ -126,7 +147,58 @@ fn resolve_instantid_sdxl_base(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(INSTANTID_SDXL_REPO);
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
+    Ok(huggingface_snapshot_dir(&settings.data_dir, repo)
+        .map(|root| instantid_tier_subdir(&root, request)))
+}
+
+/// Pick the engine-complete tier subdir of the `SceneWorks/realvisxl-mlx` turnkey `root` for the
+/// InstantID SDXL backbone (sc-9965, epic 8506). The turnkey ships self-contained `bf16/` (dense —
+/// the default, the validated fp16 identity envelope: ArcFace-cosine ~0.82 @1024²) + packed `q8/` /
+/// `q4/` subdirs, each a complete diffusers tree (`unet/` + `text_encoder{,_2}/` + `vae/` +
+/// tokenizer(s) + scheduler + model_index.json).
+///
+/// Tier selection mirrors [`instantid_quant`]'s bit mapping so the resolved tier and the applied
+/// load-quant agree (the load-time `.quantize()` no-ops on an already-packed base): `Some(4)` →
+/// `q4/`, `Some(8)` → `q8/`, `None` (the default, `mlxQuantize` unset / `<=0`) → `bf16/`. The candle
+/// InstantID lane runs dense f16 with no packed path (`candle-gen-sdxl::load_instantid_unet` reads
+/// the dense `unet/diffusion_pytorch_model.fp16.safetensors`, no `.scales` detect) and the worker
+/// already forces `recipe_bits -> None` there, so it always loads `bf16/`.
+///
+/// Falls back preferred → `bf16` → `q4` → `q8` → `root` so a partially-downloaded turnkey surfaces
+/// as a load error rather than a silent half-load — the same philosophy as
+/// [`standard_tier_subdir`]. Tier presence is filename-agnostic (a `unet/` `*.safetensors`, packed
+/// single-file or dense), so it holds for every tier regardless of the packed backbone filename.
+fn instantid_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
+    // Which tier the request wants. Only the MLX lane honors the packed Q4/Q8 tiers; candle (and the
+    // no-face build) is dense-only, so `preferred` is `bf16` there.
+    #[cfg(target_os = "macos")]
+    let preferred = match instantid_quant(request).0 {
+        Some(4) => "q4",
+        Some(8) => "q8",
+        _ => "bf16",
+    };
+    #[cfg(not(target_os = "macos"))]
+    let preferred = {
+        let _ = request;
+        "bf16"
+    };
+    // A tier is "present" when its `unet/` backbone holds any `*.safetensors` (packed single-file OR
+    // a dense `*.fp16.safetensors`). InstantID is always an SDXL turnkey — the backbone lives under
+    // `unet/`, never `transformer/` — so this one-component probe covers every tier.
+    let present = |name: &str| -> Option<PathBuf> {
+        let unet = root.join(name).join("unet");
+        let has_backbone = std::fs::read_dir(&unet)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".safetensors"));
+        has_backbone.then(|| root.join(name))
+    };
+    present(preferred)
+        .or_else(|| present("bf16"))
+        .or_else(|| present("q4"))
+        .or_else(|| present("q8"))
+        .unwrap_or_else(|| root.to_path_buf())
 }
 
 /// True when this is a native-MLX-eligible InstantID job: the production model in
@@ -153,6 +225,12 @@ fn instantid_image_count(request: &ImageRequest, settings: &Settings) -> u32 {
 /// Resolve the active angle-set collection for this job (sc-4450): the per-generation override
 /// (`advanced.keypointCollectionId`) → the user default → the built-in 11. Built-in fallback on
 /// any store error so angle generation never hard-fails on a Key Point Library hiccup.
+///
+/// ACCEPTED TRADEOFF (sc-8953 / F-151): for an angle-set job this runs its `ProjectStore` lookup
+/// twice — once via `instantid_image_count` at plan time and once here at generation time. It is a
+/// single small indexed read against the local SQLite store, negligible next to the generation, so
+/// the duplicate is left as-is; the fix (resolve once and thread the collection through the plan)
+/// is deferred until it matters.
 fn active_angle_collection(
     request: &ImageRequest,
     settings: &Settings,
@@ -192,37 +270,16 @@ fn builtin_angle_presets() -> Vec<sceneworks_core::project_store::ResolvedAngleP
 /// Resolve InstantID denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` →
 /// the torch-parity default (30).
 fn instantid_steps(request: &ImageRequest) -> u32 {
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    request
-        .advanced
-        .get("steps")
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
-        .map(|steps| steps.clamp(1, 80) as u32)
-        .unwrap_or(INSTANTID_DEFAULT_STEPS)
+    resolve_advanced_or_manifest_u32(request, "steps", INSTANTID_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve InstantID guidance: `advanced.guidanceScale` → manifest `guidanceScale` → the
 /// RealVisXL-tuned default (3.0). Clamped to a sane CFG range.
 fn instantid_guidance(request: &ImageRequest) -> f32 {
-    let manifest_default = request
-        .model_manifest_entry
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(INSTANTID_DEFAULT_GUIDANCE);
-    advanced::f32_clamped(
-        &request.advanced,
+    resolve_advanced_or_manifest_f32(
+        request,
         "guidanceScale",
-        manifest_default,
+        INSTANTID_DEFAULT_GUIDANCE,
         0.0..=30.0,
     )
 }
@@ -288,6 +345,21 @@ fn instantid_raw_settings(
     raw
 }
 
+/// The pinned commit revision for each InstantID download repo (sc-9879, F-077 follow-up). Every
+/// InstantID weight repo is a fixed, non-overridable const (the env pins point at local snapshot dirs,
+/// never another HF repo), so fetching the mutable `main` branch means a re-push (or a compromised token)
+/// could silently swap the weights we load. Pin each to its exact commit for defense-in-depth (mirrors
+/// sc-8879/sc-9682); the `lfs.oid` sha256 verify in `ensure_hf_cached_file` is retained. Any repo not in
+/// this table (a caller passing something unexpected) falls back to `main` rather than a wrong sha.
+fn instantid_revision(repo: &str) -> &'static str {
+    match repo {
+        INSTANTID_MLX_REPO => INSTANTID_MLX_REVISION,
+        INSTANTID_CONTROLNET_REPO => INSTANTID_CONTROLNET_REVISION,
+        INSTANTID_OPENPOSE_REPO => INSTANTID_OPENPOSE_REVISION,
+        _ => "main",
+    }
+}
+
 /// Resolve a single InstantID weight file: return it if already present in `dir`, else
 /// download `url` into `dir` (atomic `.tmp` + rename, so a partial download is never mistaken
 /// for a complete one — same shape as `person_segment::ensure_segmenter_weights`).
@@ -297,7 +369,7 @@ async fn ensure_instantid_file(
     dir: &Path,
     name: &str,
 ) -> WorkerResult<PathBuf> {
-    ensure_hf_cached_file(context, repo, "main", name, &dir.join(name)).await
+    ensure_hf_cached_file(context, repo, instantid_revision(repo), name, &dir.join(name)).await
 }
 
 /// Resolve only the SCRFD detector weights (`scrfd_10g.safetensors`) from the same converted
@@ -445,7 +517,7 @@ async fn ensure_instantid_weights(
         ensure_hf_cached_file(
             &context,
             INSTANTID_CONTROLNET_REPO,
-            "main",
+            INSTANTID_CONTROLNET_REVISION,
             &source,
             &controlnet_dir.join(file),
         )
@@ -599,16 +671,16 @@ async fn generate_instantid_stream(
         0.0..=2.0,
     );
     let face_restore = advanced::flag(&request.advanced, "faceRestore");
-    // PiD decoder overlay (epic 7840, sc-8371): decode Angles/Poses through the `sdxl` PiD
-    // super-resolving student (2K/4K) instead of the SDXL VAE when the request opted in
+    // PiD decoder overlay (epic 7840, sc-8371 mlx / sc-8373 candle): decode Angles/Poses through the
+    // `sdxl` PiD super-resolving student (2K/4K) instead of the SDXL VAE when the request opted in
     // (`advanced.usePid`) AND the checkpoint + Gemma snapshots are cached. `resolve_pid_weights`
     // returns `None` for a non-eligible model / missing opt-in / absent snapshots → native VAE.
-    // InstantID composes the SDXL VAE, so it shares the one `sdxl` student via the engine's
-    // `with_pid`. The candle InstantID lane has no PiD decode yet (sc-8373), so this is macOS-only —
-    // `use_pid` never reaches the candle engine (whose `InstantIdRequest` has no such field).
-    #[cfg(target_os = "macos")]
-    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model);
-    #[cfg(target_os = "macos")]
+    // InstantID composes the SDXL VAE, so BOTH the mlx and candle engines share the one `sdxl` student
+    // via `with_pid` — the candle lane (sc-8373) now carries the same `InstantId::with_pid` +
+    // `InstantIdRequest.use_pid` seam as macOS, so this resolves on either face backend.
+    #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
     let use_pid = pid_weights.is_some();
     // Load the xinsir OpenPose ControlNet only for pose mode (it is the MultiControlNet second
     // branch; identity/angle modes don't need it).
@@ -637,7 +709,7 @@ async fn generate_instantid_stream(
     }
     // Mark PiD output on the asset sidecar (epic 7840): the NSCLv1 non-commercial restriction flows
     // to PiD-decoded output, distinct from the rest of the pipeline. Only set when PiD actually ran.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
     if use_pid {
         raw_settings.insert("usePid".to_owned(), Value::Bool(true));
     }
@@ -662,6 +734,15 @@ async fn generate_instantid_stream(
     // Per-image work items: (seed, prompt, action). Pose + angle sets share one seed (only the
     // pose changes across the set — noise-derived attributes stay constant); single identity is
     // per-seed at the reference's natural pose.
+    //
+    // PiD output tier (sc-10054): when PiD runs, 2K caps the effective base so its fixed 4× lands on
+    // ~2048 (default 4K/native leaves the requested dims untouched). The skeleton/keypoints render at
+    // this same base, so control + latent stay aligned. Gated to the PiD-capable face backends (where
+    // `use_pid` + the helpers exist); the no-face build keeps the requested dims verbatim.
+    #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
+    let (width, height) =
+        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
+    #[cfg(not(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle"))))]
     let (width, height) = (request.width, request.height);
     let work: Vec<(i64, String, InstantIdAction)> = match &mode {
         InstantIdMode::PoseSet(_) => {
@@ -810,11 +891,12 @@ async fn generate_instantid_stream(
                     WorkerError::Engine(format!("InstantID face stack: {error}"))
                 })?
             };
-            // Attach the optional PiD super-resolving decoder (epic 7840, sc-8371): the `sdxl` student
-            // InstantID reuses (it composes the SDXL VAE). `pid_weights` is `Some` only when this
-            // generation opted in AND the snapshots are cached, so this is a no-op for a native-VAE
-            // generation. macOS/mlx only — the candle lane lands in sc-8373.
-            #[cfg(target_os = "macos")]
+            // Attach the optional PiD super-resolving decoder (epic 7840, sc-8371 mlx / sc-8373 candle):
+            // the `sdxl` student InstantID reuses (it composes the SDXL VAE). `pid_weights` is `Some`
+            // only when this generation opted in AND the snapshots are cached, so this is a no-op for a
+            // native-VAE generation. Both face backends expose the same `with_pid(&PidWeights)` seam, so
+            // one arm serves the mlx and candle lanes.
+            #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
             let model = match &pid_weights {
                 Some(pid) => model.with_pid(pid).map_err(|error| {
                     WorkerError::Engine(format!("InstantID PiD decoder load failed: {error}"))
@@ -910,10 +992,10 @@ async fn generate_instantid_stream(
                         controlnet_scale,
                         openpose_scale,
                         seed: seed as u64,
-                        // PiD opt-in (sc-8371): macOS/mlx-only field (the candle `InstantIdRequest`
-                        // has none); the engine errors if set without a `with_pid` load, so the two
-                        // stay in lockstep — `use_pid` is `pid_weights.is_some()`.
-                        #[cfg(target_os = "macos")]
+                        // PiD opt-in (sc-8371 mlx / sc-8373 candle): both engines' `InstantIdRequest`
+                        // carry this field; the engine errors if set without a `with_pid` load, so the
+                        // two stay in lockstep — `use_pid` is `pid_weights.is_some()`.
+                        #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
                         use_pid,
                         sampler: sampler.clone(),
                         scheduler: scheduler.clone(),
@@ -955,10 +1037,11 @@ async fn generate_instantid_stream(
                             controlnet_scale,
                             openpose_scale,
                             seed: seed as u64,
-                            // Face-restore re-render always decodes on the native VAE (sc-8371): the
-                            // engine forces this internally too (its paste-back assumes a side×side
-                            // crop a 4× PiD decode would corrupt), but be explicit at the seam.
-                            #[cfg(target_os = "macos")]
+                            // Face-restore re-render always decodes on the native VAE (sc-8371 mlx /
+                            // sc-8373 candle): the engine forces this internally too (its paste-back
+                            // assumes a side×side crop a 4× PiD decode would corrupt), but be explicit
+                            // at the seam.
+                            #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
                             use_pid: false,
                             sampler: sampler.clone(),
                             scheduler: scheduler.clone(),
@@ -1046,3 +1129,97 @@ async fn generate_instantid_stream(
 // pipeline, the engine requires width/height ∈ [512, 2048] and multiples of 8, so a
 // tile is run at the nearest valid size and the result resized back before blending.
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod instantid_tier_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(advanced: serde_json::Value) -> ImageRequest {
+        ImageRequest::from_payload(
+            json!({ "model": "instantid_realvisxl", "advanced": advanced })
+                .as_object()
+                .unwrap(),
+        )
+    }
+
+    /// Seed a present `<tier>/unet/<file>` so [`instantid_tier_subdir`]'s probe sees it downloaded
+    /// (InstantID's backbone always lives under `unet/`).
+    fn seed_unet(root: &Path, tier: &str, file: &str) {
+        let dir = root.join(tier).join("unet");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(file), b"x").unwrap();
+    }
+
+    /// The InstantID backbone defaults to the DENSE `bf16/` tier (the validated fp16 identity
+    /// envelope), NOT the standard-tier `q4/` default — quant degrades ArcFace identity, so it is
+    /// opt-in. On MLX, `mlxQuantize` 4/8 select the packed `q4/`/`q8/` tiers (mirroring
+    /// [`instantid_quant`]); off-Mac (candle / no-face) the backbone is dense-only, so every request
+    /// resolves `bf16/` regardless of the knob.
+    #[test]
+    fn defaults_to_bf16_and_selects_packed_tiers_only_on_mlx() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        seed_unet(root, "q4", "diffusion_pytorch_model.safetensors");
+        seed_unet(root, "q8", "diffusion_pytorch_model.safetensors");
+        seed_unet(root, "bf16", "diffusion_pytorch_model.fp16.safetensors");
+
+        // Unset / opt-out → bf16 on every backend.
+        assert_eq!(
+            instantid_tier_subdir(root, &request(json!({}))),
+            root.join("bf16")
+        );
+        assert_eq!(
+            instantid_tier_subdir(root, &request(json!({ "mlxQuantize": 0 }))),
+            root.join("bf16")
+        );
+
+        // Q4/Q8 opt-in resolves the packed tier ONLY on the MLX lane; the candle lane is dense-only.
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                instantid_tier_subdir(root, &request(json!({ "mlxQuantize": 4 }))),
+                root.join("q4")
+            );
+            assert_eq!(
+                instantid_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
+                root.join("q8")
+            );
+            assert_eq!(
+                instantid_tier_subdir(root, &request(json!({ "mlxQuantize": "8" }))),
+                root.join("q8")
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(
+                instantid_tier_subdir(root, &request(json!({ "mlxQuantize": 4 }))),
+                root.join("bf16")
+            );
+            assert_eq!(
+                instantid_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
+                root.join("bf16")
+            );
+        }
+    }
+
+    /// A partial turnkey falls back to a present tier rather than a half-empty subdir (so the engine
+    /// surfaces a clear missing-weights error), and an absent turnkey resolves to the repo root.
+    #[test]
+    fn falls_back_when_preferred_tier_absent() {
+        // Only q8 downloaded: an unset (bf16-preferred) request falls through bf16 → q4 → q8.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        seed_unet(root, "q8", "diffusion_pytorch_model.safetensors");
+        assert_eq!(
+            instantid_tier_subdir(root, &request(json!({}))),
+            root.join("q8")
+        );
+        // Nothing present → the repo root (engine surfaces the missing-weights error).
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            instantid_tier_subdir(empty.path(), &request(json!({}))),
+            empty.path().to_path_buf()
+        );
+    }
+}

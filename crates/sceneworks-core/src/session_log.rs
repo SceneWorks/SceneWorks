@@ -120,33 +120,36 @@ impl SessionLog {
         let guard = self.inner.lock().expect("session log lock");
         let limit = query.limit.unwrap_or(500).clamp(1, 5000);
         let search = query.search.as_deref().map(str::to_ascii_lowercase);
-        let mut matched: Vec<LogEntry> = guard
-            .entries
-            .iter()
+        let matches = |entry: &LogEntry| {
             // MSRV 1.80: `Option::is_none_or` is 1.82, so use `map_or(true, …)`.
-            .filter(|entry| query.after_seq.map_or(true, |seq| entry.seq > seq))
-            .filter(|entry| {
-                query
+            query.after_seq.map_or(true, |seq| entry.seq > seq)
+                && query
                     .source
                     .as_deref()
                     .map_or(true, |source| entry.source == source)
-            })
-            .filter(|entry| {
-                query
+                && query
                     .level
                     .as_deref()
                     .map_or(true, |level| entry.level == level)
-            })
-            .filter(|entry| {
-                search.as_deref().map_or(true, |needle| {
+                && search.as_deref().map_or(true, |needle| {
                     entry.raw.to_ascii_lowercase().contains(needle)
                 })
-            })
+        };
+        // F-093: walk newest→oldest and stop after cloning `limit` matches, instead
+        // of cloning every matching entry (up to the full 5000-deep buffer) and then
+        // `split_off`ing down to `limit`. This clones only what's returned and lets
+        // the buffer mutex — contended with `push_line` on the stdout capture threads
+        // — drop far sooner on the hot polling path.
+        let mut matched: Vec<LogEntry> = guard
+            .entries
+            .iter()
+            .rev()
+            .filter(|entry| matches(entry))
+            .take(limit)
             .cloned()
             .collect();
-        if matched.len() > limit {
-            matched = matched.split_off(matched.len() - limit);
-        }
+        // Collected newest→oldest above; restore the documented oldest→newest order.
+        matched.reverse();
         matched
     }
 
@@ -156,20 +159,37 @@ impl SessionLog {
     }
 }
 
+// The `"` and `\'` terminators cover the JSON string shape (`"token":"abc"`,
+// after the value-opening quote is skipped by `redact_marker_value`); `&` and
+// whitespace cover URL query / header / flag shapes.
+const VALUE_TERMINATORS: &[char] = &['&', '"', '\'', ' ', '\t', '<', '>', ',', '}'];
+
 fn redact_secrets(line: &str) -> String {
-    let line = redact_marker_value(
-        line.to_owned(),
-        "token=",
-        &['&', '"', '\'', ' ', '\t', '<', '>'],
-    );
-    let line = redact_marker_value(
-        line,
-        "access_token=",
-        &['&', '"', '\'', ' ', '\t', '<', '>'],
-    );
-    let line = redact_marker_value(line, "api_key=", &['&', '"', '\'', ' ', '\t', '<', '>']);
-    let line = redact_marker_value(line, "bearer ", &['"', '\'', ' ', '\t', '<', '>']);
+    // Query / flag shapes: `token=…`, `access_token=…`, `api_key=…`.
+    let line = redact_marker_value(line.to_owned(), "token=", VALUE_TERMINATORS);
+    let line = redact_marker_value(line, "access_token=", VALUE_TERMINATORS);
+    let line = redact_marker_value(line, "api_key=", VALUE_TERMINATORS);
+    // JSON object shapes: `"token":"…"`, `"access_token":"…"`, `"api_key":"…"`.
+    // The marker consumes through the value-opening quote so the redaction span
+    // starts at the secret and stops at the closing quote (a terminator). This
+    // catches secrets a `key=value` marker never would (F-072).
+    let line = redact_json_marker_value(line, "token");
+    let line = redact_json_marker_value(line, "access_token");
+    let line = redact_json_marker_value(line, "api_key");
+    // Bearer credential, in both `Bearer abc` and `"Bearer abc"` forms.
+    let line = redact_marker_value(line, "bearer ", VALUE_TERMINATORS);
     redact_authorization_header(line)
+}
+
+/// Redact the value of a `"<key>":"` JSON pair. The marker matches through the
+/// opening quote of the value so `redact_marker_value` starts replacing at the
+/// secret itself and stops at the closing quote (in `VALUE_TERMINATORS`).
+fn redact_json_marker_value(output: String, key: &str) -> String {
+    // Tolerate the whitespace serializers put around the colon: `"key": "val"`.
+    let marker_no_space = format!("\"{key}\":\"");
+    let marker_space = format!("\"{key}\": \"");
+    let output = redact_marker_value(output, &marker_no_space, VALUE_TERMINATORS);
+    redact_marker_value(output, &marker_space, VALUE_TERMINATORS)
 }
 
 fn redact_marker_value(mut output: String, marker: &str, terminators: &[char]) -> String {
@@ -189,8 +209,12 @@ fn redact_marker_value(mut output: String, marker: &str, terminators: &[char]) -
                     .then_some(value_start + index)
             })
             .unwrap_or(output.len());
+        // An immediately-terminated marker (e.g. `token=&…`) has no value here.
+        // Previously this returned the whole line, so any *later* real occurrence
+        // stayed unredacted (F-072). Advance past this marker and keep scanning.
         if value_end == value_start {
-            return output;
+            search_from = value_start;
+            continue;
         }
         output.replace_range(value_start..value_end, "[REDACTED]");
         search_from = value_start + "[REDACTED]".len();
@@ -198,13 +222,49 @@ fn redact_marker_value(mut output: String, marker: &str, terminators: &[char]) -
 }
 
 fn redact_authorization_header(mut output: String) -> String {
-    let lowered = output.to_ascii_lowercase();
-    let Some(start) = lowered.find("authorization:") else {
-        return output;
-    };
-    let value_start = start + "authorization:".len();
-    output.replace_range(value_start.., " [REDACTED]");
-    output
+    let mut search_from = 0;
+    loop {
+        let lowered = output.to_ascii_lowercase();
+        let Some(relative_start) = lowered[search_from..].find("authorization:") else {
+            return output;
+        };
+        let start = search_from + relative_start;
+        let after_colon = start + "authorization:".len();
+        // Skip optional whitespace, then an optional value-opening quote (the JSON
+        // `"authorization":"Bearer …"` shape). Redact from there.
+        let mut value_start = after_colon;
+        let bytes = output.as_bytes();
+        while value_start < output.len() && matches!(bytes[value_start], b' ' | b'\t') {
+            value_start += 1;
+        }
+        // A quoted value (JSON) terminates at its closing quote; a bare header
+        // value (`Authorization: Bearer abc123`) has no quote and runs to
+        // end-of-line. Previously this always replaced to end-of-line, clobbering
+        // any trailing JSON fields on the same line (F-072).
+        let quoted = value_start < output.len() && bytes[value_start] == b'"';
+        if quoted {
+            value_start += 1; // step over the opening quote
+        }
+        let value_end = if quoted {
+            output[value_start..]
+                .find('"')
+                .map(|offset| value_start + offset)
+                .unwrap_or(output.len())
+        } else {
+            // Bare header form: redact the whole credential to end-of-line, but
+            // stop at a structural JSON delimiter if one follows on the line.
+            output[value_start..]
+                .find(['"', ',', '}'])
+                .map(|offset| value_start + offset)
+                .unwrap_or(output.len())
+        };
+        if value_end == value_start {
+            search_from = after_colon;
+            continue;
+        }
+        output.replace_range(value_start..value_end, "[REDACTED]");
+        search_from = value_start + "[REDACTED]".len();
+    }
 }
 
 fn classify(source: &str, line: &str, seq: u64) -> LogEntry {
@@ -454,6 +514,85 @@ mod tests {
     }
 
     #[test]
+    fn empty_marker_value_does_not_abandon_later_occurrence() {
+        // F-072: a first `token=` with no value (immediately terminated) must not
+        // short-circuit redaction — a later real `token=` on the same line has to
+        // still be redacted.
+        let log = SessionLog::with_capacity(4);
+        log.push_line("worker", "token=&next token=real-secret&x=1");
+        let entry = &log.query(&LogQuery::default())[0];
+        assert!(
+            !entry.raw.contains("real-secret"),
+            "later token= must still be redacted: {}",
+            entry.raw
+        );
+        assert!(entry.raw.contains("token=[REDACTED]&x=1"));
+    }
+
+    #[test]
+    fn redacts_json_shaped_secret_values() {
+        // F-072: JSON `"token":"abc"` shapes match no `key=value` marker, so they
+        // previously survived. The dedicated JSON pass must redact them (both the
+        // no-space and spaced serializations), leaving surrounding fields intact.
+        let log = SessionLog::with_capacity(4);
+        log.push_line(
+            "api",
+            r#"{"token":"jwt-secret","api_key": "sk-abc","keep":"value"}"#,
+        );
+        let entry = &log.query(&LogQuery::default())[0];
+        assert!(!entry.raw.contains("jwt-secret"), "raw: {}", entry.raw);
+        assert!(!entry.raw.contains("sk-abc"), "raw: {}", entry.raw);
+        assert!(
+            entry.raw.contains("\"keep\":\"value\""),
+            "non-secret field preserved: {}",
+            entry.raw
+        );
+        // Still valid JSON after redaction.
+        let event = entry.event.as_ref().expect("event parses");
+        assert_eq!(event.get("keep").and_then(Value::as_str), Some("value"));
+        assert_eq!(
+            event.get("token").and_then(Value::as_str),
+            Some("[REDACTED]")
+        );
+    }
+
+    #[test]
+    fn authorization_redaction_preserves_trailing_json_fields() {
+        // F-072: the old redact-to-end-of-line clobbered every field after an
+        // `authorization` key. Terminate at the closing quote so later fields stay.
+        let log = SessionLog::with_capacity(4);
+        log.push_line(
+            "api",
+            r#"{"authorization":"Bearer abc123","url":"https://example.test/x","status":200}"#,
+        );
+        let entry = &log.query(&LogQuery::default())[0];
+        assert!(!entry.raw.contains("abc123"), "raw: {}", entry.raw);
+        let event = entry.event.as_ref().expect("event still parses as JSON");
+        assert_eq!(
+            event.get("url").and_then(Value::as_str),
+            Some("https://example.test/x"),
+            "trailing url field must survive: {}",
+            entry.raw
+        );
+        assert_eq!(event.get("status").and_then(Value::as_u64), Some(200));
+    }
+
+    #[test]
+    fn authorization_bare_header_still_redacts_to_end_of_line() {
+        // The plain header form has no closing quote; the whole credential must
+        // still be redacted (regression guard for the delimiter change).
+        let log = SessionLog::with_capacity(4);
+        log.push_line("worker", "GET /x\nAuthorization: Bearer abc123");
+        let entries = log.query(&LogQuery::default());
+        let header = entries
+            .iter()
+            .find(|entry| entry.raw.contains("Authorization"))
+            .expect("header line present");
+        assert!(!header.raw.contains("abc123"), "raw: {}", header.raw);
+        assert!(header.raw.contains("Authorization: [REDACTED]"));
+    }
+
+    #[test]
     fn ring_buffer_bounds_and_after_seq_tail() {
         let log = SessionLog::with_capacity(3);
         for i in 0..5 {
@@ -471,6 +610,27 @@ mod tests {
         });
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].seq, 4);
+    }
+
+    #[test]
+    fn query_limit_returns_newest_n_in_order() {
+        // F-093: with more matches than `limit`, return exactly the newest `limit`
+        // entries, still oldest→newest. Guards the reverse-take-reverse rewrite that
+        // avoids cloning the whole buffer.
+        let log = SessionLog::with_capacity(100);
+        for i in 0..20 {
+            log.push_line("api", &format!("line {i}"));
+        }
+        let limited = log.query(&LogQuery {
+            limit: Some(3),
+            ..Default::default()
+        });
+        assert_eq!(limited.len(), 3);
+        assert_eq!(limited[0].raw, "line 17");
+        assert_eq!(limited[1].raw, "line 18");
+        assert_eq!(limited[2].raw, "line 19");
+        // Ascending seq order preserved.
+        assert!(limited[0].seq < limited[1].seq && limited[1].seq < limited[2].seq);
     }
 
     #[test]

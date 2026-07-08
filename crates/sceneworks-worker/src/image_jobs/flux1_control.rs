@@ -15,6 +15,13 @@ const FLUX1_DEV_CONTROL_ENGINE_ID: &str = "flux1_dev_control";
 /// (the diffusers checkpoint). The default *repo* is the shared strict-control table (single source of
 /// truth — `STRICT_CONTROL_ENGINES`).
 const FLUX1_CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
+/// Pinned revision for the default `Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro-2.0` control-weights
+/// repo (sc-9879, F-077 follow-up). Fetching the mutable `main` branch means a re-push (or a compromised
+/// token) could silently swap the ControlNet checkpoint we load; pin the exact commit for defense-in-depth
+/// (mirrors the SeedVR2/Real-ESRGAN pins, sc-8879/sc-9682). Applied ONLY to the default table repo — a
+/// manifest `controlWeights.repo` override carries its own revision layout, so it keeps `main`. HF's tree
+/// API still reports the file's `lfs.oid`, which `ensure_hf_cached_file` verifies against.
+const FLUX1_CONTROL_REVISION: &str = "5d700aaad96c5ddcdf8a38ef9b22a82aac2c38e5";
 /// The asset `adapter` id recorded on FLUX.1-dev strict-control assets (the dev base MLX label —
 /// shared with the plain FLUX.1 path).
 const FLUX1_CONTROL_ADAPTER_LABEL: &str = "mlx_flux";
@@ -35,7 +42,8 @@ fn flux1_dev_control_available(request: &ImageRequest, settings: &Settings) -> b
 
 /// The (repo, filename) of the FLUX.1-dev control weights — `advanced.controlWeights.{repo,filename}`
 /// overrides, else the Shakker Union-Pro-2.0 default (parity with the FLUX.2 / Z-Image resolvers).
-fn flux1_control_repo_file(request: &ImageRequest) -> (String, String) {
+/// The payload filename must be a plain component (sc-8821 / F-019).
+fn flux1_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
     let cw = request
         .advanced
         .get("controlWeights")
@@ -48,15 +56,18 @@ fn flux1_control_repo_file(request: &ImageRequest) -> (String, String) {
             .unwrap_or(default)
             .to_owned()
     };
-    (
+    Ok((
         // Default repo from the shared strict-control table (single source of truth); the file stays
         // engine-specific.
         pick(
             "repo",
             strict_control_default_repo(FLUX1_DEV_CONTROL_ENGINE_ID),
         ),
-        pick("filename", FLUX1_CONTROL_FILE),
-    )
+        safe_weight_filename(
+            &pick("filename", FLUX1_CONTROL_FILE),
+            "advanced.controlWeights.filename",
+        )?,
+    ))
 }
 
 /// Resolve the Shakker Union-Pro-2.0 checkpoint the engine loads, downloading on first use. Order: an
@@ -69,7 +80,7 @@ async fn ensure_flux1_control_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
-    let (repo, file) = flux1_control_repo_file(request);
+    let (repo, file) = flux1_control_repo_file(request)?;
     if let Ok(p) = std::env::var("SCENEWORKS_CONTROLNET_FLUX1") {
         let p = PathBuf::from(p);
         if p.is_file() {
@@ -96,7 +107,15 @@ async fn ensure_flux1_control_weights(
         .join("cache")
         .join("controlnet-flux1")
         .join(&file);
-    crate::downloads::ensure_hf_cached_file(&context, &repo, "main", &file, &dst).await
+    // Pin the exact commit for the default table control repo so `main` moving under us can't swap the
+    // ControlNet checkpoint (sc-9879). A manifest `controlWeights.repo` override may carry its own
+    // revision layout, so only pin when we're on the default repo.
+    let revision = if repo == strict_control_default_repo(FLUX1_DEV_CONTROL_ENGINE_ID) {
+        FLUX1_CONTROL_REVISION
+    } else {
+        "main"
+    };
+    crate::downloads::ensure_hf_cached_file(&context, &repo, revision, &file, &dst).await
 }
 
 /// Control lock strength for FLUX.1-dev: `advanced.controlScale` (default 0.7, clamp [0,2]). The Shakker
@@ -210,8 +229,7 @@ fn flux1_control_load(
     adapters: Vec<AdapterSpec>,
 ) -> WorkerResult<Box<dyn Generator>> {
     let spec = flux1_control_spec(weights_dir, control_weights, quant, adapters);
-    gen_core::load(FLUX1_DEV_CONTROL_ENGINE_ID, &spec)
-        .map_err(|error| WorkerError::Engine(format!("FLUX.1-dev control load failed: {error}")))
+    load_control_engine(FLUX1_DEV_CONTROL_ENGINE_ID, &spec)
 }
 
 /// Real FLUX.1-dev strict-control generation: one image per pose, each conditioned on the requested
@@ -282,17 +300,14 @@ async fn generate_flux1_dev_control_stream(
     // (missing reference / failure → no scorer → scores omitted, set still renders). The `!Send` scorer
     // is built ONCE in the closure (source embedded once, reused across all poses).
     let likeness_source = resolve_control_identity_source(request, settings, project_path);
-    let face_stack_dir = if likeness_source.is_some() {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        likeness_source.is_some(),
+        "pose-set face-stack staging failed; likeness scores omitted",
+    )
+    .await;
 
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);

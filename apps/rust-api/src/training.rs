@@ -353,6 +353,7 @@ fn dataset_readiness_report(
                     CachedTier0Scalars {
                         content_hash,
                         bucket_edge: context.bucket_edge,
+                        metrics_version: sceneworks_core::dataset_quality::TIER0_METRICS_VERSION,
                         scalars,
                     },
                 ))
@@ -478,6 +479,7 @@ pub(crate) async fn create_training_dataset_caption_job(
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
     })
     .await?;
@@ -568,6 +570,7 @@ pub(crate) async fn create_training_dataset_analysis_job(
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
     })
     .await?;
@@ -661,6 +664,7 @@ pub(crate) async fn create_training_dataset_face_analysis_job(
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
     })
     .await?;
@@ -839,6 +843,7 @@ pub(crate) async fn create_training_dataset_upscale_job(
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status: None,
         })
     })
     .await?;
@@ -1316,6 +1321,18 @@ pub(crate) async fn create_training_job(
 
     let plan_value =
         serde_json::to_value(&plan).map_err(|error| ApiError::internal(error.to_string()))?;
+
+    // A real run gets a human-readable copy of the resolved plan dropped into its output dir up
+    // front — before the worker even claims the job — so the settings that produced (or were
+    // attempted for) each adapter are visible as `training-config.json` next to it, even when the
+    // run later fails or is abandoned (exactly the run whose config you want to inspect). Dry runs
+    // produce no adapter, so they are skipped. Best-effort and purely informational: the worker
+    // and registration drive off the job payload, never this file, so a failure is logged and does
+    // not block the submit.
+    if !payload.dry_run {
+        write_training_config_snapshot(&output_dir, &plan_value).await;
+    }
+
     let mut job_payload = JsonObject::new();
     job_payload.insert("dryRun".to_owned(), Value::Bool(payload.dry_run));
     job_payload.insert("outputName".to_owned(), Value::String(output_name));
@@ -1334,6 +1351,7 @@ pub(crate) async fn create_training_job(
                 source_job_id: None,
                 duplicate_of_job_id: None,
                 attempts: 1,
+                initial_status: None,
             },
         )
     })
@@ -1341,6 +1359,47 @@ pub(crate) async fn create_training_job(
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
     Ok((StatusCode::CREATED, Json(job)))
+}
+
+/// Write the resolved training plan to `<output_dir>/training-config.json` at submit time as a
+/// human-readable record of the settings for a run (config hyperparameters, dataset, target, and
+/// provenance snapshot) — the exact JSON otherwise trapped in the jobs store. Written up front so
+/// the file sits next to the produced adapter and survives even a run that later fails or is
+/// abandoned. Creates the output dir if the worker has not yet done so.
+///
+/// Best-effort and purely informational: the worker and LoRA registration both drive off the job
+/// payload, never this file, so any dir/serialize/write failure is logged and swallowed rather
+/// than failing the training submit.
+async fn write_training_config_snapshot(output_dir: &std::path::Path, plan: &Value) {
+    if let Err(error) = tokio::fs::create_dir_all(output_dir).await {
+        tracing::warn!(
+            event = "training_config_snapshot_dir_failed",
+            path = %output_dir.display(),
+            error = %error,
+            "failed to create output dir for training-config.json — skipping"
+        );
+        return;
+    }
+    let path = output_dir.join("training-config.json");
+    let bytes = match serde_json::to_vec_pretty(plan) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(
+                event = "training_config_snapshot_serialize_failed",
+                error = %error,
+                "failed to serialize training plan for training-config.json — skipping"
+            );
+            return;
+        }
+    };
+    if let Err(error) = tokio::fs::write(&path, bytes).await {
+        tracing::warn!(
+            event = "training_config_snapshot_write_failed",
+            path = %path.display(),
+            error = %error,
+            "failed to write training-config.json — skipping (training submit continues)"
+        );
+    }
 }
 
 /// Absolute path to the target's base model weights on the worker host. Prefers a
@@ -1373,7 +1432,7 @@ pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath
             // root, exactly as inference does. Fall back to the cache root when no snapshot is
             // materialized yet (the path need not exist at dry-run time).
             if let Some(snapshot) = huggingface_snapshot_dirs(&cache_path).into_iter().next() {
-                return snapshot.display().to_string();
+                return tiered_turnkey_train_dir(snapshot).display().to_string();
             }
             return cache_path.display().to_string();
         }
@@ -1383,6 +1442,37 @@ pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath
         .join(safe_download_dir(&target.base_model))
         .display()
         .to_string()
+}
+
+/// Whether a resolved HF snapshot is a tiered-turnkey re-host (epic 9992): tier subdirs (`bf16/ q8/
+/// q4/`) with NO flat component tree at the root. A flat diffusers snapshot (z-image / lens / the
+/// retired `krea/Krea-2-Raw` tree) has `transformer/` at the root and is NOT tiered.
+fn snapshot_is_tiered_turnkey(snapshot: &FsPath) -> bool {
+    !snapshot.join("transformer").is_dir()
+        && (snapshot.join("bf16").is_dir()
+            || snapshot.join("q8").is_dir()
+            || snapshot.join("q4").is_dir())
+}
+
+/// Whether a `bf16/` tier holds the dense component tree the trainer needs (`transformer/`,
+/// `text_encoder/`, `vae/`). The repo-level completion marker does NOT certify a tier (sc-9909), so
+/// check the actual dirs.
+fn bf16_component_tree_present(bf16: &FsPath) -> bool {
+    bf16.join("transformer").is_dir()
+        && bf16.join("text_encoder").is_dir()
+        && bf16.join("vae").is_dir()
+}
+
+/// For a tiered-turnkey re-host (epic 9992 Krea 2 Raw: `SceneWorks/krea-2-raw-mlx` ships `bf16/ q8/ q4/`
+/// tier subdirs), training reads the DENSE `bf16/` tier — the trainer needs the full-precision base, and
+/// the bf16 tier is byte-identical to the retired `krea/Krea-2-Raw` diffusers tree. A flat diffusers
+/// snapshot (transformer/ at the root) is returned unchanged, so this is backward-compatible. Mirrors
+/// how generation resolves a tier subdir via `krea_model_subdir`.
+fn tiered_turnkey_train_dir(snapshot: std::path::PathBuf) -> std::path::PathBuf {
+    if snapshot_is_tiered_turnkey(&snapshot) {
+        return snapshot.join("bf16");
+    }
+    snapshot
 }
 
 /// GPU selection for a training job, read from the config's advanced bag (the
@@ -1486,6 +1576,15 @@ pub(crate) fn training_base_model_installed(data_dir: &FsPath, target: &Training
         .filter(|repo| !repo.is_empty())
     {
         if let Some(cache_path) = huggingface_repo_cache_path(data_dir, repo) {
+            // Tiered-turnkey re-host (epic 9992 Krea 2 Raw): training reads the DENSE `bf16/` tier, but
+            // generation may have installed only the q8 default. The repo-level completion marker does
+            // NOT certify a tier (sc-9909), so require the bf16 component tree specifically — otherwise
+            // the run-gate would green-light training on a repo that has no dense weights to train.
+            if let Some(snapshot) = huggingface_snapshot_dirs(&cache_path).into_iter().next() {
+                if snapshot_is_tiered_turnkey(&snapshot) {
+                    return bf16_component_tree_present(&snapshot.join("bf16"));
+                }
+            }
             if models::huggingface_cache_health(&cache_path, &[]).installed {
                 return true;
             }

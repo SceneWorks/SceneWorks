@@ -6,22 +6,19 @@
 // broke the candle build because video_jobs.rs / the candle edit handlers call it). No `#[cfg]` here:
 // availability follows base.rs's own include cfg, which matches the callers'.
 
-/// Where a `src_w`×`src_h` image lands when contained (long edge fits) and centered in
-/// a `width`×`height` box: `(new_w, new_h, left, top)`. Parity with Python `_contain_box`
-/// (shared by the pad fit so the kept region lines up). Integer-divides the offsets.
-fn contain_box(src_w: u32, src_h: u32, width: u32, height: u32) -> (u32, u32, u32, u32) {
-    let ratio = (width as f32 / src_w as f32).min(height as f32 / src_h as f32);
-    let new_w = ((src_w as f32 * ratio).round() as u32).max(1);
-    let new_h = ((src_h as f32 * ratio).round() as u32).max(1);
-    (new_w, new_h, (width - new_w) / 2, (height - new_h) / 2)
-}
-
 /// Resize an RGB image to exactly `width`×`height` honoring `mode` without distorting it
 /// (parity with Python `fit_image`, RGB path only — no inpaint mask exists on the MLX
 /// FLUX.2 edit path, so `outpaint` degrades to `pad` geometry):
 ///   - `crop`:    scale to COVER (short edge fits), center-crop the overflow.
 ///   - `pad`/`outpaint`: scale to CONTAIN (long edge fits), center on a black canvas.
 ///   - `stretch`: legacy non-aspect-preserving resize.
+///
+/// The pad/outpaint arm's contain geometry is the engine's [`gen_core::imageops::contain_box`]
+/// (sc-8824) — the SINGLE source of truth shared with the outpaint mask
+/// ([`gen_core::imageops::outpaint_border_mask`] calls the same `contain_box`), so the letterboxed
+/// kept-rect and the mask's keep-rect are pixel-identical. It rounds half-to-even in f64 (matching
+/// Python `round`) and returns i32 offsets; the old local copy rounded half-away-from-zero in f32,
+/// which could disagree by a pixel at an exact `.5` and desync fit vs. mask on outpaint edges.
 fn fit_rgb(source: &image::RgbImage, width: u32, height: u32, mode: &str) -> image::RgbImage {
     use image::imageops::FilterType::Lanczos3;
     let width = width.max(1);
@@ -39,10 +36,12 @@ fn fit_rgb(source: &image::RgbImage, width: u32, height: u32, mode: &str) -> ima
             let top = (new_h - height) / 2;
             image::imageops::crop_imm(&resized, left, top, width, height).to_image()
         }
-        // "pad" / "outpaint": contain + center on a black canvas (letterbox).
+        // "pad" / "outpaint": contain + center on a black canvas (letterbox). The engine's
+        // `contain_box` is the shared geometry the outpaint mask also uses, so fit + mask agree.
         _ => {
-            let (new_w, new_h, left, top) = contain_box(src_w, src_h, width, height);
-            let resized = image::imageops::resize(source, new_w, new_h, Lanczos3);
+            let (new_w, new_h, left, top) =
+                gen_core::imageops::contain_box(src_w, src_h, width, height);
+            let resized = image::imageops::resize(source, new_w.max(1), new_h.max(1), Lanczos3);
             let mut canvas = image::RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
             image::imageops::overlay(&mut canvas, &resized, left as i64, top as i64);
             canvas
@@ -155,11 +154,11 @@ impl ImageRoute {
             | ImageRoute::Flux2DevControl => pose_entries(request).len() as u32,
             ImageRoute::Flux2Edit | ImageRoute::QwenEdit => grouped_edit_image_count(request),
             ImageRoute::InstantId => instantid_image_count(request, settings),
-            ImageRoute::SensenovaEdit => match flux2_grouping(request) {
-                Flux2Grouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
+            ImageRoute::SensenovaEdit => match edit_grouping(request) {
+                EditGrouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
                 // SenseNova has no strict-pose (ControlNet) path; pose jobs are excluded
                 // upstream, so any residual grouping preserves the requested image count.
-                Flux2Grouping::Poses(_) | Flux2Grouping::Plain => request.count,
+                EditGrouping::Poses(_) | EditGrouping::Plain => request.count,
             },
             // PuLID-FLUX is one identity image per seed (no angle/pose grouping) — like the base
             // MLX + SDXL-advanced + Bernini paths, the effective count is the requested count.
@@ -171,12 +170,200 @@ impl ImageRoute {
     }
 }
 
+/// The candle (Windows/CUDA/Linux) image engine a `run_image_generate_job` request routes to — the
+/// candle-lane sibling of [`ImageRoute`] (sc-8828, F-026). Each variant maps 1:1 to a bespoke candle
+/// stream handler with the uniform `(api, settings, job, &plan, &project_path, backend, &mut asset_writes)`
+/// signature; [`CandleImageRoute::PoseReject`] is the no-silent-T2I reject arm (sc-5968). Every arm is
+/// gated on `settings.backend_candle_enabled`; when off (default) the resolver returns `None` so the job
+/// falls through to the stub, exactly as before.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandleImageRoute {
+    /// InstantID identity (sc-5491) — the off-Mac sibling of `ImageRoute::InstantId`. Checked first
+    /// because `instantid_realvisxl` is not an `is_candle_engine` txt2img id.
+    InstantId,
+    /// SDXL img2img / inpaint / outpaint edit (sc-5487).
+    SdxlEdit,
+    /// FLUX.2-klein reference / img2img edit (sc-5487).
+    Flux2Edit,
+    /// Qwen-Image-Edit reference / dual-latent edit (sc-5487).
+    QwenEdit,
+    /// Z-Image img2img / edit (sc-6595).
+    ZimageEdit,
+    /// Z-Image identity-init for Image Studio "With Character" (sc-8409).
+    ZimageIdentity,
+    /// SDXL IP-Adapter-Plus reference conditioning (sc-5488).
+    SdxlIpAdapter,
+    /// Kolors IP-Adapter-Plus reference conditioning (sc-5488).
+    KolorsIpAdapter,
+    /// FLUX XLabs IP-Adapter reference conditioning (sc-5872).
+    FluxIpAdapter,
+    /// PuLID-FLUX face identity (sc-5492).
+    Pulid,
+    /// Qwen-Image strict-pose ControlNet (sc-5489).
+    QwenControl,
+    /// Kolors strict-pose ControlNet (sc-5489).
+    KolorsControl,
+    /// Z-Image strict-pose Fun-ControlNet (sc-5489).
+    ZimageControl,
+    /// FLUX.2-dev strict-pose Fun-Controlnet-Union (sc-7736).
+    Flux2Control,
+    /// FLUX.1-dev strict-control Shakker Union-Pro-2.0 (sc-8412).
+    Flux1Control,
+    /// A strict-pose job on a candle model with NO pose lane → reject loudly, never silent T2I (sc-5968).
+    PoseReject,
+    /// A plain candle txt2img engine id → `generate_candle_stream`.
+    CandleTxt2Img,
+}
+
+/// Run the candle image dispatch predicate ladder ONCE and return the [`CandleImageRoute`] (or `None`
+/// when candle is disabled / no candle engine matches → the job stubs). Mirrors the historical inline
+/// `else if settings.backend_candle_enabled && <predicate>` ladder EXACTLY — same predicate order,
+/// same `backend_candle_enabled` gating, same handler per family — so routing is byte-identical
+/// (sc-8828). Pure decision: no I/O, no generation.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_candle_image_route(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> Option<CandleImageRoute> {
+    if !settings.backend_candle_enabled {
+        return None;
+    }
+    // Order matches the historical ladder: the edit / reference / identity / control lanes are all
+    // checked BEFORE the generic `is_candle_engine` txt2img arm (they share candle txt2img model ids, so
+    // without diverting first they'd be silently rendered as plain txt2img, dropping the source / poses).
+    if instantid_available(request, settings) {
+        Some(CandleImageRoute::InstantId)
+    } else if sdxl_edit_candle_available(request, settings) {
+        Some(CandleImageRoute::SdxlEdit)
+    } else if flux2_edit_candle_available(request, settings) {
+        Some(CandleImageRoute::Flux2Edit)
+    } else if qwen_edit_candle_available(request, settings) {
+        Some(CandleImageRoute::QwenEdit)
+    } else if zimage_edit_candle_available(request, settings) {
+        Some(CandleImageRoute::ZimageEdit)
+    } else if zimage_identity_candle_available(request, settings) {
+        Some(CandleImageRoute::ZimageIdentity)
+    } else if sdxl_ipadapter_available(request, settings) {
+        Some(CandleImageRoute::SdxlIpAdapter)
+    } else if kolors_ipadapter_available(request, settings) {
+        Some(CandleImageRoute::KolorsIpAdapter)
+    } else if flux_ipadapter_available(request, settings) {
+        Some(CandleImageRoute::FluxIpAdapter)
+    } else if pulid_candle_available(request, settings) {
+        Some(CandleImageRoute::Pulid)
+    } else if qwen_control_available(request, settings) {
+        Some(CandleImageRoute::QwenControl)
+    } else if kolors_control_available(request, settings) {
+        Some(CandleImageRoute::KolorsControl)
+    } else if zimage_control_available(request, settings) {
+        Some(CandleImageRoute::ZimageControl)
+    } else if flux2_control_candle_available(request, settings) {
+        Some(CandleImageRoute::Flux2Control)
+    } else if flux1_control_candle_available(request, settings) {
+        Some(CandleImageRoute::Flux1Control)
+    } else if is_candle_engine(&request.model)
+        && !matches!(
+            request.model.as_str(),
+            "qwen_image" | "kolors" | "z_image_turbo" | "z_image" | "flux2_dev" | "flux_dev"
+        )
+        && request.mode != "edit_image"
+        && !pose_entries(request).is_empty()
+    {
+        // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane (e.g. sdxl) must
+        // be REJECTED, not silently rendered as plain txt2img. Checked BEFORE the txt2img arm below.
+        Some(CandleImageRoute::PoseReject)
+    } else if is_candle_engine(&request.model) {
+        Some(CandleImageRoute::CandleTxt2Img)
+    } else {
+        None
+    }
+}
+
+/// How a native edit job batches its iterations (sc-8946 (F-144): renamed from `Flux2Grouping` and
+/// moved here from flux2.rs — it is the SHARED grouping for the FLUX.2 / Qwen-Edit / SenseNova-U1 edit
+/// lanes, not FLUX.2-specific, so a reader auditing Qwen/SenseNova grouping finds it in base.rs).
+#[cfg(target_os = "macos")]
+enum EditGrouping {
+    /// `count` independent images (per-image seeds), the plain reference/edit path.
+    Plain,
+    /// The 11-angle Character-Studio set: shared seed, per-angle prompt augment.
+    Angles,
+    /// The best-effort pose tier: `n` poses, shared seed, `[skeleton, reference]` sets.
+    Poses(usize),
+}
+
+/// Decide the grouping for a native edit job (parity with the `Mlx*Adapter` decision: pose set >
+/// angle set > plain, all gated to `character_image` mode — an `edit_image` job is never grouped).
+/// The caller only reaches this with a reference present, so `is_character_image` reduces to the mode
+/// check. Shared by the FLUX.2 / Qwen-Edit / SenseNova-U1 edit lanes (sc-8946 moved it from flux2.rs).
+#[cfg(target_os = "macos")]
+fn edit_grouping(request: &ImageRequest) -> EditGrouping {
+    if request.mode != "character_image" {
+        return EditGrouping::Plain;
+    }
+    let poses = pose_entries(request).len();
+    if poses > 0 {
+        return EditGrouping::Poses(poses);
+    }
+    if advanced::flag(&request.advanced, "angleSet") {
+        return EditGrouping::Angles;
+    }
+    EditGrouping::Plain
+}
+
+/// Upper bound on reference images for a multi-reference edit (sc-6211). Even with the engine's
+/// sequence-gated activation chunking (sc-6266), the FLUX.2-dev edit stays activation-bound: 4
+/// references at 1024² peak ~93 GB and 5 would exceed the 96 GB floor (measured). The per-machine
+/// `flux2_dev_edit_memory_guard` rejects over-budget combinations with an actionable message; this
+/// caps absurd inputs (and bounds the DiT sequence) before that.
+#[cfg(target_os = "macos")]
+const MAX_EDIT_REFERENCES: usize = 4;
+
+/// Reference asset ids for a native edit (sc-8946 moved it from flux2.rs — shared by the FLUX.2 /
+/// SenseNova-via-grouping lanes, not FLUX.2-specific). The FLUX.2-dev multi-image picker (sc-6211)
+/// sends the plural `referenceAssetIds` — take all of them in order, capped at [`MAX_EDIT_REFERENCES`].
+/// With no plural list it falls back to the single-reference flows: the character `referenceAssetId`,
+/// else the Image-Edit `sourceAssetId` (edit_image mode). Mirrors the Python
+/// `ref_id = referenceAssetId or (sourceAssetId if edit_image)`, plus the new multi-reference set.
+#[cfg(target_os = "macos")]
+fn edit_reference_ids(request: &ImageRequest) -> Vec<String> {
+    if !request.reference_asset_ids.is_empty() {
+        // Parsed list is already trimmed + non-empty (sceneworks-core `string_list`).
+        return request
+            .reference_asset_ids
+            .iter()
+            .take(MAX_EDIT_REFERENCES)
+            .cloned()
+            .collect();
+    }
+    if let Some(id) = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return vec![id.to_owned()];
+    }
+    if request.mode == "edit_image" {
+        if let Some(id) = request
+            .source_asset_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            return vec![id.to_owned()];
+        }
+    }
+    Vec::new()
+}
+
 #[cfg(target_os = "macos")]
 fn grouped_edit_image_count(request: &ImageRequest) -> u32 {
-    match flux2_grouping(request) {
-        Flux2Grouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
-        Flux2Grouping::Poses(count) => count as u32,
-        Flux2Grouping::Plain => request.count,
+    match edit_grouping(request) {
+        EditGrouping::Angles => CHARACTER_ANGLE_SET_ORDER.len() as u32,
+        EditGrouping::Poses(count) => count as u32,
+        EditGrouping::Plain => request.count,
     }
 }
 
@@ -197,11 +384,17 @@ fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
         .to_owned()
 }
 
-/// The separate `SceneWorks/ideogram-4` repo that hosts Ideogram 4's bf16 tree under `bf16/` — shared
-/// by the candle off-Mac lane (sc-6859) and, on macOS, the selectable full-precision MLX tier
-/// (sc-8513). The MLX `q4/`/`q8/` turnkey lives in `SceneWorks/ideogram-4-mlx`; bf16 is resolved from
-/// THIS repo rather than duplicated. (The candle lane has its own cfg-gated [`CANDLE_IDEOGRAM_REPO`].)
-#[cfg(target_os = "macos")]
+/// The separate `SceneWorks/ideogram-4` repo that hosts Ideogram 4's bf16 tree under `bf16/`, the
+/// selectable full-precision tier (sc-8513). The `q4/`/`q8/` packed turnkey lives in
+/// `SceneWorks/ideogram-4-mlx`; bf16 is resolved from THIS repo rather than duplicated. sc-9650 wires it
+/// on the candle lane too: the `bf16/` subdir is in the SAME single-file `transformer/model.safetensors`
+/// layout the candle loader reads, and `linear_detect` takes its dense arm (no `.scales` sibling), so
+/// candle dense-loads bf16 exactly like macOS/MLX — while the packed q4/q8 tiers still come from the
+/// `-mlx` turnkey via `ideogram_model_subdir`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 const IDEOGRAM_BF16_REPO: &str = "SceneWorks/ideogram-4";
 
 /// Resolve the weights snapshot directory: an explicit `modelPath` dir wins, else the
@@ -234,13 +427,17 @@ pub(crate) fn resolve_weights_dir(
     // turbo variant (mlx-gen #488) shares the same turnkey — each subdir also carries the bundled
     // `turbo_lora.safetensors` the `ideogram_4_turbo` engine installs at load.
     if request.model == "ideogram_4" || request.model == "ideogram_4_turbo" {
-        // bf16 (sc-8513, epic 8506) is the SHARED `SceneWorks/ideogram-4` repo's `bf16/` subdir — the
-        // same full-precision tree the candle off-Mac lane loads (sc-6859) — NOT duplicated into the
-        // MLX turnkey. When the macOS request opts into bf16 (advanced mlxQuantize<=0) AND it is
-        // downloaded, resolve there (the dense weights load with no quantize); else the q4 (default)/q8
-        // turnkey subdir. A partial bf16 download falls back rather than half-loading. (macOS/MLX only —
-        // the candle lane resolves bf16 through its own `candle_ideogram_subdir` path, unchanged.)
-        #[cfg(target_os = "macos")]
+        // bf16 (sc-8513, epic 8506) is the SHARED `SceneWorks/ideogram-4` repo's `bf16/` subdir — NOT
+        // duplicated into the MLX turnkey. When a request opts into bf16 (advanced mlxQuantize<=0) AND it
+        // is downloaded, resolve there (the dense weights load with no quantize); else the q4 (default)/q8
+        // turnkey subdir. A partial bf16 download falls back rather than half-loading. sc-9650: wired on
+        // the candle lane too — the candle Ideogram loader reads the same `transformer/model.safetensors`
+        // layout and dense-loads bf16 via `linear_detect` (`resolve_quant` returns None for mlxQuantize<=0,
+        // so no on-the-fly quant runs). The packed q4/q8 tiers still resolve from the `-mlx` turnkey below.
+        #[cfg(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        ))]
         {
             let wants_bf16 = request
                 .advanced
@@ -267,10 +464,16 @@ pub(crate) fn resolve_weights_dir(
     ) {
         return Ok(snapshot.map(|root| boogu_model_subdir(&root, request)));
     }
-    // Krea 2 Turbo (epic 7565) ships a turnkey with packed `q8/` (default) + `q4/` self-contained subdirs;
-    // point the engine at the chosen quant's subdir rather than the repo root. The packed weights
-    // auto-detect their quant on load, so the resolved `spec.quantize` is a no-op on them.
-    if request.model == "krea_2_turbo" {
+    // Krea 2 Turbo (epic 7565) + Krea 2 Raw (epic 9992) ship a turnkey with self-contained quant subdirs
+    // (Turbo: packed `q8/` default + `q4/`; Raw: packed `q8/` default + `q4/` + dense `bf16/`); point the
+    // engine at the chosen quant's subdir rather than the repo root. The packed weights auto-detect their
+    // quant on load, so the resolved `spec.quantize` is a no-op on them. `krea_model_subdir` also falls
+    // back to any downloaded tier when the preferred one is absent — so Raw generates off the `bf16/`
+    // training-base tier when only that is present, instead of failing at the repo root (no `tokenizer/`
+    // there). Without this branch Raw fell through to `Ok(snapshot)` (the repo root) and load errored
+    // with "tokenizer: No such file or directory" (epic 9992 P5/P6 wiring gap — the `krea_2_raw` engine
+    // row already documents this resolver, but the branch was never added).
+    if request.model == "krea_2_turbo" || request.model == "krea_2_raw" {
         return Ok(snapshot.map(|root| krea_model_subdir(&root, request)));
     }
     // Catalog-wide quant-matrix models (sc-8513, epic 8506) ship as SceneWorks pre-quantized
@@ -328,6 +531,43 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     // weights, bf16 resolves to Quant::None). Replaces the gated BFL download + install-time quantize.
     "flux_schnell",
     "flux_dev",
+    // PuLID-FLUX (sc-9947, epic 8506): the MLX lane's FLUX.1-dev backbone now loads from the SAME
+    // `SceneWorks/flux1-dev-mlx` q4/q8/bf16 turnkey as base `flux_dev` (its bespoke `pulid.rs` resolver
+    // calls `standard_tier_subdir` directly; `mlx-gen-pulid` delegates the backbone to `load_flux1`, which
+    // packed-detects the tier). Registering it here makes `uses_standard_tier_layout` true for that
+    // resolver. The candle (Windows/Linux) PuLID lane keeps the upstream dense BFL backbone and never
+    // reaches the base tier path, so this is inert there (epic-9083 covers the candle packed lane).
+    "pulid_flux_dev",
+    // Lens / Lens-Turbo (sc-9092, epic 9083 gap #3): the SceneWorks re-hosted `SceneWorks/lens-mlx` /
+    // `SceneWorks/lens-turbo-mlx` turnkeys are standard q4/q8/bf16 tiers (their manifests already flag
+    // `mlx.standardTierLayout: true`, so `uses_standard_tier_layout` was already true via the manifest —
+    // registering them here is the zero-manifest-change form + documents the candle-lane opt-in). As of
+    // the candle-gen packed-load rollout (sc-8799) the candle Lens loader packed-detects the SAME
+    // turnkey subdir the macOS path loads, so the ad-hoc `candle_lens_repo` (a separate bf16 diffusers
+    // rehost) is retired and both lanes resolve Lens through `standard_tier_subdir`. Lens is the lone
+    // candle family that ALSO advertises `supported_quants` (Q4/Q8) today, so `resolve_quant` engages on
+    // its candle lane; ideogram/boogu/krea keep their legacy per-family subdir resolvers (non-standard
+    // q4-default / per-variant / q8-default layouts) and are NOT registered here.
+    "lens",
+    "lens_turbo",
+    // SANA + SANA-Sprint (sc-8489/sc-8513, epic 8506): the `SceneWorks/Sana_1600M_1024px_mlx` /
+    // `Sana_Sprint_1.6B_1024px_mlx` turnkeys ship standard q4/q8/bf16 tiers. mlx-gen #653 packs the
+    // Linear-DiT transformer + the Gemma-2 CHI TE and packed-detects on load; the DC-AE VAE stays
+    // dense in every tier. Like flux1/qwen (and UNLIKE the dense-TE klein class) the q4/q8 load-quant
+    // is a harmless no-op on the already-packed weights and bf16 resolves to Quant::None — so these do
+    // NOT need a DENSE_TE_TIER_MODELS guard. The SANA descriptor now advertises supported_quants
+    // Q4/Q8 (mlx-gen #654), so `supports_quant()` is true and they flow through the same
+    // resolve_quant + reconcile path as every other matrix model (no more no-quant special case).
+    "sana_1600m",
+    "sana_sprint_1600m",
+    // Kolors (sc-9946, epic 8506): the `SceneWorks/kolors-mlx` turnkey ships standard q4/q8/bf16
+    // tiers. mlx-gen #659 packs the SDXL-style UNet + the ChatGLM3-6B `ChatGlmLinear` projections
+    // and packed-detects on load; the SDXL VAE stays dense in every tier. Like flux1/sana (and
+    // UNLIKE the dense-TE klein class) the ChatGLM3 TE is packed, so the q4/q8 load-quant is a
+    // harmless no-op on the already-packed weights and bf16 resolves to Quant::None — no
+    // DENSE_TE_TIER_MODELS guard. The kolors descriptor already advertises supported_quants Q4/Q8,
+    // so it flows through the same resolve_quant + reconcile path as every other matrix model.
+    "kolors",
 ];
 
 /// Standard-tier models whose text encoder ships DENSE bf16 in EVERY tier (epic 8506, sc-8711:
@@ -427,25 +667,36 @@ fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
         .unwrap_or_else(|| root.to_path_buf())
 }
 
+/// The Ideogram 4 tier subdir a `mlxQuantize` request needs fetched ON DEMAND — `Some("q8")` when the
+/// request opts into Q8 (`> 4`), else `None` (the shipped default `q4/`, which the catalog download
+/// pulls; bf16 is a SEPARATE catalog repo the user opts into on the Models page, never an on-demand
+/// fetch). Shared by [`ideogram_model_subdir`] (which subdir to load) and [`ensure_ideogram_tier_present`]
+/// (which to fetch) so the two stay in lockstep, mirroring [`boogu_tier_subdir`].
+fn ideogram_tier_subdir(bits: Option<i64>) -> Option<&'static str> {
+    match bits {
+        Some(b) if b > 4 => Some("q8"),
+        _ => None,
+    }
+}
+
 /// Pick the engine-complete packed subdir of an Ideogram 4 turnkey `root`: `q8/` when the request
 /// opts into Q8 (`advanced.mlxQuantize: 8`) AND it is downloaded, else the default `q4/`. Falls back
 /// to `root` if neither subdir is present (a partially-downloaded bundle surfaces as a load error
-/// rather than a silent half-load). On-demand `q8/` download is a follow-up; `q4/` is the manifest
-/// default.
+/// rather than a silent half-load). The non-default `q8/` tier is an on-demand download fetched by
+/// [`ensure_ideogram_tier_present`] before this resolves (sc-9607); `q4/` is the manifest default.
 fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
-    let wants_q8 = request
+    let bits = request
         .advanced
         .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-        .is_some_and(|bits| bits > 4);
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
     let present = |name: &str| -> Option<PathBuf> {
         let dir = root.join(name);
         dir.join("transformer/model.safetensors")
             .is_file()
             .then_some(dir)
     };
-    if wants_q8 {
-        if let Some(dir) = present("q8") {
+    if let Some(tier) = ideogram_tier_subdir(bits) {
+        if let Some(dir) = present(tier) {
             return dir;
         }
     }
@@ -549,6 +800,147 @@ fn krea_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
         .unwrap_or_else(|| root.to_path_buf())
 }
 
+/// The private HF repo hosting the Krea 2 INT8-ConvRot DiT single-file checkpoint (sc-9300, epic
+/// 9083). Authed download with the SceneWorks HF token, like every private SceneWorks tier.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const KREA_CONVROT_REPO: &str = "SceneWorks/krea-2-turbo-int8-convrot";
+
+/// The ConvRot DiT filename inside [`KREA_CONVROT_REPO`] (mirrors the manifest download `files`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const KREA_CONVROT_DIT_FILE: &str = "krea2_turbo_int8_convrot.safetensors";
+
+/// Whether this Krea 2 request selected the candle-only INT8-ConvRot tier (sc-9300). The studio's tier
+/// picker sends `advanced.convRot: true` for the `int8-convrot` variant (it has no `mlxQuantize` — the
+/// online-rotation int8 DiT isn't a bits-based quant). Candle-lane only: the tier is `platforms`-scoped
+/// off macOS and the worker only advertises the `int8_convrot` capability on the candle lane, so this
+/// never fires on the MLX path even if a stray flag arrives. Confined to `krea_2_turbo`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn wants_krea_convrot(request: &ImageRequest) -> bool {
+    request.model == "krea_2_turbo"
+        && request
+            .advanced
+            .get("convRot")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+/// Resolve the INT8-ConvRot LoadSpec inputs for a Krea 2 request (sc-9300): the canonical bf16 Krea 2
+/// snapshot DIR (the LoadSpec `weights` root — tokenizer / Qwen3-VL TE / Qwen-Image VAE / config + the
+/// non-quantized surface) and the downloaded ConvRot DiT single-file (the LoadSpec `text_encoder`
+/// `File`, which the candle-gen krea engine's `convrot_selector` routes to `load_components_convrot`).
+///
+/// `None` when the request didn't select ConvRot, OR either artifact isn't present yet (the bf16
+/// `bf16/` subdir of the `krea-2-turbo-mlx` turnkey, or the ConvRot DiT `.safetensors`) — the caller
+/// then falls back to the normal dense/packed path rather than half-loading. The bf16 base is fetched
+/// on demand by [`ensure_krea_convrot_base_present`] before this resolves. The sm_89 compute-cap floor
+/// is enforced ENGINE-side (`ensure_int8_floor` inside `load_components_convrot`) AND surfaced as the
+/// worker's `int8_convrot` capability, so an ineligible card never reaches here (the picker hides it).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_krea_convrot(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> Option<(PathBuf, PathBuf)> {
+    if !wants_krea_convrot(request) {
+        return None;
+    }
+    // The bf16 base surface: the `bf16/` subdir of the shared `krea-2-turbo-mlx` turnkey (the SAME dir
+    // the bf16 tier ships), a candle-readable `transformer/ text_encoder/ vae/ tokenizer/` root. The
+    // ConvRot DiT replaces only the transformer at load, but the pipeline still reads the dense TE/VAE/
+    // tokenizer/config from here.
+    let base_dir = huggingface_snapshot_dir(&settings.data_dir, KREA_MLX_TURNKEY_REPO)
+        .map(|root| root.join("bf16"))
+        .filter(|dir| {
+            dir.join("model_index.json").is_file()
+                && dir.join("text_encoder").is_dir()
+                && dir.join("vae").is_dir()
+        })?;
+    // The ConvRot DiT single-file inside the private repo's snapshot.
+    let convrot_dit = huggingface_snapshot_dir(&settings.data_dir, KREA_CONVROT_REPO)
+        .map(|root| root.join(KREA_CONVROT_DIT_FILE))
+        .filter(|file| file.is_file())?;
+    Some((base_dir, convrot_dit))
+}
+
+/// The shared `krea-2-turbo-mlx` turnkey repo (its `bf16/` subdir supplies the ConvRot base surface).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const KREA_MLX_TURNKEY_REPO: &str = "SceneWorks/krea-2-turbo-mlx";
+/// Pinned revision for the fixed [`KREA_MLX_TURNKEY_REPO`] (sc-9879, F-077 follow-up). The repo is a
+/// hard-coded const (no manifest/payload override reaches this on-demand ConvRot-base fetch), so pulling
+/// the mutable `main` branch would let an upstream re-push silently swap the bf16 DiT / Qwen3-VL TE /
+/// Qwen-Image VAE we load. Pin the exact commit for defense-in-depth (mirrors the SeedVR2/Real-ESRGAN
+/// pins, sc-8879/sc-9682). The `hf` CLI still verifies each file's own hash on download.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const KREA_MLX_TURNKEY_REVISION: &str = "d009674080cc1bccf2b629d834c34bf5eccdb723";
+
+/// On-demand fetch of the canonical bf16 Krea 2 base surface for the INT8-ConvRot tier (sc-9300),
+/// the sibling of [`ensure_boogu_tier_present`]. The ConvRot catalog download pulls only the DiT
+/// single-file; the bf16 `bf16/` subdir of the `krea-2-turbo-mlx` turnkey (tokenizer / Qwen3-VL TE /
+/// Qwen-Image VAE / config) is fetched here when the ConvRot tier is selected and it isn't present —
+/// so q4/q8 users are never forced to download the 35 GB bf16 base (it isn't a global co-requisite).
+/// No-op when the request isn't a ConvRot job, the bf16 base is already complete, or the `hf` CLI is
+/// absent (then `resolve_krea_convrot` returns `None` and the job falls back / surfaces a load error).
+/// Fails loud on a real download error — fast, before any compute.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn ensure_krea_convrot_base_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &ImageRequest,
+) -> WorkerResult<()> {
+    if !wants_krea_convrot(request) {
+        return Ok(());
+    }
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, KREA_MLX_TURNKEY_REPO) else {
+        // Turnkey never fetched → `hf` may still pull it below; probe the eventual bf16 subdir path.
+        // (If the repo is entirely absent, the fetch below installs the requested bf16 leaf dirs.)
+        return fetch_krea_convrot_base(api, settings, job).await;
+    };
+    let bf16 = root.join("bf16");
+    // Present already (dense sharded transformer index + the dense TE/VAE) → no fetch.
+    if bf16.join("model_index.json").is_file()
+        && bf16.join("text_encoder").is_dir()
+        && bf16.join("vae").is_dir()
+    {
+        return Ok(());
+    }
+    fetch_krea_convrot_base(api, settings, job).await
+}
+
+/// Pull the bf16 base leaf dirs of the `krea-2-turbo-mlx` turnkey into the HF cache (sc-9300). Same
+/// leaf-glob shape as the manifest bf16 tier download; scratched marker dir keyed by job id.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn fetch_krea_convrot_base(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".krea-convrot-base-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec![
+        "bf16/transformer/*".to_owned(),
+        "bf16/text_encoder/*".to_owned(),
+        "bf16/vae/*".to_owned(),
+        "bf16/tokenizer/*".to_owned(),
+        "bf16/scheduler/*".to_owned(),
+        "bf16/model_index.json".to_owned(),
+    ];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api,
+        settings,
+        job,
+        KREA_MLX_TURNKEY_REPO,
+        KREA_MLX_TURNKEY_REVISION,
+        &files,
+        &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
+}
+
 /// On-demand fetch of a non-default Boogu tier subfolder (sc-6568 / sc-8513). The catalog download
 /// pulls only the packed Q8 `<variant>/` subfolder, so when a job opts into another tier
 /// ([`boogu_tier_subdir`]: `<=0` → `<variant>-bf16/` dense, `1..=4` → `<variant>-q4/` packed) and that
@@ -558,7 +950,15 @@ fn krea_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
 /// tier subfolder is already complete. Fails loud on a real download error — fast, before any compute;
 /// a missing `hf` CLI leaves the subfolder absent so the request gracefully falls back to Q8. Mirrors
 /// [`crate::video_jobs::ensure_ltx_q8_present`].
-#[cfg(target_os = "macos")]
+///
+/// sc-9607 (epic 9083): also runs on the candle lane (off-Mac) — `generate_candle_stream` calls it
+/// before snapshot resolution, so Windows/Linux users get the SAME on-demand `-q4/-bf16` fetch as
+/// macOS. Previously `#[cfg(target_os = "macos")]`, so off-Mac only the shipped Q8 `base/` default was
+/// installable and a non-default tier silently fell back to Q8.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 async fn ensure_boogu_tier_present(
     api: &ApiClient,
     settings: &Settings,
@@ -606,6 +1006,73 @@ async fn ensure_boogu_tier_present(
         format!("{tier}/mllm/*"),
         format!("{tier}/vae/*"),
     ];
+    let result = crate::model_jobs::download_model_with_hf_cli(
+        api,
+        settings,
+        job,
+        &model_repo(request, &model),
+        "main",
+        &files,
+        &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result.map(|_| ())
+}
+
+/// On-demand fetch of Ideogram 4's non-default `q8/` tier (sc-9607, epic 9083). The catalog download
+/// pulls only the default `q4/` subdir (`files: ["q4/*"]`), so a job that opts into Q8
+/// ([`ideogram_tier_subdir`]: `> 4` → `q8/`) needs the `q8/` subdir pulled into the HF cache before
+/// [`ideogram_model_subdir`] can resolve it. No-op when the default q4 is requested, the model isn't
+/// Ideogram, the turnkey snapshot isn't downloaded yet (`ideogram_model_subdir` then falls back to q4 /
+/// surfaces the load error), or `q8/` is already complete. The `q8/*` glob is recursive (matches
+/// `q8/transformer/…`, and for `ideogram_4_turbo` the bundled `q8/turbo_lora.safetensors`), mirroring
+/// the catalog q4 entry and [`crate::video_jobs::ensure_ltx_q8_present`]. bf16 is NOT fetched here — it
+/// lives in the separate `SceneWorks/ideogram-4` catalog repo the user opts into on the Models page
+/// (and is macOS-only). This is the on-demand `q8/` download the [`ideogram_model_subdir`] docstring
+/// flagged as a follow-up; it runs on BOTH the MLX (`generate_stream`) and candle
+/// (`generate_candle_stream`) lanes, so off-Mac gets the same q4/q8 picker as macOS. Fails loud on a
+/// real download error; a missing `hf` CLI leaves `q8/` absent so the request gracefully falls back to q4.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn ensure_ideogram_tier_present(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &ImageRequest,
+) -> WorkerResult<()> {
+    if request.model != "ideogram_4" && request.model != "ideogram_4_turbo" {
+        return Ok(());
+    }
+    let bits = request.advanced.get("mlxQuantize").and_then(quant_int);
+    let Some(tier) = ideogram_tier_subdir(bits) else {
+        // Default q4 ships in the catalog download — nothing to fetch.
+        return Ok(());
+    };
+    let Some(model) = mlx_model(&request.model) else {
+        return Ok(());
+    };
+    let Some(root) = huggingface_snapshot_dir(&settings.data_dir, &model_repo(request, &model))
+    else {
+        // Turnkey not downloaded at all → leave it to the load path's "weights not found" error.
+        return Ok(());
+    };
+    // Present already (the packed single-file transformer) → no fetch.
+    if root
+        .join(tier)
+        .join("transformer/model.safetensors")
+        .is_file()
+    {
+        return Ok(());
+    }
+    let scratch = settings
+        .data_dir
+        .join("cache")
+        .join(format!(".ideogram-tier-fetch-{}", job.id));
+    tokio::fs::create_dir_all(&scratch).await?;
+    let files = vec![format!("{tier}/*")];
     let result = crate::model_jobs::download_model_with_hf_cli(
         api,
         settings,
@@ -672,6 +1139,134 @@ fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
     }
 }
 
+/// The transformer-tier bit count a dense-TE turnkey (FLUX.2-klein, the [`DENSE_TE_TIER_MODELS`]
+/// class) actually asked for, derived from `advanced.mlxQuantize` the SAME way [`standard_tier_subdir`]
+/// picks its `bf16`/`q8`/`q4` tier (`<=0 → bf16`, `>4 → q8`, else the q4 default). Returns the recipe
+/// bit count of the REQUESTED tier: `None` (bf16) / `Some(8)` / `Some(4)`.
+///
+/// sc-9362 (F-018 follow-up): [`resolve_quant`] returns `(None, None)` for every dense-TE job (the
+/// load quant must stay `None` so the deliberately-dense bf16 text encoder is never re-quantized), so
+/// the request-derived recipe bits are ALWAYS bf16 even though the transformer is packed at q4/q8. If
+/// [`reconcile_resolved_tier_quant`] compared the resolved transformer tier against that always-`None`
+/// value, every straight (non-fallback) dense-TE job would look like a bf16→qN "downgrade" — firing a
+/// spurious `quant_tier_downgraded` event while the asset telemetry still hid the true transformer
+/// precision. Comparing the resolved tier against THIS requested-tier value instead lets the reconcile
+/// record the actual transformer precision on every job and warn/emit ONLY on a genuine fallback
+/// (requested tier absent → resolver fell through to an adjacent tier).
+///
+/// macOS-only: consumed on the MLX `generate_stream` reconcile path (the candle lane has no tier
+/// layout), alongside [`tier_quant_from_resolved_dir`].
+#[cfg(target_os = "macos")]
+fn dense_te_requested_tier_bits(request: &ImageRequest) -> Option<i64> {
+    let bits = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    match bits {
+        Some(b) if b <= 0 => None,
+        Some(b) if b > 4 => Some(8),
+        _ => Some(4),
+    }
+}
+
+/// The `(engine Quant, recipe bit count)` a resolved turnkey tier subdir ACTUALLY loads at, parsed
+/// from the tier dir's basename (sc-8820). The tier resolvers ([`standard_tier_subdir`],
+/// [`ideogram_model_subdir`], [`boogu_model_subdir`], [`krea_model_subdir`]) fall through q4→q8→bf16
+/// (or the Boogu `<variant>`-shaped names) when the requested tier isn't downloaded, so the resolved
+/// path can be a DIFFERENT precision than the request asked for. This maps the resolved basename back
+/// to its precision so the caller can record the tier that ran, not the one requested:
+///   - `bf16` / `<variant>-bf16` → dense (`None`, `None`)
+///   - `q4`   / `<variant>-q4`   → Q4 (`4`)
+///   - `q8`   / `<variant>-q8`   → Q8 (`8`)
+///   - a bare Boogu `<variant>/` (no `-q4`/`-q8`/`-bf16` suffix) → the shipped **Q8** default
+///
+/// `None` when the basename is not a recognizable tier name — e.g. the resolver fell all the way back
+/// to the repo `root` (a partial/absent turnkey the engine will error on), or the dir is a `modelPath`
+/// override. In that case the caller keeps the request-derived quant rather than inventing one.
+///
+/// macOS-only: its sole caller is [`reconcile_resolved_tier_quant`] on the MLX `generate_stream` path.
+/// The candle lane has no quant-tier layout to reconcile, so this would be dead code there.
+#[cfg(target_os = "macos")]
+fn tier_quant_from_resolved_dir(dir: &Path) -> Option<(Option<Quant>, Option<i64>)> {
+    let name = dir.file_name()?.to_str()?;
+    // Match the trailing tier token: `q4` / `q8` / `bf16`, whether the whole basename (standard/
+    // ideogram/krea) or the suffix of a Boogu `<variant>-<tier>` folder.
+    let tier = name.rsplit('-').next().unwrap_or(name);
+    match tier {
+        "bf16" => Some((None, None)),
+        "q4" => Some((Some(Quant::Q4), Some(4))),
+        "q8" => Some((Some(Quant::Q8), Some(8))),
+        // A bare Boogu `base`/`turbo`/`edit` folder (no tier suffix) IS the packed Q8 default.
+        "base" | "turbo" | "edit" => Some((Some(Quant::Q8), Some(8))),
+        _ => None,
+    }
+}
+
+/// Reconcile the request-derived `(quant, quant_bits)` against the tier subdir the resolver ACTUALLY
+/// landed on (sc-8820). The tier resolvers fall through q4→q8→bf16 when the preferred tier isn't
+/// downloaded, but the recipe quant is derived from the REQUEST — so a user who selected bf16 with
+/// only `q4/` present would silently render Q4 while the sidecar records dense. That makes the epic
+/// 8506 quant A/B workflow lie about precision (and can compare a tier against itself). This corrects
+/// the recorded quant to the resolved tier, and — when a downgrade actually happened — `warn!`s and
+/// emits a `quant_tier_downgraded` event so the UI/telemetry surfaces the fallback instead of hiding
+/// it. We do NOT hard-error: a working render at an adjacent tier beats failing because the preferred
+/// tier is missing (the finding prefers warn+fallback+correct-recording). Returns the
+/// `(quant, quant_bits)` to record + load with.
+///
+/// `allow_quant_change` gates whether the LOAD quant may be rewritten to match the resolved tier.
+/// It's `true` for the ordinary packed-turnkey families (the load-quant is a no-op on already-packed
+/// weights, so correcting it to the resolved tier is safe/right). It's `false` for the DENSE-TE
+/// turnkeys (FLUX.2-klein, sc-8711): their load quant MUST stay `None` so the deliberately-dense bf16
+/// text encoder is never re-quantized — but the *recorded* bit count still gets corrected to the
+/// packed transformer's resolved tier so the sidecar tells the truth. The event/`warn!` still fire so
+/// the fallback is surfaced either way.
+#[cfg(target_os = "macos")]
+fn reconcile_resolved_tier_quant(
+    requested: (Option<Quant>, Option<i64>),
+    weights_dir: &Path,
+    allow_quant_change: bool,
+    model_id: &str,
+    job_id: &str,
+    engine: &str,
+) -> (Option<Quant>, Option<i64>) {
+    let Some((actual_quant, actual_bits)) = tier_quant_from_resolved_dir(weights_dir) else {
+        // Not a recognizable tier dir (fell back to the repo root, or a modelPath override) — keep
+        // the request-derived quant; the engine will surface any missing-weights error itself.
+        return requested;
+    };
+    if actual_bits == requested.1 {
+        return requested;
+    }
+    // The resolved tier differs from what the request asked for → a silent fallback. Surface it and
+    // record the precision that actually ran.
+    let requested_label = requested.1.map_or("bf16".to_owned(), |b| format!("q{b}"));
+    let actual_label = actual_bits.map_or("bf16".to_owned(), |b| format!("q{b}"));
+    tracing::warn!(
+        "{engine}: requested quant tier {requested_label} for {model_id} is not downloaded; \
+         fell back to {actual_label} — recording the tier that actually ran"
+    );
+    emit_event(
+        "quant_tier_downgraded",
+        json!({
+            "jobId": job_id,
+            "engine": engine,
+            "model": model_id,
+            "requested": requested_label,
+            "resolved": actual_label,
+            "requestedBits": requested.1,
+            "resolvedBits": actual_bits,
+        }),
+    );
+    // Always correct the recorded bits; only rewrite the load quant when it's safe to (packed
+    // turnkeys), so a dense-TE turnkey keeps its `None` load quant while still recording the truth.
+    let load_quant = if allow_quant_change {
+        actual_quant
+    } else {
+        requested.0
+    };
+    (load_quant, actual_bits)
+}
+
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=80) else the family default.
 /// Shared by the MLX path and the candle lane (sc-5096).
 #[cfg(any(
@@ -716,6 +1311,131 @@ fn resolve_guidance(request: &ImageRequest, model: &ResolvedModel) -> Option<f32
         .map(|value| value as f32)
         .unwrap_or(model.default_guidance());
     Some(scale)
+}
+
+/// Resolve an unsigned advanced knob with a manifest fallback (sc-8825). The single mechanism the
+/// bespoke edit/adapter/control lanes (`*_edit_candle.rs`, `sdxl_ipadapter.rs`, `kolors_*.rs`,
+/// `qwen_control.rs`, `instantid.rs`, `pulid.rs`) had each re-implemented as an inline parse closure:
+/// `advanced[key]` (JSON uint OR numeric string) → the manifest `[key]` (same parse) → `default`.
+/// The parsed **advanced-or-manifest** value is clamped to `range`; the `default` is returned
+/// **unclamped** (it is a trusted per-lane constant, and clamping it would silently change a lane
+/// whose default sits outside its own historical range). Each caller passes its OWN `range`/`default`,
+/// so the drifting steps bounds (1..=80 / 1..=50 / 1..=100) are preserved byte-for-byte — this is a
+/// dedup-of-mechanism refactor, not a policy change.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_advanced_or_manifest_u32(
+    request: &ImageRequest,
+    key: &str,
+    default: u32,
+    range: std::ops::RangeInclusive<u32>,
+) -> u32 {
+    let parse = |value: &Value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    };
+    request
+        .advanced
+        .get(key)
+        .and_then(parse)
+        .or_else(|| request.model_manifest_entry.get(key).and_then(parse))
+        .map(|value| value.clamp(*range.start() as u64, *range.end() as u64) as u32)
+        .unwrap_or(default)
+}
+
+/// Resolve a float advanced knob with a manifest fallback (sc-8825). The guidance twin of
+/// [`resolve_advanced_or_manifest_u32`]: the manifest `[key]` (JSON float OR numeric string) supplies
+/// the effective default (else the per-lane `default`), then [`advanced::f32_clamped`] reads
+/// `advanced[key]` — falling back to that manifest default — and clamps the result to `range`. Unlike
+/// the u32 twin, the resolved value here is always clamped (matching the historical `f32_clamped`
+/// call, which clamps the manifest/default fallback too). Each caller passes its OWN `range`/`default`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_advanced_or_manifest_f32(
+    request: &ImageRequest,
+    key: &str,
+    default: f32,
+    range: std::ops::RangeInclusive<f32>,
+) -> f32 {
+    let manifest_default = request
+        .model_manifest_entry
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or(default);
+    advanced::f32_clamped(&request.advanced, key, manifest_default, range)
+}
+
+/// Closure-default twin of [`resolve_advanced_or_manifest_u32`] (sc-8825). Identical mechanism —
+/// `advanced[key]` → manifest `[key]` (parsed, clamped to `range`) — except the fallback is a
+/// per-lane `default_fn` closure evaluated **only** when both advanced and manifest are absent (and,
+/// like the const twin, returned **unclamped**). This covers the lanes whose default is model-dependent
+/// (`flux_ipadapter` variant steps, `qwen_edit_candle`/`zimage_control` per-variant steps) rather than a
+/// bare constant. Every caller passes its OWN `range`/`default_fn`, so per-lane bounds stay byte-for-byte.
+///
+/// Unlike the const twins (which have macOS-live callers in `pulid.rs`/`instantid.rs`), these variants
+/// are only *called* by the candle-exclusive lanes, so the macOS non-test lib build has no caller —
+/// hence the gate is `candle-lane OR test` (the sc-8825 unit tests exercise it on both build lanes).
+#[cfg(any(
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+fn resolve_advanced_or_manifest_u32_with(
+    request: &ImageRequest,
+    key: &str,
+    default_fn: impl FnOnce() -> u32,
+    range: std::ops::RangeInclusive<u32>,
+) -> u32 {
+    let parse = |value: &Value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+    };
+    request
+        .advanced
+        .get(key)
+        .and_then(parse)
+        .or_else(|| request.model_manifest_entry.get(key).and_then(parse))
+        .map(|value| value.clamp(*range.start() as u64, *range.end() as u64) as u32)
+        .unwrap_or_else(default_fn)
+}
+
+/// Closure-default twin of [`resolve_advanced_or_manifest_f32`] (sc-8825). Identical mechanism —
+/// manifest `[key]` supplies the effective default (else the per-lane `default_fn` closure, evaluated
+/// only when the manifest key is absent), then [`advanced::f32_clamped`] reads `advanced[key]` (falling
+/// back to that default) and clamps to `range`. Covers `flux_ipadapter`, whose guidance fallback is a
+/// per-variant fn. Each caller passes its OWN `range`/`default_fn`. Gated `candle-lane OR test` for the
+/// same reason as the u32 twin: no macOS non-test caller, but the sc-8825 tests exercise it on both lanes.
+#[cfg(any(
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
+fn resolve_advanced_or_manifest_f32_with(
+    request: &ImageRequest,
+    key: &str,
+    default_fn: impl FnOnce() -> f32,
+    range: std::ops::RangeInclusive<f32>,
+) -> f32 {
+    let manifest_default = request
+        .model_manifest_entry
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or_else(default_fn);
+    advanced::f32_clamped(&request.advanced, key, manifest_default, range)
 }
 
 /// True for a TRUE-CFG family whose engine reads the CFG scale from `true_cfg` (with a real
@@ -803,6 +1523,24 @@ pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// The adapter filename a LoRA record's manifest `files` list declares (its first
+/// entry), if any (sc-10221). When `lora_path` resolves to a record *directory*, this
+/// is the specific adapter to load — e.g. a trained LoRA's final `<stem>.safetensors`
+/// rather than a `<stem>-stepNNN` checkpoint sharing the folder. Untrusted (rides the
+/// job payload); `resolve_adapter_in_dir` re-validates it as a plain in-dir filename.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn declared_adapter_file(lora: &Value) -> Option<&str> {
+    lora.get("files")
+        .and_then(Value::as_array)
+        .and_then(|files| files.first())
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 /// Classify a LoRA file into the mlx-gen adapter `kind`. SceneWorks peft-LoKr (stamped
 /// `networkType: lokr`) → `Lokr` (the engine's metadata-gated `apply_lokr` peft path). Everything
 /// else → `Lora`, INCLUDING third-party LyCORIS (LoHa / kohya non-peft LoKr): since epic 3641
@@ -854,7 +1592,9 @@ fn resolve_adapters(request: &ImageRequest, settings: &Settings) -> WorkerResult
         // root before any on-disk use (sc-5723 / WKA-002).
         let path = crate::normalize_app_managed_lora_path(settings, &raw)?;
         let file = if path.is_dir() {
-            first_safetensors_path(&path).ok_or_else(|| {
+            // Prefer the manifest-declared adapter over an arbitrary directory scan so a
+            // trained LoRA loads its final adapter, not a step checkpoint (sc-10221).
+            crate::resolve_adapter_in_dir(&path, declared_adapter_file(lora)).ok_or_else(|| {
                 WorkerError::InvalidPayload(format!(
                     "LoRA has no .safetensors under {}",
                     path.display()
@@ -940,7 +1680,17 @@ fn load_engine(
     ip_adapter_dir: Option<PathBuf>,
 ) -> WorkerResult<Box<dyn Generator>> {
     let spec = load_spec(weights_dir, quant, adapters, ip_adapter_dir);
-    gen_core::load(engine_id, &spec)
+    load_control_engine(engine_id, &spec)
+}
+
+/// Shared real-weight smoke loader: resolve `engine_id` through the backend-neutral
+/// `gen_core::load` seam and wrap a failure as `WorkerError::Engine`. Every image
+/// control/base lane's `#[cfg(test)]` load wrapper funnels through here so the
+/// `gen_core::load` + `map_err` tail lives in one place (sc-8954). `cfg(target_os)`
+/// still decides which provider crate registered the engine, not this call.
+#[cfg(all(target_os = "macos", test))]
+fn load_control_engine(engine_id: &str, spec: &LoadSpec) -> WorkerResult<Box<dyn Generator>> {
+    gen_core::load(engine_id, spec)
         .map_err(|error| WorkerError::Engine(format!("{engine_id} load failed: {error}")))
 }
 
@@ -970,7 +1720,13 @@ fn is_flux_model(model: &str) -> bool {
 /// `mlx-gen-sensenova` engine (sc-3900).
 #[cfg(target_os = "macos")]
 fn is_sensenova_model(model: &str) -> bool {
-    matches!(model, "sensenova_u1_8b" | "sensenova_u1_8b_fast")
+    matches!(
+        model,
+        "sensenova_u1_8b"
+            | "sensenova_u1_8b_infographic_v2"
+            | "sensenova_u1_8b_fast"
+            | "sensenova_u1_8b_infographic_v2_fast"
+    )
 }
 
 /// Stage the engine's IP-Adapter dir contract from the two cached HF snapshots:
@@ -1475,6 +2231,136 @@ pub(crate) fn load_reference_image(
     })
 }
 
+/// The clamped identity img2img-init strength for a strict-pose set, or `None` for the pose-only tier.
+/// `Some(strength)` iff `advanced.referenceStrength > 0` AND a non-empty `referenceAssetId` is present;
+/// `strength` is the user value clamped to `[0.05, 1.0]`, carrying the mflux `image_strength`
+/// convention **verbatim** (higher strength → later denoise start → output stays closer to the init).
+///
+/// sc-8946 (F-144): this was duplicated line-for-line as `zimage_identity_strength` (Z-Image, sc-3146)
+/// and `flux2_identity_strength` (FLUX.2-dev control) — an identity-gate change had to be made twice.
+/// The gate + clamp are IDENTICAL across the two lanes (both mirror `MlxZImageAdapter`), so it lives
+/// here once. Pure (request only), so the parity-sensitive gate + clamp stay unit-testable without I/O.
+#[cfg(target_os = "macos")]
+fn identity_strength(request: &ImageRequest) -> Option<f32> {
+    let strength = request
+        .advanced
+        .get("referenceStrength")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .filter(|strength| *strength > 0.0)?;
+    let has_asset = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|id| !id.is_empty());
+    has_asset.then(|| (strength as f32).clamp(0.05, 1.0))
+}
+
+/// Resolve the optional identity img2img-init for a strict-pose set: `Some((image, strength))` when
+/// [`identity_strength`] engages (decoding `referenceAssetId` via [`load_reference_image`]), else
+/// `None` (the default pose-only tier). The reference is shared across the whole pose set — identity is
+/// constant; only the per-pose skeleton changes.
+///
+/// sc-8946 (F-144): the shared body of the former `resolve_identity_init` /
+/// `resolve_flux2_identity_init` (both line-for-line copies). The Z-Image strict-pose stream and the
+/// FLUX.2-dev control stream both call this.
+#[cfg(target_os = "macos")]
+fn resolve_identity_init(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Option<(Image, f32)>> {
+    let Some(strength) = identity_strength(request) else {
+        return Ok(None);
+    };
+    let asset_id = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .expect("identity_strength guarantees a non-empty referenceAssetId");
+    let image = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        asset_id,
+        project_path,
+    )?;
+    Ok(Some((image, strength)))
+}
+
+/// Resolve the **Krea 2 Turbo img2img** init (epic 8588 slice A, sc-8591): `Some((reference, strength))`
+/// from a `referenceAssetId` + `advanced.strength`, or `None` when no reference asset is supplied (the
+/// lane then falls back to plain txt2img). `strength` is the full-range 0.0–1.0 reference-fidelity
+/// slider (default 0.5); the worker does NOT clamp beyond `[0, 1]` — the usable band is model-specific
+/// (A0/sc-8589 mapped Krea Turbo's sweet spot at ~0.35–0.65, but that is guidance, not a hard clamp).
+/// The single `Conditioning::Reference` this produces is routed by the engine to
+/// `generate_turbo_img2img` (sc-10135), whose `preprocess_init_image` LANCZOS-resizes the reference to
+/// the output W×H — so, like Z-Image's [`resolve_identity_init`], the reference is fed raw (the
+/// `edit_image`-only [`should_fit_edit_source`] crop/pad-fit never applies to Krea's t2i-only surface).
+#[cfg(target_os = "macos")]
+fn resolve_img2img_init_generic(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Option<(Image, f32)>> {
+    let Some(asset_id) = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let image = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        asset_id,
+        project_path,
+    )?;
+    let strength = advanced::f32_clamped(&request.advanced, "strength", 0.5, 0.0..=1.0);
+    Ok(Some((image, strength)))
+}
+
+/// Whether the model opts into plain-t2i img2img (reference-guided latent-init) via the catalog —
+/// the SAME `ui.img2img` manifest flag the web reads to show the "Image reference" tile (epic 8588
+/// A4, sc-10195/sc-10189). Manifest-flag-driven rather than an ever-growing model-string match, so a
+/// new text-only model gains img2img by flipping its manifest flag + landing its mlx-gen entrypoint —
+/// no worker change. Mirrors the existing `uses_standard_tier_layout`/`is_dense_te_tier` pattern.
+///
+/// This gates the GENERIC img2img arm in [`resolve_generic_lane_conditioning`], which sits AFTER the
+/// model-specific reference arms (z-image identity-init, FLUX IP-Adapter, Kolors, Ideogram edit) so
+/// those bespoke surfaces keep precedence; the generic arm then catches Krea + SD3.5 + any future
+/// `ui.img2img` model uniformly.
+#[cfg(target_os = "macos")]
+fn model_supports_img2img(request: &ImageRequest) -> bool {
+    request
+        .model_manifest_entry
+        .get("ui")
+        .and_then(|ui| ui.get("img2img"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Whether a Z-Image t2i request should take the generic `ui.img2img` reference-guided latent-init
+/// rather than the Character Studio identity-init (sc-3619). Z-Image already owns a bespoke reference
+/// arm in [`resolve_generic_lane_conditioning`] (keyed on `referenceStrength`), so it never reaches the
+/// generic img2img arm below — this predicate re-introduces the generic path INSIDE that arm.
+///
+/// Identity-init keeps precedence (it also drives face-likeness scoring), so the generic img2img fires
+/// ONLY when identity-init doesn't engage (no `referenceStrength`) yet the model opts into `ui.img2img`
+/// and a reference is present — i.e. the Image Studio "Image reference" tile (`referenceAssetId` +
+/// `advanced.strength`). The two surfaces are mutually exclusive by mode (character_image vs
+/// text_to_image); encoding the precedence purely keeps it unit-testable without image I/O (epic 8588
+/// A4.5, sc-10193). Base `z_image` is NOT in the z-image arm, so it reaches the generic arm directly and
+/// never consults this predicate.
+#[cfg(target_os = "macos")]
+fn zimage_uses_generic_img2img(request: &ImageRequest, has_reference: bool) -> bool {
+    identity_strength(request).is_none() && has_reference && model_supports_img2img(request)
+}
+
 /// The source identity reference (decoded image + its asset id) a strict-control pose set scores its
 /// finished poses against (epic 4406, sc-4410), or `None` when the job carries no identity reference.
 ///
@@ -1610,7 +2496,7 @@ fn build_reference_conditioning(references: &[Image]) -> Vec<Conditioning> {
 /// Reference asset ids for a Boogu instruction edit, in order. The multi-image picker sends the plural
 /// `referenceAssetIds` — take all of them, capped at [`BOOGU_MAX_EDIT_REFERENCES`]; with no plural list
 /// it falls back to the single Image-Edit `sourceAssetId` (`edit_image` mode). Mirrors
-/// `flux2_edit_reference_ids`.
+/// `edit_reference_ids`.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1841,6 +2727,37 @@ fn parse_poses(request: &ImageRequest) -> Vec<PoseInput> {
         .collect()
 }
 
+/// Stage the antelopev2 face stack for identity-likeness scoring (epic 4406), collapsing the
+/// warn-and-`None` staging block duplicated across every scored image lane (F-024, sc-8826). When
+/// `should_stage` is false the stack is never fetched and this is `None`; when true it downloads the
+/// shared InstantID bundle (a no-op if already cached) and returns its dir. Staging is **non-fatal**:
+/// a download failure logs `warn_message` and yields `None`, so the scorer is simply skipped and the
+/// generation still renders (no scores). `warn_message` is the per-lane phrasing (e.g. the
+/// `character_image` edit streams vs. the `pose-set` control lanes) so the log line is unchanged from
+/// the hand-written blocks this replaces.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn stage_likeness(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    should_stage: bool,
+    warn_message: &'static str,
+) -> Option<PathBuf> {
+    if !should_stage {
+        return None;
+    }
+    match ensure_face_stack_dir(api, settings, job).await {
+        Ok(dir) => Some(dir),
+        Err(error) => {
+            tracing::warn!(error = %error, "{warn_message}");
+            None
+        }
+    }
+}
+
 /// The per-angle continuation clause appended to the user's prompt (parity with
 /// `character_studio_angles.ANGLE_PROMPT_AUGMENTS`). Unknown angle → empty.
 #[cfg(any(
@@ -1911,6 +2828,158 @@ fn augment_prompt_for_angle(base: &str, angle: &str) -> String {
     }
 }
 
+/// Per-family reference conditioning for the generic MLX lane (`generate_stream`), resolved once
+/// (constant across the generation set). Bundles the four values the family dispatch produces so the
+/// caller does one `resolve_generic_lane_conditioning(..)` call instead of the inline 5-way match —
+/// the historical place per-family drift bugs land (sc-8828, F-026). The families served:
+///  • Z-Image reference-identity img2img-init / edit-init (sc-3619 / epic 3529),
+///  • FLUX.1 XLabs IP-Adapter (epic 3621 — schnell + dev; `strength = ipAdapterScale`, real CFG via
+///    `trueCfgScale` on dev),
+///  • Kolors img2img (sc-4765) + IP-Adapter-Plus reference (sc-4767), and
+///  • Ideogram 4 img2img (Remix) + mask inpaint/outpaint (sc-6303).
+/// Every other family (plain t2i, Boogu multi-reference) resolves to the all-`None`/`Vec::new` default.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct LaneConditioning {
+    /// Single img2img-init / IP-Adapter reference image + strength (Z-Image, FLUX.1 IP, Kolors,
+    /// Ideogram) fed to the engine as `Conditioning::Reference`. `None` for plain t2i.
+    identity_init: Option<(Image, f32)>,
+    /// FLUX.1 / Kolors IP-Adapter weights directory threaded into the [`load_spec`]. `None` unless the
+    /// IP-Adapter reference path is active.
+    flux_ip_dir: Option<PathBuf>,
+    /// FLUX.1-dev reference path's real-CFG scale (`trueCfgScale`). `None` for distilled/guidance-scalar
+    /// families; the caller folds it into the effective `true_cfg` alongside the true-CFG-family scale.
+    flux_true_cfg: Option<f32>,
+    /// Ideogram 4 inpaint/outpaint mask (white = repaint) threaded to `generate_one` as
+    /// `Conditioning::Mask`. `None` for every other family / plain img2img.
+    ideogram_edit_mask: Option<Image>,
+}
+
+/// Resolve the [`LaneConditioning`] for `request` on the generic MLX lane. Mirrors the historical
+/// inline family dispatch EXACTLY — same predicate order, same per-family values — so routing is
+/// byte-identical (sc-8828). The strict-pose ControlNet / edit tiers divert earlier (in
+/// `resolve_image_route`), so only the reference/identity/img2img families reach here.
+#[cfg(target_os = "macos")]
+fn resolve_generic_lane_conditioning(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+    has_reference: bool,
+) -> WorkerResult<LaneConditioning> {
+    if matches!(request.model.as_str(), "z_image_turbo" | "z_image_edit") {
+        // Z-Image base path: `edit_image` → img2img-edit (sourceAssetId + strength, epic 3529);
+        // otherwise the identity-init reference (referenceAssetId + referenceStrength, sc-3619).
+        // Both feed the engine's single `Reference` conditioning; only the source + strength
+        // keying differs. The strict-pose ControlNet tier diverts earlier (zimage_control_available).
+        // Character Studio identity-init (referenceStrength, sc-3619) is the primary reference surface
+        // and keeps precedence — it also drives face-likeness scoring. When it doesn't engage (the Image
+        // Studio "Image reference" tile sends referenceAssetId + advanced.strength with NO
+        // referenceStrength), the generic `ui.img2img` reference-guided latent-init (epic 8588 A4.5,
+        // sc-10193) takes over so the slider actually reaches the engine. The two surfaces are mutually
+        // exclusive by mode (character_image vs text_to_image), so this never double-drives; both produce
+        // the same single `Conditioning::Reference`.
+        let init = if request.mode == "edit_image" {
+            resolve_zimage_edit_init(request, settings, project_path)?
+        } else if zimage_uses_generic_img2img(request, has_reference) {
+            resolve_img2img_init_generic(request, settings, project_path)?
+        } else {
+            resolve_identity_init(request, settings, project_path)?
+        };
+        Ok(LaneConditioning {
+            identity_init: init,
+            ..Default::default()
+        })
+    } else if is_flux_model(&request.model) && has_reference && request.mode != "edit_image" {
+        let reference_id = request
+            .reference_asset_id
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_owned();
+        let image = load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            &reference_id,
+            project_path,
+        )?;
+        let scale = advanced::f32_clamped(
+            &request.advanced,
+            "ipAdapterScale",
+            FLUX_IP_SCALE,
+            0.0..=1.0,
+        );
+        let ip_dir = resolve_flux_ip_adapter_dir(settings)?;
+        // Real CFG only on dev (schnell is distilled — no CFG).
+        let true_cfg = (request.model == "flux_dev").then(|| {
+            advanced::f32_clamped(
+                &request.advanced,
+                "trueCfgScale",
+                FLUX_IP_TRUE_CFG,
+                1.0..=10.0,
+            )
+        });
+        Ok(LaneConditioning {
+            identity_init: Some((image, scale)),
+            flux_ip_dir: Some(ip_dir),
+            flux_true_cfg: true_cfg,
+            ideogram_edit_mask: None,
+        })
+    } else if request.model == "kolors" && request.mode == "edit_image" {
+        // Kolors img2img (sc-4765): `sourceAssetId` + `strength` → the engine's `Reference`
+        // (img2img init, no IP-Adapter loaded). Kolors carries CFG through `guidance` + negative
+        // prompt (resolved above), not `true_cfg`.
+        let init = resolve_kolors_edit_init(request, settings, project_path)?;
+        Ok(LaneConditioning {
+            identity_init: init,
+            ..Default::default()
+        })
+    } else if request.model == "kolors" && has_reference {
+        // Kolors IP-Adapter-Plus reference (sc-4767): `referenceAssetId` → the IP image prompt at
+        // `ipAdapterScale`. `with_ip_adapter` makes the engine treat the `Reference` as the image
+        // prompt (decoupled cross-attn) rather than an img2img init.
+        let (image, scale) = resolve_kolors_ip_reference(request, settings, project_path)?;
+        let ip_dir = resolve_kolors_ip_adapter_dir(settings)?;
+        Ok(LaneConditioning {
+            identity_init: Some((image, scale)),
+            flux_ip_dir: Some(ip_dir),
+            flux_true_cfg: None,
+            ideogram_edit_mask: None,
+        })
+    } else if matches!(request.model.as_str(), "ideogram_4" | "ideogram_4_turbo")
+        && request.mode == "edit_image"
+    {
+        // Ideogram 4 img2img (Remix) + mask inpaint / outpaint (Edit), sc-6303: `sourceAssetId` →
+        // the engine's `Reference` (img2img init); a `maskAssetId` (inpaint) or `fit_mode ==
+        // "outpaint"` adds a `Conditioning::Mask` (white = repaint), threaded via `ideogram_edit_mask`.
+        // Works in both quality (`ideogram_4`) and turbo (same base + TurboTime LoRA). No IP-Adapter.
+        match resolve_ideogram_edit(request, settings, project_path)? {
+            Some((source, strength, mask)) => Ok(LaneConditioning {
+                identity_init: Some((source, strength)),
+                flux_ip_dir: None,
+                flux_true_cfg: None,
+                ideogram_edit_mask: mask,
+            }),
+            None => Ok(LaneConditioning::default()),
+        }
+    } else if model_supports_img2img(request) && has_reference && request.mode != "edit_image" {
+        // Generic plain-t2i img2img latent-init for any `ui.img2img` model (epic 8588 A4, sc-10189):
+        // a `referenceAssetId` + `advanced.strength` seeds the denoise from the VAE-encoded reference,
+        // which the engine routes to that model's img2img entrypoint via the single
+        // `Conditioning::Reference`. Krea 2 Turbo (sc-8591 #666) + SD3.5 large/turbo/medium (sc-10189
+        // #667) opt in today; a new text-only model joins by flipping `ui.img2img` + landing its
+        // mlx-gen entrypoint. Sits after the model-specific reference arms (z-image/flux/kolors/ideogram)
+        // so their bespoke surfaces keep precedence. Candle parity per model is a deferred follow-up.
+        Ok(LaneConditioning {
+            identity_init: resolve_img2img_init_generic(request, settings, project_path)?,
+            ..Default::default()
+        })
+    } else {
+        // Boogu instruction edit resolves its (1..5) references separately into `boogu_refs` below —
+        // it uses the `MultiReference`-capable path, not the single `identity_init` reference.
+        Ok(LaneConditioning::default())
+    }
+}
+
 /// Real MLX generation: load once on a blocking thread, generate each image, and
 /// stream step/decode/image events back to the async worker (which saves PNGs, emits
 /// `assetWrites`, and polls cancel). MLX runs entirely on the blocking thread (the
@@ -1931,8 +3000,10 @@ async fn generate_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
     // sc-6568: a bf16 opt-in for Boogu fetches the full-precision `<variant>-bf16/` subfolder on
     // demand (the catalog ships only the Q8 default) before snapshot resolution. No-op for every
-    // other model / the default Q8 path.
+    // other model / the default Q8 path. sc-9607: the same on-demand pattern for Ideogram's `q8/`
+    // tier (the catalog ships only q4) — was a documented follow-up, now wired on both lanes.
     ensure_boogu_tier_present(api, settings, job, request).await?;
+    ensure_ideogram_tier_present(api, settings, job, request).await?;
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("model weights not found".to_owned()))?;
     // sc-3723: surface the descriptor-derived backend ("mlx" for every linked family today; a
@@ -1943,16 +3014,50 @@ async fn generate_stream(
     } else {
         model.backend()
     };
-    // Descriptor-gated quant (mirrors the candle lane below): the generic MLX families all advertise
-    // Q4/Q8 (`supported_quants`) and tolerate the Q8 default (a real quant on a dense convert, a no-op on
-    // an already-packed turnkey). SANA (sc-8489) is the lone exception — its descriptor advertises
-    // `supported_quants: &[]` and its `load` REJECTS any `spec.quantize`, so resolve no quant for it and
-    // let it load dense bf16. Every pre-existing family keeps `supports_quant() == true`, so their
-    // resolved quant is byte-identical.
+    // Descriptor-gated quant (mirrors the candle lane below): the MLX families advertise Q4/Q8
+    // (`supported_quants`) and tolerate the Q8 default (a real quant on a dense convert, a no-op on an
+    // already-packed turnkey). SANA joined this set in mlx-gen #654 (sc-8489): its descriptor now
+    // advertises Q4/Q8 and its `load` ACCEPTS an advisory `spec.quantize` (the pre-quantized tier is
+    // packed-detected from disk, #653), so it flows through the normal resolve_quant path like every
+    // other matrix model. The `else` arm stays for any future engine that genuinely advertises no
+    // quant — such a model loads dense.
     let (quant, quant_bits) = if model.supports_quant() {
         resolve_quant(request)
     } else {
         (None, None)
+    };
+    // sc-8820: the tier resolvers ([`standard_tier_subdir`] & friends) silently fall through
+    // q4→q8→bf16 when the preferred tier isn't downloaded, but the quant above is derived from the
+    // REQUEST — so a bf16 pick with only `q4/` present would render Q4 while the recipe records dense,
+    // lying to the epic 8506 quant A/B workflow. Reconcile against the tier subdir actually resolved:
+    // record the precision that ran + `warn!`/emit `quant_tier_downgraded` on a real fallback. SANA
+    // (sc-8489) now ships standard q4/q8/bf16 turnkey tiers and advertises Q4/Q8, so it reconciles here
+    // exactly like the other matrix models.
+    //
+    // sc-9362 (F-018 follow-up): dense-TE turnkeys (FLUX.2-klein) always derive `(None, None)` from
+    // `resolve_quant` (the load quant must stay `None` so the dense bf16 TE is never re-quantized),
+    // but their transformer is packed at q4/q8. Reconciling against that always-bf16 value made every
+    // straight dense-TE job read as a bf16→qN "downgrade" — a spurious event, and pre-8820 the recipe
+    // recorded bf16 for a q4/q8 transformer. Feed reconcile the transformer tier the request ACTUALLY
+    // asked for ([`dense_te_requested_tier_bits`], mirroring the `standard_tier_subdir` mapping) so it
+    // records the resolved transformer precision on EVERY job and only warns/emits on a genuine
+    // fallback. `allow_quant_change=false` keeps the load quant `None` (TE stays dense bf16).
+    let (quant, quant_bits) = if model.supports_quant() {
+        let requested_for_reconcile = if is_dense_te_tier(request) {
+            (None, dense_te_requested_tier_bits(request))
+        } else {
+            (quant, quant_bits)
+        };
+        reconcile_resolved_tier_quant(
+            requested_for_reconcile,
+            &weights_dir,
+            !is_dense_te_tier(request),
+            &request.model,
+            &job.id,
+            backend,
+        )
+    } else {
+        (quant, quant_bits)
     };
     let steps = resolve_steps(request, &model);
     let guidance = resolve_guidance(request, &model);
@@ -2031,86 +3136,16 @@ async fn generate_stream(
         .reference_asset_id
         .as_deref()
         .is_some_and(|id| !id.trim().is_empty());
-    // Ideogram 4 inpaint/outpaint mask (sc-6303), set by the ideogram edit branch below and threaded
-    // to `generate_one` as a `Conditioning::Mask`. `None` for every other family / plain img2img.
-    let mut ideogram_edit_mask: Option<Image> = None;
-    let (identity_init, flux_ip_dir, flux_true_cfg): (
-        Option<(Image, f32)>,
-        Option<PathBuf>,
-        Option<f32>,
-    ) = if matches!(request.model.as_str(), "z_image_turbo" | "z_image_edit") {
-        // Z-Image base path: `edit_image` → img2img-edit (sourceAssetId + strength, epic 3529);
-        // otherwise the identity-init reference (referenceAssetId + referenceStrength, sc-3619).
-        // Both feed the engine's single `Reference` conditioning; only the source + strength
-        // keying differs. The strict-pose ControlNet tier diverts earlier (zimage_control_available).
-        let init = if request.mode == "edit_image" {
-            resolve_zimage_edit_init(request, settings, project_path)?
-        } else {
-            resolve_zimage_identity_init(request, settings, project_path)?
-        };
-        (init, None, None)
-    } else if is_flux_model(&request.model) && has_reference && request.mode != "edit_image" {
-        let reference_id = request
-            .reference_asset_id
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or_default()
-            .to_owned();
-        let image = load_reference_image(
-            &settings.data_dir,
-            &request.project_id,
-            &reference_id,
-            project_path,
-        )?;
-        let scale = advanced::f32_clamped(
-            &request.advanced,
-            "ipAdapterScale",
-            FLUX_IP_SCALE,
-            0.0..=1.0,
-        );
-        let ip_dir = resolve_flux_ip_adapter_dir(settings)?;
-        // Real CFG only on dev (schnell is distilled — no CFG).
-        let true_cfg = (request.model == "flux_dev").then(|| {
-            advanced::f32_clamped(
-                &request.advanced,
-                "trueCfgScale",
-                FLUX_IP_TRUE_CFG,
-                1.0..=10.0,
-            )
-        });
-        (Some((image, scale)), Some(ip_dir), true_cfg)
-    } else if request.model == "kolors" && request.mode == "edit_image" {
-        // Kolors img2img (sc-4765): `sourceAssetId` + `strength` → the engine's `Reference`
-        // (img2img init, no IP-Adapter loaded). Kolors carries CFG through `guidance` + negative
-        // prompt (resolved above), not `true_cfg`.
-        let init = resolve_kolors_edit_init(request, settings, project_path)?;
-        (init, None, None)
-    } else if request.model == "kolors" && has_reference {
-        // Kolors IP-Adapter-Plus reference (sc-4767): `referenceAssetId` → the IP image prompt at
-        // `ipAdapterScale`. `with_ip_adapter` makes the engine treat the `Reference` as the image
-        // prompt (decoupled cross-attn) rather than an img2img init.
-        let (image, scale) = resolve_kolors_ip_reference(request, settings, project_path)?;
-        let ip_dir = resolve_kolors_ip_adapter_dir(settings)?;
-        (Some((image, scale)), Some(ip_dir), None)
-    } else if matches!(request.model.as_str(), "ideogram_4" | "ideogram_4_turbo")
-        && request.mode == "edit_image"
-    {
-        // Ideogram 4 img2img (Remix) + mask inpaint / outpaint (Edit), sc-6303: `sourceAssetId` →
-        // the engine's `Reference` (img2img init); a `maskAssetId` (inpaint) or `fit_mode ==
-        // "outpaint"` adds a `Conditioning::Mask` (white = repaint), threaded via `ideogram_edit_mask`.
-        // Works in both quality (`ideogram_4`) and turbo (same base + TurboTime LoRA). No IP-Adapter.
-        match resolve_ideogram_edit(request, settings, project_path)? {
-            Some((source, strength, mask)) => {
-                ideogram_edit_mask = mask;
-                (Some((source, strength)), None, None)
-            }
-            None => (None, None, None),
-        }
-    } else {
-        // Boogu instruction edit resolves its (1..5) references separately into `boogu_refs` below —
-        // it uses the `MultiReference`-capable path, not the single `identity_init` reference.
-        (None, None, None)
-    };
+    // Per-family reference conditioning (Z-Image identity/edit-init, FLUX.1/Kolors IP-Adapter, Kolors
+    // img2img, Ideogram edit + mask), resolved once — same predicate order + per-family values as the
+    // historical inline 5-way match, now table-ized into one resolver (sc-8828, F-026). The strict-pose
+    // ControlNet / edit tiers divert earlier in `resolve_image_route`.
+    let LaneConditioning {
+        identity_init,
+        flux_ip_dir,
+        flux_true_cfg,
+        ideogram_edit_mask,
+    } = resolve_generic_lane_conditioning(request, settings, project_path, has_reference)?;
     // Boogu instruction edit (epic 6387, multi-reference sc-7645): resolve the 1..5 source references
     // (the Qwen3-VL vision tower reads each + they VAE-encode into the DiT spatial sequence); the prompt
     // is the edit instruction. Threaded to `generate_one` as `Conditioning::Reference` (one reference) /
@@ -2146,8 +3181,12 @@ async fn generate_stream(
     // Per-generation PiD decode (epic 7840, sc-7849): resolve the PiD checkpoint + Gemma for this
     // model's latent space when `advanced.usePid` is set and the snapshots are cached; otherwise keep
     // the native VAE. `use_pid` and `spec.pid` stay in lockstep (the engine rejects a mismatch).
-    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model);
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
     let use_pid = pid_weights.is_some();
+    // PiD output tier (sc-10054): PiD super-resolves the base latent by a fixed 4×, so the effective
+    // base picks whether the output lands on ~2K or ~4K. `4k`/native leave the requested dims untouched;
+    // `2k` caps the base (also lowering the F-013 decode peak). Rebind before `generate_one`.
+    let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
     let mut spec = load_spec(weights_dir, quant, adapters, flux_ip_dir);
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
@@ -2163,16 +3202,14 @@ async fn generate_stream(
     // which also resolves the CURRENT job's reference (so changing it changes the scored source) and is
     // non-fatal. The `!Send` scorer is built ONCE inside the closure and reused across the N outputs.
     let likeness_source = resolve_character_image_likeness_source(request, settings, project_path);
-    let face_stack_dir = match &likeness_source {
-        Some(_) => match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
-                None
-            }
-        },
-        None => None,
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        likeness_source.is_some(),
+        "character_image face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     // Keep the source only if the face stack staged (otherwise no scorer can be built).
     let likeness_source = face_stack_dir.as_ref().and(likeness_source);
 
@@ -2341,7 +3378,9 @@ fn is_candle_engine(model: &str) -> bool {
             | "lens_turbo"
             | "kolors"
             | "sensenova_u1_8b"
+            | "sensenova_u1_8b_infographic_v2"
             | "sensenova_u1_8b_fast"
+            | "sensenova_u1_8b_infographic_v2_fast"
             | "ideogram_4"
             | "ideogram_4_turbo"
             // Boogu-Image-0.1 (sc-7524, epic 6831): Base + Turbo (txt2img) and the Edit checkpoint, all
@@ -2351,12 +3390,14 @@ fn is_candle_engine(model: &str) -> bool {
             | "boogu_image_turbo"
             | "boogu_image_edit"
             // Krea 2 Turbo (sc-7581, epic 7565 P4): txt2img + inference LoRA/LoKr on the generic candle
-            // lane (CFG-free 8-step). Like Boogu, its MLX turnkey (`SceneWorks/krea-2-turbo-mlx`, q8/q4
-            // packed) isn't candle-readable, so the candle lane loads bf16 from the ungated public
-            // `krea/Krea-2-Turbo` snapshot root (no subdir). The `candle-gen-krea` descriptor advertises
-            // supports_lora/supports_lokr (sc-7836), so `generate_candle_stream` resolves a
+            // lane (CFG-free 8-step). sc-9092: the candle lane now packed-loads the SAME
+            // `SceneWorks/krea-2-turbo-mlx` q8/q4 turnkey subdir the macOS path loads (candle-gen sc-9411
+            // packed-detect, via the shared `resolve_weights_dir`/`krea_model_subdir`) — the ad-hoc
+            // `candle_krea_repo` bf16 diffusers rehost is retired. The `candle-gen-krea` descriptor
+            // advertises supports_lora/supports_lokr (sc-7836), so `generate_candle_stream` resolves a
             // `krea_2_raw`-trained adapter via `model.supports_adapters()`. No edit/reference/control
-            // shapes and no on-the-fly quant (dense bf16 only).
+            // shapes; on-the-fly quant stays descriptor-gated (`supported_quants` still `&[]` — the
+            // packed turnkey self-describes its tier at load).
             | "krea_2_turbo"
             // Stable Diffusion 3.5 (sc-7880, epic 7982): Large / Large Turbo / Medium all ride the generic
             // candle txt2img lane (the `candle-gen-sd3` provider). `generate_candle_stream` resolves Q4/Q8
@@ -2387,205 +3428,18 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
-        "sensenova_u1_8b" | "sensenova_u1_8b_fast" => "candle_sensenova",
+        "sensenova_u1_8b"
+        | "sensenova_u1_8b_infographic_v2"
+        | "sensenova_u1_8b_fast"
+        | "sensenova_u1_8b_infographic_v2_fast" => "candle_sensenova",
         "ideogram_4" | "ideogram_4_turbo" => "candle_ideogram",
         "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => "candle_boogu",
-        "krea_2_turbo" => "candle_krea",
+        "krea_2_turbo" | "krea_2_raw" => "candle_krea",
         // Stable Diffusion 3.5 (sc-7880): Large / Large Turbo / Medium share the candle SD3.5 engine.
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => "candle_sd3",
         // sdxl / realvisxl share the candle "sdxl" engine.
         _ => CANDLE_ADAPTER,
     }
-}
-
-/// The candle Ideogram 4 weights repo (bf16). Ideogram is the lone candle image family whose upstream
-/// isn't candle-readable — the published `SceneWorks/ideogram-4-mlx` turnkey (the MODEL_TABLE default +
-/// the macOS MLX repo) is MLX-quantized — so the candle lane loads bf16 from a separate repo (sc-6859),
-/// the image sibling of the video `CANDLE_WAN_5B_REPO`. The bf16 weights live under the repo's `bf16/`
-/// subdir so quant variants (`q4/`/`q8/`) can slot in later without a rename (cf. the MLX turnkey).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const CANDLE_IDEOGRAM_REPO: &str = "SceneWorks/ideogram-4";
-
-/// Resolve the candle Ideogram weights repo: the off-Mac (`std::env::consts::OS`) download entry's
-/// `repo` from the manifest (the bf16 repo) — the single source of truth, also driving the downloader —
-/// else the [`CANDLE_IDEOGRAM_REPO`] default. Deliberately NOT the entry-level `repo`, which is the
-/// macOS MLX turnkey. Mirrors how `candle_video_repo` overrides the MLX repo with the diffusers one.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_ideogram_repo(request: &ImageRequest) -> String {
-    let os = std::env::consts::OS;
-    request
-        .model_manifest_entry
-        .get("downloads")
-        .and_then(Value::as_array)
-        .and_then(|downloads| {
-            downloads.iter().find_map(|entry| {
-                let matches_os = entry
-                    .get("platforms")
-                    .and_then(Value::as_array)
-                    .is_some_and(|platforms| platforms.iter().any(|p| p.as_str() == Some(os)));
-                if !matches_os {
-                    return None;
-                }
-                entry
-                    .get("repo")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|repo| !repo.is_empty())
-                    .map(str::to_owned)
-            })
-        })
-        .unwrap_or_else(|| CANDLE_IDEOGRAM_REPO.to_owned())
-}
-
-/// The precision subdir within the candle Ideogram repo snapshot. Candle is bf16-only today (the
-/// provider rejects on-the-fly quant), so this resolves the `bf16/` subdir (mirroring the MLX turnkey's
-/// `q4/`/`q8/`); a future candle quant variant slots in alongside it. Falls back to the snapshot root so
-/// a flat (subdir-less) layout still loads.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_ideogram_subdir(root: &Path) -> PathBuf {
-    let bf16 = root.join("bf16");
-    if bf16.join("transformer").join("model.safetensors").is_file() {
-        bf16
-    } else {
-        root.to_path_buf()
-    }
-}
-
-/// The default candle Boogu-Image-0.1 weights repo for a variant. The MLX turnkey
-/// (`SceneWorks/boogu-image-mlx`, the `MODEL_TABLE` default + the macOS MLX repo) is MLX-quantized and
-/// NOT candle-readable, but — unlike Ideogram — Boogu needs no re-hosted bf16 turnkey: the ORIGINAL
-/// public repos `Boogu/Boogu-Image-0.1-{Base,Turbo,Edit}` (Apache-2.0, ungated) are already bf16 and
-/// already laid out as a complete `mllm/ transformer/ vae/` snapshot at the repo root — exactly what the
-/// provider's `pipeline::load_components` reads. So the candle lane points straight at them (one repo per
-/// variant, loaded from the snapshot root — no `base/ turbo/ edit/` subfolder, unlike the MLX turnkey).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_boogu_default_repo(model: &str) -> &'static str {
-    match model {
-        "boogu_image_turbo" => "Boogu/Boogu-Image-0.1-Turbo",
-        "boogu_image_edit" => "Boogu/Boogu-Image-0.1-Edit",
-        _ => "Boogu/Boogu-Image-0.1-Base",
-    }
-}
-
-/// Resolve the candle Boogu weights repo for `request.model`: the off-Mac (`std::env::consts::OS`)
-/// download entry's `repo` from the manifest (the single source of truth, also driving the downloader) —
-/// else the per-variant [`candle_boogu_default_repo`]. Deliberately NOT the entry-level `repo` /
-/// `model_repo`, which is the macOS MLX turnkey. Mirrors `candle_ideogram_repo`.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_boogu_repo(request: &ImageRequest) -> String {
-    let os = std::env::consts::OS;
-    request
-        .model_manifest_entry
-        .get("downloads")
-        .and_then(Value::as_array)
-        .and_then(|downloads| {
-            downloads.iter().find_map(|entry| {
-                let matches_os = entry
-                    .get("platforms")
-                    .and_then(Value::as_array)
-                    .is_some_and(|platforms| platforms.iter().any(|p| p.as_str() == Some(os)));
-                if !matches_os {
-                    return None;
-                }
-                entry
-                    .get("repo")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|repo| !repo.is_empty())
-                    .map(str::to_owned)
-            })
-        })
-        .unwrap_or_else(|| candle_boogu_default_repo(&request.model).to_owned())
-}
-
-/// The candle Krea 2 Turbo weights repo (bf16). The MLX turnkey (`SceneWorks/krea-2-turbo-mlx`, the
-/// `MODEL_TABLE` default + the macOS MLX repo) ships packed `q8/`/`q4/` subdirs, which the candle
-/// provider (dense bf16, `supported_quants: &[]`) can't load — but, like Boogu, Krea needs no re-hosted
-/// bf16 turnkey: the ORIGINAL public `krea/Krea-2-Turbo` (Krea 2 Community License, ungated) is already a
-/// complete bf16 `transformer/ text_encoder/ vae/ tokenizer/` diffusers snapshot at the repo root —
-/// exactly what the provider's `pipeline::load_components` reads. So the candle lane points straight at it
-/// (loaded from the snapshot root — no subdir). Mirrors `candle_boogu_repo` / `candle_ideogram_repo`.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const CANDLE_KREA_REPO: &str = "krea/Krea-2-Turbo";
-
-/// Resolve the candle Krea weights repo: the off-Mac (`std::env::consts::OS`) download entry's `repo`
-/// from the manifest (the bf16 repo — the single source of truth, also driving the downloader) — else
-/// the [`CANDLE_KREA_REPO`] default. Deliberately NOT the entry-level `repo` / `model_repo`, which is the
-/// macOS MLX turnkey. Mirrors `candle_boogu_repo`.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_krea_repo(request: &ImageRequest) -> String {
-    let os = std::env::consts::OS;
-    request
-        .model_manifest_entry
-        .get("downloads")
-        .and_then(Value::as_array)
-        .and_then(|downloads| {
-            downloads.iter().find_map(|entry| {
-                let matches_os = entry
-                    .get("platforms")
-                    .and_then(Value::as_array)
-                    .is_some_and(|platforms| platforms.iter().any(|p| p.as_str() == Some(os)));
-                if !matches_os {
-                    return None;
-                }
-                entry
-                    .get("repo")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|repo| !repo.is_empty())
-                    .map(str::to_owned)
-            })
-        })
-        .unwrap_or_else(|| CANDLE_KREA_REPO.to_owned())
-}
-
-/// The default candle Lens / Lens-Turbo weights repo for a variant. Microsoft pulled the original
-/// `microsoft/Lens` + `microsoft/Lens-Turbo` from HF; the macOS/MLX path recovered them as the
-/// packed `SceneWorks/lens-mlx` / `SceneWorks/lens-turbo-mlx` tiers (sc-8767 — the `MODEL_TABLE`
-/// default + the macOS MLX repo), which are MLX-quantized (`bf16/`/`q8/`/`q4/` subdirs) and NOT
-/// candle-readable. The candle lane instead loads a re-assembled **self-contained diffusers** snapshot
-/// (`tokenizer/ text_encoder/ transformer/ vae/` at the repo root — exactly what `Pipeline::load_components`
-/// reads): `SceneWorks/Lens` (base) / `SceneWorks/Lens-Turbo` (distilled), rebuilt from the Comfy-Org/Lens
-/// DiT + stock `openai/gpt-oss-20b` (MXFP4) encoder/tokenizer + the FLUX.2-dev VAE (sc-8799 — the candle
-/// sibling of sc-8767). Loaded from the snapshot root, no subdir. Per-variant like `candle_boogu_default_repo`.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_lens_default_repo(model: &str) -> &'static str {
-    match model {
-        "lens_turbo" => "SceneWorks/Lens-Turbo",
-        _ => "SceneWorks/Lens",
-    }
-}
-
-/// Resolve the candle Lens weights repo for `request.model`: the off-Mac (`std::env::consts::OS`)
-/// download entry's `repo` from the manifest (the single source of truth, also driving the downloader) —
-/// else the per-variant [`candle_lens_default_repo`]. Deliberately NOT the entry-level `repo` /
-/// `model_repo`, which is the macOS MLX turnkey (`SceneWorks/lens-mlx`, unreadable by the candle
-/// diffusers loader). Mirrors `candle_boogu_repo` / `candle_krea_repo`.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_lens_repo(request: &ImageRequest) -> String {
-    let os = std::env::consts::OS;
-    request
-        .model_manifest_entry
-        .get("downloads")
-        .and_then(Value::as_array)
-        .and_then(|downloads| {
-            downloads.iter().find_map(|entry| {
-                let matches_os = entry
-                    .get("platforms")
-                    .and_then(Value::as_array)
-                    .is_some_and(|platforms| platforms.iter().any(|p| p.as_str() == Some(os)));
-                if !matches_os {
-                    return None;
-                }
-                entry
-                    .get("repo")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|repo| !repo.is_empty())
-                    .map(str::to_owned)
-            })
-        })
-        .unwrap_or_else(|| candle_lens_default_repo(&request.model).to_owned())
 }
 
 /// Windows/CUDA candle execution path (sc-3675 SDXL, generalized in sc-5096). The macOS dispatch is
@@ -2634,69 +3488,42 @@ async fn generate_candle_stream(
         model.backend()
     };
     let is_ideogram = crate::ideogram_caption::is_ideogram_model(&request.model);
-    // Boogu (sc-7524) is the second candle image family whose upstream turnkey isn't candle-readable: its
-    // `SceneWorks/boogu-image-mlx` turnkey is MLX-quantized, so the candle lane loads bf16 from the
-    // ORIGINAL public `Boogu/Boogu-Image-0.1-{Base,Turbo,Edit}` repos (per-variant; each a complete
-    // `mllm/ transformer/ vae/` snapshot at its root — loaded directly, no subfolder).
-    let is_boogu = matches!(
-        request.model.as_str(),
-        "boogu_image" | "boogu_image_turbo" | "boogu_image_edit"
-    );
-    // Krea 2 Turbo (sc-7581) is the third such family: its `SceneWorks/krea-2-turbo-mlx` turnkey is packed
-    // q8/q4, so the candle lane loads bf16 from the ungated public `krea/Krea-2-Turbo` (the boogu pattern —
-    // the diffusers snapshot root, no subdir).
-    let is_krea = request.model == "krea_2_turbo";
-    // Lens / Lens-Turbo (sc-8799) is the fourth such family: Microsoft pulled the original
-    // `microsoft/Lens*`, and the recovered `SceneWorks/lens-mlx` / `SceneWorks/lens-turbo-mlx` turnkeys
-    // (sc-8767) are MLX-packed q4/q8/bf16 tiers the candle diffusers loader can't read, so the candle lane
-    // loads the re-assembled self-contained diffusers snapshot `SceneWorks/Lens` / `SceneWorks/Lens-Turbo`
-    // (snapshot root, no subdir).
-    let is_lens = matches!(request.model.as_str(), "lens" | "lens_turbo");
-    // Ideogram + Boogu + Krea + Lens are the candle image families whose `MODEL_TABLE` turnkey isn't
-    // candle-readable: the published `SceneWorks/ideogram-4-mlx` / `SceneWorks/boogu-image-mlx` /
-    // `SceneWorks/krea-2-turbo-mlx` / `SceneWorks/lens{,-turbo}-mlx` (the macOS MLX repos) are
-    // MLX-quantized, so the candle lane loads from a different repo. Ideogram re-hosts a bf16 copy
-    // (`SceneWorks/ideogram-4`'s `bf16/` subdir, because the upstream is gated); Boogu + Krea point straight
-    // at their ungated public originals (`Boogu/Boogu-Image-0.1-*` / `krea/Krea-2-Turbo`); Lens loads a
-    // re-assembled diffusers rehost (`SceneWorks/Lens{,-Turbo}`, the original source being dead) — all from
-    // the snapshot root. macOS keeps the MLX turnkeys. Every other candle family shares its upstream
-    // diffusers repo via `model_repo`.
-    let repo = if is_ideogram {
-        candle_ideogram_repo(request)
-    } else if is_boogu {
-        candle_boogu_repo(request)
-    } else if is_krea {
-        candle_krea_repo(request)
-    } else if is_lens {
-        candle_lens_repo(request)
+    // Standard-tier weight resolution, SHARED with the MLX lane (sc-9092, epic 9083 gap #3). Every
+    // candle image family — Ideogram / Boogu / Krea / Lens included — now packed-loads the SAME
+    // SceneWorks MLX-packed per-tier turnkey the macOS path uses: as of the candle-gen rollout all 11
+    // packed-load-capable crates read a packed `q4/q8/bf16` (or the Ideogram/Boogu/Krea legacy-layout)
+    // turnkey subdir directly, so the four ad-hoc `candle_{ideogram,boogu,krea,lens}_repo` resolvers
+    // (which pointed candle at a SEPARATE bf16 diffusers rehost because it couldn't read the packed
+    // turnkeys) are retired. `resolve_weights_dir` applies the identical dispatch the MLX path uses —
+    // an explicit `modelPath` override (FLUX.2-klein `_true_v2` convert-at-install), then the Ideogram
+    // (`ideogram_model_subdir`) / Boogu (`boogu_model_subdir`) / Krea (`krea_model_subdir`) per-family
+    // subdir, then `standard_tier_subdir` (Lens + the STANDARD_TIER_MODELS registry) resolving the
+    // requested `advanced.mlxQuantize` → q4/q8/bf16 tier — so the candle lane needs no bespoke repo
+    // logic. `model` is already resolved via `mlx_model` above, so a `None` here means only the
+    // snapshot is absent (unfetched turnkey), which stays a loud load error.
+    //
+    // sc-9607 (epic 9083): off-Mac on-demand fetch of the non-default Ideogram/Boogu tiers before
+    // resolution — the catalog pulls only the shipped default (ideogram q4, boogu Q8), so a candle
+    // job that opts into another tier (`advanced.mlxQuantize`) needs its subdir pulled first. These
+    // were `#[cfg(target_os = "macos")]` (boogu) / absent (ideogram), so off-Mac previously fell back
+    // to the default tier; now Windows/Linux gets the same q4/q8/bf16 picker as macOS. No-op for the
+    // default tier / every other family / an unfetched turnkey (falls through to the load error below).
+    ensure_boogu_tier_present(api, settings, job, request).await?;
+    ensure_ideogram_tier_present(api, settings, job, request).await?;
+    // Krea 2 INT8-ConvRot tier (sc-9300, epic 9083): fetch the canonical bf16 base surface on demand
+    // (the ConvRot catalog download pulls only the DiT single-file), then resolve the two LoadSpec
+    // inputs. `None` = not a ConvRot job (or an artifact still absent) → the normal dense/packed path
+    // below. When it resolves, the LoadSpec `weights` becomes the bf16 base DIR and `text_encoder` the
+    // ConvRot DiT `File` — the exact shape the candle-gen krea engine's `convrot_selector` expects.
+    ensure_krea_convrot_base_present(api, settings, job, request).await?;
+    let convrot = resolve_krea_convrot(request, settings);
+    let weights_dir = if let Some((base_dir, _)) = convrot.as_ref() {
+        base_dir.clone()
     } else {
-        model_repo(request, &model)
-    };
-    // A convert-at-install model (FLUX.2-klein `_true_v2`, sc-7459) is a single-file fine-tune with no
-    // diffusers tree in its HF cache, so it loads from the locally-assembled converted dir via the
-    // `modelPath` seam (injected by the API's `inject_converted_model_path`), exactly like the MLX
-    // path's `resolve_weights_dir`. An explicit `modelPath` (advanced override or manifest) wins over
-    // the HF-cache snapshot; `resolve_app_managed_model_dir` constrains it to app-managed data.
-    let model_path = request
-        .advanced
-        .get("modelPath")
-        .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|path| !path.is_empty());
-    let weights_dir = if let Some(model_path) = model_path {
-        resolve_app_managed_model_dir(settings, model_path, "Image modelPath")?
-    } else {
-        let snapshot = huggingface_snapshot_dir(&settings.data_dir, &repo).ok_or_else(|| {
+        resolve_weights_dir(request, settings)?.ok_or_else(|| {
+            let repo = model_repo(request, &model);
             WorkerError::InvalidPayload(format!("candle weights snapshot not found for {repo}"))
-        })?;
-        // Ideogram nests its weights under a `bf16/` subdir; Boogu's originals (and every other family)
-        // are a complete snapshot at the root, so `weights_dir` is the snapshot itself.
-        if is_ideogram {
-            candle_ideogram_subdir(&snapshot)
-        } else {
-            snapshot
-        }
+        })?
     };
 
     // Descriptor-derived denoise/guidance surface (distilled families → no guidance/negative; guided
@@ -2729,12 +3556,20 @@ async fn generate_candle_stream(
     // it resolves them like the MLX path; the sc-3675/sc-5096 families advertise neither and skip both
     // (dense bf16/fp16, no adapters) — preserving their shipped behavior. The router only lets a quant
     // request / LoRA reach this worker for a family that supports it (`image_request_candle_eligible`).
-    let (quant, quant_bits) = if model.supports_quant() {
+    let (quant, quant_bits) = if convrot.is_some() {
+        // INT8-ConvRot (sc-9300): the int8 DiT replaces the dense transformer wholesale — a bits-based
+        // load-time `Quant` is meaningless (and the candle-gen krea engine rejects a quant overlay on
+        // the ConvRot path). Force dense-None; the recipe records no `mlxQuantize` bits for this tier.
+        (None, None)
+    } else if model.supports_quant() {
         resolve_quant(request)
     } else {
         (None, None)
     };
-    let adapters = if model.supports_adapters() {
+    let adapters = if convrot.is_some() {
+        // ConvRot does not combine with LoRA/LoKr (the int8 DiT is not adapter-wired); skip adapters.
+        Vec::new()
+    } else if model.supports_adapters() {
         resolve_adapters(request, settings)?
     } else {
         Vec::new()
@@ -2829,9 +3664,42 @@ async fn generate_candle_stream(
     // other candle family ignores the fields too.
     let enhance = PromptEnhance::from_advanced(&request.advanced);
     // Record the effective CFG knob (guidance for guided families, else true_cfg) + quant bits in the
-    // recipe, so a Lens asset's sidecar reflects the Q4/Q8 it ran at (parity with the MLX path).
+    // recipe, so a Lens asset's sidecar reflects the Q4/Q8 it ran at (parity with the MLX path). The
+    // recorded repo is the resolved model repo (the MLX turnkey the candle lane now packed-loads from,
+    // sc-9092) — the same `model_repo` the MLX path records.
+    let repo = model_repo(request, &model);
     let raw_settings = mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
-    let spec = load_spec(weights_dir, quant, adapters, None);
+    // Per-generation PiD decode (epic 7840): resolve the PiD checkpoint + Gemma for this model's latent
+    // space when `advanced.usePid` is set and the snapshots are cached; otherwise keep the native VAE.
+    // `use_pid` and `spec.pid` stay in lockstep (the engine rejects a mismatch). Every candle image
+    // provider reads `spec.pid` (candle-gen sc-7853: sdxl/flux/flux2/qwen-image/z-image/chroma/boogu/
+    // ideogram/kolors/krea/lens), so this un-gates the toggle across the whole off-Mac catalog — using the
+    // SAME `resolve_pid_weights` model→backbone gate as the macOS lane (a non-eligible model → `None` →
+    // native VAE, so this is a no-op for anything without a PiD backbone).
+    // ConvRot (sc-9300) does not combine with a PiD decode overlay — the int8 DiT consume path replaces
+    // the transformer wholesale and is not PiD-wired (the candle-gen krea engine rejects the combo). So
+    // suppress PiD when ConvRot is selected; every non-ConvRot job resolves PiD exactly as before.
+    let pid_weights = if convrot.is_some() {
+        None
+    } else {
+        resolve_pid_weights(request, &settings.data_dir, &request.model)?
+    };
+    let use_pid = pid_weights.is_some();
+    // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
+    // 4K/native leaves the requested dims untouched). Rebind before `generate_one`.
+    let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
+    let mut spec = load_spec(weights_dir, quant, adapters, None);
+    if let Some(pid) = pid_weights {
+        spec = spec.with_pid(pid.checkpoint, pid.gemma);
+    }
+    // INT8-ConvRot LoadSpec seam (sc-9300, epic 9083): ride the ConvRot DiT single-file on the shared,
+    // already-optional `LoadSpec::text_encoder` as a `WeightsSource::File` while `spec.weights` stays the
+    // canonical Krea 2 bf16 snapshot `Dir` (set as `weights_dir` above). The candle-gen krea engine's
+    // `convrot_selector` decodes a `File` here → `load_components_convrot` (which enforces the sm_89
+    // compute-cap floor); a `Dir`/`None` there is the normal dense/packed path. Other engines ignore it.
+    if let Some((_, convrot_dit)) = convrot {
+        spec.text_encoder = Some(WeightsSource::File(convrot_dit));
+    }
 
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
@@ -2866,8 +3734,11 @@ async fn generate_candle_stream(
                         // (sc-7448). candle adopts cfg_pp/cfg_rescale/apg in P4; until then an unsupported
                         // method was already dropped to `None` (the engine default) before reaching here.
                         guidance_method.as_deref(),
-                        // candle PiD is Phase 4 (sc-7853); the off-Mac lane never requests it.
-                        false,
+                        // Per-generation PiD decode (epic 7840): route the final latent through the
+                        // `spec.pid` super-resolving student when resolved (opt-in + snapshots cached),
+                        // else the native VAE. Every candle image provider reads `spec.pid` (sc-7853), so
+                        // the whole off-Mac catalog honors the toggle in lockstep with `spec.pid` above.
+                        use_pid,
                         &enhance,
                         &cancel,
                         on_progress,
@@ -3011,7 +3882,9 @@ async fn consume_gen_events(
                 mark_started(index);
                 if last_cancel_check.elapsed() >= Duration::from_secs(2) {
                     last_cancel_check = Instant::now();
-                    if cancel_requested_peek(api, &job.id).await {
+                    // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
+                    // poll so a quit stops the gen at this step, matching a user cancel.
+                    if shutdown_requested() || cancel_requested_peek(api, &job.id).await {
                         // Trip the flag + show "Cancelling…", but stay non-terminal until the
                         // in-flight image actually stops (terminal Canceled posted after the
                         // blocking run returns) — sc-5515.
@@ -3071,17 +3944,25 @@ async fn consume_gen_events(
                         Value::Object(block),
                     );
                 }
-                let fact = write_image_asset(
-                    plan,
-                    index,
-                    seed,
-                    width,
-                    height,
-                    pixels,
-                    adapter_label,
-                    image_raw_settings,
-                    project_path,
-                )?;
+                // Encode + write the asset PNG off the async runtime thread (sc-8909 / F-107).
+                let plan_for_task = plan.clone();
+                let adapter_for_task = adapter_label.to_owned();
+                let project_path_for_task = project_path.to_owned();
+                let fact = tokio::task::spawn_blocking(move || {
+                    write_image_asset(
+                        &plan_for_task,
+                        index,
+                        seed,
+                        width,
+                        height,
+                        pixels,
+                        &adapter_for_task,
+                        image_raw_settings,
+                        &project_path_for_task,
+                    )
+                })
+                .await
+                .map_err(|error| crate::task_join_error("image asset write task", error))??;
                 asset_writes.push(Value::Object(fact));
                 emit_event(
                     "image_inference_complete",
@@ -3110,12 +3991,16 @@ async fn consume_gen_events(
             }
             _ = interval.tick() => {
                 heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                if !canceled && last_cancel_check.elapsed() >= Duration::from_secs(2) {
-                    last_cancel_check = Instant::now();
-                    if cancel_requested_peek(api, &job.id).await {
-                        begin_image_cancel(api, &job.id, &cancel, plan, asset_writes, backend).await;
-                        canceled = true;
-                    }
+                // sc-9618: honor a process shutdown on every tick (a local flag read, no API cost, so
+                // not throttled by the 2s user-cancel poll) so a quit trips the engine cancel promptly.
+                if !canceled && (shutdown_requested()
+                    || (last_cancel_check.elapsed() >= Duration::from_secs(2) && {
+                        last_cancel_check = Instant::now();
+                        cancel_requested_peek(api, &job.id).await
+                    }))
+                {
+                    begin_image_cancel(api, &job.id, &cancel, plan, asset_writes, backend).await;
+                    canceled = true;
                 }
             }
         }
@@ -3243,23 +4128,6 @@ mod candle_label_tests {
         assert_eq!(candle_adapter_label("sd3_5_medium"), "candle_sd3");
     }
 
-    // sc-8799: the candle Lens lane resolves the re-assembled diffusers rehost per variant (NOT the
-    // MLX-packed `SceneWorks/lens{,-turbo}-mlx` turnkey `model_repo` falls back to), since Microsoft
-    // pulled the original `microsoft/Lens*`. Base → `SceneWorks/Lens`, distilled → `SceneWorks/Lens-Turbo`.
-    // `candle_lens_repo` layers only a manifest-`downloads` override on top of this default (the exact
-    // shape unit-tested for the sibling `candle_ideogram_repo` lane), so the per-variant map is the crux.
-    #[test]
-    fn candle_lens_default_repo_is_per_variant_diffusers_rehost() {
-        assert_eq!(candle_lens_default_repo("lens"), "SceneWorks/Lens");
-        assert_eq!(
-            candle_lens_default_repo("lens_turbo"),
-            "SceneWorks/Lens-Turbo"
-        );
-        // Neither default is the MLX turnkey the entry-level `repo` / `model_repo` would supply.
-        assert!(!candle_lens_default_repo("lens").ends_with("-mlx"));
-        assert!(!candle_lens_default_repo("lens_turbo").ends_with("-mlx"));
-    }
-
     #[test]
     fn is_candle_engine_covers_only_the_wired_txt2img_families() {
         for model in [
@@ -3348,6 +4216,119 @@ mod standard_tier_tests {
                 .as_object()
                 .unwrap(),
         )
+    }
+
+    /// A4 (sc-10189): the generic img2img arm keys off the `ui.img2img` manifest flag the catalog
+    /// forwards as `modelManifestEntry`, NOT a hardcoded model string — so Krea + SD3.5 + any future
+    /// `ui.img2img` model route uniformly, and a model without the flag stays plain txt2img.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn model_supports_img2img_reads_the_ui_manifest_flag() {
+        let entry = |manifest: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": "m", "modelManifestEntry": manifest })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        // ui.img2img: true → opted in (SD3.5 + Krea shape).
+        assert!(model_supports_img2img(&entry(
+            json!({ "ui": { "img2img": true } })
+        )));
+        // Flag explicitly false, or no `ui`, or no flag → plain txt2img.
+        assert!(!model_supports_img2img(&entry(
+            json!({ "ui": { "img2img": false } })
+        )));
+        assert!(!model_supports_img2img(&entry(json!({ "family": "sd3" }))));
+        assert!(!model_supports_img2img(&entry(json!({ "ui": {} }))));
+    }
+
+    /// A4.5 (sc-10193): on Z-Image t2i the Character Studio identity-init (`referenceStrength`, sc-3619)
+    /// keeps precedence; the generic `ui.img2img` reference-guided init (Image Studio "Image reference"
+    /// tile: `advanced.strength`, no `referenceStrength`) fires only when identity-init doesn't engage,
+    /// the model opts into `ui.img2img`, AND a reference is present. Otherwise plain txt2img.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn zimage_generic_img2img_yields_to_identity_reference() {
+        let req = |advanced: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({
+                    "model": "z_image_turbo",
+                    "modelManifestEntry": { "ui": { "img2img": true } },
+                    // Both surfaces carry a reference asset; `identity_strength` reads it too.
+                    "referenceAssetId": "asset-1",
+                    "advanced": advanced,
+                })
+                .as_object()
+                .unwrap(),
+            )
+        };
+        // Image Studio "Image reference": strength only, no referenceStrength, a reference present →
+        // generic img2img takes over.
+        assert!(zimage_uses_generic_img2img(
+            &req(json!({ "strength": 0.6 })),
+            true
+        ));
+        // Character Studio identity: referenceStrength set → identity-init keeps precedence, generic
+        // img2img yields (even though ui.img2img is on and a reference is present).
+        assert!(!zimage_uses_generic_img2img(
+            &req(json!({ "referenceStrength": 0.7 })),
+            true
+        ));
+        // No reference asset present → neither surface engages (plain txt2img).
+        assert!(!zimage_uses_generic_img2img(
+            &req(json!({ "strength": 0.6 })),
+            false
+        ));
+        // Model without the ui.img2img flag → never the generic path.
+        let no_flag = ImageRequest::from_payload(
+            json!({ "model": "z_image_turbo", "modelManifestEntry": { "ui": {} }, "advanced": {} })
+                .as_object()
+                .unwrap(),
+        );
+        assert!(!zimage_uses_generic_img2img(&no_flag, true));
+    }
+
+    /// A4.4 (sc-10192): Ideogram opts into the generic `ui.img2img` surface (the Image Studio "Image
+    /// reference" tile, `text_to_image` mode) while ALSO owning the bespoke Remix/inpaint edit arm
+    /// (`edit_image` mode, [`resolve_ideogram_edit`], sc-6303). The two arms in
+    /// [`resolve_generic_lane_conditioning`] are mutually exclusive by mode — the edit arm is checked
+    /// first and gates on `mode == "edit_image"`, the generic img2img arm on `mode != "edit_image"` — so a
+    /// plain-t2i reference routes to the generic init (a single `Conditioning::Reference`, no mask, which
+    /// the native engine's edit path denoises as plain img2img) while an Edit-tab job keeps the
+    /// mask-capable path. No engine change was needed: mlx-gen `resolve_edit` already treats a Reference
+    /// with no Mask as img2img. This tripwire locks the flag + mode-split; the disk-backed resolve
+    /// (asset decode) is validated on-device.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ideogram_img2img_routes_by_mode() {
+        let req = |model: &str, mode: &str| {
+            ImageRequest::from_payload(
+                json!({
+                    "model": model,
+                    "mode": mode,
+                    "modelManifestEntry": { "ui": { "img2img": true } },
+                    "referenceAssetId": "asset-1",
+                })
+                .as_object()
+                .unwrap(),
+            )
+        };
+        for model in ["ideogram_4", "ideogram_4_turbo"] {
+            let is_ideogram_edit = |r: &ImageRequest| {
+                matches!(r.model.as_str(), "ideogram_4" | "ideogram_4_turbo")
+                    && r.mode == "edit_image"
+            };
+            // Plain t2i + reference: the generic img2img arm's gate holds (flag on, non-edit mode) and the
+            // earlier Ideogram edit arm does not — so the reference takes the generic img2img init.
+            let t2i = req(model, "text_to_image");
+            assert!(model_supports_img2img(&t2i) && t2i.mode != "edit_image");
+            assert!(!is_ideogram_edit(&t2i));
+            // Edit tab: the Ideogram edit arm claims it first and the generic arm yields (edit mode).
+            let edit = req(model, "edit_image");
+            assert!(is_ideogram_edit(&edit));
+            assert!(!(model_supports_img2img(&edit) && edit.mode != "edit_image"));
+        }
     }
 
     /// Write a minimal present `<tier>/transformer/<file>` so [`standard_tier_subdir`]'s
@@ -3576,5 +4557,381 @@ mod standard_tier_tests {
             json!({ "denseTextEncoderTier": true })
         )));
         assert!(!is_dense_te_tier(&manifest_request("flux2_dev", json!({}))));
+    }
+
+    /// sc-9092 (epic 9083 gap #3): the candle Lens lane no longer resolves a SEPARATE bf16 diffusers
+    /// rehost (`SceneWorks/Lens{,-Turbo}`, the retired `candle_lens_repo`) — it packed-loads the SAME
+    /// `SceneWorks/lens{,-turbo}-mlx` MLX turnkey the macOS path uses, routed through the shared
+    /// `standard_tier_subdir` (`lens`/`lens_turbo` opt in via `mlx.standardTierLayout`, exactly like the
+    /// MLX lane). This proves the shared tier resolver picks the requested q4/q8/bf16 subdir of a Lens
+    /// turnkey snapshot off-Mac — the candle-lane sibling of the SD3.5 `standard_tier_subdir` tests
+    /// above — so the retired resolver is fully replaced by the standard machinery.
+    #[test]
+    fn krea_model_subdir_selects_tier_and_falls_back_to_downloaded() {
+        let krea_request = |bits: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": "krea_2_raw", "advanced": { "mlxQuantize": bits } })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Krea turnkey: packed q4/q8 single-file transformer + dense sharded bf16 (index.json only).
+        seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
+
+        // q8-default (no selection) / q4 (bits<=4) / bf16 (bits<=0) each resolve to their tier subdir.
+        assert_eq!(
+            krea_model_subdir(root, &krea_request(json!(null))),
+            root.join("q8")
+        );
+        assert_eq!(
+            krea_model_subdir(root, &krea_request(json!(4))),
+            root.join("q4")
+        );
+        assert_eq!(
+            krea_model_subdir(root, &krea_request(json!(0))),
+            root.join("bf16")
+        );
+
+        // Regression guard (epic 9992): with ONLY the `bf16/` training-base tier downloaded (the Path-1
+        // unify scenario), a q8-default generation must fall back to the present bf16 tier — NOT the repo
+        // root (which has no `tokenizer/`, the reported "tokenizer: No such file or directory" load error).
+        let bf16_only = tempfile::tempdir().unwrap();
+        seed_tier(
+            bf16_only.path(),
+            "bf16",
+            "diffusion_pytorch_model.safetensors.index.json",
+        );
+        assert_eq!(
+            krea_model_subdir(bf16_only.path(), &krea_request(json!(null))),
+            bf16_only.path().join("bf16"),
+            "q8-default must fall back to the only downloaded tier (bf16), not the repo root"
+        );
+    }
+
+    #[test]
+    fn candle_lens_resolves_packed_turnkey_tier_subdir() {
+        let lens_request = |bits: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": "lens", "advanced": { "mlxQuantize": bits } })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // A Lens turnkey ships packed per-tier subdirs (transformer + gpt-oss-20b MoE TE + FLUX.2 VAE).
+        seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
+
+        // A/B tier toggle: default (q4) / mlxQuantize:8 (q8) / mlxQuantize:0 (bf16) each resolve to
+        // their tier subdir — the same q4-default recipe the `lens` manifest declares (`mlx.quantize:4`).
+        assert_eq!(
+            standard_tier_subdir(root, &lens_request(json!(null))),
+            root.join("q4")
+        );
+        assert_eq!(
+            standard_tier_subdir(root, &lens_request(json!(8))),
+            root.join("q8")
+        );
+        assert_eq!(
+            standard_tier_subdir(root, &lens_request(json!(0))),
+            root.join("bf16")
+        );
+    }
+
+    /// sc-9092 (epic 9083 gap #3, review fix): Ideogram + Boogu were left `macOnly:true` with only
+    /// off-Mac diffusers download entries, which the PR deleted — so off-Mac they resolved to the MLX
+    /// turnkey (`SceneWorks/{ideogram-4,boogu-image}-mlx`) whose download entries were macOS-only and
+    /// thus never fetched (a "candle weights snapshot not found" load error). The fix flips them
+    /// `macOnly:false` and extends the turnkey download `platforms` to windows/linux, so both lanes
+    /// packed-load the SAME turnkey the macOS path uses (candle-gen sc-9412 / sc-9410). This asserts the
+    /// per-family subdir resolvers pick the shipped tier of a turnkey snapshot regardless of platform —
+    /// the ideogram/boogu sibling of `candle_lens_resolves_packed_turnkey_tier_subdir` above.
+    #[test]
+    fn candle_ideogram_boogu_resolve_packed_turnkey_tier_subdir() {
+        let model_request = |model: &str, bits: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": model, "advanced": { "mlxQuantize": bits } })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+
+        // Ideogram turnkey (`SceneWorks/ideogram-4-mlx`): q4 default (candle off-Mac tier) + on-demand
+        // q8. `ideogram_model_subdir` probes `<tier>/transformer/model.safetensors`.
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            seed_tier(root, "q4", "model.safetensors");
+            seed_tier(root, "q8", "model.safetensors");
+            for model in ["ideogram_4", "ideogram_4_turbo"] {
+                // Default → q4 (the shipped off-Mac tier).
+                assert_eq!(
+                    ideogram_model_subdir(root, &model_request(model, json!(null))),
+                    root.join("q4")
+                );
+                // mlxQuantize:8 → q8 when present.
+                assert_eq!(
+                    ideogram_model_subdir(root, &model_request(model, json!(8))),
+                    root.join("q8")
+                );
+            }
+        }
+
+        // Boogu turnkey (`SceneWorks/boogu-image-mlx`): Q8 `base/`/`turbo/`/`edit/` is the shipped
+        // (off-Mac) default. `boogu_model_subdir` probes `<variant>/transformer/diffusion_pytorch_model.safetensors`.
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            for variant in ["base", "turbo", "edit"] {
+                seed_tier(root, variant, "diffusion_pytorch_model.safetensors");
+            }
+            for (model, variant) in [
+                ("boogu_image", "base"),
+                ("boogu_image_turbo", "turbo"),
+                ("boogu_image_edit", "edit"),
+            ] {
+                // Default (no mlxQuantize) → the shipped Q8 `<variant>/` subfolder.
+                assert_eq!(
+                    boogu_model_subdir(root, &model_request(model, json!(null))),
+                    root.join(variant)
+                );
+            }
+        }
+    }
+}
+
+/// sc-8820: the recorded quant must reflect the tier subdir ACTUALLY resolved, not the one requested,
+/// and a fallback must be surfaced (warn! + `quant_tier_downgraded` event) rather than silently
+/// downgrading with lying telemetry.
+///
+/// macOS-only: exercises [`tier_quant_from_resolved_dir`] / [`reconcile_resolved_tier_quant`], which
+/// only compile on the MLX `generate_stream` path. The candle lane has no quant-tier layout.
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod quant_tier_reconcile_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The resolved basename → precision map used to record the tier that ran (not the one requested).
+    #[test]
+    fn tier_quant_from_resolved_dir_maps_basename_to_precision() {
+        let root = std::path::Path::new("/models/sd3_5_large-mlx");
+        // Standard `q4`/`q8`/`bf16` tier dirs → their precision.
+        assert_eq!(
+            tier_quant_from_resolved_dir(&root.join("q4")),
+            Some((Some(Quant::Q4), Some(4)))
+        );
+        assert_eq!(
+            tier_quant_from_resolved_dir(&root.join("q8")),
+            Some((Some(Quant::Q8), Some(8)))
+        );
+        assert_eq!(
+            tier_quant_from_resolved_dir(&root.join("bf16")),
+            Some((None, None))
+        );
+        // Boogu `<variant>-<tier>` and bare `<variant>` (= the packed Q8 default).
+        assert_eq!(
+            tier_quant_from_resolved_dir(&root.join("base-q4")),
+            Some((Some(Quant::Q4), Some(4)))
+        );
+        assert_eq!(
+            tier_quant_from_resolved_dir(&root.join("turbo-bf16")),
+            Some((None, None))
+        );
+        assert_eq!(
+            tier_quant_from_resolved_dir(&root.join("edit")),
+            Some((Some(Quant::Q8), Some(8)))
+        );
+        // A fell-all-the-way-back-to-root (or modelPath) dir is not a recognizable tier → None, so the
+        // caller keeps the request-derived quant.
+        assert_eq!(tier_quant_from_resolved_dir(root), None);
+    }
+
+    /// The end-to-end reconcile is macOS-only (the MLX generate path). When the resolved tier matches
+    /// the request it's a pass-through; when it differs it records the tier that ran, and the
+    /// dense-TE guard keeps the load quant `None` while still correcting the recorded bits.
+    #[test]
+    fn reconcile_records_the_resolved_tier_on_fallback() {
+        // Requested q8 present as q8 → pass through, records q8.
+        assert_eq!(
+            reconcile_resolved_tier_quant(
+                (Some(Quant::Q8), Some(8)),
+                std::path::Path::new("/m/q8"),
+                true,
+                "sd3_5_large",
+                "job1",
+                "mlx",
+            ),
+            (Some(Quant::Q8), Some(8)),
+        );
+        // Requested bf16 but only q4 downloaded → resolved dir is `q4`; record Q4 (not dense) and
+        // rewrite the load quant to Q4 (safe no-op on already-packed weights).
+        assert_eq!(
+            reconcile_resolved_tier_quant(
+                (None, None),
+                std::path::Path::new("/m/q4"),
+                true,
+                "sd3_5_large",
+                "job1",
+                "mlx",
+            ),
+            (Some(Quant::Q4), Some(4)),
+        );
+        // Dense-TE turnkey: same q4 fallback, but the load quant STAYS `None` (never re-quantize the
+        // dense bf16 TE) while the recorded bits are still corrected to Q4.
+        assert_eq!(
+            reconcile_resolved_tier_quant(
+                (None, None),
+                std::path::Path::new("/m/q4"),
+                false,
+                "flux2_klein_9b",
+                "job1",
+                "mlx",
+            ),
+            (None, Some(4)),
+        );
+        // Unrecognized resolved dir (fell back to repo root / modelPath) → keep the request quant.
+        assert_eq!(
+            reconcile_resolved_tier_quant(
+                (Some(Quant::Q8), Some(8)),
+                std::path::Path::new("/m/root"),
+                true,
+                "sd3_5_large",
+                "job1",
+                "mlx",
+            ),
+            (Some(Quant::Q8), Some(8)),
+        );
+    }
+
+    /// End-to-end tier resolution + recording: a bf16 request against a turnkey where ONLY `q4/` is
+    /// downloaded resolves to `q4/`, and the reconciled recipe records Q4 — the precision that ran —
+    /// not the requested dense bf16. Guards the epic 8506 A/B workflow against telemetry that lies.
+    #[test]
+    fn bf16_request_with_only_q4_present_records_q4() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = root.join("q4").join("transformer");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("diffusion_pytorch_model.safetensors"), b"x").unwrap();
+
+        let req = ImageRequest::from_payload(
+            json!({ "model": "sd3_5_large", "advanced": { "mlxQuantize": 0 } })
+                .as_object()
+                .unwrap(),
+        );
+        // The tier resolver falls through to q4.
+        let resolved = standard_tier_subdir(root, &req);
+        assert_eq!(resolved, root.join("q4"));
+        // The request would have recorded dense bf16 — reconcile corrects it to the resolved Q4 tier.
+        let requested = resolve_quant(&req);
+        assert_eq!(requested, (None, None), "bf16 request derives dense");
+        let (quant, bits) =
+            reconcile_resolved_tier_quant(requested, &resolved, true, "sd3_5_large", "job1", "mlx");
+        assert_eq!((quant, bits), (Some(Quant::Q4), Some(4)));
+    }
+
+    /// sc-9362 (F-018 follow-up): the dense-TE transformer tier the request asks for is derived from
+    /// `advanced.mlxQuantize` exactly like [`standard_tier_subdir`] — `<=0 → bf16 (None)`, `>4 → q8`,
+    /// else the q4 default — regardless of the always-`None` load quant `resolve_quant` returns for
+    /// dense-TE. This is what reconcile compares the resolved tier against so a straight job isn't a
+    /// spurious downgrade.
+    #[test]
+    fn dense_te_requested_tier_bits_mirrors_standard_tier_mapping() {
+        let req = |mlx_quantize: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": "flux2_klein_9b", "advanced": { "mlxQuantize": mlx_quantize } })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        let default = ImageRequest::from_payload(
+            json!({ "model": "flux2_klein_9b" }).as_object().unwrap(),
+        );
+        // No selection → the q4 default (matches standard_tier_subdir's preferred).
+        assert_eq!(dense_te_requested_tier_bits(&default), Some(4));
+        assert_eq!(dense_te_requested_tier_bits(&req(json!(0))), None); // bf16 opt-out
+        assert_eq!(dense_te_requested_tier_bits(&req(json!(4))), Some(4));
+        assert_eq!(dense_te_requested_tier_bits(&req(json!(8))), Some(8));
+        assert_eq!(dense_te_requested_tier_bits(&req(json!("8"))), Some(8)); // numeric-string
+        assert_eq!(dense_te_requested_tier_bits(&req(json!(-1))), None);
+    }
+
+    /// sc-9362 (F-018 follow-up): a straight (no-fallback) dense-TE job — its q4 transformer tier is
+    /// downloaded and resolves as requested — records the ACTUAL transformer tier (Q4) while keeping
+    /// the load quant `None` (the dense bf16 TE is never re-quantized). Before the fix the request
+    /// derived `(None, None)` and — since dense-TE always requests bf16 in `resolve_quant` — the
+    /// resolved q4 tier read as a bf16→q4 downgrade; now the requested tier is the q4 the request
+    /// actually asked for, so the resolved tier MATCHES and reconcile pass-throughs it with no event.
+    #[test]
+    fn dense_te_no_fallback_records_transformer_tier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // The klein q4 transformer tier is present (dense bf16 TE lives alongside in the same tier).
+        let dir = root.join("q4").join("transformer");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("diffusion_pytorch_model.safetensors"), b"x").unwrap();
+
+        let req = ImageRequest::from_payload(
+            json!({ "model": "flux2_klein_9b", "advanced": {} })
+                .as_object()
+                .unwrap(),
+        );
+        // The tier resolver lands on the requested q4 tier (no fallback).
+        let resolved = standard_tier_subdir(root, &req);
+        assert_eq!(resolved, root.join("q4"));
+        // resolve_quant keeps dense-TE at `(None, None)` (never re-quantize the dense bf16 TE)…
+        assert_eq!(resolve_quant(&req), (None, None));
+        // …but reconcile against the REQUESTED transformer tier (q4) records the real transformer
+        // precision (Q4) with the load quant still `None`, and — since resolved == requested — with no
+        // downgrade (the requested/resolved tiers match, so it's a clean pass-through).
+        let requested_for_reconcile = (None, dense_te_requested_tier_bits(&req));
+        assert_eq!(requested_for_reconcile, (None, Some(4)));
+        let (quant, bits) = reconcile_resolved_tier_quant(
+            requested_for_reconcile,
+            &resolved,
+            false, // dense-TE: keep the load quant None
+            "flux2_klein_9b",
+            "job1",
+            "mlx",
+        );
+        assert_eq!(
+            (quant, bits),
+            (None, Some(4)),
+            "records the actual q4 transformer tier, load quant stays None"
+        );
+    }
+
+    /// sc-9362: a GENUINE dense-TE fallback still surfaces — the request asks for q8 but only q4 is
+    /// downloaded, so the resolver falls through to q4; reconcile records q4 (the tier that ran) while
+    /// the load quant stays `None`. This is the case that legitimately warns/emits.
+    #[test]
+    fn dense_te_genuine_fallback_records_resolved_tier() {
+        let req = ImageRequest::from_payload(
+            json!({ "model": "flux2_klein_9b", "advanced": { "mlxQuantize": 8 } })
+                .as_object()
+                .unwrap(),
+        );
+        // Requested q8 tier bits, but only the q4 tier exists on disk (resolver fell through).
+        assert_eq!(dense_te_requested_tier_bits(&req), Some(8));
+        let (quant, bits) = reconcile_resolved_tier_quant(
+            (None, dense_te_requested_tier_bits(&req)),
+            std::path::Path::new("/m/q4"),
+            false,
+            "flux2_klein_9b",
+            "job1",
+            "mlx",
+        );
+        assert_eq!(
+            (quant, bits),
+            (None, Some(4)),
+            "genuine q8→q4 fallback records the resolved q4 tier, load quant stays None"
+        );
     }
 }

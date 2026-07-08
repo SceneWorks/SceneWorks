@@ -25,8 +25,12 @@
       "id": "look_fixture",
       "name": "Rain coat",
       "description": "Dark rain coat and wet hair.",
-      "approvedReferenceIds": ["asset_image_fixture"],
-      "recipeSettings": { "style": "noir" },
+      "approvedReferenceIds": [
+        "asset_image_fixture"
+      ],
+      "recipeSettings": {
+        "style": "noir"
+      },
       "createdAt": "2026-05-17T13:00:00Z",
       "updatedAt": "2026-05-17T13:00:00Z"
     }
@@ -41,9 +45,16 @@
       "copiedIntoProject": true,
       "category": "character",
       "scope": "project",
-      "triggerWords": ["mira_person"],
+      "triggerWords": [
+        "mira_person"
+      ],
       "defaultWeight": 0.8,
-      "compatibility": { "families": ["z-image", "wan-video"] },
+      "compatibility": {
+        "families": [
+          "z-image",
+          "wan-video"
+        ]
+      },
       "createdAt": "2026-05-17T13:00:00Z",
       "updatedAt": "2026-05-17T13:00:00Z"
     }

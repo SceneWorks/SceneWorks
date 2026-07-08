@@ -50,16 +50,18 @@
 //! panics with a download hint and is simply not part of the run.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use gen_core::{GenerationOutput, GenerationRequest, Image, LoadSpec, Quant, WeightsSource};
+use gen_core::{GenerationOutput, GenerationRequest, LoadSpec, Quant, WeightsSource};
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_string())
-}
+use super::smoke_support::{env_or, image_std, DEGENERATE_STD_FLOOR_DEFAULT};
+
+/// One-tier-per-process guard (sc-8925). The MLX memory counters + allocator peak high-water mark are
+/// PROCESS-GLOBAL and persist across tests in the same binary, so measuring a second tier in the same
+/// process folds the first tier's residue into its numbers. `measure_footprint` flips this once and
+/// asserts it was previously false — an unfiltered `cargo test … footprint -- --ignored` run (more than
+/// one tier in one process) now fails loudly instead of silently emitting corrupt `[[FOOTPRINT]]` lines.
+static FOOTPRINT_RAN: AtomicBool = AtomicBool::new(false);
 
 /// Locate a cached `SceneWorks/<repo>` turnkey snapshot whose `<tier>/` subdir carries the packed
 /// backbone file `sentinel` (e.g. `unet/diffusion_pytorch_model.safetensors`). Returns the `<tier>/`
@@ -119,23 +121,6 @@ fn quant_for(tier: &str) -> Option<Quant> {
     }
 }
 
-/// Mean per-pixel std across the RGB buffer — the cheap "is the render non-degenerate?" floor so a
-/// broken decode doesn't silently produce a bogus footprint number.
-fn image_std(img: &Image) -> f64 {
-    let n = img.pixels.len() as f64;
-    if n == 0.0 {
-        return 0.0;
-    }
-    let mean = img.pixels.iter().map(|&p| p as f64).sum::<f64>() / n;
-    let var = img
-        .pixels
-        .iter()
-        .map(|&p| (p as f64 - mean).powi(2))
-        .sum::<f64>()
-        / n;
-    var.sqrt()
-}
-
 /// Run one real load + generation for `(model, tier)` at `dir`, sampling the MLX memory counters
 /// around it, and emit the machine-parseable `[[FOOTPRINT]]` line. Returns (residentBytes, peakBytes).
 ///
@@ -159,13 +144,20 @@ fn image_std(img: &Image) -> f64 {
 /// `get_active_memory()` post-gen WITHOUT releasing the cache, folding the gen's freeable transient
 /// INTO resident (inflating resident, understating peak−resident). Dropping the cache first leaves
 /// only the live weight arrays the generator still holds.
-fn measure_footprint(
-    model: &str,
-    tier: &str,
-    engine_id: &str,
-    dir: &Path,
-    req: GenerationRequest,
-) -> (u64, u64) {
+// Every caller discards the result — the resident/peak numbers are consumed off the printed
+// `[[FOOTPRINT]]` scrape line, not the return value — so this reports through stdout and returns
+// nothing (sc-8952).
+fn measure_footprint(model: &str, tier: &str, engine_id: &str, dir: &Path, req: GenerationRequest) {
+    // Enforce the "RUN ONE TIER PER PROCESS" invariant (sc-8925): the MLX counters are process-global,
+    // so a second measurement in the same binary invocation would report numbers contaminated by the
+    // first tier's allocator residue + peak high-water mark. Fail loudly instead of scraping garbage.
+    assert!(
+        !FOOTPRINT_RAN.swap(true, Ordering::SeqCst),
+        "footprint harness measured a second tier in one process — the MLX peak/active counters are \
+         process-global, so run exactly one `footprint_<x>` per `cargo test … -- --ignored` invocation \
+         (see the module doc). The just-attempted {model} {tier} measurement would be corrupt."
+    );
+
     println!(
         "[footprint] loading {model} ({tier}) from {} ...",
         dir.display()
@@ -201,7 +193,7 @@ fn measure_footprint(
     };
     let std = image_std(&image);
     assert!(
-        std > 5.0,
+        std > DEGENERATE_STD_FLOOR_DEFAULT,
         "{model} {tier} render looks degenerate (std {std:.2}) — measured footprint would be bogus"
     );
     let peak = mlx_rs::memory::get_peak_memory() as u64;
@@ -227,7 +219,6 @@ fn measure_footprint(
         transient as f64 / 1024.0 / 1024.0 / 1024.0,
         std,
     );
-    (resident, peak)
 }
 
 /// SDXL-family default request: 1024², real CFG. Kept modest on steps to keep the harness quick; the

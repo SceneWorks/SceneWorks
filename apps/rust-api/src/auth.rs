@@ -1,6 +1,99 @@
 use super::*;
 use axum::extract::ConnectInfo;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+
+// sc-8870 (F-068): failed-attempt throttle for the token oracle. `POST
+// /api/v1/auth/verify` is public and returns `{ok}` for any candidate token, and
+// every other gated route reveals validity via 401-vs-200; in LAN mode the token IS
+// the user's password, so with no throttle an attacker on the LAN can brute-force it
+// at wire speed. This is a small, self-contained per-peer-IP rolling-window counter:
+// once an IP exceeds `AUTH_THROTTLE_MAX_FAILURES` failures inside
+// `AUTH_THROTTLE_WINDOW`, further token attempts from that IP are refused with 429.
+// It rate-limits guessing to a sustained ceiling of ~`AUTH_THROTTLE_MAX_FAILURES`
+// failed attempts per `AUTH_THROTTLE_WINDOW` per peer IP — it is NOT a permanent
+// lockout. A blocked peer short-circuits at `is_blocked` before `record_failure`, so
+// its window is never re-armed once it trips: ~`AUTH_THROTTLE_WINDOW` after the
+// capping failure the record rolls off (via `prune_attempts`) and the peer may try
+// again. It is advisory/anti-automation, not a crypto control: a success clears the
+// peer's record immediately, and loopback-trusted peers never reach it (the bypass
+// returns first), so legitimate desktop/worker traffic is untouched.
+const AUTH_THROTTLE_MAX_FAILURES: u32 = 10;
+const AUTH_THROTTLE_WINDOW: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Default)]
+pub(crate) struct AuthThrottle {
+    state: Mutex<HashMap<IpAddr, AttemptRecord>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AttemptRecord {
+    failures: u32,
+    // Start of the current rolling window; failures older than the window are reset.
+    window_start: Instant,
+}
+
+impl AuthThrottle {
+    /// Whether this peer is currently locked out (over the failure cap inside the
+    /// live window). Non-mutating: pure read of the current record. An unknown peer
+    /// (`None`) or a peer with a stale window is never blocked.
+    pub(crate) fn is_blocked(&self, peer: Option<IpAddr>) -> bool {
+        let Some(ip) = peer else {
+            return false;
+        };
+        let now = Instant::now();
+        let mut state = self.state.lock();
+        prune_attempts(&mut state, now);
+        state
+            .get(&ip)
+            .is_some_and(|record| record.failures >= AUTH_THROTTLE_MAX_FAILURES)
+    }
+
+    /// Record one failed token attempt for this peer, re-arming its window, and
+    /// return the running failure count so the caller can `warn!` on repeats. A
+    /// missing peer IP (unit-test oneshot path) is a no-op.
+    pub(crate) fn record_failure(&self, peer: Option<IpAddr>) -> u32 {
+        let Some(ip) = peer else {
+            return 0;
+        };
+        let now = Instant::now();
+        let mut state = self.state.lock();
+        prune_attempts(&mut state, now);
+        let record = state.entry(ip).or_insert(AttemptRecord {
+            failures: 0,
+            window_start: now,
+        });
+        record.failures = record.failures.saturating_add(1);
+        record.window_start = now;
+        record.failures
+    }
+
+    /// Clear a peer's failure record after a valid token, so a legitimate user who
+    /// mistyped a few times is not punished once they authenticate.
+    pub(crate) fn record_success(&self, peer: Option<IpAddr>) {
+        let Some(ip) = peer else {
+            return;
+        };
+        self.state.lock().remove(&ip);
+    }
+}
+
+/// Drop records whose window has fully rolled off so the map can't grow unbounded
+/// from one-off probes across many source IPs.
+fn prune_attempts(state: &mut HashMap<IpAddr, AttemptRecord>, now: Instant) {
+    state.retain(|_, record| now.duration_since(record.window_start) < AUTH_THROTTLE_WINDOW);
+}
+
+/// 429 response returned when a peer IP has exceeded the failed-token budget.
+fn throttled_response() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({
+            "detail": "Too many authentication attempts; try again later",
+            "authRequired": true
+        })),
+    )
+        .into_response()
+}
 
 pub(crate) async fn access_control(
     State(state): State<AppState>,
@@ -12,23 +105,68 @@ pub(crate) async fn access_control(
     next: Next,
 ) -> Response {
     let peer = connect_info.map(|ConnectInfo(addr)| addr);
+    let peer_ip = peer.map(|addr| addr.ip());
+
+    // sc-8870: a peer that already blew its token-guess budget is refused before any
+    // token comparison — this covers both the gated routes below and the public
+    // `/api/v1/auth/verify` oracle (the throttle check runs on every request, even the
+    // public ones, but only bites once an IP has racked up failures). Loopback-trusted
+    // peers can never accrue failures (the bypass returns first), so this only ever
+    // fires on a remote/LAN brute-forcer.
+    if !loopback_trusted(state.settings.trust_loopback, peer)
+        && state.auth_throttle.is_blocked(peer_ip)
+    {
+        tracing::warn!(
+            event = "auth_throttled",
+            path = %request.uri().path(),
+            status = StatusCode::TOO_MANY_REQUESTS.as_u16(),
+            "refused token attempt from throttled peer"
+        );
+        return throttled_response();
+    }
+
+    // Unconditional bypasses — nothing to meter here: a preflight, a public/non-gated
+    // path, a loopback-trusted peer, or a valid media ticket. Loopback peers are never
+    // throttled, and none of these paths present the header token.
     if request.method() == Method::OPTIONS
-        || !requires_token(request.uri().path())
+        || !requires_token(request.method(), request.uri().path())
         || loopback_trusted(state.settings.trust_loopback, peer)
-        || is_authorized(request.headers(), &state.settings)
         || media_ticket_authorized(&state, &request)
     {
         return next.run(request).await;
     }
 
+    // A valid header token on a gated route passes auth — and, like `/auth/verify`,
+    // clears this peer's failure budget (sc-8870, F-068). Without this, a non-web
+    // LAN/API client (epic 4484) hitting gated routes directly with an occasionally
+    // wrong token could creep toward the cap with no path to reset it; only the
+    // `/auth/verify` endpoint cleared the budget before. Take + release the throttle
+    // lock inside `record_success` (no lock held across the `next.run` await), matching
+    // the rest of `AuthThrottle`. Loopback-trusted peers already returned above, so this
+    // only runs for the token-authenticated remote path.
+    if is_authorized(request.headers(), &state.settings) {
+        // Only meter when a token is configured; with auth off there is no budget.
+        if !state.settings.access_token.is_empty() {
+            state.auth_throttle.record_success(peer_ip);
+        }
+        return next.run(request).await;
+    }
+
+    // A gated route hit with a missing/invalid token is a failed attempt — count it
+    // toward the per-IP throttle so an attacker probing e.g. `GET /api/v1/jobs` for a
+    // valid token is locked out just like one hammering `/auth/verify`.
+    let failures = state.auth_throttle.record_failure(peer_ip);
+
     // Make auth rejections visible to operators (they previously returned 401 with no
     // server-side trace). Log the path + reason + status only — never the token/secret
-    // (and `uri().path()` excludes any query string).
+    // (and `uri().path()` excludes any query string). Repeated failures escalate to a
+    // dedicated warn so a brute-force attempt stands out in the log.
     tracing::warn!(
         event = "auth_rejected",
         path = %request.uri().path(),
         reason = "missing_or_invalid_token",
         status = StatusCode::UNAUTHORIZED.as_u16(),
+        failures,
         "rejected unauthenticated API request"
     );
 
@@ -66,12 +204,36 @@ pub(crate) fn cors_layer(settings: &Settings) -> CorsLayer {
         ])
 }
 
-/// Whether a path is gated by the access token. Only `/api/*` routes are
+/// Whether a request is gated by the access token. Only `/api/*` routes are
 /// protected (minus the explicitly public ones); everything else is the
 /// embedded web bundle / SPA fallback, which a browser must be able to load
 /// before it can attach the token header.
-pub(crate) fn requires_token(path: &str) -> bool {
-    path.starts_with("/api/") && !PUBLIC_PATHS.contains(&path)
+///
+/// The exemption is method-aware, not path-only (sc-8869, F-067): a public path
+/// is only exempt for the read-safe method(s) it was whitelisted for. The theme
+/// preferences path (`/api/v1/ui-preferences`) shares its route between a
+/// pre-auth GET (the theme read that loads before auth, to avoid a flash) and a
+/// PUT that writes `ui-preferences.json` to disk. Only the GET stays public; the
+/// disk-writing PUT must still present the token when one is configured, so an
+/// unauthenticated LAN caller can't overwrite the file (epic 4484: every write is
+/// authenticated). All other `PUBLIC_PATHS` entries expose a single route method,
+/// so a path-only exemption for them is already method-correct.
+pub(crate) fn requires_token(method: &Method, path: &str) -> bool {
+    // The MCP mount (sc-10233) is gated for every method, exactly like a gated
+    // `/api/v1` route: an unauthenticated LAN caller must not reach the MCP
+    // session layer at all. Loopback trust and the token header both work the
+    // same as for the API routes (this predicate only decides "gated or not").
+    if path == "/mcp" || path.starts_with("/mcp/") {
+        return true;
+    }
+    if !path.starts_with("/api/") {
+        return false;
+    }
+    if path == UI_PREFERENCES_PATH {
+        // Only the pre-auth theme READ is public; the disk-writing PUT is gated.
+        return method != Method::GET;
+    }
+    !PUBLIC_PATHS.contains(&path)
 }
 
 /// Whether a request should bypass the access token because it originates from this
@@ -85,6 +247,14 @@ pub(crate) fn requires_token(path: &str) -> bool {
 /// so a server deployment fronted by a reverse proxy — where every request would appear
 /// to come from loopback — stays fail-closed. Pure so the decision is unit-tested without
 /// a live listener; mirrors `should_warn_open_bind`.
+///
+/// Multi-user caveat (sc-8948, F-146 — accepted design tradeoff): this trust is
+/// per-connection, not per-OS-user. On a shared machine, ANY local user/process that
+/// can reach `127.0.0.1`/`::1` inherits the token bypass, not just the account running
+/// SceneWorks. Deliberate for the single-user desktop it targets; see the
+/// "Loopback trust and the multi-user-machine caveat" note in the root README's Local
+/// Access Control section. Do not set `SCENEWORKS_TRUST_LOOPBACK` on a host other local
+/// users can log into unless you trust them all.
 pub(crate) fn loopback_trusted(trust_loopback: bool, peer: Option<SocketAddr>) -> bool {
     trust_loopback && peer.is_some_and(|addr| addr.ip().is_loopback())
 }

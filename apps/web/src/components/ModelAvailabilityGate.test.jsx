@@ -1,7 +1,7 @@
 import React, { act } from "react";
-import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppContext } from "../context/AppContext.js";
+import { click, mountRoot } from "../testUtils/dom.js";
 import { ModelAvailabilityGate } from "./ModelAvailabilityGate.jsx";
 
 describe("ModelAvailabilityGate", () => {
@@ -10,9 +10,7 @@ describe("ModelAvailabilityGate", () => {
 
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
@@ -30,12 +28,6 @@ describe("ModelAvailabilityGate", () => {
           <ModelAvailabilityGate {...props} />
         </AppContext.Provider>,
       );
-    });
-  }
-
-  async function click(el) {
-    await act(async () => {
-      el.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     });
   }
 

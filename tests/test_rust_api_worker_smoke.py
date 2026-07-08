@@ -4,76 +4,193 @@ import json
 import os
 from pathlib import Path
 import shutil
-import socket
 import subprocess
 import time
-from types import SimpleNamespace
+from uuid import uuid4
 
 import httpx
 import pytest
 
-from scene_worker.image_adapters import (
-    CHARACTER_ANGLE_SET_ORDER,
-    ImageAssetWriter,
-    MODEL_TARGETS,
-    render_preview_image,
-)
-from scene_worker.runtime import (
-    ApiClient,
-    heartbeat,
-    job_cancel_requested,
-    register_worker,
-    run_image_job,
-    update_job,
-)
-from scene_worker.settings import WorkerSettings
+# In CI a missing cargo means the workflow toolchain regressed, so `require_tool`
+# fails the e2e gate instead of letting it skip to a silent green (sc-8935 / F-133).
+from conftest import require_tool
 
-# Every test here drives the compiled Rust API binary (the `rust_api` fixture
-# spawns `cargo run -p sceneworks-rust-api`), so the whole module is e2e: it
-# must run in the CI step that follows the Rust build, not in the lightweight
-# worker-suite step (sc-4180).
+# Shared, corruption-free fixtures (sc-8934 / F-132): PNG + safetensors builders
+# and the API-spawn helpers, previously copy-pasted (and drifted) between this
+# file and test_rust_api_contract_snapshots.py.
+from rust_api_harness import (
+    PNG_1X1,
+    free_port,
+    minimal_safetensors as _minimal_safetensors,
+    wait_for_health,
+)
+
+# sc-8861 (F-059): these e2e tests used to drive the live Rust API via
+# `scene_worker.runtime.ApiClient` and run the image pipeline with the in-process
+# Python worker (`run_image_job`). Both couple the ONLY live coverage of the Rust
+# API's worker protocol / procedural-pipeline / sc-2226 LoRA boundary to the
+# retired `apps/worker` package, so an epic-8283 deletion would silently take that
+# coverage down. They are now PURE-HTTP: the test itself plays the worker role over
+# the same endpoints (register → claim → heartbeat → cancel → progress), and for the
+# procedural / LoRA jobs it reports the same flat asset facts the worker posts (the
+# Rust API is the single owner of the fact→asset transform, story 1656), writing the
+# PNG bytes to the shared project dir exactly as the worker's `ImageAssetWriter` did.
+# No `scene_worker` import remains. The `rust_api` fixture spawns
+# `cargo run -p sceneworks-rust-api`, so the whole module is e2e: it must run in the
+# CI step that follows the Rust build, not the lightweight worker-suite step (sc-4180).
 pytestmark = pytest.mark.e2e
 
 
+def register_worker(base_url: str, worker_id: str, gpu: dict) -> dict:
+    """POST /api/v1/workers/register. The image queue only offers an
+    image_generate job to a worker advertising that capability, so the tests
+    register with it explicitly (the retired Python `worker_capabilities` derived
+    a richer set; image routing only needs `image_generate`)."""
+    response = httpx.post(
+        f"{base_url}/api/v1/workers/register",
+        json={
+            "workerId": worker_id,
+            "gpuId": gpu["id"],
+            "gpuName": gpu["name"],
+            "capabilities": gpu["capabilities"],
+            "loadedModels": gpu.get("loadedModels", []),
+        },
+        timeout=5,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def claim_job(base_url: str, worker_id: str) -> dict:
+    """POST /api/v1/jobs/claim — returns the claimed job envelope's `job`."""
+    response = httpx.post(
+        f"{base_url}/api/v1/jobs/claim", json={"workerId": worker_id}, timeout=5
+    )
+    response.raise_for_status()
+    return response.json()["job"]
+
+
+def heartbeat(base_url: str, worker_id: str, status: str, current_job_id: str | None, loaded_models: list[str]) -> None:
+    """POST /api/v1/workers/{id}/heartbeat."""
+    response = httpx.post(
+        f"{base_url}/api/v1/workers/{worker_id}/heartbeat",
+        json={"status": status, "currentJobId": current_job_id, "loadedModels": loaded_models},
+        timeout=5,
+    )
+    response.raise_for_status()
+
+
+def job_cancel_requested(base_url: str, job_id: str) -> bool:
+    """GET /api/v1/jobs/{id} → cancelRequested."""
+    response = httpx.get(f"{base_url}/api/v1/jobs/{job_id}", timeout=5)
+    response.raise_for_status()
+    return bool(response.json()["cancelRequested"])
+
+
+def report_progress(base_url: str, worker_id: str, job_id: str, payload: dict) -> dict:
+    """POST /api/v1/jobs/{id}/progress, stamping the reporting worker id like the
+    worker's `update_job` did (the server 409s if this worker no longer owns the
+    job — sc-4172)."""
+    body = {"workerId": worker_id, **payload}
+    response = httpx.post(f"{base_url}/api/v1/jobs/{job_id}/progress", json=body, timeout=5)
+    response.raise_for_status()
+    return response.json()
+
+
+def build_procedural_asset_writes(
+    *,
+    project_path: Path,
+    generation_set_id: str,
+    request: dict,
+    loras: list[dict] | None = None,
+) -> list[dict]:
+    """Write a weightless PNG per image under `assets/images/<genset>/` and return
+    the flat `assetWrites` facts, mirroring the shape the Python worker's
+    `ImageAssetWriter.write_incremental_outputs` posted (the Rust API's
+    `build_image_sidecar_parts` turns each fact into the served `result.assets`
+    entry, so `file`/`recipe` fields below drive the completed job's assets)."""
+    model = request["model"]
+    prompt = request["prompt"]
+    count = request.get("count", 1)
+    width = request.get("width", 512)
+    height = request.get("height", 512)
+    date_slug = time.strftime("%Y-%m-%d")
+    images_dir = project_path / "assets" / "images" / generation_set_id
+    images_dir.mkdir(parents=True, exist_ok=True)
+    writes: list[dict] = []
+    for index in range(count):
+        filename = f"{date_slug}_{model}_image_{index + 1:04d}.png"
+        (images_dir / filename).write_bytes(PNG_1X1)
+        writes.append(
+            {
+                "assetId": f"asset_{uuid4().hex}",
+                "mediaPath": f"assets/images/{generation_set_id}/{filename}",
+                "mimeType": "image/png",
+                "width": width,
+                "height": height,
+                "normalizedWidth": width,
+                "normalizedHeight": height,
+                "count": count,
+                "family": "z-image",
+                "seed": index,
+                "index": index,
+                "displayName": f"{prompt[:56] or 'Generated image'} #{index + 1}",
+                "createdAt": date_slug,
+                "mode": request.get("mode", "text_to_image"),
+                "model": model,
+                "adapter": "procedural_preview",
+                "prompt": prompt,
+                "negativePrompt": request.get("negativePrompt"),
+                "loras": loras or [],
+                "sourceAssetId": request.get("referenceAssetId"),
+                "rawAdapterSettings": dict(request.get("advanced", {})),
+            }
+        )
+    return writes
+
+
+def complete_image_job(
+    base_url: str,
+    worker_id: str,
+    job: dict,
+    *,
+    project_path: Path,
+    loras: list[dict] | None = None,
+) -> dict:
+    """Play the worker's procedural image path over HTTP: emit the flat asset
+    facts + PNG bytes, then POST the terminal `completed` progress so the Rust API
+    builds + serves `result.assets`. Returns the API's progress response."""
+    request = dict(job["payload"])
+    generation_set_id = f"genset_{uuid4().hex}"
+    asset_writes = build_procedural_asset_writes(
+        project_path=project_path,
+        generation_set_id=generation_set_id,
+        request=request,
+        loras=loras,
+    )
+    result = {
+        "generationSetId": generation_set_id,
+        "expectedCount": len(asset_writes),
+        "adapter": "procedural_preview",
+        "model": request["model"],
+        "generationSet": {
+            "id": generation_set_id,
+            "mode": request.get("mode", "text_to_image"),
+            "model": request["model"],
+            "prompt": request["prompt"],
+            "count": len(asset_writes),
+        },
+        "assetWrites": asset_writes,
+    }
+    return report_progress(
+        base_url,
+        worker_id,
+        job["id"],
+        {"status": "completed", "stage": "completed", "progress": 1, "message": "Image generation assets saved.", "result": result},
+    )
+
+
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def _minimal_safetensors() -> bytes:
-    # Smallest valid safetensors: 8-byte little-endian header length + JSON header.
-    # The import path inspects this header for architecture detection, so a stub
-    # like b"lora" is rejected with an invalid-header 400.
-    header = b'{"__metadata__":{"format":"pt"}}'
-    return len(header).to_bytes(8, "little") + header
-
-
-PNG_1X1 = (
-    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
-    b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00"
-    b"\x00\x00\x0cIDAT\x08\xd7c\xf8\xff\xff?\x00\x05\xfe"
-    b"\x02\xfeA\xe2&\x9b\x00\x00\x00\x00IEND\xaeB`\x82"
-)
-
-
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def wait_for_health(base_url: str, process: subprocess.Popen) -> None:
-    deadline = time.monotonic() + 30
-    last_error: Exception | None = None
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise AssertionError(f"Rust API exited early with code {process.returncode}")
-        try:
-            response = httpx.get(f"{base_url}/api/v1/health", timeout=1)
-            if response.status_code == 200:
-                return
-        except httpx.HTTPError as exc:
-            last_error = exc
-        time.sleep(0.25)
-    raise AssertionError(f"Rust API did not become healthy: {last_error}")
 
 
 def wait_for_job_status(base_url: str, job_id: str, status: str, process: subprocess.Popen) -> dict:
@@ -96,8 +213,7 @@ def wait_for_job_status(base_url: str, job_id: str, status: str, process: subpro
 
 @pytest.fixture()
 def rust_api(tmp_path):
-    if shutil.which("cargo") is None:
-        pytest.skip("cargo is required for the Rust API smoke test")
+    require_tool("cargo", "the Rust API smoke test")
 
     port = free_port()
     base_url = f"http://127.0.0.1:{port}"
@@ -133,21 +249,16 @@ def rust_api(tmp_path):
 
 
 def test_python_worker_protocol_round_trips_against_rust_api_binary(rust_api):
-    settings = SimpleNamespace(
-        api_url=rust_api,
-        access_token="",
-        worker_id="live-test-worker",
-    )
-    api = ApiClient(settings)
+    # sc-8861: the live claim → heartbeat → cancel → terminal-progress contract,
+    # driven entirely over HTTP (was `scene_worker.runtime.ApiClient`).
+    worker_id = "live-test-worker"
 
     # An image_generate job is only offered to workers advertising the
-    # image_generate capability, so register with it (mirrors the procedural e2e
-    # worker) or the claim below returns no job.
+    # image_generate capability, so register with it or the claim below returns no job.
     register_worker(
-        api,
-        settings,
-        {"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu", "image_generate"]},
-        loaded_models=[],
+        rust_api,
+        worker_id,
+        {"id": "gpu-0", "name": "GPU 0", "capabilities": ["image_generate"]},
     )
     created = httpx.post(
         f"{rust_api}/api/v1/image/jobs",
@@ -162,22 +273,23 @@ def test_python_worker_protocol_round_trips_against_rust_api_binary(rust_api):
     created.raise_for_status()
     job = created.json()
 
-    claimed = api.post("/api/v1/jobs/claim", {"workerId": settings.worker_id})["job"]
+    claimed = claim_job(rust_api, worker_id)
     assert claimed["id"] == job["id"]
-    assert claimed["workerId"] == settings.worker_id
+    assert claimed["workerId"] == worker_id
     assert claimed["assignedGpu"] == "gpu-0"
 
-    heartbeat(api, settings, "busy", claimed["id"], loaded_models=["Tongyi-MAI/Z-Image-Turbo"])
+    heartbeat(rust_api, worker_id, "busy", claimed["id"], loaded_models=["Tongyi-MAI/Z-Image-Turbo"])
     workers = httpx.get(f"{rust_api}/api/v1/workers", timeout=5).json()
-    worker = next(worker for worker in workers if worker["id"] == settings.worker_id)
+    worker = next(worker for worker in workers if worker["id"] == worker_id)
     assert worker["loadedModels"] == ["Tongyi-MAI/Z-Image-Turbo"]
 
     canceled = httpx.post(f"{rust_api}/api/v1/jobs/{claimed['id']}/cancel", timeout=5)
     canceled.raise_for_status()
-    assert job_cancel_requested(api, claimed["id"]) is True
+    assert job_cancel_requested(rust_api, claimed["id"]) is True
 
-    completed = update_job(
-        api,
+    completed = report_progress(
+        rust_api,
+        worker_id,
         claimed["id"],
         {
             "status": "canceled",
@@ -190,43 +302,35 @@ def test_python_worker_protocol_round_trips_against_rust_api_binary(rust_api):
     assert completed["cancelRequested"] is True
 
 
-def test_python_worker_completes_procedural_image_job_against_rust_api_binary(
-    rust_api, tmp_path, monkeypatch
-):
-    # The rust_api fixture runs the API with SCENEWORKS_DATA_DIR=tmp_path/"data"; the
-    # in-process worker below shares that same data dir. recent-projects.json is owned
-    # by the desktop/web app (the Rust API never writes it), so seed it directly the
-    # way the worker resolves project paths.
-    data_dir = tmp_path / "data"
-    data_dir.mkdir(exist_ok=True)
-    project_path = tmp_path / "project"
-    project_path.mkdir()
-    (data_dir / "recent-projects.json").write_text(
-        json.dumps([{"id": "project-1", "path": str(project_path)}]),
-        encoding="utf-8",
+def test_python_worker_completes_procedural_image_job_against_rust_api_binary(rust_api):
+    # sc-8861: the procedural image pipeline's API contract — create → claim →
+    # asset-writing (flat facts + PNG bytes) → completion → served `result.assets`.
+    # The test plays the worker's procedural path over HTTP (was in-process
+    # `run_image_job` -> ProceduralImageAdapter -> ImageAssetWriter). The Rust API
+    # owns the fact→asset transform (story 1656), so this exercises the same
+    # asset-writing contract the served assertions below cover.
+    worker_id = "image-e2e-worker"
+
+    # Create the project through the API so its store resolves the same path the
+    # worker (here, the test) writes PNG bytes into.
+    created_project = httpx.post(
+        f"{rust_api}/api/v1/projects", json={"name": "Procedural E2E"}, timeout=5
     )
+    created_project.raise_for_status()
+    project = created_project.json()
+    project_id = project["id"]
+    project_path = Path(project["path"])
 
-    monkeypatch.setenv("SCENEWORKS_API_URL", rust_api)
-    monkeypatch.setenv("SCENEWORKS_DATA_DIR", str(data_dir))
-    monkeypatch.setenv("SCENEWORKS_WORKER_ID", "image-e2e-worker")
-    monkeypatch.setenv("SCENEWORKS_GPU_ID", "gpu-0")
-    # The procedural adapter renders a deterministic preview with no model weights, so
-    # the whole image pipeline runs in CI without the multi-GB diffusion checkpoints.
-    monkeypatch.setenv("SCENEWORKS_IMAGE_ADAPTER", "procedural")
-
-    settings = WorkerSettings()
-    api = ApiClient(settings)
     register_worker(
-        api,
-        settings,
-        {"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu", "image_generate"]},
-        loaded_models=[],
+        rust_api,
+        worker_id,
+        {"id": "gpu-0", "name": "GPU 0", "capabilities": ["image_generate"]},
     )
 
     created = httpx.post(
         f"{rust_api}/api/v1/image/jobs",
         json={
-            "projectId": "project-1",
+            "projectId": project_id,
             "prompt": "mist over rolling hills",
             "model": "z_image_turbo",
             "count": 1,
@@ -238,18 +342,16 @@ def test_python_worker_completes_procedural_image_job_against_rust_api_binary(
     job = created.json()
     assert job["type"] == "image_generate"
 
-    claimed = api.post("/api/v1/jobs/claim", {"workerId": settings.worker_id})["job"]
+    claimed = claim_job(rust_api, worker_id)
     assert claimed["id"] == job["id"]
     assert claimed["type"] == "image_generate"
-    assert claimed["payload"]["projectId"] == "project-1"
+    assert claimed["payload"]["projectId"] == project_id
 
-    # Drives the real dispatch path: create_image_adapter -> ProceduralImageAdapter ->
-    # ImageAssetWriter, reporting completion back to the Rust API over HTTP.
-    run_image_job(api, settings, claimed, {})
+    complete_image_job(rust_api, worker_id, claimed, project_path=project_path)
 
     completed = httpx.get(f"{rust_api}/api/v1/jobs/{job['id']}", timeout=5).json()
     assert completed["status"] == "completed"
-    assert completed["workerId"] == settings.worker_id
+    assert completed["workerId"] == worker_id
     assets = completed["result"]["assets"]
     assert len(assets) == 1
     asset = assets[0]
@@ -261,69 +363,35 @@ def test_python_worker_completes_procedural_image_job_against_rust_api_binary(
     assert written.suffix == ".png"
 
 
-class _RecordingImageAdapter:
-    """Records the ImageRequest the worker hands the adapter, then writes weightless
-    preview images so the job completes. Unlike the procedural adapter it does NOT
-    reject loras (that is the point — sc-2226 proves loras survive the API + worker
-    boundary into request.loras for character_image angle/pose sets)."""
-
-    id = "recording-e2e"
-
-    def __init__(self, sink: list[dict]) -> None:
-        self._sink = sink
-
-    def loaded_models(self) -> list[str]:
-        return []
-
-    def generate(self, *, settings, job, request, project_path, progress, cancel_requested):
-        self._sink.append(
-            {"mode": request.mode, "loras": list(request.loras), "advanced": dict(request.advanced)}
-        )
-        model_target = MODEL_TARGETS.get(request.model, MODEL_TARGETS["z_image_turbo"])
-        if request.advanced.get("angleSet"):
-            count = len(CHARACTER_ANGLE_SET_ORDER)
-        elif isinstance(request.advanced.get("poses"), list):
-            count = len(request.advanced["poses"])
-        else:
-            count = request.count
-        return ImageAssetWriter().write_incremental_outputs(
-            request=request,
-            project_path=project_path,
-            image_count=count,
-            image_at_index=lambda index: render_preview_image(request, model_target, index, index),
-            adapter_id=self.id,
-            progress=progress,
-            cancel_requested=cancel_requested,
-            raw_settings={**request.advanced, "recordingE2E": True},
-            settings=settings,
-            job_id=job["id"],
-        )
-
-
-def test_character_image_angle_and_pose_sets_carry_loras_through_worker(rust_api, tmp_path, monkeypatch):
+def test_character_image_angle_and_pose_sets_carry_loras_through_worker(rust_api, tmp_path):
     """sc-2226: a character_image angle set AND pose set, each carrying a `loras` array,
-    submitted through the Rust API binary and run by the in-process worker, deliver those
-    loras to the adapter as request.loras (the payload -> catalog-normalized -> worker ->
-    ImageRequest.loras boundary). z_image_turbo stands in as a weightless backbone; the
-    angle/pose LoRA path itself is unit-covered in sc-2224/2225."""
-    data_dir = tmp_path / "data"
-    data_dir.mkdir(exist_ok=True)
+    submitted through the Rust API binary, must have those loras hydrated + normalized by
+    the API and delivered to the worker on the claimed payload (the
+    payload -> catalog-normalized -> worker ImageRequest.loras boundary), then survive the
+    completion round-trip onto the served asset recipe.
 
+    sc-8861: driven entirely over HTTP — the test plays the worker, so the boundary is
+    proven at the two live seams the Rust API owns: (1) `claimed["payload"]["loras"]` is the
+    API-normalized lora spec the worker would read into `request.loras`, and (2) the API
+    rebuilds `result.assets[].recipe.loras` from the completion facts. z_image_turbo stands
+    in as a weightless backbone; the angle/pose LoRA path itself is unit-covered in
+    sc-2224/2225. (The Python `_RecordingImageAdapter` that captured `request.loras`
+    in-process was retired with apps/worker; the payload assertion below is the same
+    boundary the recorder observed.)"""
     # The Rust API resolves a job's project through its own project store (for project
-    # LoRAs), so create the project via the API and mirror its path into recent-projects
-    # .json (how the in-process worker resolves the same project).
+    # LoRAs), so create the project via the API and write asset bytes into its path.
     created_project = httpx.post(f"{rust_api}/api/v1/projects", json={"name": "Lora E2E"}, timeout=5)
     created_project.raise_for_status()
     project = created_project.json()
     project_id = project["id"]
     project_path = Path(project["path"])
-    (data_dir / "recent-projects.json").write_text(
-        json.dumps([{"id": project_id, "path": str(project_path)}]), encoding="utf-8"
-    )
 
+    # The rust_api fixture points SCENEWORKS_DATA_DIR + SCENEWORKS_CONFIG_DIR at tmp_path.
     # The Rust API rejects loras not present in the catalog (it hydrates + normalizes
     # submitted specs against installed LoRAs). Seed one user LoRA whose family matches
     # the z_image_turbo backbone so the submission validates and reaches the worker.
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
     lora_id = "kelsie-zit"
     lora_dir = data_dir / "loras" / lora_id
     lora_dir.mkdir(parents=True, exist_ok=True)
@@ -354,26 +422,11 @@ def test_character_image_angle_and_pose_sets_carry_loras_through_worker(rust_api
         encoding="utf-8",
     )
 
-    monkeypatch.setenv("SCENEWORKS_API_URL", rust_api)
-    monkeypatch.setenv("SCENEWORKS_DATA_DIR", str(data_dir))
-    monkeypatch.setenv("SCENEWORKS_WORKER_ID", "lora-e2e-worker")
-    monkeypatch.setenv("SCENEWORKS_GPU_ID", "gpu-0")
-
-    # Inject a recording adapter (the procedural adapter rejects loras), so the worker's
-    # real dispatch path runs but no model weights are needed.
-    recorded: list[dict] = []
-    monkeypatch.setattr(
-        "scene_worker.runtime.create_image_adapter",
-        lambda job, image_adapters: _RecordingImageAdapter(recorded),
-    )
-
-    settings = WorkerSettings()
-    api = ApiClient(settings)
+    worker_id = "lora-e2e-worker"
     register_worker(
-        api,
-        settings,
-        {"id": "gpu-0", "name": "GPU 0", "capabilities": ["placeholder", "gpu", "image_generate"]},
-        loaded_models=[],
+        rust_api,
+        worker_id,
+        {"id": "gpu-0", "name": "GPU 0", "capabilities": ["image_generate"]},
     )
 
     loras = [{"id": lora_id, "weight": 0.8}]
@@ -403,28 +456,27 @@ def test_character_image_angle_and_pose_sets_carry_loras_through_worker(rust_api
         assert created.status_code == 201, (kind, created.status_code, created.text)
         job = created.json()
 
-        claimed = api.post("/api/v1/jobs/claim", {"workerId": settings.worker_id})["job"]
+        claimed = claim_job(rust_api, worker_id)
         assert claimed["id"] == job["id"], kind
-        # The Rust API persisted + served the (normalized) loras on the claimed payload.
-        assert [lora["id"] for lora in claimed["payload"]["loras"]] == [lora_id], kind
+        # The Rust API persisted + served the (normalized) loras on the claimed payload —
+        # exactly the spec the worker reads into request.loras (the sc-2226 boundary).
+        claimed_loras = claimed["payload"]["loras"]
+        assert [lora["id"] for lora in claimed_loras] == [lora_id], kind
+        assert claimed_loras[0]["weight"] == 0.8, kind
 
-        run_image_job(api, settings, claimed, {})
+        # Complete over HTTP, echoing the claimed loras into the asset facts as the worker
+        # would, so the API rebuilds recipe.loras and we verify the round-trip.
+        complete_image_job(rust_api, worker_id, claimed, project_path=project_path, loras=claimed_loras)
 
         completed = httpx.get(f"{rust_api}/api/v1/jobs/{job['id']}", timeout=5).json()
         assert completed["status"] == "completed", (kind, completed)
-
-    # The adapter received request.loras for BOTH the angle set and the pose set.
-    assert len(recorded) == 2
-    assert all([lora["id"] for lora in entry["loras"]] == [lora_id] for entry in recorded)
-    angle_entry = next(entry for entry in recorded if entry["advanced"].get("angleSet"))
-    pose_entry = next(entry for entry in recorded if entry["advanced"].get("poses"))
-    assert angle_entry["loras"][0]["weight"] == 0.8
-    assert pose_entry["loras"][0]["weight"] == 0.8
+        recipe_loras = completed["result"]["assets"][0]["recipe"]["loras"]
+        assert [lora["id"] for lora in recipe_loras] == [lora_id], kind
+        assert recipe_loras[0]["weight"] == 0.8, kind
 
 
 def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(rust_api, tmp_path):
-    if shutil.which("cargo") is None:
-        pytest.skip("cargo is required for the Rust worker smoke test")
+    require_tool("cargo", "the Rust worker smoke test")
 
     # The Rust API only imports a sourcePath from app-managed roots (data/loras,
     # project loras, or staged uploads) for path safety; stage the source inside
@@ -481,8 +533,11 @@ def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(ru
 
 
 def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_binary(rust_api, tmp_path):
-    if shutil.which("cargo") is None:
-        pytest.skip("cargo is required for the Rust worker smoke test")
+    require_tool("cargo", "the Rust worker smoke test")
+    # ffmpeg is intentionally NOT provisioned in the `check.yml` CI (only in the
+    # desktop/release packaging workflows), so this stays a plain skip: it must not
+    # red the e2e gate. The all-skipped guard in conftest still fires if cargo (and
+    # thus every other e2e test) also went missing (sc-8935 / F-133).
     if shutil.which("ffmpeg") is None:
         pytest.skip("ffmpeg is required for the FFmpeg worker smoke test")
 

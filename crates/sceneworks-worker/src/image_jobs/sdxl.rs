@@ -72,33 +72,6 @@ fn resolve_ip_adapter_dir(request: &ImageRequest, settings: &Settings) -> Option
     huggingface_snapshot_dir(&settings.data_dir, repo)
 }
 
-/// Resolve a mask asset id to an RGB8 [`Image`] (the engine luma-converts + binarizes it).
-fn load_mask_asset_image(
-    settings: &Settings,
-    project_id: &str,
-    mask_asset_id: &str,
-    project_path: &Path,
-) -> WorkerResult<Image> {
-    load_reference_image(&settings.data_dir, project_id, mask_asset_id, project_path)
-}
-
-/// Composite `source` contained (long edge fits) + centered on a black `width`×`height`
-/// canvas, using the **engine's** `contain_box` so the padded source lines up pixel-for-pixel
-/// with [`gen_core::imageops::outpaint_border_mask`] (both derive the same kept rect).
-fn sdxl_outpaint_canvas(source: &image::RgbImage, width: u32, height: u32) -> Image {
-    use image::imageops::FilterType::Lanczos3;
-    let (new_w, new_h, left, top) =
-        gen_core::imageops::contain_box(source.width(), source.height(), width, height);
-    let resized = image::imageops::resize(source, new_w.max(1), new_h.max(1), Lanczos3);
-    let mut canvas = image::RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
-    image::imageops::overlay(&mut canvas, &resized, left as i64, top as i64);
-    Image {
-        width,
-        height,
-        pixels: canvas.into_raw(),
-    }
-}
-
 /// An [`Image`] (RGB8) as an `image::RgbImage` for host-side compositing.
 fn engine_image_to_rgb(image: Image) -> WorkerResult<image::RgbImage> {
     image::RgbImage::from_raw(image.width, image.height, image.pixels)
@@ -310,8 +283,14 @@ async fn generate_sdxl_advanced_stream(
                     .ok_or_else(|| {
                         WorkerError::InvalidPayload("inpaint requires a mask image".to_owned())
                     })?;
-                let mask =
-                    load_mask_asset_image(settings, &request.project_id, mask_id, project_path)?;
+                // The engine luma-converts + binarizes the mask asset, so it loads through the shared
+                // reference-image loader (sc-8946 inlined the one-line `load_mask_asset_image` alias).
+                let mask = load_reference_image(
+                    &settings.data_dir,
+                    &request.project_id,
+                    mask_id,
+                    project_path,
+                )?;
                 // Align the mask to the source with the SAME fit geometry.
                 let mask = fit_engine_image(mask, width, height, &request.fit_mode)?;
                 conditioning.push(Conditioning::Mask { image: mask });
@@ -333,22 +312,30 @@ async fn generate_sdxl_advanced_stream(
                 .ok_or_else(|| {
                     WorkerError::InvalidPayload("outpaint requires a source image".to_owned())
                 })?;
-            let source = engine_image_to_rgb(load_reference_image(
+            let source = load_reference_image(
                 &settings.data_dir,
                 &request.project_id,
                 source_id,
                 project_path,
-            )?)?;
-            let (src_w, src_h) = (source.width(), source.height());
-            let canvas = sdxl_outpaint_canvas(&source, width, height);
+            )?;
+            let (src_w, src_h) = (source.width, source.height);
+            // Letterbox composite is the SHARED `fit_engine_image(.., "outpaint")` (base.rs) — the
+            // same `gen_core::imageops::contain_box` + Lanczos3 + black-canvas overlay the outpaint
+            // border mask keys off, so fit + mask stay pixel-identical (sc-9420 dedupe of the old
+            // per-lane `sdxl_outpaint_canvas` twin).
+            let canvas = fit_engine_image(source, width, height, "outpaint")?;
             // White = generate (the padded border), black = keep (the centered source).
             let mut mask = gen_core::imageops::outpaint_border_mask(src_w, src_h, width, height);
             if non_empty(&request.mask_asset_id) {
                 // Union the user edit region with the border (white wins) — pad-fit the user
                 // mask onto the same contained geometry first.
                 let mask_id = request.mask_asset_id.as_deref().unwrap().trim();
-                let user_mask =
-                    load_mask_asset_image(settings, &request.project_id, mask_id, project_path)?;
+                let user_mask = load_reference_image(
+                    &settings.data_dir,
+                    &request.project_id,
+                    mask_id,
+                    project_path,
+                )?;
                 let user_mask = fit_engine_image(user_mask, width, height, "pad")?;
                 mask = gen_core::imageops::union_masks(&mask, &user_mask).map_err(|error| {
                     WorkerError::Engine(format!("outpaint mask union failed: {error}"))
@@ -398,16 +385,14 @@ async fn generate_sdxl_advanced_stream(
         matches!(sub_mode, SdxlSubMode::Ip).then(|| {
             resolve_character_image_likeness_source(request, settings, project_path)
         });
-    let face_stack_dir = match likeness {
-        Some(Some(_)) => match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
-                None
-            }
-        },
-        _ => None,
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        matches!(likeness, Some(Some(_))),
+        "character_image face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     let likeness_source = match (&face_stack_dir, likeness.flatten()) {
         (Some(_), Some((image, asset_id))) => Some((image, asset_id)),
         _ => None,

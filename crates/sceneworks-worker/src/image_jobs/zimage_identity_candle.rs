@@ -186,16 +186,14 @@ async fn generate_candle_zimage_identity_stream(
     // img2img init uses (decoded raw, not fit — better for face detection). All non-fatal: a missing
     // reference / staging failure → no scorer → scores omitted, the generation still renders.
     let likeness_source = resolve_character_image_likeness_source(request, settings, project_path);
-    let face_stack_dir = match &likeness_source {
-        Some(_) => match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "With-Character (z-image identity) face-stack staging failed; likeness scores omitted");
-                None
-            }
-        },
-        None => None,
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        likeness_source.is_some(),
+        "With-Character (z-image identity) face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     // Keep the source only if the face stack staged (otherwise no scorer can be built).
     let likeness_source = face_stack_dir.as_ref().and(likeness_source);
 

@@ -16,8 +16,13 @@
 
 /// SceneWorks model id for native PuLID-FLUX (FLUX.1-dev backbone + PuLID injection).
 const PULID_CANDLE_MODEL: &str = "pulid_flux_dev";
-/// FLUX.1-dev backbone repo when the manifest omits `repo` (the same default the MLX route uses).
-const PULID_CANDLE_FLUX_REPO: &str = "black-forest-labs/FLUX.1-dev";
+/// FLUX.1-dev backbone repo when the manifest omits `repo`. As of sc-10103 (epic 9083) this is the
+/// ungated `SceneWorks/flux1-dev-mlx` quant-matrix turnkey — the SAME repo `flux_dev` uses — so the
+/// candle PuLID lane consumes the packed q4/q8 + bf16 tiers instead of the gated dense BFL checkpoint
+/// (the candle twin of the MLX repoint, sc-9947). The tier subdir is resolved by
+/// [`resolve_pulid_candle_base`] via [`standard_tier_subdir`]; `candle_gen_pulid`'s `FluxRefBackbone`
+/// packed-detects whichever tier landed.
+const PULID_CANDLE_FLUX_REPO: &str = "SceneWorks/flux1-dev-mlx";
 /// The PuLID-FLUX adapter (IDFormer + the 20 PerceiverAttention CA blocks). Public repo.
 const PULID_CANDLE_ADAPTER_REPO: &str = "guozinan/PuLID";
 const PULID_CANDLE_ADAPTER_FILE: &str = "pulid_flux_v0.9.1.safetensors";
@@ -32,8 +37,26 @@ const PULID_CANDLE_BISENET_FILE: &str = "bisenet_parsing.safetensors";
 const PULID_CANDLE_FACE_REPO: &str = "SceneWorks/instantid-mlx";
 const PULID_CANDLE_SCRFD_FILE: &str = "scrfd_10g.safetensors";
 const PULID_CANDLE_ARCFACE_FILE: &str = "arcface_iresnet100.safetensors";
-/// Both bundle repos ship the safetensors on `main`.
-const PULID_CANDLE_REVISION: &str = "main";
+/// Pinned commit revisions for the three PuLID download repos (sc-9879, F-077 follow-up). Every repo is
+/// a fixed, non-overridable const, so fetching the mutable `main` branch means a re-push (or a compromised
+/// token) could silently swap the adapter / EVA-BiSeNet / face-stack weights we load. Pin each to its
+/// exact commit for defense-in-depth (mirrors sc-8879/sc-9682); the `lfs.oid` sha256 verify in
+/// `ensure_hf_cached_file` is retained. `PULID_CANDLE_FACE_REPO` == `SceneWorks/instantid-mlx`, so its
+/// sha MUST equal `instantid.rs` `INSTANTID_MLX_REVISION` (they fetch the same repo).
+const PULID_CANDLE_ADAPTER_REVISION: &str = "492b1451255dc9d9bc3c857259690b5f8b998d4a";
+const PULID_CANDLE_MLX_REVISION: &str = "78ef91f977eae16d66fb191caf003154b7a0a0b8";
+const PULID_CANDLE_FACE_REVISION: &str = "bca0cacf8e5e04529bb2b326a521361b02be84fd";
+
+/// The pinned revision for one PuLID download repo (sc-9879). Any repo not in this table falls back to
+/// `main` rather than a wrong sha.
+fn pulid_candle_revision(repo: &str) -> &'static str {
+    match repo {
+        PULID_CANDLE_ADAPTER_REPO => PULID_CANDLE_ADAPTER_REVISION,
+        PULID_CANDLE_MLX_REPO => PULID_CANDLE_MLX_REVISION,
+        PULID_CANDLE_FACE_REPO => PULID_CANDLE_FACE_REVISION,
+        _ => "main",
+    }
+}
 
 /// Torch/MLX-parity defaults (the `pulid_flux_dev` "photoreal" preset): 30 steps at guidance 4.0,
 /// id_weight 1.0.
@@ -45,9 +68,13 @@ const PULID_CANDLE_DEFAULT_ID_WEIGHT: f32 = 1.0;
 const PULID_CANDLE_ENGINE: &str = "candle_pulid_flux";
 
 /// Resolve the FLUX.1-dev backbone snapshot for candle PuLID-FLUX: an explicit `modelPath` dir
-/// (advanced or manifest) wins, else the HF cache snapshot for the manifest `repo` (default
-/// FLUX.1-dev). `None` means the base is not present locally, so the job is not candle-runnable (falls
-/// through to torch). Mirrors `resolve_flux_ipadapter_base` / the MLX `resolve_pulid_flux_base`.
+/// (advanced or manifest) wins (used verbatim — an app-managed override picks its own layout), else the
+/// HF cache snapshot for the manifest `repo` (default `SceneWorks/flux1-dev-mlx`) descended into the
+/// selected quant-matrix **tier subdir** via [`standard_tier_subdir`] (sc-10103): `bf16/` when the
+/// request opts out of quant, `q8/` for Q8, else `q4/`. `candle_gen_pulid`'s `FluxRefBackbone`
+/// packed-detects whichever tier landed (or a dense BFL snapshot for a legacy `modelPath`). `None` means
+/// the base is not present locally, so the job is not candle-runnable (falls through to torch). Mirrors
+/// `resolve_flux_ipadapter_base` / the MLX `resolve_pulid_flux_base`.
 fn resolve_pulid_candle_base(
     request: &ImageRequest,
     settings: &Settings,
@@ -70,7 +97,8 @@ fn resolve_pulid_candle_base(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(PULID_CANDLE_FLUX_REPO);
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
+    Ok(huggingface_snapshot_dir(&settings.data_dir, repo)
+        .map(|root| standard_tier_subdir(&root, request)))
 }
 
 /// True when this is a candle-eligible PuLID-FLUX job: the `pulid_flux_dev` model in `character_image`
@@ -86,34 +114,13 @@ fn pulid_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
 
 /// Resolve PuLID denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` → 30.
 fn pulid_candle_steps(request: &ImageRequest) -> u32 {
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    request
-        .advanced
-        .get("steps")
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
-        .map(|steps| steps.clamp(1, 80) as u32)
-        .unwrap_or(PULID_CANDLE_DEFAULT_STEPS)
+    resolve_advanced_or_manifest_u32(request, "steps", PULID_CANDLE_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve PuLID guidance: `advanced.guidanceScale` → manifest `guidanceScale` → 4.0 (the FLUX.1-dev
 /// guidance-distilled CFG the distilled single forward consumes).
 fn pulid_candle_guidance(request: &ImageRequest) -> f32 {
-    let manifest_default = request
-        .model_manifest_entry
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(PULID_CANDLE_DEFAULT_GUIDANCE);
-    advanced::f32_clamped(&request.advanced, "guidanceScale", manifest_default, 0.0..=30.0)
+    resolve_advanced_or_manifest_f32(request, "guidanceScale", PULID_CANDLE_DEFAULT_GUIDANCE, 0.0..=30.0)
 }
 
 /// The PuLID identity-strength knob → the provider's `id_weight` (0.0 = the no-id ablation = plain
@@ -181,7 +188,7 @@ async fn ensure_pulid_candle_weights(
             return Ok(snapshot);
         }
         let dst = bundle.join(file);
-        ensure_hf_cached_file(context, repo, PULID_CANDLE_REVISION, file, &dst).await?;
+        ensure_hf_cached_file(context, repo, pulid_candle_revision(repo), file, &dst).await?;
         Ok(dst)
     }
 
@@ -210,7 +217,8 @@ async fn ensure_pulid_candle_weights(
         (PULID_CANDLE_FACE_REPO, PULID_CANDLE_ARCFACE_FILE),
         (PULID_CANDLE_MLX_REPO, PULID_CANDLE_BISENET_FILE),
     ] {
-        ensure_hf_cached_file(&context, repo, PULID_CANDLE_REVISION, file, &bundle.join(file)).await?;
+        ensure_hf_cached_file(&context, repo, pulid_candle_revision(repo), file, &bundle.join(file))
+            .await?;
     }
 
     Ok((adapter, eva, bundle))
@@ -286,17 +294,14 @@ async fn generate_candle_pulid_stream(
     // non-fatal (failure → no scorer → scores omitted, generation still renders).
     let score_likeness =
         resolve_character_image_likeness_source(request, settings, project_path).is_some();
-    let face_stack_dir = if score_likeness {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "PuLID-FLUX face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        score_likeness,
+        "PuLID-FLUX face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     let likeness_source = face_stack_dir.as_ref().map(|_| reference.clone());
     let likeness_source_ref = reference_id.to_owned();
 
@@ -333,10 +338,21 @@ async fn generate_candle_pulid_stream(
         .filter(|value| !value.is_empty())
         .unwrap_or(PULID_CANDLE_FLUX_REPO)
         .to_owned();
-    let raw_settings = pulid_candle_raw_settings(request, &repo, steps, guidance, id_weight);
+    // Per-generation PiD decode (epic 7840, sc-8044): resolve the `flux` PiD student + Gemma when
+    // `advanced.usePid` is set and the snapshots are cached; else `None` → native FLUX.1 VAE. PiD is a
+    // generative decoder, so face likeness may shift — the user's per-gen call. `use_pid` and the engine's
+    // `with_pid` load stay in lockstep (the engine rejects a mismatch).
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+    let mut raw_settings = pulid_candle_raw_settings(request, &repo, steps, guidance, id_weight);
+    // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
+    raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
     // Per-image work items: (seed, prompt) — `request.count` images at the reference identity.
-    let (width, height) = (request.width, request.height);
+    // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
+    // 4K/native leaves the requested dims untouched).
+    let (width, height) =
+        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
@@ -356,6 +372,13 @@ async fn generate_candle_pulid_stream(
             let model = PulidFlux::load(&paths).map_err(|error| {
                 WorkerError::Engine(format!("PuLID-FLUX load failed: {error}"))
             })?;
+            // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND snapshots cached.
+            let model = match &pid_weights {
+                Some(pid) => model.with_pid(pid).map_err(|error| {
+                    WorkerError::Engine(format!("PuLID-FLUX PiD decoder load failed: {error}"))
+                })?,
+                None => model,
+            };
             // Build the per-job identity-likeness scorer ONCE here (on the blocking thread where the
             // `!Send` face stack is allowed), embedding the source identity face a single time and
             // reusing it across every output (sc-4411 caching AC). `None` ⇒ non-fatal staging /
@@ -383,6 +406,8 @@ async fn generate_candle_pulid_stream(
                     seed: seed as u64,
                     sampler: sampler.clone(),
                     scheduler: scheduler.clone(),
+                    // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
+                    use_pid,
                     cancel: cancel.clone(),
                 };
                 let out = match model.generate(&req, &reference, &mut *on_progress) {

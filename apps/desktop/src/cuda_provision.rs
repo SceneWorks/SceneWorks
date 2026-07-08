@@ -12,8 +12,7 @@
 //! fetched lazily.
 //!
 //! The source is the PyPI `nvidia-*-cu12` + `onnxruntime-gpu` wheels (each a zip):
-//! exactly what build-sidecar.mjs / stage-onnxruntime-cuda.py harvested from, so the
-//! version-matched CUDA 12.9 runtime + the cuDNN/cuFFT/nvJitLink/nvRTC set
+//! the same version-matched CUDA 12.9 runtime + the cuDNN/cuFFT/nvJitLink/nvRTC set
 //! onnxruntime-gpu 1.26.0 was validated against (cuDNN 9.23 / cuFFT 11.4, sc-5496).
 //! URLs + sha256 are pinned (mirrors the pinned-URL pattern used elsewhere for
 //! reproducible downloads): resolved once from the PyPI JSON API and baked in below.
@@ -24,9 +23,10 @@
 #![cfg(target_os = "windows")]
 
 use std::fs;
-use std::io::Read;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 
@@ -198,8 +198,12 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Download one wheel into `tmp`, verify its sha256, and extract its DLLs into the
-/// destination dir. Network IO is async (reqwest stream); the CPU-bound hash + unzip
-/// run on a blocking thread so they don't stall the async runtime.
+/// destination dir. The wheel is STREAMED chunk-by-chunk to disk while the sha256 is fed
+/// incrementally (F-129, sc-8931), so a ~660 MB wheel never sits whole in RAM — the peak
+/// transient allocation is one HTTP chunk, not the entire file (previously the file was
+/// buffered by `bytes()`, then moved into the hash task while ALSO being written to
+/// disk). The CPU-bound unzip runs on a blocking thread so it doesn't stall the async
+/// runtime.
 async fn fetch_component(
     client: &reqwest::Client,
     component: &Component,
@@ -214,38 +218,48 @@ async fn fetch_component(
         .map_err(|error| format!("download {}: {error}", component.label))?
         .error_for_status()
         .map_err(|error| format!("download {}: {error}", component.label))?;
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| format!("download {}: {error}", component.label))?;
 
     let wheel_path = tmp_dir.join(format!(
         "{}.whl",
         component.label.replace(['/', ' ', '(', ')'], "_")
     ));
-    fs::write(&wheel_path, &bytes)
+
+    // Stream the body to the temp file, hashing each chunk as it lands. Peak RAM is one
+    // chunk instead of the whole wheel.
+    let mut file =
+        fs::File::create(&wheel_path).map_err(|error| format!("create wheel: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("download {}: {error}", component.label))?;
+        hasher.update(&chunk);
+        file.write_all(&chunk)
+            .map_err(|error| format!("write {}: {error}", component.label))?;
+    }
+    file.flush()
         .map_err(|error| format!("write {}: {error}", component.label))?;
+    drop(file);
+
+    let digest = hex(&hasher.finalize());
+    if digest != component.sha256 {
+        return Err(format!(
+            "{}: sha256 mismatch (expected {}, got {digest})",
+            component.label, component.sha256
+        ));
+    }
 
     let dest = match component.dest {
         Dest::Cuda => cuda.to_path_buf(),
         Dest::Onnxruntime => ort.to_path_buf(),
     };
-    let expected = component.sha256.to_owned();
     let label = component.label.to_owned();
     let dlls: Option<Vec<String>> = component
         .dlls
         .map(|names| names.iter().map(|name| name.to_string()).collect());
 
-    // Hashing + unzip are CPU/IO bound — keep them off the async executor.
+    // Unzip is CPU/IO bound — keep it off the async executor. The wheel is already on
+    // disk and sha256-verified, so this just extracts from the temp file.
     tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        let digest = hex(&hasher.finalize());
-        if digest != expected {
-            return Err(format!(
-                "{label}: sha256 mismatch (expected {expected}, got {digest})"
-            ));
-        }
         extract_dlls(&wheel_path, dlls.as_deref(), &dest)
             .map_err(|error| format!("{label}: {error}"))
     })
@@ -280,11 +294,12 @@ fn extract_dlls(wheel: &Path, names: Option<&[String]>, dest: &Path) -> Result<u
             }
         }
         let out_path = dest.join(base);
-        let mut buffer = Vec::with_capacity(entry.size() as usize);
-        entry
-            .read_to_end(&mut buffer)
-            .map_err(|error| format!("extract {base}: {error}"))?;
-        fs::write(&out_path, &buffer).map_err(|error| format!("write {base}: {error}"))?;
+        // Stream the entry straight to disk (F-129, sc-8931) instead of reading the whole
+        // DLL into a Vec first — a cuDNN DLL can be hundreds of MB, and io::copy uses a
+        // fixed-size buffer.
+        let mut out =
+            fs::File::create(&out_path).map_err(|error| format!("write {base}: {error}"))?;
+        std::io::copy(&mut entry, &mut out).map_err(|error| format!("extract {base}: {error}"))?;
         written += 1;
     }
     Ok(written)

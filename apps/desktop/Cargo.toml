@@ -49,6 +49,11 @@ nix = { version = "0.29", default-features = false, features = ["signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
+# Stream the wheel download chunk-by-chunk (StreamExt::next over reqwest's
+# bytes_stream) so a ~660 MB wheel is hashed + written to disk incrementally rather than
+# buffered whole in RAM (F-129, sc-8931). Already in the workspace lock (0.3.x), so no
+# new locked version is pulled; `alloc` is needed for the stream combinators.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 
 [lints.rust]
 # Tauri's generate_context!/Builder can emit unsafe at the webview FFI boundary,

@@ -8,7 +8,15 @@ import { ControlPanel } from "./ControlPanel.jsx";
 // gating + the canny/depth upload toggle. The picker itself is covered by PoseLibraryPicker tests.
 vi.mock("../poseLibrary.js", () => ({
   usePoseLibrary: () => ({
-    poses: [{ id: "p1", label: "Standing", category: "Basics", keypoints: [], preview: "p1.png" }],
+    poses: [
+      {
+        id: "p1",
+        label: "Standing",
+        category: "Basics",
+        keypoints: [],
+        preview: "p1.png",
+      },
+    ],
     categories: ["Basics"],
     loading: false,
     error: null,
@@ -18,7 +26,9 @@ vi.mock("../poseLibrary.js", () => ({
 // The source picker opens a modal on click; for the panel test we only need its presence/label and the
 // onChange seam, so stub it to a lightweight control surfacing the same props.
 vi.mock("./AssetPicker.jsx", () => ({
-  ImageEditSourcePickerField: ({ label }) => <div data-testid="control-image-picker">{label}</div>,
+  ImageEditSourcePickerField: ({ label }) => (
+    <div data-testid="control-image-picker">{label}</div>
+  ),
 }));
 
 describe("ControlPanel (sc-8245 gating + toggle)", () => {
@@ -42,11 +52,30 @@ describe("ControlPanel (sc-8245 gating + toggle)", () => {
     await act(async () => root.render(ui));
   }
 
+  // The panel is collapsed by default (large, optional section); clicking the head expands it so the
+  // gated inner content (tabs, pose/upload, slider) mounts. Most tests below assert on that content, so
+  // they render then expand.
+  async function expand() {
+    const head = container.querySelector(".control-panel-head");
+    await act(async () => {
+      head.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+  }
+
+  async function renderExpanded(ui) {
+    await render(ui);
+    await expand();
+  }
+
   const tabLabels = () =>
-    [...container.querySelectorAll(".control-mode-tab")].map((b) => b.textContent.trim());
+    [...container.querySelectorAll(".control-mode-tab")].map((b) =>
+      b.textContent.trim(),
+    );
 
   const tabByLabel = (label) =>
-    [...container.querySelectorAll(".control-mode-tab")].find((b) => b.textContent.trim() === label);
+    [...container.querySelectorAll(".control-mode-tab")].find(
+      (b) => b.textContent.trim() === label,
+    );
 
   function baseProps(overrides = {}) {
     return {
@@ -66,20 +95,49 @@ describe("ControlPanel (sc-8245 gating + toggle)", () => {
       importAsset: vi.fn(),
       projectId: "proj_1",
       characters: [],
-      controlScaleConfig: { label: "Control strength", default: 0.9, min: 0, max: 2, step: 0.05 },
+      controlScaleConfig: {
+        label: "Control strength",
+        default: 0.9,
+        min: 0,
+        max: 2,
+        step: 0.05,
+      },
       controlScale: 0.9,
       onControlScaleChange: vi.fn(),
       ...overrides,
     };
   }
 
-  it("shows all three tabs when the backbone supports pose+canny+depth", async () => {
+  it("is collapsed by default and expands on clicking the head", async () => {
     await render(<ControlPanel {...baseProps()} />);
+    // Collapsed: the header is present but the gated inner content is not mounted.
+    const head = container.querySelector(".control-panel-head");
+    expect(head).not.toBeNull();
+    expect(head.getAttribute("aria-expanded")).toBe("false");
+    expect(tabLabels()).toEqual([]);
+    expect(container.querySelector(".control-mode-tabs")).toBeNull();
+
+    await expand();
+    expect(head.getAttribute("aria-expanded")).toBe("true");
+    expect(tabLabels()).toEqual(["Pose", "Canny", "Depth"]);
+
+    // Clicking again collapses it back.
+    await expand();
+    expect(head.getAttribute("aria-expanded")).toBe("false");
+    expect(tabLabels()).toEqual([]);
+  });
+
+  it("shows all three tabs when the backbone supports pose+canny+depth", async () => {
+    await renderExpanded(<ControlPanel {...baseProps()} />);
     expect(tabLabels()).toEqual(["Pose", "Canny", "Depth"]);
   });
 
   it("shows only the pose tab for a pose-only backbone", async () => {
-    await render(<ControlPanel {...baseProps({ supportedModes: ["pose"], controlMode: "pose" })} />);
+    await renderExpanded(
+      <ControlPanel
+        {...baseProps({ supportedModes: ["pose"], controlMode: "pose" })}
+      />,
+    );
     expect(tabLabels()).toEqual(["Pose"]);
   });
 
@@ -89,14 +147,22 @@ describe("ControlPanel (sc-8245 gating + toggle)", () => {
   });
 
   it("pose mode shows the pose library, not the control-image upload", async () => {
-    await render(<ControlPanel {...baseProps({ controlMode: "pose" })} />);
+    await renderExpanded(
+      <ControlPanel {...baseProps({ controlMode: "pose" })} />,
+    );
     expect(container.querySelector(".pose-library")).not.toBeNull();
-    expect(container.querySelector('[data-testid="control-image-picker"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="control-image-picker"]'),
+    ).toBeNull();
   });
 
   it("canny/depth mode shows the control-image upload + the preprocess toggle", async () => {
-    await render(<ControlPanel {...baseProps({ controlMode: "canny" })} />);
-    expect(container.querySelector('[data-testid="control-image-picker"]')).not.toBeNull();
+    await renderExpanded(
+      <ControlPanel {...baseProps({ controlMode: "canny" })} />,
+    );
+    expect(
+      container.querySelector('[data-testid="control-image-picker"]'),
+    ).not.toBeNull();
     const toggle = container.querySelector('input[type="checkbox"]');
     expect(toggle).not.toBeNull();
     expect(toggle.checked).toBe(false); // preprocess (derive) by default
@@ -104,9 +170,12 @@ describe("ControlPanel (sc-8245 gating + toggle)", () => {
 
   it("the preprocess/use-as-is toggle reports its checked state", async () => {
     const onControlImagePassthroughChange = vi.fn();
-    await render(
+    await renderExpanded(
       <ControlPanel
-        {...baseProps({ controlMode: "depth", onControlImagePassthroughChange })}
+        {...baseProps({
+          controlMode: "depth",
+          onControlImagePassthroughChange,
+        })}
       />,
     );
     const toggle = container.querySelector('input[type="checkbox"]');
@@ -119,22 +188,32 @@ describe("ControlPanel (sc-8245 gating + toggle)", () => {
 
   it("falls back to the first supported mode when the active pick is unsupported", async () => {
     // controlMode is a stranded "canny" but the backbone only supports pose → pose renders.
-    await render(<ControlPanel {...baseProps({ supportedModes: ["pose"], controlMode: "canny" })} />);
+    await renderExpanded(
+      <ControlPanel
+        {...baseProps({ supportedModes: ["pose"], controlMode: "canny" })}
+      />,
+    );
     expect(tabLabels()).toEqual(["Pose"]);
     expect(container.querySelector(".pose-library")).not.toBeNull();
   });
 
   it("clicking a mode tab calls onControlModeChange", async () => {
     const onControlModeChange = vi.fn();
-    await render(<ControlPanel {...baseProps({ onControlModeChange })} />);
+    await renderExpanded(
+      <ControlPanel {...baseProps({ onControlModeChange })} />,
+    );
     await act(async () => {
-      tabByLabel("Depth").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      tabByLabel("Depth").dispatchEvent(
+        new MouseEvent("click", { bubbles: true }),
+      );
     });
     expect(onControlModeChange).toHaveBeenCalledWith("depth");
   });
 
   it("binds the control-scale slider to controlScale + its config range", async () => {
-    await render(<ControlPanel {...baseProps({ controlScale: 1.25 })} />);
+    await renderExpanded(
+      <ControlPanel {...baseProps({ controlScale: 1.25 })} />,
+    );
     const slider = container.querySelector('input[type="range"]');
     expect(slider).not.toBeNull();
     expect(slider.value).toBe("1.25");

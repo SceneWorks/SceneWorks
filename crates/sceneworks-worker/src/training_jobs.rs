@@ -83,8 +83,8 @@ use candle_gen_wan as _;
 use candle_gen_z_image as _;
 
 /// Run a `lora_train` job: parse the resolved plan, then either validate it
-/// (dry run, the default) or execute real training. Mirrors the Python
-/// `run_lora_train_job` split (apps/worker/scene_worker/runtime.py).
+/// (dry run, the default) or execute real training. The dry-run/execute split was
+/// ported from the retired Python worker's `run_lora_train_job`.
 pub(crate) async fn run_lora_train_job(
     api: &ApiClient,
     settings: &Settings,
@@ -135,6 +135,14 @@ fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -> WorkerRes
         "Training baseModelPath",
     )?;
     resolve_training_output_dir(settings, &plan.output.output_dir, "Training outputDir")?;
+    // sc-8878 (F-076): the client-supplied `output.file_name` is joined under the confined
+    // `output_dir` by the engine trainer (`TrainingRequest.file_name`), but only the preview-sample
+    // stem was ever sanitized — a `../…`/absolute `file_name` would escape the confined output dir
+    // and write the adapter anywhere the worker can. Confine it to a single plain path component
+    // (no separators, no `..`, not absolute) with the same primitive the strict-control lanes use
+    // for payload-supplied weight filenames (`safe_weight_filename`). Shared by the dry run and the
+    // real run (both call this), so both reject the same forged filename before any join.
+    safe_weight_filename(&plan.output.file_name, "Training fileName")?;
     let mut missing = Vec::new();
     for item in &plan.dataset.items {
         let image_path = resolve_dataset_item_path(
@@ -496,6 +504,10 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         sample_every: advanced_u32(advanced, "sampleEvery", 0),
         sample_steps: advanced_u32(advanced, "sampleSteps", 20),
         sample_guidance_scale: advanced_f32(advanced, "sampleGuidanceScale", 1.0),
+        // Mid-schedule resume (gen-core sc-9560 / F-125): not yet surfaced on the SceneWorks
+        // training path — default `false` preserves the current from-scratch behavior. Wiring the
+        // resume toggle from the plan's `advanced` bag is a separate training-feature story.
+        resume: false,
         // sc-8671 — the engine renders one preview per prompt, capped at `sampleCount` (default 4 =
         // the historical fixed `[:4]` cap). The UI always supplies `samplePrompts` (prefilled from the
         // trigger phrase); an absent/empty pool ⇒ no previews, exactly as before (sampling is gated by
@@ -603,6 +615,29 @@ enum TrainEvent {
     Done(TrainingOutput),
 }
 
+/// The trainer's `LoadSpec::text_encoder` override for `engine_id`, or `None` to keep the engine's
+/// own resolution. Only LTX-2.3 needs one: its Gemma-3 TE lives OUTSIDE the weights dir (the turnkey
+/// bundle ships it as a sibling `gemma/`, sc-5608), so — mirroring the inference path (sc-8827) —
+/// resolve the bundled sibling and thread it on, letting a self-contained install train without a
+/// separate `mlx-community/gemma-3-12b-it-bf16` download (sc-9989). `None` for every other family (TE
+/// lives inside the weights dir) and for a legacy LTX conversion with no sibling or an operator
+/// `$LTX_GEMMA_DIR` (the engine's env/HF-cache fallback stays in force). LTX training is mlx-only, so
+/// off-Mac this is always `None`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn training_text_encoder(engine_id: &str, weights_dir: &std::path::Path) -> Option<WeightsSource> {
+    #[cfg(target_os = "macos")]
+    if engine_id == "ltx_2_3" {
+        return crate::video_jobs::resolve_bundled_ltx_gemma_dir(weights_dir)
+            .map(WeightsSource::Dir);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (engine_id, weights_dir);
+    None
+}
+
 /// Execute a real training run on the in-process native engine (mlx-gen on macOS, candle-gen
 /// off-Mac via `backend-candle`, sc-7817). Loads the (frozen) base model via a [`LoadSpec`] (exactly
 /// as inference's `load_engine`), runs the family trainer on a blocking thread, streams staged
@@ -640,7 +675,7 @@ async fn run_training_execution(
 
     let engine_id = engine_trainer_id(plan).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
-            "No MLX trainer for kernel '{}' (base model '{}').",
+            "No native trainer for kernel '{}' (base model '{}').",
             plan.target.kernel, plan.target.base_model
         ))
     })?;
@@ -650,6 +685,10 @@ async fn run_training_execution(
         &plan.target.base_model_path,
         "Training baseModelPath",
     )?;
+
+    // LTX-2.3's Gemma-3 text encoder lives OUTSIDE `weights_dir` — thread the bundled sibling onto the
+    // trainer `LoadSpec` so a self-contained install trains without a separate gemma download (sc-9989).
+    let ltx_text_encoder = training_text_encoder(engine_id, &weights_dir);
 
     let output_dir =
         resolve_training_output_dir(settings, &plan.output.output_dir, "Training outputDir")?;
@@ -704,6 +743,9 @@ async fn run_training_execution(
                 engine_id,
                 &LoadSpec {
                     precision: load_precision,
+                    // LTX-2.3's bundled Gemma-3 TE (sc-9989); `None` for every other family (TE lives
+                    // inside `weights_dir`) and for legacy/env-override LTX installs.
+                    text_encoder: ltx_text_encoder,
                     ..LoadSpec::new(WeightsSource::Dir(weights_dir))
                 },
             )
@@ -790,10 +832,172 @@ pub(crate) async fn begin_training_cancel(
     .await;
 }
 
+/// The preview-sample plumbing (sc-5637), lifted out of [`consume_training_events`] into one cohesive
+/// unit (sc-8921, F-119): the resolved sample config + output/project/stem paths, plus the accumulated
+/// cumulative (`all_samples`) and this-cadence (`latest_samples`) record lists the Training Studio
+/// renders. The engine streams `TrainingProgress::Sample` events carrying a decoded RGB bitmap; each is
+/// persisted as a PNG project asset off the async thread and the updated lists are streamed live. All
+/// best-effort — a persistence hiccup logs and is skipped, never failing the run. Owning this state
+/// here shrinks the event loop to `persister.persist(...)` and keeps the Done handler's final-result
+/// fold reading the same accumulated samples.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct SamplePersister {
+    cfg: TrainingConfig,
+    output_dir: Option<PathBuf>,
+    project_root: Option<PathBuf>,
+    stem: String,
+    all_samples: Vec<Value>,
+    latest_step: u32,
+    latest_samples: Vec<Value>,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl SamplePersister {
+    /// Resolve the sample config + destination paths for a run. `output_dir`/`project_root` are
+    /// resolved leniently (already validated upstream in `run_training_execution`); if either is
+    /// unavailable, samples simply don't render but training is unaffected.
+    fn new(settings: &Settings, job: &JobSnapshot, plan: &TrainingPlan) -> Self {
+        let output_dir =
+            resolve_training_output_dir(settings, &plan.output.output_dir, "Training outputDir")
+                .ok();
+        let project_root = job.project_id.as_ref().and_then(|project_id| {
+            ProjectStore::new(settings.data_dir.clone(), "worker")
+                .get_project(project_id)
+                .ok()
+                // Canonicalize the project root with the SAME normalization the output
+                // path went through (`resolve_training_output_dir` -> `normalize_app_managed_path`
+                // -> `normalize_existing_or_absolute`). The project store persists `path`
+                // lexically (`data_dir.join(...).display()`), so on macOS it stays `/var/...`
+                // while `output_dir` resolves to `/private/var/...`; without this, the
+                // `strip_prefix(project_root)` in `write_training_sample` fails and every
+                // sample record silently loses its `relativePath` (sc-9812 / F-075 follow-up).
+                // The project dir always exists here (`find_project_path` requires it), so
+                // this canonicalizes fully; fall back to the lexical path if resolution fails.
+                .map(|project| {
+                    let lexical = PathBuf::from(project.path);
+                    normalize_existing_or_absolute(&lexical).unwrap_or(lexical)
+                })
+        });
+        let stem = Path::new(&plan.output.file_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("lora")
+            .to_owned();
+        Self {
+            cfg: map_training_config(&plan.config),
+            output_dir,
+            project_root,
+            stem,
+            all_samples: Vec::new(),
+            latest_step: 0,
+            latest_samples: Vec::new(),
+        }
+    }
+
+    /// Persist one `TrainingProgress::Sample` preview and stream the updated cumulative + this-cadence
+    /// lists. The PNG encode + atomic rename are blocking, so the owned `image` (no buffer clone) +
+    /// owned path/stem/prompt move into a `spawn_blocking` (sc-8909 / F-107). A write failure logs and
+    /// is skipped — the run continues.
+    #[allow(clippy::too_many_arguments)]
+    async fn persist(
+        &mut self,
+        api: &ApiClient,
+        job: &JobSnapshot,
+        backend: &str,
+        total_steps: u32,
+        step: u32,
+        index: u32,
+        total: u32,
+        prompt: String,
+        image: gen_core::Image,
+    ) -> WorkerResult<()> {
+        let output_dir = self.output_dir.clone();
+        let project_root = self.project_root.clone();
+        let stem = self.stem.clone();
+        let sample_steps = self.cfg.sample_steps;
+        let sample_guidance_scale = self.cfg.sample_guidance_scale;
+        let persisted = tokio::task::spawn_blocking(move || {
+            write_training_sample(
+                output_dir.as_deref(),
+                project_root.as_deref(),
+                &stem,
+                step,
+                index,
+                &prompt,
+                image,
+                sample_steps,
+                sample_guidance_scale,
+            )
+        })
+        .await
+        .map_err(|error| task_join_error("training preview persist task", error))?;
+        match persisted {
+            Ok(record) => {
+                let record = Value::Object(record);
+                if step != self.latest_step {
+                    self.latest_step = step;
+                    self.latest_samples.clear();
+                }
+                self.all_samples.push(record.clone());
+                self.latest_samples.push(record);
+                let result = training_samples_result(
+                    &self.all_samples,
+                    &self.latest_samples,
+                    &self.cfg.sample_prompts,
+                    self.cfg.sample_steps,
+                    self.cfg.sample_guidance_scale,
+                );
+                update_job(
+                    api,
+                    &job.id,
+                    training_progress(
+                        JobStatus::Running,
+                        ProgressStage::Training,
+                        train_fraction(step, total_steps.max(step)),
+                        &format!("Rendered preview {index}/{total} at step {step}."),
+                        Some(result),
+                        backend,
+                    ),
+                )
+                .await?;
+            }
+            Err(error) => tracing::warn!(
+                event = "training_preview_persist_failed",
+                step,
+                index,
+                error = %error,
+                "worker failed to persist training preview — skipping, training continues"
+            ),
+        }
+        Ok(())
+    }
+}
+
 /// Consume training events from the blocking thread: stream staged progress, poll
 /// cancel ~every 2s (draining after a cancel so the blocking sender never blocks),
 /// and on the final `Done` event report completion with the result the UI shows.
 /// Mirrors `image_jobs::consume_gen_events`.
+///
+/// sc-9541 (F-034 follow-up): this deliberately does NOT fold into the shared
+/// [`analysis_jobs_common::run_batched_analysis_job`] scaffold (which the CLIP + face analysis jobs
+/// share). That scaffold abstracts "N homogeneous items, each a bare `usize` index → one record `R`,
+/// all ending in ONE sidecar POST"; training shares none of those axes — its channel carries a rich
+/// `TrainEvent`/`TrainingProgress` variant tree (not a `usize`), its progress spans five kernel bands
+/// via [`map_training_progress`] (not the analysis single-ramp `item_progress`), its `Sample` events
+/// have file-persistence side effects (`SamplePersister`), its cancel posts an interim non-terminal
+/// "Cancelling…" update (`begin_training_cancel`, the analysis loop trips a bare flag), and it emits an
+/// in-place `Done` result with NO sidecar POST (the engine writes the adapter; the API registers it
+/// separately). Forcing training through the analysis scaffold would require making it generic over an
+/// event type + an event→progress mapper + a stateful side-effect hook + a no-op sidecar branch —
+/// distorting the clean analysis-only seam for more complexity than the duplication it removes. The
+/// only genuinely shared machinery (the `CancelJoinGuard` + bounded-join teardown + deferred-terminal
+/// cancel, sc-8804/8917) is already reconciled across both by convention, not code sharing.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -821,30 +1025,11 @@ async fn consume_training_events(
     let mut last_cancel_check = Instant::now();
     let mut checkpoints: Vec<Value> = Vec::new();
 
-    // sc-5637 — preview-sample plumbing. The engine streams `TrainingProgress::Sample` events
-    // carrying a decoded RGB bitmap at the configured cadence; the worker persists each as a PNG
-    // project asset and accumulates the records the Training Studio renders (`trainingSamples` =
-    // cumulative, `latestTrainingSamples` = this cadence). All best-effort: a persistence hiccup
-    // must never fail the training run. `output_dir`/`project_root` are resolved leniently (already
-    // validated upstream in `run_training_execution`); if either is unavailable, samples simply
-    // don't render but training is unaffected.
-    let sample_cfg = map_training_config(&plan.config);
-    let sample_output_dir =
-        resolve_training_output_dir(settings, &plan.output.output_dir, "Training outputDir").ok();
-    let sample_project_root = job.project_id.as_ref().and_then(|project_id| {
-        ProjectStore::new(settings.data_dir.clone(), "worker")
-            .get_project(project_id)
-            .ok()
-            .map(|project| PathBuf::from(project.path))
-    });
-    let sample_stem = Path::new(&plan.output.file_name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("lora")
-        .to_owned();
-    let mut all_samples: Vec<Value> = Vec::new();
-    let mut latest_step: u32 = 0;
-    let mut latest_samples: Vec<Value> = Vec::new();
+    // sc-5637 — preview-sample plumbing, now owned by `SamplePersister` (sc-8921): the resolved sample
+    // config + destination paths + the accumulated cumulative/this-cadence record lists. The event
+    // loop's `Sample` arm delegates to `samples.persist(...)` and the `Done` arm reads
+    // `samples.all_samples` / `samples.cfg` for the final result fold.
+    let mut samples = SamplePersister::new(settings, job, plan);
 
     let mut heartbeat_interval = tokio::time::interval(progress_report_interval(settings));
     heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -852,143 +1037,119 @@ async fn consume_training_events(
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
     let loop_result: WorkerResult<()> = async {
         loop {
-        let event = tokio::select! {
-            maybe_event = rx.recv() => match maybe_event {
-                Some(event) => event,
-                None => break,
-            },
-            _ = heartbeat_interval.tick() => {
-                // Keep the worker's heartbeat alive during long silent gaps between engine events
-                // — e.g. a slow checkpoint disk-write + preview-sampling pass for a large model
-                // (Krea2). Heartbeats otherwise ride only on incoming progress events (below), so a
-                // quiet stretch past the API's 90s worker-timeout lets the stale-sweep mark this
-                // still-running job `interrupted`, and the next progress post is then 409'd
-                // (sc-8390; same class as the inline-upscale sc-8200). Also poll cancel here so a
-                // cancel requested during such a gap is honored without awaiting the next event.
-                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                if !canceled && cancel_requested_peek(api, &job.id).await {
-                    begin_training_cancel(api, &job.id, &cancel, backend).await;
-                    canceled = true;
+            let event = tokio::select! {
+                maybe_event = rx.recv() => match maybe_event {
+                    Some(event) => event,
+                    None => break,
+                },
+                _ = heartbeat_interval.tick() => {
+                    // Keep the worker's heartbeat alive during long silent gaps between engine events
+                    // — e.g. a slow checkpoint disk-write + preview-sampling pass for a large model
+                    // (Krea2). Heartbeats otherwise ride only on incoming progress events (below), so a
+                    // quiet stretch past the API's 90s worker-timeout lets the stale-sweep mark this
+                    // still-running job `interrupted`, and the next progress post is then 409'd
+                    // (sc-8390; same class as the inline-upscale sc-8200). Also poll cancel here so a
+                    // cancel requested during such a gap is honored without awaiting the next event.
+                    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                    // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
+                    // poll (a local flag read) so a quit stops training at the next step / event gap.
+                    if !canceled && (shutdown_requested() || cancel_requested_peek(api, &job.id).await)
+                    {
+                        begin_training_cancel(api, &job.id, &cancel, backend).await;
+                        canceled = true;
+                    }
+                    continue;
                 }
-                continue;
+            };
+            if canceled {
+                continue; // drain remaining events so the blocking sender never blocks.
             }
-        };
-        if canceled {
-            continue; // drain remaining events so the blocking sender never blocks.
-        }
-        match event {
-            TrainEvent::Progress(progress) => {
-                // Poll cancel on the long training band only (cheap stages fly by).
-                if matches!(progress, TrainingProgress::Training { .. })
-                    && last_cancel_check.elapsed() >= Duration::from_secs(2)
-                {
-                    last_cancel_check = Instant::now();
-                    if cancel_requested_peek(api, &job.id).await {
+            match event {
+                TrainEvent::Progress(progress) => {
+                    // Poll cancel on the long training band only (cheap stages fly by). A process
+                    // shutdown (sc-9618) short-circuits the throttle + API poll so a quit stops on the
+                    // very next training step, not just at the heartbeat-tick gap above.
+                    if matches!(progress, TrainingProgress::Training { .. })
+                        && (shutdown_requested()
+                            || (last_cancel_check.elapsed() >= Duration::from_secs(2) && {
+                                last_cancel_check = Instant::now();
+                                cancel_requested_peek(api, &job.id).await
+                            }))
+                    {
                         begin_training_cancel(api, &job.id, &cancel, backend).await;
                         canceled = true;
                         continue;
                     }
-                }
-                if let TrainingProgress::Checkpoint { step } = progress {
-                    checkpoints.push(json!({ "step": step }));
-                }
-                // sc-5637 — a preview sample: persist it as a project asset and stream the updated
-                // sample lists (cumulative + this-cadence) so Training Studio shows it live. Handled
-                // here (not in `map_training_progress`) because it writes a file + carries a result
-                // payload. Best-effort: a write failure logs and is skipped, never failing the run.
-                if let TrainingProgress::Sample {
-                    step,
-                    index,
-                    total,
-                    prompt,
-                    image,
-                } = progress
-                {
-                    match write_training_sample(
-                        sample_output_dir.as_deref(),
-                        sample_project_root.as_deref(),
-                        &sample_stem,
+                    if let TrainingProgress::Checkpoint { step } = progress {
+                        checkpoints.push(json!({ "step": step }));
+                    }
+                    // sc-5637 — a preview sample: persist it + stream the updated cumulative/this-cadence
+                    // lists so Training Studio shows it live. Handled here (not in `map_training_progress`)
+                    // because it writes a file + carries a result payload; delegated to `SamplePersister`
+                    // (sc-8921). Best-effort: a write failure logs and is skipped, never failing the run.
+                    if let TrainingProgress::Sample {
                         step,
                         index,
-                        &prompt,
-                        &image,
-                        sample_cfg.sample_steps,
-                        sample_cfg.sample_guidance_scale,
-                    ) {
-                        Ok(record) => {
-                            let record = Value::Object(record);
-                            if step != latest_step {
-                                latest_step = step;
-                                latest_samples.clear();
-                            }
-                            all_samples.push(record.clone());
-                            latest_samples.push(record);
-                            let result = training_samples_result(
-                                &all_samples,
-                                &latest_samples,
-                                &sample_cfg.sample_prompts,
-                                sample_cfg.sample_steps,
-                                sample_cfg.sample_guidance_scale,
-                            );
-                            update_job(
+                        total,
+                        prompt,
+                        image,
+                    } = progress
+                    {
+                        samples
+                            .persist(
                                 api,
-                                &job.id,
-                                training_progress(
-                                    JobStatus::Running,
-                                    ProgressStage::Training,
-                                    train_fraction(step, total_steps.max(step)),
-                                    &format!("Rendered preview {index}/{total} at step {step}."),
-                                    Some(result),
-                                    backend,
-                                ),
+                                job,
+                                backend,
+                                total_steps,
+                                step,
+                                index,
+                                total,
+                                prompt,
+                                image,
                             )
                             .await?;
-                        }
-                        Err(error) => tracing::warn!(
-                            event = "training_preview_persist_failed",
-                            step,
-                            index,
-                            error = %error,
-                            "worker failed to persist training preview — skipping, training continues"
-                        ),
+                        continue;
                     }
-                    continue;
+                    let (status, stage, fraction, message) =
+                        map_training_progress(progress, total_steps);
+                    update_job(
+                        api,
+                        &job.id,
+                        training_progress(status, stage, fraction, &message, None, backend),
+                    )
+                    .await?;
+                    // No per-event heartbeat here: the `heartbeat_interval.tick()` arm above already
+                    // pings `Busy` on the shared 5–15 s interval, keeping `last_seen` fresh independent of
+                    // event cadence (posting progress does not refresh it). A heartbeat per progress event
+                    // just doubled the API round-trips, throttling GPU stepping to API latency (sc-8917,
+                    // F-115) with no keepalive benefit.
                 }
-                let (status, stage, fraction, message) =
-                    map_training_progress(progress, total_steps);
-                update_job(
-                    api,
-                    &job.id,
-                    training_progress(status, stage, fraction, &message, None, backend),
-                )
-                .await?;
-                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-            }
-            TrainEvent::Done(output) => {
-                let result = training_result(
-                    plan,
-                    &output,
-                    &checkpoints,
-                    &all_samples,
-                    &sample_cfg.sample_prompts,
-                    sample_cfg.sample_steps,
-                    sample_cfg.sample_guidance_scale,
-                );
-                update_job(
-                    api,
-                    &job.id,
-                    training_progress(
-                        JobStatus::Completed,
-                        ProgressStage::Completed,
-                        1.0,
-                        &format!("Trained LoRA saved as {}.", plan.output.file_name),
-                        Some(result),
+                TrainEvent::Done(output) => {
+                    let result = training_result(
+                        plan,
+                        &output,
+                        &checkpoints,
+                        &samples.all_samples,
+                        &samples.cfg.sample_prompts,
+                        samples.cfg.sample_steps,
+                        samples.cfg.sample_guidance_scale,
                         backend,
-                    ),
-                )
-                .await?;
+                    );
+                    update_job(
+                        api,
+                        &job.id,
+                        training_progress(
+                            JobStatus::Completed,
+                            ProgressStage::Completed,
+                            1.0,
+                            &format!("Trained LoRA saved as {}.", plan.output.file_name),
+                            Some(result),
+                            backend,
+                        ),
+                    )
+                    .await?;
+                }
             }
-        }
         }
         Ok(())
     }
@@ -1159,7 +1320,7 @@ fn write_training_sample(
     step: u32,
     index: u32,
     prompt: &str,
-    image: &gen_core::Image,
+    image: gen_core::Image,
     sample_steps: u32,
     sample_guidance_scale: f32,
 ) -> WorkerResult<JsonObject> {
@@ -1170,8 +1331,10 @@ fn write_training_sample(
     std::fs::create_dir_all(&dir)?;
     let filename = format!("{stem}-step{step:06}-{index}.png");
     let path = dir.join(&filename);
-    let rgb = image::RgbImage::from_raw(image.width, image.height, image.pixels.clone())
-        .ok_or_else(|| {
+    // Take `image` by value (sc-8909 / F-107) — the caller no longer needs the buffer, so the full
+    // RGB `pixels.clone()` is dropped and the raw buffer is moved straight into the encoder.
+    let rgb =
+        image::RgbImage::from_raw(image.width, image.height, image.pixels).ok_or_else(|| {
             WorkerError::Engine("training preview: image buffer size mismatch".into())
         })?;
     let temp_path = path.with_extension("tmp.png");
@@ -1211,6 +1374,7 @@ fn training_result(
     sample_prompts: &[String],
     sample_steps: u32,
     sample_guidance_scale: f32,
+    backend: &str,
 ) -> JsonObject {
     let mut result = JsonObject::new();
     result.insert("mode".to_owned(), json!("train"));
@@ -1243,7 +1407,10 @@ fn training_result(
     result.insert("resolution".to_owned(), json!(plan.config.resolution));
     result.insert("triggerWords".to_owned(), json!(plan.output.trigger_words));
     result.insert("planVersion".to_owned(), json!(plan.plan_version));
-    result.insert("backend".to_owned(), json!("mlx"));
+    // Record the REAL backend that ran the training (mlx on macOS, candle off-Mac, cpu fallback),
+    // not a hardcoded "mlx" — off-Mac candle runs otherwise stamped the wrong provenance (sc-8916,
+    // F-114).
+    result.insert("backend".to_owned(), json!(backend));
     // sc-5637 — fold the preview samples into the final result so they persist on the completed job
     // (the streamed updates are transient). `latestTrainingSamples` is left empty on completion (the
     // UI unions `trainingSamples` + `latestTrainingSamples`, so the cumulative list is sufficient).
@@ -1288,6 +1455,44 @@ mod tests {
     /// validation read (the intermittent "must be inside an app-managed
     /// directory" flake on the macOS nax-worker CI lane).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// sc-9989: only LTX-2.3 gets a trainer `LoadSpec::text_encoder` override, and only from the
+    /// bundled sibling `gemma/` (the self-contained turnkey install). Every other family's TE lives
+    /// inside the weights dir → `None`. An operator `$LTX_GEMMA_DIR` is the intended passthrough → the
+    /// engine reads the env var itself, so the override is `None`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn training_text_encoder_gates_on_engine_and_bundle() {
+        let root = std::env::temp_dir().join(format!(
+            "sw_ltx_train_te_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let (tier, gemma) = (root.join("q4"), root.join("gemma"));
+        std::fs::create_dir_all(&tier).unwrap();
+        std::fs::create_dir_all(&gemma).unwrap();
+
+        // Non-LTX engines never resolve an external TE (theirs lives inside the weights dir).
+        assert!(training_text_encoder("kolors", &tier).is_none());
+        assert!(training_text_encoder("sdxl", &tier).is_none());
+
+        // LTX with a bundled `gemma/` sibling → threads it (unless an operator `$LTX_GEMMA_DIR` is set,
+        // in which case the engine reads the env var and the override is `None`).
+        let te = training_text_encoder("ltx_2_3", &tier);
+        if std::env::var_os("LTX_GEMMA_DIR").is_none() {
+            assert!(
+                matches!(&te, Some(WeightsSource::Dir(p)) if *p == gemma),
+                "expected the bundled gemma sibling to be threaded onto the trainer LoadSpec"
+            );
+        }
+
+        // LTX with no `gemma/` sibling → `None` (engine falls back to its env/HF-cache path).
+        let bare = root.join("no_sibling").join("q4");
+        std::fs::create_dir_all(&bare).unwrap();
+        assert!(training_text_encoder("ltx_2_3", &bare).is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn test_settings(data_dir: &Path) -> Settings {
         Settings {
@@ -1704,6 +1909,55 @@ mod tests {
         );
     }
 
+    /// sc-8878 (F-076): a forged `output.file_name` carrying a path separator / `..` / an absolute
+    /// path must be rejected before the engine joins it under the confined output dir — otherwise the
+    /// adapter write escapes the app-managed output root. The plan is otherwise valid (present dataset
+    /// image, in-root output dir), so only the malicious file name trips the guard.
+    #[test]
+    fn validate_rejects_traversal_file_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        std::fs::create_dir_all(&dataset_root).expect("dataset root");
+        let image = dataset_root.join("image.png");
+        std::fs::write(&image, b"png").expect("image");
+        for bad in [
+            "../evil.safetensors",
+            "../../etc/passwd",
+            "sub/evil.safetensors",
+            "/tmp/evil.safetensors",
+            "..",
+        ] {
+            let mut value = plan_json(
+                dir.path(),
+                "z_image_lora",
+                "z_image_turbo",
+                "lora",
+                &[&image.display().to_string()],
+            );
+            value["output"]["fileName"] = json!(bad);
+            let error = validate_training_plan(&settings, &parse(value))
+                .expect_err(&format!("traversal file name '{bad}' must be rejected"));
+            assert!(
+                error.to_string().contains("Training fileName"),
+                "rejection for '{bad}' should name the field: {error}"
+            );
+        }
+        // A plain single-component file name still validates.
+        let mut ok = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image.display().to_string()],
+        );
+        ok["output"]["fileName"] = json!("my_style.safetensors");
+        assert!(
+            validate_training_plan(&settings, &parse(ok)).is_ok(),
+            "a plain file name should validate"
+        );
+    }
+
     #[test]
     fn validate_rejects_output_dir_outside_app_lora_or_model_roots() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2006,7 +2260,7 @@ mod tests {
             250,
             2,
             "mychar, studio portrait",
-            &image,
+            image,
             8,
             1.5,
         )
@@ -2029,6 +2283,130 @@ mod tests {
         // The PNG must decode back to the source dimensions.
         let decoded = image::open(&png).expect("re-open png").to_rgb8();
         assert_eq!((decoded.width(), decoded.height()), (4, 2));
+    }
+
+    /// sc-9812 (F-075 follow-up) — INTEGRATION-level guard for the caller-symmetry regression the
+    /// unit test above cannot catch. `SamplePersister::new` derives its two `strip_prefix` operands
+    /// from DIFFERENT provenance: `output_dir` from `resolve_training_output_dir`
+    /// (`normalize_app_managed_path` -> `normalize_existing_or_absolute`, canonicalized) and
+    /// `project_root` from the project store (`get_project(...).path`, persisted LEXICALLY as
+    /// `data_dir.join(...).display()`). On macOS the app data dir under `/var/...` canonicalizes to
+    /// `/private/var/...`, so before the fix the two forms diverged and `write_training_sample`'s
+    /// `strip_prefix` dropped `relativePath` from every project-scoped sample record. We build the
+    /// project root the way `project_store` does (a real `create_project`), NOT a hand-matched
+    /// lexical pair, and assert the record's `relativePath` is populated and correct. This FAILS
+    /// before the `SamplePersister::new` canonicalization and PASSES after.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn sample_persister_populates_relative_path_for_project_store_provisioned_root() {
+        let data_dir = tempfile::tempdir().expect("data dir tempdir");
+        let settings = test_settings(data_dir.path());
+
+        // Provision the project exactly as production does: the store persists `path`
+        // lexically (`project_path.display().to_string()`), which on macOS keeps the
+        // `/var/...` form even though the real path resolves under `/private/var/...`.
+        let store = ProjectStore::new(settings.data_dir.to_path_buf(), "test");
+        let project = store
+            .create_project("Char Studio")
+            .expect("project provisions");
+
+        // Project-scoped output lives under the owning project's tree, the default scope.
+        // `resolve_training_output_dir` (via `normalize_app_managed_path`) canonicalizes it,
+        // so this is the operand whose form diverges from the lexical `project.path`.
+        let output_dir = PathBuf::from(&project.path).join("loras").join("lora-1");
+
+        let mut plan_value = plan_json(
+            data_dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &["x.png"],
+        );
+        plan_value["output"]["outputDir"] = json!(output_dir.display().to_string());
+        plan_value["output"]["fileName"] = json!("mychar.safetensors");
+        let plan = parse(plan_value);
+
+        let job: JobSnapshot = serde_json::from_value(json!({
+            "id": "job-1",
+            "type": "train_lora",
+            "status": "running",
+            "projectId": project.id,
+            "projectName": "Char Studio",
+            "payload": {},
+            "result": {},
+            "requestedGpu": "auto",
+            "assignedGpu": null,
+            "workerId": "test-worker",
+            "progress": 0.0,
+            "stage": "queued",
+            "message": "queued",
+            "error": null,
+            "etaSeconds": null,
+            "elapsedSeconds": null,
+            "attempts": 1,
+            "sourceJobId": null,
+            "duplicateOfJobId": null,
+            "cancelRequested": false,
+            "createdAt": "2026-07-04T00:00:00Z",
+            "updatedAt": "2026-07-04T00:00:00Z",
+            "startedAt": null,
+            "completedAt": null,
+            "canceledAt": null,
+            "lastHeartbeatAt": null
+        }))
+        .expect("job snapshot deserializes");
+
+        // Drive the REAL provenance — this is where the two operands are resolved.
+        let persister = SamplePersister::new(&settings, &job, &plan);
+        let resolved_output = persister
+            .output_dir
+            .clone()
+            .expect("output dir resolves under the projects tree");
+        let resolved_project_root = persister
+            .project_root
+            .clone()
+            .expect("project root resolves from the store");
+
+        let image = gen_core::Image {
+            width: 4,
+            height: 2,
+            pixels: vec![255u8, 0, 0]
+                .into_iter()
+                .cycle()
+                .take(4 * 2 * 3)
+                .collect(),
+        };
+        let record = write_training_sample(
+            Some(resolved_output.as_path()),
+            Some(resolved_project_root.as_path()),
+            &persister.stem,
+            250,
+            2,
+            "mychar, studio portrait",
+            image,
+            8,
+            1.5,
+        )
+        .expect("sample persists");
+
+        // The regression: before the fix, `strip_prefix(project_root)` fails on macOS and this
+        // key is absent. It must be present and project-root-relative (the shape the Training
+        // Studio resolves as `/api/v1/projects/<id>/files/<relativePath>`).
+        let relative = record
+            .get("relativePath")
+            .and_then(|value| value.as_str())
+            .expect("relativePath is populated for a project-scoped sample");
+        assert!(
+            !relative.is_empty(),
+            "relativePath must be non-empty, got {relative:?}"
+        );
+        assert_eq!(
+            relative, "loras/lora-1/samples/step-000250/mychar-step000250-2.png",
+            "relativePath must be project-root-relative"
+        );
     }
 
     /// Real-weights smoke (sc-4732 + sc-4764): load the Kolors trainer from the installed
@@ -2093,6 +2471,7 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
+            resume: false,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -2197,6 +2576,7 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
+            resume: false,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -2304,6 +2684,7 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
+            resume: false,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -2450,6 +2831,7 @@ mod tests {
             sample_prompts: Vec::new(),
             sample_steps: 20,
             sample_guidance_scale: 1.0,
+            resume: false,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -2642,7 +3024,7 @@ mod tests {
                         step,
                         index,
                         &prompt,
-                        &image,
+                        image,
                         preview_steps,
                         preview_guidance,
                     )

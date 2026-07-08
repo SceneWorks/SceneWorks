@@ -35,6 +35,12 @@ pub(crate) struct PromptRefineRequest {
     /// Reference image for the vision tasks (`image_caption` / `image_describe`): a project
     /// asset id resolved to a confined on-disk path before the job is enqueued (epic 8102/8203).
     pub(crate) source_asset_id: Option<String>,
+    /// Multiple reference images for a "mood board" synthesis (epic 8588, sc-8595): the vision task
+    /// examines them together and emits ONE prompt/caption capturing the aesthetic they share. When
+    /// non-empty this takes precedence over `source_asset_id`; each id is resolved to a confined path
+    /// and forwarded as the worker's `imagePaths` array. Empty/absent → the single-image path above.
+    #[serde(default)]
+    pub(crate) source_asset_ids: Vec<String>,
     /// Project owning `source_asset_id` (required for the vision tasks so the
     /// asset's relative `file.path` can be resolved to an absolute path).
     pub(crate) project_id: Option<String>,
@@ -126,6 +132,17 @@ pub(crate) struct LorasQuery {
 pub(crate) struct CatalogDeleteQuery {
     pub(crate) project_id: Option<String>,
     pub(crate) scope: Option<String>,
+    /// When true, permanently unlink the artifacts instead of moving them to the OS
+    /// trash. The UI only sets this on the second call after a "move to trash" failure
+    /// prompts the user to confirm a permanent delete. Defaults to false (trash first).
+    pub(crate) permanent: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AssetPurgeQuery {
+    /// See `CatalogDeleteQuery::permanent` — false trashes the media/sidecar, true unlinks.
+    pub(crate) permanent: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,6 +152,14 @@ pub(crate) struct RecipePresetsQuery {
     pub(crate) include_archived: Option<bool>,
     pub(crate) model: Option<String>,
     pub(crate) workflow: Option<String>,
+    pub(crate) scope: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PromptBatchesQuery {
+    pub(crate) project_id: Option<String>,
+    pub(crate) include_archived: Option<bool>,
     pub(crate) scope: Option<String>,
 }
 
@@ -844,6 +869,15 @@ pub(crate) struct LoraImportRequest {
     pub(crate) source_path: Option<String>,
     #[serde(default)]
     pub(crate) files: Vec<String>,
+    /// Activation keywords collected at import so the catalog entry carries them
+    /// from the start. JSON imports send an array; multipart uploads send a
+    /// comma-delimited string that the import handler splits.
+    #[serde(default)]
+    pub(crate) trigger_words: Vec<String>,
+    /// Free-text usage guidance (how to combine keywords, recommended weights,
+    /// etc.) persisted onto the manifest entry's `notes` field.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) notes: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) family: Option<String>,
     /// Specific base model the LoRA targets (e.g. `wan_2_2_t2v_14b`). Recorded on
@@ -866,4 +900,26 @@ pub(crate) struct LoraImportRequest {
     /// client JSON. Its presence flags the import as a paired MoE write.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub(crate) secondary_source_path: Option<String>,
+}
+
+/// PATCH body for editing a catalog LoRA's user-facing metadata after import.
+/// Only the fields present are changed (absent field = left untouched), so the UI
+/// can send just the keywords, just the notes, or both.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LoraUpdateRequest {
+    #[serde(default)]
+    pub(crate) trigger_words: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) notes: Option<String>,
+}
+
+/// Query params identifying a single catalog LoRA across scopes, shared by the
+/// metadata PATCH and the embedded-tags lookup. Mirrors `CatalogDeleteQuery`'s
+/// scope/project routing without the delete-only `permanent` flag.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LoraCatalogItemQuery {
+    pub(crate) project_id: Option<String>,
+    pub(crate) scope: Option<String>,
 }

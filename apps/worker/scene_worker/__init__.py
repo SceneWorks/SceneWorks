@@ -1,1 +1,0 @@
-"""SceneWorks worker package."""

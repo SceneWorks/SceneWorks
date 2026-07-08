@@ -16,8 +16,8 @@ use crate::store_util::{
 };
 use crate::time::utc_now;
 use crate::training::{
-    Caption, CaptionSource, TrainingDataset, TrainingDatasetItem, TrainingDatasetStatus,
-    TrainingModality, TRAINING_CONTRACT_SCHEMA_VERSION,
+    caption_with_trigger_words, Caption, CaptionSource, TrainingDataset, TrainingDatasetItem,
+    TrainingDatasetStatus, TrainingModality, TRAINING_CONTRACT_SCHEMA_VERSION,
 };
 
 const DATASET_MANIFEST_NAME: &str = "dataset.sceneworks.training-dataset.json";
@@ -1009,7 +1009,7 @@ fn write_dataset_caption_sidecars(
             &caption_path,
             &format!(
                 "{}\n",
-                caption_text_with_trigger_words(&item.caption.text, &item.caption.trigger_words)
+                caption_with_trigger_words(&item.caption.text, &item.caption.trigger_words)
             ),
         )?;
         sidecars.push(TrainingCaptionSidecar {
@@ -1019,21 +1019,6 @@ fn write_dataset_caption_sidecars(
         });
     }
     Ok(sidecars)
-}
-
-fn caption_text_with_trigger_words(caption: &str, trigger_words: &[String]) -> String {
-    let cleaned = caption.split_whitespace().collect::<Vec<_>>().join(" ");
-    let lower = cleaned.to_lowercase();
-    let mut parts = trigger_words
-        .iter()
-        .map(|word| word.trim())
-        .filter(|word| !word.is_empty() && !lower.contains(&word.to_lowercase()))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    if !cleaned.is_empty() {
-        parts.push(cleaned);
-    }
-    parts.join(", ")
 }
 
 fn materialize_items(
@@ -1741,10 +1726,12 @@ mod tests {
         CachedTier0Scalars {
             content_hash: content_hash.to_owned(),
             bucket_edge,
+            metrics_version: crate::dataset_quality::TIER0_METRICS_VERSION,
             scalars: Tier0Scalars {
                 blur_variance: 1234.0,
                 shadow_clip: 0.0,
                 highlight_clip: 0.0,
+                well_exposed_fraction: 1.0,
                 phash: vec![1, 2, 3, 4, 5, 6, 7, 8],
             },
         }

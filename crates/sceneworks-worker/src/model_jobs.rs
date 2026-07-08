@@ -1,5 +1,49 @@
 use super::*;
 
+/// Post the terminal `Completed` update for a Hugging Face cache download, building the shared
+/// `{<id_key>, repo, path, storage:"huggingface_cache", completedAt}` result object (F-116). Both
+/// model download paths (`modelId`) and the LoRA path (`loraId`) funnel through here so the result
+/// shape and completion wording stay in one place.
+async fn complete_hf_cache_download(
+    api: &ApiClient,
+    job: &JobSnapshot,
+    id_key: &str,
+    repo: &str,
+    cache_path: &Path,
+    message: &str,
+) -> WorkerResult<()> {
+    let mut result = JsonObject::new();
+    result.insert(
+        id_key.to_owned(),
+        job.payload.get(id_key).cloned().unwrap_or(Value::Null),
+    );
+    result.insert("repo".to_owned(), Value::String(repo.to_owned()));
+    result.insert(
+        "path".to_owned(),
+        Value::String(cache_path.display().to_string()),
+    );
+    result.insert(
+        "storage".to_owned(),
+        Value::String("huggingface_cache".to_owned()),
+    );
+    result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            message,
+            None,
+            Some(result),
+            None,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn run_model_download_job(
     api: &ApiClient,
     settings: &Settings,
@@ -63,33 +107,13 @@ pub(crate) async fn run_model_download_job(
         if !reconcile_downloaded_model_family(api, job, &cache_path).await? {
             return Ok(());
         }
-        let mut result = JsonObject::new();
-        result.insert(
-            "modelId".to_owned(),
-            job.payload.get("modelId").cloned().unwrap_or(Value::Null),
-        );
-        result.insert("repo".to_owned(), Value::String(repo.to_owned()));
-        result.insert(
-            "path".to_owned(),
-            Value::String(cache_path.display().to_string()),
-        );
-        result.insert(
-            "storage".to_owned(),
-            Value::String("huggingface_cache".to_owned()),
-        );
-        result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
-        update_job(
+        complete_hf_cache_download(
             api,
-            &job.id,
-            progress_payload(
-                JobStatus::Completed,
-                ProgressStage::Completed,
-                1.0,
-                "Model download completed in the Hugging Face cache.",
-                None,
-                Some(result),
-                None,
-            ),
+            job,
+            "modelId",
+            repo,
+            &cache_path,
+            "Model download completed in the Hugging Face cache.",
         )
         .await?;
         return Ok(());
@@ -105,6 +129,28 @@ pub(crate) async fn run_model_download_job(
     })?;
     let snapshot =
         HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
+    // A download that resolves to ZERO files is not a success: the repo/revision has nothing under
+    // the requested filter — e.g. a quant tier whose weights aren't uploaded yet (sc-8513 rollout).
+    // Failing here, instead of downloading nothing and still writing a completion marker, surfaces a
+    // clear error rather than a silent no-op that later reads as an empty/phantom install (sc-9909).
+    if snapshot.files.is_empty() {
+        let scope = if files.is_empty() {
+            String::new()
+        } else {
+            format!(" matching {}", files.join(", "))
+        };
+        fail_job(
+            api,
+            &job.id,
+            &format!("No files to download for {repo}{scope}. This tier may not be published yet."),
+            Some(
+                "The Hugging Face repository/revision matched zero files for the requested filter."
+                    .to_owned(),
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
     if let Some(total_bytes) = snapshot.total_bytes() {
         update_job(
             api,
@@ -156,36 +202,15 @@ pub(crate) async fn run_model_download_job(
         return Ok(());
     }
 
-    let mut result = JsonObject::new();
-    result.insert(
-        "modelId".to_owned(),
-        job.payload.get("modelId").cloned().unwrap_or(Value::Null),
-    );
-    result.insert("repo".to_owned(), Value::String(repo.to_owned()));
-    result.insert(
-        "path".to_owned(),
-        Value::String(cache_path.display().to_string()),
-    );
-    result.insert(
-        "storage".to_owned(),
-        Value::String("huggingface_cache".to_owned()),
-    );
-    result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
-    update_job(
+    complete_hf_cache_download(
         api,
-        &job.id,
-        progress_payload(
-            JobStatus::Completed,
-            ProgressStage::Completed,
-            1.0,
-            "Model download completed in the Hugging Face cache.",
-            None,
-            Some(result),
-            None,
-        ),
+        job,
+        "modelId",
+        repo,
+        &cache_path,
+        "Model download completed in the Hugging Face cache.",
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 /// Download a built-in catalog LoRA's Hugging Face repo/file into the shared HF cache
@@ -288,36 +313,15 @@ pub(crate) async fn run_lora_download_job(
     .await?;
     let cache_path = huggingface_snapshot_dir(&settings.data_dir, repo).unwrap_or(repo_dir);
 
-    let mut result = JsonObject::new();
-    result.insert(
-        "loraId".to_owned(),
-        job.payload.get("loraId").cloned().unwrap_or(Value::Null),
-    );
-    result.insert("repo".to_owned(), Value::String(repo.to_owned()));
-    result.insert(
-        "path".to_owned(),
-        Value::String(cache_path.display().to_string()),
-    );
-    result.insert(
-        "storage".to_owned(),
-        Value::String("huggingface_cache".to_owned()),
-    );
-    result.insert("completedAt".to_owned(), Value::String(now_rfc3339()));
-    update_job(
+    complete_hf_cache_download(
         api,
-        &job.id,
-        progress_payload(
-            JobStatus::Completed,
-            ProgressStage::Completed,
-            1.0,
-            "LoRA download completed in the Hugging Face cache.",
-            None,
-            Some(result),
-            None,
-        ),
+        job,
+        "loraId",
+        repo,
+        &cache_path,
+        "LoRA download completed in the Hugging Face cache.",
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 /// A base model whose upstream snapshot omits the HF **fast** `tokenizer.json` the in-process Rust
@@ -329,6 +333,14 @@ struct DerivedTokenizerOverlay {
     base_repo: &'static str,
     /// SceneWorks-hosted repo holding the materialized fast `tokenizer.json`.
     tokenizer_repo: &'static str,
+    /// Pinned commit of [`tokenizer_repo`] to fetch (sc-9879, F-077 follow-up). The tokenizer repo is a
+    /// fixed SceneWorks-hosted const here (no manifest/payload override reaches this overlay), so pulling
+    /// the mutable `main` branch would let an upstream re-push silently swap the derived `tokenizer.json`
+    /// the in-process generator/trainer constructs from. Pin the exact commit for defense-in-depth
+    /// (mirrors sc-8879/sc-9682). Per-entry because entries may share a repo (Qwen-Image / -2512) but the
+    /// pin must be resolved per distinct repo. The standard resolve+download path still verifies each
+    /// file's reported `lfs.oid`.
+    tokenizer_revision: &'static str,
 }
 
 /// The single overlaid file (in every case the HF fast serialization) and its in-snapshot subdir.
@@ -345,6 +357,7 @@ const DERIVED_TOKENIZER_OVERLAYS: &[DerivedTokenizerOverlay] = &[
     DerivedTokenizerOverlay {
         base_repo: "Kwai-Kolors/Kolors-diffusers",
         tokenizer_repo: "SceneWorks/kolors-chatglm3-tokenizer",
+        tokenizer_revision: "4001e09f10ef05845457b976bbf1d28d54319886",
     },
     // Qwen-Image (sc-6570): ships the Qwen2 BPE tokenizer as `vocab.json` + `merges.txt` only. The MLX
     // `qwen-image` provider's `load_tokenizer` reads `tokenizer/tokenizer.json`. Derived via mlx-gen
@@ -353,6 +366,7 @@ const DERIVED_TOKENIZER_OVERLAYS: &[DerivedTokenizerOverlay] = &[
     DerivedTokenizerOverlay {
         base_repo: "Qwen/Qwen-Image",
         tokenizer_repo: "SceneWorks/qwen-image-tokenizer",
+        tokenizer_revision: "b0178292f0f4b1be9b5bfdda2b6e97fda0e195c3",
     },
     // Qwen-Image-2512 (sc-8271): the Dec-2025 base refresh is architecturally identical to
     // `Qwen/Qwen-Image` and reuses the same Qwen2 BPE tokenizer (unchanged across the line),
@@ -360,16 +374,17 @@ const DERIVED_TOKENIZER_OVERLAYS: &[DerivedTokenizerOverlay] = &[
     DerivedTokenizerOverlay {
         base_repo: "Qwen/Qwen-Image-2512",
         tokenizer_repo: "SceneWorks/qwen-image-tokenizer",
+        tokenizer_revision: "b0178292f0f4b1be9b5bfdda2b6e97fda0e195c3",
     },
 ];
 
-/// The hosted tokenizer repo + overlay dest for a just-downloaded `repo`, or `None` when `repo` is not
-/// a base model that needs the overlay (a no-op for every other model). Pure so the repo guard +
-/// target path are unit-testable without a download.
+/// The hosted tokenizer repo + its pinned revision + overlay dest for a just-downloaded `repo`, or
+/// `None` when `repo` is not a base model that needs the overlay (a no-op for every other model). Pure so
+/// the repo guard + pinned revision + target path are unit-testable without a download.
 pub(crate) fn derived_tokenizer_overlay(
     repo: &str,
     snapshot_dir: &Path,
-) -> Option<(&'static str, PathBuf)> {
+) -> Option<(&'static str, &'static str, PathBuf)> {
     let trimmed = repo.trim();
     DERIVED_TOKENIZER_OVERLAYS
         .iter()
@@ -377,6 +392,7 @@ pub(crate) fn derived_tokenizer_overlay(
         .map(|overlay| {
             (
                 overlay.tokenizer_repo,
+                overlay.tokenizer_revision,
                 snapshot_dir.join("tokenizer").join(DERIVED_TOKENIZER_FILE),
             )
         })
@@ -396,7 +412,9 @@ pub(crate) async fn overlay_derived_tokenizer(
     repo: &str,
     snapshot_dir: &Path,
 ) -> WorkerResult<()> {
-    let Some((tokenizer_repo, dest)) = derived_tokenizer_overlay(repo, snapshot_dir) else {
+    let Some((tokenizer_repo, tokenizer_revision, dest)) =
+        derived_tokenizer_overlay(repo, snapshot_dir)
+    else {
         return Ok(());
     };
     if dest.exists() {
@@ -409,7 +427,7 @@ pub(crate) async fn overlay_derived_tokenizer(
         http_client,
         settings,
         tokenizer_repo,
-        "main",
+        tokenizer_revision,
         &[DERIVED_TOKENIZER_FILE.to_owned()],
     )
     .await?;
@@ -692,9 +710,12 @@ async fn ensure_ltx_upscaler_cached(
         .join(format!(".ltx-upscaler-fetch-{}", job.id));
     tokio::fs::create_dir_all(&scratch).await?;
     let files = vec![file.to_owned()];
+    // Bind-then-remove: the fetch's `?` must not leak the scratch dir under data/cache on the error
+    // path (F-118). Clean the scratch dir whether the download succeeded or failed, then propagate.
     let fetched =
-        download_model_with_hf_cli(api, settings, job, repo, "main", &files, &scratch).await?;
+        download_model_with_hf_cli(api, settings, job, repo, "main", &files, &scratch).await;
     let _ = tokio::fs::remove_dir_all(&scratch).await;
+    let fetched = fetched?;
     let snapshot = match fetched {
         Some(dir) => Some(dir),
         None => huggingface_snapshot_dir(&settings.data_dir, repo),
@@ -735,6 +756,18 @@ enum ConvertPlan {
     },
 }
 
+/// A user-facing reason a conversion can't proceed (missing checkpoint, unknown converter, …). The
+/// plan resolver returns this instead of calling `fail_job` itself, so the resolution phase names the
+/// failure condition once and [`run_model_convert_job`] performs the single `fail_job` + early return
+/// — replacing the eight scattered `fail_job(...).await?; return Ok(())` pairs the resolver used to
+/// interleave with plan construction (sc-8921, F-119).
+struct ConvertPlanError {
+    /// The short `fail_job` message (the failure headline).
+    message: &'static str,
+    /// The `fail_job` detail (the actionable explanation), always present for these conditions.
+    detail: String,
+}
+
 /// The SD3.5 MMDiT variant a `sd3_5_*_quant` conversion targets — a target-neutral mirror of
 /// `mlx_gen_sd3::Sd3Variant` (which is macOS-only), so [`ConvertPlan`] stays buildable on every
 /// target. The macOS converter maps it back to the engine variant in [`convert_sd3_prequant`].
@@ -748,125 +781,45 @@ enum Sd3Variant {
     Medium,
 }
 
-/// Convert a model's native checkpoint into the local MLX format on macOS/Apple Silicon, fully
-/// in-process via the linked `mlx-gen-*` converters (epic 2337). The native checkpoint must already
-/// be downloaded into the Hugging Face cache (via a model_download job). The converter is selected by
-/// the manifest `mlx.converter` discriminator: `flux2_klein_diffusers` (sc-3136), `ltx_video`
-/// (mlx-gen-ltx), or `flux2_dev_quant` (FLUX.2-dev pre-quantization, sc-5921) — the models that
-/// install via in-app conversion, plus `sd3_5_large_quant` / `sd3_5_large_turbo_quant` /
-/// `sd3_5_medium_quant` (SD3.5 transformer pre-quantization, sc-7871). The Python
-/// `mlx_video.convert_wan` subprocess + `SCENEWORKS_PYTHON` wiring were retired here (sc-3240); the
-/// Wan2.2 converters were decommissioned once those models flipped to pre-converted SceneWorks
-/// downloads (sc-5603, epic 5594).
-///
-/// Real conversion is exercised on Mac hardware via the `#[ignore]` real-weight tests below; this
-/// wires the tracked job, progress, cancellation, and failure surfacing.
-pub(crate) async fn run_model_convert_job(
+/// Resolve the native [`ConvertPlan`] for a convert job from its `converter` discriminator, or a
+/// [`ConvertPlanError`] naming why it can't proceed (missing source file, base model not installed,
+/// unknown converter, …). Split out of [`run_model_convert_job`] (sc-8921, F-119): the converter-arm
+/// match used to interleave eight `fail_job(...).await?; return Ok(())` side-effects with plan
+/// construction inside the 350-line job body; here each becomes an `Err(ConvertPlanError)` value and
+/// the caller performs the SINGLE `fail_job`. Still async because the LTX arm may fetch the upscaler
+/// (`ensure_ltx_upscaler_cached`), and real infra errors (`?`) propagate as the outer `WorkerError`.
+async fn resolve_convert_plan(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
-) -> WorkerResult<()> {
-    let model_id = required_payload_string(&job.payload, "modelId")?.to_owned();
-    let source_repo = required_payload_string(&job.payload, "sourceRepo")?.to_owned();
-    let output_dir = required_payload_string(&job.payload, "outputDir")?.to_owned();
-    let dtype = optional_payload_string(&job.payload, "dtype")
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("bfloat16")
-        .to_owned();
-    // Optional MLX quantization. `quantizeOnly` quantizes an already-converted bf16
-    // MLX dir (turnkey models); otherwise quantization rides on the native->MLX
-    // conversion. `bits` is validated by the convert tool's choices (LTX honors it; the
-    // FLUX.2-klein converter is bf16-only and ignores it).
-    let quantize_only = payload_bool(&job.payload, "quantizeOnly");
-    let quantize_bits = job.payload.get("quantizeBits").and_then(Value::as_u64);
-
-    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-    update_job(
-        api,
-        &job.id,
-        progress_payload(
-            JobStatus::Preparing,
-            ProgressStage::Preparing,
-            0.05,
-            &format!("Preparing MLX conversion for {model_id}."),
-            None,
-            None,
-            None,
-        ),
-    )
-    .await?;
-    check_cancel(api, &job.id, "MLX conversion canceled before it started.").await?;
-
-    let Some(checkpoint_dir) = huggingface_snapshot_dir(&settings.data_dir, &source_repo) else {
-        fail_job(
-            api,
-            &job.id,
-            "Native checkpoint is not downloaded.",
-            Some(format!(
-                "Download {source_repo} before converting it to MLX."
-            )),
-        )
-        .await?;
-        return Ok(());
-    };
-
-    // Converter discriminator (sc-2235 / sc-3224 / sc-3240). Every convert-required model now
-    // declares one in its manifest `mlx.converter`; there is NO Python fallback — the
-    // `mlx_video.convert_wan` subprocess and its mlx-video venv were retired at this cutover.
-    //   flux2_klein_diffusers          -> FLUX.2-klein single-file → diffusers dir (sc-3136)
-    //   ltx_video                      -> single-file LTX-2.3 → split MLX dir (mlx-gen-ltx)
-    //   flux2_dev_quant                -> FLUX.2-dev diffusers snapshot → packed Q4 dir (sc-5921)
-    let converter = optional_payload_string(&job.payload, "converter")
-        .map(str::to_owned)
-        .unwrap_or_default();
-
-    // Quantize-only (re-quantize a pre-converted turnkey bf16 MLX dir) was a capability of the
-    // Python `convert_wan --quantize-only` with no native equivalent; it is unreachable from the UI
-    // and superseded by native-conversion-with-quant. Surface it explicitly rather than silently
-    // promoting an unconverted dir.
-    if quantize_only {
-        fail_job(
-            api,
-            &job.id,
-            "Quantize-only MLX conversion is no longer supported.",
-            Some(
-                "In-place re-quantization of a pre-converted MLX model was removed with the legacy \
-                 mlx-video converter (sc-3240). Convert the native checkpoint with quantization \
-                 instead."
-                    .to_owned(),
-            ),
-        )
-        .await?;
-        return Ok(());
-    }
-
-    let plan = match converter.as_str() {
+    checkpoint_dir: &Path,
+    quantize_bits: Option<u64>,
+) -> WorkerResult<Result<ConvertPlan, ConvertPlanError>> {
+    // Re-read the payload discriminators the caller already validated (cheap, and keeps this resolver's
+    // arg list small): `modelId`/`sourceRepo` are required, `converter` optional (empty = the "no
+    // converter configured" failure arm).
+    let model_id = required_payload_string(&job.payload, "modelId")?;
+    let source_repo = required_payload_string(&job.payload, "sourceRepo")?;
+    let converter = optional_payload_string(&job.payload, "converter").unwrap_or_default();
+    let plan = match converter {
         "flux2_klein_diffusers" => {
             let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
             let base_repo = required_payload_string(&job.payload, "baseRepo")?.to_owned();
             let source_file = checkpoint_dir.join(&source_file_name);
             if !source_file.is_file() {
-                fail_job(
-                    api,
-                    &job.id,
-                    "Converted-model source file is missing.",
-                    Some(format!("Expected {source_file_name} in {source_repo}.")),
-                )
-                .await?;
-                return Ok(());
+                return Ok(Err(ConvertPlanError {
+                    message: "Converted-model source file is missing.",
+                    detail: format!("Expected {source_file_name} in {source_repo}."),
+                }));
             }
             let Some(base_dir) = huggingface_snapshot_dir(&settings.data_dir, &base_repo) else {
-                fail_job(
-                    api,
-                    &job.id,
-                    "Base FLUX.2-klein model is not installed.",
-                    Some(format!(
+                return Ok(Err(ConvertPlanError {
+                    message: "Base FLUX.2-klein model is not installed.",
+                    detail: format!(
                         "Install {base_repo} before converting {model_id} — its VAE, text encoder, \
                          and tokenizer are reused."
-                    )),
-                )
-                .await?;
-                return Ok(());
+                    ),
+                }));
             };
             ConvertPlan::Flux2 {
                 source_file,
@@ -877,14 +830,10 @@ pub(crate) async fn run_model_convert_job(
             let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
             let source_file = checkpoint_dir.join(&source_file_name);
             if !source_file.is_file() {
-                fail_job(
-                    api,
-                    &job.id,
-                    "LTX-2.3 source checkpoint file is missing.",
-                    Some(format!("Expected {source_file_name} in {source_repo}.")),
-                )
-                .await?;
-                return Ok(());
+                return Ok(Err(ConvertPlanError {
+                    message: "LTX-2.3 source checkpoint file is missing.",
+                    detail: format!("Expected {source_file_name} in {source_repo}."),
+                }));
             }
             let upscaler_repo = required_payload_string(&job.payload, "baseRepo")?.to_owned();
             let upscaler_file = optional_payload_string(&job.payload, "upscalerFile")
@@ -895,17 +844,13 @@ pub(crate) async fn run_model_convert_job(
                 ensure_ltx_upscaler_cached(api, settings, job, &upscaler_repo, &upscaler_file)
                     .await?
             else {
-                fail_job(
-                    api,
-                    &job.id,
-                    "LTX-2.3 spatial upscaler is unavailable.",
-                    Some(format!(
+                return Ok(Err(ConvertPlanError {
+                    message: "LTX-2.3 spatial upscaler is unavailable.",
+                    detail: format!(
                         "Could not obtain {upscaler_file} from {upscaler_repo}; install the base \
                          LTX-2.3 model or check connectivity before converting {model_id}."
-                    )),
-                )
-                .await?;
-                return Ok(());
+                    ),
+                }));
             };
             // Default to the reference Q4 recipe when the manifest/request specifies no bits.
             let bits = quantize_bits.map_or(4, |bits| bits as i32);
@@ -927,7 +872,7 @@ pub(crate) async fn run_model_convert_job(
                 .and_then(Value::as_u64)
                 .map_or(64, |group| group as i32);
             ConvertPlan::Flux2Dev {
-                source_dir: checkpoint_dir.clone(),
+                source_dir: checkpoint_dir.to_path_buf(),
                 bits,
                 group_size,
             }
@@ -951,38 +896,174 @@ pub(crate) async fn run_model_convert_job(
                 _ => Sd3Variant::Medium,
             };
             ConvertPlan::Sd3 {
-                source_dir: checkpoint_dir.clone(),
+                source_dir: checkpoint_dir.to_path_buf(),
                 variant,
                 bits,
                 group_size,
             }
         }
         "" => {
-            fail_job(
-                api,
-                &job.id,
-                "No MLX converter is configured for this model.",
-                Some(format!(
+            return Ok(Err(ConvertPlanError {
+                message: "No MLX converter is configured for this model.",
+                detail: format!(
                     "{model_id} sets mlx.requiresConversion but no mlx.converter; the legacy \
                      converter was retired (sc-3240)."
-                )),
-            )
-            .await?;
-            return Ok(());
+                ),
+            }));
         }
         other => {
-            fail_job(
-                api,
-                &job.id,
-                "Unknown MLX converter.",
-                Some(format!(
-                    "Unrecognized mlx.converter '{other}' for {model_id}."
-                )),
-            )
-            .await?;
-            return Ok(());
+            return Ok(Err(ConvertPlanError {
+                message: "Unknown MLX converter.",
+                detail: format!("Unrecognized mlx.converter '{other}' for {model_id}."),
+            }));
         }
     };
+    Ok(Ok(plan))
+}
+
+/// Convert a model's native checkpoint into the local MLX format on macOS/Apple Silicon, fully
+/// in-process via the linked `mlx-gen-*` converters (epic 2337). The native checkpoint must already
+/// be downloaded into the Hugging Face cache (via a model_download job). The converter is selected by
+/// the manifest `mlx.converter` discriminator: `flux2_klein_diffusers` (sc-3136), `ltx_video`
+/// (mlx-gen-ltx), or `flux2_dev_quant` (FLUX.2-dev pre-quantization, sc-5921) — the models that
+/// install via in-app conversion, plus `sd3_5_large_quant` / `sd3_5_large_turbo_quant` /
+/// `sd3_5_medium_quant` (SD3.5 transformer pre-quantization, sc-7871). The Python
+/// `mlx_video.convert_wan` subprocess + `SCENEWORKS_PYTHON` wiring were retired here (sc-3240); the
+/// Wan2.2 converters were decommissioned once those models flipped to pre-converted SceneWorks
+/// downloads (sc-5603, epic 5594).
+///
+/// Real conversion is exercised on Mac hardware via the `#[ignore]` real-weight tests below; this
+/// wires the tracked job, progress, cancellation, and failure surfacing.
+/// Install-time provisioning of the eros Gemma-3 text encoder after a successful LTX conversion
+/// (macOS): surfaces a progress line, then pulls the bundle `gemma/` via the shared provisioner so a
+/// fresh eros install is self-contained. A no-op off macOS (the LTX engine + its gemma provisioning
+/// are mlx-only; the candle lane resolves its own `google/gemma-3-12b-it`).
+#[cfg(target_os = "macos")]
+async fn provision_ltx_eros_gemma(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Running,
+            ProgressStage::Running,
+            0.9,
+            "Fetching the Gemma-3 text encoder. This can take several minutes.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    crate::video_jobs::ensure_ltx_bundle_gemma_present(api, settings, job).await
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn provision_ltx_eros_gemma(
+    _api: &ApiClient,
+    _settings: &Settings,
+    _job: &JobSnapshot,
+) -> WorkerResult<()> {
+    Ok(())
+}
+
+pub(crate) async fn run_model_convert_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    let model_id = required_payload_string(&job.payload, "modelId")?.to_owned();
+    let source_repo = required_payload_string(&job.payload, "sourceRepo")?.to_owned();
+    let output_dir = required_payload_string(&job.payload, "outputDir")?.to_owned();
+    // NOTE: there is intentionally no `dtype` knob. The native converters each produce a fixed
+    // precision (the FLUX.2-klein converter is bf16-only; LTX / FLUX.2-dev honor `quantizeBits`),
+    // so a client-supplied `dtype` had no converter to receive it and only ever appeared in the
+    // progress message — claiming e.g. a float16 conversion that never happened (F-117). Precision
+    // is controlled by `quantizeBits` below.
+    // Optional MLX quantization. `quantizeOnly` quantizes an already-converted bf16
+    // MLX dir (turnkey models); otherwise quantization rides on the native->MLX
+    // conversion. `bits` is validated by the convert tool's choices (LTX honors it; the
+    // FLUX.2-klein converter is bf16-only and ignores it).
+    let quantize_only = payload_bool(&job.payload, "quantizeOnly");
+    let quantize_bits = job.payload.get("quantizeBits").and_then(Value::as_u64);
+
+    // The active backend label (mlx on macOS, candle off-Mac, cpu fallback) so the user-facing
+    // conversion progress / failure / completion / cancel strings name the REAL backend instead of a
+    // hardcoded "MLX" (sc-9801 fixed the cancel strings; sc-9863 extended it to the remaining
+    // progress/failure/completion strings — the F-114 follow-up to sc-8916). Same
+    // `backend_label(&settings.gpu_id)` mechanism the caption / training paths use.
+    let backend = backend_label(&settings.gpu_id).to_uppercase();
+
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.05,
+            &format!("Preparing {backend} conversion for {model_id}."),
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    check_cancel(
+        api,
+        &job.id,
+        &format!("{backend} conversion canceled before it started."),
+    )
+    .await?;
+
+    let Some(checkpoint_dir) = huggingface_snapshot_dir(&settings.data_dir, &source_repo) else {
+        fail_job(
+            api,
+            &job.id,
+            "Native checkpoint is not downloaded.",
+            Some(format!(
+                "Download {source_repo} before converting it to {backend}."
+            )),
+        )
+        .await?;
+        return Ok(());
+    };
+
+    // Quantize-only (re-quantize a pre-converted turnkey bf16 MLX dir) was a capability of the
+    // Python `convert_wan --quantize-only` with no native equivalent; it is unreachable from the UI
+    // and superseded by native-conversion-with-quant. Surface it explicitly rather than silently
+    // promoting an unconverted dir.
+    if quantize_only {
+        fail_job(
+            api,
+            &job.id,
+            &format!("Quantize-only {backend} conversion is no longer supported."),
+            Some(
+                "In-place re-quantization of a pre-converted MLX model was removed with the legacy \
+                 mlx-video converter (sc-3240). Convert the native checkpoint with quantization \
+                 instead."
+                    .to_owned(),
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // Converter discriminator (sc-2235 / sc-3224 / sc-3240). Every convert-required model declares one
+    // in its manifest `mlx.converter` (flux2_klein_diffusers / ltx_video / flux2_dev_quant / the SD3.5
+    // quant variants); there is NO Python fallback — the `mlx_video.convert_wan` subprocess was retired
+    // at this cutover. `resolve_convert_plan` reads the discriminator + source repo from the payload.
+    let plan =
+        match resolve_convert_plan(api, settings, job, &checkpoint_dir, quantize_bits).await? {
+            Ok(plan) => plan,
+            Err(ConvertPlanError { message, detail }) => {
+                fail_job(api, &job.id, message, Some(detail)).await?;
+                return Ok(());
+            }
+        };
 
     // Convert into a unique temp sibling and only promote it on success, so a
     // canceled/failed conversion never leaves a partial directory that the catalog
@@ -1014,7 +1095,7 @@ pub(crate) async fn run_model_convert_job(
             JobStatus::Running,
             ProgressStage::Running,
             0.2,
-            &format!("Converting {model_id} to MLX ({dtype}). This can take several minutes."),
+            &format!("Converting {model_id} to {backend}. This can take several minutes."),
             None,
             None,
             None,
@@ -1026,8 +1107,17 @@ pub(crate) async fn run_model_convert_job(
     // weights), so honor cancel up front and run on a blocking thread. On any failure the partial
     // temp dir is removed so it can never be promoted by the atomic rename below. The Flux2 path's
     // borrowed vae/text-encoder/tokenizer are absolute symlinks that survive the rename.
-    check_cancel(api, &job.id, "MLX conversion canceled by user.").await?;
+    check_cancel(
+        api,
+        &job.id,
+        &format!("{backend} conversion canceled by user."),
+    )
+    .await?;
     let temp = temp_dir.clone();
+    // An LTX conversion is always the eros fine-tune (the base model installs as a pre-converted
+    // turnkey bundle and never hits this path), and its bare checkpoint ships no bundled Gemma-3 text
+    // encoder — provision the bundle `gemma/` after promotion so the install is self-contained.
+    let plan_is_ltx = matches!(plan, ConvertPlan::Ltx { .. });
     let outcome = match plan {
         ConvertPlan::Flux2 {
             source_file,
@@ -1075,12 +1165,15 @@ pub(crate) async fn run_model_convert_job(
         Ok(Err(detail)) => {
             let _ = tokio::fs::remove_dir_all(&temp_dir).await;
             return Err(WorkerError::Engine(format!(
-                "MLX conversion failed. {detail}"
+                "{backend} conversion failed. {detail}"
             )));
         }
         Err(join_error) => {
             let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-            return Err(task_join_error("MLX conversion task", join_error));
+            return Err(task_join_error(
+                &format!("{backend} conversion task"),
+                join_error,
+            ));
         }
     }
 
@@ -1089,6 +1182,15 @@ pub(crate) async fn run_model_convert_job(
     if let Err(error) = finalize_converted_dir(&temp_dir, &final_dir).await {
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
         return Err(error);
+    }
+
+    // The eros checkpoint (the only model that reaches the LTX convert path) ships no bundled Gemma-3
+    // text encoder, so fetch the bundle `gemma/` now — before the job reports completion — so the
+    // install is self-contained and the first generation needs no on-the-fly ~24 GB download. Runs
+    // after promotion; a failure here fails the job loud (the checkpoint stays promoted and the
+    // generation path re-attempts the fetch as a backstop).
+    if plan_is_ltx {
+        provision_ltx_eros_gemma(api, settings, job).await?;
     }
 
     let mut result = JsonObject::new();
@@ -1107,7 +1209,7 @@ pub(crate) async fn run_model_convert_job(
             JobStatus::Completed,
             ProgressStage::Completed,
             1.0,
-            "MLX conversion completed.",
+            &format!("{backend} conversion completed."),
             None,
             Some(result),
             None,
@@ -2332,7 +2434,7 @@ mod tests {
     #[ignore]
     fn ltx_eros_rust_convert_real_weights() {
         let source =
-            hf_snapshot("models--TenStrip--LTX2.3-10Eros").join("10Eros_v1_bf16.safetensors");
+            hf_snapshot("models--TenStrip--LTX2.3-10Eros").join("10Eros_v1.3_bf16.safetensors");
         let upscaler_dir = hf_snapshot("models--Lightricks--LTX-2.3");
         assert!(
             source.is_file(),

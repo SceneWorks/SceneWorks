@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use gen_core::{
     AdapterKind, AdapterSpec, Generator, LoadSpec, MoeExpert, Precision, Quant, WeightsSource,
@@ -45,13 +45,61 @@ pub(crate) struct GeneratorCacheKey {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CacheWeightsSource {
-    Dir(PathBuf),
-    File(PathBuf),
+    Dir(PathBuf, Fingerprint),
+    File(PathBuf, Fingerprint),
+}
+
+/// Content-change proxy for a weights/adapter file (or HF snapshot dir) referenced in the cache key
+/// (sc-8841, F-039). The pre-fingerprint key identified weights/adapters by path + scale only, so a
+/// file replaced at the SAME path — a re-imported LoRA, a re-converted checkpoint — was served from
+/// the resident generator with the OLD tensors until the 300 s idle timeout ("my new LoRA does
+/// nothing"). Folding `(size, mtime)` into the key self-heals for ANY overwrite path (in-process
+/// re-import/re-convert, out-of-band replacement, manual swap) without an explicit evict hook that
+/// only fires for the code paths that remember to call it.
+///
+/// We deliberately stat metadata rather than hashing contents: mtime+size is a cheap, good
+/// content-change proxy, and hashing multi-GB weight files on every generation would be a severe
+/// perf regression.
+///
+/// For a `Dir` (an HF snapshot) we fingerprint the DIRECTORY's own metadata. A re-convert lands via
+/// the finalize/rename path (`finalize_converted_dir`), which replaces directory entries and bumps
+/// the dir's mtime, so a re-converted snapshot at the same path is a distinct key. `size` for a dir
+/// is its own metadata length (not the recursive content size) — it only needs to move on change,
+/// not be meaningful; mtime carries the signal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Fingerprint {
+    /// `metadata()` succeeded: `(len, modified)`. `modified` is `None` on the rare platform/FS that
+    /// does not report an mtime, in which case `len` alone carries the (weaker) signal.
+    Present {
+        size: u64,
+        mtime: Option<SystemTime>,
+    },
+    /// `metadata()` errored (path missing, transient stat failure, permissions). Kept DISTINCT from
+    /// any `Present` value so a stat error forces a cache MISS (rebuild) rather than serving a stale
+    /// entry — the load that follows surfaces the real error. Two `Unavailable`s compare equal
+    /// (`Eq` must stay reflexive), but that only arises when the file is genuinely gone on both the
+    /// cached and the incoming key, in which case the reload fails loudly anyway.
+    Unavailable,
+}
+
+impl Fingerprint {
+    /// Snapshot `(size, mtime)` for `path` once, at key-construction time, so the fingerprint is
+    /// stable across the lookup within a single generation (no mtime drift mid-request).
+    fn of(path: &Path) -> Self {
+        match std::fs::metadata(path) {
+            Ok(meta) => Self::Present {
+                size: meta.len(),
+                mtime: meta.modified().ok(),
+            },
+            Err(_) => Self::Unavailable,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CacheAdapterSpec {
     path: PathBuf,
+    fingerprint: Fingerprint,
     scale_bits: u32,
     kind: AdapterKind,
     pass_scale_bits: Option<Vec<u32>>,
@@ -86,8 +134,8 @@ impl GeneratorCacheKey {
 impl From<&WeightsSource> for CacheWeightsSource {
     fn from(source: &WeightsSource) -> Self {
         match source {
-            WeightsSource::Dir(path) => Self::Dir(path.clone()),
-            WeightsSource::File(path) => Self::File(path.clone()),
+            WeightsSource::Dir(path) => Self::Dir(path.clone(), Fingerprint::of(path)),
+            WeightsSource::File(path) => Self::File(path.clone(), Fingerprint::of(path)),
         }
     }
 }
@@ -96,6 +144,7 @@ impl From<&AdapterSpec> for CacheAdapterSpec {
     fn from(spec: &AdapterSpec) -> Self {
         Self {
             path: spec.path.clone(),
+            fingerprint: Fingerprint::of(&spec.path),
             scale_bits: spec.scale.to_bits(),
             kind: spec.kind,
             pass_scale_bits: spec
@@ -127,7 +176,7 @@ impl GeneratorCache {
         if self.entry.as_ref().map_or(true, |entry| entry.key != key) {
             self.entry = None;
             let generator = gen_core::load(&key.engine_id, &spec)
-                .map_err(|error| WorkerError::Engine(format!("{load_error_context}: {error}")))?;
+                .map_err(|error| crate::classify_engine_error(&load_error_context, error))?;
             self.entry = Some(GeneratorCacheEntry {
                 key: key.clone(),
                 generator,
@@ -432,6 +481,156 @@ mod tests {
         assert_ne!(
             GeneratorCacheKey::from_load_spec("z_image_turbo", &with_adapter),
             GeneratorCacheKey::from_load_spec("z_image_turbo", &different_scale)
+        );
+    }
+
+    // sc-8841 (F-039): the fingerprint helper is the core of the fix — it must report a DIFFERENT
+    // value when a file at the same path changes (size or mtime), and `Unavailable` (a distinct,
+    // cache-missing value) when the path can't be stat'd.
+    #[test]
+    fn fingerprint_tracks_content_change_and_missing_files() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("weights.safetensors");
+        std::fs::write(&path, b"original").expect("write original");
+        let original = Fingerprint::of(&path);
+        assert!(
+            matches!(original, Fingerprint::Present { .. }),
+            "an existing file must fingerprint as Present, got {original:?}"
+        );
+        // Re-stat with no change: same fingerprint → the common case still hits the cache.
+        assert_eq!(
+            original,
+            Fingerprint::of(&path),
+            "an unchanged file must produce a stable fingerprint (no spurious cache miss)"
+        );
+
+        // Grow the file (size changes) — must differ even if the clock granularity hides the mtime.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open for append");
+            f.write_all(b"-more-bytes").expect("append");
+        }
+        assert_ne!(
+            original,
+            Fingerprint::of(&path),
+            "a size change at the same path must change the fingerprint"
+        );
+
+        // mtime sensitivity, proven as a pure value comparison so it does not depend on filesystem
+        // timestamp granularity or a coarse system clock: two same-size fingerprints whose mtime
+        // differs must NOT compare equal (a same-size overwrite — e.g. a re-convert that lands an
+        // identically-sized file — still busts the cache via the mtime).
+        let now = SystemTime::now();
+        let earlier = Fingerprint::Present {
+            size: 4096,
+            mtime: Some(now),
+        };
+        let later = Fingerprint::Present {
+            size: 4096,
+            mtime: Some(now + Duration::from_secs(120)),
+        };
+        assert_ne!(
+            earlier, later,
+            "a bumped mtime at the same size must change the fingerprint"
+        );
+
+        // Missing path → Unavailable, distinct from any Present value so a stat error rebuilds
+        // rather than serving a stale entry.
+        let missing = Fingerprint::of(&dir.path().join("does-not-exist"));
+        assert_eq!(missing, Fingerprint::Unavailable);
+        assert_ne!(missing, original);
+        assert_ne!(missing, earlier);
+    }
+
+    // sc-8841 (F-039): the whole-key oracle. A LoRA re-imported at the SAME path (new bytes, same
+    // name) must yield a DIFFERENT cache key so the resident generator reloads instead of silently
+    // reusing the stale adapter within the 300 s idle window. An unchanged file must yield the SAME
+    // key so the common case keeps hitting the cache (no perf regression from spurious misses).
+    #[test]
+    fn cache_key_changes_when_adapter_file_is_replaced_at_same_path() {
+        use std::io::Write;
+
+        let base_dir = tempfile::tempdir().expect("base tempdir");
+        let lora_dir = tempfile::tempdir().expect("lora tempdir");
+        let lora_path = lora_dir.path().join("style.safetensors");
+        std::fs::write(&lora_path, b"v1-tensors").expect("write lora v1");
+
+        let make_spec = || {
+            let mut spec = LoadSpec::new(WeightsSource::Dir(base_dir.path().to_path_buf()));
+            spec.adapters = vec![AdapterSpec::new(lora_path.clone(), 0.8, AdapterKind::Lora)];
+            spec
+        };
+
+        let key_v1 = GeneratorCacheKey::from_load_spec("z_image_turbo", &make_spec());
+        // Same file, no change → identical key → cache still hits.
+        assert_eq!(
+            key_v1,
+            GeneratorCacheKey::from_load_spec("z_image_turbo", &make_spec()),
+            "an unchanged adapter file must produce an identical cache key (cache hit preserved)"
+        );
+
+        // Re-import the LoRA at the same path with new, DIFFERENTLY-SIZED bytes (a re-import writes
+        // a fresh file). The size delta alone busts the key regardless of clock granularity; the
+        // mtime path is covered as a pure value comparison in `fingerprint_tracks_content_change_*`.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&lora_path)
+                .expect("reopen lora");
+            f.write_all(b"v2-completely-different-tensors-and-longer")
+                .expect("write lora v2");
+        }
+
+        let key_v2 = GeneratorCacheKey::from_load_spec("z_image_turbo", &make_spec());
+        assert_ne!(
+            key_v1, key_v2,
+            "re-importing a LoRA at the same path must change the cache key so the stale adapter \
+             is not served from cache"
+        );
+    }
+
+    /// sc-9092 (epic 9083): the candle-lane A/B quant toggle must MISS the generator cache so the new
+    /// tier is loaded rather than the resident one reused. On the candle lane (now routed through the
+    /// shared `standard_tier_subdir`, sc-9092) toggling `advanced.mlxQuantize` changes BOTH the resolved
+    /// tier subdir (`q4/` ↔ `q8/` ↔ `bf16/`) AND the load `quantize` — either alone flips the key, so a
+    /// toggle can never collide with the cached generator (reload-always on toggle, epic 8506). This is
+    /// the candle sibling of the MLX A/B behaviour: `GeneratorCacheKey` already keys on both fields.
+    #[test]
+    fn cache_key_includes_quant_tier_toggle() {
+        // q4 tier: `<root>/q4` weights + Q4 load quant.
+        let mut q4 = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/lens/q4")));
+        q4.quantize = Some(Quant::Q4);
+        // q8 tier: `<root>/q8` weights + Q8 load quant (the A/B toggle target).
+        let mut q8 = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/lens/q8")));
+        q8.quantize = Some(Quant::Q8);
+        // bf16 tier: `<root>/bf16` weights, dense (no quant).
+        let bf16 = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/lens/bf16")));
+
+        // Every pairwise toggle is a distinct cache entry → a miss → a reload, never a wrong-tier reuse.
+        assert_ne!(
+            GeneratorCacheKey::from_load_spec("lens", &q4),
+            GeneratorCacheKey::from_load_spec("lens", &q8)
+        );
+        assert_ne!(
+            GeneratorCacheKey::from_load_spec("lens", &q8),
+            GeneratorCacheKey::from_load_spec("lens", &bf16)
+        );
+        assert_ne!(
+            GeneratorCacheKey::from_load_spec("lens", &q4),
+            GeneratorCacheKey::from_load_spec("lens", &bf16)
+        );
+        // The `quantize` field alone flips the key even if the tier dir were identical — the candle lane
+        // has always keyed on it (generator_cache.rs), so the A/B toggle is safe regardless of layout.
+        let mut same_dir_q8 = q4.clone();
+        same_dir_q8.quantize = Some(Quant::Q8);
+        assert_ne!(
+            GeneratorCacheKey::from_load_spec("lens", &q4),
+            GeneratorCacheKey::from_load_spec("lens", &same_dir_q8)
         );
     }
 

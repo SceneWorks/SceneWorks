@@ -43,17 +43,10 @@ jobs:
     # Self-hosted macOS 26.2 runner; same-repo only — never run fork code.
     if: ${{ github.repository == 'SceneWorks/SceneWorks' }}
     runs-on: [self-hosted, macOS, ARM64, nax]
-    env:
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-      APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
-      # Minisign keypair for the in-app auto-updater (sc-1355): signs the
-      # `.app.tar.gz` updater payload so the shipped app can verify it against
-      # plugins.updater.pubkey. Only needed when createUpdaterArtifacts is on (set
-      # via --config below), so other CI lanes / local builds don't require it.
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    # Signing/notarization secrets are scoped to the specific steps that consume
+    # them (the bundle build + the DMG staple) — NOT set at job level — so that
+    # `npm ci` (postinstall scripts) and every crate build.rs never see the
+    # updater signing key or the Apple credentials (sc-8864).
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
@@ -82,11 +75,29 @@ jobs:
       # signing key. Passed as a file, not inline JSON, so the same invocation is
       # quoting-safe under PowerShell on the Windows runner too.
       - name: Build, sign & notarize the desktop bundle
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+          # Minisign keypair for the in-app auto-updater (sc-1355): signs the
+          # `.app.tar.gz` updater payload so the shipped app can verify it against
+          # plugins.updater.pubkey. Only needed when createUpdaterArtifacts is on
+          # (set via --config below), so scoped to this step (sc-8864).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm --prefix apps/desktop run build -- --config updater.release.conf.json
 
       # Tauri staples the .app but not the wrapping .dmg — staple the DMG so the
       # downloaded artifact verifies offline (shared script; same as `release:mac`).
       - name: Staple the DMG
+        env:
+          # staple-dmg.mjs re-submits the DMG container to the notary, so it needs
+          # the same App Store Connect API key Tauri used (NOT the signing identity
+          # or the updater key). Scoped here rather than job-wide (sc-8864).
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
         run: node apps/desktop/scripts/staple-dmg.mjs
 
       # Create a DRAFT release with the already-stapled DMG attached (review before
@@ -151,11 +162,9 @@ jobs:
     env:
       # compute_80 PTX the driver JITs forward to sm_120 — one binary covers
       # Ampere->Blackwell (sc-3676); build-sidecar.mjs defaults this too.
+      # (Build-time constant, not a secret — safe at job level.) The updater
+      # signing key is scoped to the bundle step below, not here (sc-8864).
       CUDA_COMPUTE_CAP: "80"
-      # Same minisign keypair as the macos job — signs the NSIS updater payload so
-      # the shipped app verifies it against plugins.updater.pubkey (sc-1355).
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -199,6 +208,13 @@ jobs:
       # NSIS `-setup.exe` updater payload (+ `.sig`) for the in-app updater (sc-1355).
       # Passed as a file (not inline JSON) so it survives PowerShell quoting here.
       - name: Build Windows candle installers (NSIS + MSI)
+        env:
+          # Same minisign keypair as the macos job — signs the NSIS updater
+          # payload so the shipped app verifies it against plugins.updater.pubkey
+          # (sc-1355). Scoped to this step so `npm ci` / build.rs never see it
+          # (sc-8864).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm --prefix apps/desktop run build -- --bundles nsis,msi --config updater.release.conf.json
       # Upload to the draft release the macos job created. The user ships the MSI
       # (per desktop-windows.yml); the NSIS .exe is attached too as an alternative.

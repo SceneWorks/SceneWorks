@@ -51,7 +51,7 @@ fn decode_keeps_person_anchors_above_conf_and_builds_xyxy() {
         pad_x: 0.0,
         pad_y: 0.0,
     };
-    let dets = decode(&data, &shape, &lb, 0.25, 640, 640);
+    let dets = decode(&data, &shape, &lb, 0.25, 640, 640).expect("valid shape decodes");
     assert_eq!(dets.len(), 1, "only the above-conf person anchor survives");
     let d = dets[0];
     assert!((d.x1 - 80.0).abs() < 1e-3);
@@ -71,10 +71,82 @@ fn decode_clamps_boxes_to_the_frame() {
         pad_x: 0.0,
         pad_y: 0.0,
     };
-    let dets = decode(&data, &shape, &lb, 0.25, 640, 640);
+    let dets = decode(&data, &shape, &lb, 0.25, 640, 640).expect("valid shape decodes");
     assert_eq!(dets.len(), 1);
     assert_eq!(dets[0].x1, 0.0);
     assert_eq!(dets[0].y1, 0.0);
+}
+
+#[test]
+fn decode_rejects_malformed_output_shape_and_length() {
+    let lb = Letterbox {
+        ratio: 1.0,
+        pad_x: 0.0,
+        pad_y: 0.0,
+    };
+    // Rank < 3 (a 2-D output from a mis-pinned ONNX export) → Engine error, not an OOB panic.
+    let rank2 = decode(&[0.0; 12], &[1, 6], &lb, 0.25, 640, 640);
+    assert!(
+        matches!(rank2, Err(WorkerError::Engine(_))),
+        "rank-2 output must be rejected, got {rank2:?}"
+    );
+    // Well-formed rank but the data buffer is shorter than channels×anchors → Engine error.
+    // (1,6,2) needs 12 values; hand it 5 so `data[score_ch*anchors + a]` would read OOB.
+    let short = decode(&[0.0; 5], &[1, 6, 2], &lb, 0.25, 640, 640);
+    assert!(
+        matches!(short, Err(WorkerError::Engine(_))),
+        "truncated data buffer must be rejected, got {short:?}"
+    );
+    // channels < 5 (no person class channel) is a benign "nothing to decode", not an error.
+    let no_person = decode(&[0.0; 8], &[1, 4, 2], &lb, 0.25, 640, 640);
+    assert!(
+        matches!(no_person, Ok(ref v) if v.is_empty()),
+        "channels<5 → empty, got {no_person:?}"
+    );
+}
+
+/// sc-8906 / F-104: the shared letterbox preprocessor places pixels + pads identically
+/// whichever layout the platform selects. Runs against the layout compiled on this lane
+/// (NHWC on macOS, NCHW off-Mac) via `InputLayout::index`, so the SAME buffer contents are
+/// asserted through the SAME indexing the production path uses — pinning that the dedup
+/// preserved both the geometry and the (previously divergent) per-layout index math.
+#[test]
+fn preprocess_letterbox_places_pixels_and_pads_per_layout() {
+    // A square image fills the 640² input edge-to-edge (ratio 1.0, no pad), so every
+    // in-bounds pixel is written and the buffer carries the source color, not PAD_VALUE.
+    let mut img = RgbImage::new(DET as u32, DET as u32);
+    for px in img.pixels_mut() {
+        *px = image::Rgb([10, 20, 30]);
+    }
+    #[cfg(target_os = "macos")]
+    let layout = InputLayout::Nhwc;
+    #[cfg(not(target_os = "macos"))]
+    let layout = InputLayout::Nchw;
+
+    let (buf, lb) = preprocess_letterbox(&img, layout);
+    assert_eq!(buf.len(), DET * DET * 3);
+    assert!((lb.ratio - 1.0).abs() < 1e-6, "square image → ratio 1.0");
+    assert_eq!((lb.pad_x, lb.pad_y), (0.0, 0.0), "no letterbox pad");
+    // A center pixel carries the source color at every channel via the layout's own index.
+    let (cx, cy) = (DET / 2, DET / 2);
+    for (c, &raw) in [10u8, 20, 30].iter().enumerate() {
+        let v = buf[layout.index(cx, cy, c)];
+        assert!(
+            (v - raw as f32 / 255.0).abs() < 1e-3,
+            "channel {c} at center should be {raw}/255, got {v}"
+        );
+    }
+
+    // A portrait image (narrower than tall) fits by height → horizontal pad columns stay
+    // at PAD_VALUE/255. Column 0 is entirely inside the pad band.
+    let portrait = RgbImage::from_pixel(200, 400, image::Rgb([255, 255, 255]));
+    let (pbuf, plb) = preprocess_letterbox(&portrait, layout);
+    assert!(plb.pad_x > 0.0, "portrait letterboxes with horizontal pad");
+    let pad = PAD_VALUE / 255.0;
+    assert!(
+        (pbuf[layout.index(0, DET / 2, 0)] - pad).abs() < 1e-6,
+        "left pad column stays at PAD_VALUE"
+    );
 }
 
 #[test]
@@ -145,6 +217,29 @@ fn detections_to_json_normalizes_orders_and_drops_degenerate() {
     assert_eq!(json[1]["id"], "person_2");
     assert_eq!(json[0]["frameWidth"], 640);
     assert_eq!(json[0]["maskState"], "missing");
+}
+
+/// sc-9682 (F-077 follow-up): the first-party YOLO11 detector repo is fetched at a pinned
+/// commit, never the mutable `main` branch, so a re-push (or a compromised token) can't
+/// silently swap the detector weights we load. `DET_REVISION` is cfg-split per platform
+/// (MLX vs ONNX repo); this asserts whichever variant compiles is a real 40-hex commit id.
+#[test]
+fn det_revision_is_pinned_commit_not_main() {
+    assert_ne!(
+        DET_REVISION, "main",
+        "the detector must pin a fixed revision"
+    );
+    assert_eq!(
+        DET_REVISION.len(),
+        40,
+        "a pinned HF revision is a 40-char commit sha"
+    );
+    assert!(
+        DET_REVISION
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "the pinned revision must be lowercase hex"
+    );
 }
 
 /// Cache fixtures staged during development (sc-3633): the exported detector,

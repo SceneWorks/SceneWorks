@@ -86,36 +86,15 @@ fn kolors_ipadapter_available(request: &ImageRequest, settings: &Settings) -> bo
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=80) → manifest `steps` → default (50).
 fn kolors_ipadapter_steps(request: &ImageRequest) -> u32 {
-    let parse = |value: &Value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    };
-    request
-        .advanced
-        .get("steps")
-        .and_then(parse)
-        .or_else(|| request.model_manifest_entry.get("steps").and_then(parse))
-        .map(|steps| steps.clamp(1, 80) as u32)
-        .unwrap_or(KOLORS_IPADAPTER_DEFAULT_STEPS)
+    resolve_advanced_or_manifest_u32(request, "steps", KOLORS_IPADAPTER_DEFAULT_STEPS, 1..=80)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → default (5.0), clamped.
 fn kolors_ipadapter_guidance(request: &ImageRequest) -> f32 {
-    let manifest_default = request
-        .model_manifest_entry
-        .get("guidanceScale")
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .map(|value| value as f32)
-        .unwrap_or(KOLORS_IPADAPTER_DEFAULT_GUIDANCE);
-    advanced::f32_clamped(
-        &request.advanced,
+    resolve_advanced_or_manifest_f32(
+        request,
         "guidanceScale",
-        manifest_default,
+        KOLORS_IPADAPTER_DEFAULT_GUIDANCE,
         0.0..=30.0,
     )
 }
@@ -247,17 +226,14 @@ async fn generate_candle_kolors_ipadapter_stream(
     // outputs (source embedded once). Staging is non-fatal (failure → scores omitted).
     let score_likeness =
         resolve_character_image_likeness_source(request, settings, project_path).is_some();
-    let face_stack_dir = if score_likeness {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        score_likeness,
+        "character_image face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     let likeness_source = face_stack_dir.as_ref().map(|_| reference.clone());
     let likeness_source_ref = reference_id.to_owned();
 

@@ -1,8 +1,8 @@
 //! Real-ESRGAN image upscaling on the Rust worker (epic 3482, sc-3489; off-Mac sc-5499).
 //!
-//! Ports the Python `scene_worker/upscalers.py` + `image_adapters.run_image_upscale`
-//! `image_upscale` job to Rust so the Image Editor upscale tool (epic 2427) keeps
-//! working Python-free. The upscaler is Real-ESRGAN (RRDBNet x2/x4) run via `ort`
+//! Runs the `image_upscale` job natively in Rust (ported from the retired Python
+//! worker's `upscalers.py` + `image_adapters.run_image_upscale`) so the Image Editor
+//! upscale tool (epic 2427) keeps working Python-free. The upscaler is Real-ESRGAN (RRDBNet x2/x4) run via `ort`
 //! (onnxruntime): the **CoreML** execution provider on macOS (sc-3489, the same `ort`
 //! stack + bundled `libonnxruntime.dylib` sc-3487 ships for DWPose) and the **CUDA**
 //! execution provider off-Mac on the candle GPU-worker lane (sc-5499, the Windows/Linux
@@ -61,9 +61,8 @@ use ort::value::Tensor;
 use serde_json::{json, Value};
 
 use crate::{
-    cancel_requested_peek, fresh_asset_id, heartbeat, mark_job_canceled, now_rfc3339,
-    progress_payload, progress_report_interval, task_join_error, update_job, ApiClient,
-    CancelJoinGuard, Settings, WorkerError, WorkerResult,
+    fresh_asset_id, heartbeat, now_rfc3339, progress_payload, resolve_dataset_item_path,
+    safe_project_path, task_join_error, update_job, ApiClient, Settings, WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
@@ -95,6 +94,13 @@ const CANCEL_MESSAGE: &str = "Image upscale canceled by user.";
 /// (sc-5499). Overridable via the manifest `onnx` resource or the env pin
 /// `SCENEWORKS_REALESRGAN_X{2,4}_ONNX`.
 const ONNX_REPO: &str = "SceneWorks/real-esrgan-onnx";
+/// Pinned Real-ESRGAN ONNX revision (sc-9682, F-077 follow-up). Even though
+/// `SceneWorks/real-esrgan-onnx` is a first-party repo, fetching the mutable `main`
+/// branch means a re-push (or a compromised token) could silently swap the ONNX graph
+/// we load. Pin the exact commit for defense-in-depth, mirroring the SeedVR2 pin
+/// (sc-8879). HF's tree API still reports each file's `lfs.oid`, which
+/// `ensure_hf_cached_file` verifies the downloaded content against.
+const ONNX_REVISION: &str = "09f741bac80a246b407da3ee902bf5f3291b602f";
 
 fn onnx_file(factor: u8) -> String {
     format!("real_esrgan_x{factor}.onnx")
@@ -214,7 +220,9 @@ fn validate_upscale_target_dimensions(width: u32, height: u32) -> WorkerResult<(
 
 struct Upscaler {
     session: Session,
-    #[allow(dead_code)]
+    /// The session's actual execution device — the hardware EP ([`ACCEL_DEVICE`]: CoreML on macOS,
+    /// CUDA off-Mac) when it initialised, else `"cpu"` after the fallback. Surfaced on the upscale
+    /// result's `rawAdapterSettings` for observability (sc-8923).
     device: &'static str,
 }
 
@@ -261,10 +269,20 @@ impl Upscaler {
                 session,
                 device: ACCEL_DEVICE,
             }),
-            Err(_) => Ok(Self {
-                session: build_session(path, false)?,
-                device: "cpu",
-            }),
+            // Log WHY the hardware-EP session build failed before silently rebuilding on
+            // CPU (F-099) — otherwise a CoreML/CUDA init failure just presents as an
+            // unexplained "device = cpu" with no breadcrumb (sc-8901).
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    provider = ACCEL_DEVICE,
+                    "Real-ESRGAN {ACCEL_DEVICE} session build failed; falling back to CPU"
+                );
+                Ok(Self {
+                    session: build_session(path, false)?,
+                    device: "cpu",
+                })
+            }
         }
     }
 
@@ -332,13 +350,16 @@ impl Upscaler {
 
 /// Blocking upscale: load+cache the factor's session (amortising the CoreML/CUDA graph
 /// compile across a batch), run it. All `ort` objects live inside this closure and
-/// never cross an await (mirrors `pose_jobs::detect_batch`).
+/// never cross an await (mirrors `pose_jobs::detect_batch`). Returns the upscaled image plus the
+/// session's actual execution device (`coreml`/`cuda`/`cpu`) so the caller can surface whether the
+/// hardware EP was used or it fell back to CPU (sc-8923, mirrors `pose_jobs` reporting
+/// `detector.device`).
 fn upscale_blocking(
     onnx_path: PathBuf,
     factor: u8,
     img: RgbImage,
     cancel: CancelFlag,
-) -> WorkerResult<RgbImage> {
+) -> WorkerResult<(RgbImage, &'static str)> {
     use std::collections::hash_map::Entry;
     let cell = UPSCALERS.get_or_init(|| Mutex::new(HashMap::new()));
     // Recover from a poisoned lock rather than panicking every subsequent job: if a
@@ -354,12 +375,54 @@ fn upscale_blocking(
         Entry::Occupied(e) => e.into_mut(),
         Entry::Vacant(e) => e.insert(Upscaler::load(&onnx_path)?),
     };
-    upscaler.upscale(&img, factor as usize, &cancel)
+    let device = upscaler.device;
+    let out = upscaler.upscale(&img, factor as usize, &cancel)?;
+    Ok((out, device))
 }
 
 // ---------------------------------------------------------------------------
 // ONNX weight provisioning (download-on-first-use, mirrors Python resolution order)
 // ---------------------------------------------------------------------------
+
+/// Resolve an explicit env-pinned weight *file* (sc-8911). Unset → `Ok(None)` (fall
+/// through to cache/download). Set + existing → `Ok(Some(path))`. Set but missing → an
+/// `InvalidPayload` error so a typo fails loudly instead of silently loading whatever the
+/// download resolves. `what` names the expected file in the error. Takes the raw value
+/// explicitly so it's unit-testable without mutating the process environment.
+fn resolve_env_file_pin(
+    key: &str,
+    value: Option<std::ffi::OsString>,
+    what: &str,
+) -> WorkerResult<Option<PathBuf>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(&value);
+    if path.exists() {
+        return Ok(Some(path));
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "{key} is set to {} but that path does not exist. Point it at {what}, or unset it to download on first use.",
+        path.display()
+    )))
+}
+
+/// Resolve the `SCENEWORKS_SEEDVR2_CHECKPOINT` dir pin (sc-8911). Unset → `Ok(None)`. Set
+/// and holding both checkpoint files → `Ok(Some(dir))`. Set but incomplete → an
+/// `InvalidPayload` error. Testable without env mutation via the explicit raw value.
+fn resolve_seedvr2_dir_pin(value: Option<std::ffi::OsString>) -> WorkerResult<Option<PathBuf>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let dir = PathBuf::from(&value);
+    if dir.join(SEEDVR2_DIT_FILE).exists() && dir.join(SEEDVR2_VAE_FILE).exists() {
+        return Ok(Some(dir));
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "SCENEWORKS_SEEDVR2_CHECKPOINT is set to {} but that directory is missing {SEEDVR2_DIT_FILE} and/or {SEEDVR2_VAE_FILE}. Point it at a complete checkpoint dir, or unset it to download on first use.",
+        dir.display()
+    )))
+}
 
 /// Resolve the ONNX for `factor`. Order: explicit env pin
 /// (`SCENEWORKS_REALESRGAN_X{factor}_ONNX`, then `SCENEWORKS_REALESRGAN_ONNX`), then the
@@ -377,11 +440,15 @@ async fn ensure_onnx(
         format!("SCENEWORKS_REALESRGAN_X{factor}_ONNX"),
         "SCENEWORKS_REALESRGAN_ONNX".to_owned(),
     ] {
-        if let Ok(pinned) = std::env::var(&key) {
-            let path = PathBuf::from(pinned);
-            if path.exists() {
-                return Ok(path);
-            }
+        // A set-but-missing env pin is an operator error: fail loudly instead of silently
+        // falling through to the cache/HF download and loading different weights than the
+        // operator asked for (sc-8911).
+        if let Some(path) = resolve_env_file_pin(
+            &key,
+            std::env::var_os(&key),
+            &format!("the local Real-ESRGAN x{factor} ONNX export"),
+        )? {
+            return Ok(path);
         }
     }
 
@@ -404,7 +471,15 @@ async fn ensure_onnx(
         cancel_message: "Image upscale canceled while fetching Real-ESRGAN weights.",
         fresh_download: false,
     };
-    ensure_hf_cached_file(&context, &repo, "main", &file, &target)
+    // Pin the exact commit for the default first-party repo so `main` moving under us
+    // can't swap the ONNX graph (sc-9682). A manifest-supplied override repo may carry
+    // its own revision layout, so only pin when we're using the default repo.
+    let revision = if repo == ONNX_REPO {
+        ONNX_REVISION
+    } else {
+        "main"
+    };
+    ensure_hf_cached_file(&context, &repo, revision, &file, &target)
         .await
         .map_err(|error| match error {
             WorkerError::InvalidPayload(detail) => WorkerError::InvalidPayload(format!(
@@ -442,7 +517,14 @@ fn manifest_onnx_resource(manifest_entry: &Value, factor: u8) -> Option<(String,
 /// Upstream HuggingFace repo holding the raw SeedVR2 ComfyUI checkpoint. The `mlx-gen-seedvr2`
 /// registry loads it directly (converts to MLX layout in-memory, no Python). Public; downloaded on
 /// first use. Overridable via the manifest `seedvr2` resource or `SCENEWORKS_SEEDVR2_CHECKPOINT`.
-const SEEDVR2_REPO: &str = "numz/SeedVR2_comfyUI";
+pub(crate) const SEEDVR2_REPO: &str = "numz/SeedVR2_comfyUI";
+/// Pinned SeedVR2 checkpoint revision (sc-8879). `numz/SeedVR2_comfyUI` is a third-party
+/// mirror; fetching the mutable `main` branch means an upstream re-push would silently
+/// change the weights we load. Pin the exact commit that carries the 3B fp16 DiT + VAE
+/// (`seedvr2_ema_3b_fp16.safetensors` / `ema_vae_fp16.safetensors`) so downloads are
+/// reproducible. HF's tree API still reports each file's `lfs.oid`, which
+/// `ensure_hf_cached_file` verifies the content against.
+pub(crate) const SEEDVR2_REVISION: &str = "09ced71023636e9bc8cdf9cdecfb2625d1e691e8";
 /// The exact filenames `Seedvr2Pipeline::load` expects in the checkpoint dir (3B fp16 DiT + VAE).
 const SEEDVR2_DIT_FILE: &str = "seedvr2_ema_3b_fp16.safetensors";
 const SEEDVR2_VAE_FILE: &str = "ema_vae_fp16.safetensors";
@@ -487,11 +569,11 @@ async fn ensure_seedvr2_checkpoint(
     job: &JobSnapshot,
     manifest_entry: &Value,
 ) -> WorkerResult<PathBuf> {
-    if let Ok(pinned) = std::env::var("SCENEWORKS_SEEDVR2_CHECKPOINT") {
-        let dir = PathBuf::from(pinned);
-        if dir.join(SEEDVR2_DIT_FILE).exists() && dir.join(SEEDVR2_VAE_FILE).exists() {
-            return Ok(dir);
-        }
+    // A set env pin must resolve to a dir holding both checkpoint files; if it's set but
+    // incomplete, that's an operator error — fail loudly instead of silently downloading
+    // (sc-8911).
+    if let Some(dir) = resolve_seedvr2_dir_pin(std::env::var_os("SCENEWORKS_SEEDVR2_CHECKPOINT"))? {
+        return Ok(dir);
     }
 
     let dir = settings
@@ -525,7 +607,15 @@ async fn ensure_seedvr2_checkpoint(
         if target.exists() {
             continue;
         }
-        ensure_hf_cached_file(&context, &repo, "main", src_file, &target)
+        // Pin the exact commit for the default third-party mirror so `main` moving under
+        // us can't swap the weights (sc-8879). A manifest-supplied override repo may carry
+        // its own revision layout, so only pin when we're using the default repo.
+        let revision = if repo == SEEDVR2_REPO {
+            SEEDVR2_REVISION
+        } else {
+            "main"
+        };
+        ensure_hf_cached_file(&context, &repo, revision, src_file, &target)
             .await
             .map_err(|error| {
                 let detail = match &error {
@@ -661,7 +751,10 @@ pub(crate) async fn upscale_image_in_memory(
         _ => {
             let onnx = ensure_onnx(api, settings, http_client, job, factor, manifest_entry).await?;
             let task_cancel = cancel.clone();
-            run_upscale_with_heartbeat(
+            // This in-memory path feeds inline generation and does not build a device-reporting
+            // result, so the session device is discarded here (surfaced on the standalone
+            // `image_upscale` job's rawAdapterSettings instead, sc-8923).
+            let (out, _device) = run_upscale_with_heartbeat(
                 api,
                 settings,
                 &job.id,
@@ -670,16 +763,18 @@ pub(crate) async fn upscale_image_in_memory(
                     upscale_blocking(onnx, factor, source, task_cancel)
                 }),
             )
-            .await
+            .await?;
+            Ok(out)
         }
     }
 }
 
-/// Upscale-specific keepalive. The generic [`crate::run_blocking_with_heartbeat`] covers the same
-/// "heartbeat + cancel-poll while a blocking task runs" need for every other path (sc-8390); this
-/// one stays bespoke only because it ALSO posts an intermediate `Running`/"Canceling image upscale."
-/// update the instant a cancel is observed, so the UI acknowledges the cancel while the long
-/// diffusion finishes rather than appearing frozen until it flips terminal. Keep them in sync.
+/// Upscale keepalive: the shared [`crate::run_blocking_with_heartbeat`] (sc-8390) with the upscale's
+/// one extra behavior — the instant a cancel is observed it posts an intermediate `Running`/"Canceling
+/// image upscale." update so the UI acknowledges the cancel while the long diffusion finishes rather
+/// than appearing frozen until it flips terminal. That extra post is now the shared helper's
+/// `on_cancel_acknowledged` hook (sc-8928), so the sc-8390-critical select/heartbeat/teardown loop
+/// lives in exactly ONE place instead of a maintained-in-sync copy.
 async fn run_upscale_with_heartbeat<R>(
     api: &ApiClient,
     settings: &Settings,
@@ -690,61 +785,33 @@ async fn run_upscale_with_heartbeat<R>(
 where
     R: Send + 'static,
 {
-    // Bind the blocking upscale task to its cancel flag (sc-8804, F-003): on a `heartbeat`/
-    // `update_job` `?` early return (a transient POST failure or a 409 stale-sweep reclaim) we
-    // perform the explicit awaited bounded-join teardown (`guard.cancel_and_join()`) BEFORE the
-    // error propagates, so the still-running diffusion is wound down (or hard-abandoned) rather than
-    // leaked alongside the next claimed job. A bare `abort()` on drop is inert on a running blocking
-    // task.
-    let mut guard = CancelJoinGuard::new(cancel.clone(), task);
-    let mut canceled = false;
-    let mut interval = tokio::time::interval(progress_report_interval(settings));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            result = &mut *guard.handle_mut() => {
-                // Task RESOLVED — disarm before any `?` so a task/join error never drops an armed
-                // guard (reviewer note: `??` used to precede disarm at upscale_jobs.rs:695).
-                guard.disarm();
-                let value = result.map_err(|error| task_join_error("upscale task", error))??;
-                if canceled {
-                    mark_job_canceled(api, job_id, CANCEL_MESSAGE).await?;
-                    return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
-                }
-                return Ok(value);
-            }
-            _ = interval.tick() => {
-                if let Err(error) =
-                    heartbeat(api, settings, WorkerStatus::Busy, Some(job_id)).await
-                {
-                    guard.cancel_and_join().await;
-                    return Err(error);
-                }
-                if !canceled && cancel_requested_peek(api, job_id).await {
-                    cancel.cancel();
-                    canceled = true;
-                    if let Err(error) = update_job(
-                        api,
-                        job_id,
-                        progress_payload(
-                            JobStatus::Running,
-                            ProgressStage::Running,
-                            0.45,
-                            "Canceling image upscale.",
-                            None,
-                            None,
-                            None,
-                        ),
-                    )
-                    .await
-                    {
-                        guard.cancel_and_join().await;
-                        return Err(error);
-                    }
-                }
-            }
-        }
-    }
+    crate::run_blocking_with_heartbeat(
+        api,
+        settings,
+        job_id,
+        Some(cancel),
+        CANCEL_MESSAGE,
+        "upscale task",
+        Some(|| async move {
+            update_job(
+                api,
+                job_id,
+                progress_payload(
+                    JobStatus::Running,
+                    ProgressStage::Running,
+                    0.45,
+                    "Canceling image upscale.",
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .map(|_| ())
+        }),
+        task,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -783,6 +850,20 @@ fn resolve_source(
 // job handler
 // ---------------------------------------------------------------------------
 
+/// Resolve the requested image-upscale factor, rejecting anything other than the two supported
+/// scales (2x/4x — the only `real_esrgan_x{factor}.onnx` exports and SeedVR2 targets). Mirrors the
+/// video path's [`resolve_video_upscale_factor`](crate::video_jobs) (F-118 / sc-8920): an
+/// unsupported factor now fails loudly instead of being silently coerced to 2x, which produced a
+/// quietly-different output at a different resolution.
+fn resolve_image_upscale_factor(factor: u64) -> WorkerResult<u8> {
+    match factor {
+        2 | 4 => Ok(factor as u8),
+        other => Err(WorkerError::InvalidPayload(format!(
+            "Image upscale supports only factor 2 or 4 (got {other})."
+        ))),
+    }
+}
+
 pub(crate) async fn run_image_upscale_job(
     api: &ApiClient,
     settings: &Settings,
@@ -814,10 +895,10 @@ pub(crate) async fn run_image_upscale_job(
             WorkerError::InvalidPayload("Upscale jobs require a source image asset.".to_owned())
         })?
         .to_owned();
-    let factor: u8 = match payload.get("factor").and_then(Value::as_u64).unwrap_or(2) {
-        4 => 4,
-        _ => 2,
-    };
+    // Reject an unsupported factor early rather than silently coercing it to 2x (F-118 / sc-8920,
+    // mirroring the video path). A missing factor still defaults to 2x.
+    let factor: u8 =
+        resolve_image_upscale_factor(payload.get("factor").and_then(Value::as_u64).unwrap_or(2))?;
     let engine = payload
         .get("engine")
         .and_then(Value::as_str)
@@ -870,12 +951,25 @@ pub(crate) async fn run_image_upscale_job(
             ))
         })?;
 
-    let source_image = crate::image_decode::decode_image_any(&source_path)
-        .map_err(|e| WorkerError::InvalidPayload(format!("Source image could not be loaded: {e}")))?
-        .to_rgb8();
+    // Decode the source off the async runtime thread (sc-8909 / F-107): the full read + decode is
+    // blocking and would otherwise stall the heartbeat before the upscale even starts.
+    let source_image = {
+        let source_path = source_path.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::image_decode::decode_image_any(&source_path)
+                .map_err(|e| {
+                    WorkerError::InvalidPayload(format!("Source image could not be loaded: {e}"))
+                })
+                .map(|decoded| decoded.to_rgb8())
+        })
+        .await
+        .map_err(|e| task_join_error("upscale source decode task", e))??
+    };
     let (src_w, src_h) = (source_image.width(), source_image.height());
 
-    let upscaled = if engine_id == "seedvr2" {
+    // Real-ESRGAN reports its actual `ort` execution device (coreml/cuda/cpu) for observability;
+    // SeedVR2 is a generative pass with no such session, so it reports `None` (sc-8923).
+    let (upscaled, esrgan_device): (RgbImage, Option<&'static str>) = if engine_id == "seedvr2" {
         update_job(
             api,
             &job.id,
@@ -908,17 +1002,19 @@ pub(crate) async fn run_image_upscale_job(
         )
         .await?;
         let cancel = CancelFlag::new();
-        let seed_source = source_image.clone();
-        run_upscale_with_heartbeat(
+        // Move `source_image` into the future — the `else` branch already consumes it and it's
+        // unused after this `if`, so the clone (a full RGB buffer copy) was needless (sc-8927).
+        let out = run_upscale_with_heartbeat(
             api,
             settings,
             &job.id,
             cancel.clone(),
             tokio::spawn(async move {
-                run_seedvr2_upscale(dir, seed_source, factor, softness, seed, cancel).await
+                run_seedvr2_upscale(dir, source_image, factor, softness, seed, cancel).await
             }),
         )
-        .await?
+        .await?;
+        (out, None)
     } else {
         // Real-ESRGAN via `ort` — the CoreML EP on macOS (sc-3489), the CUDA EP off-Mac on the
         // candle GPU-worker lane (sc-5499), both with a CPU fallback. The routing oracle
@@ -957,7 +1053,7 @@ pub(crate) async fn run_image_upscale_job(
         )
         .await?;
         let cancel = CancelFlag::new();
-        run_upscale_with_heartbeat(
+        let (out, device) = run_upscale_with_heartbeat(
             api,
             settings,
             &job.id,
@@ -966,7 +1062,8 @@ pub(crate) async fn run_image_upscale_job(
                 upscale_blocking(onnx_path, factor, source_image, cancel)
             }),
         )
-        .await?
+        .await?;
+        (out, Some(device))
     };
     let (out_w, out_h) = (upscaled.width(), upscaled.height());
 
@@ -985,9 +1082,15 @@ pub(crate) async fn run_image_upscale_job(
         tokio::fs::create_dir_all(parent).await?;
     }
     let tmp_path = media_path.with_extension("tmp.png");
-    upscaled
-        .save_with_format(&tmp_path, image::ImageFormat::Png)
-        .map_err(|e| WorkerError::Io(std::io::Error::other(e)))?;
+    // Encode the upscaled PNG off the async runtime thread (sc-8909 / F-107).
+    let encode_tmp = tmp_path.clone();
+    tokio::task::spawn_blocking(move || {
+        upscaled
+            .save_with_format(&encode_tmp, image::ImageFormat::Png)
+            .map_err(|e| WorkerError::Io(std::io::Error::other(e)))
+    })
+    .await
+    .map_err(|e| task_join_error("upscale encode task", e))??;
     tokio::fs::rename(&tmp_path, &media_path)
         .await
         .inspect_err(|_| {
@@ -1014,6 +1117,11 @@ pub(crate) async fn run_image_upscale_job(
         // the result is reproducible + the UI can surface what produced it.
         upscale_settings["softness"] = json!(softness);
         upscale_settings["seed"] = json!(seed);
+    }
+    if let Some(device) = esrgan_device {
+        // Report the Real-ESRGAN `ort` session's actual execution device (coreml/cuda/cpu) so an
+        // upscale result reveals whether the hardware EP ran or it fell back to CPU (sc-8923).
+        upscale_settings["device"] = json!(device);
     }
     let fact = json!({
         "assetId": asset_id,
@@ -1096,29 +1204,49 @@ struct DatasetUpscaleItem {
     image_path: PathBuf,
 }
 
-/// Parse the `items` array of a `dataset_upscale` job into typed entries (pure). Each entry needs a
-/// non-empty `itemId` + `imagePath`; malformed entries are skipped.
-fn parse_dataset_upscale_items(payload: &JsonObject) -> Vec<DatasetUpscaleItem> {
-    payload
-        .get("items")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    let item_id = item.get("itemId").and_then(Value::as_str)?;
-                    let image_path = item.get("imagePath").and_then(Value::as_str)?;
-                    if item_id.is_empty() || image_path.is_empty() {
-                        return None;
-                    }
-                    Some(DatasetUpscaleItem {
-                        item_id: item_id.to_owned(),
-                        image_path: PathBuf::from(image_path),
-                    })
-                })
-                .collect()
+/// Parse the `items` array of a `dataset_upscale` job into typed entries. Each entry needs a
+/// non-empty `itemId` + `imagePath`; malformed entries are skipped. Every `imagePath` is confined
+/// to the payload's app-managed `datasetRoot` via [`resolve_dataset_item_path`] (sc-8842 / F-040):
+/// the `imagePath` is client-supplied and reaches an on-disk read, so an unconfined path would be an
+/// arbitrary-file-read/exfiltration primitive — a path escaping the dataset root fails the job.
+fn parse_dataset_upscale_items(
+    settings: &Settings,
+    payload: &JsonObject,
+) -> WorkerResult<Vec<DatasetUpscaleItem>> {
+    let dataset_root = payload
+        .get("datasetRoot")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Dataset upscale payload.datasetRoot must be an app-managed dataset path."
+                    .to_owned(),
+            )
+        })?;
+    let Some(items) = payload.get("items").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let item_id = item.get("itemId").and_then(Value::as_str)?;
+            let image_path = item.get("imagePath").and_then(Value::as_str)?;
+            if item_id.is_empty() || image_path.is_empty() {
+                return None;
+            }
+            let resolved = resolve_dataset_item_path(
+                settings,
+                dataset_root,
+                image_path,
+                &format!("Dataset upscale item {item_id} imagePath"),
+            );
+            Some(resolved.map(|image_path| DatasetUpscaleItem {
+                item_id: item_id.to_owned(),
+                image_path,
+            }))
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 /// Build the `/repoint` request body from `(item_id, project-relative source path)` results (pure).
@@ -1143,10 +1271,10 @@ pub(crate) async fn run_dataset_upscale_job(
 ) -> WorkerResult<()> {
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     let payload = &job.payload;
-    let factor: u8 = match payload.get("factor").and_then(Value::as_u64).unwrap_or(2) {
-        4 => 4,
-        _ => 2,
-    };
+    // Reject an unsupported factor early rather than silently coercing it to 2x (F-118 / sc-8920,
+    // mirroring the video path). A missing factor still defaults to 2x.
+    let factor: u8 =
+        resolve_image_upscale_factor(payload.get("factor").and_then(Value::as_u64).unwrap_or(2))?;
     let project_id = payload
         .get("projectId")
         .and_then(Value::as_str)
@@ -1162,7 +1290,7 @@ pub(crate) async fn run_dataset_upscale_job(
             WorkerError::InvalidPayload("Dataset upscale jobs require a datasetId.".to_owned())
         })?
         .to_owned();
-    let items = parse_dataset_upscale_items(payload);
+    let items = parse_dataset_upscale_items(settings, payload)?;
     if items.is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Dataset upscale job has no items to upscale.".to_owned(),
@@ -1211,31 +1339,47 @@ pub(crate) async fn run_dataset_upscale_job(
         )
         .await?;
 
-        let source_image = crate::image_decode::decode_image_any(&item.image_path)
-            .map_err(|e| WorkerError::InvalidPayload(format!("Image could not be loaded: {e}")))?
-            .to_rgb8();
         let onnx = onnx_path.clone();
         let cancel = CancelFlag::new();
         let cancel_run = cancel.clone();
-        let upscaled = run_upscale_with_heartbeat(
+        // Decode the source inside the blocking task (sc-8909 / F-107) so the per-item read + decode
+        // never stalls the async runtime thread across the dataset loop.
+        let item_image_path = item.image_path.clone();
+        // Per-item device is uniform across the batch (same cached session) and not recorded per
+        // item, so it's discarded here (sc-8923).
+        let (upscaled, _device) = run_upscale_with_heartbeat(
             api,
             settings,
             &job.id,
             cancel,
             tokio::task::spawn_blocking(move || {
+                let source_image = crate::image_decode::decode_image_any(&item_image_path)
+                    .map_err(|e| {
+                        WorkerError::InvalidPayload(format!("Image could not be loaded: {e}"))
+                    })?
+                    .to_rgb8();
                 upscale_blocking(onnx, factor, source_image, cancel_run)
             }),
         )
         .await?;
 
+        // sc-8842 / F-040: `dataset_id` and `item_id` are client-supplied and here reach a
+        // filesystem write (`save_with_format` overwrites), so route the project-relative output
+        // through `safe_project_path` — a `/`, `..`, or absolute component is rejected before the
+        // write instead of traversing out of the project tree.
         let rel = format!("{derived_dir_rel}/{}.png", item.item_id);
-        let abs = project_path.join(&rel);
+        let abs = safe_project_path(&project_path, &rel)?;
         if let Some(parent) = abs.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        upscaled
-            .save_with_format(&abs, image::ImageFormat::Png)
-            .map_err(|e| WorkerError::Io(std::io::Error::other(e)))?;
+        // Encode off the async runtime thread (sc-8909 / F-107).
+        tokio::task::spawn_blocking(move || {
+            upscaled
+                .save_with_format(&abs, image::ImageFormat::Png)
+                .map_err(|e| WorkerError::Io(std::io::Error::other(e)))
+        })
+        .await
+        .map_err(|e| task_join_error("dataset upscale encode task", e))??;
         records.push((item.item_id.clone(), rel));
     }
 

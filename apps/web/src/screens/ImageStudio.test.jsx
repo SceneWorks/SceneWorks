@@ -1,6 +1,6 @@
 import React, { act } from "react";
-import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { click, mountRoot, setFileInput, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
 
 // Pose loaders fetch best-effort on mount; stub the API so render never touches
 // the network. The studio's own mutations go through context fns, not apiFetch.
@@ -65,32 +65,6 @@ function baseContext(overrides = {}) {
   };
 }
 
-async function click(element) {
-  await act(async () => {
-    element.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-  });
-}
-
-function setInput(element, value) {
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-  setter.call(element, value);
-  element.dispatchEvent(new window.Event("input", { bubbles: true }));
-}
-
-function setSelect(element, value) {
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value").set;
-  setter.call(element, value);
-  element.dispatchEvent(new window.Event("change", { bubbles: true }));
-}
-
-function setFileInput(element, files) {
-  Object.defineProperty(element, "files", {
-    configurable: true,
-    value: files,
-  });
-  element.dispatchEvent(new window.Event("change", { bubbles: true }));
-}
-
 const saveButton = (container) =>
   [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Save as Preset"));
 const nameInput = (container) => container.querySelector('input[aria-label="Preset name"]');
@@ -108,14 +82,11 @@ describe("ImageStudio Save as Preset", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -134,6 +105,8 @@ describe("ImageStudio Save as Preset", () => {
     const context = baseContext();
     await render(context);
 
+    // Save-as-preset now lives inside the Advanced panel (UI-refinement 2b).
+    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Advanced"));
     const input = nameInput(container);
     expect(input).toBeTruthy();
     await act(async () => setInput(input, "Atrium Look"));
@@ -169,6 +142,7 @@ describe("ImageStudio Save as Preset", () => {
     });
     await render(context);
 
+    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Advanced"));
     await act(async () => setInput(nameInput(container), "Atrium Look"));
     await click(saveButton(container));
 
@@ -184,14 +158,11 @@ describe("ImageStudio advanced model defaults", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -293,14 +264,11 @@ describe("ImageStudio guidance method picker (epic 7434, sc-7449)", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -399,14 +367,11 @@ describe("ImageStudio edit source picker", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -423,7 +388,7 @@ describe("ImageStudio edit source picker", () => {
 
   async function openEditSourcePicker(context) {
     await render(context);
-    await click([...document.body.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "Edit"));
+    await click([...document.body.querySelectorAll(".mode-tabs button")].find((button) => button.textContent === "Edit"));
     await click([...document.body.querySelectorAll(".asset-picker-head button")].find((button) => button.textContent === "Select image"));
     return document.body.querySelector('[role="dialog"]');
   }
@@ -569,7 +534,7 @@ describe("ImageStudio edit source picker", () => {
         selectedAsset: null,
       }),
     );
-    await click([...document.body.querySelectorAll(".segmented-control button")].find((button) => button.textContent === "Edit"));
+    await click([...document.body.querySelectorAll(".mode-tabs button")].find((button) => button.textContent === "Edit"));
 
     // The multi-image picker ("Select images") replaces the single source picker ("Select image").
     const headButtons = () => [...document.body.querySelectorAll(".asset-picker-head button")];
@@ -598,14 +563,11 @@ describe("ImageStudio model picker capability gating", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -661,7 +623,7 @@ describe("ImageStudio model picker capability gating", () => {
 
   const modelOptionValues = () => [...field(container, "Model").options].map((option) => option.value);
   const modeButton = (label) =>
-    [...document.body.querySelectorAll(".segmented-control button")].find((button) => button.textContent === label);
+    [...document.body.querySelectorAll(".mode-tabs button")].find((button) => button.textContent === label);
 
   it("Text tab lists only text_to_image models, excluding edit-only and character-only (sc-5549)", async () => {
     await render(baseContext({ imageModels: [EDIT_ONLY, T2I, VARIATIONS, CHARACTER_ONLY] }));
@@ -842,6 +804,44 @@ describe("ImageStudio model picker capability gating", () => {
     expect(tierPicker(container)).toBeFalsy();
   });
 
+  // PiD decode and Upscale both super-resolve, so they're mutually exclusive: enabling one
+  // disables the other (and the upscale sub-controls).
+  it("makes PiD and Upscale mutually exclusive in Advanced", async () => {
+    const PID_MODEL = {
+      ...Z_IMAGE,
+      id: "qwen_image",
+      name: "Qwen Image",
+      ui: { pid: { checkpointId: "pid_qwenimage" } },
+    };
+    await render(
+      baseContext({
+        imageModels: [PID_MODEL],
+        models: [{ id: "pid_qwenimage", installState: "installed" }],
+      }),
+    );
+    await openAdvanced(container);
+    await act(async () => {});
+
+    const pid = () => container.querySelector('.pid-decoder-toggle input[type="checkbox"]');
+    const upscale = () => container.querySelector('.upscale-toggle input[type="checkbox"]');
+    expect(pid()).toBeTruthy();
+    expect(upscale()).toBeTruthy();
+    // Both start enabled.
+    expect(pid().disabled).toBe(false);
+    expect(upscale().disabled).toBe(false);
+
+    // PiD on → Upscale + its Scale/Engine sub-controls disable.
+    await act(async () => pid().click());
+    expect(upscale().disabled).toBe(true);
+    expect(field(container, "Scale").disabled).toBe(true);
+    expect(field(container, "Engine").disabled).toBe(true);
+
+    // PiD off, Upscale on → PiD disables.
+    await act(async () => pid().click());
+    await act(async () => upscale().click());
+    expect(pid().disabled).toBe(true);
+  });
+
   it("omits advanced.mlxQuantize on Generate when only one tier is installed (sc-8515)", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     await render(
@@ -956,14 +956,11 @@ describe("ImageStudio structured-prompt recipe round-trip (sc-6147)", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -1060,14 +1057,11 @@ describe("ImageStudio reference-image → JSON caption (epic 8102, sc-8108)", ()
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -1193,14 +1187,11 @@ describe("ImageStudio Ideogram 4 auto-expand on plain-text Generate (sc-6501)", 
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -1315,14 +1306,11 @@ describe("ImageStudio PiD decoder toggle (sc-7851)", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -1399,6 +1387,126 @@ describe("ImageStudio PiD decoder toggle (sc-7851)", () => {
     await click(generateButton());
     expect(createImageJob.mock.calls[1][0].advanced.usePid).toBe(true);
   });
+
+  const pidTargetSelect = () => document.body.querySelector(".pid-target-select select");
+
+  it("reveals the 2K/4K output selector only when PiD is on (default 4K)", async () => {
+    await render(baseContext({ imageModels: [PID_QWEN], models: [PID_QWEN, PID_CKPT("installed")] }));
+    await openAdvanced();
+    await act(async () => {});
+    // Off → no selector.
+    expect(pidTargetSelect()).toBeFalsy();
+    // On → selector appears, defaulting to 4k.
+    await act(async () => pidLabel().querySelector('input[type="checkbox"]').click());
+    expect(pidTargetSelect()).toBeTruthy();
+    expect(pidTargetSelect().value).toBe("4k");
+  });
+
+  it("emits advanced.pidTarget:'2k' only when 2K is picked (4K default omits it)", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(
+      baseContext({ createImageJob, imageModels: [PID_QWEN], models: [PID_QWEN, PID_CKPT("installed")] }),
+    );
+    await openAdvanced();
+    await act(async () => {});
+    await act(async () => pidLabel().querySelector('input[type="checkbox"]').click());
+
+    // Default 4K → usePid but no pidTarget.
+    await click(generateButton());
+    expect(createImageJob.mock.calls[0][0].advanced.usePid).toBe(true);
+    expect(createImageJob.mock.calls[0][0].advanced).not.toHaveProperty("pidTarget");
+
+    // Pick 2K → pidTarget:"2k" rides advanced.
+    await act(async () => {
+      const select = pidTargetSelect();
+      select.value = "2k";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await click(generateButton());
+    expect(createImageJob.mock.calls[1][0].advanced.pidTarget).toBe("2k");
+  });
+});
+
+describe("ImageStudio Image-reference (img2img) tile (epic 8588, sc-8593/sc-10195)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  // Krea-like img2img model: a `ui.img2img` toggle, plain text-to-image capability, no vision
+  // captioner in context (baseContext leaves `imageDescribe` undefined → describe flow unavailable).
+  const KREA_IMG2IMG = { ...Z_IMAGE, id: "krea_2_turbo", name: "Krea 2 Turbo", ui: { img2img: true } };
+  const tileByText = (text) =>
+    [...document.body.querySelectorAll("button")].find((b) => b.textContent.includes(text));
+
+  it("hides the 'Image reference' tile for a plain t2i model without ui.img2img", async () => {
+    // sc-10195: img2img is its own tile, gated purely on `ui.img2img`. A plain model with no captioner
+    // shows neither the img2img nor the describe tile.
+    await render(baseContext({ imageModels: [Z_IMAGE], models: [Z_IMAGE] }));
+    expect(tileByText("Image reference")).toBeFalsy();
+    expect(tileByText("Prompt from image")).toBeFalsy();
+  });
+
+  it("shows the 'Image reference' tile for a ui.img2img model even without the vision captioner", async () => {
+    // img2img needs no captioner — the tile appears on the flag alone, decoupled from describe (sc-10195).
+    await render(baseContext({ imageModels: [KREA_IMG2IMG], models: [KREA_IMG2IMG] }));
+    expect(tileByText("Image reference")).toBeTruthy();
+    // The describe tile stays hidden without a captioner, proving the two are independent now.
+    expect(tileByText("Prompt from image")).toBeFalsy();
+  });
+
+  // Ideogram-like structured-prompt img2img model (epic 8588 A4.4, sc-10192): the free-text prompt-tools
+  // strip is replaced by the JSON-caption builder, but the img2img "Image reference" tile must still
+  // surface — reference-guided latent-init is orthogonal to how the prompt is authored.
+  const IDEOGRAM_IMG2IMG = {
+    ...Z_IMAGE,
+    id: "ideogram_4",
+    name: "Ideogram 4",
+    family: "ideogram",
+    structuredPrompt: true,
+    ui: { img2img: true },
+  };
+
+  it("shows the 'Image reference' tile for a structured-prompt img2img model (Ideogram)", async () => {
+    await render(baseContext({ imageModels: [IDEOGRAM_IMG2IMG], models: [IDEOGRAM_IMG2IMG] }));
+    // The tile coexists with the structured caption builder…
+    expect(tileByText("Image reference")).toBeTruthy();
+    expect(document.body.querySelector(".structured-prompt-builder, .prompt-input-row.structured")).toBeTruthy();
+    // …but the free-text-only tiles ("Prompt from image" / "Refine my prompt") stay out of the strip —
+    // the caption builder owns image→caption + magic-expand, so this is the slim img2img-only strip.
+    expect(tileByText("Refine my prompt")).toBeFalsy();
+  });
+
+  it("activating the structured img2img tile reveals the reference-guidance panel", async () => {
+    await render(baseContext({ imageModels: [IDEOGRAM_IMG2IMG], models: [IDEOGRAM_IMG2IMG] }));
+    await click(tileByText("Image reference"));
+    // The img2img panel's hint distinguishes it from the caption builder's own reference→caption picker.
+    expect(
+      [...document.body.querySelectorAll(".prompt-tool-panel .structured-hint")].some((p) =>
+        p.textContent.includes("guide the render (image-to-image)"),
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
@@ -1408,14 +1516,11 @@ describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+    ({ container, root } = mountRoot());
   });
 
   afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
+    await unmountRoot(root, container);
     vi.clearAllMocks();
   });
 
@@ -1460,16 +1565,21 @@ describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
     [...document.body.querySelectorAll(".control-mode-tab")].map((b) => b.textContent.trim());
   const controlTabByLabel = (label) =>
     [...document.body.querySelectorAll(".control-mode-tab")].find((b) => b.textContent.trim() === label);
+  // The structure-control panel is collapsed by default; expand it so the gated inner content
+  // (mode tabs, control-image upload, slider) mounts before the assertions below.
+  const expandControlPanel = async () => click(document.body.querySelector(".control-panel-head"));
   const generate = async () =>
     click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
 
   it("gates the picker to the backbone's supported modes (all three)", async () => {
     await render(baseContext({ imageModels: [FULL_CONTROL] }));
+    await expandControlPanel();
     expect(controlTabs()).toEqual(["Pose", "Canny", "Depth"]);
   });
 
   it("shows only the pose tab for a pose-only backbone", async () => {
     await render(baseContext({ imageModels: [POSE_ONLY] }));
+    await expandControlPanel();
     expect(controlTabs()).toEqual(["Pose"]);
   });
 
@@ -1480,6 +1590,7 @@ describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
 
   it("re-gates and resets an unsupported mode when the backbone switches", async () => {
     await render(baseContext({ imageModels: [FULL_CONTROL, POSE_ONLY] }));
+    await expandControlPanel();
     // Pick canny on the multi-mode backbone.
     await click(controlTabByLabel("Canny"));
     expect(controlTabByLabel("Canny").getAttribute("aria-pressed")).toBe("true");
@@ -1494,6 +1605,7 @@ describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     const plate = { id: "ctrl-plate", projectId: "project_1", type: "image", displayName: "Plate", status: {} };
     await render(baseContext({ createImageJob, imageModels: [FULL_CONTROL], assets: [plate] }));
+    await expandControlPanel();
     await click(controlTabByLabel("Canny"));
     // Open the control-image picker and double-click the asset to confirm it.
     await click(
@@ -1517,6 +1629,7 @@ describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     const plate = { id: "ctrl-plate", projectId: "project_1", type: "image", displayName: "Plate", status: {} };
     await render(baseContext({ createImageJob, imageModels: [FULL_CONTROL], assets: [plate] }));
+    await expandControlPanel();
     await click(controlTabByLabel("Depth"));
     await click(
       [...document.body.querySelectorAll(".asset-picker-head button")].find((b) => b.textContent === "Select image"),

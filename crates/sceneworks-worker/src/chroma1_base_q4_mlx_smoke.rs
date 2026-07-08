@@ -25,15 +25,11 @@
 
 use std::path::{Path, PathBuf};
 
-use gen_core::{GenerationOutput, GenerationRequest, Image, LoadSpec, Quant, WeightsSource};
+use gen_core::{GenerationOutput, GenerationRequest, LoadSpec, Quant, WeightsSource};
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_string())
-}
+use super::smoke_support::{
+    env_or, image_mean, image_std, is_all_zero, save_png, DEGENERATE_STD_FLOOR_TIGHT,
+};
 
 /// The engine-complete packed subdir to load: mirror `image_jobs::base::standard_tier_subdir`'s q4
 /// selection — prefer `<root>/q4` (chroma turnkeys pack the backbone under `transformer/`), else `root`
@@ -73,45 +69,6 @@ fn cached_turnkey_root() -> Option<PathBuf> {
                 .is_file()
                 .then_some(dir)
         })
-}
-
-/// Per-pixel mean over the RGB buffer — the "is it black?" floor check, reported for the record.
-fn image_mean(img: &Image) -> f64 {
-    let n = img.pixels.len() as f64;
-    if n == 0.0 {
-        return 0.0;
-    }
-    img.pixels.iter().map(|&p| p as f64).sum::<f64>() / n
-}
-
-/// Mean per-pixel std-dev across the RGB channels — a cheap "is the image non-degenerate" check. A
-/// NaN / all-black / flat decode collapses the std toward 0; this guards that degenerate floor. The real
-/// quality call is the saved-PNG eyeball.
-fn image_std(img: &Image) -> f64 {
-    let n = img.pixels.len() as f64;
-    if n == 0.0 {
-        return 0.0;
-    }
-    let mean = image_mean(img);
-    let var = img
-        .pixels
-        .iter()
-        .map(|&p| (p as f64 - mean).powi(2))
-        .sum::<f64>()
-        / n;
-    var.sqrt()
-}
-
-/// Whether EVERY pixel byte is exactly 0 — the precise degenerate signature of a broken decode.
-fn is_all_zero(img: &Image) -> bool {
-    !img.pixels.is_empty() && img.pixels.iter().all(|&p| p == 0)
-}
-
-fn save_png(img: &Image, path: &Path) {
-    image::RgbImage::from_raw(img.width, img.height, img.pixels.clone())
-        .expect("rgb buffer")
-        .save(path)
-        .unwrap_or_else(|e| panic!("save {}: {e}", path.display()));
 }
 
 #[test]
@@ -207,7 +164,7 @@ fn chroma1_base_q4_mlx_gpu_smoke() {
         "chroma1_base Q4 decode is ALL-ZERO — a broken packed load/decode"
     );
     assert!(
-        std > 20.0,
+        std > DEGENERATE_STD_FLOOR_TIGHT,
         "chroma1_base Q4 render looks degenerate (std {std:.2}) — possible NaN / all-black / flat decode"
     );
     println!(

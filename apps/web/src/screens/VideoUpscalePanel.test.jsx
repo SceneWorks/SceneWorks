@@ -1,6 +1,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { click } from "../testUtils/dom.js";
 
 import { VideoUpscalePanel } from "./VideoUpscalePanel.jsx";
 
@@ -25,12 +26,6 @@ afterEach(() => {
 async function renderPanel(ui) {
   await act(async () => {
     createRoot(container).render(ui);
-  });
-}
-
-async function click(element) {
-  await act(async () => {
-    element.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   });
 }
 

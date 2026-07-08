@@ -30,26 +30,47 @@
 //! `SD3_STEPS` (default per model: Large 28, Turbo 4, Medium 40); `SD3_PROMPT`; `SD3_OUT_DIR`
 //! (default `/tmp/sd3_5_smoke`).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use gen_core::{
     AdapterKind, AdapterSpec, GenerationOutput, GenerationRequest, Image, LoadSpec, Quant,
     WeightsSource,
 };
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_string())
+use super::smoke_support::{env_or, save_png};
+
+/// `q4` -> Q4, `q8` -> Q8 (the manifest default for all three SD3.5 tiers). An unrecognized value
+/// panics with a clear hint rather than silently defaulting to Q8 (sc-8924): a hand-run tier
+/// validation with a typo'd `SD3_QUANT` would otherwise PASS the wrong tier and record a bogus result.
+/// Pure over the raw string so the reject behavior is unit-testable without touching process env.
+fn parse_quant(raw: &str) -> Quant {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "q4" => Quant::Q4,
+        "q8" => Quant::Q8,
+        other => panic!("SD3_QUANT must be q4 or q8, got {other:?}"),
+    }
 }
 
-/// `q4` -> Q4, anything else -> Q8 (the manifest default for all three SD3.5 tiers).
 fn quant_from_env() -> Quant {
-    match env_or("SD3_QUANT", "q8").to_ascii_lowercase().as_str() {
-        "q4" => Quant::Q4,
-        _ => Quant::Q8,
+    parse_quant(&env_or("SD3_QUANT", "q8"))
+}
+
+#[cfg(test)]
+mod quant_tests {
+    use super::{parse_quant, Quant};
+
+    #[test]
+    fn parse_quant_accepts_q4_q8_case_insensitively() {
+        assert!(matches!(parse_quant("q4"), Quant::Q4));
+        assert!(matches!(parse_quant("Q4"), Quant::Q4));
+        assert!(matches!(parse_quant(" q8 "), Quant::Q8));
+    }
+
+    #[test]
+    #[should_panic(expected = "SD3_QUANT must be q4 or q8")]
+    fn parse_quant_rejects_unknown_value() {
+        // A typo'd tier must NOT silently default (sc-8924) — it would record a bogus tier validation.
+        let _ = parse_quant("q5");
     }
 }
 
@@ -134,13 +155,6 @@ fn mean_neighbor_gradient(img: &Image) -> f64 {
         }
     }
     sum / cnt as f64
-}
-
-fn save_png(img: &Image, path: &Path) {
-    image::RgbImage::from_raw(img.width, img.height, img.pixels.clone())
-        .expect("rgb buffer")
-        .save(path)
-        .unwrap_or_else(|e| panic!("save {}: {e}", path.display()));
 }
 
 /// Drive the worker-lane load→generate seam for one SD3.5 engine id and assert a coherent image.
@@ -375,11 +389,17 @@ fn sd3_5_lora_apply_mlx_gpu_smoke() {
     let lora = match std::env::var("SD3_LORA") {
         Ok(p) if !p.trim().is_empty() => PathBuf::from(p.trim()),
         _ => {
-            eprintln!(
-                "[skip] SD3_LORA not set — point it at an sd3 LoRA .safetensors (a community adapter, or \
-                 the `train_sd3_lora` smoke output) to exercise the worker apply seam (with_adapters -> \
-                 apply_sd3_adapters)"
-            );
+            // Make the self-skip UNMISTAKABLE in a recorded validation run (sc-8926): libtest reports a
+            // bare `return` as `ok`, so a green line here would falsely read as "the LoRA apply path was
+            // exercised". Emit a loud, greppable `[SKIPPED]` marker naming the test + the missing lever on
+            // BOTH streams (stdout is captured and printed on the hand-run; stderr shows even without
+            // --nocapture) so a story-recorded run cannot mistake this skip for a real pass.
+            let msg = "[SKIPPED] sd3_5_lora_apply_mlx_gpu_smoke: SD3_LORA not set — the worker LoRA \
+                       apply seam (with_adapters -> apply_sd3_adapters) was NOT exercised. Point SD3_LORA \
+                       at an sd3 LoRA .safetensors (a community adapter, or the `train_sd3_lora` smoke \
+                       output) to run it.";
+            println!("{msg}");
+            eprintln!("{msg}");
             return;
         }
     };
@@ -390,26 +410,30 @@ fn sd3_5_lora_apply_mlx_gpu_smoke() {
     );
 
     let engine_id = env_or("SD3_LORA_ENGINE", "sd3_5_large");
-    let (hub_dir, env_snap, default_steps, default_guidance) = match engine_id.as_str() {
-        "sd3_5_medium" => (
-            "models--stabilityai--stable-diffusion-3.5-medium",
-            "SD3_MEDIUM_SNAPSHOT",
-            "40",
-            5.0,
-        ),
-        "sd3_5_large_turbo" => (
-            "models--stabilityai--stable-diffusion-3.5-large-turbo",
-            "SD3_TURBO_SNAPSHOT",
-            "4",
-            3.5,
-        ),
-        _ => (
-            "models--stabilityai--stable-diffusion-3.5-large",
-            "SD3_LARGE_SNAPSHOT",
-            "28",
-            3.5,
-        ),
-    };
+    // `default_guidance` mirrors `resolve_guidance`: `Some(scale)` for the true-CFG Large/Medium
+    // (supports_guidance=true), `None` for the CFG-free Turbo (supports_guidance=false) — so the smoke
+    // sends the SAME request shape the shipped worker sends (and the dedicated turbo smoke passes None).
+    let (hub_dir, env_snap, default_steps, default_guidance): (&str, &str, &str, Option<f32>) =
+        match engine_id.as_str() {
+            "sd3_5_medium" => (
+                "models--stabilityai--stable-diffusion-3.5-medium",
+                "SD3_MEDIUM_SNAPSHOT",
+                "40",
+                Some(5.0),
+            ),
+            "sd3_5_large_turbo" => (
+                "models--stabilityai--stable-diffusion-3.5-large-turbo",
+                "SD3_TURBO_SNAPSHOT",
+                "4",
+                None,
+            ),
+            _ => (
+                "models--stabilityai--stable-diffusion-3.5-large",
+                "SD3_LARGE_SNAPSHOT",
+                "28",
+                Some(3.5),
+            ),
+        };
 
     let scale: f32 = env_or("SD3_LORA_SCALE", "1.0")
         .parse()
@@ -435,7 +459,7 @@ fn sd3_5_lora_apply_mlx_gpu_smoke() {
         w,
         h,
         steps,
-        Some(default_guidance),
+        default_guidance,
         adapters,
         "sd3_5_lora.png",
     );

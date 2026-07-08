@@ -1,9 +1,29 @@
-/// The engine registry id for the Qwen-Image ControlNet-Union variant.
+/// The engine registry id for the Qwen-Image ControlNet-Union variant. The default control repo is
+/// the `STRICT_CONTROL_ENGINES` table row for this id (resolved via `strict_control_default_repo`),
+/// not a duplicated local constant — so a table repoint keeps the resolver, error message, and
+/// download hint in lockstep. As of sc-9870 that row is the SceneWorks PACKED tier
+/// (`SceneWorks/qwen-image-2512-fun-controlnet-union`), replacing the dense alibaba-pai overlay.
 const QWEN_CONTROL_ENGINE_ID: &str = "qwen_image_control";
-/// Default alibaba-pai Qwen-Image-2512-Fun-Controlnet-Union weights (input-agnostic VACE branch:
-/// pose/canny/depth share one control path — sc-8267 source swap, sc-8250 canny+depth exposure).
-const QWEN_CONTROL_REPO: &str = "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union";
-const QWEN_CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
+/// The single packed control file inside each tier subdir (`q4/`, `q8/`, `bf16/`). Deterministic —
+/// the packed tier ships exactly one `model.safetensors` per subdir (sc-9870), so the sc-8350
+/// two-overlay ambiguity is naturally resolved.
+const QWEN_CONTROL_FILE: &str = "model.safetensors";
+
+/// The packed control tier subdir the request's `advanced.mlxQuantize` selects (sc-9870): `bf16` (opt
+/// out of quantization, `<= 0` / "none"), `q8` (`> 4`), else the `q4` default — the SAME mapping
+/// `standard_tier_subdir` uses for the base transformer tier, so the control overlay tier tracks the
+/// base tier for a coherent A/B. Mirrors the candle `qwen_control_tier_subdir` (`qwen_control.rs`).
+fn qwen_control_tier_subdir(request: &ImageRequest) -> &'static str {
+    let bits = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    match bits {
+        Some(b) if b <= 0 => "bf16",
+        Some(b) if b > 4 => "q8",
+        _ => "q4",
+    }
+}
 
 /// True when this is the base-Qwen strict-pose tier: `qwen_image` + non-empty object
 /// `advanced.poses`, not edit mode, and base weights available. A `referenceAssetId`, if present,
@@ -16,15 +36,42 @@ fn qwen_control_available(request: &ImageRequest, settings: &Settings) -> bool {
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
-fn resolve_qwen_control_weights(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
-    // Default repo from the shared strict-control table (single source of truth); the file stays
-    // engine-specific.
-    resolve_control_weights_for(
-        request,
-        settings,
-        strict_control_default_repo(QWEN_CONTROL_ENGINE_ID),
-        QWEN_CONTROL_FILE,
-    )
+/// Resolve the 2512-Fun-Controlnet-Union checkpoint to a single `.safetensors` in the HF cache
+/// (sc-9870). Default: the SceneWorks packed tier (repo from the shared `STRICT_CONTROL_ENGINES` row —
+/// single source of truth) at `<tier>/model.safetensors`, where `<tier>` tracks the selected transformer
+/// quant via [`qwen_control_tier_subdir`]. `advanced.controlWeights.{repo,filename}` overrides still
+/// address a flat repo with a plain-component file (sc-8821 / F-019); when a `filename` override is
+/// present the tier subdir is NOT applied. `Ok(None)` when the file is absent (the download flow /
+/// on-demand fetch provisions it ahead of generation, like base weights).
+fn resolve_qwen_control_weights(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
+    let control = request
+        .advanced
+        .get("controlWeights")
+        .and_then(Value::as_object);
+    let override_field = |key: &str| -> Option<String> {
+        control
+            .and_then(|control| control.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let repo =
+        override_field("repo").unwrap_or_else(|| strict_control_default_repo(QWEN_CONTROL_ENGINE_ID).to_owned());
+    // Repo-relative path: an explicit override filename (plain component, no tier subdir) else the packed
+    // tier subdir `<tier>/model.safetensors` selected by `advanced.mlxQuantize`.
+    let rel = match override_field("filename") {
+        Some(name) => safe_weight_filename(&name, "advanced.controlWeights.filename")?,
+        None => format!("{}/{QWEN_CONTROL_FILE}", qwen_control_tier_subdir(request)),
+    };
+    let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, &repo) else {
+        return Ok(None);
+    };
+    let path = snapshot.join(rel);
+    Ok(path.exists().then_some(path))
 }
 
 /// Load the Qwen-Image ControlNet-Union generator (base snapshot + 2512-Fun control overlay).
@@ -53,9 +100,7 @@ fn qwen_control_load(
     adapters: Vec<AdapterSpec>,
 ) -> WorkerResult<Box<dyn Generator>> {
     let spec = qwen_control_spec(weights_dir, control_weights, quant, adapters);
-    gen_core::load(QWEN_CONTROL_ENGINE_ID, &spec).map_err(|error| {
-        WorkerError::Engine(format!("Qwen strict-pose control load failed: {error}"))
-    })
+    load_control_engine(QWEN_CONTROL_ENGINE_ID, &spec)
 }
 
 /// Generate one Qwen strict-pose image: the pre-built `conditioning` (the required `Control`, assembled by
@@ -150,9 +195,10 @@ async fn generate_qwen_control_stream(
         .ok_or_else(|| WorkerError::InvalidPayload("Qwen model row missing".to_owned()))?;
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("Qwen-Image weights not found".to_owned()))?;
-    let control_weights = resolve_qwen_control_weights(request, settings).ok_or_else(|| {
+    let control_weights = resolve_qwen_control_weights(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
-            "Qwen strict-pose control weights not found (download {QWEN_CONTROL_REPO})."
+            "Qwen strict-pose control weights not found (download {}).",
+            strict_control_default_repo(QWEN_CONTROL_ENGINE_ID)
         ))
     })?;
     let (quant, quant_bits) = resolve_quant(request);
@@ -201,27 +247,29 @@ async fn generate_qwen_control_stream(
     // + face-stack staging are non-fatal; the `!Send` scorer is built ONCE in the closure (source
     // embedded once, reused across poses).
     let likeness_source = resolve_control_identity_source(request, settings, project_path);
-    let face_stack_dir = if likeness_source.is_some() {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "pose-set face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        likeness_source.is_some(),
+        "pose-set face-stack staging failed; likeness scores omitted",
+    )
+    .await;
 
     let prompt = request.prompt.clone();
-    let (width, height) = (request.width, request.height);
-    let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
-    let adapter_count = adapters.len();
     // Per-generation PiD decode (epic 7840, sc-7849): the strict-pose control engine shares the
     // `qwenimage` latent space, so route its decode through PiD when `advanced.usePid` is set and the
-    // snapshots are cached; otherwise native VAE. `use_pid` and `spec.pid` stay in lockstep.
-    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model);
+    // snapshots are cached; otherwise native VAE. `use_pid` and `spec.pid` stay in lockstep. Resolved
+    // before the dims so the PiD output tier (sc-10054) can size the base — the pose skeleton is
+    // rendered at that same base, so control + latent stay aligned.
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
     let use_pid = pid_weights.is_some();
+    // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
+    // 4K/native leaves the requested dims untouched).
+    let (width, height) =
+        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
+    let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
+    let adapter_count = adapters.len();
     let mut spec = qwen_control_spec(weights_dir, control_weights, quant, adapters);
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
@@ -354,13 +402,23 @@ struct LightningDistill {
     file: &'static str,
 }
 
+/// The default Lightning distill-LoRA repo (`qwen_image_edit_2511_lightning`). A fixed default; a
+/// manifest-supplied `LightningDistill.repo` (should one ever appear) is honored but not pinned.
+const QWEN_LIGHTNING_LORA_REPO: &str = "lightx2v/Qwen-Image-Edit-2511-Lightning";
+/// Pinned revision for the default Lightning distill-LoRA repo (sc-9879, F-077 follow-up). Fetching the
+/// mutable `main` branch means an upstream re-push could silently swap the distill LoRA we stack at load.
+/// Pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). `HuggingFaceSnapshot::resolve`
+/// still verifies each file's `lfs.oid` sha256 against the downloaded content. Applied ONLY to the default
+/// repo — a non-default repo keeps `main`.
+const QWEN_LIGHTNING_LORA_REVISION: &str = "d74eba145674fd7e31b949324e148e21e7118abd";
+
 /// The Lightning distill config for a SceneWorks model id, or `None` for every
 /// production variant. Only `qwen_image_edit_2511_lightning` is a distilled variant today.
 fn qwen_edit_lightning(model: &str) -> Option<LightningDistill> {
     match model {
         "qwen_image_edit_2511_lightning" => Some(LightningDistill {
             sampler: "lightning",
-            repo: "lightx2v/Qwen-Image-Edit-2511-Lightning",
+            repo: QWEN_LIGHTNING_LORA_REPO,
             file: "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
         }),
         _ => None,
@@ -395,7 +453,13 @@ async fn ensure_distill_lora_cached(
             "Unable to resolve Hugging Face cache path for {repo}."
         ))
     })?;
-    let revision = "main";
+    // Pin the exact commit for the default distill-LoRA repo so `main` moving under us can't swap the
+    // LoRA (sc-9879). A non-default repo (none exists today, but the param is repo-agnostic) keeps `main`.
+    let revision = if repo == QWEN_LIGHTNING_LORA_REPO {
+        QWEN_LIGHTNING_LORA_REVISION
+    } else {
+        "main"
+    };
     let client = reqwest::Client::new();
     let snapshot =
         HuggingFaceSnapshot::resolve(&client, settings, repo, revision, &[file.to_owned()]).await?;
@@ -578,7 +642,7 @@ fn qwen_edit_generate_one(
 /// Real Qwen-Image-Edit generation: load the `qwen_image_edit` engine model once, then
 /// one output per grouped iteration each conditioned on the shared reference set. Mirrors
 /// [`generate_flux2_edit_stream`]'s blocking-thread + streamed-events shape and reuses the
-/// shared grouping ([`flux2_grouping`]) and [`consume_gen_events`]; differs in true-CFG
+/// shared grouping ([`edit_grouping`]) and [`consume_gen_events`]; differs in true-CFG
 /// guidance (`trueCfgScale`) + the negative prompt, the `[reference, skeleton]` pose order
 /// (reference first drives the VL identity prompt), and the body-only pose skeleton.
 async fn generate_qwen_edit_stream(
@@ -635,76 +699,47 @@ async fn generate_qwen_edit_stream(
             "Qwen-Image-Edit requires a reference image".to_owned(),
         ));
     }
-    // sc-3030 fit_image: pre-fit the Image-Edit source to the output W×H (crop / pad /
+    // Per-generation PiD decode (epic 7840, sc-7849) + output tier (sc-10054). Resolved here, ahead of
+    // the source pre-fit and generation, so a 2K tier sizes the effective base and the Image-Edit source
+    // is fit to THAT base — source and latent stay in lockstep. `use_pid`/`spec.pid` stay paired below.
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+    let (width, height) =
+        pid_effective_dims(request.width, request.height, use_pid, pid_output_tier(request));
+
+    // sc-3030 fit_image: pre-fit the Image-Edit source to the (effective) output W×H (crop / pad /
     // outpaint→pad) so an off-aspect edit doesn't stretch. Character-Studio references
     // stay native (the `should_fit_edit_source` gate excludes them).
     if should_fit_edit_source(request) {
         references = references
             .into_iter()
-            .map(|reference| {
-                fit_engine_image(reference, request.width, request.height, &request.fit_mode)
-            })
+            .map(|reference| fit_engine_image(reference, width, height, &request.fit_mode))
             .collect::<WorkerResult<Vec<_>>>()?;
     }
 
-    // Per-iteration grouping (shared with the FLUX.2 edit path): a Character-Studio angle
-    // set (11 shared-seed, per-angle prompt) / best-effort pose tier (one per pose, shared
-    // seed, each a `[reference, skeleton]` set) / else the plain per-image reference path.
-    let grouping = flux2_grouping(request);
-    let set_seed = resolve_seed(request, 0);
-    let (seeds, prompts, pose_inputs): (
-        Vec<i64>,
-        Vec<String>,
-        Option<Vec<PoseInput>>,
-    ) = match &grouping {
-        Flux2Grouping::Poses(count) => {
-            // Shared seed so only the pose changes across the set (Python parity).
-            // Keep the full PoseInput (keypoints + hands + face) so whole-body poses
-            // thread their hand/face articulation into the skeleton below (sc-6599).
-            let poses = parse_poses(request);
-            let prompts = vec![augment_prompt_for_pose(&request.prompt); *count];
-            (vec![set_seed; *count], prompts, Some(poses))
-        }
-        Flux2Grouping::Angles => {
-            // Shared seed so noise-derived attributes (hair, lighting) stay constant
-            // across angles — only the head pose changes.
-            let prompts = CHARACTER_ANGLE_SET_ORDER
-                .iter()
-                .map(|angle| augment_prompt_for_angle(&request.prompt, angle))
-                .collect();
-            (
-                vec![set_seed; CHARACTER_ANGLE_SET_ORDER.len()],
-                prompts,
-                None,
-            )
-        }
-        Flux2Grouping::Plain => {
-            let count = request.count as usize;
-            let seeds = (0..count)
-                .map(|index| resolve_seed(request, index))
-                .collect();
-            (seeds, vec![request.prompt.clone(); count], None)
-        }
-    };
+    // Per-iteration grouping (shared with the FLUX.2 edit path via `plan_edit_batch`, F-024
+    // sc-8826): a Character-Studio angle set (11 shared-seed, per-angle prompt) / best-effort pose
+    // tier (one per pose, shared seed, each a `[reference, skeleton]` set) / else the plain
+    // per-image reference path. The whole-body pose PoseInputs thread their hand/face articulation
+    // into the skeleton below (sc-6599). The builder also stamps angleSet/poseLibrary and computes
+    // the identity-likeness gate (incl. the sc-4411 plain-With-Character case). Scoring (epic 4406,
+    // sc-4409 angles / sc-4410 poses / sc-4411 plain With-Character) is generator-agnostic — Qwen-Edit
+    // produces the FINAL image directly (no face-restore pass), so scoring the generated image scores
+    // what the user sees.
+    let grouping = edit_grouping(request);
+    let EditBatch {
+        seeds,
+        prompts,
+        pose_inputs,
+        mut raw_settings,
+        score_likeness,
+    } = plan_edit_batch(
+        request,
+        &grouping,
+        qwen_edit_raw_settings(request, &repo, steps, quant_bits, guidance, references.len()),
+    );
     let total = seeds.len();
 
-    let mut raw_settings = qwen_edit_raw_settings(
-        request,
-        &repo,
-        steps,
-        quant_bits,
-        guidance,
-        references.len(),
-    );
-    match grouping {
-        Flux2Grouping::Angles => {
-            raw_settings.insert("angleSet".to_owned(), Value::Bool(true));
-        }
-        Flux2Grouping::Poses(_) => {
-            raw_settings.insert("poseLibrary".to_owned(), Value::Bool(true));
-        }
-        Flux2Grouping::Plain => {}
-    }
     // Record the Lightning recipe for telemetry/A-B parity (matches the Python `distillLora`
     // key format `repo/file`); absent on the production multi-step variants.
     if let Some(distill) = &lightning {
@@ -718,45 +753,26 @@ async fn generate_qwen_edit_stream(
         );
     }
 
-    // Identity-likeness scoring (epic 4406, sc-4409 angles / sc-4410 poses / sc-4411 plain
-    // With-Character): generator-agnostic — a Character-Studio angle set, a pose-library set, OR a plain
-    // With-Character generation on Qwen-Edit is scored through the same shared seam as InstantID /
-    // FLUX.2. The Qwen edit path produces the FINAL image directly (no face-restore pass on this lane),
-    // so scoring the generated image scores what the user sees. The PLAIN case (sc-4411) is scored only
-    // when this is a `character_image` job with a character `referenceAssetId` (NOT an `edit_image` job,
-    // whose `Plain` grouping also lands here but carries `sourceAssetId`, not an identity reference).
-    // Stage the antelopev2 face stack (shared bundle, no-op if cached) and capture the source identity
-    // reference + asset id; the `!Send` scorer is built ONCE in the closure and reused across all
-    // outputs. Staging is non-fatal (failure → no scorer → scores omitted, generation still renders).
-    let character_set = matches!(grouping, Flux2Grouping::Angles | Flux2Grouping::Poses(_));
-    // Plain With-Character (sc-4411): a `character_image` job (so NOT an `edit_image`) whose `Plain`
-    // grouping is the general subject-variation case. The scored reference is `references[0]` — for a
-    // character_image job that IS the `referenceAssetId` (first in `flux2_edit_reference_ids`).
-    let plain_with_character =
-        matches!(grouping, Flux2Grouping::Plain) && request.mode == "character_image";
-    let score_likeness = character_set || plain_with_character;
-    let face_stack_dir = if score_likeness {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // Stage the antelopev2 face stack (shared bundle, no-op if cached) and capture the source
+    // identity reference + asset id; the `!Send` scorer is built ONCE in the closure and reused
+    // across all outputs. Staging is non-fatal (failure → no scorer → scores omitted, generation
+    // still renders). The scored reference is `references[0]` — for a character_image job that IS
+    // the `referenceAssetId` (first in `qwen_edit_reference_ids`).
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        score_likeness,
+        "character_image face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     let likeness_source = (score_likeness && face_stack_dir.is_some()).then(|| references[0].clone());
     let likeness_source_ref = reference_ids.first().cloned();
 
-    let (width, height) = (request.width, request.height);
+    // `width`/`height`, `pid_weights`, and `use_pid` were resolved above (ahead of the source pre-fit)
+    // so the PiD output tier could size the effective base; reuse them here for the skeleton + spec.
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
-    // Per-generation PiD decode (epic 7840, sc-7849): Qwen-Image-Edit shares the `qwenimage` latent
-    // space, so route its decode through PiD when `advanced.usePid` is set and the snapshots are
-    // cached; otherwise native VAE. `use_pid` and `spec.pid` stay in lockstep.
-    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model);
-    let use_pid = pid_weights.is_some();
     let mut spec = load_spec(weights_dir, quant, adapters, None);
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);

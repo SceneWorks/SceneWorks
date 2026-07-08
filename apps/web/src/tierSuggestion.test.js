@@ -197,6 +197,30 @@ describe("suggestTier", () => {
     expect(tierFits(lensQ4.variants[0], 48)).toBe(true);
   });
 
+  it("Wan A14B (sc-10042): measured q4 peak fits every Mac; heavier tiers warn only on small hosts", () => {
+    // Real manifest data: sc-10049 MEASURED the q4 video peak at ~24.5 GiB on-device; q8/bf16 are
+    // disk-estimated. A14B is MoE — only ONE 14B expert is resident at a time — so q4's measured peak
+    // sits far below its ~26.7 GiB on-disk size, which is exactly why the old blanket model-level
+    // minMemoryGb 133 (both experts dense) grossly over-warned q4/q8-default users.
+    const wan = matrixModel([
+      { variant: "q4", diskGb: 26.7, peakGb: 24.5 }, // MEASURED peak (not the disk estimate)
+      { variant: "q8", diskGb: 39.8 }, // est 39.8 + 14 = 53.8 GB
+      { variant: "bf16", diskGb: 64.3 }, // est 64.3 + 14 = 78.3 GB
+    ]);
+    const [q4, q8, bf16] = wan.variants;
+    // 128 GB Mac (budget 115.2 GB): every tier fits — matches on-device reality (even bf16 A14B ran).
+    expect(tierFits(q4, 128)).toBe(true);
+    expect(tierFits(q8, 128)).toBe(true);
+    expect(tierFits(bf16, 128)).toBe(true);
+    expect(suggestTier(wan, 128)).toBe("bf16");
+    // 32 GB Mac (budget 28.8 GB): only the measured q4 fits; the heavier tiers are correctly flagged
+    // (this is the per-tier "may exceed memory" the UI now shows, replacing the blanket 133 warning).
+    expect(tierFits(q4, 32)).toBe(true);
+    expect(tierFits(q8, 32)).toBe(false);
+    expect(tierFits(bf16, 32)).toBe(false);
+    expect(suggestTier(wan, 32)).toBe("q4");
+  });
+
   it("falls back to the smallest tier when nothing fits", () => {
     const model = matrixModel([
       { variant: "q4", diskGb: 40 }, // 40 + 14 = 54 GB peak est

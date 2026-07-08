@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -9,14 +8,34 @@ use rusqlite::{
     params, params_from_iter, Connection, OptionalExtension, Row, ToSql, TransactionBehavior,
 };
 use serde::de::DeserializeOwned;
-use serde_json::{json, Map, Number, Value};
+use serde_json::{Map, Number, Value};
 
 use crate::contracts::{
     ContractNumber, JobSnapshot, JobStatus, JobType, ProgressStage, QueueSummary, WorkerCapability,
     WorkerSnapshot, WorkerStatus, WorkerUtilizationSnapshot,
 };
-use crate::store_util::{ensure_column, parse_string_enum};
-use crate::time::{format_unix_seconds, now_unix_seconds, utc_now};
+use crate::store_util::{ensure_column, parse_string_enum, random_hex};
+use crate::time::{format_unix_seconds, now_unix_seconds, parse_utc_seconds, utc_now};
+
+mod routing;
+
+// Re-export the moved routing/gating surface so the store's remaining SQL-coupled dispatch,
+// the `super::*` test modules below, and external consumers keep resolving these names through
+// `jobs_store::` unchanged (sc-8816 — a pure code move, no API change). The dispatch code uses
+// the gaps/mlx/candle predicates directly; the catalog lists are exercised only by the
+// `#[cfg(test)]` routing suites, so that glob is test-gated to stay warning-clean.
+pub(crate) use routing::candle::*;
+#[cfg(test)]
+pub(crate) use routing::catalog::*;
+pub(crate) use routing::gaps::*;
+pub(crate) use routing::mlx::*;
+
+// External re-export surface: `apps/rust-api/src/lib.rs` and the integration test
+// (`tests/jobs_store.rs`) import these already-public items from `jobs_store::` directly.
+pub use routing::catalog::{
+    mac_capabilities, model_mac_support, MacCapabilities, MAC_NOT_AVAILABLE_LABEL,
+};
+pub use routing::gaps::{candle_supported, mac_rust_supported, UnsupportedReason};
 
 pub const ACTIVE_STATUSES: &[&str] = &[
     "preparing",
@@ -28,6 +47,11 @@ pub const ACTIVE_STATUSES: &[&str] = &[
 pub const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "canceled", "interrupted"];
 pub const JOB_STATUSES: &[&str] = &[
     "queued",
+    // Accepted-but-not-yet-claimable: awaiting the API-side async payload rewrite (Ideogram 4
+    // auto-caption, sc-9120) before it becomes `queued`. Deliberately absent from both
+    // ACTIVE_STATUSES and TERMINAL_STATUSES (like `queued`) so the claim SELECT ignores it and
+    // the queue summary counts it as an in-flight, non-terminal job. See JobStatus::PendingCaption.
+    "pending_caption",
     "preparing",
     "downloading",
     "loading_model",
@@ -136,6 +160,10 @@ pub enum JobsStoreError {
     NotJobOwner {
         job_id: String,
     },
+    /// `create_job` was asked to create a job in a status other than the two
+    /// legal pre-worker statuses (`queued` / `pending_caption`), e.g. a
+    /// mid-lifecycle or terminal status. A programmer error, not user input.
+    InvalidInitialStatus(String),
 }
 
 impl std::fmt::Display for JobsStoreError {
@@ -166,6 +194,10 @@ impl std::fmt::Display for JobsStoreError {
                     "Progress rejected: the reporting worker no longer owns job {job_id}."
                 )
             }
+            Self::InvalidInitialStatus(status) => write!(
+                formatter,
+                "A job can only be created in 'queued' or 'pending_caption' status, not '{status}'."
+            ),
         }
     }
 }
@@ -206,12 +238,45 @@ pub struct CreateJob {
     pub source_job_id: Option<String>,
     pub duplicate_of_job_id: Option<String>,
     pub attempts: u32,
+    /// Status the job is created in. `None` means the default `queued` (immediately
+    /// claimable). `Some(JobStatus::PendingCaption)` creates the job NON-claimable so an
+    /// API-side async pre-step (the Ideogram 4 auto-caption, sc-9120) can rewrite its
+    /// payload and promote it to `queued` before any worker sees it. Only `queued` and
+    /// `pending_caption` are valid initial statuses; any other value is rejected so a job
+    /// can't be born mid-lifecycle (e.g. `running`) or terminal.
+    pub initial_status: Option<JobStatus>,
+}
+
+impl CreateJob {
+    /// The initial status string for the insert, defaulting to `queued`. Enforces the
+    /// invariant that a job is only ever born `queued` or `pending_caption` — the two
+    /// pre-worker statuses — so a caller can't inject a mid-lifecycle or terminal status.
+    fn initial_status_str(&self) -> JobsStoreResult<&'static str> {
+        match &self.initial_status {
+            None | Some(JobStatus::Queued) => Ok("queued"),
+            Some(JobStatus::PendingCaption) => Ok("pending_caption"),
+            Some(other) => Err(JobsStoreError::InvalidInitialStatus(
+                other.as_str().to_owned(),
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct DuplicateJob {
     pub payload_changes: Map<String, Value>,
     pub requested_gpu: Option<String>,
+}
+
+/// Outcome of [`JobsStore::promote_pending_caption_job`] (sc-9120). `promoted` is `true` when the
+/// job was still `pending_caption` and this call transitioned it to `queued`; `false` when the
+/// guarded UPDATE matched nothing because the job had already left `pending_caption` (canceled by
+/// the user, or recovered to `queued` on an API restart) — in which case the caller must NOT treat
+/// the caption as having been applied. `job` is the row's current snapshot either way.
+#[derive(Debug, Clone)]
+pub struct PendingCaptionPromotion {
+    pub promoted: bool,
+    pub job: JobSnapshot,
 }
 
 #[derive(Debug, Clone)]
@@ -268,7 +333,7 @@ pub struct ProgressUpdate {
     pub worker_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct StaleSweep {
     pub workers: Vec<WorkerSnapshot>,
     pub jobs: Vec<JobSnapshot>,
@@ -359,6 +424,19 @@ impl JobsStore {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let interrupted = self.list_jobs_by_status_on_connection(&transaction, ACTIVE_STATUSES)?;
+        // A `pending_caption` job (sc-9120) is owned by an API-side background task, not a worker,
+        // so an API restart LOSES its caption watcher — the row would otherwise sit un-claimable
+        // forever (it is not `queued`, so no worker claims it, and it is not an ACTIVE status, so
+        // the interrupt sweep above skips it). RECOVER it instead of failing it: promote it to
+        // `queued` with its ORIGINAL prompt (the payload was never rewritten), so the job still
+        // dispatches and the worker's format-guard + reseed net produces a render. Degrading is
+        // strictly better than interrupting: the user's job survives the restart.
+        let stranded_pending: Vec<JobSnapshot> =
+            self.list_jobs_by_status_on_connection(&transaction, &["pending_caption"])?;
+        let stranded_pending_ids = stranded_pending
+            .iter()
+            .map(|job| job.id.clone())
+            .collect::<Vec<_>>();
         let interrupted_ids = interrupted
             .iter()
             .map(|job| job.id.clone())
@@ -382,11 +460,23 @@ impl JobsStore {
             params![now],
         )?;
         transaction.execute(
+            "
+            update jobs
+               set status = 'queued',
+                   stage = 'queued',
+                   message = 'Waiting for an available worker.',
+                   updated_at = ?1
+             where status = 'pending_caption'
+            ",
+            params![now],
+        )?;
+        transaction.execute(
             "update workers set status = 'offline', current_job_id = null where status != 'offline'",
             [],
         )?;
         let updated_jobs = interrupted_ids
             .iter()
+            .chain(stranded_pending_ids.iter())
             .map(|job_id| self.get_job_on_connection(&transaction, job_id))
             .collect::<JobsStoreResult<Vec<_>>>()?;
         transaction.commit()?;
@@ -419,13 +509,113 @@ impl JobsStore {
         Ok(job)
     }
 
+    /// Promote a `pending_caption` job to `queued`, optionally rewriting its payload first
+    /// (sc-9120). This is the ONE method that patches a created job's payload: the Ideogram 4
+    /// auto-caption background task calls it with `Some(new_payload)` once the magic-prompt
+    /// expansion lands (rewriting `payload.prompt` to the rich caption), or with `None` to
+    /// degrade the job to `queued` with its original prompt when the expansion is
+    /// unavailable/times out — either way the job becomes claimable and the worker's
+    /// format-guard + reseed net remains the fallback.
+    ///
+    /// Race-free by construction: it runs under `BEGIN IMMEDIATE` and the UPDATE is guarded by
+    /// `status = 'pending_caption'`, so if the job was canceled (→ `canceled`) or already
+    /// recovered on a restart (→ `queued`) in the meantime, the UPDATE matches zero rows and the
+    /// method reports `promoted = false` WITHOUT clobbering the newer status. The returned
+    /// snapshot always reflects the row's current state.
+    ///
+    /// `new_payload` fully REPLACES the stored payload (the caller reads the current payload,
+    /// rewrites `prompt`, and passes the whole object back), matching how `retry`/`duplicate`
+    /// carry a full payload — there is no partial-merge ambiguity.
+    pub fn promote_pending_caption_job(
+        &self,
+        job_id: &str,
+        new_payload: Option<Map<String, Value>>,
+    ) -> JobsStoreResult<PendingCaptionPromotion> {
+        let _guard = self.lock.lock();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = utc_now();
+        let affected = match new_payload {
+            Some(payload) => transaction.execute(
+                "
+                update jobs
+                   set payload_json = ?1,
+                       status = 'queued',
+                       stage = 'queued',
+                       message = 'Waiting for an available worker.',
+                       updated_at = ?2
+                 where id = ?3 and status = 'pending_caption'
+                ",
+                params![dumps(&payload)?, now, job_id],
+            )?,
+            None => transaction.execute(
+                "
+                update jobs
+                   set status = 'queued',
+                       stage = 'queued',
+                       message = 'Waiting for an available worker.',
+                       updated_at = ?1
+                 where id = ?2 and status = 'pending_caption'
+                ",
+                params![now, job_id],
+            )?,
+        };
+        let job = self.get_job_on_connection(&transaction, job_id)?;
+        transaction.commit()?;
+        Ok(PendingCaptionPromotion {
+            promoted: affected > 0,
+            job,
+        })
+    }
+
+    /// Find an in-flight (non-terminal) `prompt_refine` job whose payload matches the given
+    /// `prompt` + `aspect_ratio`, so a repeated Ideogram auto-caption (an impatient client
+    /// re-POSTing the same image job) can REUSE an already-running magic-prompt expansion instead
+    /// of stacking a fresh refine job every time (sc-9120 acceptance: retries can't pile up
+    /// unbounded refine jobs). Returns the newest such job, or `None` when none is in flight.
+    ///
+    /// Read-only single-SELECT: no write mutex, relies on WAL reader isolation like `list_jobs`
+    /// (sc-8950 / F-148). Matching is by the expander's two inputs — the raw `prompt` and the
+    /// reduced `aspectRatio` label — which are exactly what `enqueue_magic_prompt_job` writes, so
+    /// two requests that would produce the same expansion collapse onto one refine job.
+    pub fn find_reusable_prompt_refine_job(
+        &self,
+        prompt: &str,
+        aspect_ratio: &str,
+    ) -> JobsStoreResult<Option<JobSnapshot>> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(&format!(
+            "
+            select * from jobs
+             where type = 'prompt_refine'
+               and status not in ({terminal})
+             order by created_at desc
+            ",
+            terminal = terminal_statuses_sql()
+        ))?;
+        let candidates = collect_jobs(statement.query_map([], row_to_job)?)?;
+        Ok(candidates.into_iter().find(|job| {
+            let payload = &job.payload;
+            payload.get("task").and_then(Value::as_str) == Some("magic_prompt")
+                && payload.get("prompt").and_then(Value::as_str) == Some(prompt)
+                && payload.get("aspectRatio").and_then(Value::as_str) == Some(aspect_ratio)
+        }))
+    }
+
     pub fn list_jobs(
         &self,
         project_id: Option<&str>,
         status: Option<&str>,
         limit: u32,
     ) -> JobsStoreResult<Vec<JobSnapshot>> {
-        let _guard = self.lock.lock();
+        // Read-only, single-SELECT method: it deliberately does NOT take the
+        // process-wide write mutex (sc-8950 / F-148). connect() runs in WAL mode
+        // (see `connect`), where a reader takes a consistent snapshot and runs
+        // concurrently with an in-flight writer instead of blocking on it. The
+        // mutex exists only to serialize WRITES across our own connections; a
+        // pure read never mutates and never needs it, so keeping it here would
+        // pointlessly stall list/get/summary traffic behind every claim or
+        // progress update. All mutating methods still hold the mutex.
         let connection = self.connect()?;
         let limit = limit.clamp(1, 500);
         let mut conditions: Vec<&str> = Vec::new();
@@ -452,7 +642,8 @@ impl JobsStore {
     }
 
     pub fn get_job(&self, job_id: &str) -> JobsStoreResult<JobSnapshot> {
-        let _guard = self.lock.lock();
+        // Read-only single-SELECT: no write mutex, relies on WAL reader isolation
+        // (sc-8950 / F-148 — see list_jobs for the full rationale).
         let connection = self.connect()?;
         self.get_job_on_connection(&connection, job_id)
     }
@@ -467,7 +658,13 @@ impl JobsStore {
         }
 
         let now = utc_now();
-        if job.status == JobStatus::Queued {
+        // A `queued` OR `pending_caption` job has no worker to acknowledge the cancel, so it
+        // goes straight to terminal `canceled` here. `pending_caption` (sc-9120) shares this
+        // fast path: no worker owns it, and its background caption watcher promotes only a row
+        // that is STILL `pending_caption` (a race-free guarded UPDATE), so it can't resurrect a
+        // just-canceled job. Any active (worker-owned) status falls to the cooperative branch
+        // below that requests acknowledgement.
+        if job.status == JobStatus::Queued || job.status == JobStatus::PendingCaption {
             transaction.execute(
                 "
                 update jobs
@@ -523,6 +720,10 @@ impl JobsStore {
                 source_job_id: Some(job.id),
                 duplicate_of_job_id: None,
                 attempts: job.attempts + 1,
+                // A retry re-enters the queue claimable: its payload is whatever the original
+                // ran with (already caption-rewritten if it was an Ideogram auto-caption job),
+                // so it never re-enters `pending_caption` (sc-9120).
+                initial_status: None,
             },
             None,
         )?;
@@ -552,6 +753,9 @@ impl JobsStore {
                 source_job_id: None,
                 duplicate_of_job_id: Some(job.id),
                 attempts: 1,
+                // A duplicate copies the (already-rewritten) payload and re-enters the queue
+                // claimable — never `pending_caption` (sc-9120).
+                initial_status: None,
             },
             None,
         )?;
@@ -649,9 +853,19 @@ impl JobsStore {
             ],
         )?;
         if let Some(job_id) = request.current_job_id {
+            // Verify ownership before letting a heartbeat refresh the job's
+            // liveness timestamps (sc-8873 / F-071). The progress path was
+            // hardened this way in sc-4172, but the heartbeat wasn't: a stale
+            // worker still heartbeating an old `current_job_id` it no longer
+            // owns (the job was swept to `interrupted` — worker_id cleared — or
+            // reclaimed by another worker) would keep bumping last_heartbeat_at,
+            // masking the job as alive and blocking the time-based stale sweep
+            // from ever reclaiming it. Scoping the UPDATE to the reporting
+            // worker's own rows means a non-owning heartbeat is a silent no-op.
             transaction.execute(
-                "update jobs set last_heartbeat_at = ?1, updated_at = ?1 where id = ?2",
-                params![now, job_id],
+                "update jobs set last_heartbeat_at = ?1, updated_at = ?1 \
+                 where id = ?2 and worker_id = ?3",
+                params![now, job_id, request.worker_id],
             )?;
         }
         let worker = self.get_worker_on_connection(&transaction, &request.worker_id)?;
@@ -1359,7 +1573,8 @@ impl JobsStore {
     }
 
     pub fn list_workers(&self) -> JobsStoreResult<Vec<WorkerSnapshot>> {
-        let _guard = self.lock.lock();
+        // Read-only single-SELECT: no write mutex, relies on WAL reader isolation
+        // (sc-8950 / F-148 — see list_jobs for the full rationale).
         let connection = self.connect()?;
         let mut statement = connection.prepare("select * from workers order by gpu_id, id")?;
         let workers = collect_workers(statement.query_map([], row_to_worker)?)?;
@@ -1367,16 +1582,23 @@ impl JobsStore {
     }
 
     pub fn get_worker(&self, worker_id: &str) -> JobsStoreResult<WorkerSnapshot> {
-        let _guard = self.lock.lock();
+        // Read-only single-SELECT: no write mutex, relies on WAL reader isolation
+        // (sc-8950 / F-148 — see list_jobs for the full rationale).
         let connection = self.connect()?;
         self.get_worker_on_connection(&connection, worker_id)
     }
 
     pub fn queue_summary(&self) -> JobsStoreResult<QueueSummary> {
-        // list_workers takes the store lock itself, so resolve it before we take
-        // the lock below to avoid a nested (potential self-deadlock) acquisition.
+        // Read-only aggregate: several SELECTs (per-status counts + active jobs +
+        // workers), no writes, so it takes NO write mutex and relies on WAL
+        // reader isolation like the other reads (sc-8950 / F-148). The counts and
+        // active-jobs queries run on one connection and list_workers opens its
+        // own; a writer committing between them can only make the snapshot a hair
+        // fresher, never inconsistent for the operator's queue view. (Before
+        // sc-8950 this method took the mutex and had to hoist list_workers out
+        // first to dodge a self-deadlock on the non-reentrant mutex; dropping the
+        // mutex removes that hazard entirely.)
         let workers = self.list_workers()?;
-        let _guard = self.lock.lock();
         let connection = self.connect()?;
 
         // Per-status counts over the WHOLE table — never a capped/newest-N sample.
@@ -1474,11 +1696,25 @@ impl JobsStore {
         let job_id = match job_id {
             Some(job_id) => job_id,
             None => {
-                let job_hex: String =
-                    connection
-                        .query_row("select lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+                // sc-4209 / sc-8888 (F-086): pull the id from the OS CSPRNG via the
+                // shared `random_hex` helper instead of a per-call SQLite
+                // `hex(randomblob(16))`, which turned id generation into a SQLite
+                // failure surface. `random_hex` fails only if the OS CSPRNG does;
+                // fold that into `Io` so the caller's error type is unchanged.
+                let job_hex = random_hex(16).map_err(|error| {
+                    JobsStoreError::Io(std::io::Error::other(error.to_string()))
+                })?;
                 format!("job_{job_hex}")
             }
+        };
+        // A job is born either `queued` (immediately claimable) or, for an API-side async
+        // pre-step, `pending_caption` (sc-9120) — status and stage move in lockstep, and the
+        // waiting message reflects which gate the job is behind so the queue view reads
+        // correctly before a worker (or the background rewrite) ever touches it.
+        let initial_status = request.initial_status_str()?;
+        let initial_message = match initial_status {
+            "pending_caption" => "Preparing the prompt before dispatch.",
+            _ => "Waiting for an available worker.",
         };
         connection.execute(
             "
@@ -1486,7 +1722,7 @@ impl JobsStore {
               id, type, status, project_id, project_name, payload_json, result_json,
               requested_gpu, progress, stage, message, attempts, source_job_id,
               duplicate_of_job_id, created_at, updated_at
-            ) values (?1, ?2, 'queued', ?3, ?4, ?5, '{}', ?6, 0, 'queued', ?7, ?8, ?9, ?10, ?11, ?11)
+            ) values (?1, ?2, ?12, ?3, ?4, ?5, '{}', ?6, 0, ?12, ?7, ?8, ?9, ?10, ?11, ?11)
             ",
             params![
                 job_id,
@@ -1495,11 +1731,12 @@ impl JobsStore {
                 request.project_name,
                 dumps(&request.payload)?,
                 requested_gpu,
-                "Waiting for an available worker.",
+                initial_message,
                 request.attempts,
                 request.source_job_id,
                 request.duplicate_of_job_id,
                 now,
+                initial_status,
             ],
         )?;
         self.get_job_on_connection(connection, &job_id)
@@ -1510,13 +1747,29 @@ impl JobsStore {
         connection: &Connection,
         statuses: &[&str],
     ) -> JobsStoreResult<Vec<JobSnapshot>> {
-        let mut jobs = Vec::new();
-        for status in statuses {
-            let mut statement = connection.prepare("select * from jobs where status = ?1")?;
-            jobs.extend(collect_jobs(
-                statement.query_map(params![status], row_to_job)?,
-            )?);
+        // One prepared statement + one table scan instead of preparing and
+        // executing `where status = ?` once per status (sc-8896 / F-094). The
+        // status list is quoted from the caller-provided `&[&str]` — always
+        // crate constants (e.g. ACTIVE_STATUSES), never user input — so direct
+        // interpolation is safe, matching active_statuses_sql()'s rationale.
+        // The old per-status loop returned rows grouped by status in the input
+        // order with no intra-group ordering; the single caller
+        // (mark_interrupted_on_startup) uses only the ids, so ordering is not
+        // load-bearing. We add an explicit `order by created_at desc` anyway to
+        // make the result deterministic and consistent with list_jobs/queue
+        // reads rather than leaving it to SQLite's unspecified row order.
+        if statuses.is_empty() {
+            return Ok(Vec::new());
         }
+        let status_list = statuses
+            .iter()
+            .map(|status| format!("'{status}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement = connection.prepare(&format!(
+            "select * from jobs where status in ({status_list}) order by created_at desc"
+        ))?;
+        let jobs = collect_jobs(statement.query_map([], row_to_job)?)?;
         Ok(jobs)
     }
 
@@ -1932,58 +2185,6 @@ fn elapsed_seconds(started_at: &str, completed_at: Option<&str>) -> Option<Contr
     Some(Number::from(seconds))
 }
 
-fn parse_utc_seconds(value: &str) -> Option<i64> {
-    if value.len() < 20 {
-        return None;
-    }
-    let year = value.get(0..4)?.parse::<i32>().ok()?;
-    let month = value.get(5..7)?.parse::<u32>().ok()?;
-    let day = value.get(8..10)?.parse::<u32>().ok()?;
-    let hour = value.get(11..13)?.parse::<i64>().ok()?;
-    let minute = value.get(14..16)?.parse::<i64>().ok()?;
-    let second = value.get(17..19)?.parse::<i64>().ok()?;
-    let suffix = value.get(19..)?;
-    if value.get(4..5)? != "-"
-        || value.get(7..8)? != "-"
-        || value.get(10..11)? != "T"
-        || value.get(13..14)? != ":"
-        || value.get(16..17)? != ":"
-        || month == 0
-        || month > 12
-        || day == 0
-        || day > 31
-        || hour > 23
-        || minute > 59
-        || second > 59
-    {
-        return None;
-    }
-    if suffix != "Z" {
-        if !suffix.starts_with('.') || !suffix.ends_with('Z') {
-            return None;
-        }
-        if !suffix[1..suffix.len() - 1]
-            .chars()
-            .all(|character| character.is_ascii_digit())
-        {
-            return None;
-        }
-    }
-    Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
-}
-
-fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let adjusted_year = i64::from(year) - i64::from(month <= 2);
-    let era = adjusted_year.div_euclid(400);
-    let year_of_era = adjusted_year - era * 400;
-    let month = i64::from(month);
-    let day = i64::from(day);
-    let month_prime = month + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
-}
-
 fn is_active_status(status: &str) -> bool {
     ACTIVE_STATUSES.contains(&status)
 }
@@ -2040,1190 +2241,6 @@ impl RouteDecision {
             reason,
         }
     }
-}
-
-/// True when *any* MLX-routing predicate (image/detail, video, or training) claims this
-/// job — the union an `mlx` worker would want. Used both to classify a claim for routing
-/// observability (sc-3449) and to identify the jobs the macOS grace sweep must fail when
-/// no `mlx` worker is alive (sc-3483).
-fn job_is_any_mlx_eligible(job: &JobSnapshot) -> bool {
-    job_is_mlx_eligible(job)
-        || video_job_is_mlx_eligible(job)
-        || video_upscale_job_is_mlx_eligible(job)
-        || training_job_is_mlx_eligible(job)
-        || caption_job_is_mlx_eligible(job)
-        || understanding_job_is_mlx_eligible(job)
-}
-
-/// True when *any* candle-routing predicate (image, video, image/video upscale, caption,
-/// understanding, training) claims this job — the union a candle (Windows/CUDA) worker would want,
-/// the off-Mac twin of [`job_is_any_mlx_eligible`] (sc-5502, epic 5483). Used to identify the jobs
-/// the Phase-7 candle grace sweep must fail when no live candle worker is alive
-/// ([`JobsStore::fail_stranded_candle_jobs`]). Deliberately excludes the unsupported-pose shapes
-/// the candle worker only *owns to reject* ([`image_job_candle_pose_reject`]) — those are gaps,
-/// not served, so they must strand/enforce-fail rather than wait for a candle worker. Training
-/// (sc-7817) is included only for the candle-trainable kernels; the rest stay on the torch worker.
-fn job_is_any_candle_eligible(job: &JobSnapshot) -> bool {
-    image_job_is_candle_eligible(job)
-        || video_job_is_candle_eligible(job)
-        || upscale_job_is_candle_eligible(job)
-        || video_upscale_job_is_candle_eligible(job)
-        || caption_job_is_mlx_eligible(job)
-        || understanding_job_is_mlx_eligible(job)
-        || training_job_is_candle_eligible(job)
-}
-
-/// Actionable terminal error for an MLX-eligible job stranded on macOS with no live `mlx`
-/// worker (sc-3483). Names the model + job type so the job card and the System → Logs
-/// surface point at the real gap, never a generic failure. Prefixed `mlx_unavailable:` so
-/// the cause is greppable in logs and distinguishable from `mlx_unsupported` (sc-3484).
-fn mlx_unavailable_error(job: &JobSnapshot, grace_seconds: u64) -> String {
-    let model = job
-        .payload
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or("(unknown)");
-    format!(
-        "mlx_unavailable: the MLX GPU worker is required on macOS but no live worker \
-         claimed this job within {grace_seconds}s (model={model}, type={job_type}). There \
-         is no fallback worker on Mac — check System → Logs and confirm the MLX \
-         worker is running.",
-        job_type = job.job_type.as_str()
-    )
-}
-
-/// Actionable terminal error for a candle-eligible job stranded off-Mac with no live candle
-/// (CUDA) worker (sc-5502, epic 5483) — the Windows/Linux twin of [`mlx_unavailable_error`].
-/// Names the model + job type and is prefixed `candle_unavailable:` so the cause is greppable in
-/// logs and distinguishable from `candle_unsupported`.
-fn candle_unavailable_error(job: &JobSnapshot, grace_seconds: u64) -> String {
-    let model = job
-        .payload
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or("(unknown)");
-    format!(
-        "candle_unavailable: the candle GPU worker is required off-Mac but no live worker \
-         claimed this job within {grace_seconds}s (model={model}, type={job_type}). There is no \
-         fallback worker on this deployment — check System → Logs and confirm the \
-         candle worker is running.",
-        job_type = job.job_type.as_str()
-    )
-}
-
-/// Human, actionable terminal error attributing a worker's abnormal death to its
-/// terminating signal or non-zero exit code (sc-4881 signals; sc-6320 non-signal
-/// exits). Signal 9 (an uncatchable SIGKILL — almost always an OS memory-pressure
-/// OOM kill) carries a remediation hint tailored to the dead job's kind (sc-5567):
-/// training points at gradient checkpointing (the sc-4874 first-step OOM),
-/// image/video generation at the knobs that actually shrink the working set (batch
-/// count, resolution, frame count). Other uncatchable deaths (SIGABRT GPU/Metal
-/// abort, SIGSEGV) name themselves. A non-signal non-zero exit is a self-terminated
-/// process — exit code 101 is the Rust panic code and self-names; other codes report
-/// the raw code — so the job card and System → Logs show a real cause instead of a
-/// frozen progress bar. A signal takes precedence when both are somehow present.
-/// `job_type` is the failed job's kind when one was active (`None` when the worker
-/// died idle).
-fn termination_failure_error(
-    signal: Option<i32>,
-    exit_code: Option<i32>,
-    job_type: Option<&JobType>,
-) -> String {
-    if let Some(signal) = signal {
-        let hint = match signal {
-            9 => oom_remediation_hint(job_type),
-            6 => ", likely a GPU/Metal command-buffer abort or assertion",
-            11 => " (segmentation fault)",
-            _ => "",
-        };
-        return match signal_name(signal) {
-            Some(name) => format!("Worker terminated by signal {signal} ({name}){hint}."),
-            None => format!("Worker terminated by signal {signal}{hint}."),
-        };
-    }
-    match exit_code {
-        // 101 is the Rust panic exit code — a panic that unwound to a process exit
-        // rather than aborting on a signal. Name it so the cause is unmistakable.
-        Some(101) => "Worker process panicked and exited (code 101). \
-                      Check System → Logs for the panic message."
-            .to_owned(),
-        Some(code) => format!(
-            "Worker process exited unexpectedly (code {code}). Check System → Logs for the cause."
-        ),
-        // Defensive: the supervisor only calls this for an abnormal exit (a signal
-        // or a non-zero code), so neither-present shouldn't reach here — report it
-        // generically rather than fabricate a signal or code.
-        None => {
-            "Worker process terminated unexpectedly. Check System → Logs for the cause.".to_owned()
-        }
-    }
-}
-
-/// Signal-9 (SIGKILL/OOM) remediation hint keyed to the dead job's kind so the guidance
-/// is actionable rather than training-centric (sc-5567). The `_` arm covers the long tail
-/// of non-generation job types (and is required anyway — `JobType` is `#[non_exhaustive]`).
-fn oom_remediation_hint(job_type: Option<&JobType>) -> &'static str {
-    match job_type {
-        // LoRA training: the sc-4874 first-training-step OOM — gradient checkpointing is
-        // the real lever; resolution is secondary.
-        Some(JobType::LoraTrain) => {
-            ", likely out-of-memory during the first training step \
-             — enable Gradient Checkpointing or reduce resolution"
-        }
-        // Video generation/edit: working set scales with resolution AND frame count.
-        Some(
-            JobType::VideoGenerate
-            | JobType::VideoExtend
-            | JobType::VideoBridge
-            | JobType::VideoUpscale
-            | JobType::PersonReplace,
-        ) => ", likely out-of-memory — reduce the resolution, frame count, or batch count",
-        // Image generation/edit: a multi-image batch stacks per-image working set — count
-        // is the first knob, then resolution (sc-5567).
-        Some(
-            JobType::ImageGenerate
-            | JobType::ImageEdit
-            | JobType::ImageUpscale
-            | JobType::ImageDetail
-            | JobType::ImageSegment
-            | JobType::ImageVqa
-            | JobType::ImageInterleave,
-        ) => ", likely out-of-memory — reduce the image count or resolution",
-        _ => ", likely out-of-memory — reduce the resolution or batch count",
-    }
-}
-
-/// Conventional name for the common terminating signals we attribute (sc-4881).
-fn signal_name(signal: i32) -> Option<&'static str> {
-    Some(match signal {
-        1 => "SIGHUP",
-        2 => "SIGINT",
-        6 => "SIGABRT",
-        9 => "SIGKILL",
-        11 => "SIGSEGV",
-        15 => "SIGTERM",
-        _ => return None,
-    })
-}
-
-/// Why the Rust/MLX flow can't run a job on macOS (epic 3482 / sc-3484) — the inverse of the
-/// `*_mlx_eligible` predicates, extended across every job type. Feature-precise so the
-/// `mlx_unsupported` Logs event + the gap inventory name the exact surface to port or drop.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UnsupportedReason {
-    /// Model id involved, when the gap is model-specific (e.g. "kolors", "qwen_image").
-    pub model: Option<String>,
-    /// The specific capability that isn't in the Rust/MLX flow (e.g. "strict-pose ControlNet",
-    /// "third-party LyCORIS LoRA", "image_upscale (Real-ESRGAN)").
-    pub feature: String,
-    /// Actionable human-readable explanation.
-    pub detail: String,
-    /// Closing story/epic ("epic 3401", "sc-3489"), `"drop-candidate"`, or `None` when not yet
-    /// triaged — the roadmap pointer. "where known" per the story.
-    pub suggested_epic: Option<String>,
-}
-
-impl UnsupportedReason {
-    fn new(model: Option<&str>, feature: &str, detail: &str, suggested_epic: Option<&str>) -> Self {
-        Self {
-            model: model.map(str::to_owned),
-            feature: feature.to_owned(),
-            detail: detail.to_owned(),
-            suggested_epic: suggested_epic.map(str::to_owned),
-        }
-    }
-
-    /// Terminal job error for an enforced `mlx_unsupported` failure (sc-3484): greppable
-    /// prefix, names feature + model + roadmap pointer.
-    pub fn error_message(&self) -> String {
-        let model = self
-            .model
-            .as_deref()
-            .map(|m| format!(" ({m})"))
-            .unwrap_or_default();
-        let pointer = self
-            .suggested_epic
-            .as_deref()
-            .map(|epic| format!(" [{epic}]"))
-            .unwrap_or_default();
-        format!(
-            "mlx_unsupported: {feature}{model} is not in the Rust/MLX flow on macOS — {detail}{pointer}",
-            feature = self.feature,
-            detail = self.detail,
-        )
-    }
-
-    /// Terminal job error for an enforced `candle_unsupported` failure (sc-5502, epic 5483) — the
-    /// off-Mac twin of [`Self::error_message`]: same feature/model/detail/pointer, a candle-flavored
-    /// prefix and flow name so the two backends' gap events are independently greppable.
-    pub fn candle_error_message(&self) -> String {
-        let model = self
-            .model
-            .as_deref()
-            .map(|m| format!(" ({m})"))
-            .unwrap_or_default();
-        let pointer = self
-            .suggested_epic
-            .as_deref()
-            .map(|epic| format!(" [{epic}]"))
-            .unwrap_or_default();
-        format!(
-            "candle_unsupported: {feature}{model} is not in the candle/CUDA flow off-Mac — {detail}{pointer}",
-            feature = self.feature,
-            detail = self.detail,
-        )
-    }
-}
-
-/// macOS "can the Rust/MLX flow run this?" oracle (sc-3484). `Ok(())` = the in-process mlx
-/// worker — or an MLX-agnostic in-process path (downloads, ffmpeg, prompt refine) — runs it
-/// with no Python torch dependency. `Err` names the exact Python-torch gap. This is the epic's
-/// *forcing function*: under mlx-required **enforce** mode an `Err` job fails terminal with
-/// `mlx_unsupported`, and the set of `Err`s IS the port-or-drop roadmap. Consistent with
-/// routing by construction — anything `job_is_any_mlx_eligible` accepts is `Ok`.
-pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
-    if job_is_any_mlx_eligible(job) {
-        return Ok(());
-    }
-    let model = job.payload.get("model").and_then(Value::as_str);
-    match job.job_type {
-        // In-process macOS job types with no Python torch dependency: MLX-agnostic metadata/utility
-        // work + ffmpeg, plus prompt refine — now served by the native MLX `prompt_refine` TextLlm
-        // provider (sc-5552, the mlx twin of the candle sc-5525 cutover), so the worker advertises +
-        // claims it and this `Ok` is backed by a real capability (no longer the pre-sc-5552 strand).
-        JobType::Placeholder
-        | JobType::ModelDownload
-        | JobType::ModelImport
-        | JobType::LoraImport
-        | JobType::LoraDownload
-        | JobType::FrameExtract
-        | JobType::TimelineExport
-        | JobType::PromptRefine
-        // sc-6535: dataset_analysis is a native Rust/MLX job (the CLIP image embedder), not a
-        // Python-torch gap — so it's `Ok` here. Its real capability is gated by the worker's
-        // advertisement once `mlx-gen-clip` is linked; until then it queues, never enforce-fails.
-        | JobType::DatasetAnalysis
-        // sc-6539: dataset_upscale runs the Real-ESRGAN ONNX engine natively in the Rust worker
-        // (the same engine as image_upscale) — not a Python-torch gap. Its real availability is the
-        // worker's capability advertisement, so it queues rather than enforce-fails here.
-        | JobType::DatasetUpscale
-        // sc-6538: dataset_face_analysis runs the native SCRFD+ArcFace stack (mlx-gen-face) in the Rust
-        // worker — not a Python-torch gap. Gated by the worker's capability advertisement, so it queues
-        // rather than enforce-fails here.
-        | JobType::DatasetFaceAnalysis
-        // sc-4415: face_likeness_compare runs the same native SCRFD+ArcFace stack to score two existing
-        // assets on demand — a native Rust/MLX job, not a Python-torch gap. Gated by the worker's
-        // capability advertisement, so it queues rather than enforce-fails here.
-        | JobType::FaceLikenessCompare => Ok(()),
-
-        // Forward-compat: an unrecognized job type isn't a known Python-torch gap, so don't
-        // enforce-fail it (it would otherwise break a newer job type this build doesn't model).
-        JobType::Unknown(_) => Ok(()),
-
-        JobType::ImageGenerate | JobType::ImageEdit => Err(classify_image_gap(&job.payload)),
-
-        JobType::ImageDetail => Err(UnsupportedReason::new(
-            model,
-            "non-SDXL tile-detail refine",
-            "image_detail is ported to MLX only for the SDXL/RealVisXL backbones (sc-3060); other models / third-party LyCORIS are not available in the native flow on Mac.",
-            Some("epic 3041"),
-        )),
-
-        // SenseNova-U1 VQA + Document-Studio interleave are ported to the Rust MLX worker
-        // (sc-3905, via the concrete `T2iModel` — the `Generator` contract can't express
-        // text / text+image output); eligible jobs early-return `Ok` above. This arm is
-        // reached only for an understanding job on a model with no in-process path.
-        JobType::ImageVqa | JobType::ImageInterleave => Err(UnsupportedReason::new(
-            model,
-            "image understanding / interleave on this model",
-            "image VQA / interleaved generation runs on MLX for the SenseNova-U1 model (sensenova_u1_8b[_fast]); other models have no in-process understanding path and are not available in the native flow on Mac.",
-            Some("epic 3180"),
-        )),
-
-        JobType::VideoGenerate => Err(classify_video_gap(&job.payload)),
-
-        // Reached only for ineligible extend/bridge jobs (the eligible LTX IC-LoRA path + the Wan
-        // TI2V-5B boundary-keyframe path early-return `Ok` via `job_is_any_mlx_eligible`). The
-        // remaining gap is an engine with no in-context / keyframe path: the 14B Wan MoE engines
-        // and any non-MLX video model (sc-3522 / sc-3357).
-        JobType::VideoExtend | JobType::VideoBridge => Err(UnsupportedReason::new(
-            model,
-            "extend / bridge on this engine",
-            "extend_clip / video_bridge run on MLX on the LTX IC-LoRA path (ltx_2_3 / ltx_2_3_eros) \
-             and Wan TI2V-5B (wan_2_2, single-frame boundary keyframe conditioning); other engines \
-             (the 14B Wan MoE) have no keyframe path, so they are not available in the native flow on Mac.",
-            Some("epic 3040"),
-        )),
-
-        // replace_person → native Wan-VACE (the replace-capable models) or native SCAIL-2
-        // (scail2_14b, sc-5452) is MLX-eligible (handled by the early `job_is_any_mlx_eligible` Ok
-        // above). This arm is only reached for a replace_person job on a model with no MLX video
-        // engine — that stays torch.
-        JobType::PersonReplace => Err(UnsupportedReason::new(
-            model,
-            "replace_person",
-            "person replacement runs on native Wan-VACE (the replace-capable MLX video models) or native SCAIL-2 (scail2_14b); this model has no MLX video engine, so it is not available in the native flow on Mac.",
-            Some("epic 3040"),
-        )),
-
-        // Person detection + tracking are now ported to the Rust worker (epic 3482,
-        // sc-3488): native-MLX YOLO11 detection (sc-3633), SORT/ByteTrack track assembly
-        // (sc-3634), and SAM2 per-frame segmentation (sc-3709) all run in-process on the
-        // macOS MLX worker, so the Replace-Person detect → track → mask flow is
-        // Python-free. (replace_person end-to-end still needs the video-gen/inpaint half,
-        // a tracked torch gap on `PersonReplace` below — epic 3040.)
-        JobType::PersonDetect | JobType::PersonTrack => Ok(()),
-
-        // DWPose pose detection is now ported to the Rust worker (sc-3487): RTMW
-        // whole-body via `ort`/CoreML on the macOS MLX worker, so the Pose Library
-        // "create from photo" flow + InstantID pose conditioning run Python-free.
-        JobType::PoseDetect => Ok(()),
-
-        // SCRFD 5-point landmark extraction is native-MLX on the Rust worker (sc-4433,
-        // epic 4422): the same SCRFD detector the InstantID face stack already runs
-        // in-process, so the Key Point Library "extract kps from this image" flow is
-        // Python-free on Mac.
-        JobType::KpsExtract => Ok(()),
-
-        // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt
-        // segmentation runs in-process on the macOS Rust worker (the box-PVS path of the
-        // sc-4926 SAM3 stack — `segment_jobs::run_image_segment_job`), so the Image Editor
-        // smart-select tool is Python-free on Mac. Mac-only by construction: the capability
-        // is advertised only by `mlx_gpu`, so no torch/candle worker ever claims it.
-        JobType::ImageSegment => Ok(()),
-
-        // Real-ESRGAN image upscaling is ported to the Rust worker (sc-3489) and SeedVR2 (the
-        // native-MLX one-step diffusion upscaler, epic 4811 / sc-4815) runs in-process via
-        // `mlx-gen-seedvr2`, so the upscale tool runs Python-free. The AuraSR engine (`aura-sr`,
-        // a 617M-param torch-only GigaGAN) was DROPPED on Mac after the sc-3668 port-or-drop
-        // spike (no viable Rust path; only a marginal, ~35-50x-slower quality difference vs
-        // Real-ESRGAN x4) and is now dropped as an offered engine off-Mac too (sc-5499 — the
-        // Python torch backend that served it is retired in Phase 7). The UI hides the AuraSR
-        // engine option on every platform, so this Err is a defensive submit-time guard.
-        JobType::ImageUpscale => {
-            if upscale_job_is_mlx_eligible(job) {
-                Ok(())
-            } else {
-                Err(UnsupportedReason::new(
-                    model,
-                    "image_upscale (AuraSR)",
-                    "the Rust upscaler runs Real-ESRGAN (+ SeedVR2); the AuraSR engine is dropped as an offered engine (sc-3668 / sc-5499).",
-                    Some("sc-5499"),
-                ))
-            }
-        }
-
-        // Video upscaling is net-new on Mac (epic 4811 / sc-4816): the native-MLX SeedVR2
-        // engine is the only path (there is no torch video upscaler), so a SeedVR2 job is
-        // supported and anything else has no in-process engine. Eligible jobs early-return
-        // `Ok` above via `job_is_any_mlx_eligible`; this arm is the defensive guard.
-        JobType::VideoUpscale => {
-            if video_upscale_job_is_mlx_eligible(job) {
-                Ok(())
-            } else {
-                Err(UnsupportedReason::new(
-                    model,
-                    "video_upscale (non-SeedVR2 engine)",
-                    "video upscaling runs on the native-MLX SeedVR2 engine (seedvr2); no other engine is available.",
-                    Some("epic 4811"),
-                ))
-            }
-        }
-
-        JobType::ModelConvert => classify_convert_gap(&job.payload),
-
-        JobType::LoraTrain => Err(classify_training_gap(&job.payload)),
-
-        JobType::TrainingCaption => Err(UnsupportedReason::new(
-            None,
-            "dataset captioning",
-            "this dataset captioning job is not in the Rust/MLX JoyCaption flow.",
-            Some("sc-3556"),
-        )),
-    }
-}
-
-/// Off-Mac "can the candle/CUDA flow run this?" oracle (sc-5502, epic 5483) — the Windows/Linux
-/// twin of [`mac_rust_supported`]. `Ok(())` = the candle worker (or an MLX-agnostic in-process
-/// Rust path: downloads, ffmpeg, prompt refine — sc-5525) runs it with zero torch; `Err` names the
-/// exact torch gap. Under `candle_required` **enforce** an `Err` job fails terminal with
-/// `candle_unsupported`, so the set of `Err`s is the off-Mac port-or-drop roadmap. Consistent with
-/// routing by construction — anything [`job_is_any_candle_eligible`] accepts is `Ok`.
-///
-/// **Scope (this slice):** biased toward `Ok` exactly like the MLX oracle ("never over-gate a
-/// valid combination"). It enforce-fails only the **generation** gaps that have crisp candle
-/// eligibility predicates — the shapes that would otherwise silently mis-serve as an unconditioned
-/// torch T2I (the sc-5968 concern, generalized from poses to the whole image/video surface). The
-/// CV-aux / segment / detail / training / convert / infra job types route by capability and their
-/// candle parity is still landing (Phase 5, epic 5482; the training cutover); they stay `Ok` here
-/// so the enforce sweep never kills a job the co-resident torch worker still serves. Each converts
-/// to an `Err` arm as its phase epic closes and torch is retired for that surface (sc-5503).
-pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
-    if job_is_any_candle_eligible(job) {
-        return Ok(());
-    }
-    let model = job.payload.get("model").and_then(Value::as_str);
-    match job.job_type {
-        // Reached only for an ineligible image shape (the eligible candle lanes early-return `Ok`
-        // above): a torch-only family, or a conditioned shape with no candle lane — incl. the
-        // sc-5968 strict-pose-on-an-unwired-family trap.
-        JobType::ImageGenerate | JobType::ImageEdit => Err(classify_candle_image_gap(&job.payload)),
-
-        // SenseNova-U1 VQA / interleave run on candle (sc-5501); eligible jobs early-return `Ok`.
-        // This arm is reached only for an understanding job on a model with no candle path.
-        JobType::ImageVqa | JobType::ImageInterleave => Err(UnsupportedReason::new(
-            model,
-            "image understanding / interleave on this model",
-            "image VQA / interleaved generation runs on candle for the SenseNova-U1 model \
-             (sensenova_u1_8b[_fast]); other models have no candle understanding path off-Mac.",
-            Some("epic 3180"),
-        )),
-
-        JobType::VideoGenerate => Err(classify_candle_video_gap(&job.payload)),
-
-        // Wan-VACE extend/bridge/replace run on candle (sc-5494); eligible jobs early-return `Ok`.
-        // This arm is the gap: an engine with no candle keyframe/clip path.
-        JobType::VideoExtend | JobType::VideoBridge => Err(UnsupportedReason::new(
-            model,
-            "extend / bridge on this engine",
-            "extend_clip / video_bridge run on candle only on the Wan-VACE path (the \
-             replace-capable Wan models); other engines have no candle keyframe/clip path off-Mac.",
-            Some("epic 5481"),
-        )),
-
-        JobType::PersonReplace => Err(UnsupportedReason::new(
-            model,
-            "person replacement on this engine",
-            "replace_person runs on candle via native Wan-VACE (the replace-capable Wan models); \
-             this model has no candle video engine off-Mac.",
-            Some("epic 5481"),
-        )),
-
-        // image_upscale eligible engines (Real-ESRGAN + SeedVR2) early-return `Ok`; this arm is the
-        // dropped AuraSR engine (sc-3668 / sc-5499 — a defensive submit-time guard, the UI hides it).
-        JobType::ImageUpscale => Err(UnsupportedReason::new(
-            model,
-            "image_upscale (AuraSR)",
-            "the candle upscaler runs Real-ESRGAN (+ SeedVR2); the AuraSR engine is dropped as an \
-             offered engine (sc-3668 / sc-5499).",
-            Some("sc-5499"),
-        )),
-
-        // video_upscale SeedVR2 early-returns `Ok`; this arm is the defensive non-SeedVR2 guard.
-        JobType::VideoUpscale => Err(UnsupportedReason::new(
-            model,
-            "video_upscale (non-SeedVR2 engine)",
-            "video upscaling runs on the candle SeedVR2 engine (seedvr2); no other engine is \
-             available off-Mac.",
-            Some("epic 5482"),
-        )),
-
-        // JoyCaption early-returns `Ok`; this arm is a non-JoyCaption captioner.
-        JobType::TrainingCaption => Err(UnsupportedReason::new(
-            None,
-            "dataset captioning",
-            "this dataset captioning job is not in the candle JoyCaption flow.",
-            Some("sc-5098"),
-        )),
-
-        // Not enforce-failed by this slice (biased to `Ok`). The MLX-agnostic in-process job types
-        // (downloads, model import/convert, ffmpeg, prompt refine — sc-5525) run with zero torch
-        // off-Mac. The CV-aux / segment / tile-detail / training surfaces route by capability and
-        // are still co-served by the Python torch worker until their phase epics close (Phase 5
-        // epic 5482 for person/pose/kps; the candle SAM3 segment of sc-5062; the training cutover
-        // for lora_train) — leaving them `Ok` keeps the enforce sweep from killing a job torch
-        // still serves. An unrecognized job type is never a known gap (forward-compat).
-        JobType::Placeholder
-        | JobType::ModelDownload
-        | JobType::ModelImport
-        | JobType::ModelConvert
-        | JobType::LoraImport
-        | JobType::LoraDownload
-        | JobType::FrameExtract
-        | JobType::TimelineExport
-        | JobType::PromptRefine
-        | JobType::ImageDetail
-        | JobType::PersonDetect
-        | JobType::PersonTrack
-        | JobType::PoseDetect
-        | JobType::KpsExtract
-        | JobType::ImageSegment
-        | JobType::LoraTrain
-        // sc-6535: a candle CLIP embedder (`candle-gen-clip`) is future work; until then
-        // dataset_analysis routes by capability (no candle worker advertises it) rather than
-        // enforce-failing — the same "parity landing later" treatment as the surfaces above.
-        | JobType::DatasetAnalysis
-        // sc-6539: dataset_upscale parity on candle routes by capability, like dataset_analysis.
-        | JobType::DatasetUpscale
-        // sc-6538: dataset_face_analysis on the candle lane (candle-gen-face) routes by capability too.
-        | JobType::DatasetFaceAnalysis
-        // sc-4415: face_likeness_compare on the candle lane (candle-gen-face) routes by capability too.
-        | JobType::FaceLikenessCompare
-        | JobType::Unknown(_) => Ok(()),
-    }
-}
-
-/// Name the precise gap for a candle-ineligible image job (sc-5502) — the candle-worded,
-/// candle-parity twin of [`classify_image_gap`]. The strict-pose-on-an-unwired-family case (the
-/// canonical sc-5968 silent-T2I trap) is named precisely; the rest report whether the model has no
-/// candle engine at all or is a candle txt2img family asked for a conditioned shape with no lane.
-fn classify_candle_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
-    let Some(model) = payload.get("model").and_then(Value::as_str) else {
-        return UnsupportedReason::new(None, "image generation", "no model specified.", None);
-    };
-    // The sc-5968 case generalized: a candle family with no strict-pose lane asked for poses —
-    // it would otherwise silently render an unconditioned image, so it is a hard gap off-Mac.
-    if image_request_candle_pose_reject(model, payload) {
-        return UnsupportedReason::new(
-            Some(model),
-            "strict-pose ControlNet",
-            "this model has no candle strict-pose lane (candle serves strict pose for qwen_image / \
-             kolors / z_image_turbo, and SDXL via InstantID); the pose request would otherwise \
-             silently render an unconditioned image, so it is rejected off-Mac.",
-            Some("sc-5489"),
-        );
-    }
-    if !CANDLE_ROUTED_MODELS.contains(&model) {
-        return UnsupportedReason::new(
-            Some(model),
-            "unsupported image model / shape",
-            "this model (or its requested conditioning shape) has no candle/CUDA lane off-Mac \
-             until its port lands.",
-            Some("epic 3692"),
-        );
-    }
-    // A candle txt2img family but a conditioned shape (edit / reference / inpaint / LoRA / quant)
-    // with no candle lane for it (the candle identity/control/edit lanes early-return `Ok`).
-    UnsupportedReason::new(
-        Some(model),
-        "conditioned shape on a txt2img candle family",
-        "this candle family serves text-to-image; the requested edit / reference / inpaint / LoRA / \
-         quant shape has no candle lane for it off-Mac.",
-        Some("epic 5480"),
-    )
-}
-
-/// Name the precise gap for a candle-ineligible `video_generate` job (sc-5502) — the candle-worded
-/// twin of [`classify_video_gap`]: a torch-only video model or an advanced/conditioned mode with no
-/// candle lane.
-fn classify_candle_video_gap(payload: &Map<String, Value>) -> UnsupportedReason {
-    let Some(model) = payload.get("model").and_then(Value::as_str) else {
-        return UnsupportedReason::new(None, "video generation", "no model specified.", None);
-    };
-    if !CANDLE_VIDEO_ROUTED_MODELS.contains(&model) {
-        return UnsupportedReason::new(
-            Some(model),
-            "unsupported video model",
-            "this video model has no candle/CUDA engine off-Mac.",
-            Some("epic 5095"),
-        );
-    }
-    UnsupportedReason::new(
-        Some(model),
-        "advanced / conditioned video mode",
-        "this video_generate mode is not candle-eligible on this model (candle serves base \
-         text-to-video, the 14B I2V + SVD image-to-video, and Wan-VACE extend/bridge/replace); \
-         other conditioned modes + LoRAs have no candle path off-Mac.",
-        Some("epic 5481"),
-    )
-}
-
-/// The user-facing affordance prefix the Mac UI shows in place of a torch-only control
-/// (sc-3486). Centralised so the API, the web client, and the gap docs read identically.
-pub const MAC_NOT_AVAILABLE_LABEL: &str = "Not available on Mac (Rust/MLX only)";
-
-/// UI-facing per-model macOS support (sc-3486), derived from the same `*_mlx_eligible` routing
-/// predicates as the [`mac_rust_supported`] job oracle — one source of truth, so what the UI
-/// hides can never drift from what routing refuses. `supported` = at least one generation config
-/// for this model routes to the in-process Rust/MLX flow on macOS, so the model stays in the
-/// picker; `false` = a torch-only model the Mac UI hides/disables once gating is active (its
-/// `reason` names the porting epic). The per-feature flags use "available in *some* MLX config"
-/// semantics (they never over-gate a valid combination) so a control is disabled only when the
-/// model can't use it on MLX at all; residual config-specific dead ends are caught by the
-/// `mlx_unsupported` affordance at submit.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelMacSupport {
-    pub supported: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<UnsupportedReason>,
-    pub features: ModelMacFeatures,
-}
-
-/// Per-feature macOS support for a model (sc-3486). Each flag mirrors the routing predicate for
-/// that feature with "eligible in at least one config" semantics; `false` → disable that control
-/// on Mac when gating is active. `video_modes` is populated only for video models.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelMacFeatures {
-    /// Pose conditioning (the pose picker): a non-empty `advanced.poses`, alone or with a
-    /// reference. Base `qwen_image` strict-pose uses the MLX ControlNet path (epic 3401).
-    pub pose: bool,
-    /// Reference / IP-Adapter / `character_image` identity conditioning (`referenceAssetId`).
-    pub reference: bool,
-    /// img2img `edit_image` (`mode=edit_image` + a source/reference image).
-    pub edit: bool,
-    /// Third-party LyCORIS (LoHa / non-peft LoKr) adapters — now applied on every MLX provider
-    /// (epic 3641: core loader sc-3642/3643, SDXL/Wan/LTX sc-3671), so `true` for MLX-routed models.
-    pub lycoris: bool,
-    /// Video-only: which `video_generate` modes route to MLX. Empty for non-video models.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub video_modes: BTreeMap<String, bool>,
-}
-
-/// Build a synthetic generation payload (`{ "model": ..., <entries> }`) for probing the routing
-/// predicates without a full [`JobSnapshot`] — the UI-gating sibling of how the oracle reads a
-/// real job's payload.
-fn probe_payload(model: &str, entries: &[(&str, Value)]) -> Map<String, Value> {
-    let mut payload = Map::new();
-    payload.insert("model".to_owned(), Value::String(model.to_owned()));
-    for (key, value) in entries {
-        payload.insert((*key).to_owned(), value.clone());
-    }
-    payload
-}
-
-/// UI gating support for a model id of the given catalog `model_type` ("image" / "video" / other).
-/// Non-image/video types (utility/infra: upscalers, captioners) are reported `supported` — their
-/// Python-only *actions* are gated by [`mac_capabilities`] at the job-type level, not by hiding
-/// the model from a picker. Same source of truth as [`mac_rust_supported`].
-pub fn model_mac_support(model_id: &str, model_type: &str) -> ModelMacSupport {
-    match model_type {
-        "image" => image_model_mac_support(model_id),
-        "video" => video_model_mac_support(model_id),
-        _ => ModelMacSupport {
-            supported: true,
-            reason: None,
-            features: ModelMacFeatures::default(),
-        },
-    }
-}
-
-fn image_model_mac_support(model: &str) -> ModelMacSupport {
-    if !MLX_ROUTED_MODELS.contains(&model) {
-        return ModelMacSupport {
-            supported: false,
-            reason: Some(classify_image_gap(&probe_payload(model, &[]))),
-            features: ModelMacFeatures::default(),
-        };
-    }
-    // "Available in some MLX config" probes — bias toward not-disabling so a valid combination
-    // (e.g. a Z-Image reference, with or without a pose set — sc-3619) is never blocked. Any
-    // residual config-only dead ends surface as the `mlx_unsupported` submit affordance.
-    let pose = image_request_mlx_eligible(
-        model,
-        &probe_payload(model, &[("advanced", json!({ "poses": [{}] }))]),
-    ) || image_request_mlx_eligible(
-        model,
-        &probe_payload(
-            model,
-            &[
-                ("mode", json!("character_image")),
-                ("referenceAssetId", json!("probe")),
-                ("advanced", json!({ "poses": [{}] })),
-            ],
-        ),
-    );
-    let reference = image_request_mlx_eligible(
-        model,
-        &probe_payload(model, &[("referenceAssetId", json!("probe"))]),
-    ) || image_request_mlx_eligible(
-        model,
-        &probe_payload(
-            model,
-            &[
-                ("mode", json!("character_image")),
-                ("referenceAssetId", json!("probe")),
-            ],
-        ),
-    ) || image_request_mlx_eligible(
-        model,
-        &probe_payload(
-            model,
-            &[
-                ("referenceAssetId", json!("probe")),
-                ("advanced", json!({ "poses": [{}] })),
-            ],
-        ),
-    );
-    let edit = image_request_mlx_eligible(
-        model,
-        &probe_payload(
-            model,
-            &[
-                ("mode", json!("edit_image")),
-                ("sourceAssetId", json!("probe")),
-            ],
-        ),
-    );
-    ModelMacSupport {
-        supported: true,
-        reason: None,
-        features: ModelMacFeatures {
-            pose,
-            reference,
-            edit,
-            // Third-party LyCORIS applies on every MLX provider now (epic 3641).
-            lycoris: true,
-            video_modes: BTreeMap::new(),
-        },
-    }
-}
-
-/// The `video_generate` modes the UI offers, in display order, so the gating mirrors
-/// [`video_mode_is_mlx_eligible`] for every mode a Mac user could pick. The clip-conditioning
-/// modes `extend_clip` / `video_bridge` are included (sc-3773) so the Mac UI gates them
-/// per-model — MLX on the LTX IC-LoRA path, torch on Wan — rather than via a coarse global flag.
-const VIDEO_UI_MODES: &[&str] = &[
-    "text_to_video",
-    "image_to_video",
-    "first_last_frame",
-    "extend_clip",
-    "video_bridge",
-    "replace_person",
-    // Bernini editing / reference-driven video modes (sc-4703) + multi-source modes
-    // (sc-5425: `multi_video_to_video` / `ads2v`): only `bernini` is eligible (see
-    // `video_mode_is_mlx_eligible`); they surface disabled on the other models, the same
-    // per-model gating as `replace_person` / the LTX clip modes.
-    "video_to_video",
-    "reference_to_video",
-    "reference_video_to_video",
-    "multi_video_to_video",
-    "ads2v",
-    // SCAIL-2 standalone character animation (epic 5439 / sc-5448): only `scail2_14b` is
-    // eligible; surfaces disabled on the other models. Reference character + driving video
-    // → animated clip. (Cross-identity replacement reuses `replace_person`, wired in sc-5452.)
-    "animate_character",
-];
-
-fn video_model_mac_support(model: &str) -> ModelMacSupport {
-    if !VIDEO_MLX_ROUTED_MODELS.contains(&model) {
-        return ModelMacSupport {
-            supported: false,
-            reason: Some(classify_video_gap(&probe_payload(model, &[]))),
-            features: ModelMacFeatures::default(),
-        };
-    }
-    let video_modes = VIDEO_UI_MODES
-        .iter()
-        .map(|mode| ((*mode).to_owned(), video_mode_is_mlx_eligible(model, mode)))
-        .collect();
-    ModelMacSupport {
-        supported: true,
-        reason: None,
-        features: ModelMacFeatures {
-            video_modes,
-            ..ModelMacFeatures::default()
-        },
-    }
-}
-
-/// macOS support for a non-model feature/sub-system (sc-3486): the infra job types that have no
-/// in-process Rust path. `supported=false` carries the `reason` (the same `UnsupportedReason` the
-/// `mlx_unsupported` event uses); when one of these is ported its flag flips to `true`.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MacFeatureSupport {
-    pub supported: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<UnsupportedReason>,
-}
-
-impl MacFeatureSupport {
-    // Declares a Mac feature gap with the reason + suggested port epic. Currently no
-    // feature is gated (poseFromPhoto was the last, ported in sc-3487/flipped in
-    // sc-4206) — kept as the gating vocabulary for the next torch-only surface that
-    // appears before its Rust port lands, so a gap is declared the same way every time.
-    #[allow(dead_code)]
-    fn unsupported(feature: &str, detail: &str, suggested_epic: &str) -> Self {
-        Self {
-            supported: false,
-            reason: Some(UnsupportedReason::new(
-                None,
-                feature,
-                detail,
-                Some(suggested_epic),
-            )),
-        }
-    }
-}
-
-/// macOS training support (sc-3486): the kernels with a native mlx-gen Rust trainer, so the
-/// Training studio can disable a base model whose kernel only runs on the Python torch trainer.
-/// `lokr_on_wan_supported=false` mirrors the LoKr-on-Wan routing caveat.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MacTrainingSupport {
-    pub supported_kernels: Vec<String>,
-    pub lokr_on_wan_supported: bool,
-}
-
-/// What the Mac UI needs to gate every non-model Python surface plus the master switch
-/// (sc-3486). `mac_gating_active` is the rollout flag (`SCENEWORKS_MLX_REQUIRED`): when `false`
-/// (Windows/Linux, or a Mac still in observe mode) the client applies no gating at all, so
-/// non-Mac pickers are untouched. The per-feature entries are facts about the Rust flow
-/// independent of the flag; the client only acts on them when `mac_gating_active`.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MacCapabilities {
-    pub platform: String,
-    pub mac_gating_active: bool,
-    pub not_available_label: String,
-    pub features: BTreeMap<String, MacFeatureSupport>,
-    pub training: MacTrainingSupport,
-}
-
-/// Build the [`MacCapabilities`] surface for the given platform + gating flag. The feature set is
-/// the non-model half of `docs/mac-rust-gaps.md` §5 (infra) plus the global feature gaps; keep it
-/// in sync with the oracle's job-type arms.
-pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilities {
-    // `std::env::consts::OS` is `"macos"` (the API host's OS, passed by the capabilities handler);
-    // accept the legacy `"darwin"` alias defensively. Drives the platform-intrinsic engine flags
-    // (e.g. `imageUpscaleSeedvr2`, which is Mac-only) rather than the gating-rollout flag.
-    let is_mac = matches!(platform, "macos" | "darwin");
-    // SeedVR2 has a backend on Mac (native MLX) and on Windows + Linux (the candle CUDA/NVIDIA port:
-    // Windows sc-5928, Linux sc-5160 — candle is CPU+CUDA cross-platform so Linux rides the Windows
-    // port). Drives the platform-intrinsic `imageUpscaleSeedvr2` flag.
-    let seedvr2_supported = is_mac || matches!(platform, "windows" | "linux");
-    let mut features = BTreeMap::new();
-    // Third-party LyCORIS (LoHa / non-peft LoKr) now applies on every MLX provider (epic 3641:
-    // core loader sc-3642/3643 + SDXL/Wan/LTX sc-3671), so it is no longer a Mac feature gap — the
-    // per-model `features.lycoris` flag is `true` and the web LyCORIS upload control is un-gated.
-    features.insert(
-        // Real-ESRGAN image upscaling is ported to the Rust worker (sc-3489), so the
-        // Image Editor upscale tool works on a Python-free Mac. The tool stays available;
-        // only the second engine (AuraSR) is dropped, gated per-engine below.
-        "imageUpscale".to_owned(),
-        MacFeatureSupport {
-            supported: true,
-            reason: None,
-        },
-    );
-    features.insert(
-        // The AuraSR upscale engine (`engine=aura-sr`) is dropped on Mac (sc-3668, port-or-drop
-        // spike): it is a 617M-param torch-only GigaGAN with no viable Rust path and only a marginal,
-        // ~35-50x-slower quality difference vs the already-ported Real-ESRGAN x4. As of sc-5499 it is
-        // also dropped as an OFFERED engine off-Mac — there is no native (MLX/candle) path and the
-        // Python torch backend that served it on Windows/Linux is retired in Phase 7 (epic 5483), so
-        // exposing it would point users at a path about to disappear. `supported: false` on every
-        // platform (platform-intrinsic, like `imageUpscaleSeedvr2`), so the UI hides the engine
-        // everywhere. Must agree with the AuraSR arm of `mac_rust_supported` (UI-hidden == routing
-        // refuses): the native MLX/candle workers refuse it; only the (transitional) torch worker runs
-        // an explicitly-submitted aura-sr job until Phase 7.
-        "imageUpscaleAuraSr".to_owned(),
-        MacFeatureSupport {
-            supported: false,
-            reason: Some(UnsupportedReason::new(
-                None,
-                "image_upscale (AuraSR)",
-                "AuraSR is a legacy GAN upscaler, dropped as an offered engine on all platforms (sc-3668 / sc-5499); Real-ESRGAN is the cross-platform upscaler (SeedVR2 the high-fidelity option).",
-                Some("sc-5499"),
-            )),
-        },
-    );
-    features.insert(
-        // SeedVR2 (`engine=seedvr2`) is the one-step diffusion super-resolution upscaler — native MLX
-        // on Mac (epic 4811 / sc-4815, in-process `mlx-gen-seedvr2`) and the candle CUDA/NVIDIA port on
-        // Windows (sc-5928) + Linux (sc-5160) (epic 5482, `candle-gen-seedvr2`). Both back the same
-        // `engine=seedvr2` image upscale + the net-new `video_upscale`. This flag is platform-intrinsic
-        // (a backend exists, regardless of the gating rollout flag) so the web upscale picker offers
-        // SeedVR2 on every platform that has a backend (Mac, Windows, Linux) and hides it only where
-        // there is none (contrast AuraSR, which the UI hides only under active gating). Must agree with
-        // the routing oracle (mlx OR candle claims seedvr2; a plain torch worker refuses it).
-        "imageUpscaleSeedvr2".to_owned(),
-        MacFeatureSupport {
-            supported: seedvr2_supported,
-            reason: if seedvr2_supported {
-                None
-            } else {
-                // Unreachable on the three platforms that build a SeedVR2 backend (mac/windows/linux);
-                // kept for any future platform that has neither MLX nor the candle CUDA/NVIDIA port.
-                Some(UnsupportedReason::new(
-                    None,
-                    "image_upscale (SeedVR2)",
-                    "SeedVR2 runs on Mac (native MLX) and Windows/Linux (the candle CUDA/NVIDIA backend); this platform has no SeedVR2 backend.",
-                    Some("sc-5160"),
-                ))
-            },
-        },
-    );
-    features.insert(
-        // DWPose pose detection is ported to the Rust worker (sc-3487): RTMW whole-body
-        // via `ort`/CoreML on the macOS MLX worker, so the Pose Library "create from
-        // photo" flow runs Python-free. This must agree with the PoseDetect arm of
-        // `mac_rust_supported` — what the UI hides can never drift from what routing
-        // refuses (sc-4206 / F-CORE-2).
-        "poseFromPhoto".to_owned(),
-        MacFeatureSupport {
-            supported: true,
-            reason: None,
-        },
-    );
-    features.insert(
-        // Person detection + tracking are ported to the Rust worker (sc-3488 /
-        // sc-3633/3634/3709): native-MLX YOLO11 detection, SORT/ByteTrack track assembly,
-        // and SAM2 per-frame segmentation all run in-process, so the Replace-Person
-        // detect → track → mask flow works on a Python-free Mac. (The replace_person
-        // video-gen half is gated per-model via each video model's `videoModes`.)
-        "personDetect".to_owned(),
-        MacFeatureSupport {
-            supported: true,
-            reason: None,
-        },
-    );
-    features.insert(
-        // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt
-        // segmentation runs in-process on the macOS Rust worker, so the Image Editor
-        // smart-select tool works on a Python-free Mac. Mac-only (no torch SAM3 image
-        // path); must agree with the ImageSegment arm of `mac_rust_supported` — what the
-        // UI shows == what routing accepts (sc-4206 / F-CORE-2).
-        "imageSegment".to_owned(),
-        MacFeatureSupport {
-            supported: is_mac,
-            reason: if is_mac {
-                None
-            } else {
-                Some(UnsupportedReason::new(
-                    None,
-                    "image_segment (SAM3 smart-select)",
-                    "smart-select segmentation runs on the native-MLX SAM3 stack (macOS only); there is no candle SAM3 image path yet.",
-                    Some("sc-6105"),
-                ))
-            },
-        },
-    );
-    features.insert(
-        "datasetCaptioning".to_owned(),
-        MacFeatureSupport {
-            supported: true,
-            reason: None,
-        },
-    );
-    features.insert(
-        // Video upscaling is net-new on Mac (epic 4811 / sc-4816): the native-MLX SeedVR2
-        // engine gives SceneWorks its first video upscaler, running in-process on the macOS
-        // MLX worker (zero-Python). There is no torch fallback (mac-only), so this feature is
-        // the gate for the Video Studio "Upscale" action. Must agree with the VideoUpscale arm
-        // of `mac_rust_supported` (what the UI shows == what routing accepts).
-        "videoUpscale".to_owned(),
-        MacFeatureSupport {
-            supported: true,
-            reason: None,
-        },
-    );
-    // The former global `advancedVideoModes` flag is gone (sc-3773): every video mode — including
-    // the LTX IC-LoRA clip-conditioning modes extend_clip / video_bridge — is now gated per-model
-    // via each model's `macSupport.features.videoModes`, so a Mac user on LTX is no longer blocked
-    // from a mode the in-process Rust worker can run.
-    MacCapabilities {
-        platform: platform.to_owned(),
-        mac_gating_active,
-        not_available_label: MAC_NOT_AVAILABLE_LABEL.to_owned(),
-        features,
-        training: MacTrainingSupport {
-            supported_kernels: MLX_ROUTED_TRAINING_KERNELS
-                .iter()
-                .map(|kernel| (*kernel).to_owned())
-                .collect(),
-            lokr_on_wan_supported: false,
-        },
-    }
-}
-
-/// The dedicated MLX-porting epic for a torch-only image model (epic 3482 policy: every
-/// unported model gets its own port epic + is dropped on Mac until it lands). `None` = a
-/// model we don't have a port epic for yet, which the oracle reports as "needs an epic".
-/// Keep in sync with `docs/mac-rust-gaps.md` §1.
-///
-/// **No whole-model torch-only image families remain.** Each was ported to MLX and moved into
-/// `MLX_ROUTED_MODELS`, so it never reaches this classifier: Kolors (epic 3090 / sc-3875), InstantID
-/// (epic 3109 / sc-3345), PuLID-FLUX (epic 3069 / sc-3344), z_image_edit (epic 3529 / sc-3923),
-/// Chroma (epic 3531 / sc-3843), SenseNova-U1 (epic 3180 / sc-3900), and finally Lens / Lens-Turbo
-/// (epic 3164 / sc-5105 — the LAST one). Models with a partial surface (e.g. InstantID pose-library,
-/// PuLID reference-less) are named per-feature in `classify_image_gap`, not here. This function is
-/// retained for the generic "unported model → needs a port epic" path and as the seam for any future
-/// torch-only image model: add a `match _model { "<id>" => Some("epic NNNN"), _ => None }` arm here.
-fn torch_only_image_model_epic(_model: &str) -> Option<&'static str> {
-    None
-}
-
-/// Name the precise gap for an ineligible `image_generate` / `image_edit` job: a torch-only
-/// model, or a torch-only feature on an otherwise-MLX family. Mirrors the per-family
-/// `*_mlx_eligible` gates so the reason matches why routing refused it.
-fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
-    let Some(model) = payload.get("model").and_then(Value::as_str) else {
-        return UnsupportedReason::new(None, "image generation", "no model specified.", None);
-    };
-    if !MLX_ROUTED_MODELS.contains(&model) {
-        let epic = torch_only_image_model_epic(model);
-        let detail = if epic.is_some() {
-            "this model has no Rust/MLX engine yet; it is dropped on Mac until its port epic lands."
-        } else {
-            "this model has no Rust/MLX engine and no port epic yet — file a porting epic and drop it on Mac (epic 3482 policy)."
-        };
-        return UnsupportedReason::new(Some(model), "unsupported image model", detail, epic);
-    }
-    // Third-party LyCORIS (LoHa / non-peft LoKr) now applies on every MLX provider (epic 3641,
-    // sc-3642/3643/3671), so it is no longer an image gap.
-    match model {
-        "qwen_image" => UnsupportedReason::new(
-            Some(model),
-            "reference / edit conditioning",
-            "base Qwen-Image reference / edit_image conditioning is not available in the native flow on Mac unless it is the strict-pose ControlNet tier.",
-            Some("epic 3401"),
-        ),
-        "flux_schnell" | "flux_dev" => UnsupportedReason::new(
-            Some(model),
-            "reference (XLabs IP-Adapter)",
-            "FLUX.1 reference is the XLabs IP-Adapter (not img2img-init); it is not available in the native flow on Mac until the MLX port lands. (FLUX.1 edit_image has no path on any platform — a future Kontext capability, not an eradication gap; see sc-3535.)",
-            Some("epic 3621"),
-        ),
-        "qwen_image_edit"
-        | "qwen_image_edit_2509"
-        | "qwen_image_edit_2511"
-        | "qwen_image_edit_2511_lightning" => UnsupportedReason::new(
-            Some(model),
-            "edit without a reference/source image",
-            "the Qwen-Image-Edit model needs edit_image+sourceAssetId or character_image+referenceAssetId to route to MLX.",
-            None,
-        ),
-        "sensenova_u1_8b" | "sensenova_u1_8b_fast" => {
-            let has_poses = payload
-                .get("advanced")
-                .and_then(Value::as_object)
-                .and_then(|advanced| advanced.get("poses"))
-                .and_then(Value::as_array)
-                .is_some_and(|poses| !poses.is_empty());
-            if has_poses {
-                UnsupportedReason::new(
-                    Some(model),
-                    "strict pose (ControlNet)",
-                    "SenseNova-U1 has no ControlNet/skeleton conditioning — the strict-pose tier is not an MLX path; it is not available in the native flow on Mac (dropped on Mac).",
-                    Some("epic 3180"),
-                )
-            } else {
-                UnsupportedReason::new(
-                    Some(model),
-                    "edit/character without a reference",
-                    "SenseNova-U1 edit needs edit_image+sourceAssetId, and Character Studio needs character_image+referenceAssetId, to route to MLX.",
-                    None,
-                )
-            }
-        }
-        // InstantID (sc-3345 identity + angle set; sc-3381 pose mode + face-restore): the full
-        // surface runs on MLX for `character_image` + `referenceAssetId`. Only a non-character /
-        // reference-less job has no InstantID path. Mirrors `instantid_mlx_eligible`.
-        "instantid_realvisxl" => UnsupportedReason::new(
-            Some(model),
-            "InstantID without a character reference",
-            "InstantID runs on MLX for character_image with a referenceAssetId (single identity, the 11-view angle set, pose-library mode, and face-restore); a non-character / reference-less job has no InstantID path.",
-            None,
-        ),
-        // PuLID-FLUX (sc-3344): runs on MLX only for character_image with a referenceAssetId (the
-        // face it injects). A non-character / reference-less job has no PuLID path. Mirrors
-        // `pulid_flux_mlx_eligible`.
-        "pulid_flux_dev" => UnsupportedReason::new(
-            Some(model),
-            "PuLID-FLUX without a character reference",
-            "PuLID-FLUX runs on MLX for character_image with a referenceAssetId (the reference face drives the identity injection); a non-character / reference-less job has no PuLID-FLUX path.",
-            None,
-        ),
-        // Kolors (epic 3090) runs its full surface on MLX now — T2I (sc-3875), img2img (sc-4765),
-        // the IP-Adapter-Plus reference (sc-4767) and the strict-pose tier (sc-4766 / engine sc-5012)
-        // — so a kolors job is never gap-classified; any residual falls to the defensive arm below.
-        // flux2 / sdxl / realvisxl only fall out via LyCORIS (handled above) — defensive.
-        _ => UnsupportedReason::new(
-            Some(model),
-            "unsupported configuration",
-            "this model/feature combination is not in the Rust/MLX flow.",
-            None,
-        ),
-    }
-}
-
-/// Name the precise gap for an ineligible `video_generate` job: a torch-only model (incl. SVD) or
-/// an advanced mode. Mirrors `video_job_is_mlx_eligible`. (Third-party LyCORIS and LoKr-on-Wan now
-/// apply on the MLX Wan/LTX paths — epic 3641 sc-3671 — so neither is a video gap anymore.)
-fn classify_video_gap(payload: &Map<String, Value>) -> UnsupportedReason {
-    let Some(model) = payload.get("model").and_then(Value::as_str) else {
-        return UnsupportedReason::new(None, "video generation", "no model specified.", None);
-    };
-    if !VIDEO_MLX_ROUTED_MODELS.contains(&model) {
-        return UnsupportedReason::new(
-            Some(model),
-            "unsupported video model",
-            "this video model has no Rust/MLX engine; it is not available in the native flow on Mac.",
-            Some("epic 3040"),
-        );
-    }
-    let mode = payload
-        .get("mode")
-        .and_then(Value::as_str)
-        .unwrap_or("image_to_video");
-    if !video_mode_is_mlx_eligible(model, mode) {
-        return UnsupportedReason::new(
-            Some(model),
-            "advanced video mode",
-            "this video_generate mode is not MLX-eligible on this model (first_last_frame / \
-             extend_clip / video_bridge / replace_person route to MLX only on the capable engines — \
-             LTX + Wan TI2V-5B for the keyframe/clip modes, Wan-VACE for replace_person).",
-            Some("epic 3040"),
-        );
-    }
-    UnsupportedReason::new(
-        Some(model),
-        "unsupported video configuration",
-        "this video configuration is not in the Rust/MLX flow.",
-        None,
-    )
-}
-
-/// Name the precise gap for an ineligible `lora_train` job. Mirrors `training_job_is_mlx_eligible`:
-/// a kernel with no native mlx-gen Rust trainer, or LoKr-on-Wan.
-fn classify_training_gap(payload: &Map<String, Value>) -> UnsupportedReason {
-    let kernel = payload
-        .get("plan")
-        .and_then(Value::as_object)
-        .and_then(|plan| plan.get("target"))
-        .and_then(Value::as_object)
-        .and_then(|target| target.get("kernel"))
-        .and_then(Value::as_str);
-    match kernel {
-        // `kolors_lora` (sc-4568/sc-4732) and `lens_lora` (sc-5148/sc-5180) are no longer gaps —
-        // both have native mlx-gen Rust trainers and route to the mlx worker, so they never reach
-        // this classifier.
-        Some("wan_lora") | Some("wan_moe_lora") => UnsupportedReason::new(
-            None,
-            "LoKr-on-Wan training",
-            "Wan LoKr training is not available in the native flow on Mac (no Kronecker merge in the mlx Wan path).",
-            Some("epic 3039"),
-        ),
-        _ => UnsupportedReason::new(
-            None,
-            "LoRA/LoKr training",
-            "this training kernel has no native mlx-gen Rust trainer.",
-            Some("epic 3039"),
-        ),
-    }
-}
-
-/// `model_convert` is supported only for the in-process Rust FLUX.2-klein converter
-/// (`flux2_klein_diffusers`, sc-3136). The default/absent converter is the Python mlx-video
-/// Wan/LTX path (sc-3491 / sc-3224).
-fn classify_convert_gap(payload: &Map<String, Value>) -> Result<(), UnsupportedReason> {
-    if matches!(
-        payload.get("converter").and_then(Value::as_str),
-        Some("flux2_klein_diffusers") | Some("flux2_dev_quant")
-    ) {
-        return Ok(());
-    }
-    Err(UnsupportedReason::new(
-        payload.get("model").and_then(Value::as_str),
-        "Wan/LTX model conversion (mlx_video)",
-        "installing a non-turnkey Wan/LTX checkpoint converts via the native mlx_video path.",
-        Some("sc-3491 / sc-3224"),
-    ))
 }
 
 /// Classify a *successful* claim for routing observability, named after the backend that
@@ -3547,2009 +2564,6 @@ fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResu
 
 fn is_apple_unified_gpu_id(gpu_id: &str) -> bool {
     gpu_id.eq_ignore_ascii_case("mlx") || gpu_id.eq_ignore_ascii_case("mps")
-}
-
-/// Models the in-process Rust MLX worker generates today, by id. This set grows
-/// one family story at a time as each lands real generation in
-/// `sceneworks-worker::image_jobs` — sc-3022 Z-Image, sc-3023 FLUX.1, sc-3024 Qwen,
-/// sc-3025 FLUX.2, sc-3026 SDXL (live). A model id absent here is never routed to the
-/// mlx worker, so the Python torch path stays authoritative for it.
-const MLX_ROUTED_MODELS: &[&str] = &[
-    "z_image_turbo",
-    "z_image_edit",
-    "flux_schnell",
-    "flux_dev",
-    "qwen_image",
-    "qwen_image_edit",
-    "qwen_image_edit_2509",
-    "qwen_image_edit_2511",
-    "qwen_image_edit_2511_lightning",
-    "flux2_klein_9b",
-    "flux2_klein_9b_kv",
-    "flux2_klein_9b_true_v2",
-    // FLUX.2-dev (epic 5914) — MLX-only flagship, txt2img today (edit = sc-5919).
-    "flux2_dev",
-    "sdxl",
-    "realvisxl",
-    // RealVisXL Lightning (sc-6075): standalone few-step distilled SDXL checkpoint on the shared
-    // `sdxl` engine. txt2img only — the engine's `lightning` accel sampler rejects reference/img2img
-    // conditioning (`realvisxl_lightning_mlx_eligible`), so edit/reference shapes fall back to torch.
-    "realvisxl_lightning",
-    // InstantID on RealVisXL (sc-3345): single-identity + the 11-view angle set route to the
-    // native `mlx-gen-instantid` provider. Pose-library + face-restore InstantID jobs are gated
-    // OUT by `instantid_mlx_eligible` and stay on the torch `InstantIDAdapter` (engine sc-3117 /
-    // sc-3380 not ported).
-    "instantid_realvisxl",
-    // PuLID-FLUX on FLUX.1-dev (sc-3344): the native `mlx-gen-pulid` registry generator serves
-    // `character_image` with a reference face. Mirrors `pulid_flux_mlx_eligible`.
-    "pulid_flux_dev",
-    "chroma1_hd",
-    "chroma1_base",
-    "chroma1_flash",
-    "sensenova_u1_8b",
-    "sensenova_u1_8b_fast",
-    // Kolors (epic 3090): the full surface runs on the Rust `kolors` engine model — T2I (sc-3875),
-    // img2img (sc-4765), the IP-Adapter-Plus reference (sc-4767) and the strict-pose tier (sc-4766 /
-    // engine sc-5012, the combined pose-ControlNet + IP-Adapter-identity + img2img pass).
-    "kolors",
-    // Microsoft Lens / Lens-Turbo (epic 3164 engine / sc-5105 cutover): pure T2I on the native
-    // `mlx-gen-lens` engine (gpt-oss-20b MoE encoder + dual-stream MMDiT + Flux.2 VAE), retiring the
-    // Python `/opt/lens-venv` transformers-5 sidecar on Mac. Both ids are always MLX-eligible
-    // (`lens_mlx_eligible` — no conditioning surface to gate). Lens was the LAST whole-model
-    // torch-only image family; with it routed, every image model here is MLX (`torch_only_image_model_epic`
-    // now matches nothing).
-    "lens",
-    "lens_turbo",
-    // Bernini still-image companion (epic 4699 / sc-5424): the image-typed catalog id
-    // (`bernini_image`) routes its t2i / i2i (`edit_image`) jobs to the in-process Rust
-    // worker, where the same `engine_id:"bernini"` planner+renderer runs with `frames:1`.
-    // The video `bernini` id lives in `VIDEO_MLX_ROUTED_MODELS`, not here. Mirrors
-    // `bernini_image_mlx_eligible`.
-    "bernini_image",
-    // Ideogram 4 (epic 4725): 9.3B single-stream flow DiT (asymmetric two-DiT CFG) + Qwen3-VL-8B
-    // text encoder on the native `mlx-gen-ideogram` engine (id `ideogram_4`, adapter `mlx_ideogram`),
-    // macOS-only (no torch backend). Text-to-image AND img2img/Remix + mask inpaint/outpaint edit
-    // (sc-6303 — the engine + worker `resolve_ideogram_edit` edit path); both route to MLX. Mirrors
-    // `ideogram_mlx_eligible`.
-    "ideogram_4",
-    // Ideogram 4 Turbo (mlx-gen #488) — the SAME base model + the bundled TurboTime LoRA the engine
-    // installs at load (CFG-free, few-step, single DiT; engine id `ideogram_4_turbo`). Same routing +
-    // edit surface as the base (the shared denoise serves both); registered so it reaches the picker
-    // and routes to MLX for both T2I and edit (sc-6303). macOS-only (no torch backend).
-    "ideogram_4_turbo",
-    // Boogu-Image-0.1 (epic 6387): ~10.3B Lumina-Image-2.0 / OmniGen2-lineage flow DiT + Qwen3-VL-8B
-    // condition encoder + FLUX.1 VAE on the native `mlx-gen-boogu` engine (adapter `mlx_boogu`),
-    // macOS-only (no torch backend, Apache-2.0 ungated). All three route to MLX; mirror
-    // `boogu_mlx_eligible`. Base + Turbo are text-to-image only; Edit adds the instruction
-    // image-edit `Reference` path (`resolve_boogu_edit`).
-    "boogu_image",
-    "boogu_image_turbo",
-    "boogu_image_edit",
-    // Krea 2 Turbo (epic 7565 / sc-7572): native `mlx-gen-krea` text-to-image engine
-    // (adapter `mlx_krea`) over the packed Q8/Q4 turnkey. CFG-free Turbo is text-to-image only.
-    "krea_2_turbo",
-    // Stable Diffusion 3.5 (epic 7841 / S2 sc-7871 worker MODEL_TABLE, surfaced S4 sc-7873): the three
-    // native `mlx-gen-sd3` variants (adapter `mlx_sd3`), macOS-only (no torch backend, gated). All are
-    // text-to-image only — Large + Medium run true CFG (28 / 40 steps), Turbo is the CFG-free few-step
-    // distill (4 steps). `edit_image` has no source/reference path, so it's rejected (mirrors Krea/Lens).
-    "sd3_5_large",
-    "sd3_5_large_turbo",
-    "sd3_5_medium",
-    // SANA 1600M (epic 8485 / sc-8489): native `mlx-gen-sana` text-to-image engine (adapter
-    // `mlx_sana`) over the un-gated `SceneWorks/Sana_1600M_1024px_mlx` MLX snapshot. macOS-only
-    // (no torch backend). True-CFG text-to-image only (20 steps / guidance 4.5); `edit_image` has no
-    // source/reference path, so it's rejected (mirrors Krea/SD3.5/Lens).
-    "sana_1600m",
-    // SANA-Sprint 1.6B (epic 8485 / sc-8490): the CFG-free few-step (default 2-step, SCM sampler +
-    // guidance-embed trunk) SANA distillation — same `mlx-gen-sana` engine (adapter `mlx_sana`) over the
-    // un-gated `SceneWorks/Sana_Sprint_1.6B_1024px_mlx` MLX snapshot. macOS-only (no torch backend).
-    // Text-to-image only; `edit_image` has no source/reference path, so it's rejected (mirrors base SANA).
-    "sana_sprint_1600m",
-];
-
-/// Epic 3018 routing — does this image job belong on the in-process Rust MLX
-/// worker (vs the Python torch worker)? This lifts the per-family Python
-/// `_should_route_*_to_mlx` decision (apps/worker/scene_worker/image_adapters.py)
-/// up to the API claim layer, minus the worker-local gates (platform / disable
-/// env / sidecar presence) — those are now expressed by whether an `mlx` worker
-/// is registered and idle (see `should_defer_image_to_mlx_worker`).
-///
-/// Routing-layer caveat: LyCORIS detection uses only the LoRA's *recorded*
-/// `networkType`. The Python predicate also sniffs the safetensors header, but
-/// the API has no access to the LoRA files; the mlx worker's own adapter
-/// classifier (`image_jobs::classify_adapter`, sc-3022) is the backstop for an
-/// unstamped third-party LyCORIS file that slips through.
-fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
-    // Both `image_generate` (text-to-image / character_image / reference) and the
-    // distinct `image_edit` job type (Image Studio/Editor "plain Image Edit":
-    // `mode=edit_image` + `sourceAssetId`, epic 2427) route through the same
-    // per-model predicates. The engine dispatches on payload model+mode, not job
-    // type (`run_image_generate_job`), and the per-model arms below already gate
-    // `edit_image` (qwen/flux2/sdxl edit → eligible; torch-only edit models aren't
-    // in `MLX_ROUTED_MODELS` → torch). Without `image_edit` in this gate, plain
-    // Image Edit fell through to torch silently with no `gpu_route_decision`
-    // (sc-3513).
-    if !matches!(job.job_type, JobType::ImageGenerate | JobType::ImageEdit) {
-        return false;
-    }
-    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
-        return false;
-    };
-    image_request_mlx_eligible(model, &job.payload)
-}
-
-/// Per-model image MLX-eligibility dispatch, factored out of [`image_job_is_mlx_eligible`] so the
-/// UI gating oracle ([`model_mac_support`], sc-3486) can probe the same per-family predicates with
-/// synthetic payloads — one dispatch table, no divergence between routing and what the UI hides.
-fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool {
-    if !MLX_ROUTED_MODELS.contains(&model) {
-        return false;
-    }
-    match model {
-        "z_image_turbo" | "z_image_edit" => z_image_mlx_eligible(payload),
-        "flux_schnell" | "flux_dev" => flux_mlx_eligible(payload),
-        "qwen_image" => qwen_mlx_eligible(payload),
-        "qwen_image_edit"
-        | "qwen_image_edit_2509"
-        | "qwen_image_edit_2511"
-        | "qwen_image_edit_2511_lightning" => qwen_edit_mlx_eligible(payload),
-        "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" | "flux2_dev" => {
-            flux2_mlx_eligible(payload)
-        }
-        "sdxl" | "realvisxl" => sdxl_mlx_eligible(payload),
-        "realvisxl_lightning" => realvisxl_lightning_mlx_eligible(payload),
-        "instantid_realvisxl" => instantid_mlx_eligible(payload),
-        "pulid_flux_dev" => pulid_flux_mlx_eligible(payload),
-        "chroma1_hd" | "chroma1_base" | "chroma1_flash" => chroma_mlx_eligible(payload),
-        "sensenova_u1_8b" | "sensenova_u1_8b_fast" => sensenova_mlx_eligible(payload),
-        "kolors" => kolors_mlx_eligible(payload),
-        "lens" | "lens_turbo" => lens_mlx_eligible(payload),
-        "bernini_image" => bernini_image_mlx_eligible(payload),
-        "ideogram_4" | "ideogram_4_turbo" => ideogram_mlx_eligible(payload),
-        "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => boogu_mlx_eligible(payload),
-        "krea_2_turbo" => krea_mlx_eligible(payload),
-        "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => sd3_5_mlx_eligible(payload),
-        "sana_1600m" | "sana_sprint_1600m" => sana_mlx_eligible(payload),
-        // Every model in MLX_ROUTED_MODELS must have an arm.
-        _ => false,
-    }
-}
-
-/// Does this `image_detail` job belong on the in-process Rust MLX worker? sc-3060 (epic 3041)
-/// ports the tile-ControlNet detail refine onto the engine. Detail is SDXL-family only
-/// (`sdxl` / `realvisxl`, the detail-capable backbones; the payload defaults to `realvisxl`).
-/// Third-party LyCORIS (LoHa / non-peft LoKr) now applies on the SDXL merge path too (epic 3641,
-/// sc-3671), so it no longer forces torch. On Windows/Linux no `mlx` worker exists, so detail stays
-/// on the Python torch path.
-fn image_detail_mlx_eligible(job: &JobSnapshot) -> bool {
-    if !matches!(job.job_type, JobType::ImageDetail) {
-        return false;
-    }
-    let model = job
-        .payload
-        .get("model")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("realvisxl");
-    matches!(model, "sdxl" | "realvisxl")
-}
-
-/// Whether the in-process MLX worker can serve this GPU job (image_generate or image_detail).
-fn job_is_mlx_eligible(job: &JobSnapshot) -> bool {
-    image_job_is_mlx_eligible(job) || image_detail_mlx_eligible(job)
-}
-
-/// Epic 3180 / sc-3905 routing — does this understanding job (`image_vqa` / `image_interleave`)
-/// belong on the in-process Rust MLX worker on macOS? These two modes are SenseNova-U1's
-/// understanding/interleave surface, served via the concrete `T2iModel` (`vqa` / `interleave_gen`)
-/// because the `Generator` contract emits Images/Video only. SenseNova-U1 is the only model with an
-/// in-process understanding path, so eligibility = a SenseNova-U1 id (the worker handler validates
-/// the per-mode request: VQA needs a source image + question; interleave needs a prompt). Other
-/// models on these job types have no MLX path and stay on the Python torch worker.
-fn understanding_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
-    if !matches!(job.job_type, JobType::ImageVqa | JobType::ImageInterleave) {
-        return false;
-    }
-    // The understanding job types are SenseNova-specific; a missing model defaults to the base id.
-    let model = job
-        .payload
-        .get("model")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("sensenova_u1_8b");
-    matches!(model, "sensenova_u1_8b" | "sensenova_u1_8b_fast")
-}
-
-/// SDXL MLX-routing conditions. sc-3026 brought txt2img + LoRA; sc-3060 (epic 3041) adds the
-/// advanced shapes the Rust `mlx-gen-sdxl` engine now handles — reference/IP-Adapter, img2img
-/// `edit_image`, masked inpaint, and outpaint — so they route to the in-process MLX worker on
-/// Mac instead of the Python torch `SdxlDiffusersAdapter`. The torch path stays authoritative
-/// on Windows/Linux (no `mlx` worker registered → nothing defers) and as the Mac fallback.
-/// Third-party LyCORIS (LoHa / non-peft LoKr) now applies on the SDXL merge path (epic 3641,
-/// sc-3671), so every SDXL shape — including a LyCORIS-tagged job — is MLX-eligible.
-/// `image_detail` is a separate job type with its own routing (see `image_detail_mlx_eligible`).
-fn sdxl_mlx_eligible(_payload: &Map<String, Value>) -> bool {
-    true
-}
-
-/// RealVisXL Lightning MLX-routing (sc-6075). The standalone distilled checkpoint runs through the
-/// `sdxl` engine on its few-step `lightning` (Euler-trailing) sampler, which the engine restricts to
-/// **txt2img** (it rejects an img2img/reference init — `mlx-gen-sdxl` "acceleration sampler is
-/// txt2img-only"). So only a plain text-to-image job is MLX-eligible here; any `edit_image`, source,
-/// reference, or mask conditioning falls back to the torch worker (or is hidden by the manifest's
-/// txt2img-only `capabilities`). LoRAs + quant are fine on the SDXL path, so they don't gate.
-fn realvisxl_lightning_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    let has_nonempty_id = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    !(has_nonempty_id("sourceAssetId")
-        || has_nonempty_id("referenceAssetId")
-        || has_nonempty_id("maskAssetId"))
-}
-
-/// The models the candle (Windows/CUDA) lane can serve (epic 3672 sc-3678 for SDXL; epic 5095
-/// sc-5096 adds the four image families; sc-5126 adds Lens / Lens-Turbo; sc-5484 + sc-5576 add Chroma,
-/// Kolors, and SenseNova-U1; sc-7459 adds the two FLUX.2-klein weight variants). Mirrors the worker's
-/// `image_jobs::is_candle_engine`: SDXL/RealVisXL (`realvisxl` shares the candle `"sdxl"` engine via a
-/// weights swap), plus z-image-turbo, FLUX.1 schnell/dev, FLUX.2-klein-9B (+ the `_kv` / `_true_v2`
-/// weight variants, which share the candle `flux2_klein_9b` loader), Qwen-Image,
-/// `lens`/`lens_turbo`, `chroma1_hd`/`_base`/`_flash`, `kolors`, and `sensenova_u1_8b`/`_fast` —
-/// the base **txt2img** ids (plus the klein weight swaps). Deliberately narrow: candle is a gated
-/// txt2img-only lane, so every conditioning shape AND every still-unwired weight variant (e.g.
-/// `qwen_image_edit`) falls back to the Python torch worker — including the klein variants' OWN edit /
-/// KV-cache shapes (`flux2_klein_9b_kv`'s reference-edit accel is out of scope; sc-7459 is txt2img weight
-/// parity only). Lens is pure T2I (no conditioning at all) but — unlike the others — DOES advertise
-/// quant + LoRA/LoKr, so it is also listed in [`CANDLE_QUANT_LORA_MODELS`] below to exempt it from the
-/// quant/LoRA → torch fallbacks.
-const CANDLE_ROUTED_MODELS: &[&str] = &[
-    "sdxl",
-    "realvisxl",
-    // RealVisXL Lightning (sc-7176, the candle half of sc-6128): the standalone few-step distilled
-    // checkpoint shares the candle `sdxl` engine via a weights swap (like `realvisxl`), driven on the
-    // engine's few-step `lightning` (Euler-trailing, CFG-off) sampler the worker forces for this id.
-    // **txt2img only** — its edit / reference / mask / pose shapes are rejected below
-    // (`image_request_candle_eligible`) and fall back to the Python torch worker, exactly as the MLX
-    // `realvisxl_lightning_mlx_eligible` gate restricts the macOS path (the accel sampler is
-    // conditioning-incompatible).
-    "realvisxl_lightning",
-    "z_image_turbo",
-    // Base (non-distilled, full-CFG) Z-Image (epic 8236, sc-8379 control + sc-8679 txt2img): same candle
-    // `z_image_diffusers` family as Turbo. Now routed for BOTH the strict-control lane (`z_image` +
-    // `advanced.poses` → `generate_candle_zimage_control_stream`, the base Fun-Controlnet-Union branch)
-    // AND plain txt2img (sc-8679): the registered candle `z_image` base generator (shift-6.0 / ~50-step /
-    // real CFG) runs a non-pose `z_image` job through the generic candle txt2img lane, the base sibling of
-    // `z_image_turbo`. Edit/reference/mask shapes still defer to torch (`image_request_candle_eligible`).
-    "z_image",
-    "flux_schnell",
-    "flux_dev",
-    "flux2_klein_9b",
-    // FLUX.2-klein weight variants (sc-7459, epic 6564 story 3): same candle `flux2_klein_9b`
-    // loader/arch, a weights swap. `_kv` is a separately-distilled checkpoint with a full diffusers
-    // tree (4-step, guidance 1.0); `_true_v2` is the wikeeyang undistilled fine-tune (24-step,
-    // guidance 1.0) the convert-at-install lane assembles into a local diffusers dir (loaded via the
-    // `modelPath` seam — candle converter sc-7459). **txt2img only**: `_kv`'s reference-edit / KV-cache
-    // accel and every reference/edit shape are rejected below (`image_request_candle_eligible`) and
-    // fall back to the Python torch worker.
-    "flux2_klein_9b_kv",
-    "flux2_klein_9b_true_v2",
-    // FLUX.2-dev (epic 6564 sc-7458): the guidance-distilled 32B flagship, a SEPARATE candle engine
-    // from klein (Mistral3 TE + 48/48/15360 DiT), registered by `candle-gen-flux2`'s `flux2_dev`
-    // generator (sc-7457). Off-Mac the candle lane loads the dense `black-forest-labs/FLUX.2-dev`
-    // diffusers snapshot and Q4-quantizes it at load (CPU-stage → quantize-onto-GPU; the 32B doesn't
-    // fit the GPU dense) — the manifest `mlx.quantize: 4` + the dev descriptor's `supported_quants`
-    // drive that through the shared `resolve_quant` gate, so it needs no per-payload quant request for
-    // txt2img. Its edit / multi-reference shapes (`Flux2Edit::load_dev`) and strict-pose Fun-Controlnet-
-    // Union (`Flux2Control`) are now candle lanes too (sc-7736): both branch out of
-    // `image_job_is_candle_eligible` BEFORE the txt2img gate (the edit + control eligibility predicates).
-    "flux2_dev",
-    "qwen_image",
-    "lens",
-    "lens_turbo",
-    // epic 3692 candle image families. Chroma's worker lane (#658) shipped without this router half, so
-    // chroma jobs never reached the candle worker — added here with Kolors + SenseNova-U1 (sc-5576). All
-    // pure **txt2img** on candle: their edit / IP-reference / pose-control / VQA shapes are rejected
-    // below (`image_request_candle_eligible`) and fall back to the Python torch worker.
-    "chroma1_hd",
-    "chroma1_base",
-    "chroma1_flash",
-    "kolors",
-    "sensenova_u1_8b",
-    "sensenova_u1_8b_fast",
-    // Ideogram 4 (sc-6597, epic 6561): the candle `candle-gen-ideogram` provider serves `ideogram_4`
-    // (asymmetric two-DiT CFG) and `ideogram_4_turbo` (CFG-free single DiT + bundled TurboTime LoRA).
-    // Pure **txt2img** on candle for now — edit / img2img / mask shapes are rejected below
-    // (`image_request_candle_eligible`) and fall back to the Python torch worker until the candle edit
-    // lane lands (sc-6598). These ids are also in `MLX_ROUTED_MODELS` (the macOS native engine).
-    "ideogram_4",
-    "ideogram_4_turbo",
-    // Boogu-Image-0.1 (sc-7524, epic 6831): the candle `candle-gen-boogu` provider serves `boogu_image`
-    // (Base, true-CFG), `boogu_image_turbo` (DMD few-step, CFG-free), and `boogu_image_edit` (single-
-    // reference instruction TI2I). Base + Turbo are pure **txt2img** on candle; `boogu_image_edit`'s
-    // `edit_image` shape is handled by the bespoke `boogu_edit_candle_eligible` branch in
-    // `image_job_is_candle_eligible` (the source `Reference` is resolved in-lane by the worker's
-    // `generate_candle_stream`, like Ideogram — NOT a separate bespoke stream). bf16-only (the provider
-    // rejects on-the-fly quant), so a deliberate quant request defers below — boogu is intentionally NOT
-    // in `CANDLE_QUANT_LORA_MODELS`. Apache-2.0 ungated. These ids are also in `MLX_ROUTED_MODELS` (the
-    // macOS native engine); mirror `boogu_mlx_eligible`.
-    "boogu_image",
-    "boogu_image_turbo",
-    "boogu_image_edit",
-    // Krea 2 Turbo (epic 7565 P4, sc-7581): the candle `candle-gen-krea` provider serves `krea_2_turbo`
-    // (12B single-stream rectified-flow DiT + Qwen3-VL-4B TE + Qwen-Image VAE, TDM-distilled CFG-free
-    // few-step). txt2img + inference LoRA/LoKr — `image_request_candle_eligible` accepts the plain shape
-    // and a LoRA (Krea is in `CANDLE_LORA_MODELS`; the provider merges a `krea_2_raw`-trained adapter at
-    // Turbo inference, sc-7836), but rejects edit / reference / mask / quant (the provider advertises no
-    // conditioning shapes and `supported_quants: &[]`). The MODEL_TABLE row + manifest entry are the MLX
-    // twin (sc-7572); sc-7581 adds the candle lane (bf16 off the ungated public `krea/Krea-2-Turbo`, the
-    // boogu pattern). This id is also in `MLX_ROUTED_MODELS`; mirror `krea_mlx_eligible`.
-    "krea_2_turbo",
-    // Stable Diffusion 3.5 (sc-7880, epic 7982): the candle `candle-gen-sd3` provider serves
-    // `sd3_5_large` (8B MMDiT, true-CFG), `sd3_5_large_turbo` (ADD-distilled few-step, CFG-free), and
-    // `sd3_5_medium` (2.5B MMDiT-X dual-attention). All three are pure **txt2img** on candle — the
-    // generic `image_request_candle_eligible` gate accepts the plain shape and rejects edit / reference /
-    // mask / pose / LoRA (the descriptor advertises `supports_lora: false`). The provider DOES advertise
-    // Q4/Q8 (sc-7879), so an explicit quant request stays on the candle lane (listed in
-    // `CANDLE_QUANT_MODELS` below). The MODEL_TABLE rows + manifest entries are the MLX twin (sc-7871);
-    // these ids are also in `MLX_ROUTED_MODELS` (the macOS native engine); mirror `sd3_5_mlx_eligible`.
-    "sd3_5_large",
-    "sd3_5_large_turbo",
-    "sd3_5_medium",
-];
-
-/// The candle image families that advertise on-the-fly Q4/Q8 quant AND LoRA/LoKr adapters — Lens /
-/// Lens-Turbo (sc-5126), the first such candle family. For these a LoRA or an explicit quant request
-/// does NOT force the job to the Python torch worker: the candle `generate_candle_stream` maps both
-/// into the `LoadSpec` (descriptor-gated, see `ResolvedModel::supports_quant`/`supports_adapters`).
-/// Every other candle family advertises neither, so a LoRA/quant request there still defers to torch.
-const CANDLE_QUANT_LORA_MODELS: &[&str] = &["lens", "lens_turbo"];
-
-/// The candle image families that advertise on-the-fly Q4/Q8 quant but NOT inference LoRA — Stable
-/// Diffusion 3.5 (sc-7880): the `candle-gen-sd3` descriptor advertises `supported_quants: [Q4, Q8]`
-/// with `supports_lora: false`. For these an explicit quant request stays on the candle lane (the
-/// worker's `generate_candle_stream` resolves it descriptor-side via `model.supports_quant()`), but a
-/// LoRA still defers to the Python torch worker. `CANDLE_QUANT_LORA_MODELS` (Lens) is the superset that
-/// also keeps LoRAs on candle; these two lists are disjoint and the gate consults both.
-const CANDLE_QUANT_MODELS: &[&str] = &["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"];
-
-/// The candle image families that advertise inference LoRA/LoKr adapters but NOT on-the-fly quant —
-/// Krea 2 Turbo (sc-7836): `candle-gen-krea` merges a `krea_2_raw`-trained LoRA/LoKr into the dense DiT
-/// (`supports_lora`/`supports_lokr: true`), but ships `supported_quants: &[]` (dense bf16 only). For
-/// these a LoRA stays on the candle lane (the worker's `generate_candle_stream` resolves it via
-/// `model.supports_adapters()`) while an explicit quant request still defers to the Python torch
-/// worker. The mirror of `CANDLE_QUANT_MODELS` (quant-not-LoRA); `CANDLE_QUANT_LORA_MODELS` (Lens) is
-/// the both-set. The three lists are disjoint and the gate consults all three. (sc-7836 landed the
-/// candle-gen engine merge + descriptor un-gate; the SceneWorks-side router un-gate here was missed
-/// because the sc-7837 GPU validation ran through the `candle-gen-krea` test harness, not a real
-/// `image_generate` submission — so a Krea LoRA job hit the no-torch-fallback gap instead of candle.)
-const CANDLE_LORA_MODELS: &[&str] = &["krea_2_turbo"];
-
-/// Whether `worker` is the candle (Windows/CUDA) SDXL worker — identified by the `candle` marker
-/// capability it self-advertises (`gpu::with_candle_capabilities`), mirroring the `nvidia` marker
-/// the Rust GPU worker already emits. The candle worker runs on a real CUDA gpu index, not the
-/// `mlx` sentinel, so it can't be recognized by `gpu_id`; the marker is the seam. When candle is
-/// disabled the worker never advertises the marker, so this is always `false` and routing is
-/// unchanged.
-fn worker_is_candle(worker: &WorkerSnapshot) -> bool {
-    worker
-        .capabilities
-        .iter()
-        .any(|capability| capability.as_str() == "candle")
-}
-
-/// Does this image job belong on the candle (Windows/CUDA) image lane (epic 3672, sc-3678)? The base
-/// `generate_candle_stream` drives plain text-to-image, and the bespoke lanes branched out below add
-/// the conditioned shapes ported under epic 5480 — SDXL/FLUX.2/Qwen `edit_image` (sc-5487), IP-Adapter
-/// reference (sc-5488/sc-5872), InstantID/PuLID identity (sc-5491/sc-5492), and strict-pose ControlNet
-/// (sc-5489). Anything still without a candle lane (a torch-only family, an unported shape, a LoRA on a
-/// non-Lens family) falls back to the Python torch worker, so the candle worker refuses it here.
-///
-/// Like the MLX twin [`image_job_is_mlx_eligible`], this accepts BOTH `image_generate` and the distinct
-/// `image_edit` job type (the Image Studio/Editor "plain Image Edit": `mode == "edit_image"` +
-/// `sourceAssetId`, epic 2427) — the engine dispatches the SdxlEdit/Flux2Edit/QwenEdit lanes by payload
-/// model+mode, not job type, so both job types route through the same per-model predicates. Without
-/// `image_edit` here a plain Image Edit was wrongly enforce-failed `candle_unsupported` off-Mac instead
-/// of reaching its candle edit lane (the sc-5487 lanes were validated only via `image_generate` jobs, so
-/// the gap was invisible). The conditioning signals mirror the worker's `sdxl_sub_mode` / `pose_entries`
-/// exactly, so the router and worker agree on the lane boundary.
-fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
-    if !matches!(job.job_type, JobType::ImageGenerate | JobType::ImageEdit) {
-        return false;
-    }
-    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
-        return false;
-    };
-    // InstantID (sc-5491, epic 5480): the candle `candle-gen-instantid` provider serves the SAME
-    // identity-preserving surface as the MLX path (single-identity character_image, the angle set,
-    // pose-library mode, face-restore) — a bespoke `generate_instantid_stream` lane, NOT the
-    // txt2img-only `image_request_candle_eligible` gate (which rejects `referenceAssetId`, which
-    // InstantID requires). Branch it out before that gate. Retires the Python `_vendor/instantid`
-    // off-Mac; the candle worker only advertises the `candle` marker when the backend is enabled, so a
-    // candle-disabled box still falls these jobs back to the Python torch worker unchanged.
-    if model == "instantid_realvisxl" {
-        return instantid_candle_eligible(&job.payload);
-    }
-    // SDXL img2img / inpaint / outpaint edit (sc-5487, epic 5480): an sdxl-family `edit_image` job with
-    // a source image is the bespoke candle `SdxlEdit` lane (`generate_candle_sdxl_edit_stream`), NOT
-    // txt2img — the `image_request_candle_eligible` gate below rejects the whole `edit_image` family.
-    // Branch it out first (disjoint from the IP-Adapter lane below, which is reference-only and not
-    // `edit_image`). Mirrors the worker's `sdxl_edit_candle_available` gate.
-    if matches!(model, "sdxl" | "realvisxl") && sdxl_edit_candle_eligible(&job.payload) {
-        return true;
-    }
-    // FLUX.2-klein reference / img2img edit (sc-5487, epic 5480): a klein-family `edit_image` job with a
-    // source image is the bespoke candle `Flux2Edit` lane (`generate_candle_flux2_edit_stream`), NOT
-    // txt2img — the `image_request_candle_eligible` gate below rejects the whole `edit_image` family.
-    // FLUX.2-klein has no torch path, so this is the only off-Mac edit lane for it. Mirrors the worker's
-    // `flux2_edit_candle_available` gate.
-    if matches!(model, "flux2_klein_9b" | "flux2_klein_9b_true_v2")
-        && flux2_edit_candle_eligible(&job.payload)
-    {
-        return true;
-    }
-    // FLUX.2-dev edit (sc-7736, epic 6564): the 32B flagship `edit_image` job with a source is the SAME
-    // bespoke candle `Flux2Edit` lane (`generate_candle_flux2_edit_stream` via `load_dev`, Q4 CPU-stage →
-    // quantize-onto-GPU), NOT txt2img — the `image_request_candle_eligible` gate below rejects the whole
-    // `edit_image` family. Branch it out first (the klein-edit reasoning, for the dev family). Same payload
-    // predicate as klein. Mirrors the worker's `flux2_edit_candle_available` gate.
-    if model == "flux2_dev" && flux2_edit_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Qwen-Image-Edit reference / dual-latent edit (sc-5487, epic 5480): a non-lightning Qwen-Image-Edit
-    // `edit_image` job with a source image is the bespoke candle `QwenEdit` lane
-    // (`generate_candle_qwen_edit_stream`), NOT txt2img — and `qwen_image_edit*` are not candle txt2img
-    // ids (the gate below only knows `qwen_image`), so they would fall through to torch. Branch it out
-    // first. Off-Mac this was a torch fallback. The `-2511_lightning` distill is the same `-2511` base
-    // with the lightx2v 4-step LoRA folded into the MMDiT at load (sc-6220), so it routes to candle too.
-    // Mirrors the worker's `qwen_edit_candle_available`.
-    if matches!(
-        model,
-        "qwen_image_edit"
-            | "qwen_image_edit_2509"
-            | "qwen_image_edit_2511"
-            | "qwen_image_edit_2511_lightning"
-    ) && qwen_edit_candle_eligible(&job.payload)
-    {
-        return true;
-    }
-    // Z-Image img2img / edit (sc-6595, epic 5480): a z-image-family `edit_image` job with a source image
-    // is the bespoke candle `ZImageEdit` lane (`generate_candle_zimage_edit_stream`), NOT txt2img — the
-    // gate below rejects the whole `edit_image` family, and the dedicated `z_image_edit` id isn't even a
-    // candle txt2img id (so a `z_image_edit` job would otherwise hit the "model not routed" gap and
-    // misattribute to epic 3692). Branch it out first; disjoint from the Z-Image strict-pose control lane
-    // below (that one is `advanced.poses`, not `edit_image`). Mirrors the worker's
-    // `zimage_edit_candle_available`.
-    if matches!(model, "z_image_turbo" | "z_image_edit")
-        && zimage_edit_candle_eligible(&job.payload)
-    {
-        return true;
-    }
-    // Z-Image identity-init for Image Studio "With Character" (sc-8409, epic 4406): a `z_image_turbo`
-    // `character_image` job with a `referenceAssetId` + `advanced.referenceStrength > 0` is the bespoke
-    // candle `ZImageEdit` identity-init lane (`generate_candle_zimage_identity_stream`), NOT txt2img — the
-    // `image_request_candle_eligible` gate below rejects any `referenceAssetId`, so without this the job
-    // falls back to torch/MLX (off-Mac: plain txt2img, dropping the reference — the pre-existing gap this
-    // story closes). Branch it out first; disjoint from the Z-Image edit lane above (`edit_image` +
-    // `sourceAssetId`) and the strict-pose control lane below (`advanced.poses`, which this gate excludes).
-    // Mirrors the worker's `zimage_identity_candle_available`.
-    if model == "z_image_turbo" && zimage_identity_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Ideogram 4 img2img / Remix + mask inpaint / outpaint edit (sc-6598, epic 6561): an ideogram-family
-    // `edit_image` job with a source image runs the candle `candle-gen-ideogram` edit path. Unlike the
-    // other families above, Ideogram has no bespoke edit stream — it's the SAME engine for T2I and edit,
-    // so the generic `generate_candle_stream` resolves the source `Reference` (+ optional `Mask`), exactly
-    // as the MLX `generate_stream` handles Ideogram edit in-lane. The `image_request_candle_eligible` gate
-    // below rejects the whole `edit_image` family, so branch it out here. Mirrors the worker's dispatch.
-    if matches!(model, "ideogram_4" | "ideogram_4_turbo")
-        && ideogram_edit_candle_eligible(&job.payload)
-    {
-        return true;
-    }
-    // Boogu instruction edit (sc-7524, epic 6831): a `boogu_image_edit` `edit_image` job with a source
-    // image runs the candle `candle-gen-boogu` edit path. Like Ideogram (and unlike the SDXL/FLUX.2/Qwen/
-    // Z-Image bespoke streams above), Boogu has no separate edit stream — the SAME registered
-    // `boogu_image_edit` engine resolves the source `Reference` in the worker's `generate_candle_stream`
-    // (the Qwen3-VL vision tower reads it + it VAE-encodes into the DiT reference latent), exactly as the
-    // MLX `generate_stream` handles Boogu edit in-lane. The `image_request_candle_eligible` gate below
-    // rejects the whole `edit_image` family, so branch it out here. Base/Turbo are pure T2I (the generic
-    // gate). Mirrors the worker's dispatch + the MLX `boogu_mlx_eligible`.
-    if model == "boogu_image_edit" && boogu_edit_candle_eligible(&job.payload) {
-        return true;
-    }
-    // SDXL IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): an sdxl-family model with a
-    // reference image is a bespoke candle lane (`generate_candle_sdxl_ipadapter_stream`), NOT txt2img —
-    // the `image_request_candle_eligible` gate below rejects `referenceAssetId`. Branch it out first
-    // (pure IP only; img2img/inpaint/edit shapes are the SDXL edit lane above). Mirrors the worker's
-    // `sdxl_ipadapter_available` gate.
-    if matches!(model, "sdxl" | "realvisxl") && sdxl_ipadapter_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Kolors IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): the `kolors` family with a
-    // reference image is the same bespoke candle lane (`generate_candle_kolors_ipadapter_stream`), NOT
-    // txt2img — branch it out before the gate (which rejects `referenceAssetId`). Pure IP only;
-    // img2img/edit shapes stay on torch (sc-5487). Mirrors the worker's `kolors_ipadapter_available`.
-    if model == "kolors" && kolors_ipadapter_candle_eligible(&job.payload) {
-        return true;
-    }
-    // FLUX XLabs IP-Adapter reference conditioning (sc-5872, epic 5480): a `flux_dev`/`flux_schnell`
-    // model with a reference image is the same bespoke candle lane (`generate_candle_flux_ipadapter_\
-    // stream`), NOT txt2img — branch it out before the gate (which rejects `referenceAssetId`). Pure IP
-    // only; img2img/edit shapes stay on torch (sc-5487). Mirrors the worker's `flux_ipadapter_available`.
-    if matches!(model, "flux_dev" | "flux_schnell") && flux_ipadapter_candle_eligible(&job.payload)
-    {
-        return true;
-    }
-    // Qwen-Image strict-pose ControlNet (sc-5489, epic 5480): `qwen_image` + `advanced.poses` is a
-    // bespoke candle lane (`generate_candle_qwen_control_stream`), NOT txt2img — the
-    // `image_request_candle_eligible` gate below DEFERS any `advanced.poses` job to torch. Branch it out
-    // first so `qwen_image` pose jobs reach candle (the kolors / z_image families follow below — all three
-    // strict-pose families are now wired; plain-sdxl pose has no product route). Mirrors the worker's
-    // `qwen_control_available`.
-    if model == "qwen_image" && qwen_control_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Kolors strict-pose ControlNet (sc-5489, epic 5480): `kolors` + `advanced.poses` is the bespoke
-    // candle lane (`generate_candle_kolors_control_stream`), NOT txt2img — the `image_request_candle_\
-    // eligible` gate below DEFERS any `advanced.poses` job to torch. Branch it out first (the Qwen-control
-    // reasoning, for the Kolors family). A pure-pose `kolors` job (no `referenceAssetId`) does NOT match
-    // the `kolors_ipadapter_candle_eligible` branch above, so it reaches here. Mirrors the worker's
-    // `kolors_control_available`.
-    if model == "kolors" && kolors_control_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Z-Image strict-pose Fun-ControlNet (sc-5489, epic 5480): `z_image_turbo` + `advanced.poses` is the
-    // bespoke candle lane (`generate_candle_zimage_control_stream`), NOT txt2img — the `image_request_\
-    // candle_eligible` gate below DEFERS any `advanced.poses` job to torch. Branch it out first (the
-    // Qwen/Kolors-control reasoning, for the last strict-pose family). Mirrors the worker's
-    // `zimage_control_available`. With this all three control families (qwen / kolors / z_image) are wired.
-    if model == "z_image_turbo" && zimage_control_candle_eligible(&job.payload) {
-        return true;
-    }
-    // Base (non-distilled, full-CFG) Z-Image strict-control (sc-8379, epic 8236): `z_image` +
-    // `advanced.poses` is the SAME bespoke candle `ZImageControl` lane as Turbo
-    // (`generate_candle_zimage_control_stream`, base Fun-Controlnet-Union branch), NOT txt2img — branch it
-    // out before the txt2img gate (which would defer the pose job to torch and has no base-z-image txt2img
-    // provider anyway). Same payload shape as the Turbo gate. Mirrors the worker's `zimage_control_\
-    // available` (which accepts both `z_image_turbo` and `z_image`).
-    if model == "z_image" && zimage_control_candle_eligible(&job.payload) {
-        return true;
-    }
-    // FLUX.1-dev strict-control Shakker Union-Pro-2.0 (sc-8412, epic 8236): `flux_dev` + `advanced.poses` is
-    // the bespoke candle `Flux1DevControl` lane (`generate_candle_flux1_control_stream`), NOT txt2img — the
-    // `image_request_candle_eligible` gate below DEFERS any `advanced.poses` job to torch, and the
-    // pose-reject would otherwise claim-to-reject it (it now HAS a candle pose lane). Branch it out first (the
-    // qwen/kolors/z_image/flux2-control reasoning, for the FLUX.1-dev family). A `flux_dev` reference job (a
-    // `referenceAssetId`) is the FLUX XLabs IP-Adapter branch above; a pure-pose job reaches here. Mirrors
-    // the worker's `flux1_control_candle_available`.
-    if model == "flux_dev" && flux1_control_candle_eligible(&job.payload) {
-        return true;
-    }
-    // FLUX.2-dev strict-pose Fun-Controlnet-Union (sc-7736, epic 6564): `flux2_dev` + `advanced.poses` is
-    // the bespoke candle `Flux2Control` lane (`generate_candle_flux2_control_stream`), NOT txt2img — the
-    // `image_request_candle_eligible` gate below DEFERS any `advanced.poses` job to torch, and the pose-
-    // reject would otherwise claim-to-reject it (it now HAS a candle pose lane). Branch it out first (the
-    // qwen/kolors/z_image-control reasoning, for the 4th wired strict-pose family). A flux2_dev edit job
-    // (with a source) is the edit branch above; a pure-pose job (no source) reaches here. Mirrors the
-    // worker's `flux2_control_candle_available`.
-    if model == "flux2_dev" && flux2_dev_control_candle_eligible(&job.payload) {
-        return true;
-    }
-    // PuLID-FLUX face identity (sc-5492, epic 5480): `pulid_flux_dev` is a distinct model id (not a
-    // candle txt2img id), so the `image_request_candle_eligible` gate below would reject it; the candle
-    // `candle-gen-pulid` provider serves it via a bespoke `generate_candle_pulid_stream` lane (the
-    // off-Mac sibling of the macOS `pulid_flux` registry route). Branch it out, returning eligibility
-    // directly — a non-character / reference-less job returns false → falls back to torch/MLX. Mirrors
-    // the worker's `pulid_candle_available`.
-    if model == "pulid_flux_dev" {
-        return pulid_flux_candle_eligible(&job.payload);
-    }
-    image_request_candle_eligible(model, &job.payload)
-}
-
-/// Per-model candle txt2img-eligibility, factored out of [`image_job_is_candle_eligible`] so the
-/// routing tests can probe it with synthetic payloads (parity with `image_request_mlx_eligible`).
-fn image_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
-    if !CANDLE_ROUTED_MODELS.contains(&model) {
-        return false;
-    }
-    // Base (non-distilled, full-CFG) Z-Image txt2img (sc-8679, epic 8236): the candle `z_image` base
-    // generator (shift-6.0 / ~50-step / real CFG) is now a candle txt2img provider (`is_candle_engine`),
-    // so a plain (non-pose, non-edit) `z_image` job routes to the generic candle txt2img lane here — the
-    // base sibling of `z_image_turbo`. Its strict-pose control (`advanced.poses`) is still branched out by
-    // `zimage_control_candle_eligible` in `image_job_is_candle_eligible` BEFORE this gate; its edit shapes
-    // are rejected below with every other family. (The prior sc-8379 guard that hard-rejected base z_image
-    // here — because no candle txt2img provider existed — is retired now that one does.)
-    // img2img / inpaint / outpaint all arrive as `mode == "edit_image"` (+ a source); reject the
-    // whole edit family up front (the worker's `sdxl_sub_mode` keys off the same mode).
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    let has_nonempty_id = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    // Any conditioning asset (img2img source, IP-Adapter reference, or inpaint mask) → torch. Applies
-    // to EVERY candle family including Lens (pure T2I — no conditioning shapes in the Lens port).
-    if has_nonempty_id("sourceAssetId")
-        || has_nonempty_id("referenceAssetId")
-        || has_nonempty_id("maskAssetId")
-    {
-        return false;
-    }
-    // Lens / Lens-Turbo advertise Q4/Q8 + LoRA/LoKr, so a quant request OR a LoRA stays on the candle
-    // lane for them. SD3.5 (sc-7880) advertises Q4/Q8 but NOT inference LoRA (quant stays, LoRA defers);
-    // Krea 2 Turbo (sc-7836) is the inverse — inference LoRA/LoKr but NOT quant (LoRA stays, quant
-    // defers). Every other candle family advertises neither and defers both. The two capabilities are
-    // decoupled: `supports_lora` and `supports_quant` each consult the both-set plus their own list.
-    let supports_lora =
-        CANDLE_QUANT_LORA_MODELS.contains(&model) || CANDLE_LORA_MODELS.contains(&model);
-    let supports_quant =
-        CANDLE_QUANT_LORA_MODELS.contains(&model) || CANDLE_QUANT_MODELS.contains(&model);
-    // LoRAs: not in the candle lane unless the family advertises adapters (Lens / Krea).
-    if !supports_lora
-        && payload
-            .get("loras")
-            .and_then(Value::as_array)
-            .is_some_and(|loras| !loras.is_empty())
-    {
-        return false;
-    }
-    // Strict-pose ControlNet (`advanced.poses`, object-shaped entries) → torch.
-    let has_poses = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty());
-    if has_poses {
-        return false;
-    }
-    // On-the-fly quantization (`advanced.mlxQuantize` > 0) → torch UNLESS the family advertises quant.
-    // The sc-3675/sc-5096 candle providers advertise `supported_quants: &[]` (dense bf16/fp16 only), so
-    // an explicit quant request can't be honored — route to Python rather than silently running dense
-    // (sc-5099). Lens (sc-5126) + SD3.5 (sc-7880) advertise Q4/Q8, so their quant requests stay here.
-    if !supports_quant && candle_request_wants_quant(payload) {
-        return false;
-    }
-    true
-}
-
-/// Whether the request explicitly asks for on-the-fly quantization the candle backend can't do.
-/// `advanced.mlxQuantize` is an optional advanced override (the web UI doesn't send it; the MLX path
-/// otherwise defaults quant from the manifest) — so a payload-level value `> 0` is a deliberate quant
-/// request. `<= 0` (dense) and absent both leave candle on its native dense path (sc-5099).
-fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("mlxQuantize"))
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .is_some_and(|bits| bits > 0)
-}
-
-/// The video models the candle (Windows/CUDA) lane serves: the base txt2video engines `wan_2_2`
-/// (→ candle `wan2_2_ti2v_5b`) and `ltx_2_3` (→ candle `ltx_2_3_distilled`) (epic 5095, sc-5097),
-/// plus the Wan2.2 **14B** MoE pair `wan_2_2_t2v_14b` (text-only) and `wan_2_2_i2v_14b` (image→video)
-/// (sc-5175), plus `svd` (→ candle `svd_xt`, image→video, sc-5493 / epic 5481). Mirrors the worker's
-/// `video_jobs::candle_video_engine_id`. `ltx_2_3_eros` (sc-5495) now routes to candle for plain
-/// text-to-video too — it's a full dense LTX-2.3 fine-tune → the same `ltx_2_3_distilled` engine, just
-/// its own weights repo; every conditioned mode (first_last_frame / extend / bridge / replace) + LoRA
-/// still stays on the Python torch worker. Note the 14B I2V and SVD are image→video, NOT txt2video —
-/// see [`CANDLE_VIDEO_I2V_ROUTED_MODELS`].
-const CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[
-    "wan_2_2",
-    "ltx_2_3",
-    "ltx_2_3_eros",
-    "wan_2_2_t2v_14b",
-    "wan_2_2_i2v_14b",
-    "svd",
-];
-
-/// The candle video models that run **image→video** (a source image is required), not txt2video: the
-/// Wan2.2 14B I2V MoE (sc-5175) and SVD (`svd` → `svd_xt`, sc-5493). Their candle providers condition on
-/// a source frame, so their eligibility gate requires `mode=image_to_video` + a non-empty
-/// `sourceAssetId` — the inverse of the txt2video-only gate the 5B / T2V-14B / ltx ids use.
-const CANDLE_VIDEO_I2V_ROUTED_MODELS: &[&str] = &["wan_2_2_i2v_14b", "svd"];
-
-/// Does this video job belong on the candle video lane? The candle wan/ltx providers drive plain
-/// text-to-video, the 14B I2V's single source-image conditioning (sc-5175), SVD image→video (sc-5493),
-/// **and** the Wan-VACE advanced modes — replace_person / extend / bridge (sc-5494, the `PersonReplace`
-/// / `VideoExtend` / `VideoBridge` job types → the candle `wan_vace` engine). Every other shape
-/// (reference/mask/first-last-frame conditioning, LoRAs) must fall back to the Python torch worker, so
-/// the candle worker refuses it here. SCAIL-2 (`scail2_14b`) adds a DISTINCT candle engine off-Mac —
-/// `animate_character` + `replace_person` (sc-6837, epic 6563) — gated separately (it is not a VACE
-/// model). The per-model shape gates are [`video_request_candle_eligible`] (base),
-/// [`video_request_candle_vace_eligible`] (VACE modes), and
-/// [`scail2_animate_candle_eligible`] / [`scail2_replace_candle_eligible`].
-fn video_job_is_candle_eligible(job: &JobSnapshot) -> bool {
-    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
-        return false;
-    };
-    match job.job_type {
-        // The base txt2video / image→video lane (sc-5097 / sc-5175 / sc-5493), plus SCAIL-2 standalone
-        // character animation (`animate_character`, sc-6837 — a distinct candle engine, not VACE).
-        JobType::VideoGenerate => {
-            video_request_candle_eligible(model, &job.payload)
-                || scail2_animate_candle_eligible(model, &job.payload)
-        }
-        // replace_person → candle Wan-VACE (sc-5494) OR candle SCAIL-2 (sc-6837, routed by model id).
-        JobType::PersonReplace => {
-            video_request_candle_vace_eligible(model, &job.payload, &job.job_type)
-                || scail2_replace_candle_eligible(model, &job.payload)
-        }
-        // extend_clip / video_bridge → candle Wan-VACE only (sc-5494).
-        JobType::VideoExtend | JobType::VideoBridge => {
-            video_request_candle_vace_eligible(model, &job.payload, &job.job_type)
-        }
-        _ => false,
-    }
-}
-
-/// Per-model candle txt2video-eligibility, factored out so the routing tests can probe it with
-/// synthetic payloads (parity with `image_request_candle_eligible`).
-fn video_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
-    if !CANDLE_VIDEO_ROUTED_MODELS.contains(&model) {
-        return false;
-    }
-    let has_nonempty_id = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    if CANDLE_VIDEO_I2V_ROUTED_MODELS.contains(&model) {
-        // Wan 14B I2V is image→video ONLY (sc-5175): require the `image_to_video` mode + a source
-        // image. A txt2video shape (no source) is rejected so a mis-picked text job stays on torch.
-        if payload.get("mode").and_then(Value::as_str) != Some("image_to_video") {
-            return false;
-        }
-        if !has_nonempty_id("sourceAssetId") {
-            return false;
-        }
-    } else {
-        // txt2video only: the base `video_generate` mode defaults to `image_to_video`, so require an
-        // explicit `text_to_video`. Every conditioned mode (i2v / first_last_frame / extend / bridge /
-        // replace) is thereby excluded, as is a stray source image.
-        if payload.get("mode").and_then(Value::as_str) != Some("text_to_video") {
-            return false;
-        }
-        if has_nonempty_id("sourceAssetId") {
-            return false;
-        }
-    }
-    // Reference / inpaint-mask conditioning is never in the candle video lane (i2v needs only the
-    // single source image; reference + mask are the character / inpaint shapes that stay on torch).
-    if has_nonempty_id("referenceAssetId") || has_nonempty_id("maskAssetId") {
-        return false;
-    }
-    // LoRAs are not in the candle video lane (the providers advertise none).
-    if payload
-        .get("loras")
-        .and_then(Value::as_array)
-        .is_some_and(|loras| !loras.is_empty())
-    {
-        return false;
-    }
-    // On-the-fly quantization → torch (the candle video providers are dense; sc-5099).
-    if candle_request_wants_quant(payload) {
-        return false;
-    }
-    true
-}
-
-/// The candle video models eligible for the Wan-VACE advanced modes (sc-5494). These route to the
-/// single candle `wan_vace` engine regardless of the user's wan pick. The SCAIL-2 person-replace
-/// backend is MLX-only, so `scail2_*` is deliberately absent (those stay on the torch / mac worker).
-const CANDLE_VIDEO_VACE_MODELS: &[&str] = &["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"];
-
-/// Candle Wan-VACE eligibility for the advanced video job types (sc-5494): `PersonReplace`
-/// (replace_person), `VideoExtend` (extend_clip), `VideoBridge` (video_bridge). Routes to the candle
-/// `wan_vace` engine when the model is VACE-capable and the per-mode source assets are present. LoRA /
-/// on-the-fly quant are not in the candle video lane (the VACE provider rejects them). Factored out so
-/// the routing tests can probe it with synthetic payloads (parity with [`video_request_candle_eligible`]).
-fn video_request_candle_vace_eligible(
-    model: &str,
-    payload: &Map<String, Value>,
-    job_type: &JobType,
-) -> bool {
-    if !CANDLE_VIDEO_VACE_MODELS.contains(&model) {
-        return false;
-    }
-    let has_nonempty_id = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    match job_type {
-        // replace_person: the source control clip + the tracked person + the character references.
-        JobType::PersonReplace => {
-            if !has_nonempty_id("sourceClipAssetId")
-                || !has_nonempty_id("personTrackId")
-                || !has_nonempty_id("characterId")
-            {
-                return false;
-            }
-        }
-        // extend_clip: the source clip whose tail anchors the continuation.
-        JobType::VideoExtend => {
-            if !has_nonempty_id("sourceClipAssetId") {
-                return false;
-            }
-        }
-        // video_bridge: both clips (the left tail + the right head) are pinned around the gap.
-        JobType::VideoBridge => {
-            if !has_nonempty_id("sourceClipAssetId") || !has_nonempty_id("bridgeRightClipAssetId") {
-                return false;
-            }
-        }
-        _ => return false,
-    }
-    // LoRAs / on-the-fly quant are not in the candle video lane (the VACE provider rejects them).
-    if payload
-        .get("loras")
-        .and_then(Value::as_array)
-        .is_some_and(|loras| !loras.is_empty())
-    {
-        return false;
-    }
-    if candle_request_wants_quant(payload) {
-        return false;
-    }
-    true
-}
-
-/// Candle SCAIL-2 `animate_character` eligibility (sc-6837, epic 6563). SCAIL-2 is a DISTINCT candle
-/// engine (NOT Wan-VACE), so it has its own gate rather than membership in [`CANDLE_VIDEO_VACE_MODELS`]:
-/// the `scail2_14b` model + the `animate_character` mode + a reference character image
-/// (`referenceAssetId` / `referenceAssetIds` / `sourceAssetId`) + a driving clip (`sourceClipAssetId`).
-/// Inference LoRA / LoKr / LoHa + the Bias-Aware DPO LoRA + the lightx2v lightning diff-patch ARE on the
-/// candle path now (sc-6838 — the provider merges them into the dense DiT), so a LoRA-bearing animate job
-/// stays on candle. On-the-fly quantization is still torch (the candle provider is dense). Mirrors the
-/// MLX `video_mode_is_mlx_eligible(scail2_14b, animate_character)` shape, expressed as a candle-claim
-/// gate. Factored out so the routing tests can probe it (parity with [`video_request_candle_eligible`]).
-fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
-    if model != "scail2_14b" {
-        return false;
-    }
-    if payload.get("mode").and_then(Value::as_str) != Some("animate_character") {
-        return false;
-    }
-    let has_nonempty_id = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    let has_reference = has_nonempty_id("referenceAssetId")
-        || has_nonempty_id("sourceAssetId")
-        || payload
-            .get("referenceAssetIds")
-            .and_then(Value::as_array)
-            .is_some_and(|ids| {
-                ids.iter()
-                    .any(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()))
-            });
-    if !has_reference {
-        return false;
-    }
-    if !has_nonempty_id("sourceClipAssetId") {
-        return false;
-    }
-    // Inference LoRA (DPO / lightning / user adapter) merges into the candle DiT (sc-6838), so a
-    // LoRA-bearing animate job is candle-eligible — only on-the-fly quant still falls back to torch.
-    if candle_request_wants_quant(payload) {
-        return false;
-    }
-    true
-}
-
-/// Candle SCAIL-2 `replace_person` eligibility (sc-6837, epic 6563). The `scail2_14b` model behind a
-/// `PersonReplace` job: the source control clip + the tracked person + the character references (the
-/// same per-mode assets the Wan-VACE replace gate requires). No LoRA / on-the-fly quant (the provider
-/// rejects them; inference LoRA is sc-6838). A distinct candle engine, so it is gated here rather than
-/// added to [`CANDLE_VIDEO_VACE_MODELS`]. Factored out so the routing tests can probe it.
-fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
-    if model != "scail2_14b" {
-        return false;
-    }
-    let has_nonempty_id = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    if !has_nonempty_id("sourceClipAssetId")
-        || !has_nonempty_id("personTrackId")
-        || !has_nonempty_id("characterId")
-    {
-        return false;
-    }
-    if payload
-        .get("loras")
-        .and_then(Value::as_array)
-        .is_some_and(|loras| !loras.is_empty())
-    {
-        return false;
-    }
-    if candle_request_wants_quant(payload) {
-        return false;
-    }
-    true
-}
-
-/// InstantID (`instantid_realvisxl`) MLX-routing conditions. The native `mlx-gen-instantid`
-/// provider now serves the FULL surface on Mac: single-identity `character_image`, the 11-view
-/// Character-Studio angle set (sc-3345), AND pose-library mode + face-restore (sc-3381, on the
-/// #193 engine — `generate_pose` MultiControlNet IdentityNet+OpenPose / `restore_face`). So every
-/// `character_image` job with a reference face routes to MLX; only a non-character / reference-less
-/// job stays off. Mirrors the worker's `instantid_available` gate so the router and worker agree.
-fn instantid_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) != Some("character_image") {
-        return false;
-    }
-    payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
-}
-
-/// InstantID candle-routing conditions (sc-5491, epic 5480). The candle `candle-gen-instantid`
-/// provider is the off-Mac sibling of `mlx-gen-instantid` and serves the IDENTICAL surface (single
-/// identity, the angle set, pose-library mode, face-restore via `generate_pose` / `restore_face`), so
-/// the gate is the same as [`instantid_mlx_eligible`]: a `character_image` job with a reference face.
-/// Mirrors the candle worker's `instantid_available` gate so the router and worker agree.
-fn instantid_candle_eligible(payload: &Map<String, Value>) -> bool {
-    instantid_mlx_eligible(payload)
-}
-
-/// PuLID-FLUX candle-routing conditions (sc-5492, epic 5480). The candle `candle-gen-pulid` provider is
-/// the off-Mac sibling of `mlx-gen-pulid` and serves the IDENTICAL surface (a `character_image` job with
-/// a reference face → the PuLID identity injection on FLUX.1-dev), so the gate is the same as
-/// [`pulid_flux_mlx_eligible`]. Mirrors the candle worker's `pulid_candle_available` gate so the router
-/// and worker agree. `pulid_flux_dev` is a distinct model id (not `flux_dev`), so this never collides
-/// with the FLUX XLabs IP-Adapter lane.
-fn pulid_flux_candle_eligible(payload: &Map<String, Value>) -> bool {
-    pulid_flux_mlx_eligible(payload)
-}
-
-/// SDXL img2img / inpaint / outpaint candle-routing conditions (sc-5487, epic 5480). The candle
-/// `SdxlEdit` provider serves `edit_image` mode with a `sourceAssetId` on the sdxl family: img2img (no
-/// mask), inpaint (+ `maskAssetId`), and outpaint (`fit_mode == "outpaint"`) all route to the one lane.
-/// Disjoint from the IP-Adapter lane (which is `referenceAssetId` and NOT `edit_image`). Mirrors the
-/// worker's `sdxl_edit_candle_available` gate (minus the local weight-resolve check) so the router and
-/// worker agree. Candle-only — macOS keeps the MLX `SdxlSubMode::{Edit,Inpaint,Outpaint}` path.
-fn sdxl_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
-        return false;
-    }
-    payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
-}
-
-/// FLUX.2-klein edit candle-routing conditions (sc-5487, epic 5480). The candle `Flux2Edit` provider
-/// serves `edit_image` mode with a `sourceAssetId` on the klein family — Kontext-style reference
-/// token-concat editing (no mask / inpaint / outpaint; that masked shape is the SDXL edit lane's). Same
-/// payload predicate as `sdxl_edit_candle_eligible`, gated to the klein family by the caller. Mirrors the
-/// worker's `flux2_edit_candle_available` gate (minus the local weight-resolve check) so the router and
-/// worker agree. Candle-only — macOS keeps the MLX `flux2_klein_9b_edit` registry path.
-fn flux2_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
-        return false;
-    }
-    payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
-}
-
-/// Qwen-Image-Edit candle-routing conditions (sc-5487, epic 5480). The candle `QwenEdit` provider
-/// serves `edit_image` mode with a `sourceAssetId` on the non-lightning Qwen-Image-Edit family —
-/// dual-latent reference editing (no mask / inpaint / outpaint; that masked shape is the SDXL edit
-/// lane's). Same payload predicate as `flux2_edit_candle_eligible`, gated to the qwen-edit family by the
-/// caller. Mirrors the worker's `qwen_edit_candle_available` gate (minus the local weight-resolve check)
-/// so the router and worker agree. Candle-only — macOS keeps the MLX `qwen_image_edit` registry path.
-fn qwen_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
-        return false;
-    }
-    payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
-}
-
-/// Z-Image img2img / edit candle-routing conditions (sc-6595, epic 5480). The candle `ZImageEdit`
-/// provider serves `edit_image` mode with a `sourceAssetId` on the z-image family — the Turbo weights'
-/// img2img path (no mask / inpaint / outpaint). Same payload predicate as the other edit gates, gated to
-/// the z-image family (`z_image_turbo` + the dedicated `z_image_edit` id) by the caller. Mirrors the
-/// worker's `zimage_edit_candle_available` gate (minus the local weight-resolve check) so the router and
-/// worker agree. Candle-only — macOS keeps the MLX `z_image_turbo` registry generator's `Reference` path.
-fn zimage_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
-        return false;
-    }
-    payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
-}
-
-/// Ideogram 4 img2img / Remix + mask inpaint / outpaint edit candle-routing conditions (sc-6598, epic
-/// 6561). The candle `candle-gen-ideogram` provider serves `edit_image` mode with a `sourceAssetId` on
-/// the ideogram family — img2img/Remix (source `Reference`), masked inpaint (`+ maskAssetId`), and
-/// outpaint (`fit_mode == "outpaint"`, the worker synthesizes the border mask) all require a source.
-/// Same payload predicate as the other edit gates (an optional mask / outpaint is resolved worker-side
-/// in `resolve_ideogram_edit`). Gated to the ideogram family by the caller. The candle lane reuses the
-/// generic `generate_candle_stream` (same engine as T2I), so there is no separate worker `*_available`
-/// gate to mirror — the worker's `is_candle_engine` + in-lane edit resolve cover both. Candle-only —
-/// macOS keeps the MLX `ideogram_4` registry generator's edit path (sc-6303).
-fn ideogram_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
-        return false;
-    }
-    payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
-}
-
-/// Boogu instruction-edit candle-routing conditions (sc-7524, epic 6831). The candle `boogu_image_edit`
-/// engine serves `edit_image` mode with a `sourceAssetId` — a single-reference instruction TI2I (the
-/// source is VAE-encoded into the DiT reference latent AND read by the Qwen3-VL vision tower; no mask /
-/// inpaint / outpaint, the descriptor accepts only `Reference`). Same payload predicate as the other edit
-/// gates, gated to `boogu_image_edit` by the caller (only the Edit checkpoint edits — Base/Turbo are
-/// T2I-only). Like Ideogram, the candle lane reuses the generic `generate_candle_stream` (the source is
-/// resolved in-lane by `resolve_boogu_edit`), so there is no separate worker `*_available` gate to mirror
-/// — the worker's `is_candle_engine` + in-lane edit resolve cover it. Candle-only — macOS keeps the MLX
-/// `boogu_image_edit` registry generator's edit path.
-fn boogu_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
-        return false;
-    }
-    // One source: the single `sourceAssetId`, or the plural `referenceAssetIds` multi-image picker
-    // (sc-7645 — the Boogu DiT packs up to 5 references). Either routes the edit to candle.
-    let single = payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    let plural = payload
-        .get("referenceAssetIds")
-        .and_then(Value::as_array)
-        .is_some_and(|ids| {
-            ids.iter()
-                .any(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()))
-        });
-    single || plural
-}
-
-/// SDXL IP-Adapter-Plus candle-routing conditions (sc-5488, epic 5480). The candle `IpAdapterSdxl`
-/// provider serves PURE reference (image-prompt) conditioning on the sdxl family: a `referenceAssetId`
-/// with NO img2img source / inpaint mask and NOT an `edit_image` (that advanced SDXL shape is the
-/// sc-5487 `SdxlEdit` lane). Mirrors the worker's `sdxl_ipadapter_available` gate (minus the local
-/// weight-resolve check) so the router and worker agree on the lane boundary. Candle-only — there is no
-/// MLX `IpAdapterSdxl` (the MLX SDXL IP path is the registry `SdxlSubMode::Ip`), so this has no
-/// `*_mlx_eligible` sibling.
-fn sdxl_ipadapter_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    let non_empty = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    non_empty("referenceAssetId") && !non_empty("sourceAssetId") && !non_empty("maskAssetId")
-}
-
-/// Kolors IP-Adapter-Plus candle-routing conditions (sc-5488, epic 5480). The candle `IpAdapterKolors`
-/// provider serves PURE reference (image-prompt) conditioning on the `kolors` family — the same payload
-/// shape as the SDXL IP lane: a `referenceAssetId` with NO img2img source / inpaint mask and NOT an
-/// `edit_image` (those advanced Kolors shapes are sc-5487, still torch). Mirrors the worker's
-/// `kolors_ipadapter_available` gate (minus the local weight-resolve check) so the router and worker
-/// agree on the lane boundary. Candle-only — the macOS Kolors IP path is the registry `Reference` route,
-/// not a separate candle-eligible gate.
-fn kolors_ipadapter_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    let non_empty = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    non_empty("referenceAssetId") && !non_empty("sourceAssetId") && !non_empty("maskAssetId")
-}
-
-/// FLUX XLabs IP-Adapter candle-routing conditions (sc-5872, epic 5480). The candle `IpAdapterFlux`
-/// provider serves PURE reference (image-prompt) conditioning on the `flux_dev`/`flux_schnell` families
-/// — the same payload shape as the SDXL/Kolors IP lanes: a `referenceAssetId` with NO img2img source /
-/// inpaint mask and NOT an `edit_image` (those advanced FLUX shapes are sc-5487, still torch). Mirrors
-/// the worker's `flux_ipadapter_available` gate (minus the local weight-resolve check) so the router and
-/// worker agree on the lane boundary. Candle-only — the macOS FLUX IP path is the registry `Reference`
-/// route (epic 3621), not a separate candle-eligible gate.
-fn flux_ipadapter_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    let non_empty = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    };
-    non_empty("referenceAssetId") && !non_empty("sourceAssetId") && !non_empty("maskAssetId")
-}
-
-/// Qwen-Image strict-pose ControlNet candle-routing conditions (sc-5489, epic 5480). The candle
-/// `QwenControl` provider serves `qwen_image` + a non-empty object `advanced.poses` (one image per pose,
-/// each conditioned on a DWPose skeleton), NOT an `edit_image`. A `referenceAssetId`, if present, is
-/// ignored (identity comes from a character LoRA on the base, mirroring the MLX/torch
-/// `QwenImageControlNetPipeline`). Mirrors the worker's `qwen_control_available` gate (minus the local
-/// weight-resolve check) so the router and worker agree. Candle-only — the macOS path is the registry
-/// `qwen_image_control` generator, not a separate candle-eligible gate.
-fn qwen_control_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
-}
-
-/// Kolors strict-pose ControlNet candle-routing conditions (sc-5489, epic 5480). The candle
-/// `KolorsControl` provider serves `kolors` + a non-empty `advanced.poses` (one image per pose, each
-/// conditioned on a DWPose skeleton via the `Kwai-Kolors/Kolors-ControlNet-Pose` branch), NOT an
-/// `edit_image`. Same shape as `qwen_control_candle_eligible` — the model gate (`kolors`) is applied at
-/// the call site. Mirrors the worker's `kolors_control_available` gate (minus the local weight-resolve
-/// check) so the router and worker agree. Candle-only — the macOS path is the MLX Kolors ControlNet.
-fn kolors_control_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
-}
-
-/// Z-Image strict-control Fun-ControlNet candle-routing conditions (sc-5489 origin / sc-8379 base, epic
-/// 8236). The candle `ZImageControl` provider serves `z_image_turbo` OR the base `z_image` + a non-empty
-/// `advanced.poses` (one image per pose, each conditioned on a DWPose skeleton via the VACE-style
-/// Fun-Controlnet-Union branch — the Turbo or base checkpoint), NOT an `edit_image`. Same shape as the
-/// qwen/kolors gates — the model gate (`z_image_turbo` / `z_image`) is applied at the call site (both call
-/// this). Mirrors the worker's `zimage_control_available`. Candle-only — the macOS path is the MLX
-/// `z_image_turbo_control` / `z_image_control` registry generators.
-fn zimage_control_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
-}
-
-/// Z-Image identity-init (Image Studio "With Character") candle-routing conditions (sc-8409, epic 4406).
-/// The candle `ZImageEdit` engine seeds the Turbo denoise from the chosen character `referenceAssetId`
-/// latents (identity img2img) for a `character_image` job with `advanced.referenceStrength > 0`, that is
-/// NOT an angle set (`advanced.angleSet`) and NOT a pose-library set (`advanced.poses`) — those are
-/// `character_image` too but route to (and score on) their own candle lanes (InstantID angle/pose, the
-/// Z-Image strict-control lane). The model gate (`z_image_turbo`) is applied at the call site. The
-/// `referenceStrength > 0` engage condition mirrors the macOS `zimage_identity_strength` gate (zimage.rs,
-/// sc-3146) EXACTLY, so candle routes the identity init precisely when the MLX generic lane runs it — a
-/// With-Character job without a positive `referenceStrength` stays plain txt2img on both backends. Mirrors
-/// the worker's `zimage_identity_candle_available` (minus the local weight-resolve check). Candle-only —
-/// macOS keeps the MLX `z_image_turbo` generic-lane identity img2img (`resolve_zimage_identity_init`).
-fn zimage_identity_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) != Some("character_image") {
-        return false;
-    }
-    // A non-empty referenceAssetId is the identity source.
-    let has_reference = payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    if !has_reference {
-        return false;
-    }
-    // referenceStrength > 0 engages the identity init (parity with `zimage_identity_strength`); without a
-    // positive strength the With-Character job stays plain txt2img.
-    let reference_strength = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("referenceStrength"))
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .unwrap_or(0.0);
-    if reference_strength <= 0.0 {
-        return false;
-    }
-    // Angle / pose sets are `character_image` too but route to their own lanes — exclude both so this
-    // plain With-Character gate never steals them (the worker sits this lane BEFORE the strict-control
-    // lane). Mirrors the worker's `resolve_character_image_likeness_source` exclusions.
-    let angle_set = match payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("angleSet"))
-    {
-        Some(Value::Bool(value)) => *value,
-        Some(Value::Number(number)) => number.as_f64().is_some_and(|value| value != 0.0),
-        Some(Value::String(value)) => !value.is_empty(),
-        Some(Value::Array(value)) => !value.is_empty(),
-        _ => false,
-    };
-    if angle_set {
-        return false;
-    }
-    let has_poses = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty());
-    !has_poses
-}
-
-/// FLUX.1-dev strict-control Shakker Union-Pro-2.0 candle-routing conditions (sc-8412, epic 8236). The
-/// candle `Flux1DevControl` provider serves `flux_dev` + a non-empty `advanced.poses` (one image per pose,
-/// each conditioned on a DWPose skeleton via the Shakker `FLUX.1-dev-ControlNet-Union-Pro-2.0` residual
-/// branch on the dense bf16 dev base), NOT an `edit_image`. Same shape as the qwen/kolors/zimage/flux2
-/// control gates — the model gate (`flux_dev`) is applied at the call site. Mirrors the worker's
-/// `flux1_control_candle_available`. Candle-only — the macOS path is the MLX `flux1_dev_control` registry
-/// generator (sc-8244).
-fn flux1_control_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
-}
-
-/// FLUX.2-dev strict-pose Fun-Controlnet-Union candle-routing conditions (sc-7736, epic 6564). The candle
-/// `Flux2Control` provider serves `flux2_dev` + a non-empty `advanced.poses` (one image per pose, each
-/// conditioned on a DWPose skeleton via the VACE-style `FLUX.2-dev-Fun-Controlnet-Union` branch overlaid
-/// on the Q4 dev DiT), NOT an `edit_image`. Same shape as the qwen/kolors/zimage control gates — the model
-/// gate (`flux2_dev`) is applied at the call site. Mirrors the worker's `flux2_control_candle_available`.
-/// Candle-only — the macOS path is the MLX `flux2_dev_control` registry generator (sc-6055).
-fn flux2_dev_control_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
-}
-
-/// Candle-routed image models that HAVE a candle strict-control lane (sc-5489; flux2_dev sc-7736; base
-/// z_image + flux_dev sc-8379 / sc-8412). A `advanced.poses` job on any OTHER candle-routed model has no
-/// pose path on candle (plain-SDXL pose ships via InstantID, `instantid_realvisxl`, not `sdxl`).
-fn model_has_candle_pose_lane(model: &str) -> bool {
-    matches!(
-        model,
-        "qwen_image" | "kolors" | "z_image_turbo" | "z_image" | "flux2_dev" | "flux_dev"
-    )
-}
-
-/// A strict-pose (`advanced.poses`) job on a **candle-routed model with no candle pose lane** —
-/// `sdxl` / `realvisxl` / `chroma*` / `flux*` / `lens*` / `sensenova*` (everything but the three wired
-/// pose families), not `edit_image` (sc-5968, epic 5483). Neither candle nor the co-resident torch
-/// worker has a pose path for these models off-Mac (the torch `sdxl` adapter's OpenPose lives only in
-/// the `instantid_realvisxl` adapter), so torch would silently drop the poses → an unconditioned T2I
-/// image. The candle worker therefore CLAIMS these (`worker_supports_job`) to REJECT them with a typed
-/// error in the handler, and the co-resident torch worker DECLINES them (below) so candle reliably wins
-/// and nothing silently mis-serves them. **Mac is unaffected:** `sdxl + poses` is MLX-served there
-/// (`model_mac_support("sdxl").features.pose`), so the MLX worker claims it and only the torch/`mps`
-/// worker declines. Pairs with the worker's `candle_unsupported_pose_reject` dispatch guard.
-fn image_request_candle_pose_reject(model: &str, payload: &Map<String, Value>) -> bool {
-    if !CANDLE_ROUTED_MODELS.contains(&model) || model_has_candle_pose_lane(model) {
-        return false;
-    }
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
-}
-
-/// [`image_request_candle_pose_reject`] on a [`JobSnapshot`].
-fn image_job_candle_pose_reject(job: &JobSnapshot) -> bool {
-    if !matches!(job.job_type, JobType::ImageGenerate) {
-        return false;
-    }
-    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
-        return false;
-    };
-    image_request_candle_pose_reject(model, &job.payload)
-}
-
-/// PuLID-FLUX (`pulid_flux_dev`) MLX-routing conditions (sc-3344). The native `mlx-gen-pulid`
-/// registry generator serves the single surface PuLID-FLUX has: a `character_image` job with a
-/// reference face (no plain text-to-image, no `edit_image` — the engine requires the face it
-/// injects). Mirrors the worker's `pulid_flux_available` gate so the router and worker agree, and
-/// mirrors `instantid_mlx_eligible` (its face-identity sibling). The "person-type vs non-face"
-/// split is the upstream model-id choice — a person character selects `pulid_flux_dev`; a
-/// non-person reference selects `flux_dev` + the native XLabs IP-Adapter (epic 3621) — so no
-/// separate fall-through gate is needed here. PuLID has no user-LoRA path (`supports_lora=false`),
-/// and the torch path ignored LoRAs too, so a LoRA never changes eligibility.
-fn pulid_flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) != Some("character_image") {
-        return false;
-    }
-    payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
-}
-
-/// FLUX.2 MLX-routing conditions, shared by klein and dev. FLUX.2 is an **MLX-only** family (no torch
-/// backend), so everything it does runs on MLX: klein txt2img (sc-3025), edit/reference + KV-cache +
-/// multi-reference (sc-3029), third-party LyCORIS via the core loader (epic 3641), and FLUX.2-dev
-/// txt2img (epic 5914 — dev's manifest advertises `text_to_image` only, so its edit/character modes
-/// are never offered until the Pixtral path lands in sc-5919).
-fn flux2_mlx_eligible(_payload: &Map<String, Value>) -> bool {
-    true
-}
-
-/// Qwen-Image (sc-3024 / strict pose sc-3575) MLX-routing conditions: text-to-image,
-/// plus the base-Qwen strict pose tier (`advanced.poses`) handled by the `qwen_image_control`
-/// engine variant. A reference without poses (character/edit flow) and `edit_image` stay on
-/// the Python torch path. Third-party LyCORIS (LoHa / non-peft LoKr) now applies on the core MLX
-/// loader (epic 3641, sc-3642/3643), so it no longer forces torch.
-fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    let has_poses = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty());
-    if has_poses {
-        return true;
-    }
-    let has_reference = payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    if has_reference {
-        return false;
-    }
-    true
-}
-
-/// Qwen-Image-Edit (sc-3397/sc-3398) MLX-routing conditions. The `qwen_image_edit` /
-/// `_2509` / `_2511` / `_2511_lightning` ids run the engine's `qwen_image_edit` model on
-/// the Rust worker (the edit sibling of `qwen_mlx_eligible`). Eligible when the job carries
-/// the reference the edit model requires: `edit_image` with a `sourceAssetId` (or a
-/// `referenceAssetId`), or `character_image` with a `referenceAssetId` (the subject-variation
-/// / best-effort-pose / angle-set flows — all reference-conditioned). The lightning distill
-/// (sc-3398) shares the same gate (its sampler + distill-LoRA are worker-local). Third-party
-/// LyCORIS now applies on the core MLX loader (epic 3641), so it no longer forces torch.
-fn qwen_edit_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    let has_reference = payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    let has_source = payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    match payload.get("mode").and_then(Value::as_str) {
-        Some("edit_image") => has_source || has_reference,
-        Some("character_image") => has_reference,
-        _ => false,
-    }
-}
-
-/// FLUX.1 (sc-3023) MLX-routing conditions, ported from `_should_route_flux_to_mlx`:
-/// text-to-image only — FLUX.1 reference/IP-Adapter and `edit_image` stay on the
-/// Python torch path (`FluxDiffusersAdapter`). A third-party LyCORIS LoRA also falls
-/// back to torch: the engine + the worker's `classify_adapter` apply LoRA and peft
-/// LoKr natively, but not arbitrary LyCORIS (which the worker would reject).
-/// FLUX.1 (`flux_schnell` / `flux_dev`) MLX-routing conditions. Text-to-image and
-/// **reference-image** (the XLabs IP-Adapter, epic 3621 — `referenceAssetId`, both
-/// variants: the Rust engine has no diffusers `load_ip_adapter` schnell limitation,
-/// so reference is native on schnell too). `edit_image` stays off — FLUX.1 has no
-/// edit path on any platform (a future Kontext epic, NOT a Python-eradication gap).
-/// Third-party LyCORIS now applies on the core MLX loader (epic 3641), so only `edit_image`
-/// keeps a FLUX.1 job off MLX.
-fn flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
-}
-
-/// Z-Image (sc-3022) MLX-routing conditions, ported from
-/// `_should_route_z_image_to_mlx`: text-to-image, reference-identity img2img-init
-/// (sc-3619 — `referenceAssetId` without a pose set, the plain img2img path the
-/// base engine already supports), reference+pose (the Fun-ControlNet pose tier
-/// lives only on MLX — sc-2257/sc-2328, so a reference+pose job must NOT divert to
-/// torch, which would honour count while dropping the poses), and `edit_image`
-/// img2img-edit (epic 3529 — the engine's `Conditioning::Reference` img2img path with a
-/// `sourceAssetId` init, shared by `z_image_turbo` edit_image mode and the `z_image_edit`
-/// model, both on Turbo weights). An `edit_image` without a source asset has nothing to
-/// edit, so it stays off MLX. Third-party LyCORIS now applies on the core MLX loader
-/// (epic 3641), so a LoRA never forces torch.
-fn z_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return payload
-            .get("sourceAssetId")
-            .and_then(Value::as_str)
-            .is_some_and(|id| !id.trim().is_empty());
-    }
-    true
-}
-
-/// Chroma (epic 3531, sc-3843) MLX-routing conditions. Chroma is **text-to-image only**
-/// (`text_to_image` + `style_variations`; no edit / reference / ControlNet — those would be
-/// later engine ports), so every non-edit `image_generate` job routes to the in-process Rust
-/// `mlx-gen-chroma` worker on Mac. An `edit_image` mode — which Chroma has no path for on any
-/// platform — stays off MLX (defensive; the UI never offers edit for Chroma). All three variants
-/// (`chroma1_hd` / `chroma1_base` / `chroma1_flash`) share this gate. Third-party LyCORIS and peft
-/// LoKr apply on the core MLX loader (epic 3641 / sc-3842), so a LoRA never forces torch.
-fn chroma_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
-}
-
-/// SenseNova-U1 (sc-3900, epic 3180) MLX-routing conditions. The unified NEO-Unify model serves
-/// three image modes on the single `sensenova_u1_8b` / `sensenova_u1_8b_fast` ids: plain T2I
-/// (base path), instruction edit (`edit_image` → `Conditioning::Reference`), and Character Studio
-/// (`character_image` → `Conditioning::MultiReference`, incl. the angle set) — all via the Rust
-/// worker. It has NO ControlNet, so the strict-pose tier (`advanced.poses`) is unsupported and
-/// drops to torch on non-Mac (it has no Mac path — epic 3482). Edit/character require the
-/// reference the it2i path needs; plain T2I is always eligible. User LoRAs are not supported
-/// (`supports_lora=false`) and the manifest surfaces no LoRA slot, so no LoRA gate is needed.
-fn sensenova_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    let has_poses = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty());
-    if has_poses {
-        // No skeleton/ControlNet conditioning — strict pose is not an MLX SenseNova path.
-        return false;
-    }
-    let has_reference = payload
-        .get("referenceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    let has_source = payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    match payload.get("mode").and_then(Value::as_str) {
-        Some("edit_image") => has_source || has_reference,
-        Some("character_image") => has_reference,
-        // Plain T2I (text_to_image / no mode) — eligible with or without an inert reference.
-        _ => true,
-    }
-}
-
-/// Kolors (epic 3090) MLX-routing conditions. The engine `kolors` model (an SDXL-family U-Net under
-/// a ChatGLM3-6B encoder) now runs the **full surface** on the in-process Rust worker: plain T2I
-/// (sc-3875), img2img (`edit_image` + `sourceAssetId`, sc-4765), the IP-Adapter-Plus reference
-/// (`referenceAssetId`, sc-4767) — all via the base `Reference` path — and the strict-pose tier
-/// (`advanced.poses` + a reference, the combined pose-ControlNet + IP-Adapter-identity + img2img pass:
-/// engine sc-5012 + the worker `generate_kolors_control_stream`, sc-4766). A pose set without a
-/// reference is not the pose tier (torch `_pose_entries` ignores it) and falls through to the base
-/// path as plain T2I — same as torch — so every Kolors job is MLX-eligible. Third-party LyCORIS / peft
-/// LoKr apply on the SDXL-family loader (epic 3641), so a LoRA never forces torch.
-fn kolors_mlx_eligible(_payload: &Map<String, Value>) -> bool {
-    true
-}
-
-/// Lens / Lens-Turbo (epic 3164 / sc-5105) is a pure T2I family — the `mlx-gen-lens` descriptor
-/// advertises no conditioning (no img2img / ControlNet / IP), and the base + turbo ids share the
-/// architecture/weights tree, differing only in their step/guidance defaults. Every non-edit
-/// `image_generate` job routes to the in-process Rust `mlx-gen-lens` worker on Mac. An `edit_image`
-/// mode — which Lens has no path for on any platform (`supportsEdit=false`) — stays off MLX so it is
-/// never silently run as plain T2I against a dropped source image (defensive; the UI never offers
-/// edit for Lens). Mirrors [`chroma_mlx_eligible`]. (LoRA/LoKr apply at load on the DiT — sc-3174 —
-/// so a LoRA never forces torch; LoRA/LoKr *training* is also native MLX now — the `lens_lora` kernel
-/// routes to the `mlx-gen-lens` Rust trainer via [`MLX_ROUTED_TRAINING_KERNELS`], sc-5148/sc-5180.)
-fn lens_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
-}
-
-/// Bernini still-image companion (epic 4699 / sc-5424) MLX-routing conditions. The image-typed
-/// `bernini_image` id serves two still tasks on the same `engine_id:"bernini"` planner+renderer the
-/// video `bernini` id uses: plain text-to-image (t2i, the base path) and `edit_image` img2img (i2i —
-/// the source image is VAE/ViT-encoded as the engine's `Conditioning::Reference`, with the worker
-/// forcing `frames:1` + `video_mode:"t2i"|"i2i"` so the engine returns a single still). An
-/// `edit_image` mode without a `sourceAssetId` has nothing to edit, so it stays off MLX (mirrors
-/// [`z_image_mlx_eligible`]); plain t2i is always eligible. There is no reference/character/pose
-/// still surface (the renderer's reference path is video-only — `reference_to_video`), and the
-/// engine reports `supports_lora: false`, so no LoRA gate is needed. macOS-only (the engine is
-/// `mac_only`); on Windows/Linux no `mlx` worker is registered, so nothing defers.
-fn bernini_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return payload
-            .get("sourceAssetId")
-            .and_then(Value::as_str)
-            .is_some_and(|id| !id.trim().is_empty());
-    }
-    true
-}
-
-/// Ideogram 4 (epic 4725) MLX-routing conditions — shared by `ideogram_4` and `ideogram_4_turbo`
-/// (the same base model + the bundled TurboTime LoRA). The native `mlx-gen-ideogram` engine serves
-/// **text-to-image** and, since sc-6303, **img2img / mask-inpaint edit** (`mode == "edit_image"` with
-/// a `sourceAssetId` + optional `maskAssetId`, resolved by the worker's `resolve_ideogram_edit`).
-/// Both route to the in-process Rust worker, so every `image_generate` job is MLX-eligible. (Ideogram
-/// has no identity-reference / pose path; those modes are not offered by the UI — the catalog
-/// `capabilities` drive the affordances, not this predicate — so leaving them eligible here is inert
-/// and preserves the pre-edit behavior of running an unsupported reference as plain T2I rather than
-/// stranding it.) macOS-only (the catalog flags `macOnly`); on Windows/Linux no `mlx` worker is
-/// registered, so nothing defers.
-fn ideogram_mlx_eligible(_payload: &Map<String, Value>) -> bool {
-    true
-}
-
-/// Boogu Image / Turbo / Edit (epic 6387) MLX-eligibility. Text-to-image (and any non-edit mode) is
-/// always eligible. `edit_image` is the **Edit checkpoint's** capability only — Base/Turbo are
-/// text-to-image (their semantic-edit path is incoherent without the Edit fine-tune, E7b-3), so an
-/// edit request is eligible for `boogu_image_edit` alone. This keeps `model_mac_support`'s `features.edit`
-/// false for Base/Turbo (it probes with `mode: edit_image`). macOS-only (the catalog flags `macOnly`);
-/// off-Mac no `mlx` worker registers.
-fn boogu_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    let is_edit = payload.get("mode").and_then(Value::as_str) == Some("edit_image");
-    if is_edit {
-        return payload.get("model").and_then(Value::as_str) == Some("boogu_image_edit");
-    }
-    true
-}
-
-/// Krea 2 Turbo (epic 7565 / sc-7572) MLX-eligibility. The native `mlx-gen-krea`
-/// engine serves the Turbo text-to-image surface only; `edit_image` has no source/reference
-/// path, so reject that defensive shape the same way Lens does.
-fn krea_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
-}
-
-/// Stable Diffusion 3.5 Large / Large Turbo / Medium (epic 7841, surfaced S4 sc-7873) MLX-eligibility.
-/// The native `mlx-gen-sd3` engine serves the **text-to-image** surface only (Large + Medium run true
-/// CFG, Turbo is the CFG-free few-step distill); there is no source/reference/edit path, so an
-/// `edit_image` request is rejected (the same defensive shape Krea / Lens reject). This keeps
-/// `model_mac_support`'s `features.edit` false for all three (it probes with `mode: edit_image`).
-/// macOS-only (the catalog flags `macOnly`); off-Mac no `mlx` worker registers so nothing defers.
-fn sd3_5_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
-}
-
-/// SANA 1600M (epic 8485 / sc-8489) + SANA-Sprint (sc-8490) MLX-eligibility. The native `mlx-gen-sana`
-/// engine serves the **text-to-image** surface only — base SANA (true-CFG, 20 steps / guidance 4.5) and
-/// the CFG-free few-step Sprint distillation (default 2 steps) share this gate; neither checkpoint has
-/// img2img/control conditioning, so an `edit_image` request is rejected (the same defensive shape
-/// Krea / SD3.5 / Lens reject). This keeps `model_mac_support`'s `features.edit` false (it probes with
-/// `mode: edit_image`). macOS-only (the catalog flags `macOnly`); off-Mac no `mlx` worker registers so
-/// nothing defers.
-fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
-}
-
-/// Video models the in-process Rust MLX worker generates today (sc-3034 Wan2.2,
-/// sc-3035 LTX-2.3 + audio, sc-3523 SVD-XT image→video). Mirrors
-/// `MlxVideoAdapter._supported_models`. A model id absent here is never routed to the
-/// mlx worker — the Python torch path stays authoritative for it.
-const VIDEO_MLX_ROUTED_MODELS: &[&str] = &[
-    "ltx_2_3",
-    "ltx_2_3_eros",
-    "wan_2_2",
-    "wan_2_2_t2v_14b",
-    "wan_2_2_i2v_14b",
-    "svd",
-    // Bernini (epic 4699 / sc-4707): full Qwen2.5-VL planner + Wan2.2-T2V-A14B
-    // renderer, native MLX (engine id "bernini"). Slice A serves text_to_video
-    // only; the editing/reference video modes (v2v/mv2v/r2v/rv2v/ads2v) are
-    // net-new UI vocabulary tracked under sc-4703.
-    "bernini",
-    // SCAIL-2 (epic 5439 / sc-5448): Wan2.1-14B I2V end-to-end character animation,
-    // native MLX (engine id "scail2_14b"). Serves the standalone `animate_character`
-    // mode; cross-identity `replace_person` reuses the same engine, wired in sc-5452.
-    "scail2_14b",
-];
-
-/// Epic 3018 routing (sc-3036, the video sibling of [`image_job_is_mlx_eligible`]):
-/// does this video job belong on the in-process Rust MLX worker? Encodes today's
-/// Python `create_video_adapter` MLX-eligibility (video_adapters.py) at the claim
-/// layer, minus the worker-local gates (MPS presence / sidecar) — those are now
-/// expressed by whether an `mlx` worker is registered and idle (see
-/// [`should_defer_video_to_mlx_worker`]).
-///
-/// MLX covers `text_to_video` + `image_to_video` on Wan/LTX, `image_to_video` on SVD
-/// (`svd`→`svd_xt`, image-conditioned only — sc-3523), `first_last_frame` on the FLF-capable
-/// engines (LTX + Wan TI2V-5B `wan_2_2`; sc-3520), the clip-conditioning modes `extend_clip` /
-/// `video_bridge` on the LTX IC-LoRA path **and Wan TI2V-5B** (sc-3522 / sc-3357, the `VideoExtend`
-/// / `VideoBridge` job types — Wan via single-frame boundary keyframe conditioning), and
-/// `replace_person` → native Wan-VACE (the `PersonReplace` job type, sc-3521 — see
-/// [`video_mode_is_mlx_eligible`]). Still on the Python torch path: a non-MLX model, and
-/// extend/bridge on the 14B Wan MoE engines (no `Keyframe` path).
-/// **Third-party LyCORIS (LoHa / non-peft LoKr) and LoKr-on-Wan now run on MLX**
-/// (epic 3641, sc-3671 + sc-3644): the Wan/LTX engine paths reconstruct + merge/residual the delta —
-/// the peft-LoKr-on-Wan merge has existed since sc-2393, and the old `create_video_adapter` torch
-/// gate was a routing caution, never an engine limit.
-fn video_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
-    // The base `video_generate` job type plus the advanced job types: the clip-conditioning
-    // `video_extend` / `video_bridge` (sc-3522, LTX IC-LoRA) and `person_replace` (sc-3521 →
-    // Wan-VACE). The per-model/per-mode gate below keeps each mode to its capable engines.
-    if !matches!(
-        job.job_type,
-        JobType::VideoGenerate
-            | JobType::VideoExtend
-            | JobType::VideoBridge
-            | JobType::PersonReplace
-    ) {
-        return false;
-    }
-    let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
-        return false;
-    };
-    if !VIDEO_MLX_ROUTED_MODELS.contains(&model) {
-        return false;
-    }
-    // The advanced job types carry their mode by construction (the API maps
-    // `extend_clip`→`VideoExtend` / `video_bridge`→`VideoBridge` / `replace_person`→
-    // `PersonReplace`), so derive it from the job type rather than trusting the payload
-    // `mode` — a missing/stale `mode` on those types must not fall through to the
-    // `image_to_video` default and route incorrectly. The base `video_generate` type reads
-    // the payload `mode` (default `image_to_video`, mirroring `video_request_from_job`).
-    let mode = match job.job_type {
-        JobType::VideoExtend => "extend_clip",
-        JobType::VideoBridge => "video_bridge",
-        JobType::PersonReplace => "replace_person",
-        _ => job
-            .payload
-            .get("mode")
-            .and_then(Value::as_str)
-            .unwrap_or("image_to_video"),
-    };
-    if !video_mode_is_mlx_eligible(model, mode) {
-        return false;
-    }
-    true
-}
-
-/// Which `video_generate` modes the in-process Rust MLX worker serves for `model`. The Wan/LTX
-/// engines serve `text_to_video` + `image_to_video` (sc-3034/3035); `first_last_frame` is
-/// additionally MLX on the FLF-capable engines — LTX (`ltx_2_3`/`ltx_2_3_eros`, the
-/// reference-grounded `Keyframe` path, sc-3052) and Wan TI2V-5B (`wan_2_2`, the mask-blend
-/// multi-keyframe path, sc-3357). The 14B Wan MoE engines have no `Keyframe` path, so FLF on
-/// them stays torch. **SVD (`svd`) is image-conditioned only** — it serves `image_to_video`
-/// exclusively (no text→video, sc-3523). The clip-conditioning modes `extend_clip` /
-/// `video_bridge` are MLX on the **LTX** engines (`ltx_2_3`/`ltx_2_3_eros`, the IC-LoRA
-/// multi-frame keyframe-append path — sc-3522, engine `build_clips` sc-3052/3053) **and Wan
-/// TI2V-5B** (`wan_2_2`, single-frame boundary `Keyframe` conditioning — sc-3357: extend pins the
-/// source clip's last frame, bridge pins the two boundary frames, the same mask-blend primitive as
-/// Wan FLF, matching the torch Wan reference which routed these to plain i2v). The 14B Wan MoE
-/// engines have no `Keyframe` path so they stay torch. `replace_person` is MLX on the
-/// replace-capable models (→ native Wan-VACE, sc-3521).
-fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
-    if model == "svd" {
-        return mode == "image_to_video";
-    }
-    // Bernini's renderer is Wan2.2-T2V (text-conditioned) — it has no classic
-    // still-image-to-video. Beyond `text_to_video` (sc-4707) it serves the planner's
-    // editing + reference-driven video tasks (sc-4703): `video_to_video` (v2v — a
-    // source-clip edit, `Conditioning::VideoClip`), `reference_to_video` (r2v —
-    // subject reference images, `MultiReference`), and `reference_video_to_video`
-    // (rv2v — source clip + reference images); plus the multi-source modes (sc-5425):
-    // `multi_video_to_video` (mv2v — several source clips) and `ads2v` (source video +
-    // reference video + reference images). The engine selects the matching guidance
-    // mode from `video_mode` + the supplied conditioning.
-    if model == "bernini" {
-        return matches!(
-            mode,
-            "text_to_video"
-                | "video_to_video"
-                | "reference_to_video"
-                | "reference_video_to_video"
-                | "multi_video_to_video"
-                | "ads2v"
-        );
-    }
-    // SCAIL-2 (epic 5439) is a Wan2.1-14B I2V character-animation engine: a reference character
-    // image + a driving video → an animated clip. It serves the standalone `animate_character` mode
-    // (sc-5448, the worker paints the color-coded masks from native SAM3) AND cross-identity
-    // `replace_person` (sc-5452, the integrated backend behind the YOLO11 → ByteTrack → SAM3
-    // person-track pipeline). Both run the same engine; `replace_person` flips the engine
-    // `replace_flag`. It has no classic text/image-to-video.
-    if model == "scail2_14b" {
-        return matches!(mode, "animate_character" | "replace_person");
-    }
-    match mode {
-        "text_to_video" | "image_to_video" => true,
-        "first_last_frame" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
-        // extend_clip / video_bridge: LTX via the IC-LoRA multi-frame keyframe-append (sc-3522),
-        // and Wan (`wan_2_2`) — the worker prefers native Wan-VACE ControlClip for genuine motion
-        // continuity (sc-3812, tier C: real source frames pinned at the kept positions + a
-        // generated-span mask) and falls back to the TI2V-5B single-frame boundary keyframe path
-        // (sc-3357) when the VACE snapshot is unprovisioned. Both run MLX-native, so `wan_2_2` is
-        // eligible regardless of which the worker picks. The 14B Wan MoE engines have neither
-        // path, so extend/bridge on them stay torch.
-        "extend_clip" | "video_bridge" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
-        // replace_person → native Wan-VACE (sc-3521): the engine `wan_vace` provider serves it
-        // regardless of the user-picked replace-capable model (ltx_2_3 / ltx_2_3_eros / wan_2_2,
-        // the models that advertise the capability), so admit those.
-        "replace_person" => matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "wan_2_2"),
-        _ => false,
-    }
-}
-
-/// SceneWorks training kernels with a native mlx-gen Rust trainer (epic 3039):
-/// the engine registers `z_image_turbo`/`sdxl`/`kolors`/`ltx_2_3`/`wan2_2_*` trainers,
-/// which the worker reaches via these SceneWorks kernel ids (the mlx worker maps the
-/// kernel and base model onto an engine trainer id). `kolors_lora` (SDXL U-Net plus
-/// ChatGLM3) gained a native trainer in sc-4568, cut over here in sc-4732. `lens_lora`
-/// gained a native mlx-gen-lens trainer in sc-5148, cut over here in sc-5180 (off-Mac
-/// keeps the Python sidecar trainer). `krea_lora` is the native `mlx-gen-krea` trainer
-/// (sc-7577); it has no torch path, so it is also listed in `MLX_ONLY_TRAINING_KERNELS`
-/// (sc-7578). `sd3_lora` is the native `mlx-gen-sd3` trainer (sc-7883/7885; Large +
-/// MMDiT-X Medium training bases), cut over here in sc-7884; it has no torch path either,
-/// so it is also in `MLX_ONLY_TRAINING_KERNELS`. A kernel absent here is never routed to
-/// the mlx worker.
-const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
-    "z_image_lora",
-    "sdxl_lora",
-    "kolors_lora",
-    "lens_lora",
-    "krea_lora",
-    "sd3_lora",
-    "wan_lora",
-    "wan_moe_lora",
-    "ltx_mlx_lora",
-];
-
-/// Epic 3039 routing — does this `lora_train` job belong on the in-process Rust MLX
-/// worker (vs the Python torch worker)? The training sibling of
-/// [`image_job_is_mlx_eligible`]/[`video_job_is_mlx_eligible`]: the engine has a
-/// native trainer for the family. Both dry-run and real runs are eligible (the
-/// dry-run validates the same resolved plan). LoKr-on-Wan stays torch — the mlx Wan
-/// inference path can't load a Kronecker adapter, mirroring [`video_job_is_mlx_eligible`];
-/// LoKr on Z-Image/SDXL/LTX is fine (the Rust engine applies it natively).
-///
-/// The resolved plan is stamped into the job payload at submit (apps/rust-api
-/// training.rs) for both dry-run and real runs, so the kernel + network type are
-/// readable here without touching the dataset or weights.
-fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
-    if !matches!(job.job_type, JobType::LoraTrain) {
-        return false;
-    }
-    let Some(plan) = job.payload.get("plan").and_then(Value::as_object) else {
-        return false;
-    };
-    let kernel = plan
-        .get("target")
-        .and_then(Value::as_object)
-        .and_then(|target| target.get("kernel"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if !MLX_ROUTED_TRAINING_KERNELS.contains(&kernel) {
-        return false;
-    }
-    // LoKr-on-Wan stays on the torch path (no Kronecker merge in the mlx Wan path).
-    if matches!(kernel, "wan_lora" | "wan_moe_lora") && training_plan_is_lokr(plan) {
-        return false;
-    }
-    true
-}
-
-/// SceneWorks training kernels with a native candle trainer that needs no base-model disambiguation
-/// (sc-7817, epic 5164) — the off-Mac twin of [`MLX_ROUTED_TRAINING_KERNELS`]. The candle registry
-/// holds trainers for `sdxl`, `z_image_turbo`, `lens`, `krea_2_raw` (the Krea 2 Raw 12B DiT, epic
-/// 7565 P4 — sc-8614 wires it here), and the Wan **A14B T2V** MoE (`wan2_2_t2v_14b`); the first four
-/// map straight from kernel, while `wan_moe_lora` is base-model gated (handled in
-/// [`training_job_is_candle_eligible`]). UNLIKE the torch families (z-image/sdxl/lens/wan), Krea has
-/// NO torch trainer — it is in BOTH this set and [`MLX_ONLY_TRAINING_KERNELS`] (Rust-only: mlx OR
-/// candle, never torch). The dense Wan 5B + the I2V A14B have no candle trainer yet (sc-5167
-/// follow-ups) and Kolors/LTX none at all — those kernels stay on the Python torch worker off-Mac.
-const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] =
-    &["z_image_lora", "sdxl_lora", "lens_lora", "krea_lora"];
-
-/// Epic 5164 / sc-7817 routing — does this `lora_train` job belong on the candle (Windows/CUDA +
-/// Linux/NVIDIA) worker (vs the Python torch worker)? The training sibling of
-/// [`image_job_is_candle_eligible`]/[`video_job_is_candle_eligible`]: the candle engine has a native
-/// trainer for the family. Both dry-run and real runs are eligible (the dry-run validates the same
-/// resolved plan). `wan_moe_lora` is candle-eligible ONLY for the **T2V** A14B base model
-/// (`wan_2_2_t2v_14b`) — the candle Wan trainer is registered under `wan2_2_t2v_14b` only; the I2V
-/// A14B and the dense `wan_lora` 5B have no candle trainer, so they stay on torch. UNLIKE the mlx Wan
-/// path, the candle Wan trainer DOES support LoKr (its `build_lokr_targets` merge), so there is no
-/// LoKr-on-Wan exclusion here. The resolved plan is stamped into the payload at submit (apps/rust-api
-/// training.rs), so the kernel + base model are readable without touching the dataset or weights.
-fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
-    if !matches!(job.job_type, JobType::LoraTrain) {
-        return false;
-    }
-    let Some(plan) = job.payload.get("plan").and_then(Value::as_object) else {
-        return false;
-    };
-    let target = plan.get("target").and_then(Value::as_object);
-    let kernel = target
-        .and_then(|target| target.get("kernel"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if CANDLE_ROUTED_TRAINING_KERNELS.contains(&kernel) {
-        return true;
-    }
-    // The A14B MoE: candle registers only the T2V trainer (`wan2_2_t2v_14b`). The I2V A14B base
-    // model has no candle trainer, so it stays on torch.
-    if kernel == "wan_moe_lora" {
-        let base_model = target
-            .and_then(|target| target.get("baseModel"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        return base_model == "wan_2_2_t2v_14b";
-    }
-    false
-}
-
-/// sc-3556 routing: SceneWorks training caption jobs keep their public
-/// `captioner=joy_caption` contract while the macOS mlx worker serves them through
-/// mlx-gen's JoyCaption provider. Other/unknown captioners stay off the mlx worker.
-fn caption_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
-    matches!(job.job_type, JobType::TrainingCaption)
-        && job
-            .payload
-            .get("captioner")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value.trim() == "joy_caption")
-}
-
-/// Whether an `image_upscale` job runs on the Rust/MLX path (epic 3482, sc-3489): the
-/// Real-ESRGAN (RRDBNet) engine — the default — is ported to the Rust worker, and `seedvr2`
-/// (the native-MLX one-step diffusion upscaler, epic 4811 / sc-4815) runs in-process via
-/// `mlx-gen-seedvr2`. `aura-sr` (a 617M-param torch-only GigaGAN) was dropped on Mac after the
-/// sc-3668 port-or-drop spike, so the mlx worker refuses it (it runs on the Python worker on
-/// Windows/Linux). Engine defaults to `real-esrgan` when absent (mirrors `run_image_upscale`).
-/// SeedVR2 is Mac-only here (a Windows/Linux Candle backend is the separate sc-5157); the Mac UI
-/// gating + `imageUpscaleSeedvr2` capability keep it off non-Mac pickers.
-fn upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
-    if !matches!(job.job_type, JobType::ImageUpscale) {
-        return false;
-    }
-    let engine = job
-        .payload
-        .get("engine")
-        .and_then(Value::as_str)
-        .map(|value| value.trim().to_ascii_lowercase())
-        .unwrap_or_else(|| "real-esrgan".to_owned());
-    matches!(
-        engine.as_str(),
-        "" | "real-esrgan" | "realesrgan" | "real_esrgan" | "seedvr2"
-    )
-}
-
-/// Whether a `video_upscale` job is MLX-eligible (epic 4811 / sc-4816). The only Mac engine is the
-/// native-MLX SeedVR2 upscaler (`mlx-gen-seedvr2`); there is no torch fallback (mac-only). A job with
-/// any other engine is refused by the mlx worker — though no other backend advertises `video_upscale`
-/// today, so an unsupported engine simply has nowhere to run (surfaced as unsupported, not silently
-/// dropped). Defaults to `seedvr2` when the payload omits the engine.
-fn video_upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
-    if !matches!(job.job_type, JobType::VideoUpscale) {
-        return false;
-    }
-    let engine = job
-        .payload
-        .get("engine")
-        .and_then(Value::as_str)
-        .map(|value| value.trim().to_ascii_lowercase())
-        .unwrap_or_else(|| "seedvr2".to_owned());
-    matches!(engine.as_str(), "" | "seedvr2" | "seedvr2_3b")
-}
-
-/// Whether an `image_upscale` job explicitly requests the SeedVR2 engine (`engine=seedvr2`, the id the
-/// web sends and the worker accepts). SeedVR2 has no torch backend — it runs on MLX (Mac) or candle
-/// (Windows/Linux) — so this also drives the torch worker's refusal (the inverse of the AuraSR gate).
-/// The image default engine is Real-ESRGAN, so an absent engine is NOT SeedVR2.
-fn upscale_job_requests_seedvr2(job: &JobSnapshot) -> bool {
-    matches!(job.job_type, JobType::ImageUpscale)
-        && job
-            .payload
-            .get("engine")
-            .and_then(Value::as_str)
-            .is_some_and(|engine| engine.trim().eq_ignore_ascii_case("seedvr2"))
-}
-
-/// Whether an `image_upscale` job is candle-eligible (sc-5928 SeedVR2 + sc-5499 Real-ESRGAN, epic
-/// 4811 / epic 5482): the candle worker serves **Real-ESRGAN** (`ort`/CUDA, the off-Mac sibling of
-/// the Mac CoreML path — sc-5499) AND **SeedVR2** (`candle-gen-seedvr2`, sc-5928) off-Mac. This now
-/// mirrors `upscale_job_is_mlx_eligible` exactly (the default `real-esrgan` engine + `seedvr2`);
-/// `aura-sr` was dropped as an offered engine (sc-3668 Mac / sc-5499 off-Mac) so it has no candle
-/// path — a candle worker refuses it (it runs only on the Python torch worker until Phase 7). Note
-/// Real-ESRGAN keeps its torch path as a co-resident fallback (the torch worker is NOT refused it,
-/// unlike SeedVR2), so a Real-ESRGAN job may run on whichever worker claims it first.
-fn upscale_job_is_candle_eligible(job: &JobSnapshot) -> bool {
-    upscale_job_is_mlx_eligible(job)
-}
-
-/// Whether a `video_upscale` job is candle-eligible (sc-5928, epic 4811 / epic 5482): the candle
-/// SeedVR2 provider is the off-Mac video upscaler. Mirrors `video_upscale_job_is_mlx_eligible`
-/// exactly (same engine set the worker's `run_video_upscale_job` accepts) — the engine defaults to
-/// `seedvr2` when the payload omits it.
-fn video_upscale_job_is_candle_eligible(job: &JobSnapshot) -> bool {
-    video_upscale_job_is_mlx_eligible(job)
-}
-
-/// Training kernels with NO **torch** fallback — only a Rust worker can run them, so a torch worker
-/// must refuse the job (leaving it queued for a Rust worker) rather than claim it and fail with "no
-/// training kernel". `ltx_mlx_lora` was Apple-Silicon-only MLX-Python; epic 3039 (sc-3049) retired
-/// that Python trainer, leaving the native Rust LTX trainer as the sole path. The torch families
-/// (z-image/sdxl/wan) keep their Python trainer as the Windows path + Mac fallback, so they are
-/// deliberately NOT listed here. `krea_lora` (epic 7565) is Rust-native with no torch trainer — but
-/// UNLIKE LTX/SD3 it now ALSO has a candle trainer (sc-8614, P4), so it is the one member that runs
-/// on EITHER Rust backend (mlx in-process on Mac, candle off-Mac); the [`worker_supports_job`] gate
-/// exempts a candle worker for a `krea_lora` job it is candle-eligible for (it is also in
-/// [`CANDLE_ROUTED_TRAINING_KERNELS`]), while torch is still refused. `sd3_lora` (epic 7841 T3
-/// sc-7884) is MLX-native with no torch trainer and no candle trainer yet (the off-Mac/candle SD3.5
-/// trainer is epic 7982), so — like LTX — only an mlx worker runs it today.
-const MLX_ONLY_TRAINING_KERNELS: &[&str] = &["ltx_mlx_lora", "krea_lora", "sd3_lora"];
-
-/// Whether this `lora_train` job targets a kernel with no non-Rust fallback (see
-/// [`MLX_ONLY_TRAINING_KERNELS`]). Such a job can only run on the mlx worker.
-fn training_kernel_is_mlx_only(job: &JobSnapshot) -> bool {
-    if !matches!(job.job_type, JobType::LoraTrain) {
-        return false;
-    }
-    job.payload
-        .get("plan")
-        .and_then(Value::as_object)
-        .and_then(|plan| plan.get("target"))
-        .and_then(Value::as_object)
-        .and_then(|target| target.get("kernel"))
-        .and_then(Value::as_str)
-        .is_some_and(|kernel| MLX_ONLY_TRAINING_KERNELS.contains(&kernel))
-}
-
-/// Whether a resolved training plan requests a LoKr (Kronecker) adapter. The network
-/// type lives in the plan's `config.advanced.networkType` (SceneWorks training
-/// contract), distinct from a generation request's per-LoRA `networkType`.
-fn training_plan_is_lokr(plan: &Map<String, Value>) -> bool {
-    plan.get("config")
-        .and_then(Value::as_object)
-        .and_then(|config| config.get("advanced"))
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("networkType"))
-        .and_then(Value::as_str)
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("lokr"))
 }
 
 fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
@@ -5938,9 +2952,9 @@ fn normalize_requested_gpu(value: &str) -> String {
     }
 }
 
-// Keep GPU-required job types in sync with
-// apps/worker/scene_worker/runtime.py (SUPPORTED_JOB_TYPES + TRAINING_JOB_TYPES +
-// CAPTION_JOB_TYPES) and apps/web/src/screens/QueueScreen.jsx::gpuRequiredJobTypes.
+// Keep GPU-required job types in sync with the native worker dispatch
+// (crates/sceneworks-worker/src/lib.rs::run_utility_job) and
+// apps/web/src/screens/QueueScreen.jsx::gpuRequiredJobTypes.
 // `lora_train` is GPU-required like generation, but its worker capability is
 // advertised separately (the dry-run plan validation needs no inference backend;
 // real execution is gated per platform in story 1417).
@@ -6330,6 +3344,19 @@ mod candle_routing_tests {
                 image_request_candle_eligible(model, &object(json!({ "prompt": "an aurora" }))),
                 "{model} plain txt2img must be candle-eligible"
             );
+            // sc-9607/sc-9983: a Q8/Q4 tier-select stays on candle (ideogram is in CANDLE_QUANT_MODELS —
+            // the packed q4/q8 turnkeys load off-Mac; the `mlxQuantize` value picks the subdir).
+            for bits in [8, 4] {
+                assert!(
+                    image_request_candle_eligible(
+                        model,
+                        &object(
+                            json!({ "prompt": "an aurora", "advanced": { "mlxQuantize": bits } })
+                        )
+                    ),
+                    "{model} Q{bits} tier-select should stay on candle"
+                );
+            }
             // Edit shapes → the bespoke dispatcher branch (img2img, inpaint, outpaint all need a source).
             for payload in [
                 json!({ "model": model, "mode": "edit_image", "sourceAssetId": "a" }),
@@ -6408,11 +3435,32 @@ mod candle_routing_tests {
         assert!(!boogu_edit_candle_eligible(&object(json!({
             "model": "boogu_image_edit", "mode": "edit_image", "referenceAssetIds": []
         }))));
-        // bf16-only: a deliberate Q8/Q4 quant request defers (boogu is not in CANDLE_QUANT_LORA_MODELS).
-        assert!(!image_request_candle_eligible(
-            "boogu_image",
-            &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 8 } }))
-        ));
+        // sc-9607/sc-9983: a Q8/Q4 tier-select now STAYS on candle (boogu is in CANDLE_QUANT_MODELS — the
+        // packed q4/q8 turnkeys load off-Mac, the `mlxQuantize` value picks the subdir). A LoRA still
+        // defers (boogu advertises no inference LoRA on candle).
+        for model in ["boogu_image", "boogu_image_turbo", "boogu_image_edit"] {
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 8 } }))
+                ),
+                "{model} Q8 tier-select should stay on candle"
+            );
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 4 } }))
+                ),
+                "{model} Q4 tier-select should stay on candle"
+            );
+            assert!(
+                !image_request_candle_eligible(
+                    model,
+                    &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
+                ),
+                "{model} with a LoRA must defer to torch (no candle inference LoRA)"
+            );
+        }
     }
 
     #[test]
@@ -6537,13 +3585,14 @@ mod candle_routing_tests {
     }
 
     #[test]
-    fn krea_lora_stays_on_candle_but_quant_and_conditioning_defer() {
-        // sc-7836 (epic 7565 P4): the candle `candle-gen-krea` descriptor advertises
-        // supports_lora/supports_lokr: true (it merges a `krea_2_raw`-trained adapter at Turbo
-        // inference) but `supported_quants: &[]`, so — the inverse of SD3.5 — a LoRA stays on the candle
-        // lane while an explicit quant request (and every conditioning shape) defers to the Python torch
-        // worker. Regression guard for the missed router un-gate: before this, a Krea LoRA hit the
-        // no-torch-fallback candle gap instead of routing to candle.
+    fn krea_lora_and_quant_stay_on_candle_but_conditioning_defers() {
+        // sc-7836 (epic 7565 P4) + sc-9607/sc-9983 (epic 9083): the candle `candle-gen-krea` descriptor
+        // advertises supports_lora/supports_lokr: true (it merges a `krea_2_raw`-trained adapter at Turbo
+        // inference) AND, since sc-9607, `supported_quants: [Q4, Q8]` (a no-op on the already-packed q4/q8
+        // turnkey subdir), so BOTH a LoRA and a Q8/Q4 tier-select stay on the candle lane (Krea is in
+        // CANDLE_QUANT_LORA_MODELS). Only the conditioning shapes (edit/reference/mask/pose) defer to the
+        // Python torch worker. Regression guard for the two missed router un-gates: before sc-7836 a Krea
+        // LoRA, and before sc-9983 a Krea Q8/Q4, each hit the no-torch-fallback candle gap off-Mac.
         let model = "krea_2_turbo";
         // Plain txt2img is eligible.
         assert!(
@@ -6558,14 +3607,14 @@ mod candle_routing_tests {
             ),
             "{model} with a LoRA should stay on candle"
         );
-        // Q8 / Q4 requests defer (Krea's candle provider is dense bf16 only).
+        // sc-9607/sc-9983: a Q8 / Q4 tier-select now STAYS on candle (the packed turnkey loads off-Mac).
         for bits in [8, 4] {
             assert!(
-                !image_request_candle_eligible(
+                image_request_candle_eligible(
                     model,
                     &object(json!({ "advanced": { "mlxQuantize": bits } }))
                 ),
-                "{model} Q{bits} request must fall back to torch (no candle quant lane)"
+                "{model} Q{bits} tier-select should stay on candle"
             );
         }
         // Every conditioning shape defers (txt2img + LoRA only).
@@ -7732,6 +4781,23 @@ mod candle_routing_tests {
             &understanding_job(
                 "image_interleave",
                 json!({ "model": "sensenova_u1_8b_fast", "prompt": "a short illustrated story" })
+            )
+        ));
+        // Infographic-V2 base advertises the SAME understanding surface (epic 9959): the eligibility
+        // list must include its id, else V2 VQA / Document-Studio jobs never route to the in-process
+        // worker (regression guard for the sc-9963 fix).
+        assert!(worker_supports_job(
+            &candle,
+            &understanding_job(
+                "image_vqa",
+                json!({ "model": "sensenova_u1_8b_infographic_v2", "question": "what is this?", "sourceAssetId": "a1" })
+            )
+        ));
+        assert!(worker_supports_job(
+            &candle,
+            &understanding_job(
+                "image_interleave",
+                json!({ "model": "sensenova_u1_8b_infographic_v2", "prompt": "an illustrated explainer" })
             )
         ));
         // Refuses a non-SenseNova understanding job → falls back to the Python torch worker.

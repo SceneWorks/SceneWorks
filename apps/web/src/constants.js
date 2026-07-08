@@ -46,6 +46,13 @@ export const PROMPT_REFINE_MODEL_ID = "prompt_refine_anubis_8b";
 // this id to look up install state and offer a download in the caption dialog when missing.
 export const JOY_CAPTION_MODEL_ID = "joycaption_beta_one";
 
+// Wan2.2 A14B MoE video engines (T2V + I2V). These two dual-expert models honor the
+// Lightning fast-4-step toggle (sc-10047/sc-10048, epic 10043) — the worker derives the
+// 4-step/CFG-off recipe from `advanced.lightning` for them and ignores it for the dense
+// 5B (wan_2_2) and non-Wan engines, so the UI only surfaces the toggle for these ids.
+// (Mirrors ModelManagerScreen's WAN_MOE_BASE_MODELS, which is the LoRA-pairing subset.)
+export const WAN_A14B_LIGHTNING_MODEL_IDS = new Set(["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]);
+
 // Vision captioner (epic 8102, sc-8107/8108). Turns an uploaded reference image into a structured
 // Ideogram-style JSON caption (style + grounded composition) for Ideogram 4 text-to-image variations.
 // As with PROMPT_REFINE_MODEL_ID, the native worker resolves the model by its HF repo string (carried
@@ -56,7 +63,7 @@ export const VISION_CAPTION_MODEL_REPO = "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-
 
 // Default interleave system prompt (the think/no-think protocol). Prefilled in
 // Document Studio; the worker falls back to this same text when the field is blank.
-// Keep in sync with apps/worker/scene_worker/image_adapters.py::_INTERLEAVE_SYSTEM_MESSAGE.
+// Keep in sync with the native worker's interleave system-message default.
 export const DEFAULT_INTERLEAVE_SYSTEM_MESSAGE = `You are a multimodal assistant capable of reasoning with both text and images. You support two modes:
 
 Think Mode: When reasoning is needed, you MUST start with a <think></think> block and place all reasoning inside it. You MUST interleave text with generated images using tags like <image1>, <image2>. Images can ONLY be generated between <think> and </think>, and may be referenced in the final answer.

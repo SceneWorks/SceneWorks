@@ -95,9 +95,13 @@ impl<C: CancelHandle, R> CancelJoinGuard<C, R> {
     /// (so the consumer does not drop-and-run), but with no flag to trip, a `spawn_blocking` task
     /// that ignores `abort()` runs to its natural end — it is NOT stopped, only waited-for up to the
     /// bounded deadline. Do not read the old "abort-on-drop still applies" as protection: `abort()`
-    /// is inert on a running blocking task. The `None`-cancel callers are single-shot detectors /
-    /// engine-API-locked generations whose engines can't yet be interrupted (sc-8804 residual,
-    /// tracked for real cancel-flag threading — notably SenseNova VQA, the one multi-minute case).
+    /// is inert on a running blocking task. The remaining `None`-cancel callers are single-shot
+    /// bounded operations with nothing to interrupt (kps/SCRFD, person-detect/YOLO11, ArcFace
+    /// compare, the interleave document write) — a deliberate per-engine decision, see
+    /// [`run_blocking_with_heartbeat`]. Everything loop-shaped passes `Some` (sc-9123): the
+    /// multi-minute engine-API-locked case (SenseNova VQA/interleave) got a real per-token/per-step
+    /// cancel flag, and the worker-side pose loops (DWPose batch detect + skeleton render) check a
+    /// real flag between images/persons.
     pub(crate) fn new(cancel: impl Into<Option<C>>, handle: tokio::task::JoinHandle<R>) -> Self {
         Self {
             cancel: cancel.into(),
@@ -257,34 +261,55 @@ pub(crate) async fn mark_job_canceled(
 /// (`guard.cancel_and_join()`) before returning the error, so a `Some(cancel)` task is bounded-
 /// joined rather than dropped-and-run (sc-8804).
 ///
-/// Pass `None` ONLY for paths whose engine has no cancellable surface. HONEST RESIDUAL: with
-/// `None` there is no flag to trip, so the teardown can only AWAIT the task (up to the grace
-/// window) — a `spawn_blocking` task that ignores `abort()` still runs to its natural end. The
-/// current `None` callers are single-shot detectors (kps/SCRFD, person-detect/YOLO11), an ArcFace
-/// embedding compare, and SenseNova VQA/generation; only the last is long enough that a real cancel
-/// flag would matter, and threading one requires changing the engine's generation API (sc-8804
-/// residual, tracked). Do NOT re-add a "abort-on-drop still applies" claim — abort is inert on a
-/// running blocking task.
+/// Pass `None` ONLY for paths whose work is a single bounded operation with no loop for a flag to
+/// interrupt. HONEST RESIDUAL: with `None` there is no flag to trip, so the teardown can only
+/// AWAIT the task (up to the grace window) — a `spawn_blocking` task that ignores `abort()` still
+/// runs to its natural end. The COMPLETE list of remaining `None` callers, each an explicit
+/// per-engine decision documented at its call site (sc-9123): the single-shot detectors
+/// (kps/SCRFD, person-detect/YOLO11) and the ArcFace embedding compare — each is one bounded
+/// forward pass on one image/frame (plus a cold weight load), so threading cancel through those
+/// engine surfaces would buy nothing the bounded join doesn't already give — the smart-select SAM3
+/// image ops (box/points, `segment_jobs`, sc-8908 / F-106), likewise one bounded SAM3 forward pass
+/// on one image with no per-step loop for a flag to poll (the video `propagate` path DOES thread a
+/// real flag) — and the interleave document write (bounded PNG encode + fs rename, where a mid-write
+/// abort is worse than finishing). Everything loop-shaped passes `Some`: SenseNova VQA/interleave threads a REAL
+/// `CancelFlag` the engines poll per decoded token and per denoise step (mlx-gen #634 + the candle
+/// sc-9123 sibling), and the worker-side pose loops (DWPose multi-image batch detect + the
+/// per-person skeleton render) check a real flag between iterations in worker code — no engine
+/// change needed (sc-9123). If you add a `None` caller, add it to this list and document the
+/// decision at the call site. Do NOT re-add a "abort-on-drop still applies" claim — abort is inert
+/// on a running blocking task.
 ///
 /// Every consumer is a job handler gated behind `any(target_os = "macos", feature =
 /// "backend-candle")`, so on the plain-Linux parity build (neither) this is unused — allow
 /// dead_code there only, keeping real dead-code detection on the configs that do call it.
+/// The instant a user cancel is first observed (the flag has just been tripped), the optional
+/// `on_cancel_acknowledged` closure runs once — before the terminal `Canceled` is posted. Callers
+/// use it to post an intermediate "Canceling…" job update so the UI acknowledges the cancel while an
+/// un-interruptible op finishes, instead of appearing frozen until it flips terminal (the image
+/// upscale path, sc-8928). Its error is treated exactly like a heartbeat POST failure: bounded-join
+/// teardown, then propagate. Pass [`no_cancel_ack`] when there's nothing extra to post.
 #[cfg_attr(
     all(not(target_os = "macos"), not(feature = "backend-candle")),
     allow(dead_code)
 )]
-pub(crate) async fn run_blocking_with_heartbeat<R>(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_blocking_with_heartbeat<R, F, Fut>(
     api: &ApiClient,
     settings: &Settings,
     job_id: &str,
     cancel: Option<gen_core::CancelFlag>,
     cancel_message: &str,
     task_label: &'static str,
+    on_cancel_acknowledged: Option<F>,
     task: tokio::task::JoinHandle<WorkerResult<R>>,
 ) -> WorkerResult<R>
 where
     R: Send + 'static,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = WorkerResult<()>>,
 {
+    let mut on_cancel_acknowledged = on_cancel_acknowledged;
     // Bind the blocking task to its cancel flag. On any heartbeat/`?` early return below we perform
     // the explicit awaited bounded-join teardown (`guard.cancel_and_join()`) BEFORE the error
     // propagates, so the still-running GPU task is actually wound down (or hard-abandoned) before
@@ -330,14 +355,37 @@ where
                     return Err(error);
                 }
                 if let Some(flag) = &cancel {
-                    if !canceled && cancel_requested_peek(api, job_id).await {
+                    // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
+                    // poll (a local flag read) so a quit trips the blocking task's engine cancel at the
+                    // next heartbeat tick instead of winding down only at the loop grace window.
+                    if !canceled && (shutdown_requested() || cancel_requested_peek(api, job_id).await) {
                         flag.cancel();
                         canceled = true;
+                        // Fire the one-shot cancel-acknowledged hook (e.g. post an intermediate
+                        // "Canceling…" update). Its failure is teardown-then-propagate like a
+                        // heartbeat POST failure (sc-8928).
+                        if let Some(hook) = on_cancel_acknowledged.take() {
+                            if let Err(error) = hook().await {
+                                guard.cancel_and_join().await;
+                                return Err(error);
+                            }
+                        }
                     }
                 }
             }
         }
     }
+}
+
+/// A well-typed `None` for [`run_blocking_with_heartbeat`]'s `on_cancel_acknowledged` param, for the
+/// callers with no intermediate "Canceling…" update to post. Naming a concrete future type lets the
+/// compiler infer `F`/`Fut` at the `None` call sites without a turbofish (sc-8928).
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn no_cancel_ack() -> Option<fn() -> std::future::Ready<WorkerResult<()>>> {
+    None
 }
 
 /// Check-only cancel poll (sc-5515): returns `true` when the user requested
@@ -367,6 +415,49 @@ pub(crate) async fn cancel_requested_peek(api: &ApiClient, job_id: &str) -> bool
             false
         }
     }
+}
+
+tokio::task_local! {
+    /// The process-shutdown [`gen_core::CancelFlag`] for the in-flight job (sc-9618, F-043 follow-up).
+    /// `run_job_with_shutdown` trips a shared flag on SIGTERM/Ctrl-C and awaits the un-dropped job
+    /// future (bounded by `shutdown_timeout_seconds`) — that guarantees correctness (no dangling
+    /// `running`) for EVERY handler regardless of whether it observes the flag. This task-local lets the
+    /// per-engine GPU consumer loops ALSO honor it at their existing per-step cancel checkpoints so a
+    /// prompt/gen stops mid-step on quit instead of waiting out the grace window, WITHOUT threading the
+    /// flag through ~30 stream-handler signatures (and desyncing an MLX/candle twin in the process).
+    /// `run_utility_job` scopes it via [`with_shutdown_flag`] around its whole dispatch, and every
+    /// consumer loop (image `consume_gen_events`, video `generate_video`, training
+    /// `consume_training_events`, `run_batched_analysis_job`, image-detail) runs inside that same task
+    /// (the only `tokio::spawn`s below it are the model-producer tasks, which poll the ENGINE flag), so
+    /// the scope reaches every checkpoint. Unset outside a job (e.g. unit tests) ⇒ [`shutdown_requested`]
+    /// reads `false`.
+    pub(crate) static SHUTDOWN_FLAG: gen_core::CancelFlag;
+}
+
+/// Run `future` with the process-shutdown [`SHUTDOWN_FLAG`] task-local bound to `shutdown`, so every
+/// consumer loop awaited within it can consult [`shutdown_requested`] at its cancel checkpoints
+/// (sc-9618). Scoped once around `run_utility_job`'s dispatch.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) async fn with_shutdown_flag<F>(shutdown: gen_core::CancelFlag, future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    SHUTDOWN_FLAG.scope(shutdown, future).await
+}
+
+/// Whether a process shutdown has been requested for the in-flight job (sc-9618). Reads the
+/// [`SHUTDOWN_FLAG`] task-local scoped by [`with_shutdown_flag`]; `false` when unset (outside a job, or
+/// a unit test that calls a consumer directly). Consumer-loop cancel checkpoints OR this in alongside
+/// the API `cancel_requested_peek` user-cancel poll, so a shutdown trips the engine cancel at the next
+/// step exactly like a user cancel would.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn shutdown_requested() -> bool {
+    SHUTDOWN_FLAG
+        .try_with(|flag| flag.is_cancelled())
+        .unwrap_or(false)
 }
 
 pub(crate) async fn update_job(
@@ -401,7 +492,7 @@ pub(crate) fn progress_payload(
         result,
         eta_seconds,
         // The Rust utility worker doesn't run GPU work, so it never reports
-        // per-job peak GPU stats. The Python GPU worker (scene_worker) sets
+        // per-job peak GPU stats. The native GPU worker (MLX/candle) sets
         // these (sc-2086). Same for `backend` — utility jobs run on the CPU
         // worker which never advertises a GPU runtime.
         peak_gpu_memory_pct: None,
@@ -415,4 +506,64 @@ pub(crate) fn progress_payload(
 
 pub(crate) fn number_from_f64(value: f64) -> ContractNumber {
     Number::from_f64(value).unwrap_or_else(|| Number::from(0))
+}
+
+#[cfg(test)]
+mod shutdown_flag_tests {
+    use super::*;
+
+    /// sc-9618: outside a scoped job the task-local is unset, so a consumer loop's checkpoint reads
+    /// "no shutdown" and keeps running (never spuriously cancels a job in a unit test).
+    #[tokio::test]
+    async fn shutdown_requested_is_false_when_unscoped() {
+        assert!(!shutdown_requested());
+    }
+
+    /// sc-9618: inside `with_shutdown_flag`, the checkpoint reads the scoped flag — `false` until it is
+    /// tripped, `true` once the process-shutdown flag is cancelled — exactly what
+    /// `run_job_with_shutdown` does on SIGTERM/Ctrl-C. This is the observable both `consume_gen_events`
+    /// and every twin consult at each per-step cancel checkpoint.
+    #[tokio::test]
+    async fn shutdown_requested_tracks_the_scoped_flag() {
+        let flag = gen_core::CancelFlag::new();
+        let flag_for_scope = flag.clone();
+        with_shutdown_flag(flag_for_scope, async {
+            // Not yet tripped inside the scope.
+            assert!(!shutdown_requested());
+            // Tripping the (shared clone of the) flag is observed at the next checkpoint read.
+            flag.cancel();
+            assert!(shutdown_requested());
+        })
+        .await;
+        // Back outside the scope, the task-local is gone again.
+        assert!(!shutdown_requested());
+    }
+
+    /// sc-9618: the caption (`caption_jobs::run_training_caption_job`) and prompt-refine
+    /// (`prompt_refine_jobs`) GPU consumer loops both short-circuit their `check_cancel` API poll with
+    /// `if shutdown_requested() { cancel.cancel() }` at the heartbeat checkpoint. This asserts the exact
+    /// semantics that arm relies on: outside a shutdown, the engine `cancel` flag is left untouched
+    /// (normal operation is unaffected); once the process-shutdown flag trips, the checkpoint fires the
+    /// engine cancel so the captioner/decode bails at its next per-item/per-token check.
+    #[tokio::test]
+    async fn shutdown_checkpoint_trips_the_engine_cancel_only_on_shutdown() {
+        let shutdown = gen_core::CancelFlag::new();
+        let shutdown_for_scope = shutdown.clone();
+        with_shutdown_flag(shutdown_for_scope, async {
+            // The engine-side cancel flag the producer (blocking captioner / decode) polls.
+            let engine_cancel = gen_core::CancelFlag::new();
+            // Before shutdown, the checkpoint's `if shutdown_requested()` is false — no spurious cancel.
+            if shutdown_requested() {
+                engine_cancel.cancel();
+            }
+            assert!(!engine_cancel.is_cancelled());
+            // A process shutdown trips the task-local; the next checkpoint tick fires the engine cancel.
+            shutdown.cancel();
+            if shutdown_requested() {
+                engine_cancel.cancel();
+            }
+            assert!(engine_cancel.is_cancelled());
+        })
+        .await;
+    }
 }

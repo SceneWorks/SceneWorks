@@ -1,8 +1,8 @@
 //! The image-generation job request (epic 3018, sc-3020).
 //!
-//! Parses a job `payload` into a typed request, mirroring the Python worker's
-//! `image_request_from_job` (apps/worker/scene_worker/image_adapters.py) so the
-//! native MLX Rust worker reads the same payload the UI already sends. The `advanced`
+//! Parses a job `payload` into a typed request so the native MLX/candle Rust
+//! worker reads the same payload the UI already sends (the parse was ported from
+//! the retired Python worker's `image_request_from_job`). The `advanced`
 //! and `model_manifest_entry` maps pass through verbatim (they carry per-family knobs
 //! like steps/guidanceScale/mlxQuantize/poses/angleSet/controlScale/referenceStrength
 //! and the resolved model manifest entry), so adding a family needs no DTO change.

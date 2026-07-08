@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
-import { downloadOffersFor } from "../modelEligibility.js";
 import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../macGating.js";
 import { API_BASE_URL, isAbortError } from "../api.js";
 import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
@@ -14,6 +13,7 @@ import {
   joyCaptionModel,
 } from "../training/joyCaptionPrompts.js";
 import { asText, boundedNumber, integerFromDraft } from "../training/drafts.js";
+import { trainingBaseState, trainingBaseTier } from "../trainingBase.js";
 import {
   captionDraftsFromDataset,
   datasetHealth,
@@ -508,19 +508,30 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // install reads the true state). Only gated when targets exist but every trainable base is
   // missing — a target-registry error keeps its own "registry unavailable" message.
   const usableTrainingTargets = trainingTargets.filter((target) => !macTargetBlocked(target));
+  // Readiness + the install offer track the tier LoRA training actually needs — a dedicated `training`
+  // variant (lens, sc-8797) or else the DENSE `bf16` tier (Krea 2 Raw quant-matrix re-host, epic 9992) —
+  // not the default (q4) inference tier a user may have installed for generation. Resolution lives in the
+  // pure, unit-tested `trainingBase.js` (sc-8966). A non-matrix base (z-image / sdxl) uses its default tier.
   const trainingBaseMissing = (target) => {
     const base = models.find((item) => item.id === target?.baseModel);
-    return Boolean(base) && base.installState === "missing";
+    return Boolean(base) && trainingBaseState(base) === "missing";
   };
   const trainingReady =
     usableTrainingTargets.length === 0 ||
     usableTrainingTargets.some((target) => !trainingBaseMissing(target));
   const trainingBaseIds = new Set(usableTrainingTargets.map((target) => target.baseModel).filter(Boolean));
   const trainingOffers = useMemo(
-    () => downloadOffersFor(models, (item) => trainingBaseIds.has(item.id), macCapabilities),
+    () =>
+      (models ?? []).filter(
+        (item) => trainingBaseIds.has(item.id) && trainingBaseState(item) === "missing",
+      ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [models, macCapabilities, [...trainingBaseIds].join("|")],
   );
+  // Install the DENSE bf16 tier for a quant-matrix training base (else the default tier). Mirrors the
+  // Models-page tier picker's `createModelDownloadJob(model, { variant })` (sc-8509).
+  const installTrainingBase = (model, options = {}) =>
+    createModelDownloadJob(model, { variant: trainingBaseTier(model), ...options });
   const trainingDownloadJobs = useMemo(
     () => (jobs ?? []).filter((job) => job.type === "model_download"),
     [jobs],
@@ -1054,9 +1065,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
       for (const file of imageFiles) {
         const asset = await uploadDatasetItem(file);
         if (asset?.id) {
-          asset.datasetOnly = true;
-          imported.push(asset.id);
-          setUploadedDatasetAssets((current) => [asset, ...current.filter((item) => item.id !== asset.id)]);
+          // Flag the dataset-only origin on a COPY (sc-8939): mutating the API-returned
+          // record in place can leak the flag into any other holder of that instance
+          // (e.g. an asset cached in context). Build a fresh object instead.
+          const datasetAsset = { ...asset, datasetOnly: true };
+          imported.push(datasetAsset.id);
+          setUploadedDatasetAssets((current) => [datasetAsset, ...current.filter((item) => item.id !== datasetAsset.id)]);
           const caption = captionByStem.get(uploadFileStem(file.name));
           if (caption) {
             captionsByAssetId[asset.id] = { source: "imported", text: caption };
@@ -1404,6 +1418,26 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
   }
 
+  // sc-8942 (F-140): one cohesive bundle of the Dataset Doctor readout props, shaped like
+  // the DatasetDoctorReadout signature. Both the Dataset editor and Configure-job panels
+  // take this single prop instead of the eight individually-threaded props they each used
+  // to mirror. The six fix-action handlers are hoisted function declarations (stable), so
+  // this memo only re-creates when the report or its loading flag changes.
+  const datasetDoctor = useMemo(
+    () => ({
+      report: readiness,
+      loading: readinessLoading,
+      onRemoveDuplicates: removeDuplicates,
+      onUpscaleLowRes: upscaleLowRes,
+      onSmartCrop: smartCropItems,
+      onStripExif: stripExifItems,
+      onAnalyzeDataset: analyzeDataset,
+      onAnalyzeFaces: analyzeFaces,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- action handlers are stable hoisted fn decls
+    [readiness, readinessLoading],
+  );
+
   return (
     <ModelAvailabilityGate
       ready={trainingReady}
@@ -1411,7 +1445,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       description="LoRA training needs a downloaded base model (e.g. Z-Image-Turbo or SDXL). Download one to get started."
       offers={trainingOffers}
       downloadJobs={trainingDownloadJobs}
-      onDownload={createModelDownloadJob}
+      onDownload={installTrainingBase}
       onOpenModels={() => setActiveView("Models")}
       onOpenQueue={() => setActiveView("Queue")}
     >
@@ -1526,16 +1560,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   applyOrderedNames={applyOrderedNames}
                   setCaptionDialog={setCaptionDialog}
                   health={health}
-                  readiness={readiness}
-                  readinessLoading={readinessLoading}
+                  datasetDoctor={datasetDoctor}
                   readinessByKey={readinessByKey}
                   onToggleItemAck={toggleItemQualityAck}
-                  onRemoveDuplicates={removeDuplicates}
-                  onUpscaleLowRes={upscaleLowRes}
-                  onSmartCrop={smartCropItems}
-                  onStripExif={stripExifItems}
-                  onAnalyzeDataset={analyzeDataset}
-                  onAnalyzeFaces={analyzeFaces}
                   canSave={canSave}
                   saveDataset={saveDataset}
                   savingDataset={savingDataset}
@@ -1609,15 +1636,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   resetConfigDefaults={resetConfigDefaults}
                   submitTrainingJob={submitTrainingJob}
                   configSnapshot={configSnapshot}
-                  readiness={readiness}
-                  readinessLoading={readinessLoading}
+                  datasetDoctor={datasetDoctor}
                   readinessBlocksTraining={readinessBlocksTraining}
-                  onRemoveDuplicates={removeDuplicates}
-                  onUpscaleLowRes={upscaleLowRes}
-                  onSmartCrop={smartCropItems}
-                  onStripExif={stripExifItems}
-                  onAnalyzeDataset={analyzeDataset}
-                  onAnalyzeFaces={analyzeFaces}
                 />
               ) : null}
             </section>

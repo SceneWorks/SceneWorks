@@ -67,64 +67,178 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
 mod auth;
-use auth::{access_control, cors_layer, is_authorized};
+use auth::{access_control, cors_layer, is_authorized, AuthThrottle};
 mod characters;
-use characters::*;
+use characters::{
+    add_character_reference, archive_character, attach_character_lora, create_character,
+    create_character_look, create_character_test_job, delete_character_look, detach_character_lora,
+    get_character, list_characters, purge_character, remove_character_reference, update_character,
+    update_character_look, update_character_lora, update_character_reference,
+};
 mod timelines;
-use timelines::*;
+use timelines::{
+    create_timeline, create_timeline_export, extract_timeline_frame, get_timeline, list_timelines,
+    update_timeline,
+};
 mod person;
-use person::*;
+use person::{
+    create_person_detection_job, create_person_track_job, get_person_track, list_person_tracks,
+    save_person_track_corrections,
+};
 mod projects;
-use projects::*;
+use projects::{create_project, get_project, list_projects, reindex_project_endpoint};
 mod assets;
-use assets::*;
+use assets::{
+    delete_asset, get_asset, import_asset, list_assets, move_asset_to_character,
+    move_asset_to_library, purge_asset, sweep_stale_asset_uploads, update_asset_status,
+    update_asset_tags, write_upload_field_to_dir, write_upload_field_to_temp_file,
+};
+// Test-only crate-root imports: the `tests` module reaches these helpers via
+// `super::` (either `use super::{...}` or a fully-qualified `super::fn(...)` call).
+// Gating them keeps the non-test build warning-free — they have no non-test
+// crate-root consumer.
+#[cfg(test)]
+use assets::sweep_stale_asset_uploads_before;
 mod training;
-use training::*;
+use training::{
+    batch_rename_training_dataset_items, create_training_dataset,
+    create_training_dataset_analysis_job, create_training_dataset_caption_job,
+    create_training_dataset_face_analysis_job, create_training_dataset_upscale_job,
+    create_training_job, delete_training_dataset, get_training_dataset,
+    get_training_dataset_readiness, list_training_datasets, list_training_presets,
+    list_training_targets, repoint_training_dataset_items, resolve_training_output_location,
+    set_training_dataset_item_quality_ack, smart_crop_training_dataset_items,
+    strip_exif_training_dataset_items, trusted_adapter_files, update_training_dataset,
+    upload_training_dataset_item, validate_lora_id_component,
+    write_training_dataset_analysis_embeddings, write_training_dataset_caption_sidecars,
+    write_training_dataset_face_embeddings,
+};
 mod generation;
-use generation::*;
+use generation::{
+    create_image_job, create_interleave_job, create_video_job, create_vqa_job,
+    parse_recipe_preset_resolution, JobCatalogSnapshot,
+};
+#[cfg(test)]
+use generation::{validate_interleave_job, validate_vqa_job};
 mod ideogram;
 mod jobs;
-use jobs::*;
+use jobs::{
+    cancel_job, claim_job, create_job, duplicate_job, get_job, list_jobs, retry_job,
+    update_job_progress,
+};
 mod workers;
-use workers::*;
+use workers::{
+    heartbeat_worker, host_capabilities, list_workers, mac_capability_support,
+    person_capability_readiness, queue_summary, register_worker, request_worker_restart,
+    worker_terminated,
+};
 mod events;
-use events::*;
+use events::{create_event_ticket, job_events, EventHub, EventMessage};
 mod tickets;
-use tickets::*;
+use tickets::{create_media_ticket, TicketResponse, TicketStore};
 mod dto;
-use dto::*;
+use dto::{
+    AccessResponse, AssetPurgeQuery, AssetsQuery, CatalogDeleteQuery, CharacterCreateRequest,
+    CharacterLookRequest, CharacterLookUpdateRequest, CharacterLoraRequest,
+    CharacterLoraUpdateRequest, CharacterReferenceRequest, CharacterReferenceUpdateRequest,
+    CharacterTestRequest, CharacterUpdateRequest, CharactersQuery, DatasetAnalysisJobRequest,
+    DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest, DatasetFaceRecordsBody,
+    DatasetImageFixBody, DatasetRepointBody, DatasetUpscaleJobRequest, DirectoriesResponse,
+    EventsQuery, FaceLikenessCompareRequest, FrameExtractRequest, HealthResponse,
+    HostCapabilitiesResponse, ImageJobRequest, InterleaveJobRequest, JobsQuery,
+    LoraCatalogItemQuery, LoraImportRequest, LoraUpdateRequest, LorasQuery, ModelConvertRequest,
+    ModelDownloadRequest, ModelImportRequest, PersonDetectionJobRequest,
+    PersonTrackCorrectionsRequest, PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery,
+    PromptRefineRequest, QualityAckBody, ReadinessQuery, RecipePresetsQuery, TimelineCreateRequest,
+    TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest, VerifyResponse,
+    VideoJobRequest, VqaJobRequest,
+};
 mod manifest;
-use manifest::*;
+use manifest::{
+    load_manifest_entries, merge_entries_by_id, merge_object, mutate_manifest_entries,
+    remove_catalog_manifest_entry, ManifestCache,
+};
+#[cfg(test)]
+use manifest::{strip_jsonc_comments, API_MANAGED_MANIFEST_HEADER};
 mod models;
-use models::*;
+use models::{
+    create_model_convert_job, create_model_download_job, create_model_import_job, delete_model,
+    list_models, model_catalog, model_is_installed, resolve_model_manifest_entry, ModelSizeCache,
+};
+#[cfg(test)]
+use models::{
+    download_size_from_siblings, inject_converted_model_path, manifest_download_size_bytes,
+    merge_model_manifest_entry, mlx_catalog_status, model_co_requisite_downloads, model_download,
+    retain_downloads_for_os,
+};
 mod loras;
-use loras::*;
+use loras::{
+    create_lora_download_job, create_lora_import_job, delete_lora, list_loras, lora_catalog,
+    lora_embedded_tags, lora_url_error_message, sweep_stale_lora_uploads, update_lora,
+    validate_job_lora_compatibility, validate_job_lora_compatibility_with,
+    validate_lora_specs_for_model,
+};
+#[cfg(test)]
+use loras::{lora_artifact_paths, lora_families, sweep_stale_lora_uploads_before};
 mod recipe_presets;
-use recipe_presets::*;
+use recipe_presets::{
+    create_recipe_preset, delete_recipe_preset, duplicate_recipe_preset, get_recipe_preset,
+    list_recipe_presets, preset_lora_id, preset_lora_weight, preset_prompt, recipe_preset_catalog,
+    recipe_preset_catalog_with, recipe_preset_loras, serialize_preset_lora, update_recipe_preset,
+};
+mod prompt_batches;
+use prompt_batches::{
+    create_prompt_batch, delete_prompt_batch, duplicate_prompt_batch, get_prompt_batch,
+    list_prompt_batches, update_prompt_batch,
+};
 mod credentials;
-use credentials::*;
+use credentials::{delete_credential, list_credentials, set_credential};
 mod preferences;
-use preferences::*;
+use preferences::{get_ui_preferences, set_ui_preferences};
 mod prompts;
-use prompts::*;
+use prompts::create_prompt_refine_job;
 // On-demand "compare image to another" likeness tool (epic 4406, sc-4415): enqueues a
 // `face_likeness_compare` job scoring a candidate asset against a source identity reference asset.
 mod face_likeness;
-use face_likeness::*;
+use face_likeness::create_face_likeness_compare_job;
 mod poses;
-use poses::*;
+use poses::{create_pose_sources, create_poses, get_pose_preview, sweep_stale_pose_uploads};
 mod keypoints;
-use keypoints::*;
+use keypoints::{
+    create_keypoint, create_keypoint_sources, delete_keypoint_collection,
+    list_keypoint_collections, list_keypoint_presets, set_default_keypoint_collection,
+    sweep_stale_keypoint_uploads, upsert_keypoint_collection,
+};
 mod logs;
-use logs::*;
+use logs::list_logs;
+// The shared HTTP error type (sc-8890, F-088), re-exported so the `use super::*`
+// in every handler module keeps resolving `ApiError` unchanged.
+mod error;
+pub(crate) use error::ApiError;
+// Serde `#[serde(default = "...")]` value providers for the DTOs (sc-8890, F-088),
+// re-exported so the `#[serde(default = "default_x")]` string paths and sibling
+// call sites keep resolving unchanged.
+mod defaults;
+pub(crate) use defaults::*;
+// The process-lifecycle surface — `Settings`, `AppState`, and the `run`/`run_worker`
+// binary entrypoints (sc-9736, the deferred remainder of F-088). Re-exported so
+// `main.rs` (`run`/`run_worker`), the handler modules' `use super::*` (`AppState`),
+// and `tests.rs` (`Settings`) keep resolving these paths unchanged.
+mod server;
+pub use server::{run, run_worker, AppState, Settings};
 
+// The theme-preferences route. Its GET (the pre-auth theme read) is public, but its
+// PUT writes `ui-preferences.json` to disk, so the exemption is method-aware — the
+// PUT is gated when a token is configured (sc-8869, F-067). See `auth::requires_token`.
+const UI_PREFERENCES_PATH: &str = "/api/v1/ui-preferences";
 const PUBLIC_PATHS: &[&str] = &[
     "/api/v1/health",
     "/api/v1/access",
     "/api/v1/auth/verify",
     "/api/v1/jobs/events",
-    // Non-sensitive UI state (theme); loaded before auth to avoid a flash.
-    "/api/v1/ui-preferences",
+    // Non-sensitive UI state (theme); the GET is loaded before auth to avoid a
+    // flash. The PUT is method-gated in `auth::requires_token`, not here.
+    UI_PREFERENCES_PATH,
 ];
 const DEFAULT_CORS_ORIGINS: &str = concat!(
     "http://localhost:5173,http://127.0.0.1:5173,",
@@ -161,7 +275,18 @@ const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_MODEL_UPLOAD_BYTES: usize = 256 * 1024 * 1024 * 1024;
 const MAX_LORA_MULTIPART_BODY_BYTES: usize = MAX_UPLOAD_BYTES + 16 * 1024 * 1024;
 const MAX_MODEL_MULTIPART_BODY_BYTES: usize = MAX_MODEL_UPLOAD_BYTES + 16 * 1024 * 1024;
-const STALE_LORA_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
+// sc-8885 (F-083): the shared max age for every `cache/*-uploads` staging area (asset,
+// lora, model, pose, keypoint) before the startup sweep reclaims it. Named for uploads
+// in general — the old `STALE_LORA_UPLOAD_SECONDS` misleadingly implied LoRA-only.
+const STALE_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
+// sc-8884 (F-082): the char cap applied to every free-text prompt field (`prompt` and
+// `negativePrompt`). Both are persisted into jobs.db and re-broadcast over SSE on every
+// `job.updated`, so an uncapped field bloats the row and every subscriber's payload.
+const MAX_PROMPT_CHARS: usize = 4000;
+// sc-8884 (F-082): serialized-size ceiling for the free-form `advanced` object. It is a
+// pass-through bag threaded to the worker, so it has no per-key schema — bound its total
+// serialized size instead. 64 KiB is generous for legitimate advanced settings.
+const MAX_ADVANCED_JSON_BYTES: usize = 64 * 1024;
 // Thread-local (not a process-global atomic) so a test overriding the cap to
 // exercise the size limit can't leak that value into other LoRA-upload tests
 // running concurrently on sibling threads. `#[tokio::test]` uses a current-thread
@@ -212,133 +337,6 @@ pub(crate) fn test_note_lora_catalog_build() {
     TEST_LORA_CATALOG_BUILDS.with(|cell| cell.set(cell.get() + 1));
 }
 
-#[derive(Debug, Clone)]
-pub struct Settings {
-    pub app_version: String,
-    pub host: String,
-    pub port: u16,
-    pub data_dir: PathBuf,
-    pub config_dir: PathBuf,
-    pub access_token: String,
-    pub cors_origins: Vec<String>,
-    pub worker_timeout_seconds: u64,
-    pub jobs_db_path: PathBuf,
-    pub run_utility_inprocess: bool,
-    /// Epic 3482 — macOS "MLX-required" mode. When set (the desktop sets it on macOS,
-    /// where it spawns the in-process `mlx` worker), the MPS torch worker never claims an
-    /// MLX-eligible job: it defers unconditionally to the `mlx` worker, and a job no live
-    /// `mlx` worker takes within the grace window fails terminal with `mlx_unavailable`
-    /// instead of silently falling back to MPS (sc-3483). Absent on Windows/Linux/Docker
-    /// (no `mlx` worker) → today's behaviour unchanged. Ships default OFF (observe); the
-    /// final cutover (sc-3492) flips it on for the packaged Mac build.
-    pub mlx_required: bool,
-    /// Epic 3482 / sc-3484 — when MLX-required, what to do with a job the Rust/MLX flow can't
-    /// run (`mac_rust_supported` returns `Err`). **false = warn-only** (default): log a
-    /// structured `mlx_unsupported` gap event at claim time but still run the job on the
-    /// existing torch path, so flipping `mlx_required` on for observation materializes the gap
-    /// list without breaking anything. **true = enforce**: fail the job terminal with
-    /// `mlx_unsupported`. Read from `SCENEWORKS_MLX_UNSUPPORTED_MODE` (`enforce` vs anything
-    /// else). Irrelevant unless `mlx_required`.
-    pub mlx_enforce_unsupported: bool,
-    /// Epic 5483 (sc-5502) — the off-Mac (Windows/Linux/Docker) twin of `mlx_required`. When set,
-    /// the candle (CUDA) worker is the only GPU backend: a candle-eligible job no live candle
-    /// worker takes within the grace window fails terminal with `candle_unavailable` instead of
-    /// waiting forever, and (under `candle_enforce_unsupported`) a job the candle/CUDA flow can't
-    /// serve (`candle_supported` returns `Err`) fails with `candle_unsupported` instead of silently
-    /// falling back to torch. Ships default OFF (the Python torch worker is still the fallback until
-    /// the Phase-7 cutover); flip it on per-deployment as candle reaches parity. Read from
-    /// `SCENEWORKS_CANDLE_REQUIRED`. Absent on macOS (the `mlx_required` path governs there).
-    pub candle_required: bool,
-    /// Epic 5483 (sc-5502) — the candle twin of `mlx_enforce_unsupported`. **false = warn-only**
-    /// (default): log a structured `candle_unsupported` gap event at claim time but still let the
-    /// job run on the existing torch path, so flipping `candle_required` on for observation
-    /// materializes the off-Mac gap list without breaking anything. **true = enforce**: fail the
-    /// job terminal with `candle_unsupported`. Read from `SCENEWORKS_CANDLE_UNSUPPORTED_MODE`
-    /// (`enforce` vs anything else). Irrelevant unless `candle_required`.
-    pub candle_enforce_unsupported: bool,
-    /// Epic 4484 — trust loopback peers to bypass the access token. When LAN remote
-    /// access binds `0.0.0.0` with the password as `access_token`, the embedded desktop
-    /// UI and the local GPU worker(s) still reach the API over loopback with no password;
-    /// trusting `127.0.0.1`/`::1` peers keeps local use password-free while LAN callers
-    /// (other source IPs) stay gated. The desktop sets `SCENEWORKS_TRUST_LOOPBACK`;
-    /// Docker/server never does, so a reverse-proxied deployment stays fail-closed.
-    pub trust_loopback: bool,
-}
-
-impl Settings {
-    pub fn from_env() -> Self {
-        let defaults = sceneworks_core::app_paths::AppPaths::platform_default();
-        let data_dir = env_path_or("SCENEWORKS_DATA_DIR", &defaults.data_dir);
-        let jobs_db_path = std::env::var("SCENEWORKS_JOBS_DB_PATH")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| data_dir.join("cache").join("jobs.db"));
-        Self {
-            app_version: env_string("SCENEWORKS_APP_VERSION", "0.2.0"),
-            host: env_string("SCENEWORKS_API_HOST", DEFAULT_API_HOST),
-            port: std::env::var("SCENEWORKS_API_PORT")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(8000),
-            data_dir,
-            config_dir: env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir),
-            access_token: std::env::var("SCENEWORKS_ACCESS_TOKEN")
-                .unwrap_or_default()
-                .trim()
-                .to_owned(),
-            cors_origins: env_string("SCENEWORKS_CORS_ORIGINS", DEFAULT_CORS_ORIGINS)
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-                .collect(),
-            worker_timeout_seconds: std::env::var("SCENEWORKS_WORKER_TIMEOUT_SECONDS")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(90),
-            jobs_db_path,
-            run_utility_inprocess: std::env::var("SCENEWORKS_RUN_UTILITY_INPROCESS")
-                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
-                .unwrap_or(false),
-            mlx_required: std::env::var("SCENEWORKS_MLX_REQUIRED")
-                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
-                .unwrap_or(false),
-            mlx_enforce_unsupported: std::env::var("SCENEWORKS_MLX_UNSUPPORTED_MODE")
-                .map(|value| value.trim().eq_ignore_ascii_case("enforce"))
-                .unwrap_or(false),
-            candle_required: std::env::var("SCENEWORKS_CANDLE_REQUIRED")
-                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
-                .unwrap_or(false),
-            candle_enforce_unsupported: std::env::var("SCENEWORKS_CANDLE_UNSUPPORTED_MODE")
-                .map(|value| value.trim().eq_ignore_ascii_case("enforce"))
-                .unwrap_or(false),
-            trust_loopback: std::env::var("SCENEWORKS_TRUST_LOOPBACK")
-                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "True"))
-                .unwrap_or(false),
-        }
-    }
-
-    pub fn projects_dir(&self) -> PathBuf {
-        self.data_dir.join("projects")
-    }
-}
-
-#[derive(Clone)]
-pub struct AppState {
-    settings: Settings,
-    jobs_store: Arc<JobsStore>,
-    project_store: Arc<ProjectStore>,
-    events: Arc<EventHub>,
-    event_tickets: Arc<TicketStore>,
-    media_tickets: Arc<TicketStore>,
-    manifest_cache: Arc<Mutex<ManifestCache>>,
-    manifest_write_locks: Arc<Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>>,
-    model_size_cache: Arc<Mutex<ModelSizeCache>>,
-    http_client: reqwest::Client,
-    interrupted_jobs_on_startup: usize,
-}
-
 struct ApiJson<T>(T);
 
 #[axum::async_trait]
@@ -371,6 +369,28 @@ fn open_bind_override_enabled(value: &str) -> bool {
     matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES")
 }
 
+/// Choose the builtin-manifest seed mode from the raw `SCENEWORKS_CONFIG_DIR` value (sc-10212).
+///
+/// An explicit, non-empty override marks an operator-owned config dir — a repo checkout or a Compose
+/// bind mount — which must stay authoritative, so seed `IfMissing` (fill gaps, never clobber an edited
+/// copy or dirty a checked-out `config/`). Unset or blank means `config_dir` fell back to the
+/// platform-default app-owned dir (the same one the desktop seeds `Overwrite`), so `Overwrite` there
+/// refreshes the builtin catalog on launch instead of serving a stale seed after an upgrade — the
+/// sc-10193 img2img flag was invisible on a directly-launched API because the months-old seed was
+/// never rewritten. Pure so the choice is unit-tested without touching process env or the filesystem.
+///
+/// The trim/non-empty rule mirrors [`env_path_or`] exactly, so the seed mode and the resolved
+/// `config_dir` always agree on whether the override was actually applied.
+fn seed_mode_for_config_dir(
+    config_dir_env: Option<&str>,
+) -> sceneworks_core::builtin_manifests::SeedMode {
+    use sceneworks_core::builtin_manifests::SeedMode;
+    match config_dir_env.map(str::trim) {
+        Some(value) if !value.is_empty() => SeedMode::IfMissing,
+        _ => SeedMode::Overwrite,
+    }
+}
+
 fn json_rejection_response(rejection: JsonRejection) -> Response {
     // sc-8812 (F-010): a body over the route's `DefaultBodyLimit` surfaces here as a
     // `BytesRejection` whose own status is 413. Preserve the rejection's status code
@@ -401,114 +421,6 @@ fn json_rejection_response(rejection: JsonRejection) -> Response {
         .into_response()
 }
 
-pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    // Install the tracing backbone first so every line below (and every request)
-    // flows through the format-adaptive subscriber. The buffer variant also feeds
-    // this process's own ring buffer, served by `GET /api/v1/logs` (sc-3453).
-    sceneworks_core::observability::init_logging_with_buffer(logs::api_session_log());
-    // Host mode (no HF cache env set): default HF_HOME to the shared ~/.cache/
-    // huggingface so the catalog and downloads agree on the OS cache rather than
-    // the private data dir (sc-1904 follow-up). Desktop/Compose already inject it.
-    if let Some(home) = sceneworks_core::hf_home::ensure_default_huggingface_home() {
-        tracing::info!(
-            event = "hf_home_defaulted",
-            home = %home.display(),
-            "SceneWorks Rust API defaulting HF_HOME"
-        );
-    }
-    let settings = Settings::from_env();
-    // A populated builtin catalog is mandatory — model->file resolution depends on
-    // it. The desktop wrapper and the Compose bind mount normally provide it; seed
-    // any missing manifests here so launching the API binary directly works too,
-    // and fail loudly rather than serving an empty catalog if seeding can't finish.
-    // Seed-if-missing (not overwrite) keeps an explicit config dir — a repo
-    // checkout or a Compose bind mount — authoritative; see `builtin_manifests`.
-    if let Err(error) = sceneworks_core::builtin_manifests::seed_builtin_manifests(
-        &settings.config_dir,
-        sceneworks_core::builtin_manifests::SeedMode::IfMissing,
-    ) {
-        return Err(format!(
-            "failed to seed builtin manifests into {}: {error}",
-            settings.config_dir.join("manifests").display()
-        )
-        .into());
-    }
-    let address: SocketAddr = format!("{}:{}", settings.host, settings.port).parse()?;
-    // sc-4201 (F-API-1) / sc-5720 (API-001): a non-loopback bind with no access token
-    // serves every endpoint — file reads, credential writes, job creation, large
-    // uploads — to the whole network without authentication. The default is loopback;
-    // refuse to start on an open bind without a token unless the operator explicitly
-    // opts in with SCENEWORKS_ALLOW_OPEN_BIND=1 (then warn loudly instead).
-    if should_warn_open_bind(&settings.access_token, address.ip()) {
-        let override_raw = std::env::var("SCENEWORKS_ALLOW_OPEN_BIND").unwrap_or_default();
-        if open_bind_override_enabled(&override_raw) {
-            tracing::warn!(
-                event = "open_bind_without_token",
-                address = %address,
-                "SceneWorks API is binding with no SCENEWORKS_ACCESS_TOKEN set — every endpoint is \
-                 reachable without authentication from the network. Proceeding because \
-                 SCENEWORKS_ALLOW_OPEN_BIND is set; ensure this host is on a trusted network."
-            );
-        } else {
-            return Err(format!(
-                "Refusing to bind to {address} with no SCENEWORKS_ACCESS_TOKEN set: every endpoint \
-                 would be reachable without authentication from the network. Set \
-                 SCENEWORKS_ACCESS_TOKEN, bind to 127.0.0.1, or set SCENEWORKS_ALLOW_OPEN_BIND=1 to \
-                 override (only on a trusted network)."
-            )
-            .into());
-        }
-    }
-    // The credential store is created 0600 and the API never returns tokens over
-    // HTTP, but a sysadmin or restore could leave the on-disk file group/world
-    // readable. Warn (don't fail) at startup so the secret's only at-rest
-    // protection — its file mode — is visibly broken instead of silently so.
-    #[cfg(unix)]
-    {
-        let creds_path = settings
-            .config_dir
-            .join(sceneworks_core::credentials::CREDENTIALS_FILENAME);
-        if let Some(mode) = sceneworks_core::credentials::loose_credentials_mode(&creds_path) {
-            tracing::warn!(
-                event = "credentials_file_loose_mode",
-                path = %creds_path.display(),
-                mode = format!("{mode:o}"),
-                "credentials file is group/world accessible — it holds download tokens that should \
-                 be owner-only. Run `chmod 600` on it to restrict access."
-            );
-        }
-    }
-    let run_utility_inprocess = settings.run_utility_inprocess;
-    let app = create_app(settings)?;
-    let listener = tokio::net::TcpListener::bind(address).await?;
-    // Use the actual bound address so port 0 (OS-assigned) is reported and the
-    // in-process worker connects to the real port.
-    let bound = listener.local_addr()?;
-    let port = bound.port();
-    tracing::info!(
-        event = "api_listening",
-        address = %bound,
-        "SceneWorks Rust API listening"
-    );
-
-    let utility_worker = run_utility_inprocess.then(|| spawn_inprocess_utility_worker(port));
-
-    // `into_make_service_with_connect_info` exposes the peer `SocketAddr` to the auth
-    // middleware so loopback callers can be trusted (epic 4484: keep the local desktop UI
-    // and worker password-free while LAN clients stay gated).
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
-
-    if let Some(worker) = utility_worker {
-        worker.shutdown().await;
-    }
-    Ok(())
-}
-
 /// Run this binary as a standalone worker process instead of the HTTP API.
 /// Apple-Silicon Metal preflight (sc-8411). Dispatched from `main` when
 /// `SCENEWORKS_GPU_CHECK=1`: a one-shot probe that the desktop spawns at startup —
@@ -519,48 +431,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// `Err(message)` is the user-facing reason the desktop relays onto the setup screen.
 pub fn gpu_check() -> Result<(), String> {
     sceneworks_worker::metal_preflight()
-}
-
-/// Dispatched from `main` when `SCENEWORKS_WORKER_ONLY=1`; the desktop app uses
-/// it to launch the Apple-Silicon MLX GPU worker (`SCENEWORKS_GPU_ID=mlx`,
-/// sc-3289) as a crash-isolated sibling of the API process — reusing this binary
-/// because it already links the mlx-gen engine.
-///
-/// Delegates to [`sceneworks_worker::run`] (which reads `SCENEWORKS_GPU_ID` +
-/// `SCENEWORKS_API_URL` and, for a non-`auto`/non-`cpu` id, runs a single worker
-/// loop), raced against the same parent-death watchdog the API uses: the desktop
-/// sets `SCENEWORKS_PARENT_PID` to its own PID, and a force-quit/crash skips the
-/// shell's graceful teardown — so without this a worker would orphan to launchd
-/// with its multi-GB MLX model resident.
-pub async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
-    // GPU-worker path of the shared binary (SCENEWORKS_WORKER_ONLY=1): no in-process
-    // log buffer — its stdout is captured by the desktop wrapper / Docker.
-    sceneworks_core::observability::init_logging();
-    if let Some(home) = sceneworks_core::hf_home::ensure_default_huggingface_home() {
-        tracing::info!(
-            event = "hf_home_defaulted",
-            home = %home.display(),
-            "SceneWorks Rust worker defaulting HF_HOME"
-        );
-    }
-    // Race the worker against the parent-death watchdog on every platform. The
-    // desktop sets SCENEWORKS_PARENT_PID to its own PID; a force-quit/crash skips
-    // the shell's graceful teardown, and a graceful quit on Windows TerminateProcess-
-    // kills only the `auto` supervisor — never its per-GPU/CPU children. Without this
-    // watchdog those children orphan, holding multi-GB CUDA contexts and a jobs.db
-    // handle until the next launch reaps them (and the reap only knows the supervisor
-    // PID, so the children accumulated unbounded). Unset (server/Docker) -> the
-    // watchdog future stays pending and never fires.
-    tokio::select! {
-        result = sceneworks_worker::run() => result?,
-        _ = parent_death(parent_pid_to_watch()) => {
-            tracing::info!(
-                event = "worker_parent_gone",
-                "SceneWorks Rust worker: watched parent process gone, exiting"
-            );
-        }
-    }
-    Ok(())
 }
 
 /// Spawns the utility worker loop ([`sceneworks_worker::run_worker_loop`]) as a
@@ -723,6 +593,180 @@ async fn shutdown_signal() {
     }
 }
 
+/// Stream a multipart field to `temp_path`, enforcing `max_bytes` (returning
+/// `413` with `limit_msg` when exceeded), then flush. sc-8886 (F-084): the single
+/// implementation behind every multipart upload writer (asset / lora / model), which
+/// were three copy-pasted chunk loops differing only in cap source, destination, and
+/// message. On ANY error path (chunk read, write, flush, or size cap) the file handle
+/// is dropped and `cleanup` runs before the error is returned, so an aborted or
+/// malformed multi-gigabyte upload never leaks a temp file (sc-4204). `cleanup` lets a
+/// caller remove more than the file itself (e.g. the per-upload parent directory).
+/// The parent directory of `temp_path` must already exist.
+pub(crate) async fn stream_multipart_field_to_file<Fut>(
+    mut field: axum::extract::multipart::Field<'_>,
+    temp_path: &FsPath,
+    max_bytes: usize,
+    limit_msg: impl FnOnce() -> String,
+    cleanup: impl FnOnce() -> Fut,
+) -> Result<(), ApiError>
+where
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut file = match tokio::fs::File::create(temp_path).await {
+        Ok(file) => file,
+        Err(error) => {
+            cleanup().await;
+            return Err(ApiError::internal(error.to_string()));
+        }
+    };
+    let mut uploaded_bytes = 0usize;
+    let write_result = async {
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?
+        {
+            uploaded_bytes = uploaded_bytes.saturating_add(chunk.len());
+            if uploaded_bytes > max_bytes {
+                return Err(ApiError::payload_too_large(limit_msg()));
+            }
+            file.write_all(&chunk)
+                .await
+                .map_err(|error| ApiError::internal(error.to_string()))?;
+        }
+        file.flush()
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))
+    }
+    .await;
+    if let Err(error) = write_result {
+        drop(file);
+        cleanup().await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Remove stale `upload-*` entries under `<data_dir>/cache/<subdir>` older than
+/// `cutoff`. sc-8885 (F-083): the single implementation behind every per-area startup
+/// sweep (asset, lora, model, pose, keypoint) — previously four/five copy-pasted loops
+/// that had already drifted (some skipped non-directories, some didn't). Handles both
+/// files and directories so a staging area holding either is fully reclaimed. A missing
+/// root is not an error (nothing was ever staged). Returns the number of entries removed.
+///
+/// Per-entry reclamation is best-effort: a single unremovable stale entry (locked,
+/// permission-denied) is logged and skipped so the rest of the sweep still runs — the
+/// original per-area sweepers used `let _ =` and continued the loop. Only the outer
+/// `read_dir` failure remains fatal (nothing else could have been reclaimed anyway).
+pub(crate) fn sweep_stale_uploads(
+    data_dir: &FsPath,
+    subdir: &str,
+    cutoff: SystemTime,
+) -> std::io::Result<usize> {
+    let upload_root = data_dir.join("cache").join(subdir);
+    let entries = match std::fs::read_dir(upload_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut removed = 0usize;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(
+                    event = "stale_upload_entry_read_failed",
+                    sweep = subdir,
+                    error = %error,
+                    "could not read a stale-upload dir entry; skipping it"
+                );
+                continue;
+            }
+        };
+        if !entry.file_name().to_string_lossy().starts_with("upload-") {
+            continue;
+        }
+        let is_dir = match entry.file_type() {
+            Ok(file_type) => file_type.is_dir(),
+            Err(error) => {
+                tracing::warn!(
+                    event = "stale_upload_stat_failed",
+                    sweep = subdir,
+                    path = %entry.path().display(),
+                    error = %error,
+                    "could not stat a stale-upload entry; skipping it"
+                );
+                continue;
+            }
+        };
+        let modified = match entry.metadata() {
+            Ok(metadata) => metadata.modified().unwrap_or(UNIX_EPOCH),
+            Err(error) => {
+                tracing::warn!(
+                    event = "stale_upload_stat_failed",
+                    sweep = subdir,
+                    path = %entry.path().display(),
+                    error = %error,
+                    "could not read a stale-upload entry's mtime; skipping it"
+                );
+                continue;
+            }
+        };
+        if modified <= cutoff {
+            let path = entry.path();
+            let removal = if is_dir {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            match removal {
+                Ok(()) => removed += 1,
+                Err(error) => {
+                    // Best-effort: one locked/permission-denied temp must not block
+                    // reclaiming the rest of the stale entries in this sweep.
+                    tracing::warn!(
+                        event = "stale_upload_remove_failed",
+                        sweep = subdir,
+                        path = %path.display(),
+                        error = %error,
+                        "could not remove a stale upload entry; leaving it and continuing"
+                    );
+                }
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// Log (but never fail on) a startup directory-creation error. sc-8882 (F-080): the
+/// old `let _ =` swallowed permissions/disk problems, so they only ever surfaced as
+/// downstream 500s. Startup stays best-effort — a missing dir errors where it is used.
+fn warn_on_startup_err(label: &str, path: &FsPath, result: std::io::Result<()>) {
+    if let Err(error) = result {
+        tracing::warn!(
+            event = "startup_create_dir_failed",
+            dir = label,
+            path = %path.display(),
+            error = %error,
+            "could not create startup directory"
+        );
+    }
+}
+
+/// Log (but never fail on) a stale-upload sweep error. sc-8882 (F-080): a failed sweep
+/// silently leaves leaked multi-GB upload temps unreclaimed; a warning makes that
+/// diagnosable without aborting startup.
+fn warn_on_sweep_err(kind: &str, result: std::io::Result<usize>) {
+    if let Err(error) = result {
+        tracing::warn!(
+            event = "stale_upload_sweep_failed",
+            sweep = kind,
+            error = %error,
+            "stale upload sweep failed; leaked temp uploads may remain"
+        );
+    }
+}
+
 pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
     Ok(create_app_with_state(settings)?.0)
 }
@@ -733,16 +777,33 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
 pub(crate) fn create_app_with_state(
     settings: Settings,
 ) -> Result<(Router, AppState), JobsStoreError> {
-    let _ = std::fs::create_dir_all(&settings.data_dir);
-    let _ = std::fs::create_dir_all(&settings.config_dir);
+    // sc-8882 (F-080): a permissions/disk failure here is otherwise invisible until a
+    // downstream 500 — surface it as a warning so it is diagnosable. Non-fatal: startup
+    // continues (a missing dir surfaces later where it is actually used).
+    warn_on_startup_err(
+        "data_dir",
+        &settings.data_dir,
+        std::fs::create_dir_all(&settings.data_dir),
+    );
+    warn_on_startup_err(
+        "config_dir",
+        &settings.config_dir,
+        std::fs::create_dir_all(&settings.config_dir),
+    );
     if let Some(jobs_db_parent) = settings.jobs_db_path.parent() {
-        let _ = std::fs::create_dir_all(jobs_db_parent);
+        warn_on_startup_err(
+            "jobs_db_parent",
+            jobs_db_parent,
+            std::fs::create_dir_all(jobs_db_parent),
+        );
     }
-    let _ = sweep_stale_lora_uploads(&settings.data_dir);
-    let _ = sweep_stale_pose_uploads(&settings.data_dir);
-    let _ = sweep_stale_keypoint_uploads(&settings.data_dir);
+    // sc-8882 (F-080): a failed sweep leaves leaked multi-GB upload temps unreclaimed
+    // and was previously silent. WARN (never fatal) so the operator can investigate.
+    warn_on_sweep_err("lora", sweep_stale_lora_uploads(&settings.data_dir));
+    warn_on_sweep_err("pose", sweep_stale_pose_uploads(&settings.data_dir));
+    warn_on_sweep_err("keypoint", sweep_stale_keypoint_uploads(&settings.data_dir));
     // sc-4204 (F-API-6): asset-import temp files (cache/uploads) had no startup sweep.
-    let _ = sweep_stale_asset_uploads(&settings.data_dir);
+    warn_on_sweep_err("asset", sweep_stale_asset_uploads(&settings.data_dir));
     let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
     jobs_store.initialize()?;
     let interrupted_jobs_on_startup = jobs_store.mark_interrupted_on_startup()?.len();
@@ -775,6 +836,7 @@ pub(crate) fn create_app_with_state(
         events: Arc::new(EventHub::default()),
         event_tickets: Arc::new(TicketStore::new(EVENT_TICKET_TTL_SECONDS)),
         media_tickets: Arc::new(TicketStore::new(MEDIA_TICKET_TTL_SECONDS)),
+        auth_throttle: Arc::new(AuthThrottle::default()),
         manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
         manifest_write_locks: Arc::new(Mutex::new(HashMap::new())),
         model_size_cache: Arc::new(Mutex::new(ModelSizeCache::default())),
@@ -784,7 +846,28 @@ pub(crate) fn create_app_with_state(
     let cors = cors_layer(&state.settings);
     let returned_state = state.clone();
 
+    // MCP server (epic 10231, sc-10233): the rmcp streamable-HTTP service is
+    // nested at `/mcp` INSIDE this router, so the `access_control` layer below
+    // gates it exactly like every `/api/v1` route (`requires_token` includes
+    // `/mcp`) — token header, loopback trust, and the brute-force throttle all
+    // apply unchanged. Its tools call back into this API over plain HTTP
+    // (`settings.mcp_api_url`, i.e. `SCENEWORKS_API_URL` or our own loopback
+    // port) carrying the access token, so there is no second engine/DB path.
+    // Blocking-job wait policy comes from Settings (sc-10277: SCENEWORKS_MCP_JOB_*
+    // env knobs), clamped to the invariants the poll loop needs.
+    let mcp_service = sceneworks_mcp::streamable_http_service_with(
+        sceneworks_mcp::ApiClientConfig {
+            base_url: state.settings.mcp_api_url.clone(),
+            access_token: Some(state.settings.access_token.clone()),
+        },
+        sceneworks_mcp::JobWaitConfig::clamped(
+            state.settings.mcp_job_poll_interval,
+            state.settings.mcp_job_timeout,
+        ),
+    );
+
     let router = Router::new()
+        .nest_service("/mcp", mcp_service)
         .route("/api/v1/health", get(health))
         .route("/api/v1/access", get(access))
         .route("/api/v1/auth/verify", post(verify_access))
@@ -816,6 +899,10 @@ pub(crate) fn create_app_with_state(
         .route(
             "/api/v1/projects/:project_id/assets/:asset_id/move-to-library",
             post(move_asset_to_library),
+        )
+        .route(
+            "/api/v1/projects/:project_id/assets/:asset_id/move-to-character",
+            post(move_asset_to_character),
         )
         .route(
             "/api/v1/projects/:project_id/assets/:asset_id/status",
@@ -913,7 +1000,7 @@ pub(crate) fn create_app_with_state(
         )
         .route(
             "/api/v1/projects/:project_id/characters/:character_id/archive",
-            post(archive_character_explicit),
+            post(archive_character),
         )
         .route(
             "/api/v1/projects/:project_id/characters/:character_id/purge",
@@ -1027,7 +1114,7 @@ pub(crate) fn create_app_with_state(
         )
         .route("/api/v1/credentials/:host", delete(delete_credential))
         .route(
-            "/api/v1/ui-preferences",
+            UI_PREFERENCES_PATH,
             get(get_ui_preferences).put(set_ui_preferences),
         )
         .route("/api/v1/models", get(list_models))
@@ -1046,7 +1133,14 @@ pub(crate) fn create_app_with_state(
                 .layer(DefaultBodyLimit::max(MAX_MODEL_MULTIPART_BODY_BYTES)),
         )
         .route("/api/v1/loras", get(list_loras))
-        .route("/api/v1/loras/:lora_id", delete(delete_lora))
+        .route(
+            "/api/v1/loras/:lora_id",
+            delete(delete_lora).patch(update_lora),
+        )
+        .route(
+            "/api/v1/loras/:lora_id/embedded-tags",
+            get(lora_embedded_tags),
+        )
         .route(
             "/api/v1/loras/:lora_id/download",
             post(create_lora_download_job),
@@ -1069,6 +1163,20 @@ pub(crate) fn create_app_with_state(
         .route(
             "/api/v1/recipe-presets/:preset_id/duplicate",
             post(duplicate_recipe_preset),
+        )
+        .route(
+            "/api/v1/prompt-batches",
+            get(list_prompt_batches).post(create_prompt_batch),
+        )
+        .route(
+            "/api/v1/prompt-batches/:batch_id",
+            get(get_prompt_batch)
+                .patch(update_prompt_batch)
+                .delete(delete_prompt_batch),
+        )
+        .route(
+            "/api/v1/prompt-batches/:batch_id/duplicate",
+            post(duplicate_prompt_batch),
         )
         .route("/api/v1/jobs", get(list_jobs).post(create_job))
         .route("/api/v1/jobs/claim", post(claim_job))
@@ -1146,10 +1254,38 @@ async fn access(State(state): State<AppState>) -> Json<AccessResponse> {
     })
 }
 
-async fn verify_access(State(state): State<AppState>, headers: HeaderMap) -> Json<VerifyResponse> {
-    Json(VerifyResponse {
-        ok: is_authorized(&headers, &state.settings),
-    })
+async fn verify_access(
+    State(state): State<AppState>,
+    // `Option<…>` mirrors the auth middleware: unit-test oneshot requests have no
+    // connect info, so the peer is absent and the throttle is a no-op for them.
+    connect_info: Option<axum::extract::ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+) -> Json<VerifyResponse> {
+    // sc-8870 (F-068): this endpoint is public and answers `{ok}` for any candidate
+    // token, so it is the cheapest brute-force oracle. The access-control middleware
+    // already refuses a peer that is over its failure budget (its entry check runs on
+    // every request, public ones included), so a throttled caller never reaches here;
+    // this handler only has to feed the counter — a wrong token is a failed attempt,
+    // a valid one clears the peer's record. Loopback-trusted peers still get counted
+    // here on a bad guess, but the desktop UI only ever sends the real token (or none,
+    // when auth is off), so in practice only a remote guesser accrues failures.
+    let peer_ip = connect_info.map(|axum::extract::ConnectInfo(addr)| addr.ip());
+    let ok = is_authorized(&headers, &state.settings);
+    // Only meter when a token is actually configured; with auth off every check is
+    // trivially `ok` and there is nothing to brute-force.
+    if !state.settings.access_token.is_empty() {
+        if ok {
+            state.auth_throttle.record_success(peer_ip);
+        } else {
+            let failures = state.auth_throttle.record_failure(peer_ip);
+            tracing::warn!(
+                event = "auth_verify_failed",
+                failures,
+                "rejected token via /auth/verify oracle"
+            );
+        }
+    }
+    Json(VerifyResponse { ok })
 }
 
 async fn get_project_file(
@@ -1193,6 +1329,14 @@ async fn get_project_file(
                             format!("bytes {start}-{end}/{total}"),
                         ),
                         (header::CONTENT_LENGTH, len.to_string()),
+                        // sc-9674 (sc-8872 follow-up): forbid MIME sniffing so a
+                        // user-controlled project file can't be reinterpreted by the
+                        // browser as a different (e.g. active) content type than the
+                        // Content-Type we derived. Kept inline (no attachment
+                        // disposition) so <img>/<video> preview and byte-range
+                        // playback still work — the assets are served for inline
+                        // display, not forced download.
+                        (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
                     ],
                     Body::from_stream(stream),
                 )
@@ -1214,6 +1358,9 @@ async fn get_project_file(
             (header::CONTENT_TYPE, content_type),
             (header::ACCEPT_RANGES, "bytes".to_string()),
             (header::CONTENT_LENGTH, total.to_string()),
+            // sc-9674: forbid MIME sniffing (see the range branch above). Inline
+            // disposition is kept intentionally so image/video preview still works.
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
         ],
         Body::from_stream(stream),
     )
@@ -1268,13 +1415,14 @@ mod web_assets {
     // The desktop shell navigates its privileged webview to this server, so the embedded
     // UI runs from this origin and its CSP must come from here (tauri.conf.json only
     // governs the bundled setup screen). Kept narrow: scripts only from this origin (the
-    // theme bootstrap was moved to /theme-init.js so no inline script is needed), Google
-    // Fonts allowed, images/media as self/data/blob, IPC for the Tauri webview. Same-origin
-    // API + SSE are covered by connect-src 'self'.
+    // theme bootstrap was moved to /theme-init.js so no inline script is needed), fonts
+    // self-hosted from this origin (no third-party font host — sc-8956), images/media as
+    // self/data/blob, IPC for the Tauri webview. Same-origin API + SSE are covered by
+    // connect-src 'self'.
     pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
 script-src 'self'; \
-style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
-font-src 'self' https://fonts.gstatic.com data:; \
+style-src 'self' 'unsafe-inline'; \
+font-src 'self'; \
 img-src 'self' data: blob:; \
 media-src 'self' data: blob:; \
 connect-src 'self' ipc: http://ipc.localhost; \
@@ -1390,9 +1538,33 @@ where
 }
 
 async fn queue_summary_snapshot(state: AppState) -> Result<QueueSummary, ApiError> {
+    queue_summary_snapshot_inner(state, false).await
+}
+
+/// Build the queue summary, optionally SKIPPING the stale-worker sweep.
+///
+/// The sweep is a second blocking round-trip that mutates jobs to `interrupted`.
+/// Callers that already ran `mark_stale_workers_interrupted` in their own
+/// transaction this request (currently `claim_job`) pass `skip_sweep = true` so
+/// the queue refresh doesn't sweep a SECOND time on the same request (sc-8889 /
+/// F-087). Every other caller passes `skip_sweep = false` and gets the sweep, so
+/// a plain queue read (GET /queue) or a mutation that didn't sweep still reaps
+/// stale workers.
+async fn queue_summary_snapshot_inner(
+    state: AppState,
+    skip_sweep: bool,
+) -> Result<QueueSummary, ApiError> {
     let (sweep, summary): (StaleSweep, QueueSummary) =
-        store_call(state.clone(), |store, timeout| {
-            let sweep = store.mark_stale_workers_interrupted(timeout)?;
+        store_call(state.clone(), move |store, timeout| {
+            // When the caller already swept this request, don't pay for a second
+            // sweep — just read the summary. The empty StaleSweep means the
+            // job.updated fan-out below is a no-op (the caller emitted those
+            // events off its own sweep result).
+            let sweep = if skip_sweep {
+                StaleSweep::default()
+            } else {
+                store.mark_stale_workers_interrupted(timeout)?
+            };
             let summary = store.queue_summary()?;
             Ok((sweep, summary))
         })
@@ -1403,7 +1575,8 @@ async fn queue_summary_snapshot(state: AppState) -> Result<QueueSummary, ApiErro
     // flips to "Interrupted" instead of showing its last running state forever: the frontend's job
     // list is driven by `job.updated`, while `queue.updated` only refreshes the summary/workers
     // (sc-8186). The sweep returns each job exactly once (it also flips the owning worker offline, so
-    // a later sweep can't re-select it), so this neither spams nor double-fires.
+    // a later sweep can't re-select it), so this neither spams nor double-fires. When skip_sweep is
+    // set the sweep is empty, so nothing is broadcast here.
     for job in &sweep.jobs {
         publish(&state, "job.updated", job);
     }
@@ -1418,6 +1591,33 @@ async fn create_generation_job(
     payload: JsonObject,
     requested_gpu: String,
 ) -> Result<JobSnapshot, ApiError> {
+    create_generation_job_with_status(
+        state,
+        job_type,
+        project_id,
+        project_name,
+        payload,
+        requested_gpu,
+        None,
+    )
+    .await
+}
+
+/// Like [`create_generation_job`], but creates the job in an explicit initial status.
+/// `None` is the default `queued` (immediately claimable); `Some(JobStatus::PendingCaption)`
+/// creates the job NON-claimable so an API-side async pre-step can rewrite its payload and
+/// promote it to `queued` before any worker sees it (sc-9120, Ideogram 4 auto-caption). The
+/// job.updated/queue.updated events fire either way, so a `pending_caption` job appears in the
+/// queue view immediately.
+async fn create_generation_job_with_status(
+    state: AppState,
+    job_type: JobType,
+    project_id: Option<String>,
+    project_name: Option<String>,
+    payload: JsonObject,
+    requested_gpu: String,
+    initial_status: Option<JobStatus>,
+) -> Result<JobSnapshot, ApiError> {
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type,
@@ -1428,6 +1628,7 @@ async fn create_generation_job(
             source_job_id: None,
             duplicate_of_job_id: None,
             attempts: 1,
+            initial_status,
         })
     })
     .await?;
@@ -1438,6 +1639,16 @@ async fn create_generation_job(
 
 async fn publish_queue(state: &AppState) -> Result<(), ApiError> {
     let queue = queue_summary_snapshot(state.clone()).await?;
+    publish(state, "queue.updated", &queue);
+    Ok(())
+}
+
+/// Like [`publish_queue`], but skips the stale-worker sweep because the caller
+/// already ran one in its own transaction this request (sc-8889 / F-087). Use
+/// only right after a `mark_stale_workers_interrupted` call — otherwise stale
+/// workers won't be reaped on this refresh.
+async fn publish_queue_skip_sweep(state: &AppState) -> Result<(), ApiError> {
+    let queue = queue_summary_snapshot_inner(state.clone(), true).await?;
     publish(state, "queue.updated", &queue);
     Ok(())
 }
@@ -1604,6 +1815,10 @@ fn serialize_job_lora(lora: &Value, selected_lora: &Value, lora_id: &str) -> Val
         "conditioningRole": preferred_lora_value(selected_lora, lora, "conditioningRole"),
         "installedPath": preferred_lora_value(selected_lora, lora, "installedPath"),
         "sourcePath": preferred_lora_value(selected_lora, lora, "sourcePath"),
+        // Declared adapter filename(s): lets the worker load the record's final adapter
+        // from its folder instead of an arbitrary sibling — e.g. a trained LoRA's final
+        // `<stem>.safetensors` over a `<stem>-stepNNN` checkpoint (sc-10221).
+        "files": preferred_lora_value(selected_lora, lora, "files"),
         "source": preferred_lora_value(selected_lora, lora, "source"),
         "presetManaged": selected_lora.get("presetManaged").and_then(Value::as_bool).unwrap_or(false)
     })
@@ -1916,11 +2131,51 @@ fn unique_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     unique
 }
 
+/// Result of attempting to remove a batch of SceneWorks-owned artifact paths.
+#[derive(Default)]
+struct ArtifactRemoval {
+    /// Paths successfully moved to the OS trash (or permanently unlinked).
+    removed_paths: Vec<String>,
+    /// Paths left in place because they are not inside a SceneWorks-owned root
+    /// (e.g. a shared Hugging Face cache blob referenced by another model).
+    retained_paths: Vec<String>,
+    /// Owned paths that could NOT be moved to the OS trash (recycle bin disabled,
+    /// unsupported volume, item too large, …). Nothing was deleted for these, so the
+    /// caller can prompt the user before falling back to a permanent delete.
+    trash_failed_paths: Vec<String>,
+}
+
+/// Move a single path to the operating-system trash (Windows Recycle Bin / macOS
+/// Trash / Linux XDG trash). `trash::delete` is blocking, so it runs on the blocking
+/// pool to avoid stalling the async runtime.
+async fn move_path_to_os_trash(path: PathBuf) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || trash::delete(&path))
+        .await
+        .map_err(|error| format!("trash task failed: {error}"))?
+        .map_err(|error| error.to_string())
+}
+
+/// Remove a batch of artifact paths, moving each SceneWorks-owned path to the OS
+/// trash unless `permanent` is set (then unlink it). Paths outside the allowed roots
+/// are retained. A trash failure is non-fatal: the path is recorded in
+/// `trash_failed_paths` so the caller can offer a permanent-delete confirmation.
+async fn remove_owned_artifacts(
+    paths: Vec<PathBuf>,
+    allowed_roots: &[PathBuf],
+    permanent: bool,
+) -> Result<ArtifactRemoval, ApiError> {
+    let mut removal = ArtifactRemoval::default();
+    for path in paths {
+        remove_owned_artifact_path(path, allowed_roots, permanent, &mut removal).await?;
+    }
+    Ok(removal)
+}
+
 async fn remove_owned_artifact_path(
     path: PathBuf,
     allowed_roots: &[PathBuf],
-    removed_paths: &mut Vec<String>,
-    retained_paths: &mut Vec<String>,
+    permanent: bool,
+    removal: &mut ArtifactRemoval,
 ) -> Result<(), ApiError> {
     let metadata = match tokio::fs::symlink_metadata(&path).await {
         Ok(metadata) => metadata,
@@ -1948,25 +2203,40 @@ async fn remove_owned_artifact_path(
         }
     }
     if !owned {
-        retained_paths.push(path.display().to_string());
+        removal.retained_paths.push(path.display().to_string());
         return Ok(());
     }
-    if metadata.is_dir() {
-        tokio::fs::remove_dir_all(&path).await.map_err(|error| {
-            ApiError::internal(format!(
-                "Failed to remove artifact directory {}: {error}",
-                path.display()
-            ))
-        })?;
-    } else {
-        tokio::fs::remove_file(&path).await.map_err(|error| {
-            ApiError::internal(format!(
-                "Failed to remove artifact file {}: {error}",
-                path.display()
-            ))
-        })?;
+    if permanent {
+        if metadata.is_dir() {
+            tokio::fs::remove_dir_all(&path).await.map_err(|error| {
+                ApiError::internal(format!(
+                    "Failed to remove artifact directory {}: {error}",
+                    path.display()
+                ))
+            })?;
+        } else {
+            tokio::fs::remove_file(&path).await.map_err(|error| {
+                ApiError::internal(format!(
+                    "Failed to remove artifact file {}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+        removal.removed_paths.push(path.display().to_string());
+        return Ok(());
     }
-    removed_paths.push(path.display().to_string());
+    match move_path_to_os_trash(path.clone()).await {
+        Ok(()) => removal.removed_paths.push(path.display().to_string()),
+        Err(error) => {
+            tracing::warn!(
+                event = "artifact_trash_failed",
+                path = %path.display(),
+                error = %error,
+                "Failed to move artifact to the OS trash; awaiting permanent-delete confirmation"
+            );
+            removal.trash_failed_paths.push(path.display().to_string());
+        }
+    }
     Ok(())
 }
 
@@ -2067,15 +2337,39 @@ fn validate_person_track_job(payload: &PersonTrackJobRequest) -> Result<(), ApiE
     Ok(())
 }
 
+/// sc-8884 (F-082): `negativePrompt` and the free-form `advanced` bag previously escaped
+/// all length validation (only `prompt` was capped), so an oversized field was persisted
+/// to jobs.db and re-serialized to every SSE subscriber on each status change. Cap the
+/// negative prompt at the same char limit as `prompt` and bound `advanced`'s serialized
+/// size. Shared by `validate_image_job` / `validate_video_job`.
+fn validate_prompt_extras(negative_prompt: &str, advanced: &JsonObject) -> Result<(), ApiError> {
+    if negative_prompt.chars().count() > MAX_PROMPT_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "negativePrompt must be at most {MAX_PROMPT_CHARS} characters"
+        )));
+    }
+    // Serialize once to measure the on-the-wire size of the pass-through bag.
+    let advanced_bytes = serde_json::to_vec(advanced)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    if advanced_bytes > MAX_ADVANCED_JSON_BYTES {
+        return Err(ApiError::bad_request(format!(
+            "advanced settings must serialize to at most {MAX_ADVANCED_JSON_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
     }
-    if payload.prompt.is_empty() || payload.prompt.chars().count() > 4000 {
+    if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
         return Err(ApiError::bad_request(
             "prompt must be between 1 and 4000 characters",
         ));
     }
+    validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
     if ![
         "text_to_image",
         "edit_image",
@@ -2120,11 +2414,12 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
     }
-    if payload.prompt.is_empty() || payload.prompt.chars().count() > 4000 {
+    if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
         return Err(ApiError::bad_request(
             "prompt must be between 1 and 4000 characters",
         ));
     }
+    validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
     if ![
         "image_to_video",
         "text_to_video",
@@ -2340,148 +2635,6 @@ fn required_finite_f64_field(payload: &Value, field: &str) -> Result<f64, ApiErr
     Ok(value)
 }
 
-fn default_timeline_name() -> String {
-    "Main timeline".to_owned()
-}
-
-fn default_aspect_ratio() -> String {
-    "16:9".to_owned()
-}
-
-fn default_timeline_fps() -> u32 {
-    30
-}
-
-fn default_export_resolution() -> u32 {
-    720
-}
-
-fn default_frame_intended_use() -> String {
-    "reuse".to_owned()
-}
-
-fn default_requested_gpu() -> String {
-    "auto".to_owned()
-}
-
-fn default_training_captioner() -> String {
-    "joy_caption".to_owned()
-}
-
-fn default_training_caption_model() -> String {
-    "fancyfeast/llama-joycaption-beta-one-hf-llava".to_owned()
-}
-
-fn default_dataset_analysis_embedder() -> String {
-    "clip_vit_l14".to_owned()
-}
-
-fn default_training_caption_type() -> String {
-    "Descriptive".to_owned()
-}
-
-fn default_training_caption_length() -> String {
-    "long".to_owned()
-}
-
-fn default_training_caption_temperature() -> f64 {
-    0.6
-}
-
-fn default_training_caption_top_p() -> f64 {
-    0.9
-}
-
-fn default_training_caption_max_new_tokens() -> u32 {
-    256
-}
-
-fn default_lora_scope() -> String {
-    "global".to_owned()
-}
-
-fn bool_is_false(value: &bool) -> bool {
-    !*value
-}
-
-fn default_project_lora_scope() -> String {
-    "project".to_owned()
-}
-
-fn default_character_type() -> String {
-    "person".to_owned()
-}
-
-fn default_reference_role() -> String {
-    "reference".to_owned()
-}
-
-fn default_character_lora_weight() -> f64 {
-    0.8
-}
-
-fn default_track_name() -> String {
-    "Selected person".to_owned()
-}
-
-fn default_image_mode() -> String {
-    "text_to_image".to_owned()
-}
-
-fn default_image_model() -> String {
-    "z_image_turbo".to_owned()
-}
-
-fn default_image_count() -> u32 {
-    4
-}
-
-fn default_image_size() -> u32 {
-    1024
-}
-
-fn default_style_preset() -> String {
-    "cinematic".to_owned()
-}
-
-fn default_fit_mode() -> String {
-    // epic 2551: never stretch by default. "crop" covers the frame undistorted; the
-    // worker normalizes unknown values back to crop, so this is just the wire default.
-    "crop".to_owned()
-}
-
-fn default_video_mode() -> String {
-    "image_to_video".to_owned()
-}
-
-fn default_video_model() -> String {
-    "ltx_2_3".to_owned()
-}
-
-fn default_video_duration() -> ContractNumber {
-    ContractNumber::from(6)
-}
-
-fn default_video_fps() -> u32 {
-    25
-}
-
-fn default_video_width() -> u32 {
-    768
-}
-
-fn default_video_height() -> u32 {
-    512
-}
-
-fn default_video_quality() -> String {
-    "balanced".to_owned()
-}
-
-fn default_replacement_mode() -> String {
-    "face_only".to_owned()
-}
-
 fn env_string(name: &str, default: &str) -> String {
     std::env::var(name)
         .ok()
@@ -2496,123 +2649,6 @@ fn env_path_or(name: &str, default: &FsPath) -> PathBuf {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| default.to_path_buf())
-}
-
-#[derive(Debug)]
-struct ApiError {
-    status: StatusCode,
-    detail: String,
-}
-
-impl ApiError {
-    fn bad_request(detail: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            detail: detail.into(),
-        }
-    }
-
-    fn unauthorized(detail: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::UNAUTHORIZED,
-            detail: detail.into(),
-        }
-    }
-
-    fn forbidden(detail: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::FORBIDDEN,
-            detail: detail.into(),
-        }
-    }
-
-    fn payload_too_large(detail: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::PAYLOAD_TOO_LARGE,
-            detail: detail.into(),
-        }
-    }
-
-    fn internal(detail: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            detail: detail.into(),
-        }
-    }
-}
-
-impl From<JobsStoreError> for ApiError {
-    fn from(error: JobsStoreError) -> Self {
-        match error {
-            JobsStoreError::NotFound(_) => Self {
-                status: StatusCode::NOT_FOUND,
-                detail: "Record not found".to_owned(),
-            },
-            JobsStoreError::InvalidStatus(status) => Self {
-                status: StatusCode::BAD_REQUEST,
-                detail: format!("Unsupported job status: {status}"),
-            },
-            JobsStoreError::InvalidNumber(field) => {
-                Self::bad_request(format!("Invalid numeric value for {field}"))
-            }
-            JobsStoreError::InvalidRequestedGpu(detail) => Self::bad_request(detail),
-            JobsStoreError::RetryLimit { max_attempts } => Self {
-                status: StatusCode::BAD_REQUEST,
-                detail: format!("Job retry limit reached after {max_attempts} attempts."),
-            },
-            // 409 tells the worker its report lost a race with cancel/sweep/
-            // reclaim: abandon the job instead of retrying (sc-4172).
-            JobsStoreError::TerminalJobImmutable { job_id, status } => Self {
-                status: StatusCode::CONFLICT,
-                detail: format!(
-                    "Job {job_id} is already {status}; terminal jobs cannot be updated."
-                ),
-            },
-            JobsStoreError::NotJobOwner { job_id } => Self {
-                status: StatusCode::CONFLICT,
-                detail: format!(
-                    "Progress rejected: the reporting worker no longer owns job {job_id}."
-                ),
-            },
-            other => Self::internal(other.to_string()),
-        }
-    }
-}
-
-impl From<ProjectStoreError> for ApiError {
-    fn from(error: ProjectStoreError) -> Self {
-        match error {
-            ProjectStoreError::BadRequest(detail) => Self::bad_request(detail),
-            ProjectStoreError::NotFound(detail) => Self {
-                status: StatusCode::NOT_FOUND,
-                detail,
-            },
-            other => Self::internal(other.to_string()),
-        }
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        // Make every 5xx leave a server-side trace (it previously returned `{detail}`
-        // to the client and logged nothing). Expected/normal typed 4xx domain errors
-        // stay at debug to avoid drowning the error level in routine validation noise.
-        if self.status.is_server_error() {
-            tracing::error!(
-                event = "api_error",
-                status = self.status.as_u16(),
-                detail = %self.detail,
-                "API request failed"
-            );
-        } else if self.status.is_client_error() {
-            tracing::debug!(
-                event = "api_error",
-                status = self.status.as_u16(),
-                detail = %self.detail,
-            );
-        }
-        (self.status, Json(json!({ "detail": self.detail }))).into_response()
-    }
 }
 
 #[cfg(test)]

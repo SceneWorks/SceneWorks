@@ -72,6 +72,11 @@ export function useCharacterAdvancedOptions(
   // when the model is PiD-eligible AND its checkpoint is installed (showPidToggle), so a stale `true`
   // on a non-eligible model is inert — same gating discipline as ImageStudio.
   const [usePid, setUsePid] = React.useState(false);
+  // PiD output tier (sc-10054): PiD super-resolves the base render 4×, so this picks the output size —
+  // "4k" (~4096px, the default) or "2k" (~2048px, faster + less GPU memory). Rides `advanced.pidTarget`,
+  // emitted only when the toggle is shown+on AND "2k" is picked ("4k" is the worker default). Mirrors
+  // Image Studio.
+  const [pidTarget, setPidTarget] = React.useState("4k");
   const showPidToggle = pidToggleVisible(model, catalog);
 
   // Reset the model-derived tuning whenever the backbone changes so a value from a
@@ -117,6 +122,11 @@ export function useCharacterAdvancedOptions(
     // super-resolve; mirrors Image Studio. A stale `true` on a hidden toggle stays inert.
     if (showPidToggle && usePid) {
       advanced.usePid = true;
+      // PiD output tier (sc-10054): "4k" is the worker default, so only "2k" is emitted — keeps existing
+      // usePid recipes byte-identical.
+      if (pidTarget === "2k") {
+        advanced.pidTarget = "2k";
+      }
     }
     return advanced;
   }
@@ -144,6 +154,8 @@ export function useCharacterAdvancedOptions(
     setNegativePrompt,
     usePid,
     setUsePid,
+    pidTarget,
+    setPidTarget,
     showPidToggle,
     model,
     identityStructure,
@@ -184,6 +196,8 @@ export function CharacterAdvancedOptions({ state }) {
     setNegativePrompt,
     usePid,
     setUsePid,
+    pidTarget,
+    setPidTarget,
     showPidToggle,
     model,
     identityStructure,
@@ -311,17 +325,34 @@ export function CharacterAdvancedOptions({ state }) {
             <textarea onChange={(event) => setNegativePrompt(event.target.value)} rows={3} value={negativePrompt} />
           </label>
           {showPidToggle ? (
-            <label
-              className="checkline pid-decoder-toggle"
-              title="Decode this generation through NVIDIA's PiD pixel-diffusion decoder instead of the model's VAE: it decodes and super-resolves in one pass, so output comes out at 2K/4K (sharper detail, but slower and more memory). Non-commercial use only — PiD output is licensed for research/evaluation, unlike the rest of the pipeline. Off = the model's native VAE at the selected resolution."
-            >
-              <input
-                checked={usePid}
-                onChange={(event) => setUsePid(event.target.checked)}
-                type="checkbox"
-              />
-              PiD decoder · 2K/4K <span className="badge badge-nc">Non-Commercial</span>
-            </label>
+            <>
+              <label
+                className="checkline pid-decoder-toggle"
+                title="Decode this generation through NVIDIA's PiD pixel-diffusion decoder instead of the model's VAE: it decodes and super-resolves in one pass to 2K or 4K (pick the tier at right — sharper detail, but slower and more memory). Non-commercial use only — PiD output is licensed for research/evaluation, unlike the rest of the pipeline. Off = the model's native VAE at the selected resolution."
+              >
+                <input
+                  checked={usePid}
+                  onChange={(event) => setUsePid(event.target.checked)}
+                  type="checkbox"
+                />
+                PiD decoder <span className="badge badge-nc">Non-Commercial</span>
+              </label>
+              {usePid ? (
+                <label
+                  className="pid-target-select"
+                  title="PiD super-resolves the base render 4×, so this sets the output size: 4K (~4096px, max detail) or 2K (~2048px, faster and less GPU memory). Both are super-resolved from the model's latent."
+                >
+                  Output
+                  <select
+                    onChange={(event) => setPidTarget(event.target.value)}
+                    value={pidTarget}
+                  >
+                    <option value="4k">4K · max detail</option>
+                    <option value="2k">2K · faster</option>
+                  </select>
+                </label>
+              ) : null}
+            </>
           ) : null}
         </div>
       ) : null}

@@ -187,20 +187,29 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // are the separate `*_edit`/`*_kv_edit` engine models, story sc-3029); the variants
     // differ only in their weights. Distilled klein runs guidance 1.0 (CFG-free) with no
     // negative prompt; the engine accepts guidance but rejects a negative prompt.
+    // `default_repo` is the SceneWorks pre-quantized q4/q8/bf16 turnkey re-host (sc-8711,
+    // epic 8506) — the model is registered in `STANDARD_TIER_MODELS`, so both the MLX and the
+    // candle txt2img lanes resolve the packed subdir through the shared `resolve_weights_dir`
+    // → `standard_tier_subdir` (base.rs). It must match the manifest `downloads[].repo`; the
+    // stale gated `black-forest-labs/FLUX.2-klein-9B` default made `model_repo` probe the wrong
+    // HF-cache dir and fail with "MLX weights not found or incomplete".
     ModelRow {
         sceneworks_id: "flux2_klein_9b",
         engine_id: "flux2_klein_9b",
-        default_repo: "black-forest-labs/FLUX.2-klein-9B",
+        default_repo: "SceneWorks/flux2-klein-9b-mlx",
         default_steps: 4,
         default_guidance: 1.0,
         adapter_label: "mlx_flux2",
     },
     ModelRow {
-        // Separately-distilled checkpoint, same architecture — its snapshot carries the
-        // full diffusers tree, so txt2img loads through the base `flux2_klein_9b` loader.
+        // Separately-distilled checkpoint, same architecture — txt2img loads through the base
+        // `flux2_klein_9b` loader. `default_repo` is the SceneWorks q4/q8/bf16 turnkey re-host
+        // (sc-8711); like the base 9B it is a `STANDARD_TIER_MODELS` member resolved via
+        // `standard_tier_subdir`, so it must match the manifest `downloads[].repo` rather than
+        // the pre-rehost gated `black-forest-labs/FLUX.2-klein-9b-kv`.
         sceneworks_id: "flux2_klein_9b_kv",
         engine_id: "flux2_klein_9b",
-        default_repo: "black-forest-labs/FLUX.2-klein-9b-kv",
+        default_repo: "SceneWorks/flux2-klein-9b-kv-mlx",
         default_steps: 4,
         default_guidance: 1.0,
         adapter_label: "mlx_flux2",
@@ -222,17 +231,21 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // model `flux2_dev` (Mistral3 TE + 48/48/15360 DiT), NOT a klein weight variant, so it
     // maps to its own engine id. Embedded distilled guidance (FLUX.1-dev pattern, NOT
     // true-CFG): the descriptor advertises `supports_guidance` but not negative prompt, so
-    // the engine takes the guidance scalar (default 4.0) over ~28 steps. On MLX it loads
-    // from a pre-quantized Q4 dir assembled by the install-time `flux2_dev_quant` convert
-    // job (sc-5917 / sc-5921). On the **candle** off-Mac lane (sc-7458) there is no packed
-    // convert: it loads the dense `black-forest-labs/FLUX.2-dev` diffusers snapshot and
-    // Q4-quantizes it at load — the 32B dense never lands on the GPU (CPU-staged in system
-    // RAM, then `quantize_onto` the GPU; candle-gen-flux2 sc-7457). `resolve_quant` reads
-    // the manifest `mlx.quantize: 4` so the candle descriptor's Q4 support drives it.
+    // the engine takes the guidance scalar (default 4.0) over ~28 steps. `default_repo` is the
+    // SceneWorks pre-quantized q4/q8/bf16 turnkey re-host (sc-8513, epic 8506) — a
+    // `STANDARD_TIER_MODELS` member, so both the MLX and the candle txt2img lanes packed-load
+    // the chosen tier's subdir via the shared `resolve_weights_dir` → `standard_tier_subdir`
+    // (sc-9092 retired the old candle dense-BFL load for the generic lane). It must match the
+    // manifest `downloads[].repo`; the pre-rehost gated `black-forest-labs/FLUX.2-dev` default
+    // made `model_repo` probe the wrong HF-cache dir. NOTE: the bespoke off-Mac candle *edit*
+    // lane in `flux2_edit_candle.rs` still keys its own dense-BFL default for both flux2 klein
+    // and dev, which no longer matches the re-hosted packed turnkey the catalog downloads — a
+    // separate off-Mac gap that needs candle-hardware verification, tracked as sc-10222 (epic
+    // 9083 gap #3), not touched here.
     ModelRow {
         sceneworks_id: "flux2_dev",
         engine_id: "flux2_dev",
-        default_repo: "black-forest-labs/FLUX.2-dev",
+        default_repo: "SceneWorks/flux2-dev-mlx",
         default_steps: 28,
         default_guidance: 4.0,
         adapter_label: "mlx_flux2",
@@ -288,8 +301,12 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // `kolors_mlx_eligible` until their dedicated streams land (subsequent epic-3090 slices).
     ModelRow {
         sceneworks_id: "kolors",
+        // sc-9946 (epic 8506): flipped to the SceneWorks re-host `SceneWorks/kolors-mlx`, which ships
+        // the pre-quantized q4/q8/bf16 turnkey tiers (mlx-gen #659). Was upstream
+        // `Kwai-Kolors/Kolors-diffusers` (dense + install-time quant). The derived fast tokenizer is
+        // baked into every tier, so the install-time tokenizer overlay is no longer needed here.
         engine_id: "kolors",
-        default_repo: "Kwai-Kolors/Kolors-diffusers",
+        default_repo: "SceneWorks/kolors-mlx",
         default_steps: 25,
         default_guidance: 5.0,
         adapter_label: "mlx_kolors",
@@ -360,6 +377,18 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         adapter_label: "mlx_sensenova",
     },
     ModelRow {
+        // Infographic-V2 (epic 9959): coexisting checkpoint refresh of the base NEO-unify model.
+        // Its config + tensor layout are byte-identical to the base, so it rides the SAME engine
+        // (`engine_id: "sensenova_u1_8b"`) with no engine change — only a distinct SceneWorks
+        // quant-matrix re-host (q4/q8/bf16 packed tiers, epic 9959 S1). Same defaults as the base.
+        sceneworks_id: "sensenova_u1_8b_infographic_v2",
+        engine_id: "sensenova_u1_8b",
+        default_repo: "SceneWorks/sensenova-u1-8b-infographic-v2-mlx",
+        default_steps: 50,
+        default_guidance: 4.0,
+        adapter_label: "mlx_sensenova",
+    },
+    ModelRow {
         sceneworks_id: "sensenova_u1_8b_fast",
         engine_id: "sensenova_u1_8b_fast",
         // sc-8775: SceneWorks MLX quant-matrix re-host of the *distilled* variant — q4/q8/bf16 packed
@@ -368,6 +397,18 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         // so the engine's `load_fast` loads it directly without re-merging (a packed base can't
         // re-merge). Replaces the old dense-base + distill-LoRA-at-load path.
         default_repo: "SceneWorks/sensenova-u1-8b-fast-mlx",
+        default_steps: 8,
+        default_guidance: 1.0,
+        adapter_label: "mlx_sensenova",
+    },
+    ModelRow {
+        // Infographic-V2 8-step distilled variant (epic 9959, sc-9963): the V1 distill LoRA merges
+        // cleanly onto V2 (296/296 gen-path targets) and renders coherent 8-step infographics. Same
+        // pre-merged + packed layout as the base fast (distill_merged.json marker → load_fast skip),
+        // so it rides the SAME `sensenova_u1_8b_fast` engine id — only the re-host repo differs.
+        sceneworks_id: "sensenova_u1_8b_infographic_v2_fast",
+        engine_id: "sensenova_u1_8b_fast",
+        default_repo: "SceneWorks/sensenova-u1-8b-infographic-v2-fast-mlx",
         default_steps: 8,
         default_guidance: 1.0,
         adapter_label: "mlx_sensenova",
@@ -469,6 +510,19 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 0.0,
         adapter_label: "mlx_krea",
     },
+    // Krea 2 Raw (epic 9992) — native MLX, the undistilled 12B DiT run with TRUE classifier-free guidance
+    // (the `krea_2_raw` descriptor advertises supports_guidance + supports_negative_prompt, unlike the
+    // CFG-free Turbo). 52 steps / guidance 3.5. Loads the packed bf16 / Q8 (default) / Q4 turnkey subdir
+    // (`SceneWorks/krea-2-raw-mlx`, the same `krea_model_subdir` resolver as Turbo). Shares the Krea
+    // pipeline with Turbo (arch-identical); the `krea_2_raw` id is also the LoRA-training base (Path 1).
+    ModelRow {
+        sceneworks_id: "krea_2_raw",
+        engine_id: "krea_2_raw",
+        default_repo: "SceneWorks/krea-2-raw-mlx",
+        default_steps: 52,
+        default_guidance: 3.5,
+        adapter_label: "mlx_krea",
+    },
     // Stable Diffusion 3.5 Large (epic 7841 / sc-7871) — native MLX, gated. 8B MMDiT + triple text
     // encoder (CLIP-L + CLIP-G + T5-XXL) + 16-ch VAE. True-CFG flagship: 28 steps / guidance 3.5 +
     // negative prompt (the `sd3_5_large` descriptor advertises supports_guidance + supports_negative
@@ -523,8 +577,9 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // the latter bundling the SceneWorks/gemma-2-2b-it TE so the load path resolves one snapshot dir —
     // SanaTextEncoder::from_snapshot reads `<dir>/text_encoder/gemma-2-2b-it.safetensors` + tokenizer.json).
     // Generator self-registers via the shared force-link (`use mlx_gen_sana as _;` in image_jobs.rs);
-    // reaches the generic MODEL_TABLE / `generate_stream` path. No runtime quant (the 2-bit quant is NOT
-    // ported); ships dense bf16. 32× DC-AE divisor → width/height must be multiples of 32.
+    // reaches the generic MODEL_TABLE / `generate_stream` path. Quant matrix (sc-8489/sc-8513): ships
+    // pre-packed q4/q8/bf16 tiers (transformer + Gemma-2 TE packed, DC-AE VAE dense), packed-detected
+    // on load — NOT the (unported) 2-bit SANA quant. 32× DC-AE divisor → W/H must be multiples of 32.
     ModelRow {
         sceneworks_id: "sana_1600m",
         engine_id: "sana_1600m",
@@ -541,8 +596,9 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // ~2 steps (the `sana_sprint_1600m` descriptor advertises NO supports_true_cfg / supports_negative).
     // Loads the un-gated `SceneWorks/Sana_Sprint_1.6B_1024px_mlx` MLX snapshot (same transformer/ vae/
     // text_encoder/ layout as base SANA; the text_encoder/ bundles the SceneWorks/gemma-2-2b-it TE so it is
-    // NOT duplicated). Dense bf16 (no quant). 32× DC-AE divisor → width/height multiples of 32. NVIDIA
-    // non-commercial (NSCLv1) — the re-host carries the upstream LICENSE + NOTICE.
+    // NOT duplicated). Quant matrix (sc-8490/sc-8513): pre-packed q4/q8/bf16 tiers, packed-detected on
+    // load. 32× DC-AE divisor → width/height multiples of 32. NVIDIA non-commercial (NSCLv1) — the
+    // re-host carries the upstream LICENSE + NOTICE.
     ModelRow {
         sceneworks_id: "sana_sprint_1600m",
         engine_id: "sana_sprint_1600m",
@@ -838,10 +894,11 @@ mod tests {
     // checks `mlx` on macOS (where the MLX provider crates are linked) and `candle` on the
     // `backend-candle` build — whichever registry is active — so each backend's truthfulness is enforced
     // on its own lane. `"default"` is the engine-default sentinel, always allowed.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    // All-targets (no cfg gate): the embedded manifest + jsonc strip live in `sceneworks_core`, which
+    // compiles on every platform, so this parses on the plain Linux/Windows check lane too. The
+    // sampler/scheduler drift guards below still gate themselves on macos/candle (they need a linked
+    // provider registry), but the character_image engine-wiring guards (sc-9513) read only the manifest
+    // + the declarative wiring table, so they run everywhere `cargo test` does — including CI's ubuntu lane.
     fn parse_builtin_models() -> serde_json::Value {
         let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
@@ -850,6 +907,188 @@ mod tests {
             .1;
         let stripped = sceneworks_core::jsonc::strip_jsonc_comments(text);
         serde_json::from_str(&stripped).expect("parse builtin.models.jsonc")
+    }
+
+    // ── sc-9513 (F-059 follow-up of sc-8861): character_image ⇄ engine-wiring honesty guards ─────────
+    //
+    // These three guards were extracted to `tests/test_builtin_manifest_audit.py` by sc-8861 but still
+    // cross-referenced the (now-deleted) Python worker's `MODEL_TARGETS` engine table via a lazy
+    // `importorskip` — so once epic-8283 deleted `apps/worker` they would have degraded to a clean
+    // SKIP and lost their coverage. They are reimplemented here against the Rust worker's own engine
+    // wiring, reading the SAME embedded `config/manifests/builtin.models.jsonc` the Python audit parsed,
+    // so the character_image ⇄ engine-declaration invariants keep running Python-free (and on CI's ubuntu
+    // lane, since they need neither a linked provider registry nor a macos/candle build).
+    //
+    // Source of truth for the engine facts: the worker's character-image identity/pose engine wiring —
+    // the bespoke identity/pose providers `resolve_image_route` / `resolve_candle_image_route`
+    // (`image_jobs/base.rs`) dispatch to. That dispatch ladder is `#[cfg]`-gated to the macOS (MLX) and
+    // `backend-candle` builds, so it is not even compiled on the plain check lane; this small declarative
+    // table restates its identity/pose facts as all-targets data (the Rust analog of the Python
+    // `ipAdapter`/`instantId`/`pulidFlux`/`controlNetPose` blocks). Keep it in sync when a model gains or
+    // loses an identity/pose backbone:
+    //   * `flux_dev`            → XLabs FLUX IP-Adapter          (image_jobs/flux_ipadapter.rs)
+    //   * `sdxl` / `realvisxl`  → h94 IP-Adapter-plus-face        (image_jobs/sdxl_ipadapter.rs)
+    //   * `kolors`              → Kolors IP-Adapter-Plus + pose CN (image_jobs/kolors_ipadapter.rs + kolors_control.rs)
+    //   * `instantid_realvisxl` → InstantID IdentityNet           (image_jobs/instantid.rs)
+    //   * `pulid_flux_dev`      → PuLID-FLUX face identity          (image_jobs/pulid.rs + pulid_candle.rs)
+    // (Base `qwen_image` also carries a strict-pose ControlNet, but it is NOT a reference-identity engine
+    // and its pose picker is gated by manifest `ui.poseLibrary` alone — not `character_image` — so it is
+    // outside these identity-honesty guards and intentionally not a row here.)
+    struct CharacterEngineWiring {
+        sceneworks_id: &'static str,
+        /// A dedicated reference-identity backbone (IP-Adapter / InstantID / PuLID-FLUX) — the Rust
+        /// equivalent of Python `bool(MODEL_TARGETS[id].ipAdapter or .instantId or .pulidFlux)`.
+        identity_engine: bool,
+        /// The strict-pose ControlNet repo the model carries, if any (Python `controlNetPose.repo`).
+        control_net_pose_repo: Option<&'static str>,
+    }
+
+    const CHARACTER_IMAGE_ENGINE_WIRING: &[CharacterEngineWiring] = &[
+        CharacterEngineWiring {
+            sceneworks_id: "flux_dev",
+            identity_engine: true,
+            control_net_pose_repo: None,
+        },
+        CharacterEngineWiring {
+            sceneworks_id: "sdxl",
+            identity_engine: true,
+            control_net_pose_repo: None,
+        },
+        CharacterEngineWiring {
+            sceneworks_id: "realvisxl",
+            identity_engine: true,
+            control_net_pose_repo: None,
+        },
+        CharacterEngineWiring {
+            sceneworks_id: "kolors",
+            identity_engine: true,
+            control_net_pose_repo: Some("Kwai-Kolors/Kolors-ControlNet-Pose"),
+        },
+        CharacterEngineWiring {
+            sceneworks_id: "instantid_realvisxl",
+            identity_engine: true,
+            control_net_pose_repo: None,
+        },
+        CharacterEngineWiring {
+            sceneworks_id: "pulid_flux_dev",
+            identity_engine: true,
+            control_net_pose_repo: None,
+        },
+    ];
+
+    fn character_engine_wiring(id: &str) -> Option<&'static CharacterEngineWiring> {
+        CHARACTER_IMAGE_ENGINE_WIRING
+            .iter()
+            .find(|row| row.sceneworks_id == id)
+    }
+
+    /// True iff the manifest `model` lists `capability` in its `capabilities` array.
+    fn advertises_capability(model: &serde_json::Value, capability: &str) -> bool {
+        model["capabilities"]
+            .as_array()
+            .is_some_and(|caps| caps.iter().any(|c| c.as_str() == Some(capability)))
+    }
+
+    // Guard 1 (was `test_character_image_capability_implies_engine_or_tuning_declaration`, sc-2018): every
+    // builtin that advertises `character_image` must have EITHER a worker identity engine (IP-Adapter /
+    // InstantID / PuLID-FLUX) OR a `ui.variationStrength` declaration. Otherwise the capability flag is
+    // dishonest — the picker shows the model in "With character" mode but the worker silently ignores the
+    // reference (the shape of z_image_turbo's pre-sc-2005 bug). The cross-backbone guard: a future
+    // character_image backbone added without engine wiring fails here before it ever reaches a user.
+    #[test]
+    fn character_image_capability_implies_engine_or_tuning_declaration() {
+        let manifest = parse_builtin_models();
+        let models = manifest["models"].as_array().expect("models array");
+        let mut misleading: Vec<String> = Vec::new();
+        for model in models {
+            let Some(id) = model["id"].as_str() else {
+                continue;
+            };
+            if !advertises_capability(model, "character_image") {
+                continue;
+            }
+            let has_engine = character_engine_wiring(id).is_some_and(|w| w.identity_engine);
+            let has_variation_ui = model
+                .get("ui")
+                .and_then(|ui| ui.get("variationStrength"))
+                .is_some_and(|v| !v.is_null());
+            if !(has_engine || has_variation_ui) {
+                misleading.push(id.to_owned());
+            }
+        }
+        assert!(
+            misleading.is_empty(),
+            "Models advertise `character_image` without an identity engine (IP-Adapter / InstantID / \
+             PuLID-FLUX in CHARACTER_IMAGE_ENGINE_WIRING) or a `ui.variationStrength` declaration: {misleading:?}. \
+             Wire an identity engine for a reference/face-ID backbone, or declare `ui.variationStrength` \
+             for an edit-style backbone (sc-2017), or drop the capability flag (the z_image_turbo bug, sc-2005)."
+        );
+    }
+
+    // Guard 2 (was `test_kolors_declares_strict_pose_controlnet`, sc-2264): Kolors is the strict pose
+    // tier — the manifest must advertise `ui.poseLibrary` AND the worker wiring must carry the
+    // Kolors-ControlNet-Pose repo so the pose picker offers it and the adapter can load the pose
+    // ControlNet. Identity still rides the IP-Adapter; the pose path composes both.
+    #[test]
+    fn kolors_declares_strict_pose_controlnet() {
+        let manifest = parse_builtin_models();
+        let models = manifest["models"].as_array().expect("models array");
+        let kolors = models
+            .iter()
+            .find(|m| m["id"].as_str() == Some("kolors"))
+            .expect("kolors manifest entry");
+        assert_eq!(
+            kolors
+                .get("ui")
+                .and_then(|ui| ui.get("poseLibrary"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "kolors must declare ui.poseLibrary so the pose picker offers the strict tier (sc-2264)."
+        );
+        let wiring = character_engine_wiring("kolors").expect("kolors character-engine wiring");
+        assert_eq!(
+            wiring.control_net_pose_repo,
+            Some("Kwai-Kolors/Kolors-ControlNet-Pose"),
+            "kolors wiring must carry the Kolors-ControlNet-Pose repo for the strict pose path."
+        );
+        assert!(
+            wiring.identity_engine,
+            "kolors pose path needs the IP-Adapter for identity."
+        );
+    }
+
+    // Guard 3 (was `test_models_with_engine_block_advertise_character_image`): the reverse-drift guard.
+    // Any model that ships an identity engine exists to serve Character Studio's reference flow — the
+    // manifest MUST advertise `character_image` so the picker surfaces it. Catches the case where someone
+    // wires the worker engine but forgets to flip the manifest flag, leaving the engine unreachable.
+    #[test]
+    fn models_with_engine_block_advertise_character_image() {
+        let manifest = parse_builtin_models();
+        let models = manifest["models"].as_array().expect("models array");
+        let mut unreachable_ids: Vec<String> = Vec::new();
+        for wiring in CHARACTER_IMAGE_ENGINE_WIRING {
+            if !wiring.identity_engine {
+                continue;
+            }
+            let Some(model) = models
+                .iter()
+                .find(|m| m["id"].as_str() == Some(wiring.sceneworks_id))
+            else {
+                // Identity engine wired but not exposed as a built-in (unwired path) — mirrors the
+                // Python guard's `if builtin is None: continue`.
+                continue;
+            };
+            if !advertises_capability(model, "character_image") {
+                unreachable_ids.push(wiring.sceneworks_id.to_owned());
+            }
+        }
+        assert!(
+            unreachable_ids.is_empty(),
+            "Models have an identity engine in CHARACTER_IMAGE_ENGINE_WIRING but the builtin manifest \
+             does not advertise `character_image`: {unreachable_ids:?}. Add the capability to \
+             `capabilities` and `ui.recommendedFor` so the Image Studio \"With character\" picker surfaces \
+             the model."
+        );
     }
 
     // The effective `limits[key]` list for `backend`: the per-backend `<backend>.limits[key]` override

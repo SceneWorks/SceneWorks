@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 
 import { bundledLicenses, licensesIntro } from "../data/bundledLicenses.js";
+import { safeExternalUrl } from "../urls.js";
 
 // About → Licenses (sc-3778). Aggregates the third-party components SceneWorks
 // redistributes in the desktop bundle (ffmpeg GPLv3, onnxruntime MIT, …) and
@@ -78,9 +79,13 @@ export function LicensesScreen() {
                 <>
                   <dt>Homepage</dt>
                   <dd>
-                    <a href={selected.homepage} target="_blank" rel="noreferrer">
-                      {selected.homepage}
-                    </a>
+                    {safeExternalUrl(selected.homepage) ? (
+                      <a href={safeExternalUrl(selected.homepage)} target="_blank" rel="noreferrer">
+                        {selected.homepage}
+                      </a>
+                    ) : (
+                      selected.homepage
+                    )}
                   </dd>
                 </>
               ) : null}

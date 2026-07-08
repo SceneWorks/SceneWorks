@@ -75,8 +75,14 @@ const STRICT_CONTROL_ENGINES: &[StrictControlEngine] = &[
         supported_kinds: &[ControlKind::Pose, ControlKind::Canny, ControlKind::Depth],
     },
     StrictControlEngine {
+        // sc-9870 (epic 8236): the default control-weights repo is now the SceneWorks PACKED tier
+        // (`SceneWorks/qwen-image-2512-fun-controlnet-union`, per-quant q4/q8/bf16 subdirs, one
+        // `model.safetensors` overlay each), replacing the dense alibaba-pai overlay (sc-8350). BOTH the
+        // MLX (`qwen.rs`) and candle (`qwen_control.rs`) lanes resolve the tier subdir matching the
+        // selected transformer quant (`advanced.mlxQuantize`), so this `(engine_id, control_repo,
+        // supported_kinds)` row stays consistent across both drivers.
         engine_id: "qwen_image_control",
-        repo: "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union",
+        repo: "SceneWorks/qwen-image-2512-fun-controlnet-union",
         supported_kinds: &[ControlKind::Pose, ControlKind::Canny, ControlKind::Depth],
     },
     StrictControlEngine {
@@ -254,8 +260,9 @@ fn depth_control_image(
 ) -> WorkerResult<Image> {
     let source = source.ok_or_else(|| {
         WorkerError::InvalidPayload(
-            "depth control requires either a source image to estimate from or a user-supplied \
-             depth map (advanced.controlImage)"
+            "depth control requires either a source image to estimate from \
+             (sourceAssetId / referenceAssetId) or a user-supplied depth map \
+             (advanced.controlImage)"
                 .to_owned(),
         )
     })?;
@@ -290,7 +297,9 @@ async fn ensure_depth_estimator_dir(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<PathBuf> {
-    use crate::depth::{DEPTH_ANYTHING_V2_FILE, DEPTH_ANYTHING_V2_SMALL_REPO};
+    use crate::depth::{
+        DEPTH_ANYTHING_V2_FILE, DEPTH_ANYTHING_V2_REVISION, DEPTH_ANYTHING_V2_SMALL_REPO,
+    };
 
     if let Ok(p) = std::env::var("SCENEWORKS_DEPTH_ANYTHING_V2") {
         let p = PathBuf::from(p);
@@ -317,7 +326,7 @@ async fn ensure_depth_estimator_dir(
     crate::downloads::ensure_hf_cached_file(
         &context,
         DEPTH_ANYTHING_V2_SMALL_REPO,
-        "main",
+        DEPTH_ANYTHING_V2_REVISION,
         DEPTH_ANYTHING_V2_FILE,
         &dir.join(DEPTH_ANYTHING_V2_FILE),
     )
@@ -381,7 +390,10 @@ fn preprocess_control_entry(
         ControlKind::Canny => {
             let source = source.ok_or_else(|| {
                 WorkerError::InvalidPayload(
-                    "canny control requires a source image (advanced.controlImage)".to_owned(),
+                    "canny control requires either a source image to derive edges from \
+                     (sourceAssetId / referenceAssetId) or a user-supplied edge map \
+                     (advanced.controlImage)"
+                        .to_owned(),
                 )
             })?;
             let rgb = image::RgbImage::from_raw(source.width, source.height, source.pixels.clone())
@@ -418,7 +430,9 @@ fn build_control_conditioning(
         kind => vec![Conditioning::Control {
             image: control,
             kind,
-            scale,
+            // gen-core drift (sc-9940): Conditioning::Control.scale is now Option<f32> (None = engine
+            // default). This lane always has an explicit control scale → Some.
+            scale: Some(scale),
         }],
     };
     if let Some((image, strength)) = identity_init {

@@ -201,75 +201,54 @@ async fn generate_sensenova_edit_stream(
     let conditioning = build_edit_conditioning(&references);
 
     // Per-iteration grouping: a Character-Studio angle set (11 shared-seed, per-angle prompt) or the
-    // plain per-image reference path. SenseNova has no pose tier (excluded by `sensenova_mlx_eligible`).
-    let grouping = flux2_grouping(request);
-    let set_seed = resolve_seed(request, 0);
-    let (seeds, prompts): (Vec<i64>, Vec<String>) = match &grouping {
-        Flux2Grouping::Angles => {
-            // Shared seed so noise-derived attributes stay constant across angles.
-            let prompts = CHARACTER_ANGLE_SET_ORDER
-                .iter()
-                .map(|angle| augment_prompt_for_angle(&request.prompt, angle))
-                .collect();
-            (vec![set_seed; CHARACTER_ANGLE_SET_ORDER.len()], prompts)
-        }
-        Flux2Grouping::Plain => {
-            let count = request.count as usize;
-            let seeds = (0..count)
-                .map(|index| resolve_seed(request, index))
-                .collect();
-            (seeds, vec![request.prompt.clone(); count])
-        }
-        Flux2Grouping::Poses(_) => {
-            // Unreachable: strict pose is excluded by `sensenova_mlx_eligible` (no ControlNet).
-            return Err(WorkerError::InvalidPayload(
-                "SenseNova-U1 has no strict-pose (ControlNet) path".to_owned(),
-            ));
-        }
-    };
+    // plain per-image reference path. SenseNova has no pose tier (excluded by `sensenova_mlx_eligible`),
+    // so reject a Poses grouping before routing through the shared `plan_edit_batch` builder (F-024
+    // sc-8826). The builder stamps angleSet (poseLibrary is unreachable here) and computes the
+    // identity-likeness gate (incl. the sc-4411 plain-With-Character case). Scoring (epic 4406, sc-4409
+    // angles / sc-4411 plain With-Character) is generator-agnostic — SenseNova-U1 produces the FINAL
+    // image directly (no face-restore pass), so scoring the generated image scores what the user sees.
+    let grouping = edit_grouping(request);
+    if matches!(grouping, EditGrouping::Poses(_)) {
+        // Unreachable: strict pose is excluded by `sensenova_mlx_eligible` (no ControlNet).
+        return Err(WorkerError::InvalidPayload(
+            "SenseNova-U1 has no strict-pose (ControlNet) path".to_owned(),
+        ));
+    }
+    let EditBatch {
+        seeds,
+        prompts,
+        pose_inputs: _,
+        raw_settings,
+        score_likeness,
+    } = plan_edit_batch(
+        request,
+        &grouping,
+        sensenova_edit_raw_settings(
+            request,
+            &repo,
+            steps,
+            quant_bits,
+            guidance,
+            img_cfg,
+            timestep_shift,
+            references.len(),
+        ),
+    );
     let total = seeds.len();
 
-    let mut raw_settings = sensenova_edit_raw_settings(
-        request,
-        &repo,
-        steps,
-        quant_bits,
-        guidance,
-        img_cfg,
-        timestep_shift,
-        references.len(),
-    );
-    if matches!(grouping, Flux2Grouping::Angles) {
-        raw_settings.insert("angleSet".to_owned(), Value::Bool(true));
-    }
-
-    // Identity-likeness scoring (epic 4406, sc-4409 angles / sc-4411 plain With-Character): generator-
-    // agnostic — a Character-Studio angle set OR a plain With-Character generation on SenseNova-U1 is
-    // scored through the same shared seam as InstantID / FLUX.2 / Qwen (SenseNova has no pose tier). The
-    // PLAIN case (sc-4411) is scored only when this is a `character_image` job with a character
-    // `referenceAssetId` (NOT an `edit_image` job, whose `Plain` grouping also lands here but carries
-    // `sourceAssetId`, not an identity reference). Stage the antelopev2 face stack (shared bundle, no-op
-    // if cached) and capture the source identity reference + asset id; the `!Send` scorer is built ONCE
-    // in the closure and reused across all outputs. Staging is non-fatal (failure → no scorer → scores
-    // omitted, generation still renders).
-    let angle_set = matches!(grouping, Flux2Grouping::Angles);
-    // Plain With-Character (sc-4411): a `character_image` job (so NOT an `edit_image`) whose `Plain`
-    // grouping is the general subject-variation case. The scored reference is `references[0]` — for a
-    // character_image job that IS the `referenceAssetId` (first in `qwen_edit_reference_ids`).
-    let plain_with_character =
-        matches!(grouping, Flux2Grouping::Plain) && request.mode == "character_image";
-    let score_likeness = angle_set || plain_with_character;
-    let face_stack_dir = if score_likeness {
-        match ensure_face_stack_dir(api, settings, job).await {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(error = %error, "character_image face-stack staging failed; likeness scores omitted");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // Stage the antelopev2 face stack (shared bundle, no-op if cached) and capture the source
+    // identity reference + asset id; the `!Send` scorer is built ONCE in the closure and reused
+    // across all outputs. Staging is non-fatal (failure → no scorer → scores omitted, generation
+    // still renders). The scored reference is `references[0]` — for a character_image job that IS the
+    // `referenceAssetId` (first in `qwen_edit_reference_ids`).
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        score_likeness,
+        "character_image face-stack staging failed; likeness scores omitted",
+    )
+    .await;
     let likeness_source = (score_likeness && face_stack_dir.is_some()).then(|| references[0].clone());
     let likeness_source_ref = reference_ids.first().cloned();
 
