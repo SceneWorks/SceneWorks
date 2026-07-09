@@ -2642,9 +2642,6 @@ export function ImageStudio() {
                   value={heightOverride}
                 />
               </label>
-              <span className="field-hint">
-                Custom size overrides the Aspect dropdown (256–4096 per side; leave blank to use it).
-              </span>
               {showSamplerPicker ? (
                 <label>
                   Sampler

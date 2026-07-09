@@ -111,6 +111,17 @@ describe("ImageStudio Save as Preset", () => {
     expect(document.body.querySelector(".studio-shell > .advanced-section")).toBeNull();
   });
 
+  // `.advanced-panel` is a 3-column grid, so a bare hint span is a grid ITEM: it eats a
+  // cell and shifts every control after it into the wrong column (sc-10493). Hints belong
+  // inside the <label> they describe.
+  it("puts no bare hint spans in the advanced grid", async () => {
+    await render(baseContext());
+    await click(document.body.querySelector(".advanced-section-toggle"));
+
+    expect(document.body.querySelector(".advanced-panel > .field-hint")).toBeNull();
+    expect(document.body.textContent).not.toContain("Custom size overrides the Aspect dropdown");
+  });
+
   it("snapshots the current config into a preset payload without the seed", async () => {
     const context = baseContext();
     await render(context);
