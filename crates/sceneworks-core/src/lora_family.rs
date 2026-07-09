@@ -234,8 +234,23 @@ pub fn reconcile_detected_family(
             // form) against a detected `krea_2` (the catalog/trainer token), or
             // ai-toolkit's separator-less `krea2`. Store the canonical token so the
             // recorded family matches `loraCompatibility.families` exactly.
-            if canonical_lora_family(&supplied) == canonical_lora_family(&detected) {
-                Ok(Some(canonical_lora_family(&detected)))
+            let canonical_supplied = canonical_lora_family(&supplied);
+            let canonical_detected = canonical_lora_family(&detected);
+            // A detected *base architecture* family also satisfies a declared, more specific
+            // model family built on that architecture. A Chroma checkpoint (`chroma`) with no
+            // metadata detects as `flux`; FLUX.2 [klein] / [dev] (`flux2-klein` / `flux2-dev`)
+            // carry no variant signature and detect as the base `flux2`. Without this, every
+            // legitimate Chroma / klein / dev download or import fails as a false mismatch.
+            // Keep the *declared* family — it is the model's true identity (a klein model must
+            // stay `flux2-klein`, a Chroma LoRA `chroma`), and the base is only what the
+            // detector falls back to when the variant shares the base's tensor layout.
+            if canonical_supplied == canonical_detected
+                || detected_base_architecture_satisfies_declared(
+                    &canonical_supplied,
+                    &canonical_detected,
+                )
+            {
+                Ok(Some(canonical_supplied))
             } else {
                 Err(FamilyMismatch { supplied, detected })
             }
@@ -440,6 +455,26 @@ pub fn canonical_lora_family(family: &str) -> String {
         "krea-2" => "krea_2".to_owned(),
         _ => normalized,
     }
+}
+
+/// True when a *detected* base-architecture family legitimately satisfies a declared,
+/// more specific model family — i.e. the declared family's weights share that base
+/// architecture's tensor layout, so [`detect_model_family`] can only report the base.
+/// These are exactly the families that also load the base architecture's LoRAs, so this
+/// consults the same [`extra_compatible_lora_families`] registry to stay in lockstep:
+///
+/// * Chroma (`chroma`) is FLUX.1-schnell-derived; a metadata-less Chroma checkpoint has
+///   byte-for-byte the same tensor keys as FLUX.1, so key detection reports `flux`.
+/// * FLUX.2 [klein] / [dev] (`flux2-klein` / `flux2-dev`) carry no klein/dev-specific
+///   tensor signature, so detection reports the base `flux2`.
+///
+/// The reason such a model accepts the base family's LoRAs is precisely that it *is*
+/// that base architecture, which is why the accept-detection and load-LoRA relations
+/// coincide. Both arguments must already be canonical (see [`canonical_lora_family`]).
+/// Directional on purpose: only a detected *base* satisfies a declared *variant*, never
+/// the reverse, so a genuinely wrong download/import is still a confident mismatch.
+fn detected_base_architecture_satisfies_declared(declared: &str, detected: &str) -> bool {
+    extra_compatible_lora_families(declared).contains(&detected)
 }
 
 fn read_diffusers_model_index_family(dir: &Path) -> Option<String> {
@@ -2505,6 +2540,43 @@ mod tests {
                 supplied: "z-image".to_owned(),
                 detected: "qwen-image".to_owned(),
             }
+        );
+    }
+
+    #[test]
+    fn reconcile_detected_family_accepts_base_architecture_of_derived_families() {
+        // A declared model family whose weights legitimately detect only as a compatible
+        // *base* architecture must reconcile (it previously failed every such download /
+        // import as a false mismatch), keeping the declared family as the model's identity:
+        //   - Chroma (`chroma`) is FLUX.1-derived; metadata-less weights detect as `flux`.
+        //   - FLUX.2 [klein] / [dev] carry no variant signature; weights detect as `flux2`.
+        let cases = [
+            ("chroma", "flux"),
+            ("flux2-klein", "flux2"),
+            ("flux2_klein", "flux2"),
+            ("flux2-dev", "flux2"),
+        ];
+        for (declared, detected) in cases {
+            assert_eq!(
+                reconcile_detected_family(Some(declared.to_owned()), Some(detected.to_owned()))
+                    .unwrap()
+                    .as_deref(),
+                Some(canonical_lora_family(declared).as_str()),
+                "declared {declared:?} vs detected {detected:?} should keep {declared:?}"
+            );
+        }
+        // Directional: the reverse is NOT a variant relationship, so it stays a mismatch —
+        // a plain `flux` weight is not a Chroma, and `flux2` is not FLUX.1 (`flux`).
+        assert!(
+            reconcile_detected_family(Some("flux".to_owned()), Some("chroma".to_owned())).is_err()
+        );
+        assert!(
+            reconcile_detected_family(Some("flux".to_owned()), Some("flux2".to_owned())).is_err()
+        );
+        // An unrelated cross-architecture pair is still a confident mismatch.
+        assert!(
+            reconcile_detected_family(Some("flux2-klein".to_owned()), Some("flux".to_owned()))
+                .is_err()
         );
     }
 
