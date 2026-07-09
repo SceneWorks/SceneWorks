@@ -2599,305 +2599,301 @@ export function ImageStudio() {
             presetPromptParts={presetPromptParts}
             presetLoraDetails={presetLoraDetails}
           />
-        </WorkPanel>
 
-        <AdvancedSection
-          hint="cleared values → model default"
-          onToggle={() => setAdvancedOpen((value) => !value)}
-          open={advancedOpen}
-        >
-              <div className="advanced-panel">
+          <AdvancedSection
+            hint="cleared values → model default"
+            onToggle={() => setAdvancedOpen((value) => !value)}
+            open={advancedOpen}
+          >
+            <div className="advanced-panel">
+              <label>
+                GPU
+                <select onChange={(event) => setRequestedGpu(event.target.value)} value={requestedGpu}>
+                  {gpuOptions.map((gpu) => (
+                    <option key={gpu} value={gpu}>
+                      {gpu === "auto" ? "Auto" : gpu}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Seed
+                <input onChange={(event) => setSeed(event.target.value)} placeholder="Random" type="number" value={seed} />
+              </label>
+              <label>
+                Width override
+                <input
+                  min="256"
+                  max="4096"
+                  onChange={(event) => setWidthOverride(event.target.value)}
+                  placeholder={String(dropdownWidth)}
+                  type="number"
+                  value={widthOverride}
+                />
+              </label>
+              <label>
+                Height override
+                <input
+                  min="256"
+                  max="4096"
+                  onChange={(event) => setHeightOverride(event.target.value)}
+                  placeholder={String(dropdownHeight)}
+                  type="number"
+                  value={heightOverride}
+                />
+              </label>
+              {showSamplerPicker ? (
                 <label>
-                  GPU
-                  <select onChange={(event) => setRequestedGpu(event.target.value)} value={requestedGpu}>
-                    {gpuOptions.map((gpu) => (
-                      <option key={gpu} value={gpu}>
-                        {gpu === "auto" ? "Auto" : gpu}
+                  Sampler
+                  <select onChange={(event) => setSampler(event.target.value)} value={sampler}>
+                    {samplerOptions.map((key) => (
+                      <option key={key} value={key}>
+                        {SAMPLER_LABELS[key] ?? key}
                       </option>
                     ))}
                   </select>
                 </label>
+              ) : null}
+              {showSchedulerPicker ? (
                 <label>
-                  Seed
-                  <input onChange={(event) => setSeed(event.target.value)} placeholder="Random" type="number" value={seed} />
+                  Scheduler
+                  <select onChange={(event) => setScheduler(event.target.value)} value={scheduler}>
+                    {schedulerOptions.map((key) => (
+                      <option key={key} value={key}>
+                        {SCHEDULER_LABELS[key] ?? key}
+                      </option>
+                    ))}
+                  </select>
                 </label>
+              ) : null}
+              {showSchedulerPicker && scheduler !== "default" ? (
                 <label>
-                  Width override
+                  Schedule shift
                   <input
-                    min="256"
-                    max="4096"
-                    onChange={(event) => setWidthOverride(event.target.value)}
-                    placeholder={String(dropdownWidth)}
-                    type="number"
-                    value={widthOverride}
-                  />
-                </label>
-                <label>
-                  Height override
-                  <input
-                    min="256"
-                    max="4096"
-                    onChange={(event) => setHeightOverride(event.target.value)}
-                    placeholder={String(dropdownHeight)}
-                    type="number"
-                    value={heightOverride}
-                  />
-                </label>
-                <span className="field-hint">
-                  Custom size overrides the Aspect dropdown (256–4096 per side; leave blank to use it).
-                </span>
-                {showSamplerPicker ? (
-                  <label>
-                    Sampler
-                    <select onChange={(event) => setSampler(event.target.value)} value={sampler}>
-                      {samplerOptions.map((key) => (
-                        <option key={key} value={key}>
-                          {SAMPLER_LABELS[key] ?? key}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-                {showSchedulerPicker ? (
-                  <label>
-                    Scheduler
-                    <select onChange={(event) => setScheduler(event.target.value)} value={scheduler}>
-                      {schedulerOptions.map((key) => (
-                        <option key={key} value={key}>
-                          {SCHEDULER_LABELS[key] ?? key}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-                {showSchedulerPicker && scheduler !== "default" ? (
-                  <label>
-                    Schedule shift
-                    <input
-                      max="10"
-                      min="0.1"
-                      onChange={(event) => setSchedulerShift(Number(event.target.value))}
-                      step="0.1"
-                      type="number"
-                      value={schedulerShift}
-                    />
-                  </label>
-                ) : null}
-                <label>
-                  Steps
-                  <input
-                    min="1"
-                    max="80"
-                    onChange={(event) => setStepsOverride(event.target.value)}
-                    placeholder={String(stepsDefaultFromModel(selectedModel) ?? "")}
-                    type="number"
-                    value={stepsOverride}
-                  />
-                </label>
-                <label>
-                  Guidance
-                  <input
-                    min="0"
-                    max="30"
-                    onChange={(event) => setGuidanceOverride(event.target.value)}
-                    placeholder={(() => {
-                      const value = guidanceDefaultFromModel(selectedModel);
-                      return value == null ? "" : String(value);
-                    })()}
+                    max="10"
+                    min="0.1"
+                    onChange={(event) => setSchedulerShift(Number(event.target.value))}
                     step="0.1"
                     type="number"
-                    value={guidanceOverride}
+                    value={schedulerShift}
                   />
                 </label>
-                {showGuidanceMethodPicker ? (
-                  <label>
-                    Guidance method
-                    <select
-                      onChange={(event) => setGuidanceMethod(event.target.value)}
-                      value={guidanceMethod}
-                    >
-                      {guidanceMethodOptions.map((key) => (
-                        <option key={key} value={key}>
-                          {GUIDANCE_METHOD_LABELS[key] ?? key}
-                        </option>
-                      ))}
-                    </select>
-                    {guidanceMethod === "cfg_pp" ? (
-                      <span className="field-hint">
-                        CFG++ reparameterizes guidance — use a low CFG (~1.5–2.5); high
-                        values over-saturate.
-                      </span>
-                    ) : null}
-                  </label>
-                ) : null}
+              ) : null}
+              <label>
+                Steps
+                <input
+                  min="1"
+                  max="80"
+                  onChange={(event) => setStepsOverride(event.target.value)}
+                  placeholder={String(stepsDefaultFromModel(selectedModel) ?? "")}
+                  type="number"
+                  value={stepsOverride}
+                />
+              </label>
+              <label>
+                Guidance
+                <input
+                  min="0"
+                  max="30"
+                  onChange={(event) => setGuidanceOverride(event.target.value)}
+                  placeholder={(() => {
+                    const value = guidanceDefaultFromModel(selectedModel);
+                    return value == null ? "" : String(value);
+                  })()}
+                  step="0.1"
+                  type="number"
+                  value={guidanceOverride}
+                />
+              </label>
+              {showGuidanceMethodPicker ? (
+                <label>
+                  Guidance method
+                  <select
+                    onChange={(event) => setGuidanceMethod(event.target.value)}
+                    value={guidanceMethod}
+                  >
+                    {guidanceMethodOptions.map((key) => (
+                      <option key={key} value={key}>
+                        {GUIDANCE_METHOD_LABELS[key] ?? key}
+                      </option>
+                    ))}
+                  </select>
+                  {guidanceMethod === "cfg_pp" ? (
+                    <span className="field-hint">
+                      CFG++ reparameterizes guidance — use a low CFG (~1.5–2.5); high
+                      values over-saturate.
+                    </span>
+                  ) : null}
+                </label>
+              ) : null}
+              <label
+                className="checkline flash-attn-toggle"
+                title="Fused flash-attention on the candle (Windows/CUDA) SDXL backend — faster and lower VRAM. Ignored on other backends."
+              >
+                <input
+                  checked={flashAttn}
+                  onChange={(event) => setFlashAttn(event.target.checked)}
+                  type="checkbox"
+                />
+                Flash attention
+              </label>
+              {promptEnhance ? (
                 <label
-                  className="checkline flash-attn-toggle"
-                  title="Fused flash-attention on the candle (Windows/CUDA) SDXL backend — faster and lower VRAM. Ignored on other backends."
+                  className="checkline prompt-enhance-toggle"
+                  title="Have FLUX.2-dev's built-in LLM rewrite (upsample) your prompt before generating — text-only for new images, and reference-aware when editing. Distinct from the Refine button; off by default."
                 >
                   <input
-                    checked={flashAttn}
-                    onChange={(event) => setFlashAttn(event.target.checked)}
+                    checked={enhancePrompt}
+                    onChange={(event) => setEnhancePrompt(event.target.checked)}
                     type="checkbox"
                   />
-                  Flash attention
+                  Enhance prompt
                 </label>
-                {promptEnhance ? (
+              ) : null}
+              {showTierPicker ? (
+                <label className="quant-tier-picker" title="Switch which installed quant tier generates, for A/B comparison. Higher precision = larger memory footprint; switching a heavy tier reloads it before the next generation.">
+                  Quant tier
+                  <select
+                    onChange={(event) => handleTierChange(event.target.value)}
+                    value={quantTier}
+                  >
+                    {availableTiers.map((tier) => (
+                      <option key={tier} value={tier}>
+                        {tierLabel(tier)}
+                      </option>
+                    ))}
+                  </select>
+                  {tierSwitching ? (
+                    <span className="field-hint" role="status">
+                      Loading {tierLabel(tierSwitching)}…
+                    </span>
+                  ) : null}
+                </label>
+              ) : null}
+              {precisionToggle && !showTierPicker ? (
+                <label
+                  className="checkline boogu-precision-toggle"
+                  title="Use the full-precision bf16 build instead of the default Q8. Higher fidelity, but a much larger download (~38 GB per variant, fetched on demand) that needs a larger Mac (≈96 GB unified memory). Off = the Q8 default (~23 GB, 64 GB-class Mac)."
+                >
+                  <input
+                    checked={bf16Precision}
+                    onChange={(event) => setBf16Precision(event.target.checked)}
+                    type="checkbox"
+                  />
+                  Full precision (bf16)
+                </label>
+              ) : null}
+              {showPidToggle ? (
+                <>
                   <label
-                    className="checkline prompt-enhance-toggle"
-                    title="Have FLUX.2-dev's built-in LLM rewrite (upsample) your prompt before generating — text-only for new images, and reference-aware when editing. Distinct from the Refine button; off by default."
+                    className="checkline pid-decoder-toggle"
+                    title="Decode this generation through NVIDIA's PiD pixel-diffusion decoder instead of the model's VAE: it decodes and super-resolves in one pass to 2K or 4K (pick the tier at right — sharper detail, but slower and more memory). Non-commercial use only — PiD output is licensed for research/evaluation, unlike the rest of the pipeline. Off = the model's native VAE at the selected resolution."
                   >
                     <input
-                      checked={enhancePrompt}
-                      onChange={(event) => setEnhancePrompt(event.target.checked)}
+                      checked={usePid}
+                      disabled={upscaleEnabled}
+                      onChange={(event) => setUsePid(event.target.checked)}
                       type="checkbox"
                     />
-                    Enhance prompt
+                    PiD decoder <span className="badge badge-nc">Non-Commercial</span>
                   </label>
-                ) : null}
-                {showTierPicker ? (
-                  <label className="quant-tier-picker" title="Switch which installed quant tier generates, for A/B comparison. Higher precision = larger memory footprint; switching a heavy tier reloads it before the next generation.">
-                    Quant tier
-                    <select
-                      onChange={(event) => handleTierChange(event.target.value)}
-                      value={quantTier}
-                    >
-                      {availableTiers.map((tier) => (
-                        <option key={tier} value={tier}>
-                          {tierLabel(tier)}
-                        </option>
-                      ))}
-                    </select>
-                    {tierSwitching ? (
-                      <span className="field-hint" role="status">
-                        Loading {tierLabel(tierSwitching)}…
-                      </span>
-                    ) : null}
-                  </label>
-                ) : null}
-                {precisionToggle && !showTierPicker ? (
-                  <label
-                    className="checkline boogu-precision-toggle"
-                    title="Use the full-precision bf16 build instead of the default Q8. Higher fidelity, but a much larger download (~38 GB per variant, fetched on demand) that needs a larger Mac (≈96 GB unified memory). Off = the Q8 default (~23 GB, 64 GB-class Mac)."
-                  >
-                    <input
-                      checked={bf16Precision}
-                      onChange={(event) => setBf16Precision(event.target.checked)}
-                      type="checkbox"
-                    />
-                    Full precision (bf16)
-                  </label>
-                ) : null}
-                {showPidToggle ? (
-                  <>
+                  {usePid ? (
                     <label
-                      className="checkline pid-decoder-toggle"
-                      title="Decode this generation through NVIDIA's PiD pixel-diffusion decoder instead of the model's VAE: it decodes and super-resolves in one pass to 2K or 4K (pick the tier at right — sharper detail, but slower and more memory). Non-commercial use only — PiD output is licensed for research/evaluation, unlike the rest of the pipeline. Off = the model's native VAE at the selected resolution."
+                      className="pid-target-select"
+                      title="PiD super-resolves the base render 4×, so this sets the output size: 4K (~4096px, max detail) or 2K (~2048px, faster and less GPU memory). Both are super-resolved from the model's latent."
                     >
-                      <input
-                        checked={usePid}
-                        disabled={upscaleEnabled}
-                        onChange={(event) => setUsePid(event.target.checked)}
-                        type="checkbox"
-                      />
-                      PiD decoder <span className="badge badge-nc">Non-Commercial</span>
-                    </label>
-                    {usePid ? (
-                      <label
-                        className="pid-target-select"
-                        title="PiD super-resolves the base render 4×, so this sets the output size: 4K (~4096px, max detail) or 2K (~2048px, faster and less GPU memory). Both are super-resolved from the model's latent."
+                      Output
+                      <select
+                        onChange={(event) => setPidTarget(event.target.value)}
+                        value={pidTarget}
                       >
-                        Output
-                        <select
-                          onChange={(event) => setPidTarget(event.target.value)}
-                          value={pidTarget}
-                        >
-                          <option value="4k">4K · max detail</option>
-                          <option value="2k">2K · faster</option>
-                        </select>
-                      </label>
-                    ) : null}
-                  </>
-                ) : null}
-                <label
-                  className="checkline upscale-toggle"
-                  title={usePid ? "Disabled while the PiD decoder is on — PiD already super-resolves to 2K/4K." : undefined}
-                >
+                        <option value="4k">4K · max detail</option>
+                        <option value="2k">2K · faster</option>
+                      </select>
+                    </label>
+                  ) : null}
+                </>
+              ) : null}
+              <label
+                className="checkline upscale-toggle"
+                title={usePid ? "Disabled while the PiD decoder is on — PiD already super-resolves to 2K/4K." : undefined}
+              >
+                <input
+                  checked={upscaleEnabled}
+                  disabled={usePid}
+                  onChange={(event) => setUpscaleEnabled(event.target.checked)}
+                  type="checkbox"
+                />
+                Upscale
+              </label>
+              <label>
+                Scale
+                <select disabled={!upscaleEnabled || usePid} onChange={(event) => setUpscaleFactor(Number(event.target.value))} value={upscaleFactor}>
+                  {upscaleFactorsForEngine(upscaleEngine).map((factor) => (
+                    <option key={factor} value={factor}>
+                      {factor}x
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Engine
+                <select disabled={!upscaleEnabled || usePid} onChange={(event) => handleUpscaleEngineChange(event.target.value)} value={upscaleEngine}>
+                  {availableUpscaleEngines.map((engine) => (
+                    <option key={engine.key} value={engine.key}>
+                      {engine.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {upscaleEngineHasSoftness(upscaleEngine) ? (
+                <label title="Higher restores more detail from a degraded source; 0 keeps it faithful.">
+                  Detail
                   <input
-                    checked={upscaleEnabled}
-                    disabled={usePid}
-                    onChange={(event) => setUpscaleEnabled(event.target.checked)}
-                    type="checkbox"
+                    aria-label="SeedVR2 detail (softness)"
+                    disabled={!upscaleEnabled || usePid}
+                    max="1"
+                    min="0"
+                    onChange={(event) => setUpscaleSoftness(Number(event.target.value))}
+                    step="0.05"
+                    type="range"
+                    value={upscaleSoftness}
                   />
-                  Upscale
+                  <span>{upscaleSoftness.toFixed(2)}</span>
                 </label>
-                <label>
-                  Scale
-                  <select disabled={!upscaleEnabled || usePid} onChange={(event) => setUpscaleFactor(Number(event.target.value))} value={upscaleFactor}>
-                    {upscaleFactorsForEngine(upscaleEngine).map((factor) => (
-                      <option key={factor} value={factor}>
-                        {factor}x
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Engine
-                  <select disabled={!upscaleEnabled || usePid} onChange={(event) => handleUpscaleEngineChange(event.target.value)} value={upscaleEngine}>
-                    {availableUpscaleEngines.map((engine) => (
-                      <option key={engine.key} value={engine.key}>
-                        {engine.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                {upscaleEngineHasSoftness(upscaleEngine) ? (
-                  <label title="Higher restores more detail from a degraded source; 0 keeps it faithful.">
-                    Detail
-                    <input
-                      aria-label="SeedVR2 detail (softness)"
-                      disabled={!upscaleEnabled || usePid}
-                      max="1"
-                      min="0"
-                      onChange={(event) => setUpscaleSoftness(Number(event.target.value))}
-                      step="0.05"
-                      type="range"
-                      value={upscaleSoftness}
-                    />
-                    <span>{upscaleSoftness.toFixed(2)}</span>
-                  </label>
-                ) : null}
-                <label className="prompt-field">
-                  Negative prompt
-                  <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
-                </label>
-                <LoraPickerSection
-                  selectedModel={selectedModel}
-                  selectedLoras={selectedLoras}
-                  selectedLoraIds={selectedLoraIds}
-                  compatibleLoras={compatibleLoras}
-                  userSelectedLoraCount={userSelectedLoraCount}
-                  showIncompatibleLoras={showIncompatibleLoras}
-                  setShowIncompatibleLoras={setShowIncompatibleLoras}
-                  toggleLora={toggleLora}
-                  effectiveLoraWeight={effectiveLoraWeight}
-                  setLoraWeight={setLoraWeight}
-                  loraEmptyMessage={loraEmptyMessage}
-                />
-                {/* Save-as-preset folds into Advanced with the rest of the power-user
-                    knobs (UI-refinement 2b). */}
-                <SavePresetPanel
-                  presetName={presetName}
-                  setPresetName={setPresetName}
-                  savingPreset={savingPreset}
-                  presetSaveMessage={presetSaveMessage}
-                  setPresetSaveMessage={setPresetSaveMessage}
-                  onSave={handleSaveAsPreset}
-                  presetScope={presetScope}
-                  setPresetScope={setPresetScope}
-                  activeProject={activeProject}
-                />
-              </div>
-        </AdvancedSection>
+              ) : null}
+              <label className="prompt-field">
+                Negative prompt
+                <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
+              </label>
+              <LoraPickerSection
+                selectedModel={selectedModel}
+                selectedLoras={selectedLoras}
+                selectedLoraIds={selectedLoraIds}
+                compatibleLoras={compatibleLoras}
+                userSelectedLoraCount={userSelectedLoraCount}
+                showIncompatibleLoras={showIncompatibleLoras}
+                setShowIncompatibleLoras={setShowIncompatibleLoras}
+                toggleLora={toggleLora}
+                effectiveLoraWeight={effectiveLoraWeight}
+                setLoraWeight={setLoraWeight}
+                loraEmptyMessage={loraEmptyMessage}
+              />
+              {/* Save-as-preset folds into Advanced with the rest of the power-user
+                  knobs (UI-refinement 2b). */}
+              <SavePresetPanel
+                presetName={presetName}
+                setPresetName={setPresetName}
+                savingPreset={savingPreset}
+                presetSaveMessage={presetSaveMessage}
+                setPresetSaveMessage={setPresetSaveMessage}
+                onSave={handleSaveAsPreset}
+                presetScope={presetScope}
+                setPresetScope={setPresetScope}
+                activeProject={activeProject}
+              />
+            </div>
+          </AdvancedSection>
 
           <PresetValidationWarnings presetValidationResult={presetValidationResult} selectedModel={selectedModel} />
           {selectedLoraValidationResult.incompatible.length ? (
@@ -2905,6 +2901,8 @@ export function ImageStudio() {
               Generate is blocked because these selected LoRAs are incompatible with {selectedModel?.name ?? "the selected model"}: {selectedLoraValidationResult.incompatible.join(", ")}.
             </p>
           ) : null}
+
+        </WorkPanel>
 
         <div className="studio-results">
           <section className="review-panel">

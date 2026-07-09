@@ -111,6 +111,16 @@ describe("VideoStudio Save as Preset", () => {
     await act(async () => {});
   }
 
+  // The Advanced disclosure belongs INSIDE the work-panel, not floating beneath it:
+  // the Purpose zone is one elevated card. It shipped detached in sc-10477 and was
+  // pulled back in by sc-10490 — assert the nesting so it cannot drift again.
+  it("nests the Advanced disclosure inside the work-panel", async () => {
+    await render(baseContext());
+
+    expect(document.body.querySelector(".work-panel .advanced-section")).toBeTruthy();
+    expect(document.body.querySelector(".studio-shell > .advanced-section")).toBeNull();
+  });
+
   it("snapshots the video config into a text_to_video preset without the seed", async () => {
     const context = baseContext();
     await render(context);
