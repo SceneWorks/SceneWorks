@@ -5,6 +5,7 @@ import { CompactSelector } from "../../components/CompactSelector.jsx";
 import { DatasetAddDialog } from "../../components/DatasetAddDialog.jsx";
 import { DatasetCaptionDialog } from "../../components/DatasetCaptionDialog.jsx";
 import { Icon } from "../../components/Icons.jsx";
+import { WorkPanel } from "../../components/WorkPanel.jsx";
 import {
   DatasetDoctorDistributions,
   DatasetDoctorReadout,
@@ -174,58 +175,63 @@ export function DatasetEditorPanel({
           <div className="empty-panel compact-panel">No training datasets yet — use “New” to start one.</div>
         ) : null}
         <div className="training-dataset-editor">
-          <div className="training-dataset-fields">
-            <label className="field-name">
-              Dataset name
-              <input
-                onChange={(event) => setDraftName(event.target.value)}
-                placeholder="Character portrait set"
-                value={draftName}
-              />
-            </label>
-            <span className="field-version">
-              {dirty ? "Unsaved changes" : activeDataset ? `Version ${activeDataset.version}` : "Draft"}
-            </span>
-            <button className="primary-action field-add" onClick={() => setAddDialogOpen(true)} type="button">
-              <Icon.Plus size={14} />
-              Add images
-            </button>
-
-            <label className="field-prefix">
-              Name prefix
-              <input
-                onChange={(event) => setRenamePrefix(event.target.value)}
-                placeholder="item"
-                value={renamePrefix}
-              />
-            </label>
-            <button
-              className="primary-action field-apply"
-              disabled={!activeDataset?.id || renaming || !memberAssets.length}
-              onClick={applyOrderedNames}
-              type="button"
-            >
-              <Icon.Sliders size={14} />
-              {renaming ? "Renaming…" : "Apply ordered names"}
-            </button>
-            <button
-              className="primary-action field-caption"
-              disabled={!memberAssets.length}
-              onClick={() => setCaptionDialog({ type: "all" })}
-              type="button"
-            >
-              <Icon.Sliders size={14} />
-              Caption all
-            </button>
-          </div>
-          <DatasetHealth
-            health={health}
-            action={
-              <button className="primary-action" disabled={!canSave} onClick={saveDataset} type="button">
+          <WorkPanel className="dataset-work-panel">
+            <div className="dataset-primary-row">
+              <label className="dataset-field">
+                <span>Dataset name</span>
+                <input
+                  onChange={(event) => setDraftName(event.target.value)}
+                  placeholder="Character portrait set"
+                  value={draftName}
+                />
+              </label>
+              <label className="dataset-field">
+                <span>Name prefix</span>
+                <input
+                  onChange={(event) => setRenamePrefix(event.target.value)}
+                  placeholder="item"
+                  value={renamePrefix}
+                />
+              </label>
+              <span className="dataset-version">
+                {dirty ? "Unsaved changes" : activeDataset ? `Version ${activeDataset.version}` : "Draft"}
+              </span>
+              <button className="primary-action dataset-save" disabled={!canSave} onClick={saveDataset} type="button">
                 {savingDataset ? "Saving" : activeDataset ? "Save dataset" : "Create dataset"}
               </button>
-            }
-          />
+            </div>
+            <div className="dataset-utility-row">
+              <span className="dataset-count">
+                {health.itemCount} image{health.itemCount === 1 ? "" : "s"} ·{" "}
+                {Math.max(0, health.itemCount - health.missingCaptions)} captioned
+              </span>
+              <span className="dataset-utility-actions">
+                <button className="secondary-action" onClick={() => setAddDialogOpen(true)} type="button">
+                  <Icon.Plus size={14} />
+                  Add images
+                </button>
+                <button
+                  className="secondary-action"
+                  disabled={!activeDataset?.id || renaming || !memberAssets.length}
+                  onClick={applyOrderedNames}
+                  type="button"
+                >
+                  <Icon.Sliders size={14} />
+                  {renaming ? "Renaming…" : "Apply ordered names"}
+                </button>
+                <button
+                  className="secondary-action"
+                  disabled={!memberAssets.length}
+                  onClick={() => setCaptionDialog({ type: "all" })}
+                  type="button"
+                >
+                  <Icon.Sliders size={14} />
+                  Caption all
+                </button>
+              </span>
+            </div>
+          </WorkPanel>
+          <DatasetHealth health={health} />
           <div className="training-validity">
             <span className={health.valid ? "training-valid-dot valid" : "training-valid-dot"} />
             <span>{health.valid ? "Dataset is ready for downstream steps" : "Add image assets to build this dataset"}</span>

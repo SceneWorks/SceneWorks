@@ -1449,7 +1449,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       onOpenModels={() => setActiveView("Models")}
       onOpenQueue={() => setActiveView("Queue")}
     >
-    <section className="main-surface training-studio">
+    <section className="page-frame training-studio">
       <div className="training-studio-shell">
         <div className="training-summary-band">
           <div className="section-heading">
