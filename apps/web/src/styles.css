@@ -1186,6 +1186,42 @@ button:focus-visible {
   background: var(--border);
 }
 
+/* Compact stat strip — small inset chips for at-a-glance counts inside a
+   work-panel (replaces the old hero-stats row). Reused across library-family
+   screens (Assets, Stats, …). */
+.stat-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-2);
+}
+
+.stat-chip {
+  display: grid;
+  gap: 1px;
+  padding: 6px 12px;
+  min-width: 96px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+
+.stat-chip-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.stat-chip-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Advanced section — expands in place BELOW the work-panel, never inside it. */
 .advanced-section {
   border: 1px solid var(--border);
@@ -1590,6 +1626,16 @@ label {
   flex-wrap: wrap;
   gap: 10px;
   align-items: center;
+}
+
+/* Filter-toolbar controls size to content (not the base width:100%) so they sit
+   inline in a full-width work-panel instead of each stretching to its own row. */
+.toolbar select,
+.toolbar input[type="search"],
+.toolbar input[type="text"],
+.toolbar input[type="number"] {
+  width: auto;
+  min-width: 140px;
 }
 
 .editor-header,
