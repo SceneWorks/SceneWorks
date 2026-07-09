@@ -40,8 +40,10 @@ import {
   defaultOptimizerOptions,
   defaultPresetForTarget,
   lrSchedulerOptions,
+  presetForQualityTier,
   presetsForTarget,
   promptListToLines,
+  qualityTiersForPreset,
   rangeOptions,
   samplePromptsFromTrigger,
   trainingAdapterVersionOptions,
@@ -546,11 +548,13 @@ export function TrainingStudio({ mode = "training" } = {}) {
     () => targetPresets.find((preset) => preset.id === selectedPresetId) ?? defaultPresetForTarget(targetPresets, selectedTarget?.id),
     [selectedPresetId, selectedTarget?.id, targetPresets],
   );
-  const qualityPresets = rangeOptions(selectedTarget?.limits, "qualityPresets");
-  const visibleQualityPresets =
-    configDraft.qualityPreset && !qualityPresets.includes(configDraft.qualityPreset)
-      ? [...qualityPresets, configDraft.qualityPreset]
-      : qualityPresets;
+  // Quality tiers come from the preset registry, not from the target's limits: a tier
+  // only exists if a sibling preset carries it, so the picker can never offer an
+  // unreachable value (sc-10483).
+  const qualityTiers = useMemo(
+    () => qualityTiersForPreset(targetPresets, selectedPreset),
+    [selectedPreset, targetPresets],
+  );
   const outputScopes = rangeOptions(selectedTarget?.limits, "outputScopes");
   const resolutionOptions = rangeOptions(selectedTarget?.limits, "resolutions");
   const visibleResolutionOptions =
@@ -910,6 +914,17 @@ export function TrainingStudio({ mode = "training" } = {}) {
     const preset = targetPresets.find((item) => item.id === presetId);
     if (preset) {
       applyTrainingPreset(preset);
+    }
+  }
+
+  // Picking a quality tier swaps in the sibling preset that carries it, so every
+  // hyperparameter moves with it. Unlike the optimizer path below, this applies even
+  // when fields are customized: `advanced.qualityPreset` is inert provenance, so
+  // writing it to the draft alone would leave the control a no-op (sc-10483).
+  function updateQualityTier(tier) {
+    const preset = presetForQualityTier(targetPresets, selectedPreset, tier);
+    if (preset && preset.id !== selectedPreset?.id) {
+      applyTrainingPreset(preset, { message: `${preset.name} applied` });
     }
   }
 
@@ -1528,6 +1543,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   trainingTargets={trainingTargets}
                   macTargetBlocked={macTargetBlocked}
                   updateSelectedPreset={updateSelectedPreset}
+                  updateQualityTier={updateQualityTier}
                   selectedPreset={selectedPreset}
                   targetPresets={targetPresets}
                   openDataset={openDataset}
@@ -1536,7 +1552,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   updateConfigDraft={updateConfigDraft}
                   configDraft={configDraft}
                   outputScopes={outputScopes}
-                  visibleQualityPresets={visibleQualityPresets}
+                  qualityTiers={qualityTiers}
                   gpuOptions={gpuOptions}
                   customizedConfigLabels={customizedConfigLabels}
                   showAdvancedConfig={showAdvancedConfig}

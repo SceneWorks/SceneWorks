@@ -9,6 +9,7 @@ import {
   networkTypeLabel,
   optimizerLabel,
   optionLabel,
+  qualityPresetLabel,
   timestepBiasOptions,
   timestepTypeOptions,
   trainingAdapterVersionLabels,
@@ -37,6 +38,7 @@ export function ConfigureJobPanel({
   trainingTargets,
   macTargetBlocked,
   updateSelectedPreset,
+  updateQualityTier,
   selectedPreset,
   targetPresets,
   openDataset,
@@ -45,7 +47,7 @@ export function ConfigureJobPanel({
   updateConfigDraft,
   configDraft,
   outputScopes,
-  visibleQualityPresets,
+  qualityTiers,
   gpuOptions,
   customizedConfigLabels,
   showAdvancedConfig,
@@ -137,20 +139,24 @@ export function ConfigureJobPanel({
               </select>
             </label>
             {/* Quality is a tier OF the preset (preset ids are
-                <target>.<recipe>.<optimizer>.<quality>), so it sits beside Preset.
-                Selecting a tier does not yet swap the preset — sc-10483 wires it. */}
+                <target>.<recipe>.<optimizer>.<quality>), so it sits beside Preset and
+                picking a tier swaps in the sibling preset. Groups that ship a single
+                tier have nothing to choose, so the picker shows it read-only. */}
             <label>
               Quality
               <select
-                onChange={(event) => updateConfigDraft("qualityPreset", event.target.value)}
-                value={configDraft.qualityPreset ?? ""}
+                disabled={qualityTiers.length < 2}
+                onChange={(event) => updateQualityTier(event.target.value)}
+                value={selectedPreset?.qualityPreset ?? configDraft.qualityPreset ?? ""}
               >
-                {visibleQualityPresets.length ? null : (
-                  <option value={configDraft.qualityPreset ?? ""}>{configDraft.qualityPreset || "Default"}</option>
+                {qualityTiers.length ? null : (
+                  <option value={configDraft.qualityPreset ?? ""}>
+                    {qualityPresetLabel(configDraft.qualityPreset) || "Default"}
+                  </option>
                 )}
-                {visibleQualityPresets.map((preset) => (
-                  <option key={preset} value={preset}>
-                    {preset}
+                {qualityTiers.map((preset) => (
+                  <option key={preset.id} value={preset.qualityPreset}>
+                    {qualityPresetLabel(preset.qualityPreset)}
                   </option>
                 ))}
               </select>

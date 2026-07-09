@@ -948,6 +948,123 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("swaps the preset when the quality tier changes", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 5,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "mira portrait", source: "manual", triggerWords: ["mira"] },
+        },
+      ],
+    }));
+    const createTrainingJob = vi.fn(async () => ({ id: "job_dryrun_1", type: "lora_train", status: "queued" }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          createTrainingJob,
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          gpuOptions: ["auto", "0"],
+          loadDataset,
+          trainingPresets: zImageTrainingPresets,
+          trainingTargets: [zImageTrainingTarget],
+        }),
+      );
+    });
+    await settle();
+
+    await changeField(field(container, "Dataset"), "dataset-a");
+    await settle();
+
+    // The tiers come from the preset registry (the adamw8bit character group ships two),
+    // never from the target's limits — so no unreachable value can be offered.
+    const quality = field(container, "Quality");
+    expect(quality.disabled).toBe(false);
+    expect([...quality.options].map((option) => option.value)).toEqual(["balanced", "conservative"]);
+    expect([...quality.options].map((option) => option.textContent)).toEqual(["Balanced", "Conservative"]);
+    expect(quality.value).toBe("balanced");
+
+    await changeField(quality, "conservative");
+    await settle();
+
+    expect(field(container, "Preset").value).toBe("z_image_turbo_lora.character.adamw8bit.conservative");
+    expect(container.textContent).toContain("Character conservative");
+    await openAdvancedSection(container);
+    expect(field(container, "Rank").value).toBe("8");
+    expect(field(container, "Learning rate").value).toBe("0.00005");
+
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
+    });
+    await settle();
+
+    expect(createTrainingJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        presetId: "z_image_turbo_lora.character.adamw8bit.conservative",
+        presetVersion: 1,
+        config: expect.objectContaining({
+          rank: 8,
+          alpha: 8,
+          learningRate: 0.00005,
+          advanced: expect.objectContaining({ qualityPreset: "conservative" }),
+        }),
+      }),
+    );
+  });
+
+  it("locks the quality picker when the preset group offers a single tier", async () => {
+    const loadDataset = vi.fn(async () => ({
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 5,
+      items: [
+        {
+          id: "item_0001",
+          assetId: "asset-a",
+          path: "images/item_0001.png",
+          displayName: "item_0001.png",
+          caption: { text: "mira portrait", source: "manual", triggerWords: ["mira"] },
+        },
+      ],
+    }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          gpuOptions: ["auto", "0"],
+          loadDataset,
+          trainingPresets: zImageTrainingPresets,
+          trainingTargets: [zImageTrainingTarget],
+        }),
+      );
+    });
+    await settle();
+
+    await changeField(field(container, "Dataset"), "dataset-a");
+    await settle();
+
+    // Prodigy ships one character preset, so its group has no alternative tier to offer.
+    await openAdvancedSection(container);
+    await changeField(field(container, "Optimizer"), "prodigyopt");
+    await settle();
+
+    expect(field(container, "Preset").value).toBe("z_image_turbo_lora.character.prodigyopt.balanced");
+    const quality = field(container, "Quality");
+    expect(quality.disabled).toBe(true);
+    expect([...quality.options].map((option) => option.value)).toEqual(["balanced"]);
+  });
+
   it("submits the selected de-distill adapter version for Z-Image-Turbo", async () => {
     const loadDataset = vi.fn(async () => ({
       id: "dataset-a",
