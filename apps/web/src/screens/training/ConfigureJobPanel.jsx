@@ -19,10 +19,12 @@ import {
 // fields, the Advanced disclosure with every remaining knob, and the actions row.
 // All state and handlers are owned by the TrainingStudio screen and passed in.
 //
-// The basic grid is the twelve fields the design calls out, in its order. Its
-// "Base model" slot is our `Target` select: every target maps 1:1 to a base model
-// and names it in its own label, and the job payload carries `targetId` alone —
-// the server resolves the base from the registry.
+// The basic grid holds the twelve fields the design calls out. Two deviations from
+// its literal ordering: the "Base model" slot is our `Target` select (every target
+// maps 1:1 to a base model and names it in its own label; the payload carries
+// `targetId` alone and the server resolves the base), and `Quality` sits beside
+// `Preset` because it is a tier OF the preset, not an independent axis. GPU is a
+// runtime routing knob rather than part of the plan, so it lives in Advanced.
 export function ConfigureJobPanel({
   setActiveView,
   configReady,
@@ -134,13 +136,21 @@ export function ConfigureJobPanel({
                 ))}
               </select>
             </label>
+            {/* Quality is a tier OF the preset (preset ids are
+                <target>.<recipe>.<optimizer>.<quality>), so it sits beside Preset.
+                Selecting a tier does not yet swap the preset — sc-10483 wires it. */}
             <label>
-              Output scope
-              <select onChange={(event) => updateConfigDraft("outputScope", event.target.value)} value={configDraft.outputScope ?? ""}>
-                {outputScopes.length ? null : <option value={configDraft.outputScope ?? ""}>{configDraft.outputScope || "Default"}</option>}
-                {outputScopes.map((scope) => (
-                  <option key={scope} value={scope}>
-                    {scope}
+              Quality
+              <select
+                onChange={(event) => updateConfigDraft("qualityPreset", event.target.value)}
+                value={configDraft.qualityPreset ?? ""}
+              >
+                {visibleQualityPresets.length ? null : (
+                  <option value={configDraft.qualityPreset ?? ""}>{configDraft.qualityPreset || "Default"}</option>
+                )}
+                {visibleQualityPresets.map((preset) => (
+                  <option key={preset} value={preset}>
+                    {preset}
                   </option>
                 ))}
               </select>
@@ -168,11 +178,12 @@ export function ConfigureJobPanel({
             </label>
 
             <label>
-              Requested GPU
-              <select onChange={(event) => updateConfigDraft("requestedGpu", event.target.value)} value={configDraft.requestedGpu ?? ""}>
-                {gpuOptions.map((gpu) => (
-                  <option key={gpu} value={gpu}>
-                    {gpu === "auto" ? "Auto" : `GPU ${gpu}`}
+              Output scope
+              <select onChange={(event) => updateConfigDraft("outputScope", event.target.value)} value={configDraft.outputScope ?? ""}>
+                {outputScopes.length ? null : <option value={configDraft.outputScope ?? ""}>{configDraft.outputScope || "Default"}</option>}
+                {outputScopes.map((scope) => (
+                  <option key={scope} value={scope}>
+                    {scope}
                   </option>
                 ))}
               </select>
@@ -211,17 +222,11 @@ export function ConfigureJobPanel({
           >
             <div className="training-advanced-grid">
               <label>
-                Quality preset
-                <select
-                  onChange={(event) => updateConfigDraft("qualityPreset", event.target.value)}
-                  value={configDraft.qualityPreset ?? ""}
-                >
-                  {visibleQualityPresets.length ? null : (
-                    <option value={configDraft.qualityPreset ?? ""}>{configDraft.qualityPreset || "Default"}</option>
-                  )}
-                  {visibleQualityPresets.map((preset) => (
-                    <option key={preset} value={preset}>
-                      {preset}
+                Requested GPU
+                <select onChange={(event) => updateConfigDraft("requestedGpu", event.target.value)} value={configDraft.requestedGpu ?? ""}>
+                  {gpuOptions.map((gpu) => (
+                    <option key={gpu} value={gpu}>
+                      {gpu === "auto" ? "Auto" : `GPU ${gpu}`}
                     </option>
                   ))}
                 </select>

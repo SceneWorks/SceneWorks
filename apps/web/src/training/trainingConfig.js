@@ -47,7 +47,7 @@ export const configFieldLabels = {
   outputName: "LoRA name",
   triggerWord: "Trigger phrase",
   outputScope: "Output scope",
-  qualityPreset: "Quality preset",
+  qualityPreset: "Quality",
   requestedGpu: "Requested GPU",
   rank: "Rank",
   alpha: "Alpha",
