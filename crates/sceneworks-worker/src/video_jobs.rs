@@ -4058,6 +4058,8 @@ async fn generate_video(
     // sample = Step→Decoding, decode = Decoding→engine-return (video emits no
     // per-frame decode-done event). Posted best-effort at clean completion.
     let mut phase_timer = crate::job_metrics::PhaseTimer::new(Instant::now());
+    // Effective denoise step count from the Step event (sc-10406).
+    let mut video_effective_steps: Option<u32> = None;
     // Run the progress loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003). The stall/
     // abandon watchdog inside the loop still handles the hard-wedge case via `abandoned`.
@@ -4091,7 +4093,12 @@ async fn generate_video(
                     // Phase-boundary capture (sc-10405), borrowing so `progress` is
                     // still owned by the fraction/message match below.
                     match &progress {
-                        Progress::Step { .. } => phase_timer.mark_sample_step(Instant::now()),
+                        Progress::Step { total, .. } => {
+                            phase_timer.mark_sample_step(Instant::now());
+                            if video_effective_steps.is_none() {
+                                video_effective_steps = Some(*total);
+                            }
+                        }
                         Progress::Decoding => phase_timer.mark_decoding(Instant::now()),
                     }
                     let (fraction, message) = match progress {
@@ -4210,12 +4217,19 @@ async fn generate_video(
         .await?;
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
-    // Post the per-phase timing (epic 10402, sc-10405); into_metrics closes the
-    // decode span still open at completion (video emits no decode-done event).
-    // Best-effort; coalesce-merges with the S2 hardware block server-side.
-    if let Some(phase_metrics) = phase_timer.into_metrics(Instant::now()) {
-        crate::job_metrics::post_generation_metrics(api, &job.id, &phase_metrics).await;
-    }
+    // Post the video metrics (epic 10402): model + effective steps (sc-10406)
+    // folded with the per-phase timing (sc-10405). into_metrics closes the decode
+    // span still open at completion (video emits no decode-done event). Best-effort;
+    // coalesce-merges with the S2 hardware block server-side. Video quant/cfg
+    // resolution is engine-specific and tracked for a follow-up.
+    let mut metrics = phase_timer.into_metrics(Instant::now()).unwrap_or_default();
+    metrics.model = job
+        .payload
+        .get("model")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+    metrics.steps = video_effective_steps;
+    crate::job_metrics::post_generation_metrics(api, &job.id, &metrics).await;
     result
 }
 

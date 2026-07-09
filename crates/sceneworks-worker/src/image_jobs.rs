@@ -15,6 +15,7 @@
 //! the [`crate::engines::MODEL_TABLE`] dispatch table + links its provider crate.
 
 use super::*;
+use sceneworks_core::contracts::GenerationMetrics;
 use sceneworks_core::image_request::ImageRequest;
 
 // Force each provider crate to link so its `inventory::submit!` registration survives
