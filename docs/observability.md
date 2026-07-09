@@ -181,3 +181,51 @@ with no server-side trace.
    `claim_lock_contention`.
 4. The asset's recorded `backend` (`mlx` / `mps` / `cuda`) is the ground truth for where
    it ran.
+
+## Generation metrics & the Stats screen (epic 10402)
+
+Distinct from the session logs above, SceneWorks records **structured per-run
+metrics for every job** the worker runs and surfaces them for comparison.
+
+### What's captured
+
+On completion the worker POSTs a `GenerationMetrics` block to
+`POST /api/v1/jobs/:id/metrics`, persisted 1:1 by job id in the
+`generation_metrics` companion table in `jobs.db` (kept out of the hot `jobs`
+row). Three partial blocks coalesce-merge into one row:
+
+- **Hardware** — a probe wrapping the dispatch (`crates/sceneworks-worker/src/job_metrics.rs`):
+  `peakMemoryBytes` / `peakMemoryPct` (MLX `get_peak_memory` on macOS, sampled
+  `nvidia-smi memory.used` on candle), best-effort `peakGpuLoadPct` (sampled at the
+  heartbeat cadence), `totalMs`, `backend`. Restores + broadens the per-job peak
+  capture that the Python→Rust cutover dropped (sc-2086).
+  > `peakGpuLoadPct` is **best-effort and typically absent on Apple Silicon**:
+  > it comes from the same unprivileged `ioreg` "Device Utilization %" probe as the
+  > Queue-screen GPU meter, and that key reports `0` on many Apple Silicon GPUs (a
+  > driver quirk, not our capture) — a max of `0` is recorded as "no reading" and
+  > omitted. It populates on NVIDIA/candle (`nvidia-smi utilization.gpu`). Peak
+  > **memory** is the reliable macOS signal.
+- **Phase timing** — the shared stream consumers: `loadMs` / `sampleMs` /
+  `decodeMs`, derived from the `Step` → `Decoding` → item-done event boundaries.
+- **Effective settings** (image lane): the *resolved* `model`, `quantLabel` /
+  `quantBits`, `sampler`, `scheduler`, `steps`, `guidanceScale`, `guidanceMethod`,
+  `usePid` / `pidTarget`, dims, seed, loras — the value the run actually used, not
+  the sparse `advanced` payload, so a default-settings run is fully populated.
+
+Metrics fire for **every** job type; jobs with no sample/decode phase record
+timing + memory only.
+
+### Reading it
+
+- `GET /api/v1/jobs/:id/metrics` — one job's block (`null` for pre-feature jobs).
+- `GET /api/v1/metrics?type=&model=&quant=&limit=` — the aggregate feed (metrics
+  joined to job identity), newest first.
+
+### In-app Stats screen
+
+**System → Generation Stats** (`apps/web/src/screens/StatsScreen.jsx`): a
+filterable/sortable table of every run with its captured metrics + a per-run
+detail panel, plus comparison charts (recharts) — median load/sample/decode by a
+selectable dimension (quant / model / scheduler / sampler / cfg / …) and a
+steps-vs-time scatter by quant. The charts cover generation jobs; the list covers
+every job type.
