@@ -81,12 +81,20 @@ pub(crate) struct JobMetricsProbe {
     mem_total_mb: Arc<AtomicU64>,
 }
 
+/// How often the per-job sampler reads GPU load/memory. Deliberately short (and
+/// decoupled from the 5–15s heartbeat cadence) so even a few-second turbo
+/// generation lands samples during the active GPU window — the first tick fires
+/// at t=0 while the model is still loading (idle), so a slower cadence would miss
+/// the denoise/decode burst on a fast job entirely. The underlying probe is a
+/// lightweight `ioreg` / `nvidia-smi` read; `MissedTickBehavior::Delay`
+/// self-throttles if one ever runs long, so this never stacks subprocesses.
+const GPU_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+
 impl JobMetricsProbe {
     /// Reset the MLX peak counter and spawn the background GPU-load/memory
-    /// sampler. `interval` matches the heartbeat cadence (5–15s) so the sampler
-    /// never out-paces the underlying macOS probes (which can take ~3s). A
-    /// CPU-only worker has no GPU to query, so no sampler is spawned.
-    pub(crate) fn start(gpu_id: &str, interval: Duration) -> Self {
+    /// sampler (see [`GPU_SAMPLE_INTERVAL`]). A CPU-only worker has no GPU to
+    /// query, so no sampler is spawned.
+    pub(crate) fn start(gpu_id: &str) -> Self {
         reset_peak_memory();
         let load_permille_max = Arc::new(AtomicU32::new(0));
         let mem_used_mb_max = Arc::new(AtomicU64::new(0));
@@ -99,7 +107,7 @@ impl JobMetricsProbe {
             let used = mem_used_mb_max.clone();
             let total = mem_total_mb.clone();
             Some(tokio::spawn(async move {
-                let mut ticker = tokio::time::interval(interval);
+                let mut ticker = tokio::time::interval(GPU_SAMPLE_INTERVAL);
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     ticker.tick().await;
@@ -322,7 +330,7 @@ mod tests {
     async fn cpu_probe_reports_wall_clock_without_gpu_samples() {
         // A CPU worker spawns no sampler; finish() still reports total_ms + a
         // normalized backend, and no GPU peaks (nothing to sample).
-        let probe = JobMetricsProbe::start("cpu", Duration::from_secs(5));
+        let probe = JobMetricsProbe::start("cpu");
         let metrics = probe.finish().await;
         assert_eq!(metrics.backend.as_deref(), Some("cpu"));
         assert!(metrics.total_ms.is_some());

@@ -980,8 +980,7 @@ async fn run_utility_job(
     // runs, so peak memory + peak load cover the whole job. Consumed after the
     // handler returns to POST the hardware/timing block; settings + phase
     // timings are posted separately by the handlers and coalesce-merge server-side.
-    let metrics_probe =
-        job_metrics::JobMetricsProbe::start(&settings.gpu_id, progress_report_interval(settings));
+    let metrics_probe = job_metrics::JobMetricsProbe::start(&settings.gpu_id);
     let result = with_shutdown_flag(shutdown.clone(), async {
         match job.job_type {
             JobType::Placeholder => run_placeholder_job(api, settings, &job, &shutdown)

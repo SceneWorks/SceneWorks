@@ -199,12 +199,12 @@ row). Three partial blocks coalesce-merge into one row:
   `nvidia-smi memory.used` on candle), best-effort `peakGpuLoadPct` (sampled at the
   heartbeat cadence), `totalMs`, `backend`. Restores + broadens the per-job peak
   capture that the Python→Rust cutover dropped (sc-2086).
-  > `peakGpuLoadPct` is **best-effort and typically absent on Apple Silicon**:
-  > it comes from the same unprivileged `ioreg` "Device Utilization %" probe as the
-  > Queue-screen GPU meter, and that key reports `0` on many Apple Silicon GPUs (a
-  > driver quirk, not our capture) — a max of `0` is recorded as "no reading" and
-  > omitted. It populates on NVIDIA/candle (`nvidia-smi utilization.gpu`). Peak
-  > **memory** is the reliable macOS signal.
+  > `peakGpuLoadPct` is **best-effort**: a background task samples GPU load at a
+  > ~1s cadence during the job (the same unprivileged `ioreg` "Device Utilization %"
+  > / `nvidia-smi utilization.gpu` probe as the Queue-screen GPU meter) and keeps the
+  > running max. GPU load is bursty, so a very fast (roughly sub-second) generation
+  > can miss the active window and omit it; a normal-length run captures it. Peak
+  > **memory** is captured exactly regardless of run length.
 - **Phase timing** — the shared stream consumers: `loadMs` / `sampleMs` /
   `decodeMs`, derived from the `Step` → `Decoding` → item-done event boundaries.
 - **Effective settings** (image lane): the *resolved* `model`, `quantLabel` /
