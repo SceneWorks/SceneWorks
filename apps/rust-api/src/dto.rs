@@ -8,6 +8,18 @@ pub(crate) struct JobsQuery {
     pub(crate) limit: Option<u32>,
 }
 
+/// Filters for the aggregate generation-metrics feed (epic 10402,
+/// `GET /api/v1/metrics`). All optional; the charts pass a subset.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MetricsQuery {
+    #[serde(rename = "type")]
+    pub(crate) job_type: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) quant: Option<String>,
+    pub(crate) limit: Option<u32>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PromptRefineRequest {

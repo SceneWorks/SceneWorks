@@ -915,6 +915,98 @@ pub struct JobSnapshot {
     pub extra: ExtraFields,
 }
 
+/// Structured per-run generation metrics (epic 10402). Written by the worker on
+/// job completion via `POST /api/v1/jobs/:id/metrics` and persisted to the
+/// `generation_metrics` companion table keyed by job id. Every field is optional
+/// so any job type can populate only the subset that applies — a caption job
+/// records timing + memory but no sampler/quant. The resolved-settings fields
+/// carry the worker's *effective* values (post `resolve_quant`/`resolve_guidance`
+/// /model-default resolution), not the sparse `advanced` payload, so a
+/// default-settings run still reports a real quant/steps/cfg to compare on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationMetrics {
+    // --- resolved effective settings ---
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Normalized quant label: "bf16" / "q8" / "q4" / "int8-convrot".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quant_label: Option<String>,
+    /// Quant bit-width (16 / 8 / 4); None for non-bits tiers like ConvRot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quant_bits: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampler: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler_shift: Option<ContractNumber>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guidance_scale: Option<ContractNumber>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub true_cfg_scale: Option<ContractNumber>,
+    /// Guidance method: "cfg" (standard) / "cfgpp" (CFG++).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guidance_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_pid: Option<bool>,
+    /// PiD output tier: "2k" / "4k".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loras: Option<Vec<String>>,
+    // --- phase timing (milliseconds) ---
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_ms: Option<u64>,
+    // --- hardware peaks ---
+    /// Peak GPU memory in bytes observed during the run (MLX get_peak_memory or
+    /// the candle nvidia-smi high-water mark).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_memory_bytes: Option<u64>,
+    /// Peak memory as a percentage of total device memory (0..100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_memory_pct: Option<ContractNumber>,
+    /// Best-effort peak GPU load percentage sampled during the run (0..100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_gpu_load_pct: Option<ContractNumber>,
+    /// Runtime backend the run executed on ("mlx" / "mps" / "cuda" / "cpu").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+/// One row of the aggregate metrics feed (`GET /api/v1/metrics`, epic 10402):
+/// the metrics record plus the minimal job identity needed to filter/group and
+/// link back to the job. Powers the Generation Stats comparison charts, which
+/// read a broader window than the 100-row job list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationMetricsRow {
+    pub job_id: String,
+    #[serde(rename = "type")]
+    pub job_type: JobType,
+    pub status: JobStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    pub created_at: String,
+    pub metrics: GenerationMetrics,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceSidecarsFixture {

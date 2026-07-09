@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use rusqlite::{params, Connection};
 use sceneworks_core::contracts::{
-    JobSnapshot, JobStatus, JobType, ProgressStage, WorkerCapability, WorkerStatus,
-    WorkerUtilizationSnapshot,
+    GenerationMetrics, JobSnapshot, JobStatus, JobType, ProgressStage, WorkerCapability,
+    WorkerStatus, WorkerUtilizationSnapshot,
 };
 use sceneworks_core::jobs_store::{
     candle_supported, mac_capabilities, mac_rust_supported, model_mac_support, CreateJob,
@@ -55,6 +55,100 @@ fn register_image_worker(store: &JobsStore) {
             utilization: None,
         })
         .expect("worker registers");
+}
+
+#[test]
+fn generation_metrics_upsert_get_list_and_merge() {
+    let store = store("gen-metrics");
+    let job = store
+        .create_job(image_job(object(json!({ "prompt": "mist over hills" }))))
+        .expect("job creates");
+
+    let metrics = GenerationMetrics {
+        model: Some("qwen_image".to_owned()),
+        quant_label: Some("q8".to_owned()),
+        quant_bits: Some(8),
+        sampler: Some("euler".to_owned()),
+        scheduler: Some("karras".to_owned()),
+        steps: Some(20),
+        guidance_scale: serde_json::Number::from_f64(4.0),
+        use_pid: Some(false),
+        width: Some(1024),
+        height: Some(1024),
+        seed: Some(42),
+        loras: Some(vec!["style-a".to_owned()]),
+        load_ms: Some(2100),
+        sample_ms: Some(6400),
+        decode_ms: Some(900),
+        total_ms: Some(9400),
+        peak_memory_bytes: Some(12_884_901_888),
+        peak_memory_pct: serde_json::Number::from_f64(71.5),
+        peak_gpu_load_pct: serde_json::Number::from_f64(88.0),
+        backend: Some("mlx".to_owned()),
+        ..Default::default()
+    };
+    store
+        .upsert_generation_metrics(&job.id, &metrics)
+        .expect("metrics upsert");
+
+    let read = store
+        .get_generation_metrics(&job.id)
+        .expect("metrics read")
+        .expect("metrics present");
+    assert_eq!(read.model.as_deref(), Some("qwen_image"));
+    assert_eq!(read.quant_label.as_deref(), Some("q8"));
+    assert_eq!(read.steps, Some(20));
+    assert_eq!(read.use_pid, Some(false));
+    assert_eq!(read.seed, Some(42));
+    assert_eq!(read.loras.as_deref(), Some(&["style-a".to_owned()][..]));
+    assert_eq!(read.total_ms, Some(9400));
+    assert_eq!(read.peak_memory_bytes, Some(12_884_901_888));
+    assert_eq!(
+        read.guidance_scale
+            .as_ref()
+            .and_then(serde_json::Number::as_f64),
+        Some(4.0)
+    );
+
+    let rows = store
+        .list_generation_metrics(None, None, None, 100)
+        .expect("metrics list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].job_id, job.id);
+    assert_eq!(rows[0].job_type, JobType::ImageGenerate);
+    assert_eq!(rows[0].metrics.model.as_deref(), Some("qwen_image"));
+
+    // A partial second report (only total_ms) must merge, not wipe prior fields.
+    let partial = GenerationMetrics {
+        total_ms: Some(9100),
+        ..Default::default()
+    };
+    store
+        .upsert_generation_metrics(&job.id, &partial)
+        .expect("metrics merge upsert");
+    let merged = store
+        .get_generation_metrics(&job.id)
+        .expect("metrics reread")
+        .expect("metrics still present");
+    assert_eq!(merged.total_ms, Some(9100), "total_ms overwritten");
+    assert_eq!(
+        merged.model.as_deref(),
+        Some("qwen_image"),
+        "prior fields preserved on partial upsert"
+    );
+
+    // Filters narrow the aggregate feed.
+    assert_eq!(
+        store
+            .list_generation_metrics(None, Some("qwen_image"), Some("q8"), 100)
+            .expect("filtered list")
+            .len(),
+        1
+    );
+    assert!(store
+        .list_generation_metrics(None, Some("no-such-model"), None, 100)
+        .expect("empty filtered list")
+        .is_empty());
 }
 
 #[test]
