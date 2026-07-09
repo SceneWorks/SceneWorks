@@ -22,6 +22,16 @@ use std::path::Path;
 
 use sceneworks_core::video_request::{is_ltx_model, VideoRequest};
 
+// Used only by the video generation metrics builders below, which are themselves
+// gated to the macOS / backend-candle lanes (the shared `generate_video` funnel) —
+// so gate the import to match, or the Linux-no-candle "neither" build sees it as
+// unused (`-D warnings`, the sc-10404 dead-code trap).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use sceneworks_core::contracts::GenerationMetrics;
+
 use super::*;
 use crate::media_jobs::{run_ffmpeg, FfmpegContext};
 
@@ -3948,6 +3958,113 @@ fn video_engine_sampling_surface(engine_id: &str) -> (Vec<&'static str>, Vec<&'s
         .unwrap_or_default()
 }
 
+/// The effective video settings captured from the resolved [`VideoGenInput`] just
+/// before it moves into the blocking generation task (epic 10402, sc-10418). Sourced
+/// from the single resolved funnel so it reflects exactly what reached the engine —
+/// the tier-resolved quant, the N3-guarded sampler/scheduler, and the recipe-resolved
+/// steps/guidance — rather than re-deriving them from the sparse `advanced` payload
+/// (the video engines' quant/guidance rules are engine-specific and would drift from
+/// what actually ran). Captured like `log_engine_id`, before the move at the spawn.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct VideoSettingsSnapshot {
+    quant: Option<Quant>,
+    sampler: Option<String>,
+    scheduler: Option<String>,
+    scheduler_shift: Option<f32>,
+    guidance: Option<f32>,
+    width: u32,
+    height: u32,
+    seed: u64,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl VideoSettingsSnapshot {
+    fn from_input(input: &VideoGenInput) -> Self {
+        Self {
+            quant: input.quant,
+            sampler: input.sampler.clone(),
+            scheduler: input.scheduler.clone(),
+            scheduler_shift: input.scheduler_shift,
+            guidance: input.guidance,
+            width: input.width,
+            height: input.height,
+            seed: input.seed,
+        }
+    }
+}
+
+/// Normalized quant label + bit-width for a resolved video [`Quant`] (epic 10402,
+/// sc-10418): `Q8` → ("q8", 8), `Q4` → ("q4", 4), `None` (dense/bf16) → ("bf16", None).
+/// Mirrors the image lane's `effective_quant_label` mapping so the Stats charts group
+/// video and image runs on the same tier labels.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn video_quant_label(quant: Option<Quant>) -> (Option<String>, Option<u32>) {
+    match quant {
+        Some(q) => {
+            let bits = q.bits() as u32;
+            (Some(format!("q{bits}")), Some(bits))
+        }
+        None => (Some("bf16".to_owned()), None),
+    }
+}
+
+/// Fold the effective video settings + model + observed step count into the
+/// phase-timing metrics block for a finished video job (epic 10402, sc-10418). A
+/// video job produces one output (sc-10426). Sampler/scheduler fall back to
+/// "default" (engine-native) so the comparison charts always have a non-blank group,
+/// mirroring the image lane. Guidance / scheduler-shift stay `None` when the engine's
+/// own config default was used (not overridden) — an honest "not captured" rather
+/// than a fabricated value the worker can't know without loading the engine config.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn build_video_metrics(
+    mut metrics: GenerationMetrics,
+    settings: &VideoSettingsSnapshot,
+    model: Option<String>,
+    effective_steps: Option<u32>,
+) -> GenerationMetrics {
+    let (quant_label, quant_bits) = video_quant_label(settings.quant);
+    metrics.model = model;
+    metrics.quant_label = quant_label;
+    metrics.quant_bits = quant_bits;
+    metrics.sampler = Some(
+        settings
+            .sampler
+            .clone()
+            .unwrap_or_else(|| "default".to_owned()),
+    );
+    metrics.scheduler = Some(
+        settings
+            .scheduler
+            .clone()
+            .unwrap_or_else(|| "default".to_owned()),
+    );
+    metrics.scheduler_shift = settings
+        .scheduler_shift
+        .and_then(|shift| serde_json::Number::from_f64(shift as f64));
+    metrics.steps = effective_steps;
+    metrics.image_count = Some(1); // one video output per job (sc-10426)
+    metrics.guidance_scale = settings
+        .guidance
+        .and_then(|scale| serde_json::Number::from_f64(scale as f64));
+    metrics.guidance_method = Some("cfg".to_owned());
+    metrics.width = Some(settings.width);
+    metrics.height = Some(settings.height);
+    metrics.seed = Some(settings.seed as i64);
+    metrics
+}
+
 /// Drive a `run_video_generation` on a blocking thread, forwarding its streamed denoise
 /// progress to the async worker (Generating stage ~0.25..0.58) + polling cancel ~every 2s.
 /// The shared blocking + mpsc + cancel plumbing for Wan and LTX. A forward-progress watchdog
@@ -4002,6 +4119,10 @@ async fn generate_video(
     let cancel = CancelFlag::new();
     let stall_timeout = video_stall_timeout();
     let log_engine_id = input.engine_id;
+    // Snapshot the effective settings before `input` moves into the blocking task
+    // (sc-10418), so the completion-time metrics POST reports exactly what reached
+    // the engine (resolved quant / sampler / scheduler / guidance / dims / seed).
+    let video_settings = VideoSettingsSnapshot::from_input(&input);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Progress>(64);
     let blocking = {
         let cancel = cancel.clone();
@@ -4217,19 +4338,19 @@ async fn generate_video(
         .await?;
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
-    // Post the video metrics (epic 10402): model + effective steps (sc-10406)
-    // folded with the per-phase timing (sc-10405). into_metrics closes the decode
-    // span still open at completion (video emits no decode-done event). Best-effort;
-    // coalesce-merges with the S2 hardware block server-side. Video quant/cfg
-    // resolution is engine-specific and tracked for a follow-up.
-    let mut metrics = phase_timer.into_metrics(Instant::now()).unwrap_or_default();
-    metrics.model = job
+    // Post the video metrics (epic 10402): the resolved effective settings
+    // (quant / sampler / scheduler / guidance / dims / seed, sc-10418) + model +
+    // effective steps (sc-10406) folded with the per-phase timing (sc-10405).
+    // into_metrics closes the decode span still open at completion (video emits no
+    // decode-done event). Best-effort; coalesce-merges with the S2 hardware block
+    // server-side.
+    let timing = phase_timer.into_metrics(Instant::now()).unwrap_or_default();
+    let model = job
         .payload
         .get("model")
         .and_then(|value| value.as_str())
         .map(str::to_owned);
-    metrics.steps = video_effective_steps;
-    metrics.image_count = Some(1); // one video output per job (sc-10426)
+    let metrics = build_video_metrics(timing, &video_settings, model, video_effective_steps);
     crate::job_metrics::post_generation_metrics(api, &job.id, &metrics).await;
     result
 }
@@ -9032,6 +9153,115 @@ mod tests {
 
     fn request(value: Value) -> VideoRequest {
         VideoRequest::from_payload(&value.as_object().cloned().unwrap())
+    }
+
+    /// sc-10418: the resolved video quant maps to the same normalized tier labels the
+    /// image lane uses, so the Stats charts group video + image runs on one axis.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn video_quant_label_maps_tiers() {
+        assert_eq!(
+            video_quant_label(Some(Quant::Q8)),
+            (Some("q8".to_owned()), Some(8))
+        );
+        assert_eq!(
+            video_quant_label(Some(Quant::Q4)),
+            (Some("q4".to_owned()), Some(4))
+        );
+        assert_eq!(video_quant_label(None), (Some("bf16".to_owned()), None));
+    }
+
+    /// sc-10418 (mirrors the S4 image `image_settings_metrics` tests): the video
+    /// settings builder folds the resolved effective settings onto the phase-timing
+    /// block WITHOUT clobbering the timings, records one output (sc-10426), and carries
+    /// quant / sampler / scheduler / guidance / dims / seed through.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn build_video_metrics_folds_settings_onto_timing() {
+        let timing = GenerationMetrics {
+            load_ms: Some(3000),
+            sample_ms: Some(12000),
+            decode_ms: Some(2000),
+            ..Default::default()
+        };
+        let settings = VideoSettingsSnapshot {
+            quant: Some(Quant::Q4),
+            sampler: Some("euler".to_owned()),
+            scheduler: Some("karras".to_owned()),
+            scheduler_shift: Some(3.0),
+            guidance: Some(5.0),
+            width: 832,
+            height: 480,
+            seed: 1234,
+        };
+        let metrics = build_video_metrics(
+            timing,
+            &settings,
+            Some("wan2_2_t2v_14b".to_owned()),
+            Some(4),
+        );
+        // Phase timings survive the fold.
+        assert_eq!(metrics.load_ms, Some(3000));
+        assert_eq!(metrics.sample_ms, Some(12000));
+        assert_eq!(metrics.decode_ms, Some(2000));
+        // Effective settings folded in.
+        assert_eq!(metrics.model.as_deref(), Some("wan2_2_t2v_14b"));
+        assert_eq!(metrics.quant_label.as_deref(), Some("q4"));
+        assert_eq!(metrics.quant_bits, Some(4));
+        assert_eq!(metrics.sampler.as_deref(), Some("euler"));
+        assert_eq!(metrics.scheduler.as_deref(), Some("karras"));
+        assert_eq!(
+            metrics.scheduler_shift.as_ref().and_then(|n| n.as_f64()),
+            Some(3.0)
+        );
+        assert_eq!(metrics.steps, Some(4));
+        assert_eq!(metrics.image_count, Some(1));
+        assert_eq!(
+            metrics.guidance_scale.as_ref().and_then(|n| n.as_f64()),
+            Some(5.0)
+        );
+        assert_eq!(metrics.guidance_method.as_deref(), Some("cfg"));
+        assert_eq!(metrics.width, Some(832));
+        assert_eq!(metrics.height, Some(480));
+        assert_eq!(metrics.seed, Some(1234));
+    }
+
+    /// sc-10418: a default-settings video run (no user sampler/scheduler override,
+    /// engine-default guidance) still reports non-blank sampler/scheduler so the charts
+    /// have a group, but leaves guidance / scheduler-shift `None` — an honest "engine
+    /// default, not captured" rather than a fabricated value.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn build_video_metrics_defaults_when_unset() {
+        let settings = VideoSettingsSnapshot {
+            quant: None,
+            sampler: None,
+            scheduler: None,
+            scheduler_shift: None,
+            guidance: None,
+            width: 1280,
+            height: 720,
+            seed: 7,
+        };
+        let metrics = build_video_metrics(GenerationMetrics::default(), &settings, None, None);
+        assert_eq!(metrics.quant_label.as_deref(), Some("bf16"));
+        assert_eq!(metrics.quant_bits, None);
+        assert_eq!(metrics.sampler.as_deref(), Some("default"));
+        assert_eq!(metrics.scheduler.as_deref(), Some("default"));
+        assert!(metrics.scheduler_shift.is_none());
+        assert!(metrics.guidance_scale.is_none());
+        assert_eq!(metrics.image_count, Some(1));
+        assert_eq!(metrics.width, Some(1280));
+        assert_eq!(metrics.height, Some(720));
     }
 
     /// sc-8879 / sc-9879 (F-077 follow-up): the video SeedVR2 upscale fetches the same fixed
