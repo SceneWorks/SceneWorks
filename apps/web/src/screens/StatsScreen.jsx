@@ -83,6 +83,7 @@ const COLUMNS = [
   { key: "scheduler", label: "sched", get: (r) => r.metrics?.scheduler ?? "—" },
   { key: "cfg", label: "cfg", numeric: true, get: (r) => num1(r.metrics?.guidanceScale) },
   { key: "steps", label: "steps", numeric: true, get: (r) => r.metrics?.steps ?? "—" },
+  { key: "images", label: "imgs", numeric: true, get: (r) => r.metrics?.imageCount ?? "—" },
   { key: null, label: "PiD", get: (r) => pidLabel(r.metrics) },
   { key: "load", label: "load", numeric: true, get: (r) => formatMs(r.metrics?.loadMs) },
   { key: "sample", label: "sample", numeric: true, get: (r) => formatMs(r.metrics?.sampleMs) },
@@ -112,6 +113,8 @@ function FilterSelect({ label, value, onChange, options, render = (v) => v, allL
 
 function RunDetail({ row, onClose }) {
   const m = row.metrics ?? {};
+  const count = Math.max(1, Number(m.imageCount) || 1);
+  const perImage = (ms) => formatMs(ms != null && Number.isFinite(Number(ms)) ? Number(ms) / count : null);
   const items = [
     ["Job", `${typeLabel(row.type)} · ${row.jobId}`],
     ["Model", m.model ?? "—"],
@@ -130,6 +133,7 @@ function RunDetail({ row, onClose }) {
       }${m.trueCfgScale != null ? ` · trueCfg ${num1(m.trueCfgScale)}` : ""}`,
     ],
     ["Steps", m.steps ?? "—"],
+    ["Images", m.imageCount ?? "—"],
     ["PiD", pidLabel(m)],
     ["Size", m.width && m.height ? `${m.width}×${m.height}` : "—"],
     ["Seed", m.seed ?? "—"],
@@ -139,6 +143,10 @@ function RunDetail({ row, onClose }) {
       `${formatMs(m.loadMs)} / ${formatMs(m.sampleMs)} / ${formatMs(m.decodeMs)}`,
     ],
     ["Total time", formatMs(m.totalMs)],
+    [
+      "Per image",
+      `${perImage(m.totalMs)} total · ${perImage(m.sampleMs)} sample · ${perImage(m.decodeMs)} decode`,
+    ],
     ["Peak memory", `${formatPercent(m.peakMemoryPct)} (${formatBytes(m.peakMemoryBytes)})`],
     ["Peak GPU load", formatPercent(m.peakGpuLoadPct)],
     ["Created", formatDate(row.createdAt)],
@@ -185,7 +193,7 @@ function StatsCharts({ rows }) {
     <div className="stats-charts">
       <div className="stats-chart-card">
         <div className="stats-chart-head">
-          <span className="stats-chart-title">Median phase time (s) — group by</span>
+          <span className="stats-chart-title">Median per-image time (s) — group by</span>
           <select value={groupBy} onChange={(event) => setGroupBy(event.target.value)}>
             {Object.entries(GROUP_BY_LABELS).map(([key, label]) => (
               <option key={key} value={key}>
@@ -220,7 +228,7 @@ function StatsCharts({ rows }) {
 
       <div className="stats-chart-card">
         <div className="stats-chart-head">
-          <span className="stats-chart-title">Steps vs total time (s), by quant</span>
+          <span className="stats-chart-title">Steps vs per-image time (s), by quant</span>
         </div>
         {scatterData.length ? (
           <ResponsiveContainer width="100%" height={240}>

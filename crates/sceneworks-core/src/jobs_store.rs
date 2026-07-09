@@ -432,6 +432,7 @@ impl JobsStore {
               scheduler text,
               scheduler_shift real,
               steps integer,
+              image_count integer,
               guidance_scale real,
               true_cfg_scale real,
               guidance_method text,
@@ -458,6 +459,9 @@ impl JobsStore {
               on generation_metrics(quant_label);
             ",
         )?;
+        // Batch size per job (epic 10402, sc-10426) — added after the table shipped,
+        // so back-fill the column on existing generation_metrics tables.
+        ensure_column(&transaction, "generation_metrics", "image_count", "integer")?;
         transaction.commit()?;
         Ok(())
     }
@@ -713,10 +717,10 @@ impl JobsStore {
                 guidance_method, use_pid, pid_target, width, height, seed,
                 loras_json, load_ms, sample_ms, decode_ms, total_ms,
                 peak_memory_bytes, peak_memory_pct, peak_gpu_load_pct, backend,
-                updated_at
+                image_count, updated_at
             ) values (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
+                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27
             )
             on conflict(job_id) do update set
                 model = coalesce(excluded.model, generation_metrics.model),
@@ -743,6 +747,7 @@ impl JobsStore {
                 peak_memory_pct = coalesce(excluded.peak_memory_pct, generation_metrics.peak_memory_pct),
                 peak_gpu_load_pct = coalesce(excluded.peak_gpu_load_pct, generation_metrics.peak_gpu_load_pct),
                 backend = coalesce(excluded.backend, generation_metrics.backend),
+                image_count = coalesce(excluded.image_count, generation_metrics.image_count),
                 updated_at = excluded.updated_at
             ",
             params![
@@ -771,6 +776,7 @@ impl JobsStore {
                 metrics.peak_memory_pct.as_ref().and_then(Number::as_f64),
                 metrics.peak_gpu_load_pct.as_ref().and_then(Number::as_f64),
                 metrics.backend,
+                metrics.image_count,
                 now,
             ],
         )?;
@@ -2112,6 +2118,7 @@ fn row_to_generation_metrics(row: &Row<'_>) -> rusqlite::Result<GenerationMetric
         scheduler: row.get("scheduler")?,
         scheduler_shift: scheduler_shift.map(number_from_f64),
         steps: row.get("steps")?,
+        image_count: row.get("image_count")?,
         guidance_scale: guidance_scale.map(number_from_f64),
         true_cfg_scale: true_cfg_scale.map(number_from_f64),
         guidance_method: row.get("guidance_method")?,

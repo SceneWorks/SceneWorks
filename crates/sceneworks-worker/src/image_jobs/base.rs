@@ -1907,8 +1907,9 @@ mod metrics_settings_tests {
             "width": 1024, "height": 1024, "seed": 42
         }));
         let metrics =
-            image_settings_metrics(&req, Some(20), Some(4.0), Some("q8".to_owned()), Some(8));
+            image_settings_metrics(&req, Some(20), Some(4.0), Some("q8".to_owned()), Some(8), 4);
         assert_eq!(metrics.model.as_deref(), Some("qwen_image"));
+        assert_eq!(metrics.image_count, Some(4));
         assert_eq!(metrics.quant_label.as_deref(), Some("q8"));
         assert_eq!(metrics.quant_bits, Some(8));
         // A default run is not blank — sampler/scheduler/method carry the effective default.
@@ -1937,7 +1938,7 @@ mod metrics_settings_tests {
                 "usePid": true, "pidTarget": "2k", "guidanceMethod": "cfgpp"
             }
         }));
-        let metrics = image_settings_metrics(&req, Some(30), None, Some("bf16".to_owned()), None);
+        let metrics = image_settings_metrics(&req, Some(30), None, Some("bf16".to_owned()), None, 1);
         assert_eq!(metrics.sampler.as_deref(), Some("dpmpp_2m"));
         assert_eq!(metrics.scheduler.as_deref(), Some("karras"));
         assert_eq!(
@@ -3900,6 +3901,7 @@ fn image_settings_metrics(
     effective_guidance: Option<f32>,
     quant_label: Option<String>,
     quant_bits: Option<i64>,
+    image_count: u32,
 ) -> GenerationMetrics {
     let adv = &request.advanced;
     let string_or = |key: &str, default: &str| -> Option<String> {
@@ -3924,6 +3926,7 @@ fn image_settings_metrics(
         scheduler: string_or("scheduler", "default"),
         scheduler_shift: number_field("schedulerShift"),
         steps: effective_steps,
+        image_count: Some(image_count),
         guidance_scale: effective_guidance
             .map(|scale| scale as f64)
             .and_then(serde_json::Number::from_f64),
@@ -3977,17 +3980,32 @@ fn effective_quant_label(request: &ImageRequest) -> (Option<String>, Option<i64>
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn build_image_metrics(request: &ImageRequest, effective_steps: Option<u32>) -> GenerationMetrics {
+fn build_image_metrics(
+    request: &ImageRequest,
+    effective_steps: Option<u32>,
+    image_count: u32,
+) -> GenerationMetrics {
     let (quant_label, quant_bits) = effective_quant_label(request);
     let guidance = mlx_model(&request.model).and_then(|model| resolve_guidance(request, &model));
-    image_settings_metrics(request, effective_steps, guidance, quant_label, quant_bits)
+    image_settings_metrics(
+        request,
+        effective_steps,
+        guidance,
+        quant_label,
+        quant_bits,
+        image_count,
+    )
 }
 #[cfg(not(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 )))]
-fn build_image_metrics(request: &ImageRequest, effective_steps: Option<u32>) -> GenerationMetrics {
-    image_settings_metrics(request, effective_steps, None, None, None)
+fn build_image_metrics(
+    request: &ImageRequest,
+    effective_steps: Option<u32>,
+    image_count: u32,
+) -> GenerationMetrics {
+    image_settings_metrics(request, effective_steps, None, None, None, image_count)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4242,7 +4260,7 @@ async fn consume_gen_events(
     // Post the effective-settings + per-phase timing block (epic 10402,
     // sc-10405/sc-10406). Best-effort; coalesce-merges with the S2 hardware block
     // (which owns totalMs/backend/peaks) server-side.
-    let mut metrics = build_image_metrics(&plan.request, effective_steps);
+    let mut metrics = build_image_metrics(&plan.request, effective_steps, total as u32);
     if let Some(phase) = phase_timer.into_metrics(Instant::now()) {
         metrics.load_ms = phase.load_ms;
         metrics.sample_ms = phase.sample_ms;

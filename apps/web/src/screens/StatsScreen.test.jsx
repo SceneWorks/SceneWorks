@@ -21,6 +21,7 @@ vi.mock("../hooks/useGenerationMetrics.js", () => ({
           scheduler: "default",
           guidanceScale: 4.0,
           steps: 20,
+          imageCount: 2,
           totalMs: 9400,
           loadMs: 2100,
           sampleMs: 6400,
@@ -93,5 +94,6 @@ describe("StatsScreen", () => {
     expect(container.querySelector(".stats-detail")).not.toBeNull();
     expect(container.textContent).toContain("Run detail");
     expect(container.textContent).toContain("mlx"); // backend surfaced in detail
+    expect(container.textContent).toContain("Per image"); // per-image breakdown (sc-10426)
   });
 });
