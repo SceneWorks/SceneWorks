@@ -1179,6 +1179,13 @@ button:focus-visible {
   flex-shrink: 0;
 }
 
+/* Hairline separator between grouped rows inside a work-panel (e.g. Queue's
+   composer / project filter). Spans the panel content width. */
+.work-panel-divider {
+  height: 1px;
+  background: var(--border);
+}
+
 /* Advanced section — expands in place BELOW the work-panel, never inside it. */
 .advanced-section {
   border: 1px solid var(--border);
@@ -9925,6 +9932,12 @@ details[open] > summary.lora-scope-group-heading::before,
   grid-template-columns: minmax(180px, 1fr) minmax(108px, 140px) auto;
   gap: 8px;
   align-items: end;
+}
+
+/* Share the one control height so the composer row (input · select · button)
+   sits on a single baseline (Page-Frame standard). */
+.job-composer button {
+  min-height: var(--control-h);
 }
 
 .job-composer label {
