@@ -107,7 +107,7 @@ const navSections = [
     label: "System",
     items: [
       { id: "Queue", icon: Icon.Queue },
-      { id: "Stats", label: "Generation Stats", icon: Icon.Chart },
+      { id: "Stats", icon: Icon.Chart },
       { id: "Logs", icon: Icon.Logs },
       { id: "Settings", icon: Icon.Sliders },
       { id: "Licenses", icon: Icon.Info },
