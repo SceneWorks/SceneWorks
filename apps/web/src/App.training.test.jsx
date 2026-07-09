@@ -136,8 +136,39 @@ describe("SceneWorks app shell", () => {
     // lives in the separate Data Sets library (sc-10475).
     expect(container.querySelector(".training-config-panel")).toBeTruthy();
     expect(document.body.querySelector("[role='tablist']")).toBeNull();
-    expect(container.textContent).toContain("A dry run validates the training plan");
     expect(container.textContent).not.toContain("Import images & captions");
+  });
+
+  // sc-10492: the actions row carries exactly two buttons. The preset-value strip, the
+  // validation chips, the run-mode select and the dry-run explainer are all gone.
+  it("closes the configure panel with only Reset defaults and Start training", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withTrainingStudioContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 2 }],
+          trainingPresets: zImageTrainingPresets,
+          trainingTargets: [zImageTrainingTarget],
+        }),
+      );
+    });
+    await settle();
+
+    const actions = container.querySelector(".training-config-actions");
+    expect([...actions.querySelectorAll("button")].map((button) => button.textContent)).toEqual([
+      "Reset defaults",
+      "Start training",
+    ]);
+
+    expect(container.querySelector(".training-preset-summary")).toBeNull();
+    expect(container.querySelector(".training-config-warnings")).toBeNull();
+    expect(container.querySelector(".training-run-mode")).toBeNull();
+    expect(container.querySelector(".training-run-note")).toBeNull();
+    expect(field(container, "Run mode")).toBeFalsy();
+    expect(container.textContent).not.toContain("A dry run validates the training plan");
+    // Readiness still has a home: the panel head's pill.
+    expect(container.querySelector(".training-status-pill").textContent).toBe("Needs input");
   });
 
   it("creates a training dataset from selected image assets", async () => {
@@ -853,7 +884,7 @@ describe("SceneWorks app shell", () => {
     await changeField(field(container, "Guidance scale"), "1.2");
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Start training").click();
     });
     await settle();
 
@@ -863,7 +894,7 @@ describe("SceneWorks app shell", () => {
         datasetId: "dataset-a",
         datasetVersion: 5,
         outputName: "Portrait Set LoRA",
-        dryRun: true,
+        dryRun: false,
         config: expect.objectContaining({
           rank: 16,
           alpha: 16,
@@ -882,7 +913,7 @@ describe("SceneWorks app shell", () => {
         }),
       }),
     );
-    expect(container.textContent).toContain("Queued dry-run job");
+    expect(container.textContent).toContain("Queued training job");
   });
 
   it("applies training presets and includes selected preset metadata", async () => {
@@ -930,7 +961,7 @@ describe("SceneWorks app shell", () => {
     expect(field(container, "Sample cadence").value).toBe("200");
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Start training").click();
     });
     await settle();
 
@@ -1002,7 +1033,7 @@ describe("SceneWorks app shell", () => {
     expect(field(container, "Learning rate").value).toBe("0.00005");
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Start training").click();
     });
     await settle();
 
@@ -1111,7 +1142,7 @@ describe("SceneWorks app shell", () => {
     await changeField(adapterSelect, "v1");
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Start training").click();
     });
     await settle();
 
@@ -1129,7 +1160,10 @@ describe("SceneWorks app shell", () => {
     );
   });
 
-  it("marks manual training preset edits as customizations", async () => {
+  // The "Customized: …" chip is gone (sc-10492), but the tracking behind it still
+  // matters: once a field is hand-edited, switching Optimizer must NOT silently swap
+  // the preset out from under the edit.
+  it("stops the optimizer from re-applying a preset once a field is hand-edited", async () => {
     root = createRoot(container);
     await act(async () => {
       root.render(
@@ -1145,11 +1179,15 @@ describe("SceneWorks app shell", () => {
 
     await openAdvancedSection(container);
     await changeField(field(container, "Rank"), "24");
+    await changeField(field(container, "Optimizer"), "prodigyopt");
 
-    expect(container.textContent).toContain("Customized: Rank");
+    // Without the edit this swaps to `…character.prodigyopt.balanced` (LR 1, 1600 steps).
+    expect(field(container, "Preset").value).toBe("z_image_turbo_lora.character.adamw8bit.balanced");
+    expect(field(container, "Rank").value).toBe("24");
+    expect(field(container, "Learning rate").value).toBe("0.0001");
   });
 
-  it("queues a dry-run training job from the configure tab", async () => {
+  it("queues a training job from the configure tab", async () => {
     const loadDataset = vi.fn(async () => ({
       id: "dataset-a",
       name: "Portrait Set",
@@ -1186,7 +1224,7 @@ describe("SceneWorks app shell", () => {
     await changeField(field(container, "Trigger phrase"), "miraStyle");
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Start training").click();
     });
     await settle();
 
@@ -1196,65 +1234,11 @@ describe("SceneWorks app shell", () => {
         datasetId: "dataset-a",
         datasetVersion: 5,
         outputName: "Portrait Set LoRA",
-        dryRun: true,
-        config: expect.objectContaining({ rank: 16, triggerWord: "miraStyle" }),
-      }),
-    );
-    expect(container.textContent).toContain("Queued dry-run job job_dryrun_1");
-  });
-
-  it("queues a real training job when run mode is set to training", async () => {
-    const loadDataset = vi.fn(async () => ({
-      id: "dataset-a",
-      name: "Portrait Set",
-      version: 5,
-      items: [
-        {
-          id: "item_0001",
-          assetId: "asset-a",
-          path: "images/item_0001.png",
-          displayName: "item_0001.png",
-          caption: { text: "mira portrait", source: "manual", triggerWords: ["mira"] },
-        },
-      ],
-    }));
-    const createTrainingJob = vi.fn(async () => ({ id: "job_train_1", type: "lora_train", status: "queued" }));
-
-    root = createRoot(container);
-    await act(async () => {
-      root.render(
-        withTrainingStudioContext({
-          activeProject: { id: "project-a", name: "Project A" },
-          createTrainingJob,
-          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
-          gpuOptions: ["auto", "0"],
-          loadDataset,
-          trainingTargets: [zImageTrainingTarget],
-        }),
-      );
-    });
-    await settle();
-
-    await changeField(field(container, "Dataset"), "dataset-a");
-    await settle();
-    await changeField(field(container, "Trigger phrase"), "miraStyle");
-    await changeField(field(container, "Run mode"), "real");
-
-    await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Start training").click();
-    });
-    await settle();
-
-    expect(createTrainingJob).toHaveBeenCalledWith(
-      expect.objectContaining({
-        targetId: "z_image_turbo_lora",
-        datasetId: "dataset-a",
-        outputName: "Portrait Set LoRA",
         dryRun: false,
         config: expect.objectContaining({ rank: 16, triggerWord: "miraStyle" }),
       }),
     );
-    expect(container.textContent).toContain("Queued training job job_train_1");
+    expect(container.textContent).toContain("Queued training job job_dryrun_1");
   });
 
   it("keeps config edits when GPU options are recomputed", async () => {
@@ -1347,17 +1331,21 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.textContent).toContain("Select a saved dataset");
-    expect(container.textContent).toContain("Add a trigger phrase");
-    expect([...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job").disabled).toBe(true);
+    // sc-10492 removed the validation chips. Readiness now shows only as the head pill
+    // plus a disabled Start button. ("Select a saved dataset" is still on the page — it's
+    // the Dataset select's placeholder option — so assert on the chip-only copy instead.)
+    expect(container.querySelector(".training-status-pill").textContent).toBe("Needs input");
+    expect(container.textContent).not.toContain("Add a trigger phrase");
+    expect([...document.body.querySelectorAll("button")].find((button) => button.textContent === "Start training").disabled).toBe(true);
 
     await changeField(field(container, "Dataset"), "dataset-a");
     await settle();
     await changeField(field(container, "Trigger phrase"), "miraStyle");
     await changeField(field(container, "Checkpoint cadence"), "");
 
-    const submitButton = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue dry-run job");
-    expect(container.textContent).toContain("Checkpoint cadence must be greater than zero");
+    const submitButton = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Start training");
+    expect(container.querySelector(".training-status-pill").textContent).toBe("Needs input");
+    expect(container.textContent).not.toContain("Checkpoint cadence must be greater than zero");
     expect(submitButton.disabled).toBe(true);
 
     await act(async () => {

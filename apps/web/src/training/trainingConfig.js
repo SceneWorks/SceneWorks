@@ -51,38 +51,6 @@ export const trainingAdapterVersionLabels = {
   v1: "v1 — stable (smaller)",
   v2: "v2 — experimental (heavier de-distill)",
 };
-export const configFieldLabels = {
-  outputName: "LoRA name",
-  triggerWord: "Trigger phrase",
-  outputScope: "Output scope",
-  requestedGpu: "Requested GPU",
-  rank: "Rank",
-  alpha: "Alpha",
-  networkType: "Network type",
-  decomposeFactor: "LoKr factor",
-  optimizer: "Optimizer",
-  learningRate: "Learning rate",
-  weightDecay: "Weight decay",
-  lrScheduler: "LR scheduler",
-  lrWarmupSteps: "LR warmup steps",
-  steps: "Steps",
-  timestepType: "Timestep type",
-  timestepBias: "Timestep bias",
-  lossType: "Loss type",
-  trainingAdapterVersion: "De-distill adapter",
-  gradientCheckpointing: "Gradient checkpointing",
-  resolution: "Resolution",
-  precision: "Precision",
-  saveEvery: "Checkpoint cadence",
-  sampleEvery: "Sample cadence",
-  sampleSteps: "Sample steps",
-  sampleGuidanceScale: "Guidance scale",
-  sampleCount: "Sample count",
-  samplePrompts: "Sample prompts",
-  batchSize: "Batch size",
-  gradientAccumulation: "Gradient accumulation",
-  seed: "Seed",
-};
 
 export function rangeOptions(limits, key) {
   return Array.isArray(limits?.[key]) ? limits[key] : [];
