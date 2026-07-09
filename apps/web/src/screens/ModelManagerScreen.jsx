@@ -1449,11 +1449,6 @@ export function ModelManagerScreen() {
 
   return (
     <section className="main-surface models-surface">
-      <div className="section-heading">
-        <p className="eyebrow">Runtime assets</p>
-        <h2>Models</h2>
-      </div>
-
       <div className="models-tabbar">
         <div className="mode-tabs" role="tablist" aria-label="Model type">
           {tabDefs.map(([key, label, count]) => {
