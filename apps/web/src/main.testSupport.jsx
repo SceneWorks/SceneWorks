@@ -203,9 +203,21 @@ export async function settle() {
   });
 }
 
+// Find a control by its visible <label>, falling back to an aria-label for the controls
+// that carry no visible label — e.g. the Data Sets name field, which reads as the page's
+// heading rather than a labelled input (sc-10481).
 export function field(container, labelText) {
   const label = [...container.querySelectorAll("label")].find((item) => item.childNodes[0]?.textContent.trim() === labelText);
-  return label?.querySelector("input, select, textarea");
+  const labelled = label?.querySelector("input, select, textarea");
+  if (labelled) {
+    return labelled;
+  }
+  // `?? undefined` keeps the "not found" value what callers already assert on.
+  return (
+    container.querySelector(
+      `input[aria-label="${labelText}"], select[aria-label="${labelText}"], textarea[aria-label="${labelText}"]`,
+    ) ?? undefined
+  );
 }
 
 export function loraPanel(container) {

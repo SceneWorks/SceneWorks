@@ -52,5 +52,8 @@ export const Icon = {
   Wand: (p) => <I {...p} d="M15 4l5 5L9 20l-5-5zM14 5l5 5M3 14l3 3" />,
   Star: ({ filled = false, ...p }) => <I {...p} fill={filled} d="M12 2l2.4 7.4H22l-6.2 4.5L18 21l-6-4.4L6 21l2.2-7.1L2 9.4h7.6z" />,
   Stars: (p) => <I {...p} fill d="M12 2l2.4 7.4H22l-6.2 4.5L18 21l-6-4.4L6 21l2.2-7.1L2 9.4h7.6z" />,
+  Refresh: (p) => <I {...p} d="M21 12a9 9 0 11-3-6.7L21 8M21 3v5h-5" />,
+  Pencil: (p) => <I {...p} d="M12 20h9M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z" />,
+  Stethoscope: (p) => <I {...p} d="M6 3v5a4 4 0 008 0V3M10 15v-3M10 15a5 5 0 0010 0v-2M18 11a2 2 0 100-4 2 2 0 000 4z" />,
 };
 
