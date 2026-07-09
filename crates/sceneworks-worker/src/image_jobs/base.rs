@@ -1892,6 +1892,70 @@ pub(crate) fn curated_image_menu() -> (Vec<&'static str>, Vec<&'static str>) {
 }
 
 #[cfg(test)]
+mod metrics_settings_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(value: serde_json::Value) -> ImageRequest {
+        ImageRequest::from_payload(value.as_object().unwrap())
+    }
+
+    #[test]
+    fn default_run_reports_effective_settings_not_blank() {
+        let req = request(json!({
+            "projectId": "p", "model": "qwen_image", "prompt": "mist",
+            "width": 1024, "height": 1024, "seed": 42
+        }));
+        let metrics =
+            image_settings_metrics(&req, Some(20), Some(4.0), Some("q8".to_owned()), Some(8));
+        assert_eq!(metrics.model.as_deref(), Some("qwen_image"));
+        assert_eq!(metrics.quant_label.as_deref(), Some("q8"));
+        assert_eq!(metrics.quant_bits, Some(8));
+        // A default run is not blank — sampler/scheduler/method carry the effective default.
+        assert_eq!(metrics.sampler.as_deref(), Some("default"));
+        assert_eq!(metrics.scheduler.as_deref(), Some("default"));
+        assert_eq!(metrics.guidance_method.as_deref(), Some("cfg"));
+        assert_eq!(metrics.use_pid, Some(false));
+        assert_eq!(metrics.steps, Some(20));
+        assert_eq!(metrics.seed, Some(42));
+        assert_eq!(metrics.width, Some(1024));
+        assert_eq!(
+            metrics
+                .guidance_scale
+                .as_ref()
+                .and_then(serde_json::Number::as_f64),
+            Some(4.0)
+        );
+    }
+
+    #[test]
+    fn advanced_overrides_are_reported() {
+        let req = request(json!({
+            "projectId": "p", "model": "sdxl", "prompt": "mist", "width": 832, "height": 1216,
+            "advanced": {
+                "sampler": "dpmpp_2m", "scheduler": "karras", "schedulerShift": 3.0,
+                "usePid": true, "pidTarget": "2k", "guidanceMethod": "cfgpp"
+            }
+        }));
+        let metrics = image_settings_metrics(&req, Some(30), None, Some("bf16".to_owned()), None);
+        assert_eq!(metrics.sampler.as_deref(), Some("dpmpp_2m"));
+        assert_eq!(metrics.scheduler.as_deref(), Some("karras"));
+        assert_eq!(
+            metrics
+                .scheduler_shift
+                .as_ref()
+                .and_then(serde_json::Number::as_f64),
+            Some(3.0)
+        );
+        assert_eq!(metrics.use_pid, Some(true));
+        assert_eq!(metrics.pid_target.as_deref(), Some("2k"));
+        assert_eq!(metrics.guidance_method.as_deref(), Some("cfgpp"));
+        assert_eq!(metrics.quant_label.as_deref(), Some("bf16"));
+        assert_eq!(metrics.quant_bits, None);
+    }
+}
+
+#[cfg(test)]
 mod sampling_knob_tests {
     use super::*;
 
@@ -3808,6 +3872,124 @@ async fn generate_candle_stream(
 /// Shared by the base txt2img path ([`generate_stream`]) and the Z-Image strict-pose
 /// control path ([`generate_zimage_control_stream`]). `total` is the number of images
 /// the job produces (the request count, or the pose count).
+/// Best-effort human label for a LoRA entry in a request (epic 10402). Accepts a
+/// bare string or an object with an id/name field.
+fn lora_label(value: &Value) -> Option<String> {
+    match value {
+        Value::String(name) => Some(name.clone()),
+        Value::Object(map) => map
+            .get("id")
+            .or_else(|| map.get("name"))
+            .or_else(|| map.get("loraId"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        _ => None,
+    }
+}
+
+/// Assemble the EFFECTIVE-settings metrics block for an image job (epic 10402,
+/// sc-10406). Reports the value the run actually used — not the sparse `advanced`
+/// payload where defaults are omitted: sampler/scheduler default to "default"
+/// (model-native), guidanceMethod to "cfg", `use_pid` to false, steps come from
+/// the observed denoise total, guidance from the resolver, quant from
+/// [`effective_quant_label`]. A default-settings run is fully populated, never
+/// blank — which is what makes the comparison charts meaningful (sc-10409).
+fn image_settings_metrics(
+    request: &ImageRequest,
+    effective_steps: Option<u32>,
+    effective_guidance: Option<f32>,
+    quant_label: Option<String>,
+    quant_bits: Option<i64>,
+) -> GenerationMetrics {
+    let adv = &request.advanced;
+    let string_or = |key: &str, default: &str| -> Option<String> {
+        Some(
+            adv.get(key)
+                .and_then(Value::as_str)
+                .unwrap_or(default)
+                .to_owned(),
+        )
+    };
+    let number_field = |key: &str| -> Option<serde_json::Number> {
+        adv.get(key)
+            .and_then(|value| value.as_f64().or_else(|| value.as_str()?.trim().parse().ok()))
+            .and_then(serde_json::Number::from_f64)
+    };
+    let loras: Vec<String> = request.loras.iter().filter_map(lora_label).collect();
+    GenerationMetrics {
+        model: (!request.model.is_empty()).then(|| request.model.clone()),
+        quant_label,
+        quant_bits: quant_bits.map(|bits| bits as u32),
+        sampler: string_or("sampler", "default"),
+        scheduler: string_or("scheduler", "default"),
+        scheduler_shift: number_field("schedulerShift"),
+        steps: effective_steps,
+        guidance_scale: effective_guidance
+            .map(|scale| scale as f64)
+            .and_then(serde_json::Number::from_f64),
+        true_cfg_scale: number_field("trueCfgScale"),
+        guidance_method: string_or("guidanceMethod", "cfg"),
+        use_pid: Some(adv.get("usePid").and_then(Value::as_bool).unwrap_or(false)),
+        pid_target: adv.get("pidTarget").and_then(Value::as_str).map(str::to_owned),
+        width: Some(request.width),
+        height: Some(request.height),
+        seed: request.seed.or_else(|| request.seeds.first().copied()),
+        loras: (!loras.is_empty()).then_some(loras),
+        ..Default::default()
+    }
+}
+
+/// The effective quant label + bit count for a request (epic 10402): the Krea
+/// INT8-ConvRot tier, then dense-TE turnkey tiers (which `resolve_quant` reports
+/// as bf16 to keep the dense TE full-precision), else `resolve_quant`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn effective_quant_label(request: &ImageRequest) -> (Option<String>, Option<i64>) {
+    if request
+        .advanced
+        .get("convRot")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return (Some("int8-convrot".to_owned()), None);
+    }
+    #[cfg(target_os = "macos")]
+    if is_dense_te_tier(request) {
+        return match dense_te_requested_tier_bits(request) {
+            Some(8) => (Some("q8".to_owned()), Some(8)),
+            Some(4) => (Some("q4".to_owned()), Some(4)),
+            _ => (Some("bf16".to_owned()), None),
+        };
+    }
+    match resolve_quant(request).1 {
+        Some(8) => (Some("q8".to_owned()), Some(8)),
+        Some(4) => (Some("q4".to_owned()), Some(4)),
+        _ => (Some("bf16".to_owned()), None),
+    }
+}
+
+/// Resolve quant + guidance with the generation's own rules and assemble the
+/// effective-settings metrics for an image job (epic 10402, sc-10406). A build
+/// with neither the MLX nor candle backend reports quant/guidance as none.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn build_image_metrics(request: &ImageRequest, effective_steps: Option<u32>) -> GenerationMetrics {
+    let (quant_label, quant_bits) = effective_quant_label(request);
+    let guidance = mlx_model(&request.model).and_then(|model| resolve_guidance(request, &model));
+    image_settings_metrics(request, effective_steps, guidance, quant_label, quant_bits)
+}
+#[cfg(not(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+)))]
+fn build_image_metrics(request: &ImageRequest, effective_steps: Option<u32>) -> GenerationMetrics {
+    image_settings_metrics(request, effective_steps, None, None, None)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn consume_gen_events(
     api: &ApiClient,
@@ -3861,6 +4043,15 @@ async fn consume_gen_events(
     // mirrors the caption-job select!-with-interval).
     let mut interval = tokio::time::interval(progress_report_interval(settings));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Per-phase wall-clock (epic 10402, sc-10405): derive load/sample/decode spans
+    // from this shared event stream — load = start→first Step, sample = Step→Decoding,
+    // decode = Decoding→Image — summed across the batch's images. Both the MLX and
+    // candle image lanes funnel through here, so both get the split. Posted best-effort
+    // at clean completion; coalesce-merges with the S2 hardware block server-side.
+    let mut phase_timer = crate::job_metrics::PhaseTimer::new(Instant::now());
+    // Effective denoise step count (sc-10406): the Step event's `total` is the
+    // resolved step count, so a default run reports real steps, not the sparse payload.
+    let mut effective_steps: Option<u32> = None;
     // Run the event loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
     let loop_result: WorkerResult<()> = async {
@@ -3880,6 +4071,10 @@ async fn consume_gen_events(
                 total: step_total,
             } => {
                 mark_started(index);
+                phase_timer.mark_sample_step(Instant::now());
+                if effective_steps.is_none() {
+                    effective_steps = Some(step_total);
+                }
                 if last_cancel_check.elapsed() >= Duration::from_secs(2) {
                     last_cancel_check = Instant::now();
                     // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
@@ -3909,6 +4104,7 @@ async fn consume_gen_events(
             }
             GenEvent::Decoding { index } => {
                 mark_started(index);
+                phase_timer.mark_decoding(Instant::now());
                 update_job(
                     api,
                     &job.id,
@@ -3931,6 +4127,7 @@ async fn consume_gen_events(
                 pixels,
                 face_likeness,
             } => {
+                phase_timer.mark_item_done(Instant::now());
                 // The identity-likeness post-pass (sc-4409) scores each image on the blocking thread
                 // and hands the pre-built `faceLikeness` block back through the event. Attach it to a
                 // PER-IMAGE clone of the shared raw settings under the sidecar key so each angle's
@@ -4042,6 +4239,16 @@ async fn consume_gen_events(
         .await?;
         return Err(WorkerError::Canceled(message.to_owned()));
     }
+    // Post the effective-settings + per-phase timing block (epic 10402,
+    // sc-10405/sc-10406). Best-effort; coalesce-merges with the S2 hardware block
+    // (which owns totalMs/backend/peaks) server-side.
+    let mut metrics = build_image_metrics(&plan.request, effective_steps);
+    if let Some(phase) = phase_timer.into_metrics(Instant::now()) {
+        metrics.load_ms = phase.load_ms;
+        metrics.sample_ms = phase.sample_ms;
+        metrics.decode_ms = phase.decode_ms;
+    }
+    crate::job_metrics::post_generation_metrics(api, &job.id, &metrics).await;
     task_result
 }
 

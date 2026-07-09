@@ -11,8 +11,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Number, Value};
 
 use crate::contracts::{
-    ContractNumber, JobSnapshot, JobStatus, JobType, ProgressStage, QueueSummary, WorkerCapability,
-    WorkerSnapshot, WorkerStatus, WorkerUtilizationSnapshot,
+    ContractNumber, GenerationMetrics, GenerationMetricsRow, JobSnapshot, JobStatus, JobType,
+    ProgressStage, QueueSummary, WorkerCapability, WorkerSnapshot, WorkerStatus,
+    WorkerUtilizationSnapshot,
 };
 use crate::store_util::{ensure_column, parse_string_enum, random_hex};
 use crate::time::{format_unix_seconds, now_unix_seconds, parse_utc_seconds, utc_now};
@@ -415,6 +416,48 @@ impl JobsStore {
         // / "cpu"). First-non-null wins so the WorkerProgressCard's arch pill
         // stays stable across the run.
         ensure_column(&transaction, "jobs", "backend", "text")?;
+        // Structured per-run generation metrics (epic 10402). A companion table
+        // keyed 1:1 by job id — kept out of the hot `jobs` row so the queue
+        // read path stays lean. Written by the worker on completion and read
+        // back by the Generation Stats views. Every settings/timing/hardware
+        // column is nullable so any job type populates only what applies.
+        transaction.execute_batch(
+            "
+            create table if not exists generation_metrics (
+              job_id text primary key,
+              model text,
+              quant_label text,
+              quant_bits integer,
+              sampler text,
+              scheduler text,
+              scheduler_shift real,
+              steps integer,
+              guidance_scale real,
+              true_cfg_scale real,
+              guidance_method text,
+              use_pid integer,
+              pid_target text,
+              width integer,
+              height integer,
+              seed integer,
+              loras_json text,
+              load_ms integer,
+              sample_ms integer,
+              decode_ms integer,
+              total_ms integer,
+              peak_memory_bytes integer,
+              peak_memory_pct real,
+              peak_gpu_load_pct real,
+              backend text,
+              updated_at text not null
+            );
+
+            create index if not exists idx_genmetrics_model
+              on generation_metrics(model);
+            create index if not exists idx_genmetrics_quant
+              on generation_metrics(quant_label);
+            ",
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -646,6 +689,159 @@ impl JobsStore {
         // (sc-8950 / F-148 — see list_jobs for the full rationale).
         let connection = self.connect()?;
         self.get_job_on_connection(&connection, job_id)
+    }
+
+    /// Upsert the structured generation metrics for a job (epic 10402). Called
+    /// by the worker on completion via `POST /api/v1/jobs/:id/metrics`. Merges
+    /// with any existing row via `coalesce(excluded, existing)` so a partial
+    /// second report never wipes a field a prior report set. Holds the write
+    /// mutex like every other mutating method.
+    pub fn upsert_generation_metrics(
+        &self,
+        job_id: &str,
+        metrics: &GenerationMetrics,
+    ) -> JobsStoreResult<()> {
+        let _guard = self.lock.lock();
+        let connection = self.connect()?;
+        let now = utc_now();
+        let loras_json = optional_dumps(metrics.loras.as_ref())?;
+        connection.execute(
+            "
+            insert into generation_metrics (
+                job_id, model, quant_label, quant_bits, sampler, scheduler,
+                scheduler_shift, steps, guidance_scale, true_cfg_scale,
+                guidance_method, use_pid, pid_target, width, height, seed,
+                loras_json, load_ms, sample_ms, decode_ms, total_ms,
+                peak_memory_bytes, peak_memory_pct, peak_gpu_load_pct, backend,
+                updated_at
+            ) values (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
+            )
+            on conflict(job_id) do update set
+                model = coalesce(excluded.model, generation_metrics.model),
+                quant_label = coalesce(excluded.quant_label, generation_metrics.quant_label),
+                quant_bits = coalesce(excluded.quant_bits, generation_metrics.quant_bits),
+                sampler = coalesce(excluded.sampler, generation_metrics.sampler),
+                scheduler = coalesce(excluded.scheduler, generation_metrics.scheduler),
+                scheduler_shift = coalesce(excluded.scheduler_shift, generation_metrics.scheduler_shift),
+                steps = coalesce(excluded.steps, generation_metrics.steps),
+                guidance_scale = coalesce(excluded.guidance_scale, generation_metrics.guidance_scale),
+                true_cfg_scale = coalesce(excluded.true_cfg_scale, generation_metrics.true_cfg_scale),
+                guidance_method = coalesce(excluded.guidance_method, generation_metrics.guidance_method),
+                use_pid = coalesce(excluded.use_pid, generation_metrics.use_pid),
+                pid_target = coalesce(excluded.pid_target, generation_metrics.pid_target),
+                width = coalesce(excluded.width, generation_metrics.width),
+                height = coalesce(excluded.height, generation_metrics.height),
+                seed = coalesce(excluded.seed, generation_metrics.seed),
+                loras_json = coalesce(excluded.loras_json, generation_metrics.loras_json),
+                load_ms = coalesce(excluded.load_ms, generation_metrics.load_ms),
+                sample_ms = coalesce(excluded.sample_ms, generation_metrics.sample_ms),
+                decode_ms = coalesce(excluded.decode_ms, generation_metrics.decode_ms),
+                total_ms = coalesce(excluded.total_ms, generation_metrics.total_ms),
+                peak_memory_bytes = coalesce(excluded.peak_memory_bytes, generation_metrics.peak_memory_bytes),
+                peak_memory_pct = coalesce(excluded.peak_memory_pct, generation_metrics.peak_memory_pct),
+                peak_gpu_load_pct = coalesce(excluded.peak_gpu_load_pct, generation_metrics.peak_gpu_load_pct),
+                backend = coalesce(excluded.backend, generation_metrics.backend),
+                updated_at = excluded.updated_at
+            ",
+            params![
+                job_id,
+                metrics.model,
+                metrics.quant_label,
+                metrics.quant_bits,
+                metrics.sampler,
+                metrics.scheduler,
+                metrics.scheduler_shift.as_ref().and_then(Number::as_f64),
+                metrics.steps,
+                metrics.guidance_scale.as_ref().and_then(Number::as_f64),
+                metrics.true_cfg_scale.as_ref().and_then(Number::as_f64),
+                metrics.guidance_method,
+                metrics.use_pid,
+                metrics.pid_target,
+                metrics.width,
+                metrics.height,
+                metrics.seed,
+                loras_json,
+                metrics.load_ms,
+                metrics.sample_ms,
+                metrics.decode_ms,
+                metrics.total_ms,
+                metrics.peak_memory_bytes,
+                metrics.peak_memory_pct.as_ref().and_then(Number::as_f64),
+                metrics.peak_gpu_load_pct.as_ref().and_then(Number::as_f64),
+                metrics.backend,
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Read the structured metrics for a single job (epic 10402). Returns None
+    /// when the job predates metrics capture or never recorded any (e.g. an old
+    /// row). Read-only — no write mutex (WAL reader isolation, see `list_jobs`).
+    pub fn get_generation_metrics(
+        &self,
+        job_id: &str,
+    ) -> JobsStoreResult<Option<GenerationMetrics>> {
+        let connection = self.connect()?;
+        let metrics = connection
+            .query_row(
+                "select * from generation_metrics where job_id = ?1",
+                params![job_id],
+                row_to_generation_metrics,
+            )
+            .optional()?;
+        Ok(metrics)
+    }
+
+    /// Aggregate metrics feed for the comparison charts (epic 10402): every
+    /// metrics row joined to its job's identity, newest first, optionally
+    /// filtered by job type / model / quant. Read-only — no write mutex.
+    pub fn list_generation_metrics(
+        &self,
+        job_type: Option<&str>,
+        model: Option<&str>,
+        quant_label: Option<&str>,
+        limit: u32,
+    ) -> JobsStoreResult<Vec<GenerationMetricsRow>> {
+        let connection = self.connect()?;
+        let limit = limit.clamp(1, 5000);
+        let mut conditions: Vec<&str> = Vec::new();
+        let mut bindings: Vec<Box<dyn ToSql>> = Vec::new();
+        if let Some(job_type) = job_type {
+            conditions.push("j.type = ?");
+            bindings.push(Box::new(job_type.to_owned()));
+        }
+        if let Some(model) = model {
+            conditions.push("m.model = ?");
+            bindings.push(Box::new(model.to_owned()));
+        }
+        if let Some(quant_label) = quant_label {
+            conditions.push("m.quant_label = ?");
+            bindings.push(Box::new(quant_label.to_owned()));
+        }
+        let mut sql = String::from(
+            "select m.*, j.type as j_type, j.status as j_status, \
+             j.project_id as j_project_id, j.created_at as j_created_at \
+             from generation_metrics m join jobs j on j.id = m.job_id",
+        );
+        if !conditions.is_empty() {
+            sql.push_str(" where ");
+            sql.push_str(&conditions.join(" and "));
+        }
+        sql.push_str(" order by j.created_at desc limit ?");
+        bindings.push(Box::new(limit));
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(
+            params_from_iter(bindings.iter()),
+            row_to_generation_metrics_row,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     pub fn cancel_job(&self, job_id: &str) -> JobsStoreResult<JobSnapshot> {
@@ -1894,6 +2090,59 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
         backend,
         title,
         extra: Default::default(),
+    })
+}
+
+/// Map a `generation_metrics` row to the contract struct (epic 10402). Reads
+/// every metrics column by name, so it works both for a bare `select *` and for
+/// the joined aggregate query (whose extra job-identity columns are aliased
+/// `j_*` and ignored here).
+fn row_to_generation_metrics(row: &Row<'_>) -> rusqlite::Result<GenerationMetrics> {
+    let scheduler_shift: Option<f64> = row.get("scheduler_shift")?;
+    let guidance_scale: Option<f64> = row.get("guidance_scale")?;
+    let true_cfg_scale: Option<f64> = row.get("true_cfg_scale")?;
+    let peak_memory_pct: Option<f64> = row.get("peak_memory_pct")?;
+    let peak_gpu_load_pct: Option<f64> = row.get("peak_gpu_load_pct")?;
+    let loras: Option<String> = row.get("loras_json")?;
+    Ok(GenerationMetrics {
+        model: row.get("model")?,
+        quant_label: row.get("quant_label")?,
+        quant_bits: row.get("quant_bits")?,
+        sampler: row.get("sampler")?,
+        scheduler: row.get("scheduler")?,
+        scheduler_shift: scheduler_shift.map(number_from_f64),
+        steps: row.get("steps")?,
+        guidance_scale: guidance_scale.map(number_from_f64),
+        true_cfg_scale: true_cfg_scale.map(number_from_f64),
+        guidance_method: row.get("guidance_method")?,
+        use_pid: row.get("use_pid")?,
+        pid_target: row.get("pid_target")?,
+        width: row.get("width")?,
+        height: row.get("height")?,
+        seed: row.get("seed")?,
+        loras: loras.and_then(|value| serde_json::from_str(&value).ok()),
+        load_ms: row.get("load_ms")?,
+        sample_ms: row.get("sample_ms")?,
+        decode_ms: row.get("decode_ms")?,
+        total_ms: row.get("total_ms")?,
+        peak_memory_bytes: row.get("peak_memory_bytes")?,
+        peak_memory_pct: peak_memory_pct.map(number_from_f64),
+        peak_gpu_load_pct: peak_gpu_load_pct.map(number_from_f64),
+        backend: row.get("backend")?,
+        extra: Default::default(),
+    })
+}
+
+/// Map a joined aggregate row (metrics + `j_*`-aliased job identity) to a
+/// `GenerationMetricsRow` for the `GET /api/v1/metrics` feed (epic 10402).
+fn row_to_generation_metrics_row(row: &Row<'_>) -> rusqlite::Result<GenerationMetricsRow> {
+    Ok(GenerationMetricsRow {
+        job_id: row.get("job_id")?,
+        job_type: parse_string_enum(&row.get::<_, String>("j_type")?),
+        status: parse_string_enum(&row.get::<_, String>("j_status")?),
+        project_id: row.get("j_project_id")?,
+        created_at: row.get("j_created_at")?,
+        metrics: row_to_generation_metrics(row)?,
     })
 }
 

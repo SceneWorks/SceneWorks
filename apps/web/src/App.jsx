@@ -21,6 +21,7 @@ import { QueueScreen } from "./screens/QueueScreen.jsx";
 import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
 import { SettingsScreen } from "./screens/SettingsScreen.jsx";
 import { LogsScreen } from "./screens/LogsScreen.jsx";
+import { StatsScreen } from "./screens/StatsScreen.jsx";
 import { LicensesScreen } from "./screens/LicensesScreen.jsx";
 import { SetupWizard } from "./screens/SetupWizard.jsx";
 import { editModelForAsset } from "./presetUtils.js";
@@ -106,6 +107,7 @@ const navSections = [
     label: "System",
     items: [
       { id: "Queue", icon: Icon.Queue },
+      { id: "Stats", icon: Icon.Chart },
       { id: "Logs", icon: Icon.Logs },
       { id: "Settings", icon: Icon.Sliders },
       { id: "Licenses", icon: Icon.Info },
@@ -131,6 +133,7 @@ const viewTitles = {
   Presets: { title: "Presets", blurb: "Save and share recurring generation setups." },
   Models: { title: "Models", blurb: "Download, import and manage local checkpoints." },
   Queue: { title: "Queue", blurb: "All running and recent jobs across workers." },
+  Stats: { title: "Generation Stats", blurb: "Compare runs by model, quant, settings, timing and memory." },
   Logs: { title: "Logs", blurb: "This session's activity — routing decisions, worker phases and errors." },
   Settings: { title: "Settings", blurb: "Paths, service tokens, and detected GPU." },
   Licenses: {
@@ -2312,6 +2315,7 @@ export function App() {
           <CharacterStudio key={activeProject?.id ?? "default"} />
         ) : null}
         {activeView === "Settings" ? <SettingsScreen /> : null}
+        {activeView === "Stats" ? <StatsScreen /> : null}
         {activeView === "Logs" ? <LogsScreen /> : null}
         {activeView === "Licenses" ? <LicensesScreen /> : null}
           </>

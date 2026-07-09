@@ -22,6 +22,56 @@ pub(crate) async fn list_jobs(
     ))
 }
 
+/// Worker → API write of a job's structured generation metrics (epic 10402).
+/// Posted once on completion; upserts (merges) into the `generation_metrics`
+/// table and echoes the stored block back.
+pub(crate) async fn upsert_job_metrics(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+    ApiJson(payload): ApiJson<GenerationMetrics>,
+) -> Result<Json<GenerationMetrics>, ApiError> {
+    let metrics = store_call(state, move |store, _timeout| {
+        store.upsert_generation_metrics(&job_id, &payload)?;
+        Ok::<GenerationMetrics, JobsStoreError>(payload)
+    })
+    .await?;
+    Ok(Json(metrics))
+}
+
+/// Read a single job's structured metrics (epic 10402). Returns `null` (200)
+/// when the job never recorded metrics — friendlier for the detail view than a
+/// 404 for the common "older job" case.
+pub(crate) async fn get_job_metrics(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<Option<GenerationMetrics>>, ApiError> {
+    Ok(Json(
+        store_call(state, move |store, _timeout| {
+            store.get_generation_metrics(&job_id)
+        })
+        .await?,
+    ))
+}
+
+/// Aggregate metrics feed powering the Generation Stats comparison charts
+/// (epic 10402). Newest first, filterable by job type / model / quant.
+pub(crate) async fn list_metrics(
+    State(state): State<AppState>,
+    Query(query): Query<MetricsQuery>,
+) -> Result<Json<Vec<GenerationMetricsRow>>, ApiError> {
+    Ok(Json(
+        store_call(state, move |store, _timeout| {
+            store.list_generation_metrics(
+                query.job_type.as_deref(),
+                query.model.as_deref(),
+                query.quant.as_deref(),
+                query.limit.unwrap_or(2000),
+            )
+        })
+        .await?,
+    ))
+}
+
 pub(crate) async fn create_job(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<JobCreateRequest>,
