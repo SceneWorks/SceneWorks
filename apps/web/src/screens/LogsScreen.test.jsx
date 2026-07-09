@@ -94,6 +94,20 @@ describe("LogsScreen", () => {
     expect(container.textContent).toContain("image_inference_failed");
   });
 
+  it("renders timestamps in the local timezone, not the raw UTC substring", async () => {
+    await render();
+    // Row 0's timestamp is 2026-06-07T01:02:00Z (UTC). The time column must be
+    // the viewer's local wall-clock time, parsed from the ISO string — not the
+    // raw "01:02:00" substring lifted out of the UTC value.
+    const expected = new Intl.DateTimeFormat(undefined, {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).format(new Date("2026-06-07T01:02:00Z"));
+    expect(container.querySelector(".logs-time").textContent).toBe(expected);
+  });
+
   it("highlights routing-decision events", async () => {
     await render();
     const highlighted = container.querySelector(".logs-row.highlighted");

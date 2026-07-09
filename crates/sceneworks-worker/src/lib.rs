@@ -91,6 +91,7 @@ use api_client::*;
 mod engines;
 mod gpu;
 use gpu::*;
+mod job_metrics;
 mod supervisor;
 use supervisor::*;
 mod model_jobs;
@@ -974,6 +975,12 @@ async fn run_utility_job(
     // (via `shutdown_requested()`), stopping a gen/prompt mid-step on quit instead of waiting out the
     // grace window — without threading the flag through every stream-handler signature. The placeholder
     // path keeps its explicit `&shutdown` (it's the always-compiled reference implementation).
+    // Per-run metrics probe (epic 10402, sc-10404): reset the MLX peak-memory
+    // window and start the background GPU-load/memory sampler before the job
+    // runs, so peak memory + peak load cover the whole job. Consumed after the
+    // handler returns to POST the hardware/timing block; settings + phase
+    // timings are posted separately by the handlers and coalesce-merge server-side.
+    let metrics_probe = job_metrics::JobMetricsProbe::start(&settings.gpu_id);
     let result = with_shutdown_flag(shutdown.clone(), async {
         match job.job_type {
             JobType::Placeholder => run_placeholder_job(api, settings, &job, &shutdown)
@@ -1210,6 +1217,11 @@ async fn run_utility_job(
             }
         }
     }
+    // Capture + POST the run's hardware metrics for every job type — including
+    // failed/canceled runs, which still carry a meaningful peak + wall-clock
+    // (epic 10402, sc-10404). Best-effort: never fails the job.
+    let metrics = metrics_probe.finish().await;
+    job_metrics::post_generation_metrics(api, &job.id, &metrics).await;
     let _ = heartbeat(api, settings, WorkerStatus::Idle, None).await;
 }
 

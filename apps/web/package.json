@@ -14,7 +14,8 @@
     "konva": "^9.3.22",
     "react": "18.3.1",
     "react-dom": "18.3.1",
-    "react-konva": "^18.2.16"
+    "react-konva": "^18.2.16",
+    "recharts": "^2.15.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

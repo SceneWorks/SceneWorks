@@ -20,10 +20,11 @@ use axum::{Json, Router};
 use futures_util::future::join_all;
 use parking_lot::Mutex;
 use sceneworks_core::contracts::{
-    ClaimRequest, ClaimResponse, ContractNumber, DuplicateJobRequest, ImageUpscaleRequest,
-    JobCreateRequest, JobSnapshot, JobStatus, JobType, JsonObject, ProgressRequest, QueueSummary,
-    RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
-    WorkerSnapshot, WorkerStatus, WorkerTerminationRequest,
+    ClaimRequest, ClaimResponse, ContractNumber, DuplicateJobRequest, GenerationMetrics,
+    GenerationMetricsRow, ImageUpscaleRequest, JobCreateRequest, JobSnapshot, JobStatus, JobType,
+    JsonObject, ProgressRequest, QueueSummary, RetryJobRequest, WorkerCapability,
+    WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot, WorkerStatus,
+    WorkerTerminationRequest,
 };
 use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};
 use sceneworks_core::jobs_store::{
@@ -123,8 +124,8 @@ use generation::{validate_interleave_job, validate_vqa_job};
 mod ideogram;
 mod jobs;
 use jobs::{
-    cancel_job, claim_job, create_job, duplicate_job, get_job, list_jobs, retry_job,
-    update_job_progress,
+    cancel_job, claim_job, create_job, duplicate_job, get_job, get_job_metrics, list_jobs,
+    list_metrics, retry_job, update_job_progress, upsert_job_metrics,
 };
 mod workers;
 use workers::{
@@ -146,8 +147,8 @@ use dto::{
     DatasetImageFixBody, DatasetRepointBody, DatasetUpscaleJobRequest, DirectoriesResponse,
     EventsQuery, FaceLikenessCompareRequest, FrameExtractRequest, HealthResponse,
     HostCapabilitiesResponse, ImageJobRequest, InterleaveJobRequest, JobsQuery,
-    LoraCatalogItemQuery, LoraImportRequest, LoraUpdateRequest, LorasQuery, ModelConvertRequest,
-    ModelDownloadRequest, ModelImportRequest, PersonDetectionJobRequest,
+    LoraCatalogItemQuery, LoraImportRequest, LoraUpdateRequest, LorasQuery, MetricsQuery,
+    ModelConvertRequest, ModelDownloadRequest, ModelImportRequest, PersonDetectionJobRequest,
     PersonTrackCorrectionsRequest, PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery,
     PromptRefineRequest, QualityAckBody, ReadinessQuery, RecipePresetsQuery, TimelineCreateRequest,
     TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest, VerifyResponse,
@@ -1190,6 +1191,14 @@ pub(crate) fn create_app_with_state(
         .route("/api/v1/jobs/:job_id/retry", post(retry_job))
         .route("/api/v1/jobs/:job_id/duplicate", post(duplicate_job))
         .route("/api/v1/jobs/:job_id/progress", post(update_job_progress))
+        // Per-run generation metrics (epic 10402): worker POSTs on completion;
+        // GET returns a single job's block; the aggregate feed powers the
+        // Generation Stats comparison charts.
+        .route(
+            "/api/v1/jobs/:job_id/metrics",
+            get(get_job_metrics).post(upsert_job_metrics),
+        )
+        .route("/api/v1/metrics", get(list_metrics))
         .route("/api/v1/queue", get(queue_summary))
         .route("/api/v1/logs", get(list_logs))
         .route("/api/v1/workers", get(list_workers))
