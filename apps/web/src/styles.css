@@ -3477,6 +3477,61 @@ label {
 /* Dataset header fields aligned to the 4 health columns (sc-2025 polish):
    row 1 = name | version | Add images, row 2 = prefix | Apply names | Caption all;
    the health grid below (row 3) shares the same 4-column geometry. */
+/* Dataset editor controls (sc-10448) — replaces the crammed equal-weight
+   .training-dataset-fields grid: a primary row (the two inputs + the one filled
+   Save CTA) over a de-emphasized utility row (add / rename / caption + a live
+   count), inside a work-panel. */
+.dataset-primary-row {
+  display: flex;
+  gap: 10px;
+  align-items: end;
+  flex-wrap: wrap;
+}
+
+.dataset-field {
+  display: grid;
+  gap: 6px;
+  flex: 1 1 220px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.dataset-version {
+  align-self: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.dataset-save {
+  flex: 0 0 auto;
+  min-height: var(--control-h);
+}
+
+.dataset-utility-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.dataset-count {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.dataset-utility-actions {
+  display: inline-flex;
+  gap: 8px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
 .training-dataset-fields {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
