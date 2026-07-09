@@ -34,6 +34,7 @@ import { useModelsAndLoras } from "./hooks/useModelsAndLoras.js";
 import { usePersonTracks } from "./hooks/usePersonTracks.js";
 import { useTimelines } from "./hooks/useTimelines.js";
 import { useAccessGate } from "./hooks/useAccessGate.js";
+import { useDropNavigationGuard } from "./hooks/useDropNavigationGuard.js";
 import { useJobEvents } from "./hooks/useJobEvents.js";
 import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
@@ -434,6 +435,9 @@ export function App() {
     saveToken,
     lockRemote,
   } = useAccessGate({ setError, pushNotice, dismissNoticeKind });
+  // Stop a file dropped outside a real dropzone from navigating the webview to
+  // the image and replacing the whole UI (issue #1308).
+  useDropNavigationGuard();
   const [theme, setTheme] = useState(readStoredTheme);
   // Apply a theme and persist it through the API. localStorage gives an instant
   // initial paint, but on the desktop shell the UI runs at the API's per-launch
