@@ -1,19 +1,35 @@
 name: Desktop (Windows)
 
-# Builds + packages the Windows desktop installers (NSIS + MSI) on a real runner.
-# This is the Windows build coverage for epic 1330 Phase 3 (sc-1356): the Linux
-# `parity` job (check.yml) excludes the Tauri desktop crate, so this job is the only
-# place the desktop bundle is compiled + packaged in CI. Path-filtered so it only
-# runs when desktop-relevant code changes; heavy (candle CUDA release build).
+# Windows desktop CI coverage for epic 1330 Phase 3 (sc-1356): the Linux `parity`
+# job (check.yml) excludes the Tauri desktop crate, so this is the only lane that
+# exercises `sceneworks-desktop` (its build.rs resource validation + Windows cfg
+# code). Path-filtered to desktop-relevant changes.
+#
+# Two cost tiers, split by trigger (sc-10420-adjacent CI-cost work) via a
+# per-step `if: github.event_name != 'pull_request'`:
+#   pull_request  — CHEAP (~5 min): desktop crate test + clippy + the gen-core skew
+#                   guard only. No CUDA Toolkit, no candle build, no packaging — the
+#                   `sceneworks-desktop` crate is the Tauri host shell and links
+#                   neither candle nor CUDA, so nvcc is not needed to check it. This
+#                   is what keeps every PR off the ~20–50 min candle/CUDA build.
+#   push:main /   — FULL (~20–50 min): also builds the candle (CUDA) sidecar and
+#   dispatch        packages the NSIS + MSI installers as an UNSIGNED smoke, so a
+#                   packaging break (datablock limit, Tauri bundling) surfaces the
+#                   moment it lands on main — before a release tag, not during one.
+#
+# The SIGNED, SHIPPED installers are built by release.yml's `windows` job on `v*`
+# tags (identical build steps — keep the two in sync). The candle SIDECAR compile
+# is additionally guarded on every PR, cheaply, on the self-hosted windows-candle.yml
+# lane (`cargo check -p sceneworks-rust-api --features embed-web,backend-candle`),
+# since that box has CUDA + a warm target dir.
 #
 # The desktop is candle (CUDA) by default off-Mac (sc-5559/sc-5563): the Python
 # torch worker is retired, so a non-candle Windows build has no inference backend
-# at all — a useless shell. So this lane builds the REAL candle installers (the
-# shipped artifacts), which is why it needs the CUDA Toolkit + MSVC toolset below
-# (the candle SIDECAR compile still needs nvcc). The ~2.7 GB CUDA/cuDNN/onnxruntime
-# redist is NOT bundled into the installer anymore — it exceeded NSIS's ~2 GB
-# datablock limit — so the app downloads it on first run (cuda_provision.rs); the
-# installers are small. (Folds in the former desktop-candle-windows.yml lane.)
+# at all — a useless shell. The full build needs the CUDA Toolkit + MSVC toolset
+# (the candle SIDECAR compile needs nvcc). The ~2.7 GB CUDA/cuDNN/onnxruntime redist
+# is NOT bundled into the installer — it exceeded NSIS's ~2 GB datablock limit — so
+# the app downloads it on first run (cuda_provision.rs); the installers are small.
+# (Folds in the former desktop-candle-windows.yml lane.)
 
 on:
   pull_request:
@@ -63,14 +79,17 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
-      # Put the VS2022 MSVC toolchain (cl.exe) on PATH so nvcc finds the host
-      # compiler when candle-kernels' build script compiles the CUDA kernels.
+      # Put the VS2022 MSVC toolchain (cl.exe) on PATH. On the full build it lets
+      # nvcc find the host compiler when candle-kernels' build script compiles the
+      # CUDA kernels; kept unconditional (incl. PRs) so the desktop crate's cargo
+      # test/clippy get a consistent MSVC env too. Cheap (~9s).
       - name: Set up MSVC developer environment
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       # Install the CUDA 12.9 Toolkit (nvcc + cudart/cublas/curand/nvrtc dev libs)
       # the candle `cuda` feature links against. Sets CUDA_PATH for the build +
       # the redist staging in build-sidecar.mjs.
       - name: Install CUDA Toolkit 12.9
+        if: ${{ github.event_name != 'pull_request' }} # full candle build only; PRs skip the ~7 min install
         # v0.2.35: the version catalog must contain CUDA 12.9.1 — the older v0.2.21
         # pin tops out at 12.8.0 (network method still validates against the map), so
         # `cuda: "12.9.1"` failed with "Version not available". (Kept in lockstep with
@@ -90,9 +109,14 @@ jobs:
           bash scripts/check-gen-core-skew.sh --self-test
           bash scripts/check-gen-core-skew.sh sceneworks-worker --features backend-candle
           bash scripts/check-gen-core-skew.sh sceneworks-rust-api --features embed-web,backend-candle
+      # Only the packaged build needs the web embed + the @tauri-apps/cli. The PR
+      # path runs neither `tauri build` nor a web build, and stage-test-sidecars.mjs
+      # uses node built-ins only, so skip both installs on PRs.
       - name: Install web dependencies
+        if: ${{ github.event_name != 'pull_request' }}
         run: npm ci --prefix apps/web
       - name: Install desktop dependencies
+        if: ${{ github.event_name != 'pull_request' }}
         run: npm ci --prefix apps/desktop
       # Placeholder sidecar + resource dirs so the Tauri build-script resource
       # validation passes for the desktop crate test/lint below (the real ones are
@@ -114,8 +138,10 @@ jobs:
       # --bundles nsis,msi builds BOTH the .exe (NSIS) and .msi (WiX) installers —
       # the user ships the MSI. Output lands in the workspace target dir.
       - name: Build Windows candle installers (NSIS + MSI)
+        if: ${{ github.event_name != 'pull_request' }} # full candle/CUDA build — push:main + dispatch only, never PRs
         run: npm --prefix apps/desktop run build -- --bundles nsis,msi
       - name: Upload installer artifacts
+        if: ${{ github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sceneworks-windows-installers
