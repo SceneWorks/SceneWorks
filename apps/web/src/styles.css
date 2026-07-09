@@ -70,6 +70,7 @@
   --pad-tile: 14px;
   --pad-panel: 20px;
   --row-h: 40px;
+  --control-h: 38px;
 
   /* Motion */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
@@ -225,6 +226,7 @@ textarea,
 select {
   width: 100%;
   min-width: 0;
+  box-sizing: border-box;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
@@ -245,6 +247,40 @@ select:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--shadow-glow);
+}
+
+/* ---------- One control height (Page-Frame standard, sc-10435) ----------
+   A native <select> sizes itself from OS font + chrome, so it never matches an
+   <input> even with identical padding. Lock text-like inputs + selects to one
+   baseline (--control-h) and strip the OS select chrome, supplying our own
+   caret. Scoped to text-like types on purpose — checkbox / radio / range /
+   color / file keep their own sizing. Multiline textarea opts out (it keeps the
+   base padding + its own min-height and is deliberately absent below). */
+input[type="text"],
+input[type="search"],
+input[type="number"],
+input[type="password"],
+input[type="email"],
+input[type="tel"],
+input[type="url"],
+input:not([type]),
+select {
+  height: var(--control-h);
+  padding: 0 12px;
+  font: 500 13px/1 var(--font-ui);
+}
+
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='12'%20height='12'%20viewBox='0%200%2012%2012'%20fill='none'%20stroke='%236b7280'%20stroke-width='1.5'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M3%204.5%206%207.5%209%204.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 11px center;
+}
+
+[data-theme="dark"] select {
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='12'%20height='12'%20viewBox='0%200%2012%2012'%20fill='none'%20stroke='%238b95a1'%20stroke-width='1.5'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M3%204.5%206%207.5%209%204.5'/%3E%3C/svg%3E");
 }
 
 button:focus-visible {
