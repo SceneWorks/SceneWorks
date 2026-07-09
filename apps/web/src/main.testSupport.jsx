@@ -294,7 +294,6 @@ export const zImageTrainingTarget = {
   limits: {
     resolutions: [512, 768, 1024],
     optimizers: ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-    qualityPresets: ["speed", "balanced", "quality"],
     outputScopes: ["project", "global"],
   },
   ui: { label: "Z-Image-Turbo LoRA" },

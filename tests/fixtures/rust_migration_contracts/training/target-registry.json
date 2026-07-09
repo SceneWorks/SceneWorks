@@ -69,11 +69,6 @@
           "project",
           "global"
         ],
-        "qualityPresets": [
-          "speed",
-          "balanced",
-          "quality"
-        ],
         "rank": [
           4,
           128
@@ -169,11 +164,6 @@
           "project",
           "global"
         ],
-        "qualityPresets": [
-          "speed",
-          "balanced",
-          "quality"
-        ],
         "rank": [
           4,
           128
@@ -267,11 +257,6 @@
         "outputScopes": [
           "project",
           "global"
-        ],
-        "qualityPresets": [
-          "speed",
-          "balanced",
-          "quality"
         ],
         "rank": [
           4,
@@ -370,11 +355,6 @@
           "project",
           "global"
         ],
-        "qualityPresets": [
-          "speed",
-          "balanced",
-          "quality"
-        ],
         "rank": [
           4,
           128
@@ -471,11 +451,6 @@
         "outputScopes": [
           "project",
           "global"
-        ],
-        "qualityPresets": [
-          "speed",
-          "balanced",
-          "quality"
         ],
         "rank": [
           4,
@@ -579,11 +554,6 @@
         "outputScopes": [
           "project",
           "global"
-        ],
-        "qualityPresets": [
-          "speed",
-          "balanced",
-          "quality"
         ],
         "rank": [
           4,
@@ -691,11 +661,6 @@
           "project",
           "global"
         ],
-        "qualityPresets": [
-          "speed",
-          "balanced",
-          "quality"
-        ],
         "rank": [
           4,
           128
@@ -783,11 +748,6 @@
         "outputScopes": [
           "project",
           "global"
-        ],
-        "qualityPresets": [
-          "speed",
-          "balanced",
-          "quality"
         ],
         "rank": [
           4,
@@ -889,11 +849,6 @@
           "project",
           "global"
         ],
-        "qualityPresets": [
-          "speed",
-          "balanced",
-          "quality"
-        ],
         "rank": [
           4,
           128
@@ -989,11 +944,6 @@
           "project",
           "global"
         ],
-        "qualityPresets": [
-          "speed",
-          "balanced",
-          "quality"
-        ],
         "rank": [
           4,
           128
@@ -1088,11 +1038,6 @@
         "outputScopes": [
           "project",
           "global"
-        ],
-        "qualityPresets": [
-          "speed",
-          "balanced",
-          "quality"
         ],
         "rank": [
           4,

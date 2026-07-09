@@ -36,6 +36,14 @@ export const networkTypeLabels = {
   lora: "LoRA",
   lokr: "LoKr (LyCORIS Kronecker)",
 };
+// The quality vocabulary the built-in preset registry actually emits. Quality is an
+// attribute of a preset rather than a standalone hyperparameter — each tier is a
+// sibling preset with its own rank/alpha/LR/steps/resolution (sc-10483).
+export const qualityPresetLabels = {
+  balanced: "Balanced",
+  conservative: "Conservative",
+  low_vram: "Low VRAM",
+};
 // Versions of the ostris de-distill training adapter (Z-Image-Turbo only). The
 // worker maps these to the matching repo file; legacy "v2-default" normalizes to v2.
 export const trainingAdapterVersionOptions = ["v1", "v2"];
@@ -47,7 +55,6 @@ export const configFieldLabels = {
   outputName: "LoRA name",
   triggerWord: "Trigger phrase",
   outputScope: "Output scope",
-  qualityPreset: "Quality",
   requestedGpu: "Requested GPU",
   rank: "Rank",
   alpha: "Alpha",
@@ -97,9 +104,40 @@ export function optionLabel(value) {
     .join(" ");
 }
 
+export function qualityPresetLabel(value) {
+  return qualityPresetLabels[value] ?? optionLabel(value);
+}
+
 function presetSortValue(preset) {
   const order = Number(preset?.ui?.order);
   return Number.isFinite(order) ? order : 999;
+}
+
+// Two presets belong to the same group when they differ only by quality tier. Preset
+// ids spell this out as `<target>.<recipe>.<optimizer>.<quality>`, but key off the
+// fields rather than the id so a renamed id can't silently regroup the registry.
+function presetGroupKey(preset) {
+  const recipe = (preset?.recommendedFor ?? []).join("+");
+  return `${preset?.targetId ?? ""}|${recipe}|${preset?.optimizer ?? ""}`;
+}
+
+// The quality tiers reachable from `preset`, in preset display order. Most groups in
+// the built-in registry are single-tier; only a handful offer a real choice, so
+// callers should treat a length below 2 as "nothing to pick" (sc-10483).
+export function qualityTiersForPreset(presets, preset) {
+  if (!preset) {
+    return [];
+  }
+  const key = presetGroupKey(preset);
+  return (presets ?? [])
+    .filter((item) => presetGroupKey(item) === key)
+    .slice()
+    .sort((left, right) => presetSortValue(left) - presetSortValue(right));
+}
+
+// The sibling preset carrying `tier`, or null when the group doesn't offer it.
+export function presetForQualityTier(presets, preset, tier) {
+  return qualityTiersForPreset(presets, preset).find((item) => item.qualityPreset === tier) ?? null;
 }
 
 export function presetsForTarget(presets, targetId) {
@@ -266,6 +304,8 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     sampleGuidanceScale: numberFromDraft(configDraft.sampleGuidanceScale),
     sampleCount: numberFromDraft(configDraft.sampleCount),
     samplePrompts,
+    // Provenance only: no backend reads `advanced.qualityPreset`. The tier is carried
+    // for real by presetId/presetVersion, which pin the hyperparameters below (sc-10483).
     qualityPreset: configDraft.qualityPreset,
     outputScope: configDraft.outputScope,
     requestedGpu: configDraft.requestedGpu,

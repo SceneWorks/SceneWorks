@@ -1099,7 +1099,6 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             // advertised on the validated image backends (epic 2193).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
         })),
         ui: object(json!({
@@ -1206,7 +1205,6 @@ fn lens_turbo_lora_target() -> TrainingTarget {
             // target modules above.
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
         })),
         ui: object(json!({
@@ -1309,7 +1307,6 @@ fn krea_raw_lora_target() -> TrainingTarget {
             // inference (the `mlx-gen-krea` trainer builds both; the apply path handles both).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
             // No `requiresBackend`/`appleSiliconOnly` markers: a Rust trainer runs on BOTH backends
             // (mlx on Apple Silicon, candle on Windows/Linux NVIDIA — sc-8614), no torch path.
@@ -1399,7 +1396,6 @@ fn sd3_large_lora_target() -> TrainingTarget {
             // (the `mlx-gen-sd3` trainer builds both; `supports_lokr: true`).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"],
             // Native MLX trainer — no torch SD3 path (mirrors the Krea / LTX MLX targets).
             "requiresBackend": "mlx",
@@ -1483,7 +1479,6 @@ fn sd3_medium_lora_target() -> TrainingTarget {
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"],
             "requiresBackend": "mlx",
             "appleSiliconOnly": true
@@ -1564,7 +1559,6 @@ fn ltx_video_lora_target() -> TrainingTarget {
             // scope for epic 2193 v1, so this target stays `lora`-only.
             "networkTypes": ["lora"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"],
             "requiresBackend": "mlx",
             "appleSiliconOnly": true
@@ -1661,7 +1655,6 @@ fn wan_lora_target() -> TrainingTarget {
             // LoKr Wan job falls back to the torch path (sc-2211; native MLX is sc-2213).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
         })),
         ui: object(json!({
@@ -1743,7 +1736,6 @@ fn wan_moe_lora_target(
             // image backends (Z-Image/SDXL) first; video stays `lora`-only.
             "networkTypes": ["lora"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
         })),
         ui: object(json!({
@@ -1845,7 +1837,6 @@ fn sdxl_lora_target() -> TrainingTarget {
             // the validated torch/PEFT image backends (epic 2193).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
         })),
         ui: object(json!({
@@ -1920,7 +1911,6 @@ fn kolors_lora_target() -> TrainingTarget {
             // LoKr save + PEFT-injection inference path (epic 2193, sc-2217).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "qualityPresets": ["speed", "balanced", "quality"],
             "outputScopes": ["project", "global"]
         })),
         ui: object(json!({
