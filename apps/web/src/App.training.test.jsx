@@ -840,11 +840,11 @@ describe("SceneWorks app shell", () => {
     await settle();
     await changeField(field(container, "Trigger phrase"), "miraStyle");
 
+    expect(field(container, "Target").value).toBe("z_image_turbo_lora");
+
     // Everything outside the twelve basic plan fields lives in the Advanced
     // disclosure, which unmounts its body while collapsed (sc-10475).
     await openAdvancedSection(container);
-    expect(field(container, "Target").value).toBe("z_image_turbo_lora");
-    expect(field(container, "Base model").value).toBe("z_image_turbo");
     expect(field(container, "Guidance scale").value).toBe("1");
     expect(field(container, "Rank").value).toBe("16");
     expect(field(container, "Precision").value).toBe("bf16");

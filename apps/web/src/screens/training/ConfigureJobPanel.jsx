@@ -20,8 +20,9 @@ import {
 // All state and handlers are owned by the TrainingStudio screen and passed in.
 //
 // The basic grid is the twelve fields the design calls out, in its order. Its
-// "Base model" slot is our `Target` select — the real base+kernel picker; the
-// read-only base-model echo lives in Advanced with everything else.
+// "Base model" slot is our `Target` select: every target maps 1:1 to a base model
+// and names it in its own label, and the job payload carries `targetId` alone —
+// the server resolves the base from the registry.
 export function ConfigureJobPanel({
   setActiveView,
   configReady,
@@ -209,10 +210,6 @@ export function ConfigureJobPanel({
             open={showAdvancedConfig}
           >
             <div className="training-advanced-grid">
-              <label>
-                Base model
-                <input disabled readOnly value={selectedTarget.baseModel ?? ""} />
-              </label>
               <label>
                 Quality preset
                 <select
