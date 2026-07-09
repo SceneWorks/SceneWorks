@@ -3498,7 +3498,7 @@ export function ImageEditor() {
   );
 
   return (
-    <section className="main-surface image-editor-surface ie-shell" data-ie-layout={layout}>
+    <section className="image-editor-surface ie-shell" data-ie-layout={layout}>
       <header className="ie-topbar">
         <div className="ie-brand">
           <div className="ie-brand-mark">

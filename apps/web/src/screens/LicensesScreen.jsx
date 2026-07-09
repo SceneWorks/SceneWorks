@@ -26,7 +26,7 @@ export function LicensesScreen() {
 
   if (!selected) {
     return (
-      <section className="main-surface licenses-screen">
+      <section className="page-frame licenses-screen">
         <p className="licenses-empty">No bundled third-party components are recorded.</p>
       </section>
     );
@@ -35,7 +35,7 @@ export function LicensesScreen() {
   const activeDoc = selected.documents[docIndex] ?? selected.documents[0];
 
   return (
-    <section className="main-surface licenses-screen">
+    <section className="page-frame licenses-screen">
       {licensesIntro ? <p className="licenses-intro">{licensesIntro}</p> : null}
 
       <div className="licenses-layout">

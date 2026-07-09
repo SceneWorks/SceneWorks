@@ -2310,7 +2310,7 @@ export function App() {
         ) : null}
 
         {activeView === "ImageEditor" ? (
-          <React.Suspense fallback={<section className="main-surface">Loading editor…</section>}>
+          <React.Suspense fallback={<section className="page-frame">Loading editor…</section>}>
             <ImageEditor key={activeProject?.id ?? "default"} />
           </React.Suspense>
         ) : null}

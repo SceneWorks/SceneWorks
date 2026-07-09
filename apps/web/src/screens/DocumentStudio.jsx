@@ -3,6 +3,7 @@ import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { DocumentView } from "../components/DocumentView.jsx";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
+import { WorkPanel } from "../components/WorkPanel.jsx";
 import {
   DEFAULT_INTERLEAVE_RESOLUTION,
   DEFAULT_INTERLEAVE_SYSTEM_MESSAGE,
@@ -141,7 +142,11 @@ export function DocumentStudio() {
       onOpenQueue={onOpenQueue}
       onCancelJob={onCancelJob}
     >
-    <section className="main-surface document-studio">
+    <section className="page-frame document-studio">
+      <WorkPanel
+        eyebrow="Compose a document"
+        hint="Describe the document; the model interleaves prose with the images it generates."
+      >
       <form className="studio-form" onSubmit={submit}>
         <label className="field">
           <span>Prompt</span>
@@ -232,6 +237,7 @@ export function DocumentStudio() {
           {submitting ? "Submitting…" : "Compose document"}
         </button>
       </form>
+      </WorkPanel>
 
       <section className="studio-results">
         {localJobs.length ? (
