@@ -706,13 +706,15 @@ impl ProjectStore {
     /// The web UI degrades each to a placeholder (`assetMedia.jsx`), so the only
     /// symptom is server-log noise — one 404 per missing asset, every startup.
     ///
-    /// Prunes ONLY the index row, never the sidecar. The sidecar is the rebuildable
-    /// source of truth (`reindex` reconstructs the row from it), so preserving it is
-    /// a safety net: if the "missing" media ever returns — e.g. a path that was
-    /// transiently absent — a reindex restores the asset instead of it being lost.
-    /// Media lives beside the sidecar under the project directory, so in the normal
-    /// case a file missing from a readable project is a genuine purge. Idempotent;
-    /// returns the number of rows pruned.
+    /// Deletes the index row and moves the orphaned `*.sceneworks.json` sidecar out
+    /// of the scanned asset tree into the project's `.orphaned-sidecars/` quarantine
+    /// (see [`prune_orphaned_asset_rows`]). Quarantining rather than deleting keeps
+    /// the recipe metadata recoverable, and moving it out of the folders
+    /// `asset_sidecars` scans stops a rebuild (`reindex` / the empty-table
+    /// auto-reindex in `list_assets`) from resurrecting the row. Media lives beside
+    /// the sidecar under the project directory, so in the normal case a file missing
+    /// from a readable project is a genuine purge. Idempotent; returns the number of
+    /// rows pruned.
     pub fn prune_orphaned_assets(&self, project_id: &str) -> ProjectStoreResult<usize> {
         let project_path = self.find_project_path(project_id)?;
         prune_orphaned_asset_rows(&project_path)
@@ -4004,40 +4006,103 @@ fn purge_asset_record(project_path: &Path, asset_id: &str) -> ProjectStoreResult
     Ok(())
 }
 
-/// Delete index rows whose recorded media file is gone from disk. Backs
-/// [`ProjectStore::prune_orphaned_assets`]; see that method for the rationale and
-/// the sidecar-preservation safety net. Takes the per-project file lock so the
-/// read-then-delete is serialized against concurrent indexing/mutation.
+/// Sidecars of pruned "purged-but-referenced" assets are moved here, out of the
+/// folders `asset_sidecars` scans, so a rebuild can't resurrect them. A dotdir so
+/// it reads as internal state, not user content.
+const ORPHANED_SIDECAR_DIR: &str = ".orphaned-sidecars";
+
+/// Delete index rows whose recorded media file is gone from disk, and quarantine
+/// each orphaned sidecar out of the scanned asset tree. Backs
+/// [`ProjectStore::prune_orphaned_assets`]; see that method for the rationale.
+/// Takes the per-project file lock so the read-then-delete is serialized against
+/// concurrent indexing/mutation.
 fn prune_orphaned_asset_rows(project_path: &Path) -> ProjectStoreResult<usize> {
     let _guard = lock_project_files(project_path);
     let mut connection = connect_project_db(project_path)?;
     let transaction = connection.transaction()?;
     apply_project_migrations(&transaction)?;
-    let orphan_ids: Vec<String> = {
-        let mut statement = transaction.prepare("select id, file_path from assets")?;
+    // (asset id, orphaned sidecar to quarantine) for every row whose media is gone.
+    let orphans: Vec<(String, Option<PathBuf>)> = {
+        let mut statement =
+            transaction.prepare("select id, file_path, sidecar_path from assets")?;
         let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
         })?;
-        let mut ids = Vec::new();
+        let mut orphans = Vec::new();
         for row in rows {
-            let (asset_id, file_rel) = row?;
+            let (asset_id, file_rel, sidecar_rel) = row?;
             let Some(file_rel) = file_rel else {
                 continue;
             };
             // Normalize separators before joining — matching `normalize_asset_cached`'s
             // URL builder — so a Windows-authored sidecar (backslash paths) isn't
             // misread as missing on a POSIX host and wrongly pruned.
-            if !project_path.join(file_rel.replace('\\', "/")).exists() {
-                ids.push(asset_id);
+            let file_rel = file_rel.replace('\\', "/");
+            if project_path.join(&file_rel).exists() {
+                continue;
             }
+            // Resolve the orphan's sidecar (the indexed path first, else derived from
+            // the media path — mirroring `list_assets`) so it can be quarantined too.
+            let sidecar = sidecar_rel
+                .map(|rel| project_path.join(rel.replace('\\', "/")))
+                .filter(|path| path.exists())
+                .or_else(|| {
+                    let derived = project_path
+                        .join(&file_rel)
+                        .with_extension("sceneworks.json");
+                    derived.exists().then_some(derived)
+                });
+            orphans.push((asset_id, sidecar));
         }
-        ids
+        orphans
     };
-    for asset_id in &orphan_ids {
+    for (asset_id, _) in &orphans {
         transaction.execute("delete from assets where id = ?1", params![asset_id])?;
     }
     transaction.commit()?;
-    Ok(orphan_ids.len())
+    // The row(s) are gone from the registry; now move each orphaned sidecar OUT of
+    // the scanned asset folders into `.orphaned-sidecars/` (never scanned by
+    // `asset_sidecars`). This declutters the project and closes the resurrection
+    // edge — a fully-orphaned project would otherwise re-add these rows via the
+    // empty-table auto-reindex in `list_assets`. The sidecar is retained (moved, not
+    // deleted) so the recipe metadata stays recoverable. Best-effort: a move failure
+    // just leaves the sidecar in place (the row is already pruned).
+    for (asset_id, sidecar) in &orphans {
+        let Some(sidecar) = sidecar else {
+            continue;
+        };
+        if let Err(error) = quarantine_orphaned_sidecar(project_path, asset_id, sidecar) {
+            tracing::debug!(
+                event = "orphaned_sidecar_quarantine_failed",
+                asset_id = %asset_id,
+                sidecar = %sidecar.display(),
+                error = %error,
+                "could not move orphaned sidecar out of the asset tree; leaving it in place"
+            );
+        }
+    }
+    Ok(orphans.len())
+}
+
+/// Move an orphaned asset's sidecar into `<project>/.orphaned-sidecars/`, keyed by
+/// the (charset-validated) asset id. Retained rather than deleted so the metadata
+/// is recoverable; a same-key file from a prior prune is overwritten.
+fn quarantine_orphaned_sidecar(
+    project_path: &Path,
+    asset_id: &str,
+    sidecar: &Path,
+) -> std::io::Result<()> {
+    let dir = project_path.join(ORPHANED_SIDECAR_DIR);
+    fs::create_dir_all(&dir)?;
+    let dest = dir.join(format!("{asset_id}.sceneworks.json"));
+    if dest.exists() {
+        fs::remove_file(&dest)?;
+    }
+    fs::rename(sidecar, &dest)
 }
 
 fn project_has_sidecars(project_path: &Path) -> bool {
@@ -5431,13 +5496,20 @@ mod tests {
             0
         );
 
-        // The sidecar is preserved as the rebuildable source of truth — the row is
-        // pruned, but the on-disk metadata (and thus a reindex recovery path) remains.
+        // The orphaned sidecar is moved OUT of the scanned asset tree into the
+        // `.orphaned-sidecars/` quarantine (declutter + no resurrection), but retained
+        // there (moved, not deleted) so the recipe metadata stays recoverable.
         assert!(
-            project_path
+            !project_path
                 .join("assets/images/genset/gone.sceneworks.json")
                 .exists(),
-            "pruned asset's sidecar is left on disk"
+            "orphaned sidecar is removed from the scanned asset folder"
+        );
+        assert!(
+            project_path
+                .join(".orphaned-sidecars/gone.sceneworks.json")
+                .exists(),
+            "orphaned sidecar is retained in the quarantine"
         );
     }
 
@@ -5460,6 +5532,36 @@ mod tests {
 
         // A second sweep is a no-op.
         assert_eq!(store.prune_all_orphaned_assets().expect("second sweep"), 0);
+    }
+
+    #[test]
+    fn prune_quarantines_sidecar_so_empty_table_reindex_does_not_resurrect() {
+        // A project whose ONLY asset is orphaned: after pruning, the assets table is
+        // empty, so `list_assets`' auto-reindex (fires only when the table is empty)
+        // would rebuild the row from the sidecar — UNLESS the sidecar has been moved
+        // out of the scanned tree. This is the resurrection edge sc-10467 closes.
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("AllOrphans").expect("project creates");
+        store
+            .persist_generated_asset(&project.id, "job-1", "genset", &orphan_test_fact("gone"))
+            .expect("gone persists");
+
+        assert_eq!(
+            store.prune_orphaned_assets(&project.id).expect("prune"),
+            1,
+            "the sole (media-less) asset is pruned, emptying the table"
+        );
+
+        // The empty table would trigger auto-reindex here; the quarantined sidecar is
+        // no longer scannable, so nothing is rebuilt.
+        let assets = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .expect("list after prune");
+        assert!(
+            assets.is_empty(),
+            "orphan is not resurrected via the empty-table auto-reindex"
+        );
     }
 
     #[test]
