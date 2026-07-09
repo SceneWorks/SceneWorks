@@ -1553,11 +1553,23 @@ fn cuda_preflight() -> Result<(), String> {
 /// (relayed verbatim onto the setup screen), or a fallback if the probe produced none.
 #[cfg(target_os = "macos")]
 async fn metal_preflight(app: &AppHandle) -> Result<(), String> {
-    let output = app
+    let mut command = app
         .shell()
         .sidecar("sceneworks-api")
         .map_err(|error| format!("locate api for GPU check: {error}"))?
-        .env("SCENEWORKS_GPU_CHECK", "1")
+        .env("SCENEWORKS_GPU_CHECK", "1");
+    // The probe's `astype`+`eval` dispatches a real MLX kernel, which loads MLX's
+    // Metal shader library — so it needs the bundled metallib just like the API
+    // sidecar and MLX worker spawns (sc-10349). This runs FIRST on startup, before
+    // spawn_api/gate_window, so on a clean Mac (no ~/.cache/pmetal, no build tree) a
+    // preflight without this env fails with "Failed to load the default metallib.
+    // library not found" and the setup screen relays it — stranding every fresh
+    // install on the first screen (sc-10353). Keeps the probe's spawn context
+    // identical to the worker's, as this fn's own contract states.
+    if let Some(metallib) = resolve_bundled_metallib(app) {
+        command = command.env("PMETAL_METALLIB_PATH", metallib);
+    }
+    let output = command
         .output()
         .await
         .map_err(|error| format!("run GPU check: {error}"))?;
