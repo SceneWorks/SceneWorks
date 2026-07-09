@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AssetMedia, assetCanRenderAsImage, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
+import { WorkPanel } from "../components/WorkPanel.jsx";
 import { formatSeconds } from "../formatting.js";
 import {
   aspectOptions,
@@ -404,27 +405,32 @@ export function EditorScreen() {
 
   if (!activeProject) {
     return (
-      <section className="main-surface">
-        <div className="section-heading">
-          <p className="eyebrow">Video Editor</p>
-          <h2>Create a project</h2>
-        </div>
+      <section className="page-frame">
         <div className="empty-panel">Open a project before assembling a timeline.</div>
       </section>
     );
   }
 
   return (
-    <section className="main-surface editor-surface">
-      <div className="surface-header editor-header hero">
-        <div className="section-heading">
-          <p className="eyebrow">Video Editor</p>
-          <h2>{activeTimeline?.name ?? "Timelines"}</h2>
-          <p className="hero-blurb">
-            Sequence clips on the timeline, scrub through the preview, and export when the cut feels right.
-          </p>
-        </div>
-        <div className="editor-actions">
+    <section className="page-frame editor-surface">
+      <WorkPanel
+        eyebrow={activeTimeline?.name ?? "Timelines"}
+        hint="Sequence clips on the timeline, scrub through the preview, and export when the cut feels right."
+        actions={
+          <>
+            <button disabled={!activeTimeline} onClick={() => saveTimeline(activeTimeline)} type="button">
+              Save
+            </button>
+            <button disabled={!history.length} onClick={undo} type="button">
+              Undo
+            </button>
+            <button disabled={!future.length} onClick={redo} type="button">
+              Redo
+            </button>
+          </>
+        }
+      >
+        <div className="editor-header">
           <select onChange={(event) => setSelectedTimelineId(event.target.value)} value={selectedTimelineId ?? ""}>
             <option value="">Select timeline</option>
             {timelines.map((timeline) => (
@@ -433,35 +439,26 @@ export function EditorScreen() {
               </option>
             ))}
           </select>
-          <button disabled={!activeTimeline} onClick={() => saveTimeline(activeTimeline)} type="button">
-            Save
-          </button>
-          <button disabled={!history.length} onClick={undo} type="button">
-            Undo
-          </button>
-          <button disabled={!future.length} onClick={redo} type="button">
-            Redo
-          </button>
         </div>
-      </div>
 
-      <form className="timeline-create" onSubmit={submitNewTimeline}>
-        <label>
-          Timeline
-          <input onChange={(event) => setNewTimelineName(event.target.value)} value={newTimelineName} />
-        </label>
-        <label>
-          Aspect
-          <select onChange={(event) => setNewAspectRatio(event.target.value)} value={newAspectRatio}>
-            {Object.entries(aspectOptions).map(([value, option]) => (
-              <option key={value} value={value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button type="submit">New Timeline</button>
-      </form>
+        <form className="timeline-create" onSubmit={submitNewTimeline}>
+          <label>
+            Timeline
+            <input onChange={(event) => setNewTimelineName(event.target.value)} value={newTimelineName} />
+          </label>
+          <label>
+            Aspect
+            <select onChange={(event) => setNewAspectRatio(event.target.value)} value={newAspectRatio}>
+              {Object.entries(aspectOptions).map(([value, option]) => (
+                <option key={value} value={value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button type="submit">New Timeline</button>
+        </form>
+      </WorkPanel>
 
       {activeTimeline ? (
         <div className="editor-layout">
