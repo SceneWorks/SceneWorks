@@ -1,6 +1,8 @@
 import React from "react";
 
+import { AdvancedSection } from "../../components/AdvancedSection.jsx";
 import { Icon } from "../../components/Icons.jsx";
+import { WorkPanel } from "../../components/WorkPanel.jsx";
 import { DatasetDoctorReadout } from "./DatasetDoctor.jsx";
 import {
   lossTypeOptions,
@@ -12,12 +14,15 @@ import {
   trainingAdapterVersionLabels,
 } from "../../training/trainingConfig.js";
 
-// Configure-training-job panel (sc-4199): extracted verbatim from TrainingStudio
-// so the target/preset/dataset selectors, the advanced config grid, and the
-// run-mode actions live in their own component. All state and handlers are owned
-// by the TrainingStudio screen and passed in as props — behavior is unchanged.
+// Configure-training-job panel. The Purpose zone of the Training Studio under the
+// page-frame standard (sc-10475): one work-panel holding the twelve basic plan
+// fields, the Advanced disclosure with every remaining knob, and the actions row.
+// All state and handlers are owned by the TrainingStudio screen and passed in.
+//
+// The basic grid is the twelve fields the design calls out, in its order. Its
+// "Base model" slot is our `Target` select — the real base+kernel picker; the
+// read-only base-model echo lives in Advanced with everything else.
 export function ConfigureJobPanel({
-  active,
   setActiveView,
   configReady,
   trainingTargetsError,
@@ -65,21 +70,24 @@ export function ConfigureJobPanel({
   datasetDoctor,
   readinessBlocksTraining = false,
 }) {
+  const resolvedGpu = configDraft.requestedGpu === "auto" || !configDraft.requestedGpu
+    ? "Auto"
+    : `GPU ${configDraft.requestedGpu}`;
   return (
-    <>
-      <div className="training-panel-head">
-        <div>
-          <p className="eyebrow">Configure Job</p>
-          <h3>{active.title}</h3>
-        </div>
-        <div className="training-head-actions">
+    <WorkPanel
+      className="training-config-panel"
+      eyebrow="Configure the run"
+      hint="Pick a captioned dataset from the Data Sets library, choose a target and a preset, then queue the plan."
+      actions={
+        <>
           <button className="secondary-action" onClick={() => setActiveView?.("LibraryDataSets")} type="button">
             <Icon.Library size={14} />
             Data Sets
           </button>
           <span className="training-status-pill">{configReady ? "Ready" : "Needs input"}</span>
-        </div>
-      </div>
+        </>
+      }
+    >
       {trainingTargetsError ? <p className="inline-warning">{trainingTargetsError}</p> : null}
       {trainingPresetsError ? <p className="inline-warning">{trainingPresetsError}</p> : null}
       {configError ? <p className="inline-warning">{configError}</p> : null}
@@ -89,6 +97,17 @@ export function ConfigureJobPanel({
       ) : (
         <div className="training-config-form" aria-label="Training job configuration">
           <div className="training-config-grid">
+            <label>
+              Dataset
+              <select onChange={(event) => openDataset(event.target.value)} value={activeDataset?.id ?? ""}>
+                <option value="">Select a saved dataset</option>
+                {datasets.map((dataset) => (
+                  <option key={dataset.id} value={dataset.id}>
+                    {dataset.name ?? dataset.id}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label>
               Target
               <select onChange={(event) => setSelectedTargetId(event.target.value)} value={selectedTarget.id}>
@@ -115,29 +134,6 @@ export function ConfigureJobPanel({
               </select>
             </label>
             <label>
-              Base model
-              <input disabled readOnly value={selectedTarget.baseModel ?? ""} />
-            </label>
-            <label>
-              Dataset
-              <select onChange={(event) => openDataset(event.target.value)} value={activeDataset?.id ?? ""}>
-                <option value="">Select a saved dataset</option>
-                {datasets.map((dataset) => (
-                  <option key={dataset.id} value={dataset.id}>
-                    {dataset.name ?? dataset.id}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              LoRA name
-              <input onChange={(event) => updateConfigDraft("outputName", event.target.value)} value={configDraft.outputName ?? ""} />
-            </label>
-            <label>
-              Trigger phrase
-              <input onChange={(event) => updateConfigDraft("triggerWord", event.target.value)} value={configDraft.triggerWord ?? ""} />
-            </label>
-            <label>
               Output scope
               <select onChange={(event) => updateConfigDraft("outputScope", event.target.value)} value={configDraft.outputScope ?? ""}>
                 {outputScopes.length ? null : <option value={configDraft.outputScope ?? ""}>{configDraft.outputScope || "Default"}</option>}
@@ -148,22 +144,28 @@ export function ConfigureJobPanel({
                 ))}
               </select>
             </label>
+
             <label>
-              Quality preset
-              <select
-                onChange={(event) => updateConfigDraft("qualityPreset", event.target.value)}
-                value={configDraft.qualityPreset ?? ""}
-              >
-                {visibleQualityPresets.length ? null : (
-                  <option value={configDraft.qualityPreset ?? ""}>{configDraft.qualityPreset || "Default"}</option>
-                )}
-                {visibleQualityPresets.map((preset) => (
-                  <option key={preset} value={preset}>
-                    {preset}
-                  </option>
-                ))}
-              </select>
+              LoRA name
+              <input onChange={(event) => updateConfigDraft("outputName", event.target.value)} value={configDraft.outputName ?? ""} />
             </label>
+            <label>
+              Trigger phrase
+              <input onChange={(event) => updateConfigDraft("triggerWord", event.target.value)} value={configDraft.triggerWord ?? ""} />
+            </label>
+            <label>
+              Steps
+              <input onChange={(event) => updateConfigDraft("steps", event.target.value)} type="number" value={configDraft.steps ?? ""} />
+            </label>
+            <label>
+              Checkpoint cadence
+              <input
+                onChange={(event) => updateConfigDraft("saveEvery", event.target.value)}
+                type="number"
+                value={configDraft.saveEvery ?? ""}
+              />
+            </label>
+
             <label>
               Requested GPU
               <select onChange={(event) => updateConfigDraft("requestedGpu", event.target.value)} value={configDraft.requestedGpu ?? ""}>
@@ -175,11 +177,12 @@ export function ConfigureJobPanel({
               </select>
             </label>
             <label>
-              Sample cadence
+              Sample count
               <input
-                onChange={(event) => updateConfigDraft("sampleEvery", event.target.value)}
+                min="0"
+                onChange={(event) => updateConfigDraft("sampleCount", event.target.value)}
                 type="number"
-                value={configDraft.sampleEvery ?? ""}
+                value={configDraft.sampleCount ?? ""}
               />
             </label>
             <label>
@@ -191,62 +194,41 @@ export function ConfigureJobPanel({
               />
             </label>
             <label>
-              Guidance scale
+              Sample cadence
               <input
-                onChange={(event) => updateConfigDraft("sampleGuidanceScale", event.target.value)}
-                step="0.1"
+                onChange={(event) => updateConfigDraft("sampleEvery", event.target.value)}
                 type="number"
-                value={configDraft.sampleGuidanceScale ?? ""}
-              />
-            </label>
-            <label>
-              Sample count
-              <input
-                min="0"
-                onChange={(event) => updateConfigDraft("sampleCount", event.target.value)}
-                type="number"
-                value={configDraft.sampleCount ?? ""}
+                value={configDraft.sampleEvery ?? ""}
               />
             </label>
           </div>
 
-          <label className="training-sample-prompts">
-            Sample prompts
-            <textarea
-              onChange={(event) => updateConfigDraft("samplePrompts", event.target.value)}
-              placeholder="One prompt per line. Leave blank to use the trigger-phrase defaults."
-              rows={4}
-              value={configDraft.samplePrompts ?? ""}
-            />
-            <span className="training-field-hint">
-              One prompt per line. Renders one preview per prompt, up to the sample count.
-            </span>
-          </label>
-
-          {selectedPreset ? (
-            <div className="training-preset-summary" aria-label="Preset values">
-              <span>{selectedPreset.name}</span>
-              <span>Rank {configDraft.rank || "-"}</span>
-              <span>LR {configDraft.learningRate || "-"}</span>
-              <span>{optimizerLabel(configDraft.optimizer)}</span>
-              <span>{configDraft.steps || "-"} steps</span>
-              <span>{configDraft.resolution || "-"}px</span>
-              {customizedConfigLabels.length ? (
-                <span>Customized: {customizedConfigLabels.join(", ")}</span>
-              ) : null}
-            </div>
-          ) : null}
-
-          <details
-            className="training-advanced-panel"
-            onToggle={(event) => setShowAdvancedConfig(event.currentTarget.open)}
+          <AdvancedSection
+            hint="cleared values → preset default"
+            onToggle={() => setShowAdvancedConfig(!showAdvancedConfig)}
             open={showAdvancedConfig}
           >
-            <summary>
-              <Icon.Sliders size={14} />
-              Advanced
-            </summary>
             <div className="training-advanced-grid">
+              <label>
+                Base model
+                <input disabled readOnly value={selectedTarget.baseModel ?? ""} />
+              </label>
+              <label>
+                Quality preset
+                <select
+                  onChange={(event) => updateConfigDraft("qualityPreset", event.target.value)}
+                  value={configDraft.qualityPreset ?? ""}
+                >
+                  {visibleQualityPresets.length ? null : (
+                    <option value={configDraft.qualityPreset ?? ""}>{configDraft.qualityPreset || "Default"}</option>
+                  )}
+                  {visibleQualityPresets.map((preset) => (
+                    <option key={preset} value={preset}>
+                      {preset}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <label>
                 Rank
                 <input onChange={(event) => updateConfigDraft("rank", event.target.value)} type="number" value={configDraft.rank ?? ""} />
@@ -314,9 +296,24 @@ export function ConfigureJobPanel({
                   value={configDraft.weightDecay ?? ""}
                 />
               </label>
-              <label>
-                Steps
-                <input onChange={(event) => updateConfigDraft("steps", event.target.value)} type="number" value={configDraft.steps ?? ""} />
+              <label title="Learning-rate scheduler (not the timestep/noise scheduler). Constant holds the LR fixed for the whole run; linear and cosine decay it toward zero over the run.">
+                LR scheduler
+                <select onChange={(event) => updateConfigDraft("lrScheduler", event.target.value)} value={configDraft.lrScheduler ?? ""}>
+                  {visibleLrSchedulerOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {optionLabel(option)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label title="Optional linear warmup: number of steps to ramp the LR up from zero before the scheduler body runs. 0 disables warmup.">
+                LR warmup steps
+                <input
+                  min="0"
+                  onChange={(event) => updateConfigDraft("lrWarmupSteps", event.target.value)}
+                  type="number"
+                  value={configDraft.lrWarmupSteps ?? ""}
+                />
               </label>
               <label>
                 Timestep type
@@ -348,25 +345,6 @@ export function ConfigureJobPanel({
                   ))}
                 </select>
               </label>
-              <label title="Learning-rate scheduler (not the timestep/noise scheduler). Constant holds the LR fixed for the whole run; linear and cosine decay it toward zero over the run.">
-                LR scheduler
-                <select onChange={(event) => updateConfigDraft("lrScheduler", event.target.value)} value={configDraft.lrScheduler ?? ""}>
-                  {visibleLrSchedulerOptions.map((option) => (
-                    <option key={option} value={option}>
-                      {optionLabel(option)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label title="Optional linear warmup: number of steps to ramp the LR up from zero before the scheduler body runs. 0 disables warmup.">
-                LR warmup steps
-                <input
-                  min="0"
-                  onChange={(event) => updateConfigDraft("lrWarmupSteps", event.target.value)}
-                  type="number"
-                  value={configDraft.lrWarmupSteps ?? ""}
-                />
-              </label>
               {showTrainingAdapter ? (
                 <label title="ostris de-distill adapter for the step-distilled Z-Image-Turbo base. Fused in for training, removed at inference. v1 is stable; v2 is a heavier, experimental de-distill.">
                   De-distill adapter
@@ -397,6 +375,31 @@ export function ConfigureJobPanel({
                 Precision
                 <input onChange={(event) => updateConfigDraft("precision", event.target.value)} value={configDraft.precision ?? ""} />
               </label>
+              <label>
+                Guidance scale
+                <input
+                  onChange={(event) => updateConfigDraft("sampleGuidanceScale", event.target.value)}
+                  step="0.1"
+                  type="number"
+                  value={configDraft.sampleGuidanceScale ?? ""}
+                />
+              </label>
+            </div>
+
+            <label className="training-sample-prompts">
+              Sample prompts
+              <textarea
+                onChange={(event) => updateConfigDraft("samplePrompts", event.target.value)}
+                placeholder="One prompt per line. Leave blank to use the trigger-phrase defaults."
+                rows={4}
+                value={configDraft.samplePrompts ?? ""}
+              />
+              <span className="training-field-hint">
+                One prompt per line. Renders one preview per prompt, up to the sample count.
+              </span>
+            </label>
+
+            <div className="training-advanced-toggles">
               <label className="training-checkbox-field">
                 <input
                   checked={Boolean(configDraft.gradientCheckpointing)}
@@ -405,16 +408,22 @@ export function ConfigureJobPanel({
                 />
                 Gradient checkpointing
               </label>
-              <label>
-                Checkpoint cadence
-                <input
-                  onChange={(event) => updateConfigDraft("saveEvery", event.target.value)}
-                  type="number"
-                  value={configDraft.saveEvery ?? ""}
-                />
-              </label>
             </div>
-          </details>
+          </AdvancedSection>
+
+          {selectedPreset ? (
+            <div className="training-preset-summary" aria-label="Preset values">
+              <span>{selectedPreset.name}</span>
+              <span>Rank {configDraft.rank || "-"}</span>
+              <span>LR {configDraft.learningRate || "-"}</span>
+              <span>{optimizerLabel(configDraft.optimizer)}</span>
+              <span>{configDraft.steps || "-"} steps</span>
+              <span>{configDraft.resolution || "-"}px</span>
+              {customizedConfigLabels.length ? (
+                <span>Customized: {customizedConfigLabels.join(", ")}</span>
+              ) : null}
+            </div>
+          ) : null}
 
           {configWarnings.length ? (
             <div className="training-config-warnings" aria-label="Configuration warnings">
@@ -447,6 +456,7 @@ export function ConfigureJobPanel({
                 <option value="real">Run training (beta)</option>
               </select>
             </label>
+            <span className="training-run-note">Runs locally · {resolvedGpu}</span>
             <button className="secondary-action" onClick={resetConfigDefaults} type="button">
               Reset defaults
             </button>
@@ -470,6 +480,6 @@ export function ConfigureJobPanel({
         A dry run validates the training plan and dataset on a GPU worker without training. Run training
         (beta) hands the same plan to the worker's Z-Image LoRA kernel to produce a real .safetensors adapter.
       </p>
-    </>
+    </WorkPanel>
   );
 }

@@ -212,6 +212,18 @@ export function loraPanel(container) {
   return container.querySelector("form[aria-label='Import LoRA']");
 }
 
+// The AdvancedSection disclosure unmounts its body when collapsed (sc-10474), so a
+// test that touches an override field has to expand it first — unlike the `<details>`
+// element it replaced, which kept its contents in the DOM.
+export async function openAdvancedSection(scope = document.body) {
+  const toggle = scope.querySelector(".advanced-section-toggle");
+  if (toggle?.getAttribute("aria-expanded") === "false") {
+    await act(async () => {
+      toggle.click();
+    });
+  }
+}
+
 // The Model Manager is a tabbed interface (epic 10309): Image / Video / Utility / LoRAs.
 // A model card or the LoRA import form is only mounted while its tab is active, so tests
 // switch tabs after opening the Models page. The tab button text carries a trailing count

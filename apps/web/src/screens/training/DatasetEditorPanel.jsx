@@ -52,7 +52,6 @@ function DatasetHealth({ health, action }) {
 // dialogs live in their own component. All state and handlers are owned by the
 // TrainingStudio screen and passed in as props — behavior is unchanged.
 export function DatasetEditorPanel({
-  active,
   loadingDatasets,
   onRefreshDatasets,
   busyDatasetId,
@@ -142,7 +141,7 @@ export function DatasetEditorPanel({
       <div className="training-panel-head">
         <div>
           <p className="eyebrow">Dataset</p>
-          <h3>{active.title}</h3>
+          <h3>Dataset management</h3>
         </div>
         <div className="training-head-actions">
           <button className="secondary-action" disabled={loadingDatasets} onClick={onRefreshDatasets} type="button">

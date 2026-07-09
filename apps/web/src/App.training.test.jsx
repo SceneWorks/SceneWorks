@@ -2,7 +2,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./main.jsx";
-import { withTrainingStudioContext, withTrainingDataSetsLibraryContext, FakeEventSource, response, settle, field, buttonInside, zImageTrainingTarget, zImageTrainingPresets, changeField } from "./main.testSupport.jsx";
+import { withTrainingStudioContext, withTrainingDataSetsLibraryContext, FakeEventSource, response, settle, field, buttonInside, openAdvancedSection, zImageTrainingTarget, zImageTrainingPresets, changeField } from "./main.testSupport.jsx";
 
 describe("SceneWorks app shell", () => {
   let container;
@@ -114,7 +114,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     expect(container.textContent).toContain("Training Studio");
-    expect(container.textContent).toContain("Configure Job");
+    expect(container.textContent).toContain("Configure the run");
     expect(container.textContent).toContain("Data Sets");
     expect(container.textContent).not.toContain("Rename & Caption");
     expect([...document.body.querySelectorAll("button")].some((button) => /queue training/i.test(button.textContent))).toBe(false);
@@ -132,10 +132,11 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    expect(document.body.querySelector("#training-tab-configure").getAttribute("aria-selected")).toBe("true");
+    // The Training Studio is a single work-panel — no tablist, and dataset building
+    // lives in the separate Data Sets library (sc-10475).
+    expect(container.querySelector(".training-config-panel")).toBeTruthy();
+    expect(document.body.querySelector("[role='tablist']")).toBeNull();
     expect(container.textContent).toContain("A dry run validates the training plan");
-    expect(document.body.querySelector("#training-tab-dataset")).toBeNull();
-    expect(document.body.querySelector("#training-tab-rename-caption")).toBeNull();
     expect(container.textContent).not.toContain("Import images & captions");
   });
 
@@ -755,7 +756,6 @@ describe("SceneWorks app shell", () => {
     expect(field(container, "Trigger phrase").value).toBe("Portrait Set");
 
     await changeField(field(container, "Trigger phrase"), "manualTrigger");
-    expect(document.body.querySelector("#training-tab-rename-caption")).toBeNull();
     expect(field(container, "Trigger phrase").value).toBe("manualTrigger");
   });
 
@@ -836,13 +836,13 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    await act(async () => {
-      document.body.querySelector("#training-tab-configure").click();
-    });
     await changeField(field(container, "Dataset"), "dataset-a");
     await settle();
     await changeField(field(container, "Trigger phrase"), "miraStyle");
 
+    // Everything outside the twelve basic plan fields lives in the Advanced
+    // disclosure, which unmounts its body while collapsed (sc-10475).
+    await openAdvancedSection(container);
     expect(field(container, "Target").value).toBe("z_image_turbo_lora");
     expect(field(container, "Base model").value).toBe("z_image_turbo");
     expect(field(container, "Guidance scale").value).toBe("1");
@@ -918,14 +918,12 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    await act(async () => {
-      document.body.querySelector("#training-tab-configure").click();
-    });
     await changeField(field(container, "Dataset"), "dataset-a");
     await settle();
 
     expect(field(container, "Preset").value).toBe("z_image_turbo_lora.character.adamw8bit.balanced");
     expect(container.textContent).toContain("Character balanced");
+    await openAdvancedSection(container);
     await changeField(field(container, "Optimizer"), "prodigyopt");
     expect(field(container, "Preset").value).toBe("z_image_turbo_lora.character.prodigyopt.balanced");
     expect(field(container, "Learning rate").value).toBe("1");
@@ -983,14 +981,12 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    await act(async () => {
-      document.body.querySelector("#training-tab-configure").click();
-    });
     await changeField(field(container, "Dataset"), "dataset-a");
     await settle();
 
     // The selector appears for Z-Image-Turbo and normalizes the preset's legacy
     // "v2-default" value to "v2".
+    await openAdvancedSection(container);
     const adapterSelect = field(container, "De-distill adapter");
     expect(adapterSelect).toBeTruthy();
     expect(adapterSelect.value).toBe("v2");
@@ -1030,9 +1026,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    await act(async () => {
-      document.body.querySelector("#training-tab-configure").click();
-    });
+    await openAdvancedSection(container);
     await changeField(field(container, "Rank"), "24");
 
     expect(container.textContent).toContain("Customized: Rank");
@@ -1070,9 +1064,6 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    await act(async () => {
-      document.body.querySelector("#training-tab-configure").click();
-    });
     await changeField(field(container, "Dataset"), "dataset-a");
     await settle();
     await changeField(field(container, "Trigger phrase"), "miraStyle");
@@ -1127,9 +1118,6 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    await act(async () => {
-      document.body.querySelector("#training-tab-configure").click();
-    });
     await changeField(field(container, "Dataset"), "dataset-a");
     await settle();
     await changeField(field(container, "Trigger phrase"), "miraStyle");
@@ -1185,12 +1173,10 @@ describe("SceneWorks app shell", () => {
       render(["auto", "0"]);
     });
     await settle();
-    await act(async () => {
-      document.body.querySelector("#training-tab-configure").click();
-    });
     await changeField(field(container, "Dataset"), "dataset-a");
     await settle();
     await changeField(field(container, "Trigger phrase"), "miraStyle");
+    await openAdvancedSection(container);
     await changeField(field(container, "Rank"), "24");
     await changeField(field(container, "Requested GPU"), "0");
 
@@ -1243,9 +1229,6 @@ describe("SceneWorks app shell", () => {
       );
     });
     await settle();
-    await act(async () => {
-      document.body.querySelector("#training-tab-configure").click();
-    });
 
     expect(container.textContent).toContain("Select a saved dataset");
     expect(container.textContent).toContain("Add a trigger phrase");
