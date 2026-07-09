@@ -1,7 +1,7 @@
 import os, glob, json, numpy as np, cv2
 from insightface.app import FaceAnalysis
 
-FOLDER = "/Users/michael/Library/Application Support/SceneWorks/data/projects/ab.sceneworks/assets/images/genset_e6b07eb5b5374627af1bf47083bac305"
+FOLDER = "~/Library/Application Support/SceneWorks/data/projects/ab.sceneworks/assets/images/genset_e6b07eb5b5374627af1bf47083bac305"
 ANGLES = ["front","three_quarter_left","three_quarter_right","left_profile","right_profile",
           "up","down","up_left","up_right","down_left","down_right"]
 

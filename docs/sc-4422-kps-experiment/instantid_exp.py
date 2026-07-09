@@ -2,11 +2,11 @@ import os, sys, json, time, importlib
 import numpy as np, cv2, torch
 from PIL import Image
 
-WORKER = "/Users/michael/Repos/SceneWorks/apps/worker/scene_worker"
+WORKER = "~/Repos/SceneWorks/apps/worker/scene_worker"
 VENDOR = os.path.join(WORKER, "_vendor", "instantid")
 sys.path.insert(0, VENDOR)
 OUT = "/tmp/instantid_exp"; os.makedirs(OUT, exist_ok=True)
-REF = "/Users/michael/Library/Application Support/SceneWorks/data/projects/ab.sceneworks/assets/images/genset_e6b07eb5b5374627af1bf47083bac305/2026-06-10_qwen_image_edit_2511_lightning_22-year-old-woman-with-fair-complexion-a-p_0001.png"
+REF = "~/Library/Application Support/SceneWorks/data/projects/ab.sceneworks/assets/images/genset_e6b07eb5b5374627af1bf47083bac305/2026-06-10_qwen_image_edit_2511_lightning_22-year-old-woman-with-fair-complexion-a-p_0001.png"
 SEED = 3004710356
 PROMPT = ("22 year old woman, with fair complexion, a petite thin frame. short cropped brown hair with auburn "
           "highlights, slightly upturned nose, neutral expression, plain grey background, sharp focus, photorealistic, 4k")

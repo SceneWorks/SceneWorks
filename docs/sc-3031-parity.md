@@ -23,7 +23,7 @@ Numeric output parity is therefore established **at the engine layer**, where `m
 carries an extensive golden suite dumped from the mflux fork (tolerance ~1e-2 peak / ~1e-5 mean):
 per-component + full-e2e for Z-Image (incl. Q4/Q8 + img2img), Qwen (incl. edit), FLUX.1 (incl.
 Q4/Q8), FLUX.2 (te/vae/e2e/edit), LTX (14 parity files incl. A/V e2e), and SDXL accel samplers, plus
-per-crate `perf.rs` compiled-vs-eager A/B. See `/Users/michael/Repos/mlx-gen` `tools/golden/` +
+per-crate `perf.rs` compiled-vs-eager A/B. See the sibling `mlx-gen` repo's `tools/golden/` +
 each crate's `tests/*_real_weights.rs` / `*_parity.rs`.
 
 So sc-3031 validates the three things the engine goldens do **not** cover — the worker integration:
