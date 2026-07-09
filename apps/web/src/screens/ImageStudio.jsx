@@ -3,6 +3,7 @@ import { AssetPickerField, ImageEditSourcePickerField } from "../components/Asse
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia, assetUrl } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
+import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
@@ -1915,9 +1916,9 @@ export function ImageStudio() {
       onOpenQueue={onOpenQueue}
       onCancelJob={onCancelJob}
     >
-    <section className="main-surface image-studio">
+    <section className="page-frame image-studio">
       <form className="studio-shell" onSubmit={submit}>
-        <div className="surface-header hero studio-prompt-hero">
+        <WorkPanel className="studio-work-panel">
           <div className="prompt-hero-top">
             <div className="mode-tabs" role="tablist" aria-label="Image mode">
               {[
@@ -2597,8 +2598,9 @@ export function ImageStudio() {
             presetPromptParts={presetPromptParts}
             presetLoraDetails={presetLoraDetails}
           />
+        </WorkPanel>
 
-          <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
+        <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
             <Icon.ChevDown className={advancedOpen ? "chev-rotate open" : "chev-rotate"} size={14} />
             {advancedOpen ? "Hide advanced" : "Advanced"}
           </button>
@@ -2903,7 +2905,6 @@ export function ImageStudio() {
               Generate is blocked because these selected LoRAs are incompatible with {selectedModel?.name ?? "the selected model"}: {selectedLoraValidationResult.incompatible.join(", ")}.
             </p>
           ) : null}
-        </div>
 
         <div className="studio-results">
           <section className="review-panel">
