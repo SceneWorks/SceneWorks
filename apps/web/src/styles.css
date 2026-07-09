@@ -1063,17 +1063,20 @@ button:focus-visible {
 .workspace > .notice,
 .workspace > section.main-surface,
 .workspace > section[class*="-surface"],
-.workspace > section[class*="-layout"] {
+.workspace > section[class*="-layout"],
+.workspace > .page-frame {
   margin: 0 22px;
 }
 
 .workspace > section.main-surface:first-of-type,
-.workspace > section[class*="-surface"]:first-of-type {
+.workspace > section[class*="-surface"]:first-of-type,
+.workspace > .page-frame:first-of-type {
   margin-top: var(--pad-panel);
 }
 
 .workspace > section.main-surface:last-of-type,
-.workspace > section[class*="-surface"]:last-of-type {
+.workspace > section[class*="-surface"]:last-of-type,
+.workspace > .page-frame:last-of-type {
   margin-bottom: 30px;
 }
 
