@@ -1154,13 +1154,12 @@ export function VideoStudio() {
           />
 
           {durationHint ? <p className="helper-copy">{durationHint}</p> : null}
-        </WorkPanel>
 
-        <AdvancedSection
-          hint="cleared values → model default"
-          onToggle={() => setAdvancedOpen((value) => !value)}
-          open={advancedOpen}
-        >
+          <AdvancedSection
+            hint="cleared values → model default"
+            onToggle={() => setAdvancedOpen((value) => !value)}
+            open={advancedOpen}
+          >
             <div className="advanced-panel">
               <label>
                 Frames
@@ -1456,7 +1455,7 @@ export function VideoStudio() {
                 videoAssets={videoAssets}
               />
             </div>
-        </AdvancedSection>
+          </AdvancedSection>
 
           <PresetValidationWarnings presetValidationResult={presetValidationResult} selectedModel={selectedModel} />
           {blockedMessage ? <p className="inline-warning">{blockedMessage}</p> : null}
@@ -1465,6 +1464,8 @@ export function VideoStudio() {
               Generate is blocked because these selected LoRAs are incompatible with {selectedModel?.name ?? "the selected model"}: {selectedLoraValidationResult.incompatible.join(", ")}.
             </p>
           ) : null}
+
+        </WorkPanel>
 
         <div className="studio-results">
           <section className="review-panel">
