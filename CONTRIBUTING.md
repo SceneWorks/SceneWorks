@@ -90,6 +90,35 @@ That expands to `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D
 warnings`, `cargo test`, and `cargo build`. Clippy warnings **fail** the build,
 so keep it clean.
 
+**The "neither" build** — CI's `parity` lane runs the Rust clippy on **Linux with
+default features (no `backend-candle`)**. The worker's generation harness
+(`crates/sceneworks-worker/src/image_jobs/base.rs`) is compiled only on macOS **or** the
+`backend-candle` lane, so anything used *only* by that gated code is dead on this "neither
+backend" build and fails `-D warnings`. Reproduce it locally with:
+
+```bash
+npm run rust:check:neither
+```
+
+On Linux/Windows that's a native clippy — the host already *is* the neither build. On
+macOS it runs the same clippy inside a Linux Docker container, because a native macOS
+clippy always compiles `base.rs` and can never see the trap. It's also wired into the
+optional pre-push hook (installed by `npm run hooks:install`; skip a run with
+`SKIP_NEITHER_CHECK=1` or `git push --no-verify`).
+
+> **The base.rs / candle cfg rule.** Any `sceneworks-worker` item — a `use`, struct, or
+> helper fn — used **only** by `base.rs` or other candle-only code MUST carry the same cfg
+> as `base.rs`, or it's dead code on the neither build:
+>
+> ```rust
+> #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
+> ```
+>
+> `npm run rust:check` on **macOS cannot catch a violation** (there `target_os` is always
+> `macos`, so `base.rs` always compiles) — use `npm run rust:check:neither`, the pre-push
+> hook, or the CI parity lane. This trap has bitten sc-10404 (`PhaseTimer`) and sc-8390
+> (`run_blocking_with_heartbeat`).
+
 **Web** (from the repo root):
 
 ```bash

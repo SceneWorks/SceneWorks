@@ -18,6 +18,7 @@
     "rust:test": "cargo test",
     "rust:build": "cargo build",
     "rust:check": "npm run rust:fmt && npm run rust:lint && npm run rust:test && npm run rust:build",
+    "rust:check:neither": "node scripts/check-neither-build.mjs",
     "desktop:build": "cargo build -p sceneworks-desktop",
     "desktop:check": "cargo clippy -p sceneworks-desktop --all-targets -- -D warnings",
     "web:build": "npm --prefix apps/web run build",
