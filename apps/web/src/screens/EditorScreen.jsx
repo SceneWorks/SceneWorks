@@ -418,13 +418,13 @@ export function EditorScreen() {
         hint="Sequence clips on the timeline, scrub through the preview, and export when the cut feels right."
         actions={
           <>
-            <button disabled={!activeTimeline} onClick={() => saveTimeline(activeTimeline)} type="button">
+            <button className="secondary-action" disabled={!activeTimeline} onClick={() => saveTimeline(activeTimeline)} type="button">
               Save
             </button>
-            <button disabled={!history.length} onClick={undo} type="button">
+            <button className="secondary-action" disabled={!history.length} onClick={undo} type="button">
               Undo
             </button>
-            <button disabled={!future.length} onClick={redo} type="button">
+            <button className="secondary-action" disabled={!future.length} onClick={redo} type="button">
               Redo
             </button>
           </>
