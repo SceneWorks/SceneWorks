@@ -36,7 +36,7 @@ from torch import nn
 import aura_sr
 
 SNAP = Path(
-    "/Users/michael/.cache/huggingface/hub/models--fal--AuraSR-v2/"
+    "~/.cache/huggingface/hub/models--fal--AuraSR-v2/"
     "snapshots/ff452185a7c8b51206dd62c21c292e7baad5c3a3"
 )
 OUT = Path("/tmp/sc3668")

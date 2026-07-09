@@ -538,7 +538,7 @@ mod tests {
     /// eyes above nose above mouth, left-eye left of right-eye, all normalized into `[0,1]`.
     /// This exercises `detect_largest_kps` end to end (Weights load → blob → detect → largest
     /// → normalize). Needs the `scrfd_10g.safetensors` bundle (`SCENEWORKS_INSTANTID_WEIGHTS`
-    /// overrides) + a face image (`SCENEWORKS_TEST_FACE` overrides) + a Metal device. On demand:
+    /// overrides) + a face image (set via `SCENEWORKS_TEST_FACE`) + a Metal device. On demand:
     /// `cargo test -p sceneworks-worker --lib -- --ignored kps_extract_real_weights --nocapture`.
     #[cfg(target_os = "macos")]
     #[test]
@@ -553,9 +553,9 @@ mod tests {
             })
             .join("scrfd_10g.safetensors");
         assert!(scrfd_path.exists(), "missing SCRFD weights: {scrfd_path:?}");
-        let face_path = std::env::var("SCENEWORKS_TEST_FACE").unwrap_or_else(|_| {
-            "/Users/michael/Library/Application Support/SceneWorks/data/projects/ab.sceneworks/assets/images/genset_e6b07eb5b5374627af1bf47083bac305/2026-06-10_qwen_image_edit_2511_lightning_22-year-old-woman-with-fair-complexion-a-p_0001.png".to_owned()
-        });
+        let face_path = std::env::var("SCENEWORKS_TEST_FACE").expect(
+            "set SCENEWORKS_TEST_FACE to a face image path for this ignored real-weights test",
+        );
         let decoded = image::open(&face_path)
             .unwrap_or_else(|e| panic!("face {face_path}: {e}"))
             .to_rgb8();

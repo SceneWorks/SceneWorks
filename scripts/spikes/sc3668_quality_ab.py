@@ -27,11 +27,11 @@ OUT = Path("/tmp/sc3668")
 OUT.mkdir(parents=True, exist_ok=True)
 SRC = Path("poses/standing_09.png")  # same image family as the sc-3489 spike
 AURA_SNAP = Path(
-    "/Users/michael/.cache/huggingface/hub/models--fal--AuraSR-v2/"
+    "~/.cache/huggingface/hub/models--fal--AuraSR-v2/"
     "snapshots/ff452185a7c8b51206dd62c21c292e7baad5c3a3"
 )
 ESRGAN_PTH = Path(
-    "/Users/michael/Library/Application Support/SceneWorks/data/models/"
+    "~/Library/Application Support/SceneWorks/data/models/"
     "nateraw__real-esrgan/RealESRGAN_x4plus.pth"
 )
 

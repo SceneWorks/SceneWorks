@@ -22,11 +22,11 @@ from PIL import Image, ImageDraw
 OUT = Path("/tmp/sc3668")
 SRC = Path("docs/sc-3494/images/candle-sdxl-seed42.png")  # 1024x1024 real render
 AURA_SNAP = Path(
-    "/Users/michael/.cache/huggingface/hub/models--fal--AuraSR-v2/"
+    "~/.cache/huggingface/hub/models--fal--AuraSR-v2/"
     "snapshots/ff452185a7c8b51206dd62c21c292e7baad5c3a3"
 )
 ESRGAN_PTH = Path(
-    "/Users/michael/Library/Application Support/SceneWorks/data/models/"
+    "~/Library/Application Support/SceneWorks/data/models/"
     "nateraw__real-esrgan/RealESRGAN_x4plus.pth"
 )
 # texture-rich crops in the 1024^2 image: (name, cx, cy, size)

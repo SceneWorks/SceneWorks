@@ -2411,7 +2411,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 /// Needs: RealVisXL (`SG161222/RealVisXL_V5.0`) + InstantID IdentityNet (`InstantX/InstantID`)
 /// in the HF cache, the converted bundle (`scrfd_10g`/`arcface_iresnet100`/`ip-adapter`) in the
 /// app cache (`SCENEWORKS_INSTANTID_WEIGHTS` overrides), and a reference face
-/// (`SCENEWORKS_TEST_FACE` overrides). Metal device. On demand:
+/// (set via `SCENEWORKS_TEST_FACE`). Metal device. On demand:
 /// `cargo test -p sceneworks-worker --lib -- --ignored instantid_angle_kps_real_weights --nocapture`.
 #[cfg(target_os = "macos")]
 #[test]
@@ -2437,9 +2437,8 @@ fn instantid_angle_kps_real_weights_fills_frame_and_holds_identity() {
     ] {
         assert!(p.exists(), "missing InstantID weight: {}", p.display());
     }
-    let face_path = std::env::var("SCENEWORKS_TEST_FACE").unwrap_or_else(|_| {
-        "/Users/michael/Library/Application Support/SceneWorks/data/projects/ab.sceneworks/assets/images/genset_e6b07eb5b5374627af1bf47083bac305/2026-06-10_qwen_image_edit_2511_lightning_22-year-old-woman-with-fair-complexion-a-p_0001.png".to_owned()
-    });
+    let face_path = std::env::var("SCENEWORKS_TEST_FACE")
+        .expect("set SCENEWORKS_TEST_FACE to a reference face image path for this ignored real-weights test");
     let decoded = image::open(&face_path)
         .unwrap_or_else(|e| panic!("reference face {face_path}: {e}"))
         .to_rgb8();
