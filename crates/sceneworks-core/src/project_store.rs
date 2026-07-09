@@ -5599,6 +5599,63 @@ mod tests {
     }
 
     #[test]
+    fn list_assets_advertises_poster_url_only_when_the_poster_exists() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Videos").expect("project creates");
+        let project_path = store.find_project_path(&project.id).expect("project path");
+
+        let video_fact = |id: &str| {
+            json!({
+                "assetId": id,
+                "mediaPath": format!("assets/videos/genset/{id}.mp4"),
+                "mimeType": "video/mp4",
+                "type": "video",
+                "displayName": id,
+                "createdAt": "2026-05-25T00:00:00Z",
+                "mode": "image_to_video",
+                "model": "wan",
+                "adapter": "wan",
+                "prompt": "x",
+            })
+        };
+        store
+            .persist_generated_asset(&project.id, "job-1", "genset", &video_fact("withposter"))
+            .expect("withposter persists");
+        store
+            .persist_generated_asset(&project.id, "job-1", "genset", &video_fact("noposter"))
+            .expect("noposter persists");
+        // Only `withposter` has its `<name>.poster.jpg` sibling on disk.
+        std::fs::write(
+            project_path.join("assets/videos/genset/withposter.poster.jpg"),
+            b"jpg-bytes",
+        )
+        .expect("write poster");
+
+        let assets = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .expect("list");
+        let by_id = |id: &str| {
+            assets
+                .iter()
+                .find(|asset| asset["id"] == id)
+                .unwrap_or_else(|| panic!("asset {id} present"))
+        };
+        assert_eq!(
+            by_id("withposter")["posterUrl"],
+            json!(format!(
+                "/api/v1/projects/{}/files/assets/videos/genset/withposter.poster.jpg",
+                project.id
+            )),
+            "posterUrl is advertised when the poster file exists"
+        );
+        assert!(
+            by_id("noposter").get("posterUrl").is_none(),
+            "no posterUrl is advertised when the poster file is absent"
+        );
+    }
+
+    #[test]
     fn build_generated_asset_sidecar_derives_video_type_from_mime() {
         let fact = json!({
             "assetId": "asset_v",

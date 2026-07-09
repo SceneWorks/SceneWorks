@@ -208,6 +208,22 @@ pub(crate) fn normalize_asset_cached(
     }
     if let Some(path) = asset.pointer("/file/path").and_then(Value::as_str) {
         let normalized_path = path.replace('\\', "/");
+        // A generated/rendered video carries a sibling `<name>.poster.jpg` (worker
+        // frame-0 extract) that the web UI shows in place of the <video>'s own first
+        // frame — WKWebView won't paint it. Advertise a `posterUrl` ONLY when that
+        // file actually exists on disk, so the client never requests a poster a video
+        // doesn't have — an imported clip, or a generation where ffmpeg was
+        // unavailable — which would otherwise 404 on every render (sc-10468). Resolved
+        // at read time so it reflects the real on-disk state; images never have one.
+        let poster_url = (asset.get("type").and_then(Value::as_str) == Some("video"))
+            .then(|| Path::new(&normalized_path).with_extension("poster.jpg"))
+            .filter(|poster_rel| project_path.join(poster_rel).is_file())
+            .map(|poster_rel| {
+                format!(
+                    "/api/v1/projects/{project_id}/files/{}",
+                    poster_rel.to_string_lossy().replace('\\', "/")
+                )
+            });
         if let Some(object) = asset.as_object_mut() {
             object.insert(
                 "url".to_owned(),
@@ -215,6 +231,9 @@ pub(crate) fn normalize_asset_cached(
                     "/api/v1/projects/{project_id}/files/{normalized_path}"
                 )),
             );
+            if let Some(poster_url) = poster_url {
+                object.insert("posterUrl".to_owned(), Value::String(poster_url));
+            }
         }
     }
     if let Some(generation_set_id) = asset.get("generationSetId").and_then(Value::as_str) {
