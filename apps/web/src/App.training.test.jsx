@@ -133,7 +133,7 @@ describe("SceneWorks app shell", () => {
     });
 
     expect(document.body.querySelector("#training-tab-configure").getAttribute("aria-selected")).toBe("true");
-    expect(container.textContent).toContain("A dry run validates the Rust-resolved training plan");
+    expect(container.textContent).toContain("A dry run validates the training plan");
     expect(document.body.querySelector("#training-tab-dataset")).toBeNull();
     expect(document.body.querySelector("#training-tab-rename-caption")).toBeNull();
     expect(container.textContent).not.toContain("Import images & captions");

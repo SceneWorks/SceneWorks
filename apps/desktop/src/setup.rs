@@ -1860,7 +1860,7 @@ mod bind_tests {
         // Loopback (OS-assigned) — the default packaged first-run path.
         assert_eq!(
             parse_listening_port(
-                r#"{"message":"SceneWorks Rust API listening","event":"api_listening","address":"127.0.0.1:60294","level":"info","reportedAt":"2026-07-04T15:20:19Z"}"#
+                r#"{"message":"SceneWorks API listening","event":"api_listening","address":"127.0.0.1:60294","level":"info","reportedAt":"2026-07-04T15:20:19Z"}"#
             ),
             Some(60294)
         );

@@ -89,7 +89,7 @@ describe("SceneWorks app shell", () => {
             {
               id: "rust-gpu-1",
               gpuId: "1",
-              gpuName: "Rust placeholder GPU",
+              gpuName: "Placeholder GPU",
               status: "idle",
               capabilities: ["placeholder", "gpu", "nvidia"],
             },
@@ -103,7 +103,7 @@ describe("SceneWorks app shell", () => {
             {
               id: "rust-cpu",
               gpuId: "cpu",
-              gpuName: "Rust CPU utility worker",
+              gpuName: "CPU utility worker",
               status: "idle",
               capabilities: ["placeholder", "cpu", "model_download"],
             },
@@ -128,8 +128,8 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("20.0 GB");
     expect(container.textContent).toContain("4.0 GB / 24.0 GB");
     expect(container.textContent).toContain("12%");
-    expect(container.textContent).not.toContain("Rust CPU utility worker");
-    expect(container.textContent).not.toContain("Rust placeholder GPU");
+    expect(container.textContent).not.toContain("CPU utility worker");
+    expect(container.textContent).not.toContain("Placeholder GPU");
     expect(container.textContent).not.toContain("Stale GPU");
     expect([...document.body.querySelector("#queue-gpu").options].map((option) => option.value)).toEqual(["auto", "0"]);
   });

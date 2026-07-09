@@ -1163,7 +1163,7 @@ impl JobsStore {
                 update jobs
                    set status = 'failed',
                        stage = 'failed',
-                       message = 'Not supported by the Rust/MLX flow on macOS.',
+                       message = 'Not supported by the MLX flow on macOS.',
                        error = ?2,
                        completed_at = ?1,
                        updated_at = ?1,

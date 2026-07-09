@@ -1207,7 +1207,7 @@ fn cpu_utility_worker_does_not_claim_gpu_generation_job() {
         .register_worker(RegisterWorker {
             worker_id: "worker-cpu".to_owned(),
             gpu_id: "cpu".to_owned(),
-            gpu_name: Some("Rust CPU utility worker".to_owned()),
+            gpu_name: Some("CPU utility worker".to_owned()),
             capabilities: vec![
                 WorkerCapability::Cpu,
                 WorkerCapability::ModelDownload,

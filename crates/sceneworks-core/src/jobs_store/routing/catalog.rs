@@ -12,7 +12,7 @@ use crate::jobs_store::routing::mlx::{image_request_mlx_eligible, video_mode_is_
 
 /// The user-facing affordance prefix the Mac UI shows in place of a torch-only control
 /// (sc-3486). Centralised so the API, the web client, and the gap docs read identically.
-pub const MAC_NOT_AVAILABLE_LABEL: &str = "Not available on Mac (Rust/MLX only)";
+pub const MAC_NOT_AVAILABLE_LABEL: &str = "Not available on Mac (MLX only)";
 
 /// UI-facing per-model macOS support (sc-3486), derived from the same `*_mlx_eligible` routing
 /// predicates as the [`mac_rust_supported`] job oracle — one source of truth, so what the UI
