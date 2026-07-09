@@ -18,6 +18,7 @@ export const SORT_ACCESSORS = {
   scheduler: (r) => r.metrics?.scheduler ?? "",
   cfg: (r) => num(r.metrics?.guidanceScale),
   steps: (r) => num(r.metrics?.steps),
+  images: (r) => num(r.metrics?.imageCount),
   load: (r) => num(r.metrics?.loadMs),
   sample: (r) => num(r.metrics?.sampleMs),
   decode: (r) => num(r.metrics?.decodeMs),
@@ -143,9 +144,12 @@ export function groupPhaseTimings(rows, groupKey) {
       groups.set(group, { load: [], sample: [], decode: [], count: 0 });
     }
     const bucket = groups.get(group);
-    push(bucket.load, r.metrics?.loadMs);
-    push(bucket.sample, r.metrics?.sampleMs);
-    push(bucket.decode, r.metrics?.decodeMs);
+    // Amortize per image so batch sizes compare fairly (sc-10426): the timings
+    // are batch totals, so a 4-image job's phases divide by its image count.
+    const per = Math.max(1, Number(r.metrics?.imageCount) || 1);
+    push(bucket.load, Number(r.metrics?.loadMs) / per);
+    push(bucket.sample, Number(r.metrics?.sampleMs) / per);
+    push(bucket.decode, Number(r.metrics?.decodeMs) / per);
     bucket.count += 1;
   }
   return [...groups.entries()]
@@ -167,7 +171,8 @@ export function scatterByQuant(rows) {
     if (!isGenerationRow(r)) continue;
     const quant = r.metrics?.quantLabel ?? "unknown";
     const steps = Number(r.metrics?.steps);
-    const total = Number(r.metrics?.totalMs);
+    const per = Math.max(1, Number(r.metrics?.imageCount) || 1);
+    const total = Number(r.metrics?.totalMs) / per; // per-image (sc-10426)
     if (!Number.isFinite(steps) || !Number.isFinite(total)) continue;
     if (!byQuant.has(quant)) byQuant.set(quant, []);
     byQuant.get(quant).push({ steps, total: msToSeconds(total) });

@@ -4229,6 +4229,7 @@ async fn generate_video(
         .and_then(|value| value.as_str())
         .map(str::to_owned);
     metrics.steps = video_effective_steps;
+    metrics.image_count = Some(1); // one video output per job (sc-10426)
     crate::job_metrics::post_generation_metrics(api, &job.id, &metrics).await;
     result
 }

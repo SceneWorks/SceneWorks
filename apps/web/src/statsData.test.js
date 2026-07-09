@@ -141,6 +141,37 @@ describe("scatterByQuant", () => {
   });
 });
 
+describe("per-image normalization (sc-10426)", () => {
+  it("divides phase timings by imageCount in groupPhaseTimings", () => {
+    const rows = [
+      row("m1", "image_generate", "completed", "2026-07-05T10:00:00Z", {
+        quantLabel: "q8", loadMs: 2000, sampleMs: 8000, decodeMs: 4000, totalMs: 14000,
+        imageCount: 4, steps: 20,
+      }),
+    ];
+    const [g] = groupPhaseTimings(rows, "quant");
+    expect(g.load).toBe(0.5); // 2000/4 = 500ms
+    expect(g.sample).toBe(2); // 8000/4 = 2000ms
+    expect(g.decode).toBe(1); // 4000/4 = 1000ms
+  });
+  it("divides total by imageCount in scatterByQuant", () => {
+    const rows = [
+      row("m1", "image_generate", "completed", "2026-07-05T10:00:00Z", {
+        quantLabel: "q8", totalMs: 14000, steps: 20, imageCount: 4,
+      }),
+    ];
+    expect(scatterByQuant(rows)[0].points[0].total).toBe(3.5); // 14000/4
+  });
+  it("treats a missing imageCount as 1 (no division)", () => {
+    const rows = [
+      row("m1", "image_generate", "completed", "2026-07-05T10:00:00Z", {
+        quantLabel: "q8", sampleMs: 6000, totalMs: 9000, steps: 20,
+      }),
+    ];
+    expect(groupPhaseTimings(rows, "quant")[0].sample).toBe(6);
+  });
+});
+
 describe("computeKpis", () => {
   it("counts runs, medians, and the fastest quant tier", () => {
     const kpis = computeKpis(ROWS);

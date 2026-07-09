@@ -71,6 +71,7 @@ fn generation_metrics_upsert_get_list_and_merge() {
         sampler: Some("euler".to_owned()),
         scheduler: Some("karras".to_owned()),
         steps: Some(20),
+        image_count: Some(4),
         guidance_scale: serde_json::Number::from_f64(4.0),
         use_pid: Some(false),
         width: Some(1024),
@@ -98,6 +99,7 @@ fn generation_metrics_upsert_get_list_and_merge() {
     assert_eq!(read.model.as_deref(), Some("qwen_image"));
     assert_eq!(read.quant_label.as_deref(), Some("q8"));
     assert_eq!(read.steps, Some(20));
+    assert_eq!(read.image_count, Some(4));
     assert_eq!(read.use_pid, Some(false));
     assert_eq!(read.seed, Some(42));
     assert_eq!(read.loras.as_deref(), Some(&["style-a".to_owned()][..]));

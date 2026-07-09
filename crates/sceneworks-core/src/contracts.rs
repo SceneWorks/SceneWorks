@@ -943,6 +943,12 @@ pub struct GenerationMetrics {
     pub scheduler_shift: Option<ContractNumber>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steps: Option<u32>,
+    /// Number of images this job produced (a batch of N). The phase timings
+    /// below are batch totals — `sampleMs`/`decodeMs` sum across all N images
+    /// (`loadMs` is one-time) — so a fair per-image comparison divides them by
+    /// this count (epic 10402, sc-10426). Video = 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guidance_scale: Option<ContractNumber>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
