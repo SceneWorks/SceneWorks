@@ -5,6 +5,7 @@ import { terminalStatuses } from "../jobTypes.js";
 import { KpsOverlay } from "../components/KpsOverlay.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { assetUrl } from "../components/assetMedia.jsx";
+import { WorkPanel } from "../components/WorkPanel.jsx";
 import {
   BUILTIN_DEFAULT_COLLECTION_ID,
   GLOBAL_KEYPOINTS_PROJECT_ID,
@@ -584,16 +585,8 @@ export function KeyPointLibraryScreen() {
   );
 
   return (
-    <section className="main-surface library-surface keypoint-library-surface">
-      <div className="surface-header hero">
-        <div className="section-heading">
-          <p className="eyebrow">Key Point Library</p>
-          <h2>Face angles</h2>
-          <p className="hero-blurb">
-            Capture face-angle framing presets from photos and compose them into angle-set collections. The default
-            collection drives Character Studio’s “Generate angle set”.
-          </p>
-        </div>
+    <section className="page-frame library-surface keypoint-library-surface">
+      <WorkPanel>
         <div className="segmented-control" role="tablist" aria-label="Key Point Library sections">
           {TABS.map(([id, label]) => (
             <button
@@ -610,7 +603,7 @@ export function KeyPointLibraryScreen() {
             </button>
           ))}
         </div>
-      </div>
+      </WorkPanel>
 
       <KeypointLibraryPanel
         hidden={activeTab !== "library"}
