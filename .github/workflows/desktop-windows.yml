@@ -1,35 +1,38 @@
 name: Desktop (Windows)
 
-# Windows desktop CI coverage for epic 1330 Phase 3 (sc-1356): the Linux `parity`
-# job (check.yml) excludes the Tauri desktop crate, so this is the only lane that
-# exercises `sceneworks-desktop` (its build.rs resource validation + Windows cfg
-# code). Path-filtered to desktop-relevant changes.
+# Windows desktop CI, split into two jobs by trigger (cache-budget + CI-cost work —
+# sc-10456, follow-on to sc-10432):
 #
-# Two cost tiers, split by trigger (sc-10420-adjacent CI-cost work) via a
-# per-step `if: github.event_name != 'pull_request'`:
-#   pull_request  — CHEAP (~5 min): desktop crate test + clippy + the gen-core skew
-#                   guard only. No CUDA Toolkit, no candle build, no packaging — the
-#                   `sceneworks-desktop` crate is the Tauri host shell and links
-#                   neither candle nor CUDA, so nvcc is not needed to check it. This
-#                   is what keeps every PR off the ~20–50 min candle/CUDA build.
-#   push:main /   — FULL (~20–50 min): also builds the candle (CUDA) sidecar and
-#   dispatch        packages the NSIS + MSI installers as an UNSIGNED smoke, so a
-#                   packaging break (datablock limit, Tauri bundling) surfaces the
-#                   moment it lands on main — before a release tag, not during one.
+#   build-windows  (pull_request, GitHub-hosted windows-2022) — CHEAP (~3–5 min):
+#     desktop-crate test + clippy + the gen-core skew guard. No CUDA Toolkit, no
+#     candle build, no packaging — the `sceneworks-desktop` crate is the Tauri host
+#     shell and links neither candle nor CUDA, so nvcc isn't needed to check it. This
+#     is the PR gate: the Linux `parity` job (check.yml) excludes the desktop crate,
+#     so this is the only lane that exercises it (epic 1330 Phase 3 / sc-1356).
 #
-# The SIGNED, SHIPPED installers are built by release.yml's `windows` job on `v*`
-# tags (identical build steps — keep the two in sync). The candle SIDECAR compile
-# is additionally guarded on every PR, cheaply, on the self-hosted windows-candle.yml
-# lane (`cargo check -p sceneworks-rust-api --features backend-candle`), since that
-# box has CUDA + a warm target dir.
+#   package-windows  (push:main + workflow_dispatch, SELF-HOSTED cuda box) — the full
+#     candle/CUDA sidecar build + NSIS/MSI packaging, as an UNSIGNED smoke so a
+#     packaging break (NSIS's ~2 GB datablock limit, Tauri bundling) surfaces the
+#     moment it lands on main — before a release tag, not during one. Runs on the same
+#     RTX box as windows-candle.yml: CUDA + the toolchain are pre-installed (no ~7 min
+#     toolkit install) and the target dir persists on disk (warm, incremental), so it
+#     uses ZERO GitHub Actions cache. That's why it moved here — the hosted lane's
+#     2.3 GB rust-cache entry was a prime LRU-eviction target under the repo's hard
+#     10 GB cache cap, causing cold ~33 min rebuilds; taking it off the cache frees
+#     that budget and removes the churn.
 #
-# The desktop is candle (CUDA) by default off-Mac (sc-5559/sc-5563): the Python
-# torch worker is retired, so a non-candle Windows build has no inference backend
-# at all — a useless shell. The full build needs the CUDA Toolkit + MSVC toolset
-# (the candle SIDECAR compile needs nvcc). The ~2.7 GB CUDA/cuDNN/onnxruntime redist
-# is NOT bundled into the installer — it exceeded NSIS's ~2 GB datablock limit — so
-# the app downloads it on first run (cuda_provision.rs); the installers are small.
-# (Folds in the former desktop-candle-windows.yml lane.)
+# The SIGNED, SHIPPED installers are still built by release.yml's `windows` job on
+# `v*` tags (GitHub-hosted; keep its build steps in sync with package-windows). The
+# candle SIDECAR compile is additionally guarded on every PR, cheaply, on the
+# self-hosted windows-candle.yml lane (`cargo check -p sceneworks-rust-api --features
+# backend-candle`).
+#
+# The desktop is candle (CUDA) by default off-Mac (sc-5559/sc-5563): the Python torch
+# worker is retired, so a non-candle Windows build has no inference backend at all —
+# a useless shell. The ~2.7 GB CUDA/cuDNN/onnxruntime redist is NOT bundled into the
+# installer (it exceeded NSIS's ~2 GB datablock limit); the app downloads it on first
+# run (cuda_provision.rs), so the installers stay small. (Folds in the former
+# desktop-candle-windows.yml lane.)
 
 on:
   pull_request:
@@ -41,7 +44,7 @@ on:
       - "crates/**"
       # Also embedded into the installer: the builtin model catalog (via
       # include_str! in setup.rs). Changes here can break the packaged app, so
-      # they must trigger the only job that compiles + packages the desktop.
+      # they must trigger the job that compiles + packages the desktop.
       # (The Python worker was retired off-Mac — sc-5563 — so apps/worker +
       # packages/shared no longer feed the desktop bundle.)
       - "config/manifests/**"
@@ -61,20 +64,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # PR gate — cheap desktop-crate checks on a hosted runner. No candle/CUDA/packaging.
   build-windows:
-    # windows-2022 ships VS2022 with an MSVC 14.4x toolset; CUDA 12.9's nvcc rejects
-    # VS2026's 14.51 (sc-3676), so pin the older image rather than windows-latest.
+    if: ${{ github.event_name == 'pull_request' }}
+    # windows-2022 ships VS2022 with an MSVC 14.4x toolset (matches the desktop
+    # crate's expectations); pinned rather than windows-latest per sc-3676.
     runs-on: windows-2022
-    # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
-    # default (sc-10420). This is the heavy candle CUDA release build (nvcc
-    # compiles every provider's kernels), so a cold-cache run is legitimately
-    # long — cap generously at 2 h to avoid false-failing real builds while still
-    # cutting a genuine hang to a third of the default.
-    timeout-minutes: 120
-    env:
-      # compute_80 PTX the driver JITs forward to sm_120 — one binary covers
-      # Ampere->Blackwell (sc-3676); build-sidecar.mjs defaults this too.
-      CUDA_COMPUTE_CAP: "80"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -85,29 +80,13 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
-      # Put the VS2022 MSVC toolchain (cl.exe) on PATH. On the full build it lets
-      # nvcc find the host compiler when candle-kernels' build script compiles the
-      # CUDA kernels; kept unconditional (incl. PRs) so the desktop crate's cargo
-      # test/clippy get a consistent MSVC env too. Cheap (~9s).
+      # MSVC (cl.exe) on PATH so the desktop crate's cargo test/clippy link cleanly.
+      # Cheap (~9s).
       - name: Set up MSVC developer environment
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-      # Install the CUDA 12.9 Toolkit (nvcc + cudart/cublas/curand/nvrtc dev libs)
-      # the candle `cuda` feature links against. Sets CUDA_PATH for the build +
-      # the redist staging in build-sidecar.mjs.
-      - name: Install CUDA Toolkit 12.9
-        if: ${{ github.event_name != 'pull_request' }} # full candle build only; PRs skip the ~7 min install
-        # v0.2.35: the version catalog must contain CUDA 12.9.1 — the older v0.2.21
-        # pin tops out at 12.8.0 (network method still validates against the map), so
-        # `cuda: "12.9.1"` failed with "Version not available". (Kept in lockstep with
-        # server-candle-linux.yml's pin.)
-        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
-        with:
-          cuda: "12.9.1"
-          method: "network"
-      # The candle-gen single-rev invariant the default skew gate is blind to: with
-      # `--features backend-candle` the optional candle-gen providers are pulled, so
-      # a candle-gen pin that resolves a different gen-core rev would split the
-      # inventory registry => runtime "engine not found" (sc-4482). `--target all`
+      # candle-gen single-rev invariant (sc-4482): a candle-gen pin resolving a
+      # different gen-core rev would split the inventory registry => runtime "engine
+      # not found". `cargo tree` only — no compile, no CUDA needed. `--target all`
       # also resolves the macOS-only mlx-gen transitive gen-core.
       - name: Guard against gen-core version skew (candle)
         shell: bash
@@ -115,43 +94,46 @@ jobs:
           bash scripts/check-gen-core-skew.sh --self-test
           bash scripts/check-gen-core-skew.sh sceneworks-worker --features backend-candle
           bash scripts/check-gen-core-skew.sh sceneworks-rust-api --features embed-web,backend-candle
-      # Only the packaged build needs the web embed + the @tauri-apps/cli. The PR
-      # path runs neither `tauri build` nor a web build, and stage-test-sidecars.mjs
-      # uses node built-ins only, so skip both installs on PRs.
-      - name: Install web dependencies
-        if: ${{ github.event_name != 'pull_request' }}
-        run: npm ci --prefix apps/web
-      - name: Install desktop dependencies
-        if: ${{ github.event_name != 'pull_request' }}
-        run: npm ci --prefix apps/desktop
-      # Placeholder sidecar + resource dirs so the Tauri build-script resource
-      # validation passes for the desktop crate test/lint below (the real ones are
-      # staged by build-sidecar.mjs during `tauri build`).
+      # Placeholder sidecar + resource dirs so the desktop crate's Tauri build-script
+      # resource validation passes (stage-test-sidecars.mjs uses node built-ins only,
+      # so no npm install is needed on this path).
       - name: Stage desktop test sidecar placeholders
         run: node apps/desktop/scripts/stage-test-sidecars.mjs
       - name: Run desktop Rust tests
         run: cargo test -p sceneworks-desktop
       - name: Check desktop Rust lint
         run: npm run desktop:check
-      # `tauri build` runs the beforeBuildCommand (build-sidecar.mjs), which on
-      # Windows now builds the candle sidecar by default (cargo build -p
-      # sceneworks-rust-api --release --features embed-web,backend-candle — nvcc
-      # compiles every provider's CUDA kernels) and stages the ffmpeg resource, then
-      # packages the installers. The ~2.7 GB CUDA runtime + cuDNN + onnxruntime-gpu
-      # DLLs are NO LONGER bundled (they exceeded NSIS's ~2 GB datablock limit); the
-      # app downloads them on first run into %APPDATA%\SceneWorks\gpu-runtime
-      # (apps/desktop/src/cuda_provision.rs), so the installer is now small.
-      # --bundles nsis,msi builds BOTH the .exe (NSIS) and .msi (WiX) installers —
-      # the user ships the MSI. Output lands in the workspace target dir.
-      - name: Build Windows candle installers (NSIS + MSI)
-        if: ${{ github.event_name != 'pull_request' }} # full candle/CUDA build — push:main + dispatch only, never PRs
-        run: npm --prefix apps/desktop run build -- --bundles nsis,msi
-      - name: Upload installer artifacts
-        if: ${{ github.event_name != 'pull_request' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: sceneworks-windows-installers
-          path: |
-            target/release/bundle/nsis/*.exe
-            target/release/bundle/msi/*.msi
-          if-no-files-found: error
+
+  # Full candle/CUDA package smoke on the self-hosted RTX box. push:main + dispatch
+  # only (never PRs). Same box as windows-candle.yml; see the header for why it lives
+  # here (off the 10 GB Actions cache).
+  package-windows:
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: [self-hosted, Windows, X64, cuda]
+    env:
+      # compute_80 PTX the driver JITs forward to sm_120 — one binary covers
+      # Ampere->Blackwell (sc-3676); matches release.yml + build-sidecar.mjs's default.
+      # A distinct value from windows-candle.yml's 120 is fine: this is a `--release`
+      # build in a separate target subdir from that lane's debug checks, so their
+      # candle-kernels artifacts never collide or thrash each other.
+      CUDA_COMPUTE_CAP: "80"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # No setup-node / rust-toolchain / CUDA-toolkit / rust-cache actions: this box
+      # has Node, rustup + the repo's pinned toolchain, the CUDA 12.9 Toolkit, and the
+      # MSVC 14.44 BuildTools pre-installed, and reuses its _work target dir (warm).
+      # Mirrors windows-candle.yml. `tauri build` fetches NSIS/WiX + ffmpeg itself.
+      #
+      # nvcc needs the MSVC 14.44 host compiler (NOT VS2026 14.51, which CUDA 12.9
+      # rejects — sc-3676): load vcvars in-shell, then run the whole build in the SAME
+      # cmd invocation so the toolchain env reaches the cargo build that build-sidecar
+      # spawns (each step is a fresh shell). `|| exit /b 1` because cmd does not
+      # fail-fast between lines. Mirrors release.yml's `windows` job — keep in sync.
+      - name: Build candle installers (NSIS + MSI) — packaging smoke
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          call npm ci --prefix apps/web || exit /b 1
+          call npm ci --prefix apps/desktop || exit /b 1
+          call npm --prefix apps/desktop run build -- --bundles nsis,msi || exit /b 1
