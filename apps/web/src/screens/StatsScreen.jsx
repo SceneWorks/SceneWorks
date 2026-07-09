@@ -1,9 +1,35 @@
 import React, { useMemo, useState } from "react";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Scatter,
+  ScatterChart,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import { useAppStatic } from "../context/AppContext.js";
 import { useGenerationMetrics } from "../hooks/useGenerationMetrics.js";
 import { formatBytes, formatMs, formatPercent, quantLabel } from "../formatting.js";
-import { computeKpis, deriveFilterOptions, filterRows, sortRows } from "../statsData.js";
+import {
+  computeKpis,
+  deriveFilterOptions,
+  filterRows,
+  groupPhaseTimings,
+  GROUP_BY_LABELS,
+  scatterByQuant,
+  sortRows,
+} from "../statsData.js";
+
+// Fixed, mode-stable series colors (Tidepool). Phase timing = three shades of one
+// hue (parts of a whole); quant = categorical.
+const PHASE_COLORS = { load: "#B5D4F4", sample: "#378ADD", decode: "#0C447C" };
+const QUANT_COLORS = { bf16: "#2a78d6", q8: "#1baf7a", q4: "#eda100", "int8-convrot": "#4a3aa7" };
+const SERIES_FALLBACK = ["#2a78d6", "#1baf7a", "#eda100", "#4a3aa7", "#e34948", "#e87ba4"];
 
 // Generation Stats screen (epic 10402, sc-10408): a filterable, sortable list of
 // every run with its captured metrics, plus a per-run detail panel. Reads the
@@ -137,6 +163,102 @@ function RunDetail({ row, onClose }) {
   );
 }
 
+function StatsCharts({ rows }) {
+  const [groupBy, setGroupBy] = useState("quant");
+  const isDark =
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(prefers-color-scheme: dark)")?.matches;
+  const gridColor = isDark ? "#2c2c2a" : "#e1e0d9";
+  const tickColor = "#898781"; // legible in both light and dark
+  const tooltipStyle = {
+    background: "var(--surface)",
+    border: "1px solid var(--border)",
+    color: "var(--text)",
+    borderRadius: "8px",
+    fontSize: "12px",
+  };
+
+  const phaseData = useMemo(() => groupPhaseTimings(rows, groupBy), [rows, groupBy]);
+  const scatterData = useMemo(() => scatterByQuant(rows), [rows]);
+
+  return (
+    <div className="stats-charts">
+      <div className="stats-chart-card">
+        <div className="stats-chart-head">
+          <span className="stats-chart-title">Median phase time (s) — group by</span>
+          <select value={groupBy} onChange={(event) => setGroupBy(event.target.value)}>
+            {Object.entries(GROUP_BY_LABELS).map(([key, label]) => (
+              <option key={key} value={key}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </div>
+        {phaseData.length ? (
+          <ResponsiveContainer width="100%" height={240}>
+            <BarChart data={phaseData} margin={{ top: 8, right: 8, bottom: 4, left: -8 }}>
+              <CartesianGrid stroke={gridColor} vertical={false} />
+              <XAxis dataKey="group" tick={{ fill: tickColor, fontSize: 11 }} />
+              <YAxis tick={{ fill: tickColor, fontSize: 11 }} unit="s" />
+              <Tooltip contentStyle={tooltipStyle} cursor={{ fill: "transparent" }} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Bar dataKey="load" stackId="phase" fill={PHASE_COLORS.load} name="load" />
+              <Bar dataKey="sample" stackId="phase" fill={PHASE_COLORS.sample} name="sample" />
+              <Bar
+                dataKey="decode"
+                stackId="phase"
+                fill={PHASE_COLORS.decode}
+                name="decode"
+                radius={[3, 3, 0, 0]}
+              />
+            </BarChart>
+          </ResponsiveContainer>
+        ) : (
+          <p className="stats-empty">No generation runs to chart yet.</p>
+        )}
+      </div>
+
+      <div className="stats-chart-card">
+        <div className="stats-chart-head">
+          <span className="stats-chart-title">Steps vs total time (s), by quant</span>
+        </div>
+        {scatterData.length ? (
+          <ResponsiveContainer width="100%" height={240}>
+            <ScatterChart margin={{ top: 8, right: 8, bottom: 4, left: -8 }}>
+              <CartesianGrid stroke={gridColor} />
+              <XAxis
+                type="number"
+                dataKey="steps"
+                name="steps"
+                tick={{ fill: tickColor, fontSize: 11 }}
+              />
+              <YAxis
+                type="number"
+                dataKey="total"
+                name="total"
+                unit="s"
+                tick={{ fill: tickColor, fontSize: 11 }}
+              />
+              <Tooltip contentStyle={tooltipStyle} cursor={{ strokeDasharray: "3 3" }} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              {scatterData.map((series, index) => (
+                <Scatter
+                  key={series.quant}
+                  name={series.quant}
+                  data={series.points}
+                  fill={QUANT_COLORS[series.quant] ?? SERIES_FALLBACK[index % SERIES_FALLBACK.length]}
+                />
+              ))}
+            </ScatterChart>
+          </ResponsiveContainer>
+        ) : (
+          <p className="stats-empty">No generation runs to chart yet.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function StatsScreen() {
   const { token } = useAppStatic();
   const { rows, loading, error, refresh } = useGenerationMetrics({ token });
@@ -231,6 +353,8 @@ export function StatsScreen() {
       </div>
 
       {error ? <p className="stats-error">{error}</p> : null}
+
+      <StatsCharts rows={filtered} />
 
       <div className="stats-table-wrap">
         <table className="stats-table">

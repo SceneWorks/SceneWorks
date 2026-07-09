@@ -83,6 +83,100 @@ export function median(values) {
   return nums.length % 2 ? nums[mid] : (nums[mid - 1] + nums[mid]) / 2;
 }
 
+// The job types the comparison charts (sc-10409) aggregate — generation jobs,
+// where quant/sampler/scheduler/cfg/phases are meaningful. The list/detail view
+// still shows every type; only the charts restrict to these.
+const GENERATION_TYPES = new Set([
+  "image_generate",
+  "image_edit",
+  "image_detail",
+  "video_generate",
+]);
+
+export function isGenerationRow(row) {
+  return GENERATION_TYPES.has(row?.type);
+}
+
+// Group-by dimensions for the charts. Continuous axes (cfg) are bucketed to a
+// label so they group cleanly. Returns null to drop a row from a group.
+export const GROUP_BY = {
+  quant: (r) => r.metrics?.quantLabel ?? null,
+  model: (r) => r.metrics?.model ?? null,
+  scheduler: (r) => r.metrics?.scheduler ?? null,
+  sampler: (r) => r.metrics?.sampler ?? null,
+  guidanceMethod: (r) => r.metrics?.guidanceMethod ?? null,
+  pid: (r) => (r.metrics?.usePid ? "PiD" : "native"),
+  cfg: (r) => {
+    const c = Number(r.metrics?.guidanceScale);
+    return Number.isFinite(c) ? `cfg ${(Math.round(c * 2) / 2).toFixed(1)}` : null;
+  },
+};
+
+export const GROUP_BY_LABELS = {
+  quant: "quant",
+  model: "model",
+  scheduler: "scheduler",
+  sampler: "sampler",
+  guidanceMethod: "guidance method",
+  pid: "PiD on/off",
+  cfg: "cfg",
+};
+
+function msToSeconds(ms) {
+  return ms === null ? 0 : Math.round(ms / 100) / 10;
+}
+
+// Median load/sample/decode SECONDS per group (generation rows only), for the
+// stacked phase-timing bar chart. Sorted by group label; carries a run count.
+export function groupPhaseTimings(rows, groupKey) {
+  const accessor = GROUP_BY[groupKey] ?? GROUP_BY.quant;
+  const groups = new Map();
+  const push = (arr, value) => {
+    const n = Number(value);
+    if (Number.isFinite(n)) arr.push(n);
+  };
+  for (const r of rows) {
+    if (!isGenerationRow(r)) continue;
+    const group = accessor(r);
+    if (group === null || group === undefined || group === "") continue;
+    if (!groups.has(group)) {
+      groups.set(group, { load: [], sample: [], decode: [], count: 0 });
+    }
+    const bucket = groups.get(group);
+    push(bucket.load, r.metrics?.loadMs);
+    push(bucket.sample, r.metrics?.sampleMs);
+    push(bucket.decode, r.metrics?.decodeMs);
+    bucket.count += 1;
+  }
+  return [...groups.entries()]
+    .map(([group, b]) => ({
+      group: String(group),
+      load: msToSeconds(median(b.load)),
+      sample: msToSeconds(median(b.sample)),
+      decode: msToSeconds(median(b.decode)),
+      count: b.count,
+    }))
+    .sort((a, b) => (a.group < b.group ? -1 : a.group > b.group ? 1 : 0));
+}
+
+// Scatter points (steps → total seconds) grouped into a series per quant tier,
+// for the steps-vs-time chart. Generation rows only.
+export function scatterByQuant(rows) {
+  const byQuant = new Map();
+  for (const r of rows) {
+    if (!isGenerationRow(r)) continue;
+    const quant = r.metrics?.quantLabel ?? "unknown";
+    const steps = Number(r.metrics?.steps);
+    const total = Number(r.metrics?.totalMs);
+    if (!Number.isFinite(steps) || !Number.isFinite(total)) continue;
+    if (!byQuant.has(quant)) byQuant.set(quant, []);
+    byQuant.get(quant).push({ steps, total: msToSeconds(total) });
+  }
+  return [...byQuant.entries()]
+    .map(([quant, points]) => ({ quant, points }))
+    .sort((a, b) => (a.quant < b.quant ? -1 : a.quant > b.quant ? 1 : 0));
+}
+
 export function computeKpis(rows) {
   const totals = rows.map((r) => num(r.metrics?.totalMs)).filter((v) => v !== null);
   const mems = rows.map((r) => num(r.metrics?.peakMemoryPct)).filter((v) => v !== null);

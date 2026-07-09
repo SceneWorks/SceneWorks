@@ -41,6 +41,14 @@ vi.mock("../hooks/useGenerationMetrics.js", () => ({
   }),
 }));
 
+// recharts' ResponsiveContainer observes size via ResizeObserver, which jsdom
+// doesn't implement — stub it so the charts mount in the test env.
+globalThis.ResizeObserver ||= class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+};
+
 // Imported after the mock so StatsScreen picks up the mocked hook.
 const { StatsScreen } = await import("./StatsScreen.jsx");
 

@@ -4,7 +4,10 @@ import {
   computeKpis,
   deriveFilterOptions,
   filterRows,
+  groupPhaseTimings,
+  isGenerationRow,
   median,
+  scatterByQuant,
   sortRows,
 } from "./statsData.js";
 
@@ -83,6 +86,58 @@ describe("median", () => {
     expect(median([3, 1, 2])).toBe(2);
     expect(median([1, 2, 3, 4])).toBe(2.5);
     expect(median([])).toBe(null);
+  });
+});
+
+const GEN_ROWS = [
+  row("g1", "image_generate", "completed", "2026-07-01T10:00:00Z", {
+    model: "qwen_image", quantLabel: "q8", steps: 20, guidanceScale: 4.0,
+    loadMs: 2000, sampleMs: 6000, decodeMs: 1000, totalMs: 9000,
+  }),
+  row("g2", "image_generate", "completed", "2026-07-02T10:00:00Z", {
+    model: "qwen_image", quantLabel: "q8", steps: 20, guidanceScale: 4.0,
+    loadMs: 2200, sampleMs: 6400, decodeMs: 1000, totalMs: 9600,
+  }),
+  row("g3", "image_generate", "completed", "2026-07-03T10:00:00Z", {
+    model: "sdxl", quantLabel: "q4", steps: 30, guidanceScale: 7.0,
+    loadMs: 1400, sampleMs: 3300, decodeMs: 600, totalMs: 5300,
+  }),
+  // Non-generation → excluded from the charts.
+  row("c1", "caption", "completed", "2026-07-04T10:00:00Z", { model: "joycaption", totalMs: 1200 }),
+];
+
+describe("isGenerationRow", () => {
+  it("accepts image/video gen types and rejects others", () => {
+    expect(isGenerationRow({ type: "image_generate" })).toBe(true);
+    expect(isGenerationRow({ type: "video_generate" })).toBe(true);
+    expect(isGenerationRow({ type: "caption" })).toBe(false);
+    expect(isGenerationRow(null)).toBe(false);
+  });
+});
+
+describe("groupPhaseTimings", () => {
+  it("medians load/sample/decode seconds per group, generation rows only", () => {
+    const groups = groupPhaseTimings(GEN_ROWS, "quant");
+    expect(groups.map((g) => g.group)).toEqual(["q4", "q8"]); // caption excluded
+    const q8 = groups.find((g) => g.group === "q8");
+    expect(q8.count).toBe(2);
+    expect(q8.load).toBe(2.1); // median(2000,2200)=2100ms → 2.1s
+    expect(q8.sample).toBe(6.2);
+    expect(q8.decode).toBe(1);
+  });
+  it("re-buckets when the group dimension changes", () => {
+    expect(groupPhaseTimings(GEN_ROWS, "model").map((g) => g.group)).toEqual(["qwen_image", "sdxl"]);
+  });
+});
+
+describe("scatterByQuant", () => {
+  it("builds a steps→seconds series per quant, generation rows only", () => {
+    const series = scatterByQuant(GEN_ROWS);
+    expect(series.map((s) => s.quant)).toEqual(["q4", "q8"]);
+    expect(series.find((s) => s.quant === "q8").points).toEqual([
+      { steps: 20, total: 9 },
+      { steps: 20, total: 9.6 },
+    ]);
   });
 });
 
