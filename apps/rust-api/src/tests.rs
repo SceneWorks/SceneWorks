@@ -3956,10 +3956,7 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
     let (status, caps) = request(app, "GET", "/api/v1/capabilities/mac", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(caps["macGatingActive"], true);
-    assert_eq!(
-        caps["notAvailableLabel"],
-        "Not available on Mac (Rust/MLX only)"
-    );
+    assert_eq!(caps["notAvailableLabel"], "Not available on Mac (MLX only)");
     // Real-ESRGAN upscaling is ported to the Rust worker (sc-3489) → tool supported, no reason.
     assert_eq!(caps["features"]["imageUpscale"]["supported"], true);
     assert_eq!(caps["features"]["imageUpscale"]["reason"], Value::Null);

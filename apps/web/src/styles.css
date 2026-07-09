@@ -5094,8 +5094,11 @@ details[open] > summary.lora-scope-group-heading::before,
 
 /* A native <select> renders shorter than a text input even with matching padding.
    Strip the native chrome (so it honors the shared 9px 12px padding + line-height)
-   and add a chevron, so the Scope/Family selects match the URL/Name input height. */
-.models-import-grid select {
+   and add a chevron, so selects match their sibling text/number inputs' height.
+   Covers the LoRA import grid (Scope/Family) and the training config grids. */
+.models-import-grid select,
+.training-config-grid select,
+.training-advanced-grid select {
   appearance: none;
   -webkit-appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2.5'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");

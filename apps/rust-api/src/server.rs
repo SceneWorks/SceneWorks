@@ -254,7 +254,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!(
             event = "hf_home_defaulted",
             home = %home.display(),
-            "SceneWorks Rust API defaulting HF_HOME"
+            "SceneWorks API defaulting HF_HOME"
         );
     }
     let settings = Settings::from_env();
@@ -338,7 +338,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         event = "api_listening",
         address = %bound,
-        "SceneWorks Rust API listening"
+        "SceneWorks API listening"
     );
 
     let utility_worker = run_utility_inprocess.then(|| spawn_inprocess_utility_worker(port));

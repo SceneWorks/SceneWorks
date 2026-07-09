@@ -355,7 +355,7 @@ pub(crate) async fn run_vqa_job(
     _job: &JobSnapshot,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
-        "image_vqa runs on the macOS MLX worker, the candle (Windows/CUDA) worker, not this Rust worker"
+        "image_vqa runs on the macOS MLX worker, the candle (Windows/CUDA) worker, not this worker"
             .to_owned(),
     ))
 }
@@ -826,7 +826,7 @@ pub(crate) async fn run_interleave_job(
     _job: &JobSnapshot,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
-        "image_interleave runs on the macOS MLX worker, the candle (Windows/CUDA) worker, not this Rust worker"
+        "image_interleave runs on the macOS MLX worker, the candle (Windows/CUDA) worker, not this worker"
             .to_owned(),
     ))
 }

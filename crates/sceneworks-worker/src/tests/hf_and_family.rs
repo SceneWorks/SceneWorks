@@ -28,6 +28,39 @@ fn wan_video_safetensors_keys() -> Vec<String> {
     keys
 }
 
+fn flux2_safetensors_keys() -> Vec<String> {
+    // Mirrors the FLUX.2 architecture signature: the top-level shared-modulation
+    // tensors (unique to FLUX.2) plus its double/single stream blocks. klein and dev
+    // weights carry no variant-specific signature, so both detect as the base `flux2`.
+    let mut keys = vec![
+        "double_stream_modulation_img".to_owned(),
+        "double_stream_modulation_txt".to_owned(),
+        "single_stream_modulation.weight".to_owned(),
+    ];
+    for block in 0..8 {
+        keys.push(format!("double_blocks.{block}.img_attn.qkv.weight"));
+        keys.push(format!("double_blocks.{block}.txt_attn.qkv.weight"));
+        keys.push(format!("single_blocks.{block}.linear1.weight"));
+    }
+    keys
+}
+
+fn flux1_no_metadata_safetensors_keys() -> Vec<String> {
+    // FLUX.1 double + single stream blocks. Chroma is FLUX.1-schnell-derived and shares
+    // this exact tensor layout, so a metadata-less Chroma checkpoint key-detects as the
+    // base `flux` (the `single_transformer_blocks.` prefix is the Flux discriminator).
+    let mut keys = Vec::new();
+    for block in 0..8 {
+        for module in ["attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out.0"] {
+            keys.push(format!("transformer.transformer_blocks.{block}.{module}.weight"));
+            keys.push(format!(
+                "transformer.single_transformer_blocks.{block}.{module}.weight"
+            ));
+        }
+    }
+    keys
+}
+
 #[test]
 fn hf_cli_windows_encoding_failures_are_detected() {
     let stderr = "Fetching 28 files: 100%|##########| 28/28 [00:00<00:00, 14016.05it/s]\n\
@@ -211,6 +244,57 @@ fn download_family_check_proceeds_when_detection_matches_catalog() {
     assert!(matches!(
         check_downloaded_model_family(Some("wan-video".to_owned()), dir.path()),
         DownloadFamilyCheck::Proceed
+    ));
+}
+
+#[test]
+fn download_family_check_proceeds_for_derived_family_base_architecture() {
+    // Regression: a catalog entry declares a model family whose downloaded weights detect
+    // only as a compatible *base* architecture. The download guard must treat that as a
+    // match, not a false mismatch that fails the install with e.g. "Downloaded model files
+    // appear to be flux2, but the catalog declared family flux2-klein".
+    //
+    // FLUX.2 [klein] / [dev] (`flux2-klein` / `flux2-dev`) detect as `flux2`; a metadata-
+    // less Chroma checkpoint (`chroma`, FLUX.1-derived) detects as `flux`.
+    let flux2_dir = tempdir().expect("tempdir creates");
+    write_safetensors_with_keys(
+        &flux2_dir.path().join("model.safetensors"),
+        &flux2_safetensors_keys(),
+    );
+    for declared in ["flux2-klein", "flux2-dev", "flux2"] {
+        assert!(
+            matches!(
+                check_downloaded_model_family(Some(declared.to_owned()), flux2_dir.path()),
+                DownloadFamilyCheck::Proceed
+            ),
+            "declared {declared:?} against flux2 weights should proceed"
+        );
+    }
+
+    let chroma_dir = tempdir().expect("tempdir creates");
+    write_safetensors_with_keys(
+        &chroma_dir.path().join("model.safetensors"),
+        &flux1_no_metadata_safetensors_keys(),
+    );
+    for declared in ["chroma", "flux"] {
+        assert!(
+            matches!(
+                check_downloaded_model_family(Some(declared.to_owned()), chroma_dir.path()),
+                DownloadFamilyCheck::Proceed
+            ),
+            "declared {declared:?} against flux weights should proceed"
+        );
+    }
+
+    // A genuinely wrong declaration is still caught: wan-video weights are not flux.
+    let wan_dir = tempdir().expect("tempdir creates");
+    write_safetensors_with_keys(
+        &wan_dir.path().join("model.safetensors"),
+        &wan_video_safetensors_keys(),
+    );
+    assert!(matches!(
+        check_downloaded_model_family(Some("chroma".to_owned()), wan_dir.path()),
+        DownloadFamilyCheck::Mismatch(_)
     ));
 }
 

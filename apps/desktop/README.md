@@ -2,7 +2,7 @@
 
 SceneWorks Desktop packages the full SceneWorks AI image and video studio as a
 single native application — no Docker, no terminal, no Python to install. It is a
-[Tauri](https://tauri.app) shell (`net.trefry.sceneworks`, v0.7.2) that bundles
+[Tauri](https://tauri.app) shell (`net.trefry.sceneworks`, v0.7.3) that bundles
 the SceneWorks API and runs generation on a native, platform-specific engine:
 
 - **macOS** runs on Apple's **MLX** engine (Apple Silicon only).
@@ -117,6 +117,13 @@ On first launch a setup screen reports progress. What happens differs by platfor
    cached and version-marked, so later launches skip it. Time depends on your
    connection (typically a few minutes on a fast link).
 3. **Engine starts.** The API starts and the candle/CUDA worker registers.
+
+> **No internet on the target machine?** The GPU runtime can be pre-staged so first
+> run completes fully offline — copy an already-provisioned machine's
+> `%APPDATA%\SceneWorks\gpu-runtime` folder across, or stage the redist and point
+> `SCENEWORKS_GPU_RUNTIME_DIR` at it. See
+> [Offline / air-gapped install](docs/offline-install.md). (Model weights are a
+> separate download — that guide covers seeding them too.)
 
 ### macOS (first run)
 
@@ -290,10 +297,11 @@ is no CPU or AMD fallback. A supported NVIDIA GPU is required.
 Your driver is below the floor for the bundled CUDA 12.9 runtime. Update your
 NVIDIA driver from the GeForce/Studio app or nvidia.com, then relaunch.
 
-**Windows: "GPU runtime download failed."**
+**Windows: "GPU runtime setup failed."**
 The first-run CUDA runtime download did not complete (network/disk). Check your
 connection and free space, then retry from the setup screen. The download resumes
-into `%APPDATA%\SceneWorks\gpu-runtime`.
+into `%APPDATA%\SceneWorks\gpu-runtime`. On a machine with no internet access, pre-stage
+the runtime instead — see [Offline / air-gapped install](docs/offline-install.md).
 
 **"The local API did not start in time."**
 The bundled API didn't become healthy within the startup window. Retry from the

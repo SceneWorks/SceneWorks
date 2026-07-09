@@ -15,7 +15,7 @@ import {
 const gating = {
   macGatingActive: true,
   platform: "macos",
-  notAvailableLabel: "Not available on Mac (Rust/MLX only)",
+  notAvailableLabel: "Not available on Mac (MLX only)",
   features: {
     imageUpscale: {
       supported: false,
@@ -50,7 +50,7 @@ describe("macGating helpers", () => {
   it("blocks a torch-only model and names its port epic when gating is active", () => {
     const block = macModelBlock(torchModel, gating);
     expect(block?.blocked).toBe(true);
-    expect(block?.text).toContain("Not available on Mac (Rust/MLX only)");
+    expect(block?.text).toContain("Not available on Mac (MLX only)");
     expect(block?.text).toContain("epic 3532");
     expect(macModelBlock(mlxModel, gating)).toBeNull();
   });
@@ -144,6 +144,6 @@ describe("macGating helpers", () => {
   });
 
   it("falls back to the bare label when a reason is missing", () => {
-    expect(macReasonText(gating, null)).toBe("Not available on Mac (Rust/MLX only)");
+    expect(macReasonText(gating, null)).toBe("Not available on Mac (MLX only)");
   });
 });

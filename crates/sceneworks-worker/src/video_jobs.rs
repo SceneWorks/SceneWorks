@@ -2085,7 +2085,7 @@ pub(crate) async fn run_video_upscale_job(
     let engine = req.engine.trim().to_ascii_lowercase();
     if !matches!(engine.as_str(), "" | "seedvr2" | "seedvr2_3b") {
         return Err(WorkerError::InvalidPayload(format!(
-            "Rust video upscaler supports only engine=seedvr2 (got {engine})."
+            "This video upscaler supports only engine=seedvr2 (got {engine})."
         )));
     }
     let project_id = req

@@ -7,7 +7,7 @@
 // after submit. On Windows/Linux (and a Mac still in observe mode) `macGatingActive` is false and
 // every helper here is a no-op, so non-Mac pickers are untouched.
 
-export const MAC_NOT_AVAILABLE_LABEL = "Not available on Mac (Rust/MLX only)";
+export const MAC_NOT_AVAILABLE_LABEL = "Not available on Mac (MLX only)";
 
 // The inert default used until the capabilities endpoint responds (and the permanent value on
 // non-Mac / observe-mode deployments). Every helper below short-circuits to "not blocked".

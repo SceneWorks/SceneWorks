@@ -1188,7 +1188,7 @@ async fn run_utility_job(
                 let result = fail_job(
                     api,
                     &job.id,
-                    "No Rust utility exists for this job type.",
+                    "No utility exists for this job type.",
                     Some(format!(
                         "Unsupported utility job type: {}",
                         job.job_type.as_str()

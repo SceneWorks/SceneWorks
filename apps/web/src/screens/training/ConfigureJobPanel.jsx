@@ -97,7 +97,7 @@ export function ConfigureJobPanel({
                   return (
                     <option key={target.id} value={target.id} disabled={blocked}>
                       {target.ui?.label ?? target.name}
-                      {blocked ? " — not on Mac (Rust/MLX only)" : ""}
+                      {blocked ? " — not on Mac (MLX only)" : ""}
                     </option>
                   );
                 })}
@@ -267,7 +267,7 @@ export function ConfigureJobPanel({
                       return (
                         <option key={option} value={option} disabled={blocked}>
                           {networkTypeLabel(option)}
-                          {blocked ? " — not on Mac (Rust/MLX only)" : ""}
+                          {blocked ? " — not on Mac (MLX only)" : ""}
                         </option>
                       );
                     })}
@@ -467,7 +467,7 @@ export function ConfigureJobPanel({
         </div>
       )}
       <p className="view-copy">
-        A dry run validates the Rust-resolved training plan and dataset on a GPU worker without training. Run training
+        A dry run validates the training plan and dataset on a GPU worker without training. Run training
         (beta) hands the same plan to the worker's Z-Image LoRA kernel to produce a real .safetensors adapter.
       </p>
     </>
