@@ -70,6 +70,7 @@
   --pad-tile: 14px;
   --pad-panel: 20px;
   --row-h: 40px;
+  --control-h: 38px;
 
   /* Motion */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
@@ -225,6 +226,7 @@ textarea,
 select {
   width: 100%;
   min-width: 0;
+  box-sizing: border-box;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
@@ -245,6 +247,40 @@ select:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--shadow-glow);
+}
+
+/* ---------- One control height (Page-Frame standard, sc-10435) ----------
+   A native <select> sizes itself from OS font + chrome, so it never matches an
+   <input> even with identical padding. Lock text-like inputs + selects to one
+   baseline (--control-h) and strip the OS select chrome, supplying our own
+   caret. Scoped to text-like types on purpose — checkbox / radio / range /
+   color / file keep their own sizing. Multiline textarea opts out (it keeps the
+   base padding + its own min-height and is deliberately absent below). */
+input[type="text"],
+input[type="search"],
+input[type="number"],
+input[type="password"],
+input[type="email"],
+input[type="tel"],
+input[type="url"],
+input:not([type]),
+select {
+  height: var(--control-h);
+  padding: 0 12px;
+  font: 500 13px/1 var(--font-ui);
+}
+
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='12'%20height='12'%20viewBox='0%200%2012%2012'%20fill='none'%20stroke='%236b7280'%20stroke-width='1.5'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M3%204.5%206%207.5%209%204.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 11px center;
+}
+
+[data-theme="dark"] select {
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='12'%20height='12'%20viewBox='0%200%2012%2012'%20fill='none'%20stroke='%238b95a1'%20stroke-width='1.5'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M3%204.5%206%207.5%209%204.5'/%3E%3C/svg%3E");
 }
 
 button:focus-visible {
@@ -1072,6 +1108,136 @@ button:focus-visible {
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
   min-height: 0;
+}
+
+/* ---------- Page-Frame standard (direction 1b, epic sc-10433) ----------
+   Every migrated screen is: a work-panel (Purpose zone) above bare results
+   (Results zone) on the plain canvas. The topbar (global) owns the page name;
+   no screen repeats it. Replaces the per-page hero + whole-page .main-surface
+   card wrap. */
+.page-frame {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 0;
+}
+
+/* The one elevated card per page. 3px accent top-rule; nothing in the results
+   zone gets a card except an optional detail rail. */
+.work-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-3);
+  padding: var(--pad-panel);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+}
+
+.work-panel-rule {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--accent), color-mix(in oklch, var(--accent) 30%, transparent));
+}
+
+.work-panel-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--gap-3);
+}
+
+.work-panel-head-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.work-panel-eyebrow {
+  color: var(--accent-strong);
+}
+
+.work-panel-hint {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.work-panel-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-2);
+  flex-shrink: 0;
+}
+
+/* Advanced section — expands in place BELOW the work-panel, never inside it. */
+.advanced-section {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.advanced-section-head {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+  padding: 11px 14px;
+  background: var(--surface-2);
+}
+
+.advanced-section.open .advanced-section-head {
+  border-bottom: 1px solid var(--border);
+}
+
+.advanced-section-toggle {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-2);
+  min-width: 0;
+  text-align: left;
+}
+
+.advanced-section-label {
+  color: var(--accent-strong);
+}
+
+.advanced-section-hint {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.advanced-section-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-2);
+}
+
+.advanced-section-caret-btn {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-faint);
+}
+
+.advanced-section-caret {
+  transition: transform var(--t-fast) var(--ease-out);
+}
+
+.advanced-section-caret.open {
+  transform: rotate(180deg);
+}
+
+.advanced-section-body {
+  padding: 14px;
+  display: grid;
+  gap: var(--gap-2);
 }
 
 .section-heading {
