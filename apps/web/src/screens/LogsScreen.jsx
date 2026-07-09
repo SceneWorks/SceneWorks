@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { apiFetch } from "../api.js";
 import { useAppStatic } from "../context/AppContext.js";
 import { isDesktop, tauriInvoke } from "../runtime.js";
+import { WorkPanel } from "../components/WorkPanel.jsx";
 
 // In-app Logs viewer (sc-3452). Shows the current session's activity — most
 // importantly the GPU routing decisions (`gpu_route_decision`) and claim
@@ -162,8 +163,9 @@ export function LogsScreen() {
   }, [entries, paused]);
 
   return (
-    <section className="main-surface logs-screen">
-      <div className="logs-toolbar" role="toolbar" aria-label="Log filters">
+    <section className="page-frame logs-screen">
+      <WorkPanel eyebrow="Filter the stream">
+        <div className="logs-toolbar" role="toolbar" aria-label="Log filters">
         <div className="segmented-control" role="group" aria-label="Source">
           <button
             type="button"
@@ -218,7 +220,8 @@ export function LogsScreen() {
         >
           {paused ? "Paused" : "● Live"}
         </button>
-      </div>
+        </div>
+      </WorkPanel>
 
       {error ? (
         <p className="logs-error" role="alert">

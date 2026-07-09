@@ -1063,17 +1063,20 @@ button:focus-visible {
 .workspace > .notice,
 .workspace > section.main-surface,
 .workspace > section[class*="-surface"],
-.workspace > section[class*="-layout"] {
+.workspace > section[class*="-layout"],
+.workspace > .page-frame {
   margin: 0 22px;
 }
 
 .workspace > section.main-surface:first-of-type,
-.workspace > section[class*="-surface"]:first-of-type {
+.workspace > section[class*="-surface"]:first-of-type,
+.workspace > .page-frame:first-of-type {
   margin-top: var(--pad-panel);
 }
 
 .workspace > section.main-surface:last-of-type,
-.workspace > section[class*="-surface"]:last-of-type {
+.workspace > section[class*="-surface"]:last-of-type,
+.workspace > .page-frame:last-of-type {
   margin-bottom: 30px;
 }
 
@@ -1174,6 +1177,13 @@ button:focus-visible {
   align-items: center;
   gap: var(--gap-2);
   flex-shrink: 0;
+}
+
+/* Hairline separator between grouped rows inside a work-panel (e.g. Queue's
+   composer / project filter). Spans the panel content width. */
+.work-panel-divider {
+  height: 1px;
+  background: var(--border);
 }
 
 /* Advanced section — expands in place BELOW the work-panel, never inside it. */
@@ -9922,6 +9932,12 @@ details[open] > summary.lora-scope-group-heading::before,
   grid-template-columns: minmax(180px, 1fr) minmax(108px, 140px) auto;
   gap: 8px;
   align-items: end;
+}
+
+/* Share the one control height so the composer row (input · select · button)
+   sits on a single baseline (Page-Frame standard). */
+.job-composer button {
+  min-height: var(--control-h);
 }
 
 .job-composer label {

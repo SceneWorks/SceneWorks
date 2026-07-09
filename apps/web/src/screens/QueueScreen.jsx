@@ -4,6 +4,7 @@ import { terminalStatuses } from "../constants.js";
 import { GPU_REQUIRED_JOB_TYPES, NON_GPU_JOB_TYPES } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
 import { resolveJobResultAssets } from "../jobResultAssets.js";
+import { WorkPanel } from "../components/WorkPanel.jsx";
 
 function formatJobType(type) {
   return String(type ?? "job").replaceAll("_", " ");
@@ -207,12 +208,11 @@ export function QueueScreen() {
   // contexts that may not yet expose it (test harnesses, etc.).
   const gpuWorkers = useMemo(() => workers.filter(isGpuWorker), [workers]);
   return (
-    <section className="main-surface queue-surface">
-      <div className="queue-header">
-        <div className="section-heading">
-          <p className="eyebrow">Jobs and GPUs</p>
-          <h2>Queue</h2>
-        </div>
+    <section className="page-frame queue-surface">
+      <WorkPanel
+        eyebrow="Add a job"
+        hint="Queue a prompt to a GPU — or Auto to route to the first free worker."
+      >
         <form className="job-composer" onSubmit={createJob}>
           <label htmlFor="queue-job-prompt">Prompt</label>
           <input id="queue-job-prompt" onChange={(event) => setJobPrompt(event.target.value)} value={jobPrompt} />
@@ -228,9 +228,8 @@ export function QueueScreen() {
             Add job
           </button>
         </form>
-      </div>
-
-      <div className="queue-tools">
+        <div className="work-panel-divider" />
+        <div className="queue-tools">
         <label htmlFor="project-filter">Project</label>
         <select id="project-filter" onChange={(event) => setProjectFilter(event.target.value)} value={projectFilter}>
           <option value="all">All projects</option>
@@ -240,7 +239,8 @@ export function QueueScreen() {
             </option>
           ))}
         </select>
-      </div>
+        </div>
+      </WorkPanel>
 
       <div className="worker-grid">
         {gpuWorkers.length === 0 ? (
