@@ -49,6 +49,12 @@ jobs:
     # windows-2022 ships VS2022 with an MSVC 14.4x toolset; CUDA 12.9's nvcc rejects
     # VS2026's 14.51 (sc-3676), so pin the older image rather than windows-latest.
     runs-on: windows-2022
+    # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
+    # default (sc-10420). This is the heavy candle CUDA release build (nvcc
+    # compiles every provider's kernels), so a cold-cache run is legitimately
+    # long — cap generously at 2 h to avoid false-failing real builds while still
+    # cutting a genuine hang to a third of the default.
+    timeout-minutes: 120
     env:
       # compute_80 PTX the driver JITs forward to sm_120 — one binary covers
       # Ampere->Blackwell (sc-3676); build-sidecar.mjs defaults this too.
