@@ -3,8 +3,10 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AdvancedSection } from "./AdvancedSection.jsx";
 
-// AdvancedSection expands in place below the work-panel (sc-10436). Proves the AC:
-// the body only renders when open, the caret/label toggle calls onToggle, and
+// AdvancedSection is the canonical Advanced disclosure (sc-10436, sc-10474): a
+// bordered block whose header row is the toggle and whose controls open
+// contiguously beneath that header. Proves the AC: the body only renders when
+// open, both header affordances call onToggle, the Show/Hide label flips, and
 // `actions` render alongside their own click handler.
 
 let container;
@@ -54,6 +56,22 @@ describe("AdvancedSection (sc-10436)", () => {
     act(() => container.querySelector(".advanced-section-toggle").click());
     act(() => container.querySelector(".advanced-section-caret-btn").click());
     expect(toggles).toBe(2);
+  });
+
+  it("flips the Show/Hide label with the open state", () => {
+    render(
+      <AdvancedSection open={false} onToggle={() => {}}>
+        <div>knobs</div>
+      </AdvancedSection>,
+    );
+    expect(container.querySelector(".advanced-section-caret-label").textContent).toBe("Show");
+
+    render(
+      <AdvancedSection open onToggle={() => {}}>
+        <div>knobs</div>
+      </AdvancedSection>,
+    );
+    expect(container.querySelector(".advanced-section-caret-label").textContent).toBe("Hide");
   });
 
   it("renders actions with their own handler", () => {

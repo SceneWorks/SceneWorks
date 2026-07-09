@@ -1225,11 +1225,13 @@ button:focus-visible {
   white-space: nowrap;
 }
 
-/* Advanced section — expands in place BELOW the work-panel, never inside it. */
+/* Advanced section — the one canonical disclosure. A bordered, header-labelled
+   block whose controls open contiguously beneath its own header, inside the same
+   block (sc-10474). Collapsed it is header-only, so it reserves no space. */
 .advanced-section {
   border: 1px solid var(--border);
   border-radius: var(--r-md);
-  background: var(--surface);
+  background: var(--surface-2);
   overflow: hidden;
 }
 
@@ -1238,7 +1240,7 @@ button:focus-visible {
   align-items: center;
   gap: var(--gap-2);
   padding: 11px 14px;
-  background: var(--surface-2);
+  cursor: pointer;
 }
 
 .advanced-section.open .advanced-section-head {
@@ -1272,7 +1274,12 @@ button:focus-visible {
 .advanced-section-caret-btn {
   display: inline-flex;
   align-items: center;
+  gap: 6px;
   color: var(--text-faint);
+}
+
+.advanced-section-caret-label {
+  font-size: 11px;
 }
 
 .advanced-section-caret {
