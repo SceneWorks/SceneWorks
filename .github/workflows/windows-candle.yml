@@ -14,11 +14,12 @@ name: Windows Candle worker
 # RUNNING `cargo test --features backend-candle` on every candle-touching PR.
 #
 # It also compile-checks the desktop candle SIDECAR here
-# (`cargo check -p sceneworks-rust-api --features embed-web,backend-candle`): the
-# hosted desktop-windows.yml lane stopped compiling it on PRs (the full candle/CUDA
-# build moved to release/main-only, to keep every PR off the ~20–50 min hosted
-# build). This warm box already has CUDA + an incremental target dir, so it's the
-# cheap place to catch a sidecar build break on the PR instead of at release-tag time.
+# (`cargo check -p sceneworks-rust-api --features backend-candle`): the hosted
+# desktop-windows.yml lane stopped compiling it on PRs (the full candle/CUDA build
+# moved to release/main-only, to keep every PR off the ~20–50 min hosted build).
+# This warm box already has CUDA + an incremental target dir, so it's the cheap
+# place to catch a candle sidecar build break on the PR instead of at release-tag
+# time. (embed-web is left off — it needs a built web bundle; see the step comment.)
 #
 # RUNS ON A SELF-HOSTED Windows + NVIDIA (CUDA) RUNNER (label `cuda`). GitHub's
 # hosted windows runners have no GPU and only compile; a real candle build also
@@ -86,15 +87,22 @@ jobs:
           cargo test -p sceneworks-worker --features backend-candle
       # PR guard for the desktop candle SIDECAR the hosted lane no longer builds on
       # PRs (see header). `cargo check` runs the build scripts (incl. the nvcc kernel
-      # compile) and typechecks the full graph, so a sidecar build break is caught on
-      # the PR — cheap here on the warm, CUDA-equipped box. (Release-only codegen/link
-      # breaks still surface first in the release.yml / push:main packaging build.)
-      - name: Check the desktop candle sidecar builds (rust-api, embed-web)
+      # compile) and typechecks the full graph, so a candle sidecar build break is
+      # caught on the PR — cheap here on the warm, CUDA-equipped box.
+      #
+      # NB: `embed-web` is intentionally OMITTED. It embeds apps/web/dist via
+      # rust-embed (with `debug-embed`, so it embeds at compile time even under
+      # `cargo check`), which requires a built web bundle — this lane never runs a
+      # web build, so including it fails with "no `get` on WebAssets". embed-web is
+      # orthogonal to candle (static-serving glue) and is compiled on the push:main /
+      # release.yml package builds, where web/dist exists. (Release-only codegen/link
+      # breaks also still surface first in those builds.)
+      - name: Check the candle sidecar builds (rust-api, backend-candle)
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo check -p sceneworks-rust-api --features embed-web,backend-candle
+          cargo check -p sceneworks-rust-api --features backend-candle
       - name: Clippy (candle worker)
         shell: cmd
         run: |

@@ -20,8 +20,8 @@ name: Desktop (Windows)
 # The SIGNED, SHIPPED installers are built by release.yml's `windows` job on `v*`
 # tags (identical build steps — keep the two in sync). The candle SIDECAR compile
 # is additionally guarded on every PR, cheaply, on the self-hosted windows-candle.yml
-# lane (`cargo check -p sceneworks-rust-api --features embed-web,backend-candle`),
-# since that box has CUDA + a warm target dir.
+# lane (`cargo check -p sceneworks-rust-api --features backend-candle`), since that
+# box has CUDA + a warm target dir.
 #
 # The desktop is candle (CUDA) by default off-Mac (sc-5559/sc-5563): the Python
 # torch worker is retired, so a non-candle Windows build has no inference backend
