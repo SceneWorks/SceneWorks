@@ -1225,11 +1225,13 @@ button:focus-visible {
   white-space: nowrap;
 }
 
-/* Advanced section — expands in place BELOW the work-panel, never inside it. */
+/* Advanced section — the one canonical disclosure. A bordered, header-labelled
+   block whose controls open contiguously beneath its own header, inside the same
+   block (sc-10474). Collapsed it is header-only, so it reserves no space. */
 .advanced-section {
   border: 1px solid var(--border);
   border-radius: var(--r-md);
-  background: var(--surface);
+  background: var(--surface-2);
   overflow: hidden;
 }
 
@@ -1238,7 +1240,7 @@ button:focus-visible {
   align-items: center;
   gap: var(--gap-2);
   padding: 11px 14px;
-  background: var(--surface-2);
+  cursor: pointer;
 }
 
 .advanced-section.open .advanced-section-head {
@@ -1272,7 +1274,12 @@ button:focus-visible {
 .advanced-section-caret-btn {
   display: inline-flex;
   align-items: center;
+  gap: 6px;
   color: var(--text-faint);
+}
+
+.advanced-section-caret-label {
+  font-size: 11px;
 }
 
 .advanced-section-caret {
@@ -3299,10 +3306,8 @@ label {
 .training-metrics > div,
 .training-empty-state,
 .training-panel,
-.training-live-panel,
 .training-step-block,
-.training-dataset-editor,
-.training-advanced-panel {
+.training-dataset-editor {
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   background: var(--surface-2);
@@ -3378,10 +3383,11 @@ label {
   font-weight: 700;
 }
 
+/* Results zone: the live runs sit flush on the workspace canvas — only the
+   WorkerProgressCard rows carry their own borders (page-frame standard). */
 .training-live-panel {
   display: grid;
   gap: 12px;
-  padding: 14px;
 }
 
 /* .training-live-title remains because TrainingStudio.jsx still renders it as the
@@ -3740,32 +3746,22 @@ label {
   grid-template-columns: repeat(4, minmax(150px, 1fr));
 }
 
-.training-advanced-panel {
-  padding: 12px;
-  background: var(--surface);
-}
-
-.training-advanced-panel summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  cursor: pointer;
-  color: var(--text);
-  font-weight: 700;
-}
-
 .training-advanced-grid {
   grid-template-columns: repeat(4, minmax(120px, 1fr));
-  margin-top: 12px;
 }
 
-.training-advanced-grid .training-checkbox-field {
+.training-advanced-grid .training-checkbox-field,
+.training-advanced-toggles .training-checkbox-field {
+  display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   align-content: center;
   gap: 8px;
-  min-height: 58px;
+  min-height: var(--control-h);
+  min-width: 0;
   color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
 }
 
 .training-config-warnings {
@@ -3801,19 +3797,39 @@ label {
   font-weight: 700;
 }
 
+/* Toggles close the Advanced disclosure, divided from the override grid above
+   them (design handoff: "a grouped grid of override fields, then a toggles row"). */
+.training-advanced-toggles {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+/* Actions close the work-panel: the run-mode note on the left, one filled
+   primary on the right, divided from the config above. */
 .training-config-actions {
   display: flex;
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px;
   align-items: flex-end;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.training-run-note {
+  margin-right: auto;
+  align-self: center;
+  color: var(--text-faint);
+  font-size: 11.5px;
 }
 
 .training-run-mode {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  margin-right: auto;
   font-size: 0.78rem;
 }
 
@@ -4464,7 +4480,6 @@ label {
 .review-card,
 .asset-detail,
 .preview-button,
-.advanced-panel,
 .studio-controls,
 .review-panel {
   border: 1px solid var(--border);
@@ -7262,12 +7277,10 @@ details[open] > summary.lora-scope-group-heading::before,
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+/* Every Advanced panel now renders inside an `.advanced-section` disclosure, which
+   owns the bordered block. What is left here is only the override grid (sc-10478). */
 .advanced-panel {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  padding: 12px;
-  background: var(--surface-2);
-  border-radius: var(--r-md);
-  border: 1px solid var(--border);
 }
 
 /* Uniform control height so every select and number/text field in the panel lines up
@@ -7306,6 +7319,7 @@ details[open] > summary.lora-scope-group-heading::before,
 .advanced-panel .lora-picker {
   grid-column: 1 / -1;
 }
+
 
 .video-preset-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));

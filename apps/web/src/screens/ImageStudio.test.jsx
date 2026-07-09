@@ -106,7 +106,7 @@ describe("ImageStudio Save as Preset", () => {
     await render(context);
 
     // Save-as-preset now lives inside the Advanced panel (UI-refinement 2b).
-    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Advanced"));
+    await click(document.body.querySelector(".advanced-section-toggle"));
     const input = nameInput(container);
     expect(input).toBeTruthy();
     await act(async () => setInput(input, "Atrium Look"));
@@ -142,7 +142,7 @@ describe("ImageStudio Save as Preset", () => {
     });
     await render(context);
 
-    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Advanced"));
+    await click(document.body.querySelector(".advanced-section-toggle"));
     await act(async () => setInput(nameInput(container), "Atrium Look"));
     await click(saveButton(container));
 
@@ -225,7 +225,7 @@ describe("ImageStudio advanced model defaults", () => {
       }),
     );
 
-    await click([...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced"));
+    await click(document.body.querySelector(".advanced-section-toggle"));
     await act(async () => setSelect(field(container, "Sampler"), "euler"));
     await act(async () => setSelect(field(container, "Scheduler"), "shift"));
     await act(async () => setInput(field(container, "Schedule shift"), "7.7"));
@@ -296,7 +296,7 @@ describe("ImageStudio guidance method picker (epic 7434, sc-7449)", () => {
   };
 
   const openAdvanced = async () =>
-    click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Advanced"));
+    click(document.body.querySelector(".advanced-section-toggle"));
   const generate = async () =>
     click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
 
@@ -737,7 +737,7 @@ describe("ImageStudio model picker capability gating", () => {
   const precisionLabel = (root) =>
     root.querySelector("label.boogu-precision-toggle");
   const openAdvanced = async (root) =>
-    click([...root.querySelectorAll("button")].find((b) => b.textContent === "Advanced"));
+    click(root.querySelector(".advanced-section-toggle"));
 
   it("exposes the Full-precision (bf16) toggle for Boogu in Advanced when ui.precisionToggle is set (sc-6568)", async () => {
     await render(
@@ -1332,7 +1332,7 @@ describe("ImageStudio PiD decoder toggle (sc-7851)", () => {
   const PID_CKPT = (installState) => ({ id: "pid_qwenimage", type: "utility", installState });
 
   const openAdvanced = async () =>
-    click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Advanced"));
+    click(document.body.querySelector(".advanced-section-toggle"));
   const pidLabel = () =>
     [...document.body.querySelectorAll("label")].find((l) => l.textContent.includes("PiD decoder"));
   const generateButton = () =>

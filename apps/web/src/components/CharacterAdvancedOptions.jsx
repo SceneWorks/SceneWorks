@@ -1,4 +1,6 @@
 import React from "react";
+
+import { AdvancedSection } from "./AdvancedSection.jsx";
 import {
   SAMPLER_LABELS,
   SCHEDULER_LABELS,
@@ -219,10 +221,7 @@ export function CharacterAdvancedOptions({ state }) {
 
   return (
     <div className="character-advanced">
-      <button className="advanced-toggle" onClick={() => setOpen((value) => !value)} type="button">
-        {open ? "Hide advanced" : "Advanced"}
-      </button>
-      {open ? (
+      <AdvancedSection hint="cleared values → model default" onToggle={() => setOpen((value) => !value)} open={open}>
         <div className="advanced-panel">
           <label className="reference-strength">
             {referenceStrengthCfg?.label ??
@@ -355,7 +354,7 @@ export function CharacterAdvancedOptions({ state }) {
             </>
           ) : null}
         </div>
-      ) : null}
+      </AdvancedSection>
     </div>
   );
 }

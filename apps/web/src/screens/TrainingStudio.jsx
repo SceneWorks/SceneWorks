@@ -54,10 +54,6 @@ import { DatasetEditorPanel } from "./training/DatasetEditorPanel.jsx";
 // screen; the implementations now live in ../training/trainingConfig.js (sc-4199).
 export { configDraftFromTarget, trainingConfigSnapshot };
 
-const trainingTabs = [
-  { id: "configure", label: "Configure Job", title: "Configure training job", status: "Queue dry run" },
-];
-
 const IMPORT_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff"]);
 
 function uploadFileBaseName(name) {
@@ -255,7 +251,7 @@ function TrainingLiveProgress({ jobs, projectId, onCancel, onPreview }) {
     <section className="training-live-panel" aria-label="Active training progress">
       <div className="training-live-title">
         <div>
-          <p className="eyebrow">Live training</p>
+          <p className="eyebrow">Runs</p>
           <h3>Training in progress</h3>
         </div>
         <span>{jobs.length} active</span>
@@ -341,8 +337,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const createCaptionJob = createTrainingDatasetCaptionJob;
   const trainingPresets = trainingPresetsCatalog?.presets ?? [];
   const trainingTargets = trainingTargetsCatalog?.targets ?? [];
-  const workflowTabs = datasetLibraryMode ? [] : trainingTabs;
-  const [activeTab, setActiveTab] = useState(datasetLibraryMode ? "dataset" : "configure");
   const [activeDataset, setActiveDataset] = useState(null);
   const [datasetError, setDatasetError] = useState("");
   const [datasetMessage, setDatasetMessage] = useState("");
@@ -395,10 +389,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // the plan to the worker's Z-Image LoRA kernel. Default to the safe dry run.
   const [trainingRunMode, setTrainingRunMode] = useState("dry_run");
   const configBasisRef = useRef("");
-  const tabRefs = useRef({});
 
-  const activeIndex = workflowTabs.findIndex((tab) => tab.id === activeTab);
-  const active = workflowTabs[activeIndex] ?? { id: activeTab, title: datasetLibraryMode ? "Dataset management" : "Configure training job" };
   const datasetSummary = useMemo(() => summarizeDatasets(datasets), [datasets]);
   const datasetAssets = useMemo(
     () => datasetOwnedAssets(activeDataset, activeProject?.id, assets),
@@ -719,10 +710,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
     configBasisRef.current = "";
   }, [activeProject?.id]);
 
-  useEffect(() => {
-    setActiveTab(datasetLibraryMode ? "dataset" : "configure");
-  }, [datasetLibraryMode]);
-
   // sc-2022: open a dataset requested from elsewhere (Character Studio's
   // "Open" action hands off via studioLaunch). Keyed on the launch id so a
   // repeat request for the same dataset re-opens it.
@@ -819,34 +806,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
       return { ...current, requestedGpu: gpuOptions[0] ?? "" };
     });
   }, [gpuOptionsKey]);
-
-  function focusTab(index) {
-    if (!workflowTabs.length) {
-      return;
-    }
-    const next = workflowTabs[(index + workflowTabs.length) % workflowTabs.length];
-    setActiveTab(next.id);
-    window.requestAnimationFrame(() => tabRefs.current[next.id]?.focus());
-  }
-
-  function onTabKeyDown(event) {
-    if (event.key === "ArrowRight") {
-      event.preventDefault();
-      focusTab(activeIndex + 1);
-    }
-    if (event.key === "ArrowLeft") {
-      event.preventDefault();
-      focusTab(activeIndex - 1);
-    }
-    if (event.key === "Home") {
-      event.preventDefault();
-      focusTab(0);
-    }
-    if (event.key === "End") {
-      event.preventDefault();
-      focusTab(workflowTabs.length - 1);
-    }
-  }
 
   async function openDataset(datasetId) {
     if (!datasetId) {
@@ -1451,39 +1410,33 @@ export function TrainingStudio({ mode = "training" } = {}) {
     >
     <section className="page-frame training-studio">
       <div className="training-studio-shell">
-        <div className="training-summary-band">
-          <div className="section-heading">
-            <p className="eyebrow">{datasetLibraryMode ? "Library" : "Training Studio"}</p>
-            <h2>{datasetLibraryMode ? "Data Sets" : "Native LoRA training workflow"}</h2>
-            <p className="view-copy">
-              {datasetLibraryMode
-                ? "Create training datasets, manage imported dataset images, and normalize captions in one place."
-                : "Select an existing dataset and prepare a training plan before any ML runtime work begins."}
-            </p>
+        {/* Data Sets keeps its own header band; the Training Studio is named by the
+            topbar and leads straight into its work-panel (page-frame standard). */}
+        {datasetLibraryMode ? (
+          <div className="training-summary-band">
+            <div className="section-heading">
+              <p className="eyebrow">Library</p>
+              <h2>Data Sets</h2>
+              <p className="view-copy">
+                Create training datasets, manage imported dataset images, and normalize captions in one place.
+              </p>
+            </div>
+            <div className="training-metrics" aria-label="Training workspace summary">
+              <div>
+                <strong>{activeProject?.name ?? "No workspace"}</strong>
+                <span>Project</span>
+              </div>
+              <div>
+                <strong>{datasets.length}</strong>
+                <span>Datasets</span>
+              </div>
+              <div>
+                <strong>{datasetSummary.items}</strong>
+                <span>Items</span>
+              </div>
+            </div>
           </div>
-          <div className="training-metrics" aria-label="Training workspace summary">
-            <div>
-              <strong>{activeProject?.name ?? "No workspace"}</strong>
-              <span>Project</span>
-            </div>
-            <div>
-              <strong>{datasets.length}</strong>
-              <span>Datasets</span>
-            </div>
-            <div>
-              <strong>{datasetSummary.items}</strong>
-              <span>Items</span>
-            </div>
-          </div>
-        </div>
-        {datasetLibraryMode ? null : (
-          <TrainingLiveProgress
-            jobs={activeTrainingJobs}
-            projectId={activeProject?.id}
-            onCancel={jobAction ? (job) => jobAction(job, "cancel") : undefined}
-            onPreview={setPreviewAsset}
-          />
-        )}
+        ) : null}
 
         {!authenticated ? (
           <div className="training-empty-state" role="status">
@@ -1503,40 +1456,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
           </div>
         ) : (
           <>
-            {workflowTabs.length ? (
-            <div className="training-tabs" role="tablist" aria-label="Training workflow">
-              {workflowTabs.map((tab) => (
-                <button
-                  aria-controls={activeTab === tab.id ? `training-panel-${tab.id}` : undefined}
-                  aria-selected={activeTab === tab.id}
-                  className={activeTab === tab.id ? "active" : ""}
-                  id={`training-tab-${tab.id}`}
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  onKeyDown={onTabKeyDown}
-                  ref={(node) => {
-                    tabRefs.current[tab.id] = node;
-                  }}
-                  role="tab"
-                  tabIndex={activeTab === tab.id ? 0 : -1}
-                  type="button"
-                >
-                  <span>{tab.label}</span>
-                  <small>{tab.status}</small>
-                </button>
-              ))}
-            </div>
-            ) : null}
-
-            <section
-              aria-labelledby={workflowTabs.length ? `training-tab-${active.id}` : undefined}
-              className="training-panel"
-              id={`training-panel-${active.id}`}
-              role="tabpanel"
-            >
-              {datasetLibraryMode || activeTab === "dataset" ? (
+            {datasetLibraryMode ? (
+              <section className="training-panel">
                 <DatasetEditorPanel
-                  active={active}
                   loadingDatasets={loadingDatasets}
                   onRefreshDatasets={onRefreshDatasets}
                   busyDatasetId={busyDatasetId}
@@ -1591,11 +1513,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   captionModelSizeLabel={captionModelSizeLabel}
                   captionModelName={captionModel?.name ?? "JoyCaption"}
                 />
-              ) : null}
-
-              {activeTab === "configure" ? (
+              </section>
+            ) : (
+              <>
                 <ConfigureJobPanel
-                  active={active}
                   setActiveView={setActiveView}
                   configReady={configReady}
                   trainingTargetsError={trainingTargetsError}
@@ -1639,8 +1560,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   datasetDoctor={datasetDoctor}
                   readinessBlocksTraining={readinessBlocksTraining}
                 />
-              ) : null}
-            </section>
+                <TrainingLiveProgress
+                  jobs={activeTrainingJobs}
+                  projectId={activeProject?.id}
+                  onCancel={jobAction ? (job) => jobAction(job, "cancel") : undefined}
+                  onPreview={setPreviewAsset}
+                />
+              </>
+            )}
           </>
         )}
       </div>

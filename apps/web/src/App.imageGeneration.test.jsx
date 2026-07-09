@@ -612,7 +612,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Missing LoRA");
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      document.body.querySelector(".advanced-section-toggle").click();
     });
 
     // Add-on-demand LoRA picker (UI-refinement 3b): open the "Add LoRA" dropdown and click a
@@ -704,7 +704,7 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      document.body.querySelector(".advanced-section-toggle").click();
     });
     // Open the Add-LoRA dropdown to inspect which LoRAs the model offers as compatible.
     await act(async () => {
@@ -743,7 +743,7 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      document.body.querySelector(".advanced-section-toggle").click();
     });
     // Reveal the incompatible LoRA in the dropdown, then add it via its Add row.
     await act(async () => {
@@ -764,11 +764,11 @@ describe("SceneWorks app shell", () => {
     expect(generate.disabled).toBe(true);
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Hide advanced").click();
+      document.body.querySelector(".advanced-section-toggle").click();
     });
     await settle();
 
-    expect([...document.body.querySelectorAll("button")].some((button) => button.textContent === "Hide advanced")).toBe(true);
+    expect(document.body.querySelector(".advanced-section.open")).toBeTruthy();
     expect(container.textContent).toContain("Qwen Only");
 
     await act(async () => {
@@ -1052,7 +1052,7 @@ describe("SceneWorks app shell", () => {
     expect(field(container, "Variations").value).toBe("4");
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      document.body.querySelector(".advanced-section-toggle").click();
     });
 
     expect(field(container, "GPU")).not.toBeUndefined();
@@ -1100,7 +1100,7 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      document.body.querySelector(".advanced-section-toggle").click();
     });
 
     expect(document.body.querySelector('.upscale-toggle input[type="checkbox"]').checked).toBe(false);
@@ -1519,9 +1519,9 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    // The toggle lives in the (collapsed-by-default) Advanced panel — open it first.
+    // The toggle lives in the (collapsed-by-default) Advanced disclosure — open it first.
     await act(async () => {
-      document.body.querySelector(".advanced-toggle").click();
+      document.body.querySelector(".advanced-section-toggle").click();
     });
 
     // The manifest-driven "Enhance prompt" toggle renders for flux2_dev (off by default).
@@ -1874,7 +1874,7 @@ describe("SceneWorks app shell", () => {
     expect(createImageJob).not.toHaveBeenCalled();
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      document.body.querySelector(".advanced-section-toggle").click();
     });
     await changeField(field(container, "Model"), "qwen_image");
     await settle();
@@ -2019,7 +2019,7 @@ describe("SceneWorks app shell", () => {
       [...document.body.querySelectorAll(".mode-control button")].find((button) => button.textContent === "Text → Video").click();
     });
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      document.body.querySelector(".advanced-section-toggle").click();
     });
 
     const quantSelect = field(container, "Quantization");
@@ -2098,7 +2098,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      document.body.querySelector(".advanced-section-toggle").click();
     });
     await settle();
 

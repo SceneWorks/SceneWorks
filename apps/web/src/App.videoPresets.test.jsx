@@ -278,7 +278,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("LTX Motion");
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      document.body.querySelector(".advanced-section-toggle").click();
     });
     await changeField(field(container, "Model"), "wan_2_2");
     await settle();
