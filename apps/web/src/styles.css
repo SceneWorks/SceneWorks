@@ -1137,7 +1137,9 @@ button:focus-visible {
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-md);
-  overflow: hidden;
+  /* No `overflow: hidden` here — it would clip custom popovers that open inside
+     the panel (e.g. the CompactSelector dropdown, sc-10473). The accent top-rule
+     rounds its own top corners instead so it still hugs the panel. */
 }
 
 .work-panel-rule {
@@ -1146,6 +1148,7 @@ button:focus-visible {
   top: 0;
   right: 0;
   height: 3px;
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
   background: linear-gradient(90deg, var(--accent), color-mix(in oklch, var(--accent) 30%, transparent));
 }
 
