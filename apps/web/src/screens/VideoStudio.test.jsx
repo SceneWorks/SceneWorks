@@ -76,12 +76,10 @@ const buttonWithText = (root, text) =>
 const saveButton = (container) =>
   [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Save as Preset"));
 const nameInput = (container) => container.querySelector('input[aria-label="Preset name"]');
-// Save-as-Preset folds into the Advanced panel (collapsed by default), matching Image
-// Studio's single-column layout — open it before touching the preset controls.
+// Save-as-Preset folds into the Advanced disclosure (collapsed by default), matching
+// Image Studio — open it before touching the preset controls.
 const openAdvanced = async (container) => {
-  const toggle = [...container.querySelectorAll("button.advanced-toggle")].find((b) =>
-    b.textContent.includes("Advanced"),
-  );
+  const toggle = container.querySelector(".advanced-section-toggle");
   if (toggle) {
     await click(toggle);
   }
@@ -915,9 +913,9 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     await act(async () => {});
   }
 
-  // Open the Advanced panel where the toggle + steps/guidance live.
+  // Open the Advanced disclosure where the toggle + steps/guidance live.
   const openAdvanced = async () => {
-    await click(buttonWithText(container, "Advanced"));
+    await click(container.querySelector(".advanced-section-toggle"));
   };
   const lightningLabel = () =>
     [...container.querySelectorAll(".lightning-toggle label")].find((el) =>

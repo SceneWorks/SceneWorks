@@ -5,6 +5,7 @@ import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.j
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
+import { AdvancedSection } from "../components/AdvancedSection.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
@@ -1155,12 +1156,11 @@ export function VideoStudio() {
           {durationHint ? <p className="helper-copy">{durationHint}</p> : null}
         </WorkPanel>
 
-        <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
-            <Icon.ChevDown className={advancedOpen ? "chev-rotate open" : "chev-rotate"} size={14} />
-            {advancedOpen ? "Hide advanced" : "Advanced"}
-          </button>
-
-          {advancedOpen ? (
+        <AdvancedSection
+          hint="cleared values → model default"
+          onToggle={() => setAdvancedOpen((value) => !value)}
+          open={advancedOpen}
+        >
             <div className="advanced-panel">
               <label>
                 Frames
@@ -1456,7 +1456,7 @@ export function VideoStudio() {
                 videoAssets={videoAssets}
               />
             </div>
-          ) : null}
+        </AdvancedSection>
 
           <PresetValidationWarnings presetValidationResult={presetValidationResult} selectedModel={selectedModel} />
           {blockedMessage ? <p className="inline-warning">{blockedMessage}</p> : null}

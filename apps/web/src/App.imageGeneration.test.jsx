@@ -2019,7 +2019,7 @@ describe("SceneWorks app shell", () => {
       [...document.body.querySelectorAll(".mode-control button")].find((button) => button.textContent === "Text → Video").click();
     });
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      document.body.querySelector(".advanced-section-toggle").click();
     });
 
     const quantSelect = field(container, "Quantization");
@@ -2098,7 +2098,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced").click();
+      document.body.querySelector(".advanced-section-toggle").click();
     });
     await settle();
 
