@@ -53,12 +53,27 @@ export function suppressThumbnailContextMenu(event) {
 // Generated videos get a sibling `<name>.poster.jpg` (the worker extracts frame 0).
 // WKWebView won't paint a <video>'s own first frame as a poster, so the UI shows
 // this real image instead — as the thumbnail and as the player's poster attribute.
+//
+// The server attaches `posterUrl` to a normalized asset ONLY when that poster file
+// actually exists on disk (sc-10468). So for a persisted (normalized) asset — which
+// always carries a server-built `url` — the ABSENCE of `posterUrl` means the video
+// has no poster, and we must NOT probe `<name>.poster.jpg` (that 404'd on every
+// render, spamming the log). We only fall back to deriving the poster path for
+// transient/live-job assets the server hasn't normalized yet (no `url`), preserving
+// the in-progress poster behavior in the studios.
 export function posterUrl(asset) {
-  const src = bareAssetUrl(asset);
-  if (!src || !assetCanRenderAsVideo(asset)) {
+  if (!assetCanRenderAsVideo(asset)) {
     return "";
   }
-  return withMediaTicket(src.replace(/\.\w+$/, ".poster.jpg"));
+  if (asset?.posterUrl) {
+    return withMediaTicket(API_BASE_URL + asset.posterUrl);
+  }
+  if (asset?.url) {
+    // Normalized asset with no server-advertised poster ⇒ none exists; don't probe.
+    return "";
+  }
+  const src = bareAssetUrl(asset);
+  return src ? withMediaTicket(src.replace(/\.\w+$/, ".poster.jpg")) : "";
 }
 
 // Placeholder shown when an asset's underlying file can't be loaded — e.g. it
