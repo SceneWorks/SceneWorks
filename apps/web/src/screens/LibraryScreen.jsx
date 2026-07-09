@@ -4,6 +4,7 @@ import { foldUpscaledAssetVariants } from "../assetVariants.js";
 import { AssetDetail, AssetGrid, emptyTrash } from "../components/assetPanels.jsx";
 import { isLibraryAsset, terminalStatuses } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
+import { WorkPanel } from "../components/WorkPanel.jsx";
 
 export function LibraryScreen() {
   const {
@@ -117,15 +118,8 @@ export function LibraryScreen() {
   const availableTags = [...new Set(libraryAssets.flatMap((asset) => (Array.isArray(asset.tags) ? asset.tags : [])))].sort();
 
   return (
-    <section className="main-surface library-surface">
-      <div className="surface-header hero">
-        <div className="section-heading">
-          <p className="eyebrow">Project assets</p>
-          <h2>Assets</h2>
-          <p className="hero-blurb">
-            Browse stills and clips across {activeProject?.name ?? "your project"} — pick a recent render to drop into the editor, or send one back to a studio for another pass.
-          </p>
-        </div>
+    <section className="page-frame library-surface">
+      <WorkPanel>
         <div className="toolbar">
           <label className="file-upload-button">
             <input accept="image/*,video/*" disabled={isImporting} onChange={handleImport} type="file" />
@@ -169,25 +163,25 @@ export function LibraryScreen() {
             </button>
           ) : null}
         </div>
-        <div className="hero-stats">
-          <div className="hero-stat">
-            <span className="hero-stat-label">Project</span>
-            <span className="hero-stat-value">{activeProject?.name ?? "—"}</span>
+        <div className="stat-strip">
+          <div className="stat-chip">
+            <span className="stat-chip-label">Project</span>
+            <span className="stat-chip-value">{activeProject?.name ?? "—"}</span>
           </div>
-          <div className="hero-stat">
-            <span className="hero-stat-label">Assets</span>
-            <span className="hero-stat-value">{libraryAssets.length} total</span>
+          <div className="stat-chip">
+            <span className="stat-chip-label">Assets</span>
+            <span className="stat-chip-value">{libraryAssets.length} total</span>
           </div>
-          <div className="hero-stat">
-            <span className="hero-stat-label">Images</span>
-            <span className="hero-stat-value">{imageCount}</span>
+          <div className="stat-chip">
+            <span className="stat-chip-label">Images</span>
+            <span className="stat-chip-value">{imageCount}</span>
           </div>
-          <div className="hero-stat">
-            <span className="hero-stat-label">Clips</span>
-            <span className="hero-stat-value">{videoCount + uploadCount}</span>
+          <div className="stat-chip">
+            <span className="stat-chip-label">Clips</span>
+            <span className="stat-chip-value">{videoCount + uploadCount}</span>
           </div>
         </div>
-      </div>
+      </WorkPanel>
 
       <AssetSelectionBar batch={batch} showDiscard={assetMode === "assets"} />
 

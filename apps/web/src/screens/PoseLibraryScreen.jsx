@@ -7,6 +7,7 @@ import { useAppContext, useAppStatic } from "../context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { GLOBAL_POSES_PROJECT_ID } from "../poseLibrary.js";
+import { WorkPanel } from "../components/WorkPanel.jsx";
 
 // The Pose Library screen (epic 2282). Two tabs:
 //  - "Poses": manage the global pose store — user-created type:"pose" assets in the
@@ -526,16 +527,8 @@ export function PoseLibraryScreen() {
   }, [visible]);
 
   return (
-    <section className="main-surface library-surface pose-library-surface">
-      <div className="surface-header hero">
-        <div className="section-heading">
-          <p className="eyebrow">Pose Library</p>
-          <h2>Poses</h2>
-          <p className="hero-blurb">
-            Manage your whole-body pose skeletons — discard, restore, tag, and categorize. Create new poses from photos
-            in the Create tab.
-          </p>
-        </div>
+    <section className="page-frame library-surface pose-library-surface">
+      <WorkPanel>
         <div className="segmented-control" role="tablist" aria-label="Pose Library sections">
           {TABS.map(([id, label]) => {
             const macBlock = id === "create" ? macPoseDetectBlock : null;
@@ -557,7 +550,7 @@ export function PoseLibraryScreen() {
             );
           })}
         </div>
-      </div>
+      </WorkPanel>
 
       <div
         aria-labelledby="pose-library-tab-poses"

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { LoraKeywordSummary } from "../components/LoraKeywordSummary.jsx";
 import { Icon } from "../components/Icons.jsx";
+import { WorkPanel } from "../components/WorkPanel.jsx";
 import {
   MAX_PRESET_LORAS,
   compactModeList,
@@ -376,12 +377,8 @@ export function PresetManagerScreen() {
   }
 
   return (
-    <section className="main-surface preset-manager">
-      <div className="surface-header">
-        <div className="section-heading">
-          <p className="eyebrow">Preset Manager</p>
-          <h2>{activeProject ? activeProject.name : "Global presets"}</h2>
-        </div>
+    <section className="page-frame preset-manager">
+      <WorkPanel eyebrow="Preset Manager">
         <div className="toolbar">
           <button onClick={startNewPreset} type="button">
             New Preset
@@ -393,7 +390,7 @@ export function PresetManagerScreen() {
             Archive
           </button>
         </div>
-      </div>
+      </WorkPanel>
 
       <div className={creating ? "preset-layout creating" : "preset-layout"}>
         <section className="preset-list" aria-label="Presets">

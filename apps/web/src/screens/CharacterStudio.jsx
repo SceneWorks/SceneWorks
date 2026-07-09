@@ -11,6 +11,7 @@ import {
   editableLora,
 } from "./characterPanels.jsx";
 import { CompactSelector } from "../components/CompactSelector.jsx";
+import { WorkPanel } from "../components/WorkPanel.jsx";
 import { assetMatchesCharacter } from "../characterMembership.js";
 import { extractFamilies } from "../presetUtils.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
@@ -492,12 +493,8 @@ export function CharacterStudio() {
   }
 
   return (
-    <section className="main-surface character-studio">
-      <div className="surface-header">
-        <div className="section-heading">
-          <p className="eyebrow">Character Studio</p>
-          <h2>{activeProject ? activeProject.name : "Create a project"}</h2>
-        </div>
+    <section className="page-frame character-studio">
+      <WorkPanel>
         <CompactSelector
           createLabel="New character"
           disabled={!activeProject}
@@ -512,7 +509,7 @@ export function CharacterStudio() {
           placeholder="Select a character"
           selectedId={selectedCharacter?.id ?? ""}
         />
-      </div>
+      </WorkPanel>
 
       <div className="character-layout">
         {!selectedCharacter ? (
