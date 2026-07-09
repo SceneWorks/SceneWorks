@@ -587,7 +587,9 @@ describe("ModelManagerScreen type-grouped layout", () => {
         { id: "flux_dev", name: "FLUX.1 [dev]", type: "image", family: "flux", capabilities: ["text_to_image"], installState: "missing" },
       ],
     });
-    const band = container.querySelector(".models-accent-band");
+    // Recommended picks now render flush inside the work-panel (page-frame
+    // standard) as .models-recommended, above the "All models" catalog on canvas.
+    const band = container.querySelector(".models-recommended");
     expect(band).toBeTruthy();
     expect(band.textContent).toContain("Recommended");
     expect(band.querySelectorAll(".model-card").length).toBe(1);
