@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
+import { WorkPanel } from "../components/WorkPanel.jsx";
 import { terminalStatuses } from "../constants.js";
 import { hasPresentCredential, loadCredentials, serverToken } from "../credentials.js";
 import {
@@ -1372,7 +1373,9 @@ export function ModelManagerScreen() {
 
   // A model type panel: an accent Recommended band (when any recommended match) over an
   // "All {type} models" grid of the rest. Both filtered by the active search + family.
-  function renderModelTabPanel(type) {
+  // Filter the catalog for a type by the active search + family, split into the
+  // curated Recommended picks (surfaced in the work-panel) and the rest.
+  function modelTabGroups(type) {
     const activeModels = models
       .filter((model) => model.type === type)
       .filter(modelMatchesQuery)
@@ -1382,19 +1385,36 @@ export function ModelManagerScreen() {
     const typeLabel = { image: "image", video: "video", utility: "utility" }[type] ?? type;
     const othersHeading =
       recommended.length > 0 ? `All ${typeLabel} models` : `${typeLabel.charAt(0).toUpperCase()}${typeLabel.slice(1)} models`;
+    return { recommended, others, othersHeading };
+  }
+
+  // Recommended picks, rendered flush inside the work-panel (Page-Frame standard:
+  // curated getting-started content belongs to the action, not floating on the
+  // canvas). No accent-band card here — the work-panel is already the one card.
+  function renderRecommendedPicks(type) {
+    const { recommended } = modelTabGroups(type);
+    if (!recommended.length) {
+      return null;
+    }
+    return (
+      <div className="models-recommended">
+        <div className="models-accent-band-head">
+          <span className="models-accent-dot" aria-hidden="true" />
+          <p className="eyebrow">Recommended</p>
+          <span className="models-accent-band-count">{recommended.length}</span>
+          <span className="models-accent-band-caption">Curated getting-started picks</span>
+        </div>
+        <div className="models-card-grid">{recommended.map((model) => renderModelCard(model))}</div>
+      </div>
+    );
+  }
+
+  // The catalog grid on the canvas: "All {type} models" (the non-recommended
+  // rest). Recommended picks render separately in the work-panel above.
+  function renderModelTabPanel(type) {
+    const { recommended, others, othersHeading } = modelTabGroups(type);
     return (
       <div className="models-tab-panel">
-        {recommended.length ? (
-          <div className="models-accent-band">
-            <div className="models-accent-band-head">
-              <span className="models-accent-dot" aria-hidden="true" />
-              <p className="eyebrow">Recommended</p>
-              <span className="models-accent-band-count">{recommended.length}</span>
-              <span className="models-accent-band-caption">Curated getting-started picks</span>
-            </div>
-            <div className="models-card-grid">{recommended.map((model) => renderModelCard(model))}</div>
-          </div>
-        ) : null}
         {others.length ? (
           <div className="models-section">
             <div className="models-section-heading">
@@ -1448,8 +1468,9 @@ export function ModelManagerScreen() {
   }
 
   return (
-    <section className="main-surface models-surface">
-      <div className="models-tabbar">
+    <section className="page-frame models-surface">
+      <WorkPanel>
+        <div className="models-tabbar">
         <div className="mode-tabs" role="tablist" aria-label="Model type">
           {tabDefs.map(([key, label, count]) => {
             const active = effectiveTab === key;
@@ -1495,7 +1516,9 @@ export function ModelManagerScreen() {
             ))}
           </select>
         </div>
-      </div>
+        </div>
+        {isModelTab ? renderRecommendedPicks(effectiveTab) : null}
+      </WorkPanel>
 
       {deleteMessage.text ? <p className={deleteMessage.tone === "success" ? "inline-success" : "inline-warning"}>{deleteMessage.text}</p> : null}
 

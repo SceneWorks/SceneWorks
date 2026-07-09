@@ -5766,6 +5766,15 @@ details[open] > summary.lora-scope-group-heading::before,
   align-self: flex-start;
 }
 
+/* Recommended picks flush inside the Model Manager work-panel — same header
+   treatment as the accent band, minus the tinted card (the work-panel is already
+   the one card, so no card-in-card). */
+.models-recommended {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+
 /* Plain section (All {type} models, Built-In LoRAs, a User family group, a Search group). */
 .models-section {
   display: flex;
