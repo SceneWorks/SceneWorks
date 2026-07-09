@@ -1,0 +1,210 @@
+//! Per-job generation-metrics probe (epic 10402, sc-10404).
+//!
+//! Wraps a job's execution in `run_utility_job` to capture the
+//! externally-observable hardware metrics — peak GPU memory, peak GPU load, and
+//! total wall-clock — and POST them once to `/api/v1/jobs/:id/metrics` on
+//! completion. Every generation runs one-at-a-time on the single
+//! generator-cache thread (`generator_cache::with_cached_generator`), so a
+//! process-global `reset_peak_memory` / `get_peak_memory` window is safe per
+//! job. Resolved settings (S4) and per-phase timings (S3) are posted separately
+//! by the handlers and coalesce-merge into the same row on the server.
+//!
+//! This restores — and broadens to every job type — the per-job peak GPU
+//! sampling that the Python→Rust cutover dropped (sc-2086).
+
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use sceneworks_core::contracts::GenerationMetrics;
+
+use crate::api_client::ApiClient;
+use crate::gpu::gpu_utilization;
+
+/// Reset the MLX peak-memory high-water mark at job start (macOS/MLX only). The
+/// counter is process-global, so this scopes the subsequent `get_peak_memory`
+/// read to this job. Matches the `generator_cache::write_gpu_telemetry` gating —
+/// tests never touch real MLX.
+#[cfg(all(target_os = "macos", not(test)))]
+fn reset_peak_memory() {
+    mlx_rs::memory::reset_peak_memory();
+}
+#[cfg(any(not(target_os = "macos"), test))]
+fn reset_peak_memory() {}
+
+/// Read the MLX peak-memory high-water mark in bytes (macOS/MLX only). `None` on
+/// other backends, where peak memory is derived from the sampled `memory.used`
+/// high-water mark instead.
+#[cfg(all(target_os = "macos", not(test)))]
+fn mlx_peak_memory_bytes() -> Option<u64> {
+    Some(mlx_rs::memory::get_peak_memory() as u64)
+}
+#[cfg(any(not(target_os = "macos"), test))]
+fn mlx_peak_memory_bytes() -> Option<u64> {
+    None
+}
+
+/// Total device memory in bytes for the pct denominator. macOS reads the cached
+/// `sysctl hw.memsize` (unified memory); other backends fall back to the sampled
+/// `memory.total` from the utilization snapshot.
+async fn total_memory_bytes(sampled_total_mb: u64) -> Option<u64> {
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        if let Some(gb) = crate::gpu::total_unified_memory_gb().await {
+            return Some((gb * 1024.0 * 1024.0 * 1024.0) as u64);
+        }
+    }
+    (sampled_total_mb > 0).then_some(sampled_total_mb * 1024 * 1024)
+}
+
+/// Normalize the worker's `gpu_id` to the contract's backend vocabulary. The
+/// Rust worker is either the Apple-Silicon MLX worker (`gpu_id == "mlx"`), a
+/// candle/NVIDIA worker (a device index), or CPU-only.
+fn normalize_backend(gpu_id: &str) -> &'static str {
+    match gpu_id {
+        "mlx" => "mlx",
+        "" | "cpu" => "cpu",
+        _ => "cuda",
+    }
+}
+
+/// A running probe scoped to a single job. Created via [`JobMetricsProbe::start`]
+/// before the handler runs and consumed by [`JobMetricsProbe::finish`] after, so
+/// the peak-memory window and GPU-load samples cover the whole job (model load +
+/// generation + any inline upscale).
+pub(crate) struct JobMetricsProbe {
+    started: Instant,
+    backend: &'static str,
+    sampler: Option<tokio::task::JoinHandle<()>>,
+    load_permille_max: Arc<AtomicU32>,
+    mem_used_mb_max: Arc<AtomicU64>,
+    mem_total_mb: Arc<AtomicU64>,
+}
+
+impl JobMetricsProbe {
+    /// Reset the MLX peak counter and spawn the background GPU-load/memory
+    /// sampler. `interval` matches the heartbeat cadence (5–15s) so the sampler
+    /// never out-paces the underlying macOS probes (which can take ~3s). A
+    /// CPU-only worker has no GPU to query, so no sampler is spawned.
+    pub(crate) fn start(gpu_id: &str, interval: Duration) -> Self {
+        reset_peak_memory();
+        let load_permille_max = Arc::new(AtomicU32::new(0));
+        let mem_used_mb_max = Arc::new(AtomicU64::new(0));
+        let mem_total_mb = Arc::new(AtomicU64::new(0));
+        let sampler = if gpu_id.is_empty() || gpu_id == "cpu" {
+            None
+        } else {
+            let gpu_id = gpu_id.to_owned();
+            let load = load_permille_max.clone();
+            let used = mem_used_mb_max.clone();
+            let total = mem_total_mb.clone();
+            Some(tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    ticker.tick().await;
+                    if let Some(snapshot) = gpu_utilization(&gpu_id).await {
+                        if let Some(load_pct) = snapshot.gpu_load_percent {
+                            let permille = (load_pct * 10.0).round().clamp(0.0, 1000.0) as u32;
+                            load.fetch_max(permille, Ordering::Relaxed);
+                        }
+                        if let Some(used_mb) = snapshot.memory_used_mb {
+                            used.fetch_max(used_mb, Ordering::Relaxed);
+                        }
+                        if let Some(total_mb) = snapshot.memory_total_mb {
+                            total.store(total_mb, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }))
+        };
+        Self {
+            started: Instant::now(),
+            backend: normalize_backend(gpu_id),
+            sampler,
+            load_permille_max,
+            mem_used_mb_max,
+            mem_total_mb,
+        }
+    }
+
+    /// Stop sampling and build the metrics block: peak memory (MLX exact on
+    /// macOS, sampled max elsewhere), peak GPU load, total wall-clock, backend.
+    pub(crate) async fn finish(mut self) -> GenerationMetrics {
+        if let Some(handle) = self.sampler.take() {
+            handle.abort();
+        }
+        let total_ms = self.started.elapsed().as_millis() as u64;
+        let load_permille = self.load_permille_max.load(Ordering::Relaxed);
+        let peak_gpu_load_pct = (load_permille > 0)
+            .then(|| serde_json::Number::from_f64(load_permille as f64 / 10.0))
+            .flatten();
+        let sampled_used_mb = self.mem_used_mb_max.load(Ordering::Relaxed);
+        let peak_memory_bytes = mlx_peak_memory_bytes()
+            .or_else(|| (sampled_used_mb > 0).then_some(sampled_used_mb * 1024 * 1024));
+        let total_bytes = total_memory_bytes(self.mem_total_mb.load(Ordering::Relaxed)).await;
+        let peak_memory_pct = match (peak_memory_bytes, total_bytes) {
+            (Some(peak), Some(total)) if total > 0 => {
+                serde_json::Number::from_f64(peak as f64 / total as f64 * 100.0)
+            }
+            _ => None,
+        };
+        GenerationMetrics {
+            backend: Some(self.backend.to_owned()),
+            total_ms: Some(total_ms),
+            peak_memory_bytes,
+            peak_memory_pct,
+            peak_gpu_load_pct,
+            ..Default::default()
+        }
+    }
+}
+
+/// Best-effort POST of a job's metrics block. A failure is logged and swallowed
+/// so telemetry never fails the job. Coalesce-merges server-side, so this
+/// composes with the settings/timing blocks the handlers post separately.
+pub(crate) async fn post_generation_metrics(
+    api: &ApiClient,
+    job_id: &str,
+    metrics: &GenerationMetrics,
+) {
+    if let Err(error) = api
+        .post_json::<GenerationMetrics, GenerationMetrics>(
+            &format!("/api/v1/jobs/{job_id}/metrics"),
+            metrics,
+        )
+        .await
+    {
+        tracing::warn!(
+            event = "job_metrics_post_failed",
+            jobId = %job_id,
+            error = %error,
+            "failed to post generation metrics"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_backend_maps_worker_gpu_ids() {
+        assert_eq!(normalize_backend("mlx"), "mlx");
+        assert_eq!(normalize_backend("cpu"), "cpu");
+        assert_eq!(normalize_backend(""), "cpu");
+        assert_eq!(normalize_backend("0"), "cuda");
+    }
+
+    #[tokio::test]
+    async fn cpu_probe_reports_wall_clock_without_gpu_samples() {
+        // A CPU worker spawns no sampler; finish() still reports total_ms + a
+        // normalized backend, and no GPU peaks (nothing to sample).
+        let probe = JobMetricsProbe::start("cpu", Duration::from_secs(5));
+        let metrics = probe.finish().await;
+        assert_eq!(metrics.backend.as_deref(), Some("cpu"));
+        assert!(metrics.total_ms.is_some());
+        assert!(metrics.peak_gpu_load_pct.is_none());
+        assert!(metrics.peak_memory_pct.is_none());
+    }
+}
