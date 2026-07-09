@@ -4054,6 +4054,10 @@ async fn generate_video(
     // the caption-job select!-with-interval).
     let mut interval = tokio::time::interval(crate::progress_report_interval(settings));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Per-phase wall-clock (epic 10402, sc-10405): load = start→first Step,
+    // sample = Step→Decoding, decode = Decoding→engine-return (video emits no
+    // per-frame decode-done event). Posted best-effort at clean completion.
+    let mut phase_timer = crate::job_metrics::PhaseTimer::new(Instant::now());
     // Run the progress loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003). The stall/
     // abandon watchdog inside the loop still handles the hard-wedge case via `abandoned`.
@@ -4083,6 +4087,12 @@ async fn generate_video(
                             continue;
                         }
                         heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                    }
+                    // Phase-boundary capture (sc-10405), borrowing so `progress` is
+                    // still owned by the fraction/message match below.
+                    match &progress {
+                        Progress::Step { .. } => phase_timer.mark_sample_step(Instant::now()),
+                        Progress::Decoding => phase_timer.mark_decoding(Instant::now()),
                     }
                     let (fraction, message) = match progress {
                         Progress::Step { current, total } => (
@@ -4199,6 +4209,12 @@ async fn generate_video(
         )
         .await?;
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+    }
+    // Post the per-phase timing (epic 10402, sc-10405); into_metrics closes the
+    // decode span still open at completion (video emits no decode-done event).
+    // Best-effort; coalesce-merges with the S2 hardware block server-side.
+    if let Some(phase_metrics) = phase_timer.into_metrics(Instant::now()) {
+        crate::job_metrics::post_generation_metrics(api, &job.id, &phase_metrics).await;
     }
     result
 }

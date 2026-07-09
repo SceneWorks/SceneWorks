@@ -3861,6 +3861,12 @@ async fn consume_gen_events(
     // mirrors the caption-job select!-with-interval).
     let mut interval = tokio::time::interval(progress_report_interval(settings));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Per-phase wall-clock (epic 10402, sc-10405): derive load/sample/decode spans
+    // from this shared event stream — load = start→first Step, sample = Step→Decoding,
+    // decode = Decoding→Image — summed across the batch's images. Both the MLX and
+    // candle image lanes funnel through here, so both get the split. Posted best-effort
+    // at clean completion; coalesce-merges with the S2 hardware block server-side.
+    let mut phase_timer = crate::job_metrics::PhaseTimer::new(Instant::now());
     // Run the event loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
     let loop_result: WorkerResult<()> = async {
@@ -3880,6 +3886,7 @@ async fn consume_gen_events(
                 total: step_total,
             } => {
                 mark_started(index);
+                phase_timer.mark_sample_step(Instant::now());
                 if last_cancel_check.elapsed() >= Duration::from_secs(2) {
                     last_cancel_check = Instant::now();
                     // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
@@ -3909,6 +3916,7 @@ async fn consume_gen_events(
             }
             GenEvent::Decoding { index } => {
                 mark_started(index);
+                phase_timer.mark_decoding(Instant::now());
                 update_job(
                     api,
                     &job.id,
@@ -3931,6 +3939,7 @@ async fn consume_gen_events(
                 pixels,
                 face_likeness,
             } => {
+                phase_timer.mark_item_done(Instant::now());
                 // The identity-likeness post-pass (sc-4409) scores each image on the blocking thread
                 // and hands the pre-built `faceLikeness` block back through the event. Attach it to a
                 // PER-IMAGE clone of the shared raw settings under the sidecar key so each angle's
@@ -4041,6 +4050,11 @@ async fn consume_gen_events(
         )
         .await?;
         return Err(WorkerError::Canceled(message.to_owned()));
+    }
+    // Post the per-phase timing block (epic 10402, sc-10405). Best-effort; coalesce-
+    // merges with the S2 hardware block (which owns totalMs/backend/peaks) server-side.
+    if let Some(phase_metrics) = phase_timer.into_metrics(Instant::now()) {
+        crate::job_metrics::post_generation_metrics(api, &job.id, &phase_metrics).await;
     }
     task_result
 }

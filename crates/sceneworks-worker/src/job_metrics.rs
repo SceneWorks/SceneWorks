@@ -160,6 +160,82 @@ impl JobMetricsProbe {
     }
 }
 
+/// Accumulates load / sample / decode wall-clock from a generation's
+/// phase-boundary events (epic 10402, sc-10405). Timestamps are passed in rather
+/// than read from a clock, so the accumulation is unit-testable and the logic is
+/// shared verbatim by the image and video stream consumers:
+/// load = start→first step, sample = step→decoding, decode = decoding→item-done,
+/// summed across a batch's items (the model loads once, so load is one-time).
+pub(crate) struct PhaseTimer {
+    start: Instant,
+    load_ms: Option<u64>,
+    sample_ms: u64,
+    decode_ms: u64,
+    sample_started: Option<Instant>,
+    decode_started: Option<Instant>,
+}
+
+impl PhaseTimer {
+    pub(crate) fn new(start: Instant) -> Self {
+        Self {
+            start,
+            load_ms: None,
+            sample_ms: 0,
+            decode_ms: 0,
+            sample_started: None,
+            decode_started: None,
+        }
+    }
+
+    /// A denoise/sample step arrived. The first step across the whole job ends
+    /// the load phase; the first step of each item opens its sample span.
+    pub(crate) fn mark_sample_step(&mut self, now: Instant) {
+        if self.load_ms.is_none() {
+            self.load_ms = Some(now.saturating_duration_since(self.start).as_millis() as u64);
+        }
+        if self.sample_started.is_none() {
+            self.sample_started = Some(now);
+        }
+    }
+
+    /// Decoding began — close the open sample span and open the decode span.
+    pub(crate) fn mark_decoding(&mut self, now: Instant) {
+        if let Some(started_at) = self.sample_started.take() {
+            self.sample_ms += now.saturating_duration_since(started_at).as_millis() as u64;
+        }
+        if self.decode_started.is_none() {
+            self.decode_started = Some(now);
+        }
+    }
+
+    /// An item finished (image ready / engine returned) — close the decode span,
+    /// or fold the remaining time into sample if the engine emitted no decoding
+    /// event.
+    pub(crate) fn mark_item_done(&mut self, now: Instant) {
+        if let Some(started_at) = self.decode_started.take() {
+            self.decode_ms += now.saturating_duration_since(started_at).as_millis() as u64;
+        } else if let Some(started_at) = self.sample_started.take() {
+            self.sample_ms += now.saturating_duration_since(started_at).as_millis() as u64;
+        }
+    }
+
+    /// Consume into a phase-only metrics block, closing any span still open at
+    /// `now` (video's decode ends when the engine returns, with no event).
+    /// Returns None when nothing was measured, so the caller skips an empty POST.
+    pub(crate) fn into_metrics(mut self, now: Instant) -> Option<GenerationMetrics> {
+        self.mark_item_done(now);
+        if self.load_ms.is_none() && self.sample_ms == 0 && self.decode_ms == 0 {
+            return None;
+        }
+        Some(GenerationMetrics {
+            load_ms: self.load_ms,
+            sample_ms: (self.sample_ms > 0).then_some(self.sample_ms),
+            decode_ms: (self.decode_ms > 0).then_some(self.decode_ms),
+            ..Default::default()
+        })
+    }
+}
+
 /// Best-effort POST of a job's metrics block. A failure is logged and swallowed
 /// so telemetry never fails the job. Coalesce-merges server-side, so this
 /// composes with the settings/timing blocks the handlers post separately.
@@ -194,6 +270,52 @@ mod tests {
         assert_eq!(normalize_backend("cpu"), "cpu");
         assert_eq!(normalize_backend(""), "cpu");
         assert_eq!(normalize_backend("0"), "cuda");
+    }
+
+    #[test]
+    fn phase_timer_splits_load_sample_decode_and_sums_items() {
+        let t0 = Instant::now();
+        let mut timer = PhaseTimer::new(t0);
+        // Item 0: cold load (200ms) → sample (300ms) → decode (100ms).
+        timer.mark_sample_step(t0 + Duration::from_millis(200));
+        timer.mark_sample_step(t0 + Duration::from_millis(350));
+        timer.mark_decoding(t0 + Duration::from_millis(500));
+        timer.mark_item_done(t0 + Duration::from_millis(600));
+        // Item 1: model cached (no new load) → sample (300ms) → decode (50ms).
+        timer.mark_sample_step(t0 + Duration::from_millis(700));
+        timer.mark_decoding(t0 + Duration::from_millis(1000));
+        timer.mark_item_done(t0 + Duration::from_millis(1050));
+        let metrics = timer
+            .into_metrics(t0 + Duration::from_millis(1050))
+            .expect("measured");
+        assert_eq!(
+            metrics.load_ms,
+            Some(200),
+            "load is one-time (first step only)"
+        );
+        assert_eq!(metrics.sample_ms, Some(600), "sample sums across items");
+        assert_eq!(metrics.decode_ms, Some(150), "decode sums across items");
+    }
+
+    #[test]
+    fn phase_timer_folds_into_sample_without_decoding_event() {
+        let t0 = Instant::now();
+        let mut timer = PhaseTimer::new(t0);
+        timer.mark_sample_step(t0 + Duration::from_millis(100));
+        // Engine returns without a decoding event → the open span becomes sample.
+        let metrics = timer
+            .into_metrics(t0 + Duration::from_millis(500))
+            .expect("measured");
+        assert_eq!(metrics.load_ms, Some(100));
+        assert_eq!(metrics.sample_ms, Some(400));
+        assert_eq!(metrics.decode_ms, None);
+    }
+
+    #[test]
+    fn phase_timer_reports_nothing_without_events() {
+        let t0 = Instant::now();
+        let timer = PhaseTimer::new(t0);
+        assert!(timer.into_metrics(t0 + Duration::from_millis(50)).is_none());
     }
 
     #[tokio::test]
