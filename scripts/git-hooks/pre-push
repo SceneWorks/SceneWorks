@@ -1,0 +1,55 @@
+#!/bin/sh
+# sc-10463: before pushing Rust changes, run the "neither" build (Linux, no backend-candle) locally
+# so the cfg/dead-code trap that only surfaces in CI's parity lane is caught here instead of after a
+# full CI round-trip. Only runs when the pushed commits touch Rust; skip with SKIP_NEITHER_CHECK=1 or
+# `git push --no-verify`. See CONTRIBUTING.md ("The base.rs / candle cfg rule").
+set -eu
+
+if [ "${SKIP_NEITHER_CHECK:-0}" = "1" ]; then
+  exit 0
+fi
+
+zero="0000000000000000000000000000000000000000"
+rust_changed=0
+
+# stdin: "<local ref> <local sha> <remote ref> <remote sha>" per ref being pushed.
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue # branch deletion — nothing to lint.
+
+  if [ "$remote_sha" = "$zero" ]; then
+    # New remote branch: diff from the parent of the oldest not-yet-pushed commit.
+    oldest="$(git rev-list "$local_sha" --not --remotes 2>/dev/null | tail -n 1)"
+    if [ -n "$oldest" ]; then
+      base="$(git rev-parse "$oldest^" 2>/dev/null || git hash-object -t tree /dev/null)"
+      diff_range="$base..$local_sha"
+    else
+      diff_range="$local_sha"
+    fi
+  else
+    diff_range="$remote_sha..$local_sha"
+  fi
+
+  if git diff --name-only "$diff_range" 2>/dev/null \
+    | grep -Eq '(^|/)([^/]+\.rs|Cargo\.(toml|lock)|rustfmt\.toml)$|^\.cargo/.*\.toml$'; then
+    rust_changed=1
+  fi
+done
+
+[ "$rust_changed" = "0" ] && exit 0
+
+echo "Running the 'neither' build (Linux, no backend-candle) for pushed Rust changes..."
+echo "(skip with SKIP_NEITHER_CHECK=1 or 'git push --no-verify')"
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "npm is required to run the neither-build check. Install Node/npm or add it to PATH."
+  exit 1
+fi
+
+if ! npm run --silent rust:check:neither; then
+  echo
+  echo "The neither build failed: an item used only by base.rs / candle-only code is dead on the"
+  echo "Linux no-candle build. Gate it with the same cfg as base.rs:"
+  echo '  #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]'
+  echo "See CONTRIBUTING.md ('The base.rs / candle cfg rule')."
+  exit 1
+fi
