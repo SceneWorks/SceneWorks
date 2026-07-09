@@ -599,7 +599,7 @@ pub(crate) fn visible_gpu_ids(value: Option<&str>) -> Option<Vec<String>> {
 pub(crate) fn cpu_gpu() -> DiscoveredGpu {
     DiscoveredGpu {
         id: "cpu".to_owned(),
-        name: "Rust CPU utility worker".to_owned(),
+        name: "CPU utility worker".to_owned(),
         capabilities: vec![WorkerCapability::Placeholder, WorkerCapability::Cpu],
         utilization: None,
     }

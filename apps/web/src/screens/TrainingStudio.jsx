@@ -1458,7 +1458,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
             <p className="view-copy">
               {datasetLibraryMode
                 ? "Create training datasets, manage imported dataset images, and normalize captions in one place."
-                : "Select an existing dataset and prepare a Rust-owned training plan before any ML runtime work begins."}
+                : "Select an existing dataset and prepare a training plan before any ML runtime work begins."}
             </p>
           </div>
           <div className="training-metrics" aria-label="Training workspace summary">

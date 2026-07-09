@@ -595,7 +595,7 @@ describe("ImageStudio model picker capability gating", () => {
   const MAC_CAPS = {
     macGatingActive: true,
     platform: "darwin",
-    notAvailableLabel: "Not available on Mac (Rust/MLX only)",
+    notAvailableLabel: "Not available on Mac (MLX only)",
     features: {},
     training: { supportedKernels: [], lokrOnWanSupported: false },
   };

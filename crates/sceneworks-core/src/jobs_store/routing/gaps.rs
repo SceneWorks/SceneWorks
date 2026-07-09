@@ -230,7 +230,7 @@ impl UnsupportedReason {
             .map(|epic| format!(" [{epic}]"))
             .unwrap_or_default();
         format!(
-            "mlx_unsupported: {feature}{model} is not in the Rust/MLX flow on macOS — {detail}{pointer}",
+            "mlx_unsupported: {feature}{model} is not in the MLX flow on macOS — {detail}{pointer}",
             feature = self.feature,
             detail = self.detail,
         )
@@ -390,7 +390,7 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
                 Err(UnsupportedReason::new(
                     model,
                     "image_upscale (AuraSR)",
-                    "the Rust upscaler runs Real-ESRGAN (+ SeedVR2); the AuraSR engine is dropped as an offered engine (sc-3668 / sc-5499).",
+                    "the upscaler runs Real-ESRGAN (+ SeedVR2); the AuraSR engine is dropped as an offered engine (sc-3668 / sc-5499).",
                     Some("sc-5499"),
                 ))
             }
@@ -420,7 +420,7 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         JobType::TrainingCaption => Err(UnsupportedReason::new(
             None,
             "dataset captioning",
-            "this dataset captioning job is not in the Rust/MLX JoyCaption flow.",
+            "this dataset captioning job is not in the MLX JoyCaption flow.",
             Some("sc-3556"),
         )),
     }
@@ -632,7 +632,7 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
         return UnsupportedReason::new(
             Some(model),
             "unsupported image model",
-            "this model has no Rust/MLX engine and no port epic yet — file a porting epic and drop it on Mac (epic 3482 policy).",
+            "this model has no MLX engine and no port epic yet — file a porting epic and drop it on Mac (epic 3482 policy).",
             None,
         );
     }
@@ -708,7 +708,7 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
         _ => UnsupportedReason::new(
             Some(model),
             "unsupported configuration",
-            "this model/feature combination is not in the Rust/MLX flow.",
+            "this model/feature combination is not in the MLX flow.",
             None,
         ),
     }
@@ -725,7 +725,7 @@ pub(crate) fn classify_video_gap(payload: &Map<String, Value>) -> UnsupportedRea
         return UnsupportedReason::new(
             Some(model),
             "unsupported video model",
-            "this video model has no Rust/MLX engine; it is not available in the native flow on Mac.",
+            "this video model has no MLX engine; it is not available in the native flow on Mac.",
             Some("epic 3040"),
         );
     }
@@ -746,7 +746,7 @@ pub(crate) fn classify_video_gap(payload: &Map<String, Value>) -> UnsupportedRea
     UnsupportedReason::new(
         Some(model),
         "unsupported video configuration",
-        "this video configuration is not in the Rust/MLX flow.",
+        "this video configuration is not in the MLX flow.",
         None,
     )
 }
@@ -774,7 +774,7 @@ pub(crate) fn classify_training_gap(payload: &Map<String, Value>) -> Unsupported
         _ => UnsupportedReason::new(
             None,
             "LoRA/LoKr training",
-            "this training kernel has no native mlx-gen Rust trainer.",
+            "this training kernel has no native mlx-gen trainer.",
             Some("epic 3039"),
         ),
     }
