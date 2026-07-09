@@ -5,6 +5,7 @@ import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.j
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
+import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
@@ -818,9 +819,9 @@ export function VideoStudio() {
       onOpenQueue={onOpenQueue}
       onCancelJob={onCancelJob}
     >
-    <section className="main-surface video-studio">
+    <section className="page-frame video-studio">
       <form className="studio-shell" onSubmit={submit}>
-        <div className="surface-header hero studio-prompt-hero">
+        <WorkPanel className="studio-work-panel">
           <div className="prompt-hero-top">
             <div className="mode-tabs mode-control" role="tablist" aria-label="Video mode">
               {modeOptions.map(([value, label]) => {
@@ -1152,8 +1153,9 @@ export function VideoStudio() {
           />
 
           {durationHint ? <p className="helper-copy">{durationHint}</p> : null}
+        </WorkPanel>
 
-          <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
+        <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
             <Icon.ChevDown className={advancedOpen ? "chev-rotate open" : "chev-rotate"} size={14} />
             {advancedOpen ? "Hide advanced" : "Advanced"}
           </button>
@@ -1463,7 +1465,6 @@ export function VideoStudio() {
               Generate is blocked because these selected LoRAs are incompatible with {selectedModel?.name ?? "the selected model"}: {selectedLoraValidationResult.incompatible.join(", ")}.
             </p>
           ) : null}
-        </div>
 
         <div className="studio-results">
           <section className="review-panel">
