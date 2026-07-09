@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from "react";
+import { WorkPanel } from "../components/WorkPanel.jsx";
 import {
   Bar,
   BarChart,
@@ -294,38 +295,28 @@ export function StatsScreen() {
   };
 
   return (
-    <section className="main-surface stats-surface">
-      <div className="surface-header hero">
-        <div className="section-heading">
-          <p className="eyebrow">System</p>
-          <h2>Generation stats</h2>
-          <p className="hero-blurb">
-            Compare runs by model, quant, and settings — with per-phase timing, peak memory, and GPU load
-            for every job.
-          </p>
+    <section className="page-frame stats-surface">
+      <WorkPanel>
+        <div className="stat-strip">
+          <div className="stat-chip">
+            <span className="stat-chip-label">Runs</span>
+            <span className="stat-chip-value">{kpis.runs}</span>
+          </div>
+          <div className="stat-chip">
+            <span className="stat-chip-label">Median total</span>
+            <span className="stat-chip-value">{formatMs(kpis.medianTotalMs)}</span>
+          </div>
+          <div className="stat-chip">
+            <span className="stat-chip-label">Median peak mem</span>
+            <span className="stat-chip-value">{formatPercent(kpis.medianPeakMemPct)}</span>
+          </div>
+          <div className="stat-chip">
+            <span className="stat-chip-label">Fastest quant</span>
+            <span className="stat-chip-value">{kpis.fastestQuant ?? "—"}</span>
+          </div>
         </div>
-      </div>
 
-      <div className="hero-stats">
-        <div className="hero-stat">
-          <span className="hero-stat-label">Runs</span>
-          <span className="hero-stat-value">{kpis.runs}</span>
-        </div>
-        <div className="hero-stat">
-          <span className="hero-stat-label">Median total</span>
-          <span className="hero-stat-value">{formatMs(kpis.medianTotalMs)}</span>
-        </div>
-        <div className="hero-stat">
-          <span className="hero-stat-label">Median peak mem</span>
-          <span className="hero-stat-value">{formatPercent(kpis.medianPeakMemPct)}</span>
-        </div>
-        <div className="hero-stat">
-          <span className="hero-stat-label">Fastest quant</span>
-          <span className="hero-stat-value">{kpis.fastestQuant ?? "—"}</span>
-        </div>
-      </div>
-
-      <div className="stats-filters">
+        <div className="stats-filters">
         <FilterSelect
           label="Job type"
           value={filters.type}
@@ -358,7 +349,8 @@ export function StatsScreen() {
         <button type="button" className="stats-refresh" onClick={refresh} disabled={loading}>
           {loading ? "Loading…" : "Refresh"}
         </button>
-      </div>
+        </div>
+      </WorkPanel>
 
       {error ? <p className="stats-error">{error}</p> : null}
 
