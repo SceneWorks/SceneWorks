@@ -684,12 +684,70 @@ impl ProjectStore {
     pub fn reindex_project(&self, project_id: &str) -> ProjectStoreResult<ReindexResult> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         let counts = reindex_project_path(&project_path)?;
+        // Rebuilding re-adds a row for every sidecar on disk, including any whose
+        // media was purged. Prune those straight back out so an explicit reindex
+        // leaves the registry as clean as the startup sweep does. The auto-reindex
+        // in `list_assets` calls `reindex_project_path` directly (not this method),
+        // so it is unaffected — it still recovers on-disk sidecars as before.
+        let pruned = prune_orphaned_asset_rows(&project_path)?;
         Ok(ReindexResult {
             project_id: project_id.to_owned(),
-            assets: counts.assets,
+            assets: counts.assets.saturating_sub(pruned as u32),
             generation_sets: counts.generation_sets,
             timelines: counts.timelines,
         })
+    }
+
+    /// Remove index rows for "purged-but-referenced" assets — rows whose recorded
+    /// media file no longer exists on disk. These arise when an asset's media is
+    /// deleted out-of-band, or a purge is interrupted after the file is unlinked
+    /// but before the row is removed: the row (and its sidecar) linger, so
+    /// `list_assets` keeps serving an asset whose `/files/` URL 404s on every open.
+    /// The web UI degrades each to a placeholder (`assetMedia.jsx`), so the only
+    /// symptom is server-log noise — one 404 per missing asset, every startup.
+    ///
+    /// Prunes ONLY the index row, never the sidecar. The sidecar is the rebuildable
+    /// source of truth (`reindex` reconstructs the row from it), so preserving it is
+    /// a safety net: if the "missing" media ever returns — e.g. a path that was
+    /// transiently absent — a reindex restores the asset instead of it being lost.
+    /// Media lives beside the sidecar under the project directory, so in the normal
+    /// case a file missing from a readable project is a genuine purge. Idempotent;
+    /// returns the number of rows pruned.
+    pub fn prune_orphaned_assets(&self, project_id: &str) -> ProjectStoreResult<usize> {
+        let project_path = self.find_project_path(project_id)?;
+        prune_orphaned_asset_rows(&project_path)
+    }
+
+    /// Run [`prune_orphaned_assets`](Self::prune_orphaned_assets) across every
+    /// registered project (including the reserved global libraries) that already
+    /// has an initialized `project.db`. Best-effort per project: one project's
+    /// failure is logged and does not abort the sweep. Intended as a startup
+    /// data-integrity pass so the Library never fetches a purged asset. Returns the
+    /// total number of rows pruned across all projects.
+    pub fn prune_all_orphaned_assets(&self) -> ProjectStoreResult<usize> {
+        let project_paths: Vec<PathBuf> = {
+            let _guard = self.lock.lock();
+            self.load_registry()?
+                .into_iter()
+                .filter_map(|item| item.path.map(PathBuf::from))
+                // Only touch projects that have been opened at least once (a DB
+                // exists); never materialize a `project.db` for one that has not.
+                .filter(|path| path.join("project.db").exists())
+                .collect()
+        };
+        let mut total = 0;
+        for project_path in project_paths {
+            match prune_orphaned_asset_rows(&project_path) {
+                Ok(count) => total += count,
+                Err(error) => tracing::warn!(
+                    event = "orphaned_asset_prune_project_failed",
+                    project = %project_path.display(),
+                    error = %error,
+                    "could not prune orphaned assets for project"
+                ),
+            }
+        }
+        Ok(total)
     }
 
     pub fn list_timelines(&self, project_id: &str) -> ProjectStoreResult<Vec<TimelineSummary>> {
@@ -3946,6 +4004,42 @@ fn purge_asset_record(project_path: &Path, asset_id: &str) -> ProjectStoreResult
     Ok(())
 }
 
+/// Delete index rows whose recorded media file is gone from disk. Backs
+/// [`ProjectStore::prune_orphaned_assets`]; see that method for the rationale and
+/// the sidecar-preservation safety net. Takes the per-project file lock so the
+/// read-then-delete is serialized against concurrent indexing/mutation.
+fn prune_orphaned_asset_rows(project_path: &Path) -> ProjectStoreResult<usize> {
+    let _guard = lock_project_files(project_path);
+    let mut connection = connect_project_db(project_path)?;
+    let transaction = connection.transaction()?;
+    apply_project_migrations(&transaction)?;
+    let orphan_ids: Vec<String> = {
+        let mut statement = transaction.prepare("select id, file_path from assets")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        let mut ids = Vec::new();
+        for row in rows {
+            let (asset_id, file_rel) = row?;
+            let Some(file_rel) = file_rel else {
+                continue;
+            };
+            // Normalize separators before joining — matching `normalize_asset_cached`'s
+            // URL builder — so a Windows-authored sidecar (backslash paths) isn't
+            // misread as missing on a POSIX host and wrongly pruned.
+            if !project_path.join(file_rel.replace('\\', "/")).exists() {
+                ids.push(asset_id);
+            }
+        }
+        ids
+    };
+    for asset_id in &orphan_ids {
+        transaction.execute("delete from assets where id = ?1", params![asset_id])?;
+    }
+    transaction.commit()?;
+    Ok(orphan_ids.len())
+}
+
 fn project_has_sidecars(project_path: &Path) -> bool {
     asset_sidecars(project_path).is_ok_and(|paths| !paths.is_empty())
 }
@@ -5272,6 +5366,134 @@ mod tests {
             assets.is_empty(),
             "no sidecars on disk => empty library, no spurious assets"
         );
+    }
+
+    /// Fact for a generated image asset in `genset`. `persist_generated_asset`
+    /// writes the sidecar + index row but NOT the media file (the worker writes
+    /// media), so a test controls "media present" by writing the `.png` itself.
+    fn orphan_test_fact(asset_id: &str) -> Value {
+        json!({
+            "assetId": asset_id,
+            "mediaPath": format!("assets/images/genset/{asset_id}.png"),
+            "mimeType": "image/png",
+            "displayName": asset_id,
+            "createdAt": "2026-05-25T00:00:00Z",
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "adapter": "z_image_diffusers",
+            "prompt": "x",
+        })
+    }
+
+    #[test]
+    fn prune_orphaned_assets_removes_only_rows_whose_media_is_missing() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Prune").expect("project creates");
+        let project_path = store.find_project_path(&project.id).expect("project path");
+
+        store
+            .persist_generated_asset(&project.id, "job-1", "genset", &orphan_test_fact("keep"))
+            .expect("keep persists");
+        store
+            .persist_generated_asset(&project.id, "job-1", "genset", &orphan_test_fact("gone"))
+            .expect("gone persists");
+        // `keep` has its media on disk; `gone` does not (its media was purged).
+        std::fs::write(
+            project_path.join("assets/images/genset/keep.png"),
+            b"png-bytes",
+        )
+        .expect("write keep media");
+
+        // Precondition: both rows are indexed and listed (list_assets checks the
+        // sidecar, not the media, so it still serves the media-less `gone`).
+        let before = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .expect("list before prune");
+        assert_eq!(before.len(), 2, "both assets listed before prune");
+
+        let pruned = store
+            .prune_orphaned_assets(&project.id)
+            .expect("prune succeeds");
+        assert_eq!(pruned, 1, "only the media-less row is pruned");
+
+        let after = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .expect("list after prune");
+        assert_eq!(after.len(), 1, "the purged asset is no longer served");
+        assert_eq!(after[0]["id"], json!("keep"));
+
+        // Idempotent: a second pass finds nothing to prune.
+        assert_eq!(
+            store
+                .prune_orphaned_assets(&project.id)
+                .expect("second prune"),
+            0
+        );
+
+        // The sidecar is preserved as the rebuildable source of truth — the row is
+        // pruned, but the on-disk metadata (and thus a reindex recovery path) remains.
+        assert!(
+            project_path
+                .join("assets/images/genset/gone.sceneworks.json")
+                .exists(),
+            "pruned asset's sidecar is left on disk"
+        );
+    }
+
+    #[test]
+    fn prune_all_orphaned_assets_sweeps_every_registered_project() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        // Two projects, each with one asset whose media was never written (purged).
+        for name in ["Alpha", "Beta"] {
+            let project = store.create_project(name).expect("project creates");
+            store
+                .persist_generated_asset(&project.id, "job-1", "genset", &orphan_test_fact("gone"))
+                .expect("gone persists");
+        }
+
+        let total = store
+            .prune_all_orphaned_assets()
+            .expect("sweep succeeds across projects");
+        assert_eq!(total, 2, "one orphan pruned from each project");
+
+        // A second sweep is a no-op.
+        assert_eq!(store.prune_all_orphaned_assets().expect("second sweep"), 0);
+    }
+
+    #[test]
+    fn reindex_project_does_not_resurrect_orphaned_assets() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Reindex").expect("project creates");
+        let project_path = store.find_project_path(&project.id).expect("project path");
+
+        store
+            .persist_generated_asset(&project.id, "job-1", "genset", &orphan_test_fact("present"))
+            .expect("present persists");
+        store
+            .persist_generated_asset(&project.id, "job-1", "genset", &orphan_test_fact("orphan"))
+            .expect("orphan persists");
+        // Only `present` has media on disk; both sidecars exist (so a rebuild would
+        // re-add both rows without the post-reindex prune).
+        std::fs::write(
+            project_path.join("assets/images/genset/present.png"),
+            b"png-bytes",
+        )
+        .expect("write present media");
+
+        let counts = store.reindex_project(&project.id).expect("reindex works");
+        assert_eq!(
+            counts.assets, 1,
+            "reindex re-adds both sidecars then prunes the media-less one"
+        );
+
+        let assets = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .expect("list after reindex");
+        assert_eq!(assets.len(), 1, "the orphan is not resurrected by reindex");
+        assert_eq!(assets[0]["id"], json!("present"));
     }
 
     #[test]

@@ -830,6 +830,25 @@ pub(crate) fn create_app_with_state(
             "could not ensure global keypoint library project"
         );
     }
+    // Startup data-integrity pass: drop index rows for assets whose media was
+    // purged from disk but whose row/sidecar lingered, so the Library never fetches
+    // a file that 404s on every open (the source of the app-startup 404 log spam).
+    // Runs before the server binds, so the first `list_assets` is already clean.
+    // Best-effort and non-fatal — a failure just leaves the stale rows for next
+    // startup; the sidecars are untouched, so nothing is lost.
+    match project_store.prune_all_orphaned_assets() {
+        Ok(0) => {}
+        Ok(pruned) => tracing::info!(
+            event = "orphaned_assets_pruned",
+            count = pruned,
+            "pruned purged-but-referenced assets from project registries at startup"
+        ),
+        Err(error) => tracing::warn!(
+            event = "orphaned_assets_prune_failed",
+            error = %error,
+            "startup orphaned-asset prune failed; the Library may still request purged media"
+        ),
+    }
     let state = AppState {
         settings,
         jobs_store,
@@ -1302,10 +1321,30 @@ async fn get_project_file(
     Path((project_id, relative_path)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let project_file = project_call(state, move |store| {
-        store.project_file(&project_id, &relative_path)
+    let project_file = project_call(state, {
+        let project_id = project_id.clone();
+        let relative_path = relative_path.clone();
+        move |store| store.project_file(&project_id, &relative_path)
     })
-    .await?;
+    .await
+    .inspect_err(|error| {
+        // The generic 4xx logger (error.rs) records only `status` + `detail`, so a
+        // bare "File not found" line can't be traced back to a file. Name the missing
+        // resource here — mirroring the `auth_rejected`/`auth_throttled` structured
+        // logs — so operators can see which asset the web UI requested. The common
+        // startup culprits are a video's `<name>.poster.jpg` that was never generated
+        // and an asset purged from disk but still referenced by the project; the web
+        // UI degrades both to a placeholder (assetMedia.jsx), so the only trace is here.
+        if error.status == StatusCode::NOT_FOUND {
+            tracing::debug!(
+                event = "project_file_missing",
+                project_id = %project_id,
+                relative_path = %relative_path,
+                status = error.status.as_u16(),
+                "requested project file not found"
+            );
+        }
+    })?;
     let mut file = tokio::fs::File::open(&project_file.path)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
