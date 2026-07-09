@@ -856,7 +856,7 @@ describe("SceneWorks app shell", () => {
 
     // The Identity-structure slider seeds from angleSetDefault, not the 0.80 single-image default.
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Advanced")?.click();
+      document.body.querySelector(".advanced-section-toggle")?.click();
     });
     const lockSlider = [...document.body.querySelectorAll(".reference-strength")].find((label) =>
       label.textContent.includes("Identity structure"),

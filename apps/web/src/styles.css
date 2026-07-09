@@ -4480,7 +4480,6 @@ label {
 .review-card,
 .asset-detail,
 .preview-button,
-.advanced-panel,
 .studio-controls,
 .review-panel {
   border: 1px solid var(--border);
@@ -7278,12 +7277,10 @@ details[open] > summary.lora-scope-group-heading::before,
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+/* Every Advanced panel now renders inside an `.advanced-section` disclosure, which
+   owns the bordered block. What is left here is only the override grid (sc-10478). */
 .advanced-panel {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  padding: 12px;
-  background: var(--surface-2);
-  border-radius: var(--r-md);
-  border: 1px solid var(--border);
 }
 
 /* Uniform control height so every select and number/text field in the panel lines up
@@ -7323,15 +7320,6 @@ details[open] > summary.lora-scope-group-heading::before,
   grid-column: 1 / -1;
 }
 
-/* Inside the disclosure the block's chrome belongs to `.advanced-section`, so the
-   panel is just a grid. CharacterAdvancedOptions still renders `.advanced-panel`
-   standalone with its own card; this override drops out with it (sc-10478). */
-.advanced-section-body .advanced-panel {
-  padding: 0;
-  background: none;
-  border: 0;
-  border-radius: 0;
-}
 
 .video-preset-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
