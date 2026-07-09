@@ -15,6 +15,13 @@
 //! the [`crate::engines::MODEL_TABLE`] dispatch table + links its provider crate.
 
 use super::*;
+// Used only by the generation harness in base.rs (the metrics builders), which is
+// itself `include!`d only on macOS / the backend-candle lane — so gate the import to
+// match, or the Linux-no-candle "neither" build sees it as unused (`-D warnings`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 use sceneworks_core::contracts::GenerationMetrics;
 use sceneworks_core::image_request::ImageRequest;
 
