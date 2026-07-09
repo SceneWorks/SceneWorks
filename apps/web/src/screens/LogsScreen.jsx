@@ -256,9 +256,19 @@ export function LogsScreen() {
   );
 }
 
+const TIME_FORMAT = new Intl.DateTimeFormat(undefined, {
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
 function shortTime(timestamp) {
   if (!timestamp) return "";
-  // ISO 8601 → HH:MM:SS (drop date + zone for a compact column).
+  // ISO 8601 (UTC, trailing Z) → HH:MM:SS in the system's local timezone.
+  const date = new Date(timestamp);
+  if (!Number.isNaN(date.getTime())) return TIME_FORMAT.format(date);
+  // Fall back to the raw HH:MM:SS substring if the value can't be parsed.
   const match = /T(\d{2}:\d{2}:\d{2})/.exec(timestamp);
   return match ? match[1] : timestamp;
 }
