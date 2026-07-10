@@ -656,6 +656,16 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // SANA 1600M + SANA-Sprint (epic 8485 / sc-8489 / sc-8490): MLX-only txt2img (no torch/candle backend).
     ModelCaps::new("sana_1600m", true, false, false, false, false),
     ModelCaps::new("sana_sprint_1600m", true, false, false, false, false),
+    // Anima base / aesthetic / turbo (epic 10512 / sc-10523): native-MLX anime txt2img. MLX-routed with
+    // install-time Q4/Q8 quant + inference LoRA/LoKr (advertised via the engine descriptor + manifest;
+    // quant+LoRA TOGETHER is unsupported, tracked sc-10578 — the engine `load()` errors on the combo).
+    // `candle_routed = false`: the candle port (sc-10525) is numerically CPU-validated but has NEVER been
+    // generated on real CUDA hardware, so no candle lane is advertised (all candle_* columns false, which
+    // also keeps the sc-9495 superset invariant trivially satisfied). Re-evaluate once sc-10525's
+    // hardware-gated acceptance passes on the NVIDIA rig.
+    ModelCaps::new("anima_base", true, false, false, false, false),
+    ModelCaps::new("anima_aesthetic", true, false, false, false, false),
+    ModelCaps::new("anima_turbo", true, false, false, false, false),
 ];
 
 /// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
@@ -933,6 +943,9 @@ mod tests {
         "sd3_5_medium",
         "sana_1600m",
         "sana_sprint_1600m",
+        "anima_base",
+        "anima_aesthetic",
+        "anima_turbo",
     ];
 
     const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[
