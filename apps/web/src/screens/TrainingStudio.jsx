@@ -34,8 +34,8 @@ import {
 } from "../training/datasetReadiness.js";
 import {
   configDraftFromTarget,
-  configFieldLabels,
   configValidation,
+  configValueErrors,
   defaultGpuOptions,
   defaultOptimizerOptions,
   defaultPresetForTarget,
@@ -387,9 +387,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // until the user edits them (sc-8671), mirroring configTriggerFollowsCaptions.
   const [configPromptsFollowTrigger, setConfigPromptsFollowTrigger] = useState(true);
   const [submittingJob, setSubmittingJob] = useState(false);
-  // Dry run validates the Rust-resolved plan without training; a real run hands
-  // the plan to the worker's Z-Image LoRA kernel. Default to the safe dry run.
-  const [trainingRunMode, setTrainingRunMode] = useState("dry_run");
   const configBasisRef = useRef("");
 
   const datasetSummary = useMemo(() => summarizeDatasets(datasets), [datasets]);
@@ -605,9 +602,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
     [activeProject?.id, jobs],
   );
   const gpuOptionsKey = gpuOptions.join("\u0000");
-  const configWarnings = configValidation({ activeDataset, configDraft, selectedTarget });
-  const configReady = configWarnings.length === 0;
-  const customizedConfigLabels = [...customizedConfigFields].map((field) => configFieldLabels[field] ?? field);
+  // Every issue gates Start training and the head's Ready / Needs input pill. Only the
+  // broken-value ones are worth a chip: an unfilled field is visible in the form, but a
+  // cleared number leaves no clue why Start went dead (sc-10492 → sc-10501).
+  const configIssues = configValidation({ activeDataset, configDraft, selectedTarget });
+  const configReady = configIssues.length === 0;
+  const configValueErrorMessages = configValueErrors(configIssues);
 
   // The dataset's character kind (person/style/object) — refines the readiness kind
   // and thus the blur floor. "" when the dataset isn't tied to a character.
@@ -1370,7 +1370,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setConfigError("");
     setConfigMessage("");
     try {
-      const dryRun = trainingRunMode === "dry_run";
+      // The dry-run mode selector is gone (sc-10492); the studio only ever queues a
+      // real training job. The API still accepts dryRun, so send it explicitly.
+      const dryRun = false;
       const snapshot = trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, dryRun });
       const job = await createTrainingJob({
         targetId: snapshot.targetId,
@@ -1383,8 +1385,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
         config: snapshot.config,
       });
       setConfigSnapshot(snapshot);
-      const label = dryRun ? "dry-run" : "training";
-      setConfigMessage(`Queued ${label} job ${job?.id ?? ""}`.trim() + ". Track it in the Queue.");
+      setConfigMessage(`Queued training job ${job?.id ?? ""}`.trim() + ". Track it in the Queue.");
     } catch (err) {
       setConfigError(err.message);
     } finally {
@@ -1554,7 +1555,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   outputScopes={outputScopes}
                   qualityTiers={qualityTiers}
                   gpuOptions={gpuOptions}
-                  customizedConfigLabels={customizedConfigLabels}
                   showAdvancedConfig={showAdvancedConfig}
                   setShowAdvancedConfig={setShowAdvancedConfig}
                   showNetworkType={showNetworkType}
@@ -1566,10 +1566,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   showTrainingAdapter={showTrainingAdapter}
                   visibleTrainingAdapterVersions={visibleTrainingAdapterVersions}
                   visibleResolutionOptions={visibleResolutionOptions}
-                  configWarnings={configWarnings}
-                  trainingRunMode={trainingRunMode}
+                  configValueErrors={configValueErrorMessages}
                   submittingJob={submittingJob}
-                  setTrainingRunMode={setTrainingRunMode}
                   resetConfigDefaults={resetConfigDefaults}
                   submitTrainingJob={submitTrainingJob}
                   configSnapshot={configSnapshot}

@@ -26,6 +26,15 @@ import {
 // `targetId` alone and the server resolves the base), and `Quality` sits beside
 // `Preset` because it is a tier OF the preset, not an independent axis. GPU is a
 // runtime routing knob rather than part of the plan, so it lives in Advanced.
+//
+// The actions row is deliberately just Reset defaults + Start training (sc-10492).
+// The preset-value strip, the run-mode select and the dry-run explainer all read as
+// noise around the one button that matters. Readiness shows in the head's Ready /
+// Needs input pill and in the disabled Start button.
+//
+// The one exception is `configValueErrors` (sc-10501): chips for values the user
+// actively broke. Missing-field hints stay suppressed — you can see an empty field —
+// but a cleared number leaves nothing on screen to explain the dead button.
 export function ConfigureJobPanel({
   setActiveView,
   configReady,
@@ -49,7 +58,6 @@ export function ConfigureJobPanel({
   outputScopes,
   qualityTiers,
   gpuOptions,
-  customizedConfigLabels,
   showAdvancedConfig,
   setShowAdvancedConfig,
   showNetworkType,
@@ -61,10 +69,8 @@ export function ConfigureJobPanel({
   showTrainingAdapter,
   visibleTrainingAdapterVersions,
   visibleResolutionOptions,
-  configWarnings,
-  trainingRunMode,
+  configValueErrors,
   submittingJob,
-  setTrainingRunMode,
   resetConfigDefaults,
   submitTrainingJob,
   configSnapshot,
@@ -75,9 +81,6 @@ export function ConfigureJobPanel({
   datasetDoctor,
   readinessBlocksTraining = false,
 }) {
-  const resolvedGpu = configDraft.requestedGpu === "auto" || !configDraft.requestedGpu
-    ? "Auto"
-    : `GPU ${configDraft.requestedGpu}`;
   return (
     <WorkPanel
       className="training-config-panel"
@@ -419,28 +422,6 @@ export function ConfigureJobPanel({
             </div>
           </AdvancedSection>
 
-          {selectedPreset ? (
-            <div className="training-preset-summary" aria-label="Preset values">
-              <span>{selectedPreset.name}</span>
-              <span>Rank {configDraft.rank || "-"}</span>
-              <span>LR {configDraft.learningRate || "-"}</span>
-              <span>{optimizerLabel(configDraft.optimizer)}</span>
-              <span>{configDraft.steps || "-"} steps</span>
-              <span>{configDraft.resolution || "-"}px</span>
-              {customizedConfigLabels.length ? (
-                <span>Customized: {customizedConfigLabels.join(", ")}</span>
-              ) : null}
-            </div>
-          ) : null}
-
-          {configWarnings.length ? (
-            <div className="training-config-warnings" aria-label="Configuration warnings">
-              {configWarnings.map((warning) => (
-                <span key={warning}>{warning}</span>
-              ))}
-            </div>
-          ) : null}
-
           {/* Dataset Doctor readout before the Train button (sc-6534). Advisory: it
               only hard-blocks training when the gate is Blocked (too few images / a
               fatal flag); warnings stay informational. */}
@@ -451,20 +432,18 @@ export function ConfigureJobPanel({
             </p>
           ) : null}
 
+          {/* Only broken values, never the "you haven't picked a dataset yet" hints —
+              those are obvious from the form. Sits against the actions row so it reads
+              as the reason Start training is dead (sc-10501). */}
+          {configValueErrors.length ? (
+            <div className="training-config-warnings" aria-label="Configuration errors">
+              {configValueErrors.map((warning) => (
+                <span key={warning}>{warning}</span>
+              ))}
+            </div>
+          ) : null}
+
           <div className="training-config-actions">
-            <label className="training-run-mode">
-              <span>Run mode</span>
-              <select
-                aria-label="Training run mode"
-                disabled={submittingJob}
-                onChange={(event) => setTrainingRunMode(event.target.value)}
-                value={trainingRunMode}
-              >
-                <option value="dry_run">Validate (dry run)</option>
-                <option value="real">Run training (beta)</option>
-              </select>
-            </label>
-            <span className="training-run-note">Runs locally · {resolvedGpu}</span>
             <button className="secondary-action" onClick={resetConfigDefaults} type="button">
               Reset defaults
             </button>
@@ -474,20 +453,12 @@ export function ConfigureJobPanel({
               onClick={submitTrainingJob}
               type="button"
             >
-              {submittingJob
-                ? "Queuing"
-                : trainingRunMode === "dry_run"
-                  ? "Queue dry-run job"
-                  : "Start training"}
+              {submittingJob ? "Queuing" : "Start training"}
             </button>
           </div>
           {configSnapshot ? <pre className="training-config-snapshot">{JSON.stringify(configSnapshot, null, 2)}</pre> : null}
         </div>
       )}
-      <p className="view-copy">
-        A dry run validates the training plan and dataset on a GPU worker without training. Run training
-        (beta) hands the same plan to the worker's Z-Image LoRA kernel to produce a real .safetensors adapter.
-      </p>
     </WorkPanel>
   );
 }

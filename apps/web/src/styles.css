@@ -235,6 +235,28 @@ select {
   transition: border-color var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out);
 }
 
+/* The chrome above is for text-like fields. A checkbox/radio paints its own control,
+   and `width: 100%` stretches it out of square — a 13px-tall box drawn 20px wide,
+   which reads as a rounded blob rather than a checkbox (sc-10492). Opt them out here,
+   once, instead of patching `width: auto` onto each host (`.checkline` et al). */
+input[type="checkbox"],
+input[type="radio"] {
+  width: auto;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+
+/* One legible size for the painted control, on the brand accent. The UA default is
+   13px, which reads as a speck next to our 12.5-13px labels. */
+input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
 textarea {
   min-height: 116px;
   resize: vertical;
@@ -3632,6 +3654,25 @@ label {
   grid-template-columns: repeat(4, minmax(120px, 1fr));
 }
 
+/* Chips for values the user actively broke, sitting against the actions row so they
+   read as the reason Start training is disabled (sc-10501). Missing-field hints are
+   deliberately NOT rendered here — an empty field speaks for itself. */
+.training-config-warnings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.training-config-warnings span {
+  padding: 5px 8px;
+  border: 1px solid color-mix(in oklch, var(--danger) 40%, var(--border));
+  border-radius: var(--r-pill);
+  background: color-mix(in oklch, var(--danger) 8%, var(--surface));
+  color: color-mix(in oklch, var(--danger) 75%, var(--text));
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .training-advanced-grid .training-checkbox-field,
 .training-advanced-toggles .training-checkbox-field {
   display: grid;
@@ -3646,39 +3687,6 @@ label {
   font-weight: 500;
 }
 
-.training-config-warnings {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-}
-
-.training-preset-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-  align-items: center;
-}
-
-.training-preset-summary span {
-  padding: 5px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--surface);
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.training-config-warnings span {
-  padding: 5px 8px;
-  border: 1px solid color-mix(in oklch, var(--danger) 40%, var(--border));
-  border-radius: var(--r-pill);
-  background: color-mix(in oklch, var(--danger) 8%, var(--surface));
-  color: color-mix(in oklch, var(--danger) 75%, var(--text));
-  font-size: 12px;
-  font-weight: 700;
-}
-
 /* Toggles close the Advanced disclosure, divided from the override grid above
    them (design handoff: "a grouped grid of override fields, then a toggles row"). */
 .training-advanced-toggles {
@@ -3689,34 +3697,23 @@ label {
   border-top: 1px solid var(--border);
 }
 
-/* Actions close the work-panel: the run-mode note on the left, one filled
-   primary on the right, divided from the config above. */
+/* Actions close the work-panel: Reset defaults then one filled primary, divided
+   from the config above (sc-10492). Both buttons share the control baseline —
+   `.primary-action`'s 44px default would otherwise stand taller than the 36px
+   `.secondary-action` beside it. */
 .training-config-actions {
   display: flex;
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px;
-  align-items: flex-end;
+  align-items: center;
   padding-top: 14px;
   border-top: 1px solid var(--border);
 }
 
-.training-run-note {
-  margin-right: auto;
-  align-self: center;
-  color: var(--text-faint);
-  font-size: 11.5px;
-}
-
-.training-run-mode {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 0.78rem;
-}
-
-.training-run-mode > span {
-  color: var(--text-muted, #94a3b8);
+.training-config-actions .secondary-action,
+.training-config-actions .primary-action {
+  min-height: var(--control-h);
 }
 
 .training-config-snapshot {
@@ -4323,10 +4320,6 @@ label {
   align-items: center;
   font-size: 13px;
   color: var(--text-muted);
-}
-
-.checkline input {
-  width: auto;
 }
 
 /* Non-commercial marker on the PiD decoder toggle (epic 7840): PiD output is
@@ -7193,10 +7186,6 @@ details[open] > summary.lora-scope-group-heading::before,
 }
 
 /* The checkbox itself must never shrink away inside the flex row. */
-.checkline input[type="checkbox"] {
-  flex: none;
-}
-
 .advanced-panel .prompt-field,
 .advanced-panel .lora-picker {
   grid-column: 1 / -1;
