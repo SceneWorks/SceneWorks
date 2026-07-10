@@ -4733,6 +4733,183 @@
       }
     },
     {
+      "id": "illustrious_xl_v1",
+      "name": "Illustrious-XL v1.0 (anime)",
+      "family": "sdxl",
+      "type": "image",
+      "adapter": "sdxl_diffusers",
+      // Danbooru-tag anime SDXL finetune (OnomaAI). Architecturally vanilla SDXL — identical UNet,
+      // dual CLIP-L + OpenCLIP-bigG, eps-pred, VAE scaling_factor 0.13025 — so it reuses the `sdxl`
+      // engine and the whole sdxl-family LoRA/LoKr stack unchanged (epic 10609).
+      "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image", "style_variations"],
+      "downloads": [
+        // SceneWorks turnkey re-host (sc-10611). Upstream OnomaAIResearch/Illustrious-XL-v1.0 ships a
+        // SINGLE-FILE LDM checkpoint, which neither mlx-gen-sdxl nor candle-gen-sdxl can read — it is
+        // converted to a tiered diffusers turnkey offline by `scripts/build_sdxl_turnkey.py`
+        // (sc-10610). Sizes measured on the built trees, not extrapolated.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/illustrious-xl-v1-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 3911461825,
+          "footprint": { "diskSizeBytes": 3911461825, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/illustrious-xl-v1-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 5385646417,
+          "footprint": { "diskSizeBytes": 5385646417, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/illustrious-xl-v1-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 7108498305,
+          "footprint": { "diskSizeBytes": 7108498305, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/illustrious-xl-v1-mlx"
+      },
+      "gated": false,
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 30,
+        "guidanceScale": 7.0,
+        "count": 4
+      },
+      "limits": {
+        // MEASURED, not taken from the model card (sc-10620). v1.0 tolerates wide frames: 0/3 seeds
+        // duplicated the subject at 1536x1536, and 1248x1824 rendered cleanly. The card's "native
+        // 1536x1536" claim holds; the checkpoint's own `modelspec.resolution: 1024x1024` is a stale
+        // training-harness stamp. NOTE v2.0 does NOT share this list — see that entry.
+        "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344", "1536x1536"],
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
+      },
+      "loraCompatibility": {
+        "families": ["sdxl"],
+        "types": ["style", "enhance", "character"]
+      },
+      "mlx": {
+        "quantize": 4,
+        "standardTierLayout": true,
+        "limits": {
+          "guidanceMethods": ["cfg", "cfg_pp"]
+        }
+      },
+      "ui": {
+        "label": "Illustrious-XL v1.0 (anime)",
+        "description": "Danbooru-tag anime SDXL finetune from OnomaAI, trained for high-resolution illustration. Same UNet and dual-CLIP as SDXL, so sdxl-family LoRAs apply and real CFG + negative prompt work as usual. Prompts blend Danbooru tags with natural language. Handles wide frames up to 1536x1536. SDXL license (openrail++), commercial use OK, ungated.",
+        "recommendedFor": ["text_to_image", "style_variations"],
+        "pid": { "checkpointId": "pid_sdxl" },
+        "promptGuide": {
+          "title": "Illustrious Prompt Guide",
+          "path": "/prompt-guides/illustrious.md",
+          "sources": [
+            { "label": "Illustrious-XL v1.0 model card", "url": "https://huggingface.co/OnomaAIResearch/Illustrious-XL-v1.0" },
+            { "label": "SDXL technical report", "url": "https://arxiv.org/abs/2307.01952" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "illustrious_xl_v2",
+      "name": "Illustrious-XL v2.0 (anime)",
+      "family": "sdxl",
+      "type": "image",
+      "adapter": "sdxl_diffusers",
+      // The `v2.0-STABLE` last-annealing-phase snapshot of a cosine-annealing run. A SEPARATE
+      // catalog id, not a replacement for v1.0: upstream describe it as behaviourally distinct, and
+      // it has a materially narrower safe resolution range (see `limits`). Same vanilla-SDXL
+      // architecture, and it ships no checkpoint metadata at all — `prediction_type: epsilon` was
+      // read off the conversion, not the file (epic 10609).
+      "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image", "style_variations"],
+      "downloads": [
+        // SceneWorks turnkey re-host (sc-10612). As with v1.0, upstream ships a single-file LDM
+        // checkpoint converted offline by `scripts/build_sdxl_turnkey.py`. v2.0 additionally carries a
+        // stray I64 `position_ids` buffer and a BF16 VAE, both normalized by the conversion.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/illustrious-xl-v2-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 3911461501,
+          "footprint": { "diskSizeBytes": 3911461501, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/illustrious-xl-v2-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 5385646137,
+          "footprint": { "diskSizeBytes": 5385646137, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/illustrious-xl-v2-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 7108498177,
+          "footprint": { "diskSizeBytes": 7108498177, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/illustrious-xl-v2-mlx"
+      },
+      "gated": false,
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 30,
+        "guidanceScale": 7.0,
+        "count": 4
+      },
+      "limits": {
+        // DELIBERATELY NARROWER THAN v1.0 — do not "unify" these two lists (sc-10620).
+        // v2.0 duplicates the subject in WIDE frames: a `1girl, solo` prompt renders two girls on
+        // 1/2 seeds at 1344 wide and 3/4 at 1536 wide, while v1.0 is 0/3 at 1536. The failure tracks
+        // horizontal extent, not pixel count — v2 @1536x1024 duplicates while v2 @1024x1536 (same
+        // 1.57 MP) is clean. So `1344x768` (a STOCK SDXL bucket) and `1536x1536` are both omitted,
+        // while the tall `768x1344` is kept: only wide frames fail.
+        "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "768x1344"],
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
+      },
+      "loraCompatibility": {
+        "families": ["sdxl"],
+        "types": ["style", "enhance", "character"]
+      },
+      "mlx": {
+        "quantize": 4,
+        "standardTierLayout": true,
+        "limits": {
+          "guidanceMethods": ["cfg", "cfg_pp"]
+        }
+      },
+      "ui": {
+        "label": "Illustrious-XL v2.0 (anime)",
+        "description": "The v2.0-STABLE snapshot of Illustrious-XL — subtler and more stable than v1.0, but with a narrower safe frame width: it tends to duplicate the subject in wide compositions, so the widest aspect buckets are not offered. Prefer square or tall framing. Same Danbooru-tag prompting and sdxl-family LoRA support. CreativeML OpenRAIL-M, commercial use OK, ungated.",
+        "recommendedFor": ["text_to_image", "style_variations"],
+        "pid": { "checkpointId": "pid_sdxl" },
+        "promptGuide": {
+          "title": "Illustrious Prompt Guide",
+          "path": "/prompt-guides/illustrious.md",
+          "sources": [
+            { "label": "Illustrious-XL v2.0 model card", "url": "https://huggingface.co/OnomaAIResearch/Illustrious-XL-v2.0" },
+            { "label": "SDXL technical report", "url": "https://arxiv.org/abs/2307.01952" }
+          ]
+        }
+      }
+    },
+    {
       "id": "instantid_realvisxl",
       "recommended": true,
       "name": "InstantID (RealVisXL)",

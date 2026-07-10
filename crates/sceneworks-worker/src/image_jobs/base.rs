@@ -3492,6 +3492,10 @@ fn is_candle_engine(model: &str) -> bool {
         model,
         "sdxl"
             | "realvisxl"
+            // Illustrious-XL (epic 10609): vanilla-SDXL anime finetunes on the shared candle `sdxl`
+            // engine. Their turnkeys are tiered, so the dense lanes resolve `bf16/` (dense_tier_subdir).
+            | "illustrious_xl_v1"
+            | "illustrious_xl_v2"
             // RealVisXL Lightning (sc-7176): shares the candle `sdxl` engine via a weights swap; the
             // few-step `lightning` sampler is forced in `generate_candle_stream`. txt2img-only (the
             // router defers its conditioning shapes to torch), so it rides the base candle txt2img lane.
@@ -3694,7 +3698,12 @@ async fn generate_candle_stream(
         .unwrap_or(true);
     match request.model.as_str() {
         // realvisxl_lightning shares the candle `sdxl` engine (sc-7176), so the SDXL flash toggle applies.
-        "sdxl" | "realvisxl" | "realvisxl_lightning" => candle_gen_sdxl::set_flash_attn(flash_attn),
+        // So do the Illustrious-XL finetunes (epic 10609).
+        "sdxl"
+        | "realvisxl"
+        | "realvisxl_lightning"
+        | "illustrious_xl_v1"
+        | "illustrious_xl_v2" => candle_gen_sdxl::set_flash_attn(flash_attn),
         // Base z_image (sc-8679) shares the candle z-image accel-attention toggle with Turbo.
         "z_image_turbo" | "z_image" => candle_gen_z_image::set_accel_attn(flash_attn),
         _ => {}

@@ -88,9 +88,15 @@ fn pid_backbone_for(model: &str) -> Option<&'static str> {
         // sdxl (sc-7848): SDXL base, RealVisXL (+ Lightning), Kolors (reuses the SDXL VAE). InstantID
         // (sc-8370/8371) composes the SDXL VAE too, so its Angles/Poses latents decode through the same
         // `sdxl` PiD student — the engine's `InstantId::with_pid` loads that one checkpoint.
-        "sdxl" | "realvisxl" | "realvisxl_lightning" | "kolors" | "instantid_realvisxl" => {
-            Some("sdxl")
-        }
+        // Illustrious-XL (epic 10609) ships the stock SDXL VAE (scaling_factor 0.13025 — verified on
+        // the converted turnkey), so its latents decode through the same `sdxl` PiD student.
+        "sdxl"
+        | "realvisxl"
+        | "realvisxl_lightning"
+        | "kolors"
+        | "instantid_realvisxl"
+        | "illustrious_xl_v1"
+        | "illustrious_xl_v2" => Some("sdxl"),
         _ => None,
     }
 }

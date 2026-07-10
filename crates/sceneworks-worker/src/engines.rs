@@ -276,6 +276,31 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 7.0,
         adapter_label: "mlx_sdxl",
     },
+    // Illustrious-XL (epic 10609) — Danbooru-tag anime SDXL finetunes from OnomaAI. Architecturally
+    // vanilla SDXL (identical UNet shapes, dual CLIP-L + OpenCLIP-bigG, eps-pred, VAE
+    // scaling_factor 0.13025), so both share the `sdxl` engine via a weights swap. Upstream ships a
+    // SINGLE-FILE LDM checkpoint, which no gen crate can read — the turnkeys are built offline by
+    // `scripts/build_sdxl_turnkey.py` (sc-10610), not converted at install.
+    //
+    // v1.0 and v2.0 are SEPARATE ids, not a version toggle: v2.0 is the `v2.0-STABLE` snapshot of a
+    // cosine-annealing run, behaviourally distinct, and it duplicates the subject in wide frames
+    // where v1.0 does not (sc-10620 — hence their different `limits.resolutions`).
+    ModelRow {
+        sceneworks_id: "illustrious_xl_v1",
+        engine_id: "sdxl",
+        default_repo: "SceneWorks/illustrious-xl-v1-mlx",
+        default_steps: 30,
+        default_guidance: 7.0,
+        adapter_label: "mlx_sdxl",
+    },
+    ModelRow {
+        sceneworks_id: "illustrious_xl_v2",
+        engine_id: "sdxl",
+        default_repo: "SceneWorks/illustrious-xl-v2-mlx",
+        default_steps: 30,
+        default_guidance: 7.0,
+        adapter_label: "mlx_sdxl",
+    },
     // RealVisXL Lightning (sc-6075) — standalone few-step *distilled* sibling of RealVisXL_V5.0.
     // Same SDXL arch, so it shares the `sdxl` engine via a weights swap; differs only in the
     // distilled checkpoint + the few-step recipe: ~5 steps at guidance 1.0 (CFG off). The
@@ -1003,6 +1028,19 @@ mod tests {
             identity_engine: true,
             control_net_pose_repo: None,
         },
+        // Illustrious-XL (epic 10609): character_image via the shared SDXL IP-Adapter lane
+        // (is_sdxl_ipadapter_model), so identity_engine is true, like the rest of the plain SDXL
+        // family. No strict-pose ControlNet.
+        CharacterEngineWiring {
+            sceneworks_id: "illustrious_xl_v1",
+            identity_engine: true,
+            control_net_pose_repo: None,
+        },
+        CharacterEngineWiring {
+            sceneworks_id: "illustrious_xl_v2",
+            identity_engine: true,
+            control_net_pose_repo: None,
+        },
         CharacterEngineWiring {
             sceneworks_id: "kolors",
             identity_engine: true,
@@ -1348,7 +1386,12 @@ mod tests {
     fn sdxl_family_advertises_cfgpp_on_mlx() {
         let manifest = parse_builtin_models();
         let models = manifest["models"].as_array().expect("models array");
-        for id in ["sdxl", "realvisxl"] {
+        for id in [
+            "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ] {
             let model = models
                 .iter()
                 .find(|m| m["id"].as_str() == Some(id))
@@ -1591,6 +1634,8 @@ mod tests {
             ("sdxl", "SceneWorks/sdxl-base-mlx"),
             ("realvisxl", "SceneWorks/realvisxl-mlx"),
             ("realvisxl_lightning", "SceneWorks/realvisxl-lightning-mlx"),
+            ("illustrious_xl_v1", "SceneWorks/illustrious-xl-v1-mlx"),
+            ("illustrious_xl_v2", "SceneWorks/illustrious-xl-v2-mlx"),
         ] {
             let row = MODEL_TABLE
                 .iter()

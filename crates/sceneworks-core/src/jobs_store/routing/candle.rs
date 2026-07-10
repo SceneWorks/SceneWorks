@@ -59,7 +59,7 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     // txt2img — the `image_request_candle_eligible` gate below rejects the whole `edit_image` family.
     // Branch it out first (disjoint from the IP-Adapter lane below, which is reference-only and not
     // `edit_image`). Mirrors the worker's `sdxl_edit_candle_available` gate.
-    if matches!(model, "sdxl" | "realvisxl") && sdxl_edit_candle_eligible(&job.payload) {
+    if is_sdxl_family_candle_model(model) && sdxl_edit_candle_eligible(&job.payload) {
         return true;
     }
     // FLUX.2-klein reference / img2img edit (sc-5487, epic 5480): a klein-family `edit_image` job with a
@@ -147,7 +147,7 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     // the `image_request_candle_eligible` gate below rejects `referenceAssetId`. Branch it out first
     // (pure IP only; img2img/inpaint/edit shapes are the SDXL edit lane above). Mirrors the worker's
     // `sdxl_ipadapter_available` gate.
-    if matches!(model, "sdxl" | "realvisxl") && sdxl_ipadapter_candle_eligible(&job.payload) {
+    if is_sdxl_family_candle_model(model) && sdxl_ipadapter_candle_eligible(&job.payload) {
         return true;
     }
     // Kolors IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): the `kolors` family with a
@@ -567,6 +567,20 @@ pub(crate) fn instantid_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// with the FLUX XLabs IP-Adapter lane.
 pub(crate) fn pulid_flux_candle_eligible(payload: &Map<String, Value>) -> bool {
     pulid_flux_mlx_eligible(payload)
+}
+
+/// The SDXL-family model ids whose conditioning shapes have a bespoke candle lane (edit + IP-Adapter).
+///
+/// NOT every id on the `sdxl` engine: `realvisxl_lightning` is txt2img-only (its accel sampler is
+/// engine-incompatible with reference/img2img conditioning) and `instantid_realvisxl` has its own
+/// bespoke lane. Must stay in lockstep with the worker's `is_sdxl_edit_candle_model` /
+/// `is_sdxl_ipadapter_model` — a model the router sends to a lane the worker then rejects fails the
+/// job rather than falling back.
+pub(crate) fn is_sdxl_family_candle_model(model: &str) -> bool {
+    matches!(
+        model,
+        "sdxl" | "realvisxl" | "illustrious_xl_v1" | "illustrious_xl_v2"
+    )
 }
 
 /// SDXL img2img / inpaint / outpaint candle-routing conditions (sc-5487, epic 5480). The candle

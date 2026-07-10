@@ -373,6 +373,26 @@ export const fallbackModels = [
     },
   },
   {
+    id: "illustrious_xl_v1",
+    name: "Illustrious-XL v1.0 (anime)",
+    type: "image",
+    capabilities: ["text_to_image", "edit_image", "character_image", "style_variations"],
+    ui: {
+      description: "Danbooru-tag anime SDXL finetune from OnomaAI, trained for high-resolution illustration. Same SDXL UNet + dual CLIP, sdxl-family LoRA support, real CFG + negative prompt. Prompts blend Danbooru tags with natural language. Handles wide frames up to 1536x1536. SDXL license (openrail++), commercial use OK, ungated.",
+      promptGuide: { title: "Illustrious Prompt Guide", path: "/prompt-guides/illustrious.md" },
+    },
+  },
+  {
+    id: "illustrious_xl_v2",
+    name: "Illustrious-XL v2.0 (anime)",
+    type: "image",
+    capabilities: ["text_to_image", "edit_image", "character_image", "style_variations"],
+    ui: {
+      description: "The v2.0-STABLE snapshot of Illustrious-XL — subtler and more stable than v1.0, but with a narrower safe frame width (it tends to duplicate the subject in wide compositions, so the widest aspect buckets are not offered — prefer square or tall). Same Danbooru-tag prompting and sdxl-family LoRA support. CreativeML OpenRAIL-M, commercial use OK, ungated.",
+      promptGuide: { title: "Illustrious Prompt Guide", path: "/prompt-guides/illustrious.md" },
+    },
+  },
+  {
     id: "instantid_realvisxl",
     name: "InstantID (RealVisXL)",
     type: "image",

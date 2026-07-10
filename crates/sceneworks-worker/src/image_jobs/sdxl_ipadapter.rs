@@ -35,15 +35,25 @@ const SDXL_IPADAPTER_DEFAULT_GUIDANCE: f32 = 5.0;
 /// txt2img `candle_sdxl` and the `candle_instantid` lanes).
 const SDXL_IPADAPTER_ENGINE: &str = "candle_sdxl_ipadapter";
 
-/// SDXL model ids the candle IP-Adapter route accepts (the txt2img-eligible SDXL family).
+/// SDXL model ids the candle IP-Adapter route accepts (the txt2img-eligible SDXL family). Must stay
+/// in lockstep with `jobs_store::routing::candle`'s `sdxl_ipadapter_candle_eligible` guard.
 fn is_sdxl_ipadapter_model(model: &str) -> bool {
-    matches!(model, "sdxl" | "realvisxl")
+    matches!(
+        model,
+        "sdxl" | "realvisxl" | "illustrious_xl_v1" | "illustrious_xl_v2"
+    )
 }
 
 /// Default SDXL base repo for a model id when the manifest omits `repo`.
+///
+/// `sdxl` and `realvisxl` name FLAT upstream diffusers snapshots. Illustrious has no such upstream —
+/// OnomaAI ship a single-file LDM checkpoint — so it names its tiered turnkey, and
+/// `dense_tier_subdir` descends into the dense `bf16/` tier (sc-10614).
 fn sdxl_ipadapter_default_repo(model: &str) -> &'static str {
     match model {
         "realvisxl" => "SG161222/RealVisXL_V5.0",
+        "illustrious_xl_v1" => "SceneWorks/illustrious-xl-v1-mlx",
+        "illustrious_xl_v2" => "SceneWorks/illustrious-xl-v2-mlx",
         _ => "stabilityai/stable-diffusion-xl-base-1.0",
     }
 }

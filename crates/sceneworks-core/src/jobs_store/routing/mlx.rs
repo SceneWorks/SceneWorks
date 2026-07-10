@@ -58,7 +58,10 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" | "flux2_dev" => {
             flux2_mlx_eligible(payload)
         }
-        "sdxl" | "realvisxl" => sdxl_mlx_eligible(payload),
+        // Illustrious-XL shares the `sdxl` engine and its full conditioning surface (epic 10609).
+        "sdxl" | "realvisxl" | "illustrious_xl_v1" | "illustrious_xl_v2" => {
+            sdxl_mlx_eligible(payload)
+        }
         "realvisxl_lightning" => realvisxl_lightning_mlx_eligible(payload),
         "instantid_realvisxl" => instantid_mlx_eligible(payload),
         "pulid_flux_dev" => pulid_flux_mlx_eligible(payload),
@@ -97,7 +100,10 @@ pub(crate) fn image_detail_mlx_eligible(job: &JobSnapshot) -> bool {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("realvisxl");
-    matches!(model, "sdxl" | "realvisxl")
+    matches!(
+        model,
+        "sdxl" | "realvisxl" | "illustrious_xl_v1" | "illustrious_xl_v2"
+    )
 }
 
 /// Whether the in-process MLX worker can serve this GPU job (image_generate or image_detail).

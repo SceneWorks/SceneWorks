@@ -338,6 +338,9 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("flux2_dev", true, false),
         ("sdxl", true, true),
         ("realvisxl", true, true),
+        // Illustrious-XL v1.0 / v2.0 (epic 10609): plain SDXL engine, real CFG + negative prompt.
+        ("illustrious_xl_v1", true, true),
+        ("illustrious_xl_v2", true, true),
         // RealVisXL Lightning (sc-6075): shares the `sdxl` engine id, whose descriptor advertises
         // guidance + negative prompt (true, true). The few-step recipe runs CFG-off (guidance 1.0,
         // negative inert) via the worker-forced `lightning` sampler, but that's a recipe default,
