@@ -5780,3 +5780,88 @@ fn progress_from_non_owner_worker_is_rejected() {
         .expect_err("ownerless report on an owned job is rejected");
     assert!(matches!(error, JobsStoreError::NotJobOwner { .. }));
 }
+
+/// Regression for the Anima routing gap (epic 10512 / sc-10523): `anima_base`/`anima_aesthetic`/
+/// `anima_turbo` shipped as `mlx_routed = true` rows in `IMAGE_MODEL_CAPS`, but
+/// `image_request_mlx_eligible` had no dispatch arm for them, so they fell through to `_ => false`.
+/// The mlx worker then refused to claim them (`worker_supports_job`), and because Anima advertises
+/// no candle/torch lane (`candle_routed = false`, macOnly) NOTHING could claim the job — every
+/// Anima generation sat on "Waiting for an available worker." forever.
+#[test]
+fn mlx_worker_claims_anima_text_to_image_jobs() {
+    for model in ["anima_base", "anima_aesthetic", "anima_turbo"] {
+        // A fresh store + worker per model: a worker that claims a job goes `busy` and holds a
+        // `current_job_id`, so it cannot claim a second job in the same store.
+        let store = store(&format!("anima-claim-{model}"));
+        store
+            .register_worker(RegisterWorker {
+                worker_id: "mlx-worker".to_owned(),
+                gpu_id: "mlx".to_owned(),
+                gpu_name: Some("Apple Silicon (MLX)".to_owned()),
+                capabilities: vec![
+                    WorkerCapability::Gpu,
+                    WorkerCapability::ImageGenerate,
+                    WorkerCapability::ImageDetail,
+                ],
+                loaded_models: Vec::new(),
+                utilization: None,
+            })
+            .expect("mlx worker registers");
+
+        let mut payload = Map::new();
+        payload.insert("model".to_owned(), Value::String(model.to_owned()));
+        payload.insert("mode".to_owned(), Value::String("text_to_image".to_owned()));
+        let job = store.create_job(image_job(payload)).expect("job created");
+
+        let claimed = store
+            .claim_next_job("mlx-worker")
+            .expect("claim ok")
+            .unwrap_or_else(|| {
+                panic!(
+                    "{model}: mlx worker must claim the Anima job, but nothing claimed it \
+                     (job {} sits on 'Waiting for an available worker.')",
+                    job.id
+                )
+            });
+        assert_eq!(claimed.id, job.id, "{model}: claimed the wrong job");
+        assert_eq!(
+            claimed.assigned_gpu.as_deref(),
+            Some("mlx"),
+            "{model}: Anima must land on the mlx worker"
+        );
+    }
+}
+
+/// Anima has no edit path (`capabilities: ["text_to_image"]`), so an `edit_image` request must NOT
+/// be MLX-eligible — the defensive shape SANA / SD3.5 / Krea / Lens use.
+#[test]
+fn mlx_worker_refuses_anima_edit_image_jobs() {
+    let store = store("anima-refuses-edit");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "mlx-worker".to_owned(),
+            gpu_id: "mlx".to_owned(),
+            gpu_name: Some("Apple Silicon (MLX)".to_owned()),
+            capabilities: vec![WorkerCapability::Gpu, WorkerCapability::ImageGenerate],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("mlx worker registers");
+
+    let mut payload = Map::new();
+    payload.insert("model".to_owned(), Value::String("anima_base".to_owned()));
+    payload.insert("mode".to_owned(), Value::String("edit_image".to_owned()));
+    payload.insert(
+        "sourceAssetId".to_owned(),
+        Value::String("asset-1".to_owned()),
+    );
+    store.create_job(image_job(payload)).expect("job created");
+
+    assert!(
+        store
+            .claim_next_job("mlx-worker")
+            .expect("claim ok")
+            .is_none(),
+        "an Anima edit_image job must not be claimed by the mlx worker"
+    );
+}
