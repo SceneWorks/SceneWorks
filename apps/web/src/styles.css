@@ -12094,6 +12094,12 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 7px;
 }
 
+/* Every mix below interpolates `in srgb`, not `in oklch`. Both `--border` and `--text`
+   carry hue 240 at low chroma, and oklch takes the shorter arc around the hue wheel to
+   reach it — so `--warn` (hue 70, amber) lands on hue 172, a teal, and `--danger`
+   (hue 25) lands on 298, a lavender. An advisory chip with a green border reads as
+   success. Measured in the browser; oklch is right for perceptual lightness ramps and
+   wrong for pulling a hue toward a near-neutral. */
 .validation-chip {
   padding: 5px 8px;
   border-radius: var(--r-pill);
@@ -12103,17 +12109,17 @@ details[open] > summary.lora-scope-group-heading::before,
 
 /* A value the user broke. Blocks the CTA, so it reads at full danger weight. */
 .validation-chip.tone-error {
-  border: 1px solid color-mix(in oklch, var(--danger) 40%, var(--border));
-  background: color-mix(in oklch, var(--danger) 8%, var(--surface));
-  color: color-mix(in oklch, var(--danger) 75%, var(--text));
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  color: color-mix(in srgb, var(--danger) 75%, var(--text));
 }
 
 /* Worth saying, doesn't block. Amber keeps it distinguishable from an error at a
    glance — the two kinds sit side by side in the same row. */
 .validation-chip.tone-advisory {
-  border: 1px solid color-mix(in oklch, var(--warn) 40%, var(--border));
-  background: color-mix(in oklch, var(--warn) 10%, var(--surface));
-  color: color-mix(in oklch, var(--warn) 70%, var(--text));
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
+  background: color-mix(in srgb, var(--warn) 10%, var(--surface));
+  color: color-mix(in srgb, var(--warn) 70%, var(--text));
 }
 
 /* The readiness pill. Its predecessor .training-status-pill was accent-toned in both
@@ -12142,17 +12148,27 @@ details[open] > summary.lora-scope-group-heading::before,
 
 /* The mark on a broken input. An attribute selector rather than a class, because
    `invalidProps` returns props for an existing input and never wraps it in a node —
-   a node added inside .training-config-grid would become a grid item (sc-10481). */
+   a node added inside .training-config-grid would become a grid item (sc-10481).
+   Specificity (0,1,1) clears the base `input` chrome at (0,0,1), and ties with
+   `.training-config-grid select` — which this rule follows, so it wins the tie.
+
+   `background-color`, never the `background` shorthand: that sibling rule paints the
+   select's chevron with `background-image`, and the shorthand would erase it, leaving
+   an invalid Resolution select with no arrow. */
 input[aria-invalid="true"],
 select[aria-invalid="true"],
 textarea[aria-invalid="true"] {
-  border-color: color-mix(in oklch, var(--danger) 55%, var(--border));
-  background: color-mix(in oklch, var(--danger) 4%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  background-color: color-mix(in srgb, var(--danger) 4%, var(--surface));
 }
 
+/* Focus must stay red. The base `:focus` rule sets `outline: none` and repaints
+   `border-color` with the accent, so an `outline-color` override would do nothing and
+   the field would turn teal the instant the user clicks in to fix it. Mirror the glow
+   in the danger hue instead. */
 input[aria-invalid="true"]:focus,
 select[aria-invalid="true"]:focus,
 textarea[aria-invalid="true"]:focus {
-  outline-color: var(--danger);
   border-color: var(--danger);
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--danger) 18%, transparent);
 }

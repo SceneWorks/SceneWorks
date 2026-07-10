@@ -34,7 +34,6 @@ import {
 import {
   configDraftFromTarget,
   configValidation,
-  configValueErrors,
   defaultGpuOptions,
   defaultOptimizerOptions,
   defaultPresetForTarget,
@@ -48,6 +47,7 @@ import {
   trainingAdapterVersionOptions,
   trainingConfigSnapshot,
 } from "../training/trainingConfig.js";
+import { useValidation } from "../validation/useValidation.js";
 import { ConfigureJobPanel } from "./training/ConfigureJobPanel.jsx";
 import { DatasetEditorPanel } from "./training/DatasetEditorPanel.jsx";
 
@@ -600,12 +600,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
     [activeProject?.id, jobs],
   );
   const gpuOptionsKey = gpuOptions.join("\u0000");
-  // Every issue gates Start training and the head's Ready / Needs input pill. Only the
-  // broken-value ones are worth a chip: an unfilled field is visible in the form, but a
-  // cleared number leaves no clue why Start went dead (sc-10492 → sc-10501).
-  const configIssues = configValidation({ activeDataset, configDraft, selectedTarget });
-  const configReady = configIssues.length === 0;
-  const configValueErrorMessages = configValueErrors(configIssues);
+  // One call decides both whether Start training may fire and what the panel says about
+  // why it may not, so the two cannot drift apart (epic 10644). Only broken values earn
+  // a chip: an unfilled field is visible in the form, and the "Needs input" pill carries
+  // it (sc-10492 → sc-10501).
+  const configContext = useMemo(() => ({ activeDataset, selectedTarget }), [activeDataset, selectedTarget]);
+  const configValidity = useValidation(configValidation, configDraft, configContext);
 
   // The dataset's character kind (person/style/object) — refines the readiness kind
   // and thus the blur floor. "" when the dataset isn't tied to a character.
@@ -1361,7 +1361,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   }
 
   async function submitTrainingJob() {
-    if (!configReady || submittingJob || readinessBlocksTraining) {
+    if (!configValidity.ready || submittingJob || readinessBlocksTraining) {
       return;
     }
     setSubmittingJob(true);
@@ -1506,7 +1506,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
               <>
                 <ConfigureJobPanel
                   setActiveView={setActiveView}
-                  configReady={configReady}
+                  configValidity={configValidity}
                   trainingTargetsError={trainingTargetsError}
                   trainingPresetsError={trainingPresetsError}
                   configError={configError}
@@ -1538,7 +1538,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   showTrainingAdapter={showTrainingAdapter}
                   visibleTrainingAdapterVersions={visibleTrainingAdapterVersions}
                   visibleResolutionOptions={visibleResolutionOptions}
-                  configValueErrors={configValueErrorMessages}
                   submittingJob={submittingJob}
                   resetConfigDefaults={resetConfigDefaults}
                   submitTrainingJob={submitTrainingJob}

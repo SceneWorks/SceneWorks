@@ -76,4 +76,16 @@ describe("styles.css: the two chip kinds are visually distinct", () => {
     expect(declaration(advisory, "background")).not.toContain("--danger");
     expect(declaration(advisory, "background")).toContain("--warn");
   });
+
+  // Mix in srgb, never oklch. `--warn` (amber, hue 70) and `--danger` (red, hue 25) both
+  // land on a low-chroma hue-240 token here, and oklch takes the short arc — so
+  // `oklch(--warn, --border)` resolves to a teal and the advisory chip reads as success.
+  // Verified in the browser (sc-10647). A regex, not the computed colour, because vitest
+  // never resolves color-mix — the point is to stop the space being switched back.
+  it("mixes tones in srgb so the hue never arcs through green", () => {
+    for (const decl of ["border", "background", "color"]) {
+      expect(declaration(error, decl), `error ${decl}`).not.toContain("in oklch");
+      expect(declaration(advisory, decl), `advisory ${decl}`).not.toContain("in oklch");
+    }
+  });
 });

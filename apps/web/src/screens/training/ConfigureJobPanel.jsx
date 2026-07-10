@@ -4,6 +4,7 @@ import { AdvancedSection } from "../../components/AdvancedSection.jsx";
 import { Icon } from "../../components/Icons.jsx";
 import { WorkPanel } from "../../components/WorkPanel.jsx";
 import { DatasetDoctorReadout } from "./DatasetDoctor.jsx";
+import { invalidProps, ReadyPill, ValidationSummary } from "../../validation/Validation.jsx";
 import {
   lossTypeOptions,
   networkTypeLabel,
@@ -32,12 +33,13 @@ import {
 // noise around the one button that matters. Readiness shows in the head's Ready /
 // Needs input pill and in the disabled Start button.
 //
-// The one exception is `configValueErrors` (sc-10501): chips for values the user
-// actively broke. Missing-field hints stay suppressed — you can see an empty field —
-// but a cleared number leaves nothing on screen to explain the dead button.
+// `configValidity` is the whole validation summary (epic 10644): the same object gates
+// Start, tones the pill, fills the chip row, and outlines the inputs the chips name.
+// Missing-field hints stay suppressed — you can see an empty field — but a cleared
+// number leaves nothing on screen to explain the dead button (sc-10501).
 export function ConfigureJobPanel({
   setActiveView,
-  configReady,
+  configValidity,
   trainingTargetsError,
   trainingPresetsError,
   configError,
@@ -69,7 +71,6 @@ export function ConfigureJobPanel({
   showTrainingAdapter,
   visibleTrainingAdapterVersions,
   visibleResolutionOptions,
-  configValueErrors,
   submittingJob,
   resetConfigDefaults,
   submitTrainingJob,
@@ -92,7 +93,7 @@ export function ConfigureJobPanel({
             <Icon.Library size={14} />
             Data Sets
           </button>
-          <span className="training-status-pill">{configReady ? "Ready" : "Needs input"}</span>
+          <ReadyPill ready={configValidity.ready} />
         </>
       }
     >
@@ -175,7 +176,12 @@ export function ConfigureJobPanel({
             </label>
             <label>
               Steps
-              <input onChange={(event) => updateConfigDraft("steps", event.target.value)} type="number" value={configDraft.steps ?? ""} />
+              <input
+                onChange={(event) => updateConfigDraft("steps", event.target.value)}
+                type="number"
+                value={configDraft.steps ?? ""}
+                {...invalidProps(configValidity, "steps")}
+              />
             </label>
             <label>
               Checkpoint cadence
@@ -183,6 +189,7 @@ export function ConfigureJobPanel({
                 onChange={(event) => updateConfigDraft("saveEvery", event.target.value)}
                 type="number"
                 value={configDraft.saveEvery ?? ""}
+                {...invalidProps(configValidity, "saveEvery")}
               />
             </label>
 
@@ -242,11 +249,21 @@ export function ConfigureJobPanel({
               </label>
               <label>
                 Rank
-                <input onChange={(event) => updateConfigDraft("rank", event.target.value)} type="number" value={configDraft.rank ?? ""} />
+                <input
+                  onChange={(event) => updateConfigDraft("rank", event.target.value)}
+                  type="number"
+                  value={configDraft.rank ?? ""}
+                  {...invalidProps(configValidity, "rank")}
+                />
               </label>
               <label>
                 Alpha
-                <input onChange={(event) => updateConfigDraft("alpha", event.target.value)} type="number" value={configDraft.alpha ?? ""} />
+                <input
+                  onChange={(event) => updateConfigDraft("alpha", event.target.value)}
+                  type="number"
+                  value={configDraft.alpha ?? ""}
+                  {...invalidProps(configValidity, "alpha")}
+                />
               </label>
               {showNetworkType ? (
                 <label title="Adapter parameterization. LoRA is the standard low-rank adapter; LoKr (LyCORIS Kronecker) trains a much smaller, often more expressive adapter (torch backends only).">
@@ -296,6 +313,7 @@ export function ConfigureJobPanel({
                   step="0.00001"
                   type="number"
                   value={configDraft.learningRate ?? ""}
+                  {...invalidProps(configValidity, "learningRate")}
                 />
               </label>
               <label>
@@ -373,7 +391,11 @@ export function ConfigureJobPanel({
               ) : null}
               <label>
                 Resolution
-                <select onChange={(event) => updateConfigDraft("resolution", event.target.value)} value={configDraft.resolution ?? ""}>
+                <select
+                  onChange={(event) => updateConfigDraft("resolution", event.target.value)}
+                  value={configDraft.resolution ?? ""}
+                  {...invalidProps(configValidity, "resolution")}
+                >
                   {visibleResolutionOptions.length ? null : <option value={configDraft.resolution ?? ""}>{configDraft.resolution ?? ""}</option>}
                   {visibleResolutionOptions.map((resolution) => (
                     <option key={resolution} value={resolution}>
@@ -435,13 +457,7 @@ export function ConfigureJobPanel({
           {/* Only broken values, never the "you haven't picked a dataset yet" hints —
               those are obvious from the form. Sits against the actions row so it reads
               as the reason Start training is dead (sc-10501). */}
-          {configValueErrors.length ? (
-            <div className="training-config-warnings" aria-label="Configuration errors">
-              {configValueErrors.map((warning) => (
-                <span key={warning}>{warning}</span>
-              ))}
-            </div>
-          ) : null}
+          <ValidationSummary issues={configValidity.surfaced} label="Configuration errors" />
 
           <div className="training-config-actions">
             <button className="secondary-action" onClick={resetConfigDefaults} type="button">
@@ -449,7 +465,7 @@ export function ConfigureJobPanel({
             </button>
             <button
               className="primary-action"
-              disabled={!configReady || submittingJob || readinessBlocksTraining}
+              disabled={!configValidity.ready || submittingJob || readinessBlocksTraining}
               onClick={submitTrainingJob}
               type="button"
             >
