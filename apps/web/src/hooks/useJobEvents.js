@@ -91,7 +91,11 @@ export function useJobEvents({
       if (job.status === "completed" && job.projectId && job.type === "person_detect") {
         refreshAssetsRef.current?.(job.projectId);
       }
-      if (job.status === "completed" && job.type === "model_download") {
+      // A completed download flips the catalog's `installState`; a completed conversion writes the
+      // MLX artifact that flips `mlxConversionState` to "converted". Both are derived server-side
+      // from the filesystem, so the catalog must be refetched or the Models row keeps offering
+      // "Convert to MLX" for an already-converted model until the app is restarted.
+      if (job.status === "completed" && (job.type === "model_download" || job.type === "model_convert")) {
         refreshDataRef.current?.();
       }
       // A completed built-in LoRA download (sc-5944) flips the catalog entry to
