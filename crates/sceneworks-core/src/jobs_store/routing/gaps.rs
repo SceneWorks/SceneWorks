@@ -780,13 +780,13 @@ pub(crate) fn classify_training_gap(payload: &Map<String, Value>) -> Unsupported
     }
 }
 
-/// `model_convert` is supported only for the in-process Rust FLUX.2-klein converter
-/// (`flux2_klein_diffusers`, sc-3136). The default/absent converter is the Python mlx-video
-/// Wan/LTX path (sc-3491 / sc-3224).
+/// `model_convert` is supported for the in-process Rust converters (FLUX.2-klein `flux2_klein_diffusers`
+/// sc-3136; FLUX.2-dev `flux2_dev_quant`; Anima `anima_quant`, sc-10517 — the on-device q4/q8/bf16
+/// matrix). The default/absent converter is the retired Python mlx-video path (sc-3491 / sc-3224).
 pub(crate) fn classify_convert_gap(payload: &Map<String, Value>) -> Result<(), UnsupportedReason> {
     if matches!(
         payload.get("converter").and_then(Value::as_str),
-        Some("flux2_klein_diffusers") | Some("flux2_dev_quant")
+        Some("flux2_klein_diffusers") | Some("flux2_dev_quant") | Some("anima_quant")
     ) {
         return Ok(());
     }
