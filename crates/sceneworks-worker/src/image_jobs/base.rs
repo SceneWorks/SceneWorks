@@ -704,10 +704,12 @@ fn anima_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
     let present = |name: &str| -> Option<PathBuf> {
         let dir = root.join(name);
+        // A hidden `._*.safetensors` AppleDouble sidecar is not a DiT (SceneWorks#1333).
         let has_dit = std::fs::read_dir(dir.join("diffusion_models"))
             .map(|entries| {
                 entries
                     .flatten()
+                    .filter(|entry| !sceneworks_core::lora_family::is_hidden_file(&entry.path()))
                     .any(|entry| entry.file_name().to_string_lossy().ends_with(".safetensors"))
             })
             .unwrap_or(false);
