@@ -4856,6 +4856,9 @@
         "label": "Illustrious-XL v1.0 (anime)",
         "description": "Danbooru-tag anime SDXL finetune from OnomaAI, trained for high-resolution illustration. Same UNet and dual-CLIP as SDXL, so sdxl-family LoRAs apply and real CFG + negative prompt work as usual. Prompts blend Danbooru tags with natural language. Handles wide frames up to 1536x1536. SDXL license (openrail++), commercial use OK, ungated.",
         "recommendedFor": ["text_to_image", "style_variations"],
+        // Anime negative-prompt convention (sc-10621), matching the baseline in the prompt guide.
+        // Image Studio seeds this into an empty negative box.
+        "defaultNegativePrompt": "lowres, bad anatomy, bad hands, missing fingers, extra digits, worst quality, low quality, jpeg artifacts, signature, watermark, username, blurry",
         "pid": { "checkpointId": "pid_sdxl" },
         "promptGuide": {
           "title": "Illustrious Prompt Guide",
@@ -4946,6 +4949,9 @@
         "label": "Illustrious-XL v2.0 (anime)",
         "description": "The v2.0-STABLE snapshot of Illustrious-XL — subtler and more stable than v1.0, but with a narrower safe frame width: it tends to duplicate the subject in wide compositions, so the widest aspect buckets are not offered. Prefer square or tall framing. Same Danbooru-tag prompting and sdxl-family LoRA support. CreativeML OpenRAIL-M, commercial use OK, ungated.",
         "recommendedFor": ["text_to_image", "style_variations"],
+        // Anime negative-prompt convention (sc-10621), matching the baseline in the prompt guide.
+        // Image Studio seeds this into an empty negative box.
+        "defaultNegativePrompt": "lowres, bad anatomy, bad hands, missing fingers, extra digits, worst quality, low quality, jpeg artifacts, signature, watermark, username, blurry",
         "pid": { "checkpointId": "pid_sdxl" },
         "promptGuide": {
           "title": "Illustrious Prompt Guide",
