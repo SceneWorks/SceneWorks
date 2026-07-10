@@ -13,7 +13,7 @@ const MANIFEST_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis
 /// RAII holder for the cross-process advisory exclusive lock on a `<manifest>.lock`
 /// sibling. Released when the file handle drops. Acquired on a blocking thread since
 /// flock is synchronous (see [`acquire_manifest_file_lock`]).
-struct ManifestFileLock {
+pub(crate) struct ManifestFileLock {
     _file: std::fs::File,
 }
 
@@ -27,7 +27,9 @@ fn manifest_lock_path(manifest_path: &FsPath) -> PathBuf {
 }
 
 /// Acquire the cross-process manifest lock, off the async runtime (flock blocks).
-async fn acquire_manifest_file_lock(path: &FsPath) -> Result<ManifestFileLock, ApiError> {
+pub(crate) async fn acquire_manifest_file_lock(
+    path: &FsPath,
+) -> Result<ManifestFileLock, ApiError> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|error| {
             ApiError::internal(format!(

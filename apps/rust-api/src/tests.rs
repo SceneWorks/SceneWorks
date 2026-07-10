@@ -5735,6 +5735,36 @@ async fn video_jobs_expand_recipe_presets_server_side() {
         video_job["payload"]["advanced"]["recipePresetId"],
         "dream_motion"
     );
+
+    // sc-10520: submitting the job stamped lastUsedAt into the usage side store, and it
+    // surfaces on the catalog read even though dream_motion is a read-only BUILTIN preset
+    // (its own manifest can't be rewritten). The store lives beside the manifests.
+    assert!(
+        config_dir.join("recipe-preset-usage.json").is_file(),
+        "job submit should create the recipe-preset usage store"
+    );
+    let (status, presets) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/recipe-presets?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let dream = presets
+        .as_array()
+        .expect("presets list")
+        .iter()
+        .find(|preset| preset["id"] == "dream_motion")
+        .expect("dream_motion present");
+    assert_eq!(dream["scope"], "builtin");
+    assert!(
+        dream["lastUsedAt"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()),
+        "builtin preset should carry lastUsedAt after use, got {:?}",
+        dream["lastUsedAt"]
+    );
 }
 
 #[tokio::test]

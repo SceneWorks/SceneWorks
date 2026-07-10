@@ -281,6 +281,23 @@ pub(crate) async fn recipe_preset_catalog_with(
     for preset in presets.iter_mut() {
         finalize_recipe_preset_entry(preset, models)?;
     }
+    // Overlay `lastUsedAt` from the usage side store (sc-10520). The store is the source
+    // of truth for recency: builtin presets are read-only so their usage can't live in
+    // their manifest, so every scope reads it here. A store value always wins over any
+    // stale `lastUsedAt` carried in a writable manifest.
+    let usage = load_recipe_preset_usage(state).await;
+    if !usage.is_empty() {
+        for preset in presets.iter_mut() {
+            let Some(id) = preset.get("id").and_then(Value::as_str).map(str::to_owned) else {
+                continue;
+            };
+            if let Some(last_used) = usage.get(&id).and_then(Value::as_str) {
+                if let Some(object) = preset.as_object_mut() {
+                    object.insert("lastUsedAt".to_owned(), Value::String(last_used.to_owned()));
+                }
+            }
+        }
+    }
     presets.sort_by(|left, right| {
         let left_key = (
             recipe_preset_scope_order(left.get("scope").and_then(Value::as_str)),
@@ -516,6 +533,9 @@ pub(crate) fn strip_recipe_preset_write_context(payload: &mut Value) {
         object.remove("manifestPath");
         object.remove("builtInLoras");
         object.remove("appliedDefaults");
+        // lastUsedAt is API-managed via the usage side store (sc-10520); a client
+        // echoing it back on update must not be allowed to overwrite it.
+        object.remove("lastUsedAt");
     }
 }
 
@@ -524,6 +544,9 @@ pub(crate) fn strip_recipe_preset_runtime_fields(payload: &mut Value) {
         object.remove("manifestPath");
         object.remove("builtInLoras");
         object.remove("appliedDefaults");
+        // A duplicate is a brand-new, never-used preset — drop the source's recency
+        // so it sorts as unused until applied to a job (sc-10520).
+        object.remove("lastUsedAt");
     }
 }
 
@@ -1044,4 +1067,85 @@ pub(crate) fn preset_name_exists(entries: &[Value], name: &str) -> bool {
     entries
         .iter()
         .any(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
+}
+
+// -- Recipe preset usage side store (sc-10520) ------------------------------------
+//
+// `lastUsedAt` is persisted in a dedicated `recipe-preset-usage.json` keyed by preset
+// id, NOT in the preset manifests, for two reasons: builtin presets are read-only so
+// their usage can't live in `builtin.recipe-presets.jsonc`, and rewriting a JSONC
+// manifest on the generate hot path is too costly. The store is overlaid onto the
+// catalog on read (see `recipe_preset_catalog_with`) so every scope can surface it.
+
+pub(crate) fn recipe_preset_usage_path(state: &AppState) -> PathBuf {
+    state
+        .settings
+        .config_dir
+        .join("manifests")
+        .join("recipe-preset-usage.json")
+}
+
+/// Load the usage side store as an id → RFC3339 map. Best-effort: a missing or malformed
+/// store yields an empty map so a usage-store problem can never fail a catalog read.
+pub(crate) async fn load_recipe_preset_usage(state: &AppState) -> JsonObject {
+    let path = recipe_preset_usage_path(state);
+    let Ok(payload) = tokio::fs::read_to_string(&path).await else {
+        return JsonObject::new();
+    };
+    serde_json::from_str::<Value>(&payload)
+        .ok()
+        .as_ref()
+        .and_then(|value| value.get("lastUsed"))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Record `preset_id` as used at the current instant in the usage side store. Best-effort:
+/// serialized by the shared manifest lock (in-process mutex + cross-process advisory lock)
+/// so concurrent job submits don't clobber one another, but any failure is logged and
+/// swallowed rather than failing the job the user actually asked for.
+pub(crate) async fn stamp_recipe_preset_used(state: &AppState, preset_id: &str) {
+    if let Err(error) = stamp_recipe_preset_used_inner(state, preset_id).await {
+        tracing::warn!(
+            preset_id,
+            error = %error.detail,
+            "failed to stamp recipe preset lastUsedAt"
+        );
+    }
+}
+
+async fn stamp_recipe_preset_used_inner(state: &AppState, preset_id: &str) -> Result<(), ApiError> {
+    let path = recipe_preset_usage_path(state);
+    let lock = manifest_write_lock(state, &path);
+    let _guard = lock.lock().await;
+    let _file_lock = acquire_manifest_file_lock(&path).await?;
+    let mut root = match tokio::fs::read_to_string(&path).await {
+        Ok(payload) => serde_json::from_str::<Value>(&payload)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => JsonObject::new(),
+        Err(error) => {
+            return Err(ApiError::internal(format!(
+                "Failed to read preset usage store {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    let last_used = root
+        .entry("lastUsed".to_owned())
+        .or_insert_with(|| Value::Object(JsonObject::new()));
+    if !last_used.is_object() {
+        *last_used = Value::Object(JsonObject::new());
+    }
+    if let Some(map) = last_used.as_object_mut() {
+        map.insert(preset_id.to_owned(), Value::String(now_rfc3339()));
+    }
+    root.entry("schemaVersion".to_owned())
+        .or_insert_with(|| json!(1));
+    let payload = serde_json::to_string_pretty(&Value::Object(root)).map_err(|error| {
+        ApiError::internal(format!("Failed to encode preset usage store: {error}"))
+    })?;
+    write_manifest_atomic(&path, &format!("{payload}\n")).await
 }
