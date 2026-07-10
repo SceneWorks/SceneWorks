@@ -7463,6 +7463,42 @@ fn turbo_cache_health_flags_missing_lora_only_when_listed_explicitly() {
 }
 
 #[test]
+fn cache_health_does_not_let_an_appledouble_sidecar_satisfy_a_required_pattern() {
+    // SceneWorks#1333: `._model.safetensors` is a macOS AppleDouble sidecar, not weights. It
+    // carries the `.safetensors` extension, so a `*.safetensors` glob matched it and the model
+    // reported INSTALLED while the real weights file was absent — the worst failure mode here,
+    // because the load then dies at generation time with a corrupt-header error.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let repo_root = temp_dir.path().join("models--SceneWorks--boogu-image-mlx");
+    let mllm = repo_root.join("snapshots/abc123/base/mllm");
+    std::fs::create_dir_all(&mllm).expect("mllm creates");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("refs creates");
+    std::fs::write(repo_root.join("refs/main"), "abc123").expect("ref writes");
+    std::fs::write(mllm.join("config.json"), "{}").expect("config writes");
+    // A real AppleDouble header (magic 0x00051607, version 0x00020000) — and NO real weights.
+    std::fs::write(
+        mllm.join("._model.safetensors"),
+        [0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00],
+    )
+    .expect("sidecar writes");
+
+    let pattern = vec!["base/mllm/*.safetensors".to_owned()];
+    let health = super::models::huggingface_cache_health(&repo_root, &pattern);
+    assert!(
+        !health.installed,
+        "a lone AppleDouble sidecar must not satisfy `base/mllm/*.safetensors`"
+    );
+
+    // The real shard makes it complete.
+    std::fs::write(mllm.join("model.safetensors"), "weights").expect("weights write");
+    let fixed = super::models::huggingface_cache_health(&repo_root, &pattern);
+    assert!(
+        fixed.installed && !fixed.incomplete,
+        "complete once the real shard is present"
+    );
+}
+
+#[test]
 fn filtered_cache_health_reports_absent_filter_as_missing_not_incomplete() {
     // sc-9907: a filter whose files are ENTIRELY absent is cleanly missing, not torn. Only a
     // partially-present filter (some files there, some gone) counts as incomplete/repairable.

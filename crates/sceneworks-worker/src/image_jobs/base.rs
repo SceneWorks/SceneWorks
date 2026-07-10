@@ -642,11 +642,17 @@ fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
         .get("mlxQuantize")
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
     // A component dir "has weights" when it holds a packed/dense safetensors or a shard index.
+    // Hidden entries don't count: a dir holding only a `._model.safetensors` AppleDouble sidecar has
+    // no weights, and reporting otherwise routes the loader at a tier it cannot load
+    // (SceneWorks#1333).
     let component_has_weights = |dir: &Path| -> bool {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return false;
         };
         entries.flatten().any(|entry| {
+            if sceneworks_core::lora_family::is_hidden_file(&entry.path()) {
+                return false;
+            }
             let file = entry.file_name();
             let name = file.to_string_lossy();
             name.ends_with(".safetensors") || name.ends_with(".index.json")
@@ -698,10 +704,12 @@ fn anima_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
     let present = |name: &str| -> Option<PathBuf> {
         let dir = root.join(name);
+        // A hidden `._*.safetensors` AppleDouble sidecar is not a DiT (SceneWorks#1333).
         let has_dit = std::fs::read_dir(dir.join("diffusion_models"))
             .map(|entries| {
                 entries
                     .flatten()
+                    .filter(|entry| !sceneworks_core::lora_family::is_hidden_file(&entry.path()))
                     .any(|entry| entry.file_name().to_string_lossy().ends_with(".safetensors"))
             })
             .unwrap_or(false);

@@ -1,6 +1,7 @@
 use super::*;
 
 use sceneworks_core::credentials::normalize_host;
+use sceneworks_core::lora_family::is_hidden_file;
 
 const ALLOWED_MODEL_TYPES: &[&str] = &["image", "video", "utility"];
 const MODEL_SIZE_CACHE_LIMIT: usize = 64;
@@ -1905,9 +1906,10 @@ fn diffusers_component_requires_weights(component: &str, class_name: &str) -> bo
 fn diffusers_component_dir_nonempty(snapshot: &FsPath, component: &str) -> bool {
     std::fs::read_dir(snapshot.join(component))
         .map(|entries| {
-            entries
-                .flatten()
-                .any(|entry| path_is_readable_file(&entry.path()))
+            entries.flatten().any(|entry| {
+                let path = entry.path();
+                !is_hidden_file(&path) && path_is_readable_file(&path)
+            })
         })
         .unwrap_or(false)
 }
@@ -1924,7 +1926,8 @@ fn diffusers_component_has_weight_file(snapshot: &FsPath, component: &str) -> bo
             .and_then(|value| value.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        path_is_readable_file(&path)
+        !is_hidden_file(&path)
+            && path_is_readable_file(&path)
             && (name.ends_with(".safetensors")
                 || name.ends_with(".bin")
                 || name.ends_with(".msgpack")
@@ -1943,6 +1946,12 @@ fn snapshot_has_payload_file(snapshot: &FsPath) -> bool {
     })
 }
 
+/// Every readable file under `snapshot`, snapshot-relative, `/`-separated.
+///
+/// Hidden entries are excluded. They are not payload, and — because this list backs
+/// [`snapshot_contains_pattern`]'s glob branch — a `._model.safetensors` sidecar would
+/// otherwise satisfy a required `*.safetensors` pattern, reporting a model installed
+/// while its real weights file is absent (SceneWorks#1333).
 fn snapshot_files(snapshot: &FsPath) -> Vec<String> {
     let mut output = Vec::new();
     let mut stack = vec![snapshot.to_path_buf()];
@@ -1954,6 +1963,8 @@ fn snapshot_files(snapshot: &FsPath) -> Vec<String> {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
+            } else if is_hidden_file(&path) {
+                continue;
             } else if path_is_readable_file(&path) {
                 if let Ok(relative) = path.strip_prefix(snapshot) {
                     output.push(relative.to_string_lossy().replace('\\', "/"));
