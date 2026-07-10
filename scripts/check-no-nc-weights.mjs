@@ -195,11 +195,15 @@ const ALLOWLIST_BASENAMES = new Set(ALLOWLIST.map((entry) => entry.basename));
 // is the source of truth). This is not left to vigilance: the self-test asserts that
 // once the manifest itself yields an `anima` / `circlestone` token, this array MUST
 // be empty — so the "temporary" seed cannot silently become permanent.
-const BOOTSTRAP_NC_TOKENS = [
-  "circlestone-labs/anima",
-  "models--circlestone-labs--anima",
-  "anima",
-];
+// EMPTIED by sc-10523 (epic 10512): Anima now lands in config/manifests/builtin.models.jsonc as three
+// `nonCommercial: true` entries (family `anima`, repo `circlestone-labs/Anima`), so
+// `buildManifestNcTokens()` derives the exact tokens this seed used to carry
+// (`circlestone-labs/anima`, `models--circlestone-labs--anima`, `anima`) straight from the manifest —
+// the manifest is now the single source of truth. The self-test tripwire below asserts this array MUST
+// be empty once the manifest yields an Anima/CircleStone token; keeping a seed here would silently
+// re-hardcode the family and defeat the manifest-derivation design. Re-seed here ONLY for a NEW NC
+// family that is being ported before its manifest entry exists, and remove it the moment that lands.
+const BOOTSTRAP_NC_TOKENS = [];
 
 // -- JSONC parsing (manifests carry // comments). Mirrors scripts/check-scaffold.mjs. --
 function stripJsoncComments(body) {
