@@ -3172,16 +3172,13 @@ label {
   align-content: start;
 }
 
-.training-empty-state,
-.training-step-block {
+.training-empty-state {
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   background: var(--surface-2);
 }
 
-.training-step-block span,
-.training-empty-state span,
-.training-tabs small {
+.training-empty-state span {
   color: var(--text-muted);
   font-size: 12px;
 }
@@ -3197,39 +3194,6 @@ label {
 .training-empty-state > div {
   display: grid;
   gap: 4px;
-}
-
-.training-tabs {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.training-tabs button {
-  display: grid;
-  min-height: 66px;
-  gap: 4px;
-  padding: 10px 12px;
-  text-align: left;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--surface-2);
-  color: var(--text);
-}
-
-.training-tabs button:hover {
-  border-color: var(--border-strong);
-  background: var(--surface-hover);
-}
-
-.training-tabs button.active {
-  border-color: color-mix(in oklch, var(--accent) 55%, var(--border));
-  background: var(--surface);
-  box-shadow: var(--shadow-sm);
-}
-
-.training-tabs span {
-  font-weight: 700;
 }
 
 /* Results zone: the live runs sit flush on the workspace canvas — only the
@@ -3278,20 +3242,11 @@ label {
   font-weight: 700;
 }
 
-.training-dataset-list,
-.training-workflow-grid,
-.training-config-preview,
 .training-config-form,
 .training-config-grid,
 .training-advanced-grid {
   display: grid;
   gap: 10px;
-}
-
-.training-step-block {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
 }
 
 /* ---------- Data Sets hero (sc-10481) ----------
@@ -3501,74 +3456,17 @@ input.dataset-name-input.boxed:focus {
   font-weight: 600;
 }
 
-.training-dataset-fields {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  align-items: end;
-}
-
-.field-name,
-.field-prefix {
+/* The Preset editor's Name field — sole survivor of the old 4-column dataset header
+   grid, whose other cells died with it (sc-10497). Its `grid-column: 1 / span 2` went
+   with them: .preset-section-body is a single-column grid, so spanning two columns had
+   been opening an implicit second one that the other .field siblings auto-placed into.
+   The preset sections now stack, which the Presets redesign will settle properly. */
+.field-name {
   display: grid;
   gap: 7px;
-  grid-column: 1 / span 2;
   font-size: 12px;
   font-weight: 700;
   color: var(--text-muted);
-}
-
-.field-name {
-  grid-row: 1;
-}
-
-.field-prefix {
-  grid-row: 2;
-}
-
-.field-version {
-  grid-row: 1;
-  grid-column: 3;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 44px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-}
-
-.field-add {
-  grid-row: 1;
-  grid-column: 4;
-}
-
-.field-apply {
-  grid-row: 2;
-  grid-column: 3;
-}
-
-.field-caption {
-  grid-row: 2;
-  grid-column: 4;
-}
-
-/* Split the difference: inputs grow a touch (larger font), buttons shrink, both
-   land on a shared 44px control height. */
-.training-dataset-fields input {
-  height: 44px;
-  font-size: 15px;
-}
-
-.training-dataset-fields .primary-action {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  width: 100%;
-  height: 44px;
-  padding-top: 0;
-  padding-bottom: 0;
 }
 
 /* Health rail (sc-10481): three counts plus a wide tile carrying the readiness dot
@@ -3681,19 +3579,6 @@ input.dataset-name-input.boxed:focus {
   font-weight: 700;
 }
 
-.training-workflow-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.training-step-block {
-  padding: 14px;
-}
-
-.training-config-preview {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.training-config-preview label,
 .training-config-grid label,
 .training-advanced-grid label {
   display: grid;
@@ -10381,12 +10266,8 @@ details[open] > summary.lora-scope-group-heading::before,
   .media-grid,
   .library-layout,
   .studio-layout,
-  .training-tabs,
-  .training-dataset-fields,
   .training-health-grid,
   .training-caption-card,
-  .training-workflow-grid,
-  .training-config-preview,
   .training-config-grid,
   .training-advanced-grid,
   .preset-layout,
