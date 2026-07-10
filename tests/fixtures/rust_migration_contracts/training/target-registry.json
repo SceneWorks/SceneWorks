@@ -689,6 +689,97 @@
       }
     },
     {
+      "id": "anima_base_lora",
+      "name": "Anima LoRA",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "anima",
+      "baseModel": "anima_base",
+      "baseModelRepo": "circlestone-labs/Anima",
+      "kernel": "anima_lora",
+      "defaults": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": false,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "sampleGuidanceScale": 4.5,
+          "sampleSteps": 10,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "limits": {
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          4
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "rank": [
+          4,
+          128
+        ],
+        "resolutions": [
+          512,
+          768,
+          1024
+        ],
+        "steps": [
+          200,
+          6000
+        ]
+      },
+      "ui": {
+        "description": "Train an anime image LoRA for the Anima base model (Cosmos-Predict2 DiT + text conditioner).",
+        "label": "Anima LoRA",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
+      }
+    },
+    {
       "id": "ltx_video_lora",
       "name": "LTX-2.3 Video LoRA",
       "modality": "video",

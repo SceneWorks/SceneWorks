@@ -1186,6 +1186,142 @@
         "description": "Higher-step style LoRA for Wan2.2 14B I2V.",
         "order": 20
       }
+    },
+    {
+      "id": "anima_base_lora.character.adamw8bit.balanced",
+      "version": 1,
+      "targetId": "anima_base_lora",
+      "name": "Character balanced",
+      "recommendedFor": [
+        "character"
+      ],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": false,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "sampleGuidanceScale": 4.5,
+          "sampleSteps": 10,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "ui": {
+        "default": true,
+        "description": "Balanced first run for 12-25 clean character images on the Anima base model (trains the DiT + llm_adapter conditioner).",
+        "order": 10
+      }
+    },
+    {
+      "id": "anima_base_lora.character.adamw8bit.conservative",
+      "version": 1,
+      "targetId": "anima_base_lora",
+      "name": "Character conservative",
+      "recommendedFor": [
+        "character"
+      ],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "conservative",
+      "config": {
+        "rank": 8,
+        "alpha": 8,
+        "learningRate": 0.00005,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": false,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "conservative",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "sampleGuidanceScale": 4.5,
+          "sampleSteps": 10,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "ui": {
+        "description": "Lower-rank, lower-LR Anima character preset for tight identity datasets.",
+        "order": 20
+      }
+    },
+    {
+      "id": "anima_base_lora.style.adamw8bit.balanced",
+      "version": 1,
+      "targetId": "anima_base_lora",
+      "name": "Style balanced",
+      "recommendedFor": [
+        "style"
+      ],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 32,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": false,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "sampleGuidanceScale": 4.5,
+          "sampleSteps": 10,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "ui": {
+        "description": "Higher-capacity Anima style LoRA for anime texture and visual-language transfer.",
+        "order": 30
+      }
     }
   ]
 }

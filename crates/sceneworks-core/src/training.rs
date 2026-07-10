@@ -429,6 +429,7 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             krea_raw_lora_target(),
             sd3_large_lora_target(),
             sd3_medium_lora_target(),
+            anima_base_lora_target(),
             ltx_video_lora_target(),
             wan_lora_target(),
             wan_t2v_14b_lora_target(),
@@ -444,6 +445,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
     let sdxl_target = sdxl_lora_target();
     let kolors_target = kolors_lora_target();
     let krea_target = krea_raw_lora_target();
+    let anima_target = anima_base_lora_target();
     let wan_target = wan_lora_target();
     let wan_t2v_14b_target = wan_t2v_14b_lora_target();
     let wan_i2v_14b_target = wan_i2v_14b_lora_target();
@@ -842,6 +844,57 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 object(json!({
                     "description": "Higher-step style LoRA for Wan2.2 14B I2V.",
                     "order": 20
+                })),
+            ),
+            anima_preset(
+                &anima_target,
+                "anima_base_lora.character.adamw8bit.balanced",
+                "Character balanced",
+                &["character"],
+                ("adamw8bit", "balanced"),
+                |mut config| {
+                    config.steps = 3000;
+                    config
+                },
+                object(json!({
+                    "description": "Balanced first run for 12-25 clean character images on the Anima base model (trains the DiT + llm_adapter conditioner).",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            anima_preset(
+                &anima_target,
+                "anima_base_lora.character.adamw8bit.conservative",
+                "Character conservative",
+                &["character"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.learning_rate = number(0.00005);
+                    config.steps = 3000;
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR Anima character preset for tight identity datasets.",
+                    "order": 20
+                })),
+            ),
+            anima_preset(
+                &anima_target,
+                "anima_base_lora.style.adamw8bit.balanced",
+                "Style balanced",
+                &["style"],
+                ("adamw8bit", "balanced"),
+                |mut config| {
+                    config.rank = 32;
+                    config.alpha = 16;
+                    config.steps = 3000;
+                    config
+                },
+                object(json!({
+                    "description": "Higher-capacity Anima style LoRA for anime texture and visual-language transfer.",
+                    "order": 30
                 })),
             ),
         ],
@@ -2211,6 +2264,126 @@ fn validate_lr_scheduler(config: &TrainingConfig) -> Result<(), TrainingPlanErro
         }
     }
     Ok(())
+}
+
+/// The Anima (Cosmos-Predict2 DiT + `AnimaTextConditioner`) image LoRA/LoKr training target (epic
+/// 10512, sc-10522). Trained on the undistilled `anima_base` (like Krea Raw→Turbo / SD3 Large→turbo);
+/// the family-arch-identical aesthetic/turbo variants apply the same adapter back via
+/// `apply_anima_adapters`. The native `mlx-gen-anima` trainer trains the 448 DiT targets **and** the
+/// 60 `llm_adapter` conditioner targets (508 total). mlx-only (no torch/candle Anima trainer). NB the
+/// `mlx-gen-anima` trainer does not yet honor gradient checkpointing or preview sampling (dense-only,
+/// no in-training previews), so those advanced knobs default off here.
+fn anima_base_lora_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "anima_base_lora".to_owned(),
+        name: "Anima LoRA".to_owned(),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: "anima".to_owned(),
+        base_model: "anima_base".to_owned(),
+        base_model_repo: Some("circlestone-labs/Anima".to_owned()),
+        kernel: "anima_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: 16,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 3000,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 1024,
+            save_every: 250,
+            seed: 42,
+            optimizer: "adamw8bit".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                // Anima's base is bf16 on disk; the trainer runs bf16 mixed-precision (frozen base +
+                // activations bf16, trainable factors/optimizer f32). VAE latents + the Qwen3
+                // conditioner inputs are cached; the trained conditioner is re-run per step.
+                "mixedPrecision": "bf16",
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                // Dense-only for now (the mlx-gen-anima trainer does not implement block
+                // checkpointing yet — a follow-up); keep it off so the UI does not advertise a no-op.
+                "gradientCheckpointing": false,
+                "networkType": "lora",
+                // Flow-match noising: sigmoid timestep with a high-noise tilt, MSE on the velocity
+                // target (ε − x0), static schedule shift 3.0 baked into the trainer.
+                "timestepType": "sigmoid",
+                "timestepBias": "high_noise",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                "lrScheduler": "constant",
+                // In-training preview sampling is not implemented in the mlx-gen-anima trainer yet
+                // (a follow-up), so sampling defaults off.
+                "sampleEvery": 0,
+                "sampleSteps": 10,
+                "sampleGuidanceScale": 4.5,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 6000],
+            // Dense-only training (no memory guard/checkpointing yet), so the training-resolution
+            // ceiling stays at 1024 even though inference supports up to 1536 (a follow-up).
+            "resolutions": [512, 768, 1024],
+            "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            // The native mlx-gen-anima trainer reports `supports_lokr`; the inference loader applies
+            // LoKr through the shared `apply_anima_adapters` seam (sc-10521).
+            "networkTypes": ["lora", "lokr"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "outputScopes": ["project", "global"]
+        })),
+        ui: object(json!({
+            "label": "Anima LoRA",
+            "description": "Train an anime image LoRA for the Anima base model (Cosmos-Predict2 DiT + text conditioner).",
+            "recommendedFor": ["character", "style"]
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
+/// Build an Anima image LoRA/LoKr preset. The flow-match sampling + caching knobs live on the target
+/// defaults, so the preset overrides only the optimizer + quality label and whatever the `mutate`
+/// closure tweaks (rank/alpha/steps/LR).
+fn anima_preset<F>(
+    target: &TrainingTarget,
+    id: &str,
+    name: &str,
+    recommended_for: &[&str],
+    optimizer_quality: (&str, &str),
+    mutate: F,
+    ui: JsonObject,
+) -> TrainingPreset
+where
+    F: FnOnce(TrainingConfig) -> TrainingConfig,
+{
+    let (optimizer, quality_preset) = optimizer_quality;
+    let mut config = mutate(target.defaults.clone());
+    config.optimizer = optimizer.to_owned();
+    config
+        .advanced
+        .insert("qualityPreset".to_owned(), json!(quality_preset));
+    TrainingPreset {
+        id: id.to_owned(),
+        version: 1,
+        target_id: target.id.clone(),
+        name: name.to_owned(),
+        recommended_for: recommended_for
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect(),
+        optimizer: optimizer.to_owned(),
+        quality_preset: quality_preset.to_owned(),
+        config,
+        ui,
+        extra: ExtraFields::new(),
+    }
 }
 
 #[cfg(test)]
