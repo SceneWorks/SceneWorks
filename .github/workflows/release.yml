@@ -88,6 +88,15 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm --prefix apps/desktop run build -- --config updater.release.conf.json
 
+      # License guard (sc-10526): scan the freshly-built .app tree for model weights
+      # before we sign/staple/publish it. This is the real-artifact form of the
+      # check.yml source-tree scan — the DMG is opaque, but the .app under
+      # bundle/macos/ carries the exact Contents/Resources payload the DMG wraps, so
+      # a weight baked into the bundle fails the release here. NC weights (Anima /
+      # CircleStone, FLUX NC, Ideogram, Krea, SANA, …) must never ship in an installer.
+      - name: Guard against NC model weights in the desktop bundle (sc-10526)
+        run: node scripts/check-no-nc-weights.mjs --dir target/release/bundle
+
       # Tauri staples the .app but not the wrapping .dmg — staple the DMG so the
       # downloaded artifact verifies offline (shared script; same as `release:mac`).
       - name: Staple the DMG
@@ -216,6 +225,13 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm --prefix apps/desktop run build -- --bundles nsis,msi --config updater.release.conf.json
+      # License guard (sc-10526): scan the built Windows bundle tree for model
+      # weights before publishing. The NSIS/MSI installers are opaque, but any loose
+      # resource weight Tauri stages under bundle/ is caught; the exhaustive
+      # resource-source scan runs in check.yml over apps/. NC weights must never ship.
+      - name: Guard against NC model weights in the desktop bundle (sc-10526)
+        shell: bash
+        run: node scripts/check-no-nc-weights.mjs --dir target/release/bundle
       # Upload to the draft release the macos job created. The user ships the MSI
       # (per desktop-windows.yml); the NSIS .exe is attached too as an alternative.
       # --clobber so re-running the job replaces rather than 409s. Then merge the
