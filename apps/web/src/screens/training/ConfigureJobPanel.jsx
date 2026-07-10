@@ -77,10 +77,9 @@ export function ConfigureJobPanel({
   configSnapshot,
   // sc-8942 (F-140): grouped Dataset Doctor readout props (report/loading + the six
   // fix-action callbacks), shared verbatim with DatasetEditorPanel. Spread straight onto
-  // DatasetDoctorReadout below. `readinessBlocksTraining` stays a separate prop — it gates
-  // the Train button, not the readout.
+  // DatasetDoctorReadout below. Whether readiness blocks the run is now one of
+  // `configValidity`'s issues (sc-10648), so there is no separate readiness prop.
   datasetDoctor,
-  readinessBlocksTraining = false,
 }) {
   return (
     <WorkPanel
@@ -446,13 +445,10 @@ export function ConfigureJobPanel({
 
           {/* Dataset Doctor readout before the Train button (sc-6534). Advisory: it
               only hard-blocks training when the gate is Blocked (too few images / a
-              fatal flag); warnings stay informational. */}
+              fatal flag); warnings stay informational. A Blocked gate now rides in the
+              chip row below as one of configValidity's errors (sc-10648), so the
+              hand-rolled "isn't ready to train" paragraph is gone. */}
           <DatasetDoctorReadout {...datasetDoctor} compact />
-          {readinessBlocksTraining ? (
-            <p className="inline-warning">
-              This dataset isn’t ready to train yet — open Data Sets to add or fix images.
-            </p>
-          ) : null}
 
           {/* Only broken values, never the "you haven't picked a dataset yet" hints —
               those are obvious from the form. Sits against the actions row so it reads
@@ -465,7 +461,7 @@ export function ConfigureJobPanel({
             </button>
             <button
               className="primary-action"
-              disabled={!configValidity.ready || submittingJob || readinessBlocksTraining}
+              disabled={!configValidity.ready || submittingJob}
               onClick={submitTrainingJob}
               type="button"
             >

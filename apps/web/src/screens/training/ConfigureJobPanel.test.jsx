@@ -104,7 +104,6 @@ function baseProps(overrides = {}) {
     // sc-8942 (F-140): the Dataset Doctor readout props are now one grouped `datasetDoctor`
     // bundle (report/loading + the six fix-action handlers) shared with DatasetEditorPanel.
     datasetDoctor: { report: null, loading: false },
-    readinessBlocksTraining: false,
     ...overrides,
   };
 }
@@ -125,20 +124,28 @@ describe("ConfigureJobPanel readiness gate", () => {
     expect(button.disabled).toBe(false);
   });
 
-  it("disables Train and shows an advisory when readiness is Blocked", () => {
+  // Readiness is no longer a separate prop (sc-10648): a Blocked gate is one of
+  // configValidity's errors, so it disables Train and shows up in the chip row like any
+  // other. Drive it through the real rules via ctx.datasetNotReady.
+  it("disables Train and names the reason when the dataset readiness gate is Blocked", () => {
+    const configValidity = validityFor(VALID_DRAFT, {
+      activeDataset: DATASET,
+      selectedTarget: TARGET,
+      datasetNotReady: true,
+    });
     mount(
       <ConfigureJobPanel
         {...baseProps({
+          configValidity,
           datasetDoctor: {
             report: { gate: "blocked", subScores: { technical: 0 }, counts: { fatal: 1 }, itemCount: 2, items: [], datasetFlags: [] },
             loading: false,
           },
-          readinessBlocksTraining: true,
         })}
       />,
     );
     expect(submitButton().disabled).toBe(true);
-    expect(container.textContent).toContain("isn’t ready to train");
+    expect(chips()).toContain("This dataset isn’t ready to train yet — open Data Sets to add or fix images.");
   });
 
   it("keeps Train disabled when the config itself is not ready", () => {

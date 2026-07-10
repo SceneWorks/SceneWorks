@@ -191,7 +191,7 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
 //
 // sc-10492 dropped both as noise; sc-10501 brought the errors back and this is where
 // that distinction became the app's vocabulary rather than one screen's helper.
-export function configValidation(configDraft, { activeDataset, selectedTarget } = {}) {
+export function configValidation(configDraft, { activeDataset, selectedTarget, datasetNotReady = false } = {}) {
   const issues = [];
   if (!selectedTarget) {
     issues.push(issue.requirement("target", "Select a training target"));
@@ -223,6 +223,15 @@ export function configValidation(configDraft, { activeDataset, selectedTarget } 
     if (!value || value <= 0) {
       issues.push(issue.error(field, `${label} must be greater than zero`));
     }
+  }
+  // Whether the chosen dataset is trainable is part of "can this job run", so it belongs
+  // in the Train button's one validity summary rather than a separate `disabled` term.
+  // The screen passes the already-computed gate (trainBlockedByReadiness keeps its
+  // bias-to-warn rule in datasetReadiness.js); a `needs_attention` gate is deliberately
+  // NOT surfaced here — DatasetDoctorReadout's headline already carries it, and a chip
+  // would only repeat it. field is null: the fix is in Data Sets, not an input on this form.
+  if (datasetNotReady) {
+    issues.push(issue.error(null, "This dataset isn’t ready to train yet — open Data Sets to add or fix images."));
   }
   return issues;
 }

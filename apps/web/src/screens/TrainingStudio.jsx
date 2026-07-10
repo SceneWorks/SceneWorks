@@ -20,6 +20,7 @@ import {
   datasetItemSelectionKey,
   datasetOwnedAssets,
   datasetPayload,
+  datasetSaveValidation,
   imageAssetName,
   normalizeDatasetAssetIds,
   selectionAfterDuplicateRemoval,
@@ -459,12 +460,13 @@ export function TrainingStudio({ mode = "training" } = {}) {
       selectedAssetIds.length !== originalAssetIds.length ||
       selectedAssetIds.some((id, index) => id !== originalAssetIds[index]) ||
       captionsDirty);
-  const canSave =
-    draftName.trim().length > 0 &&
-    selectedAssetIds.length > 0 &&
-    health.disabledItems === 0 &&
-    !savingDataset &&
-    (!activeDataset || dirty);
+  // One summary gates Save and feeds the chip row, so they cannot disagree (epic 10644).
+  // `savingDataset` and "nothing changed" are non-validation gates — like submittingJob on
+  // the Train button — so they stay in the disabled expression rather than becoming issues.
+  const saveDraft = useMemo(() => ({ name: draftName, selectedAssetIds }), [draftName, selectedAssetIds]);
+  const saveContext = useMemo(() => ({ health }), [health]);
+  const saveValidity = useValidation(datasetSaveValidation, saveDraft, saveContext);
+  const canSave = saveValidity.ready && !savingDataset && (!activeDataset || dirty);
   const displayedCaptionPrompt = captionSettings.captionPrompt || buildJoyCaptionPrompt(captionSettings);
   // JoyCaption model provisioning (sc-5620): the native captioner has no auto-download (unlike
   // the torch path), so on a gated Mac a missing model would just fail the queued caption job.
@@ -604,7 +606,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // why it may not, so the two cannot drift apart (epic 10644). Only broken values earn
   // a chip: an unfilled field is visible in the form, and the "Needs input" pill carries
   // it (sc-10492 → sc-10501).
-  const configContext = useMemo(() => ({ activeDataset, selectedTarget }), [activeDataset, selectedTarget]);
+  const configContext = useMemo(
+    () => ({ activeDataset, selectedTarget, datasetNotReady: readinessBlocksTraining }),
+    [activeDataset, selectedTarget, readinessBlocksTraining],
+  );
   const configValidity = useValidation(configValidation, configDraft, configContext);
 
   // The dataset's character kind (person/style/object) — refines the readiness kind
@@ -1361,7 +1366,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   }
 
   async function submitTrainingJob() {
-    if (!configValidity.ready || submittingJob || readinessBlocksTraining) {
+    if (!configValidity.ready || submittingJob) {
       return;
     }
     setSubmittingJob(true);
@@ -1473,6 +1478,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 readinessByKey={readinessByKey}
                 onToggleItemAck={toggleItemQualityAck}
                 canSave={canSave}
+                saveValidity={saveValidity}
                 saveDataset={saveDataset}
                 savingDataset={savingDataset}
                 unavailableAssetIds={unavailableAssetIds}
@@ -1543,7 +1549,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   submitTrainingJob={submitTrainingJob}
                   configSnapshot={configSnapshot}
                   datasetDoctor={datasetDoctor}
-                  readinessBlocksTraining={readinessBlocksTraining}
                 />
                 <TrainingLiveProgress
                   jobs={activeTrainingJobs}

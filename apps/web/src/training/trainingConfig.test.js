@@ -227,4 +227,28 @@ describe("configValidation", () => {
   it("tolerates a missing context", () => {
     expect(() => configValidation(wholeDraft)).not.toThrow();
   });
+
+  // Readiness rides in the same summary as the draft rules (sc-10648), so the Train button
+  // has one reason-set instead of a separate `disabled` term. A Blocked dataset is a
+  // form-scoped error — the fix is in Data Sets, not an input here.
+  describe("dataset readiness gate", () => {
+    it("adds a form-scoped error when the dataset is not ready to train", () => {
+      const issues = configValidation(wholeDraft, { ...ctx, datasetNotReady: true });
+      const readiness = issues.find((entry) => entry.message.includes("isn’t ready to train"));
+      expect(readiness).toBeTruthy();
+      expect(readiness.kind).toBe("error");
+      expect(readiness.field).toBeNull();
+      expect(summarize(issues).ready).toBe(false);
+    });
+
+    it("says nothing when the dataset is trainable", () => {
+      const issues = configValidation(wholeDraft, { ...ctx, datasetNotReady: false });
+      expect(issues.some((entry) => entry.message.includes("ready to train"))).toBe(false);
+      expect(summarize(issues).ready).toBe(true);
+    });
+
+    it("defaults to trainable when readiness is unknown", () => {
+      expect(summarize(configValidation(wholeDraft, ctx)).ready).toBe(true);
+    });
+  });
 });
