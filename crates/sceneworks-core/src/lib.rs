@@ -6,6 +6,7 @@ pub mod character_store;
 pub mod contracts;
 pub mod credentials;
 pub mod dataset_quality;
+pub mod external_roots;
 pub mod hf_home;
 pub mod ideogram_caption;
 pub mod image_request;

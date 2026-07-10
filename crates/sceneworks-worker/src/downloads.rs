@@ -1436,6 +1436,7 @@ mod ensure_cached_file_tests {
             backend_mlx_enabled: true,
             backend_candle_enabled: false,
             gpu_memory_limit_bytes: 0,
+            external_model_roots: Vec::new(),
         };
         let api = ApiClient::new(&settings);
         let context = DownloadContext {

@@ -23,7 +23,6 @@ import {
   imageAssetName,
   normalizeDatasetAssetIds,
   selectionAfterDuplicateRemoval,
-  summarizeDatasets,
 } from "../training/datasetHelpers.js";
 import {
   captionHash,
@@ -389,7 +388,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const [submittingJob, setSubmittingJob] = useState(false);
   const configBasisRef = useRef("");
 
-  const datasetSummary = useMemo(() => summarizeDatasets(datasets), [datasets]);
   const datasetAssets = useMemo(
     () => datasetOwnedAssets(activeDataset, activeProject?.id, assets),
     [activeDataset, activeProject?.id, assets],
@@ -1426,34 +1424,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     >
     <section className="page-frame training-studio">
       <div className="training-studio-shell">
-        {/* Data Sets keeps its own header band; the Training Studio is named by the
-            topbar and leads straight into its work-panel (page-frame standard). */}
-        {datasetLibraryMode ? (
-          <div className="training-summary-band">
-            <div className="section-heading">
-              <p className="eyebrow">Library</p>
-              <h2>Data Sets</h2>
-              <p className="view-copy">
-                Create training datasets, manage imported dataset images, and normalize captions in one place.
-              </p>
-            </div>
-            <div className="training-metrics" aria-label="Training workspace summary">
-              <div>
-                <strong>{activeProject?.name ?? "No workspace"}</strong>
-                <span>Project</span>
-              </div>
-              <div>
-                <strong>{datasets.length}</strong>
-                <span>Datasets</span>
-              </div>
-              <div>
-                <strong>{datasetSummary.items}</strong>
-                <span>Items</span>
-              </div>
-            </div>
-          </div>
-        ) : null}
-
+        {/* Both modes are named by the topbar and lead straight into their work-panel
+            (page-frame standard, sc-10481). */}
         {!authenticated ? (
           <div className="training-empty-state" role="status">
             <Icon.Train size={24} />
@@ -1473,63 +1445,63 @@ export function TrainingStudio({ mode = "training" } = {}) {
         ) : (
           <>
             {datasetLibraryMode ? (
-              <section className="training-panel">
-                <DatasetEditorPanel
-                  loadingDatasets={loadingDatasets}
-                  onRefreshDatasets={onRefreshDatasets}
-                  busyDatasetId={busyDatasetId}
-                  datasetThumbAsset={datasetThumbAsset}
-                  datasets={datasets}
-                  startNewDataset={startNewDataset}
-                  openDataset={openDataset}
-                  activeDataset={activeDataset}
-                  selectedDatasetId={selectedDatasetId}
-                  datasetsError={datasetsError}
-                  datasetError={datasetError}
-                  datasetMessage={datasetMessage}
-                  draftName={draftName}
-                  setDraftName={setDraftName}
-                  dirty={dirty}
-                  setAddDialogOpen={setAddDialogOpen}
-                  renamePrefix={renamePrefix}
-                  setRenamePrefix={setRenamePrefix}
-                  renaming={renaming}
-                  memberAssets={memberAssets}
-                  applyOrderedNames={applyOrderedNames}
-                  setCaptionDialog={setCaptionDialog}
-                  health={health}
-                  datasetDoctor={datasetDoctor}
-                  readinessByKey={readinessByKey}
-                  onToggleItemAck={toggleItemQualityAck}
-                  canSave={canSave}
-                  saveDataset={saveDataset}
-                  savingDataset={savingDataset}
-                  unavailableAssetIds={unavailableAssetIds}
-                  removeUnavailableAsset={removeUnavailableAsset}
-                  captionDraftById={captionDraftById}
-                  onPreview={onPreview}
-                  updateCaption={updateCaption}
-                  captioning={captioning}
-                  addDialogOpen={addDialogOpen}
-                  imageAssets={imageAssets}
-                  characters={characters}
-                  importingAssets={importingAssets}
-                  selectedAssetIds={selectedAssetIds}
-                  addAssets={addAssets}
-                  handleImport={handleImport}
-                  captionDialog={captionDialog}
-                  gpuOptions={gpuOptions}
-                  updateCaptionSetting={updateCaptionSetting}
-                  runCaptionJob={runCaptionJob}
-                  toggleCaptionExtraOption={toggleCaptionExtraOption}
-                  displayedCaptionPrompt={displayedCaptionPrompt}
-                  captionSettings={captionSettings}
-                  captionModelMissing={captionModelMissing}
-                  onDownloadCaptionModel={onDownloadCaptionModel}
-                  captionModelSizeLabel={captionModelSizeLabel}
-                  captionModelName={captionModel?.name ?? "JoyCaption"}
-                />
-              </section>
+              <DatasetEditorPanel
+                loadingDatasets={loadingDatasets}
+                onRefreshDatasets={onRefreshDatasets}
+                busyDatasetId={busyDatasetId}
+                datasetThumbAsset={datasetThumbAsset}
+                datasets={datasets}
+                startNewDataset={startNewDataset}
+                openDataset={openDataset}
+                activeDataset={activeDataset}
+                selectedDatasetId={selectedDatasetId}
+                datasetsError={datasetsError}
+                datasetError={datasetError}
+                datasetMessage={datasetMessage}
+                draftName={draftName}
+                setDraftName={setDraftName}
+                dirty={dirty}
+                setAddDialogOpen={setAddDialogOpen}
+                renamePrefix={renamePrefix}
+                setRenamePrefix={setRenamePrefix}
+                renaming={renaming}
+                memberAssets={memberAssets}
+                applyOrderedNames={applyOrderedNames}
+                setCaptionDialog={setCaptionDialog}
+                health={health}
+                datasetDoctor={datasetDoctor}
+                readinessByKey={readinessByKey}
+                onToggleItemAck={toggleItemQualityAck}
+                canSave={canSave}
+                saveDataset={saveDataset}
+                savingDataset={savingDataset}
+                unavailableAssetIds={unavailableAssetIds}
+                removeUnavailableAsset={removeUnavailableAsset}
+                captionDraftById={captionDraftById}
+                onPreview={onPreview}
+                updateCaption={updateCaption}
+                captioning={captioning}
+                addDialogOpen={addDialogOpen}
+                imageAssets={imageAssets}
+                characters={characters}
+                associatedCharacterId={associatedCharacterId}
+                setActiveView={setActiveView}
+                importingAssets={importingAssets}
+                selectedAssetIds={selectedAssetIds}
+                addAssets={addAssets}
+                handleImport={handleImport}
+                captionDialog={captionDialog}
+                gpuOptions={gpuOptions}
+                updateCaptionSetting={updateCaptionSetting}
+                runCaptionJob={runCaptionJob}
+                toggleCaptionExtraOption={toggleCaptionExtraOption}
+                displayedCaptionPrompt={displayedCaptionPrompt}
+                captionSettings={captionSettings}
+                captionModelMissing={captionModelMissing}
+                onDownloadCaptionModel={onDownloadCaptionModel}
+                captionModelSizeLabel={captionModelSizeLabel}
+                captionModelName={captionModel?.name ?? "JoyCaption"}
+              />
             ) : (
               <>
                 <ConfigureJobPanel

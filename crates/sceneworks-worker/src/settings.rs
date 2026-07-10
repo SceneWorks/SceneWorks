@@ -39,6 +39,14 @@ pub struct Settings {
     /// env var still overrides either way (set `0` to force a candle build back onto the Python
     /// torch fallback during a staged rollout).
     pub backend_candle_enabled: bool,
+    /// Operator-configured directories outside the app data dir and the Hugging Face cache
+    /// that may be read for model weights — typically an existing ComfyUI `models/` tree
+    /// (epic 10451, sc-10452). Widens the confinement allow-list in
+    /// [`crate::paths::normalize_app_managed_lora_path`] **only**; it is never derived from a
+    /// job payload, so the LAN-exposed jobs API (epic 4484) cannot introduce a root. Empty
+    /// (feature off) unless `SCENEWORKS_EXTERNAL_MODEL_ROOTS` is set, and always empty on
+    /// macOS — see `sceneworks_core::external_roots`.
+    pub external_model_roots: Vec<PathBuf>,
     /// Soft ceiling, in bytes, on the shared/unified GPU memory the MLX runtime may use, from
     /// `SCENEWORKS_GPU_MEMORY_LIMIT_BYTES` (epic 7819, sc-7820). `0` (the default / unset) leaves
     /// MLX at its own budget — byte-identical to prior behavior. When non-zero it is applied
@@ -107,6 +115,7 @@ impl Settings {
                 cfg!(feature = "backend-candle"),
             ),
             gpu_memory_limit_bytes: env_u64_any(&["SCENEWORKS_GPU_MEMORY_LIMIT_BYTES"], 0),
+            external_model_roots: sceneworks_core::external_roots::external_model_roots_from_env(),
         }
     }
 }

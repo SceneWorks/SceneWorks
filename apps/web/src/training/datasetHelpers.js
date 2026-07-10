@@ -13,10 +13,6 @@ export function datasetItemCount(dataset) {
   return Number.isFinite(value) ? value : 0;
 }
 
-export function summarizeDatasets(datasets) {
-  return datasets.reduce((summary, dataset) => ({ items: summary.items + datasetItemCount(dataset) }), { items: 0 });
-}
-
 export function captionText(item) {
   return String(item?.caption?.text ?? "").trim();
 }
