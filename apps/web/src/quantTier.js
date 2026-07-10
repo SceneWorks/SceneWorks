@@ -145,8 +145,11 @@ function defaultInstalledTier(model, tiers) {
 // The tier the picker should start on for `model`. Preference order:
 //   1. `lastUsed` — the per-model last-used tier, when it is still installed (persistence).
 //   2. the model's declared default tier (`variant.default: true`), when installed.
-//   3. q4 if installed (the catalog's smallest/default convention).
-//   4. the first installed tier.
+//   3. q8 if installed (epic 10721 / sc-10726 — Q8 is the app-wide default generation tier, replacing
+//      the old q4 base convention; clamped to installed so it only wins when q8 is actually present).
+//      A later story (S4) sources this from a global user setting; here it is the hardcoded base default.
+//   4. q4 if installed (clean-tiers fallback so a q4-only install still seeds a real tier, not null).
+//   5. the first installed tier.
 // Returns null when nothing is installed (no picker will render anyway). `options` (sc-9300) forwards
 // the `convRotEligible` gate so a hidden INT8-ConvRot tier is never seeded as the selection.
 export function defaultTierSelection(model, lastUsed, options = {}) {
@@ -161,11 +164,14 @@ export function defaultTierSelection(model, lastUsed, options = {}) {
   if (declared) {
     return declared;
   }
-  // Convert-at-install models (mlxTiers) preselect q8 — matching the worker's Q8 generation default
-  // (sc-10714 / epic 10721), so the picker's initial value never silently sends the washed q4.
-  // Download-matrix models keep the historical q4 (smallest) preselection.
+  // Q8 is the app-wide base default (epic 10721 / sc-10726), matching the worker's Q8 generation
+  // default and replacing the old q4-hard-default so the picker never silently sends the washed q4.
+  // Clamped to installed. Convert-at-install models (mlxTiers, sc-10730) additionally prefer bf16
+  // over q4 as the clean-tier fallback when q8 isn't on disk; download-matrix models fall q8 → q4.
   const preferred =
-    !model?.hasVariantMatrix && Array.isArray(model?.mlxTiers) ? ["q8", "bf16", "q4"] : ["q4"];
+    !model?.hasVariantMatrix && Array.isArray(model?.mlxTiers)
+      ? ["q8", "bf16", "q4"]
+      : ["q8", "q4"];
   for (const tier of preferred) {
     if (tiers.includes(tier)) {
       return tier;

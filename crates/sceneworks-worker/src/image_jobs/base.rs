@@ -635,8 +635,13 @@ fn is_dense_te_tier(request: &ImageRequest) -> bool {
 
 /// Pick the engine-complete tier subdir of a standard SceneWorks quant-matrix turnkey `root`:
 /// `bf16/` when the request opts out of quantization (`advanced.mlxQuantize <= 0` / "none"), `q8/`
-/// when it opts into Q8 (`> 4`), else the default `q4/`. Falls back through q4 → q8 → bf16 → `root`
-/// so a partially-downloaded turnkey surfaces as a load error rather than a silent half-load.
+/// when it opts into Q8 (`> 4`), `q4/` for an explicit Q4 pick (`1..=4`), else — with NO explicit
+/// `mlxQuantize` — the **`q8/`** default (epic 10721 / sc-10726: the app-wide gen-time default tier,
+/// matching [`resolve_quant`]'s Q8 default and [`anima_tier_subdir`], replacing the old blind q4).
+/// Falls back through the clean tiers first (q8 → bf16 → q4 → `root`) so a partial install never
+/// silently lands on the low-fidelity q4 (and a fully-absent turnkey surfaces as a load error). The
+/// Q8 default is CLAMPED to what's installed: with only `q4/` on disk it resolves q4, so a heavy model
+/// never OOMs on a tier the user didn't download.
 ///
 /// Tier presence is filename-agnostic: a tier is "present" when its backbone component holds any
 /// `*.safetensors` (packed single-file OR a `*-00001-of-*.safetensors` shard) or a `*.index.json`
@@ -682,16 +687,20 @@ fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
             || component_has_weights(&dir);
         has_backbone.then_some(dir)
     };
-    // bits<=0 (advanced.mlxQuantize: 0 / "none") → bf16; bits>4 → q8; else the q4 default.
+    // No explicit selection → q8 (the app-wide default, epic 10721 / sc-10726); bits<=0
+    // (advanced.mlxQuantize: 0 / "none") → bf16; bits>4 → q8; else (an explicit 1..=4) the q4 the user
+    // asked for. Fallback prefers the clean tiers (q8 → bf16 → q4) so a partial install never silently
+    // lands on the washed q4, and the q8 default is clamped to what's on disk.
     let preferred = match bits {
+        None => "q8",
         Some(b) if b <= 0 => "bf16",
         Some(b) if b > 4 => "q8",
         _ => "q4",
     };
     present(preferred)
-        .or_else(|| present("q4"))
         .or_else(|| present("q8"))
         .or_else(|| present("bf16"))
+        .or_else(|| present("q4"))
         .unwrap_or_else(|| root.to_path_buf())
 }
 
@@ -801,10 +810,14 @@ fn ideogram_tier_subdir(bits: Option<i64>) -> Option<&'static str> {
 }
 
 /// Pick the engine-complete packed subdir of an Ideogram 4 turnkey `root`: `q8/` when the request
-/// opts into Q8 (`advanced.mlxQuantize: 8`) AND it is downloaded, else the default `q4/`. Falls back
-/// to `root` if neither subdir is present (a partially-downloaded bundle surfaces as a load error
-/// rather than a silent half-load). The non-default `q8/` tier is an on-demand download fetched by
-/// [`ensure_ideogram_tier_present`] before this resolves (sc-9607); `q4/` is the manifest default.
+/// opts into Q8 (`advanced.mlxQuantize: 8`) AND it is downloaded, `q4/` for an explicit Q4 pick
+/// (`1..=4`), else — with NO explicit `mlxQuantize` — the **`q8/`** default (epic 10721 / sc-10726),
+/// CLAMPED to what's installed (only `q4/` on disk ⇒ q4). Falls back to `root` if neither subdir is
+/// present (a partially-downloaded bundle surfaces as a load error rather than a silent half-load).
+/// The `q8/` tier is an on-demand download fetched by [`ensure_ideogram_tier_present`] on an explicit
+/// opt-in (sc-9607); this resolver never triggers that fetch for the plain default — it simply prefers
+/// q8 when it happens to be on disk. Ideogram's turnkey carries only `q4/`/`q8/` (bf16 is a separate
+/// catalog repo), so the clean-tiers fallback here is q8 ⇆ q4.
 fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let bits = request
         .advanced
@@ -821,9 +834,15 @@ fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
             return dir;
         }
     }
-    present("q4")
-        .or_else(|| present("q8"))
-        .unwrap_or_else(|| root.to_path_buf())
+    // An explicit Q4 pick (`1..=4`) stays q4-first; the default (no `mlxQuantize`) and any other
+    // non-q8-opt-in prefer the clean q8 tier when installed, clamping to q4 otherwise.
+    let prefer_q4 = matches!(bits, Some(b) if (1..=4).contains(&b));
+    if prefer_q4 {
+        present("q4").or_else(|| present("q8"))
+    } else {
+        present("q8").or_else(|| present("q4"))
+    }
+    .unwrap_or_else(|| root.to_path_buf())
 }
 
 /// The Boogu subfolder for a `mlxQuantize` request — `None` keeps the Q8 default. Shared by
@@ -1262,8 +1281,10 @@ fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
 
 /// The transformer-tier bit count a dense-TE turnkey (FLUX.2-klein, the [`DENSE_TE_TIER_MODELS`]
 /// class) actually asked for, derived from `advanced.mlxQuantize` the SAME way [`standard_tier_subdir`]
-/// picks its `bf16`/`q8`/`q4` tier (`<=0 → bf16`, `>4 → q8`, else the q4 default). Returns the recipe
-/// bit count of the REQUESTED tier: `None` (bf16) / `Some(8)` / `Some(4)`.
+/// picks its `bf16`/`q8`/`q4` tier (no explicit pick → `q8`; `<=0 → bf16`; `>4 → q8`; else `q4`).
+/// Returns the recipe bit count of the REQUESTED tier: `None` (bf16) / `Some(8)` / `Some(4)`. Kept in
+/// lockstep with the q8 default (sc-10726) so a straight default dense-TE job that resolves the q8 tier
+/// isn't mis-reported as a bf16/q4→q8 tier change by [`reconcile_resolved_tier_quant`].
 ///
 /// sc-9362 (F-018 follow-up): [`resolve_quant`] returns `(None, None)` for every dense-TE job (the
 /// load quant must stay `None` so the deliberately-dense bf16 text encoder is never re-quantized), so
@@ -1284,6 +1305,7 @@ fn dense_te_requested_tier_bits(request: &ImageRequest) -> Option<i64> {
         .get("mlxQuantize")
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
     match bits {
+        None => Some(8),
         Some(b) if b <= 0 => None,
         Some(b) if b > 4 => Some(8),
         _ => Some(4),
@@ -4727,7 +4749,7 @@ mod standard_tier_tests {
     }
 
     #[test]
-    fn defaults_to_q4_and_honors_quantize_selection() {
+    fn defaults_to_q8_and_honors_quantize_selection() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         // Packed q4/q8 single-file + dense sharded bf16 (only the index.json shape).
@@ -4735,9 +4757,14 @@ mod standard_tier_tests {
         seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
         seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
 
-        // No selection → q4 default.
+        // No selection → q8 default (epic 10721 / sc-10726), clamped to installed.
         assert_eq!(
             standard_tier_subdir(root, &request(json!({}))),
+            root.join("q8")
+        );
+        // An explicit Q4 pick is still honored (never overridden by the q8 default).
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({ "mlxQuantize": 4 }))),
             root.join("q4")
         );
         // mlxQuantize 8 → q8; 0/"none" → bf16; numeric-string accepted.
@@ -4766,6 +4793,12 @@ mod standard_tier_tests {
             standard_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
             root.join("q4")
         );
+        // sc-10726: the q8 default is CLAMPED to installed — with only q4 on disk a default job
+        // (no mlxQuantize) resolves q4, never a tier the user didn't download (no OOM risk).
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({}))),
+            root.join("q4")
+        );
         // Nothing present → the repo root (engine surfaces the missing-weights error).
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(
@@ -4788,10 +4821,10 @@ mod standard_tier_tests {
         seed_unet("q4");
         seed_unet("q8");
         seed_unet("bf16");
-        // Default q4, q8 selection, bf16 opt-out all resolve to the unet-backed tier subdir.
+        // Default q8, q8 selection, bf16 opt-out all resolve to the unet-backed tier subdir.
         assert_eq!(
             standard_tier_subdir(root, &request(json!({}))),
-            root.join("q4")
+            root.join("q8")
         );
         assert_eq!(
             standard_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
@@ -4821,7 +4854,7 @@ mod standard_tier_tests {
         seed_flat("bf16", "model.safetensors.index.json");
         assert_eq!(
             standard_tier_subdir(root, &request(json!({}))),
-            root.join("q4")
+            root.join("q8")
         );
         assert_eq!(
             standard_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
@@ -5033,7 +5066,9 @@ mod standard_tier_tests {
                 .expect("set SDXL_TIER_ROOT to the downloaded realvisxl-mlx tier root")
                 .trim(),
         );
-        // The worker resolution: a `realvisxl` request (q4 default, no mlxQuantize) must land on q4/.
+        // The worker resolution: a default `realvisxl` request (no mlxQuantize) prefers the q8 default
+        // (sc-10726) but CLAMPS to installed — only the q4 tier was downloaded here (`--include "q4/*"`),
+        // so it lands on q4/.
         let req = ImageRequest::from_payload(
             json!({ "model": "realvisxl", "advanced": {} })
                 .as_object()
@@ -5238,11 +5273,12 @@ mod standard_tier_tests {
         seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
         seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
 
-        // A/B tier toggle: default (q4) / mlxQuantize:8 (q8) / mlxQuantize:0 (bf16) each resolve to
-        // their tier subdir — the same q4-default recipe the `lens` manifest declares (`mlx.quantize:4`).
+        // A/B tier toggle: default (q8, sc-10726) / mlxQuantize:8 (q8) / mlxQuantize:0 (bf16) each
+        // resolve to their tier subdir — the default now prefers the clean q8 tier (clamped to
+        // installed), matching `resolve_quant`'s Q8 default.
         assert_eq!(
             standard_tier_subdir(root, &lens_request(json!(null))),
-            root.join("q4")
+            root.join("q8")
         );
         assert_eq!(
             standard_tier_subdir(root, &lens_request(json!(8))),
@@ -5272,23 +5308,28 @@ mod standard_tier_tests {
             )
         };
 
-        // Ideogram turnkey (`SceneWorks/ideogram-4-mlx`): q4 default (candle off-Mac tier) + on-demand
-        // q8. `ideogram_model_subdir` probes `<tier>/transformer/model.safetensors`.
+        // Ideogram turnkey (`SceneWorks/ideogram-4-mlx`): q4 + q8 tiers. `ideogram_model_subdir` probes
+        // `<tier>/transformer/model.safetensors`.
         {
             let tmp = tempfile::tempdir().unwrap();
             let root = tmp.path();
             seed_tier(root, "q4", "model.safetensors");
             seed_tier(root, "q8", "model.safetensors");
             for model in ["ideogram_4", "ideogram_4_turbo"] {
-                // Default → q4 (the shipped off-Mac tier).
+                // Default (no mlxQuantize) → q8 when installed (epic 10721 / sc-10726).
                 assert_eq!(
                     ideogram_model_subdir(root, &model_request(model, json!(null))),
-                    root.join("q4")
+                    root.join("q8")
                 );
                 // mlxQuantize:8 → q8 when present.
                 assert_eq!(
                     ideogram_model_subdir(root, &model_request(model, json!(8))),
                     root.join("q8")
+                );
+                // An explicit Q4 pick is still honored.
+                assert_eq!(
+                    ideogram_model_subdir(root, &model_request(model, json!(4))),
+                    root.join("q4")
                 );
             }
         }
@@ -5448,10 +5489,10 @@ mod quant_tier_reconcile_tests {
     }
 
     /// sc-9362 (F-018 follow-up): the dense-TE transformer tier the request asks for is derived from
-    /// `advanced.mlxQuantize` exactly like [`standard_tier_subdir`] — `<=0 → bf16 (None)`, `>4 → q8`,
-    /// else the q4 default — regardless of the always-`None` load quant `resolve_quant` returns for
-    /// dense-TE. This is what reconcile compares the resolved tier against so a straight job isn't a
-    /// spurious downgrade.
+    /// `advanced.mlxQuantize` exactly like [`standard_tier_subdir`] — no explicit pick → `q8` (sc-10726),
+    /// `<=0 → bf16 (None)`, `>4 → q8`, else `q4` — regardless of the always-`None` load quant
+    /// `resolve_quant` returns for dense-TE. This is what reconcile compares the resolved tier against so
+    /// a straight default job (resolving the q8 tier) isn't flagged as a spurious downgrade.
     #[test]
     fn dense_te_requested_tier_bits_mirrors_standard_tier_mapping() {
         let req = |mlx_quantize: serde_json::Value| {
@@ -5464,45 +5505,47 @@ mod quant_tier_reconcile_tests {
         let default = ImageRequest::from_payload(
             json!({ "model": "flux2_klein_9b" }).as_object().unwrap(),
         );
-        // No selection → the q4 default (matches standard_tier_subdir's preferred).
-        assert_eq!(dense_te_requested_tier_bits(&default), Some(4));
+        // No selection → the q8 default (matches standard_tier_subdir's preferred, sc-10726).
+        assert_eq!(dense_te_requested_tier_bits(&default), Some(8));
         assert_eq!(dense_te_requested_tier_bits(&req(json!(0))), None); // bf16 opt-out
-        assert_eq!(dense_te_requested_tier_bits(&req(json!(4))), Some(4));
+        assert_eq!(dense_te_requested_tier_bits(&req(json!(4))), Some(4)); // explicit q4 honored
         assert_eq!(dense_te_requested_tier_bits(&req(json!(8))), Some(8));
         assert_eq!(dense_te_requested_tier_bits(&req(json!("8"))), Some(8)); // numeric-string
         assert_eq!(dense_te_requested_tier_bits(&req(json!(-1))), None);
     }
 
-    /// sc-9362 (F-018 follow-up): a straight (no-fallback) dense-TE job — its q4 transformer tier is
-    /// downloaded and resolves as requested — records the ACTUAL transformer tier (Q4) while keeping
-    /// the load quant `None` (the dense bf16 TE is never re-quantized). Before the fix the request
-    /// derived `(None, None)` and — since dense-TE always requests bf16 in `resolve_quant` — the
-    /// resolved q4 tier read as a bf16→q4 downgrade; now the requested tier is the q4 the request
-    /// actually asked for, so the resolved tier MATCHES and reconcile pass-throughs it with no event.
+    /// sc-9362 (F-018 follow-up) + sc-10726: a straight (no-fallback) dense-TE default job — its q8
+    /// transformer tier is downloaded and resolves as the new q8 default — records the ACTUAL
+    /// transformer tier (Q8) while keeping the load quant `None` (the dense bf16 TE is never
+    /// re-quantized). The requested tier ([`dense_te_requested_tier_bits`], now q8 by default) MATCHES
+    /// the resolved q8 tier, so reconcile pass-throughs it with no spurious `quant_tier_downgraded`.
     #[test]
     fn dense_te_no_fallback_records_transformer_tier() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        // The klein q4 transformer tier is present (dense bf16 TE lives alongside in the same tier).
-        let dir = root.join("q4").join("transformer");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("diffusion_pytorch_model.safetensors"), b"x").unwrap();
+        // The klein q4 + q8 transformer tiers are present (dense bf16 TE lives alongside in each tier);
+        // a default job takes the q8 default.
+        for tier in ["q4", "q8"] {
+            let dir = root.join(tier).join("transformer");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("diffusion_pytorch_model.safetensors"), b"x").unwrap();
+        }
 
         let req = ImageRequest::from_payload(
             json!({ "model": "flux2_klein_9b", "advanced": {} })
                 .as_object()
                 .unwrap(),
         );
-        // The tier resolver lands on the requested q4 tier (no fallback).
+        // The tier resolver lands on the q8 default tier (no fallback).
         let resolved = standard_tier_subdir(root, &req);
-        assert_eq!(resolved, root.join("q4"));
+        assert_eq!(resolved, root.join("q8"));
         // resolve_quant keeps dense-TE at `(None, None)` (never re-quantize the dense bf16 TE)…
         assert_eq!(resolve_quant(&req), (None, None));
-        // …but reconcile against the REQUESTED transformer tier (q4) records the real transformer
-        // precision (Q4) with the load quant still `None`, and — since resolved == requested — with no
+        // …but reconcile against the REQUESTED transformer tier (q8) records the real transformer
+        // precision (Q8) with the load quant still `None`, and — since resolved == requested — with no
         // downgrade (the requested/resolved tiers match, so it's a clean pass-through).
         let requested_for_reconcile = (None, dense_te_requested_tier_bits(&req));
-        assert_eq!(requested_for_reconcile, (None, Some(4)));
+        assert_eq!(requested_for_reconcile, (None, Some(8)));
         let (quant, bits) = reconcile_resolved_tier_quant(
             requested_for_reconcile,
             &resolved,
@@ -5513,8 +5556,8 @@ mod quant_tier_reconcile_tests {
         );
         assert_eq!(
             (quant, bits),
-            (None, Some(4)),
-            "records the actual q4 transformer tier, load quant stays None"
+            (None, Some(8)),
+            "records the actual q8 transformer tier, load quant stays None"
         );
     }
 

@@ -143,15 +143,27 @@ describe("defaultTierSelection", () => {
     expect(defaultTierSelection(model, null)).toBe("q8");
   });
 
-  it("falls back to q4 when installed and no default/last-used applies", () => {
+  it("honors an installed declared default tier over the q8 base default", () => {
     const model = matrixModel({ installed: ["q4", "bf16"], defaultTier: "q4" });
-    // Declared default q4 is installed → picked.
+    // Declared default q4 is installed → picked (the manifest's per-model default still wins).
     expect(defaultTierSelection(model, undefined)).toBe("q4");
   });
 
-  it("falls back to the first installed tier when neither default nor q4 is present", () => {
-    const model = matrixModel({ tiers: ["q8", "bf16"], installed: ["q8", "bf16"], defaultTier: "none" });
+  it("prefers q8 by default when installed and no declared default/last-used applies (sc-10726)", () => {
+    // No declared default, no last-used → the app-wide q8 base default is seeded when q8 is installed.
+    const model = matrixModel({ installed: ["q4", "q8", "bf16"], defaultTier: "none" });
     expect(defaultTierSelection(model, undefined)).toBe("q8");
+  });
+
+  it("clamps the q8 base default to q4 when only q4 is installed (sc-10726)", () => {
+    // Q8 base default falls back to q4 when q8 isn't on disk — never seeds a tier that isn't installed.
+    const model = matrixModel({ tiers: ["q4", "q8", "bf16"], installed: ["q4"], defaultTier: "none" });
+    expect(defaultTierSelection(model, undefined)).toBe("q4");
+  });
+
+  it("falls back to the first installed tier when neither a declared default, q8, nor q4 is present", () => {
+    const model = matrixModel({ tiers: ["bf16"], installed: ["bf16"], defaultTier: "none" });
+    expect(defaultTierSelection(model, undefined)).toBe("bf16");
   });
 
   it("returns null when nothing is installed", () => {
@@ -191,13 +203,16 @@ describe("quantTier — convert-at-install mlxTiers (sc-10730)", () => {
     expect(defaultTierSelection(convertModel(), "q4")).toBe("q4");
   });
 
-  it("does not touch download-matrix behavior (still preselects q4)", () => {
+  it("mlxTiers logic does not disturb download-matrix models (which now also default q8, sc-10726)", () => {
+    // A bare non-matrix model with no mlxTiers still surfaces no tiers.
     expect(installedTiers({ id: "x", hasVariantMatrix: false })).toEqual([]);
+    // Download-matrix models honor the same app-wide q8 base default (epic 10721 / sc-10726),
+    // consistent with the worker resolvers — not the old q4-hard-default.
     expect(
       defaultTierSelection(
         matrixModel({ installed: ["q4", "q8", "bf16"], defaultTier: "none" }),
         null,
       ),
-    ).toBe("q4");
+    ).toBe("q8");
   });
 });
