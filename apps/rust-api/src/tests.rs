@@ -12924,3 +12924,42 @@ fn external_lora_family_is_detected_and_gates_model_compatibility() {
         error.detail
     );
 }
+
+/// sc-10452: an adapter whose family the detector cannot identify (in the real tree:
+/// an LLM LoRA, and the ComfyUI Qwen-Image adapters of sc-10506) is still LISTED —
+/// the user pointed us at the folder and deserves to see we found the file — but the
+/// API **fails closed** when one is attached to a generation. We will not guess a
+/// family and load arbitrary tensors into a model.
+#[test]
+fn external_lora_without_a_detected_family_is_refused_at_job_create() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let comfy_root = temp_dir.path().join("models");
+    let adapter = comfy_root.join("loras").join("mystery.safetensors");
+    std::fs::create_dir_all(adapter.parent().expect("parent")).expect("mkdir");
+    write_test_safetensors_with_keys(&adapter, &["some.unknown.tensor".to_owned()]);
+
+    let mut cache = crate::external_loras::ExternalLoraCache::default();
+    let catalog =
+        crate::external_loras::scan_external_loras(std::slice::from_ref(&comfy_root), &mut cache);
+
+    // Listed, installed, but carrying no family.
+    let lora = catalog.first().expect("the adapter is still surfaced");
+    assert_eq!(lora["installState"], "installed");
+    assert!(lora.get("family").is_none(), "no family could be detected");
+
+    let attached = vec![json!({ "id": lora["id"].as_str().expect("id"), "weight": 0.8 })];
+    let models = vec![json!({
+        "id": "wan_2_2",
+        "loraCompatibility": { "families": ["wan-video"], "types": ["style"] }
+    })];
+
+    let error = super::validate_lora_specs_for_model(
+        &models, &catalog, "wan_2_2", &attached, false, "LoRA",
+    )
+    .expect_err("an unidentifiable adapter must not be loaded into a model");
+    assert!(
+        error.detail.contains("no declared family"),
+        "the refusal explains why: {}",
+        error.detail
+    );
+}
