@@ -69,6 +69,33 @@ node scripts/check-no-nc-weights.mjs --self-test     # prove the gate fires
 - **`--dir <path>` (repeatable):** a real built artifact — an extracted Docker image
   rootfs, a built `.app` / bundle tree, or a RunPod build context. The release
   workflow points this at `target/release/bundle` after building the desktop bundle.
+- **Tauri bundle-resource config (always):** on every run the guard also reads the
+  committed `apps/desktop/tauri*.conf.json` files and inspects the declared
+  `bundle.resources` / `bundle.externalBin` specs. It **fails** if any spec is an
+  archive/container (`.zip`, `.tar.gz`, `.dmg`, …), stages a weight file directly,
+  matches an NC family token, or is rooted at a weights directory (`weights/`,
+  `checkpoints/`, `loras/`). This is the cheap defense for the one vector the
+  file-tree scans cannot see into: a weight sealed inside an archive staged as a
+  resource. The current resources (`onnxruntime/**/*`, `ffmpeg/**/*`, `mlx/**/*`) are
+  clean.
+
+### The `.bin` question (not a blind spot)
+
+A bare `.bin` extension is **not** in the weight-extension set — fonts, wasm, and
+misc blobs also use `.bin`, so treating every `.bin` as a weight would false-trip.
+But an NC `.bin` is still caught **by default, with no flags**, three ways:
+
+1. The **strong NC repo-path match** (`org/name`, `models--org--name`) runs on every
+   file regardless of extension, so any blob inside a redistributed NC repo/cache
+   directory fails (this is the `pytorch_model.bin` under `models--…--Anima/` case).
+2. A `.bin` whose path matches a **bare NC family token** (e.g. `anima-base.bin`) is
+   promoted to a weight.
+3. The **canonical Hugging Face `.bin` weight names** — `pytorch_model.bin`,
+   `diffusion_pytorch_model.bin`, `open_clip_pytorch_model.bin` and their sharded
+   forms (the second dominant HF weight format after safetensors) — count as weights
+   by name even with no NC token.
+
+`--include-bin` additionally promotes **every** `.bin` to a weight (belt-and-suspenders).
 
 ### What it deliberately does NOT scan, and why
 
@@ -127,6 +154,21 @@ The `.dmg` / `.msi` / `-setup.exe` installers are opaque compressed archives; th
 installer. The exhaustive resource-source scan in `check.yml` covers the resource
 trees that feed those installers, so a weight cannot reach an installer without first
 tripping the source scan.
+
+**Archive-*content* scanning is not implemented (tracked follow-up).** The guard
+inspects file *names* on disk and Tauri resource *config*, but it does not open
+archives (`.zip` / `.tar.gz` / `.dmg` / …) to scan the files *inside* them. The
+config-level resource check above already fails the build if an archive or a weights
+directory is *declared* as a bundle resource — which is the realistic vector and is
+cheap to enforce — so a weight cannot be staged into the bundle inside an archive
+without the config check catching the declaration. A full recursive decompress-and-
+scan of every archive in a built artifact is comparatively expensive (needs a
+decompressor per format, temp extraction, and archive-bomb guards) and buys little
+over the declaration check, so it is deliberately deferred to a tracked Shortcut
+story rather than implemented here. `include_bytes!`-compiled weights (a weight
+embedded in a Rust binary at compile time) are likewise not detectable by a file
+scan; the source-tree scan catches the weight *file* that such a macro would embed,
+before it is compiled in.
 
 The **RunPod image (epic 10362) does not exist yet** — there is no RunPod-specific
 Dockerfile in the repo. The existing `docker/rust.Dockerfile` (the base the RunPod

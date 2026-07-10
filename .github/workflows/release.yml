@@ -88,12 +88,15 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm --prefix apps/desktop run build -- --config updater.release.conf.json
 
-      # License guard (sc-10526): scan the freshly-built .app tree for model weights
-      # before we sign/staple/publish it. This is the real-artifact form of the
-      # check.yml source-tree scan — the DMG is opaque, but the .app under
-      # bundle/macos/ carries the exact Contents/Resources payload the DMG wraps, so
-      # a weight baked into the bundle fails the release here. NC weights (Anima /
-      # CircleStone, FLUX NC, Ideogram, Krea, SANA, …) must never ship in an installer.
+      # License guard (sc-10526): scan the freshly-built bundle tree for model
+      # weights. The previous step already signed, notarized & stapled the .app, so
+      # this runs AFTER signing but BEFORE the DMG is stapled, the release is drafted,
+      # and anything is uploaded — a weight in the bundle still fails the job before
+      # any artifact is published. This is the real-artifact form of the check.yml
+      # source-tree scan — the DMG is opaque, but the .app under bundle/macos/ carries
+      # the exact Contents/Resources payload the DMG wraps, so a weight baked into the
+      # bundle is caught here. NC weights (Anima / CircleStone, FLUX NC, Ideogram,
+      # Krea, SANA, …) must never ship in an installer.
       - name: Guard against NC model weights in the desktop bundle (sc-10526)
         run: node scripts/check-no-nc-weights.mjs --dir target/release/bundle
 
