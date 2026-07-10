@@ -11965,6 +11965,87 @@ fn tiered_turnkey_base_trains_on_bf16_tier() {
 }
 
 #[test]
+fn sdxl_family_tiered_turnkey_trains_on_its_bf16_unet_tier() {
+    // sc-10613: the SDXL family packs its backbone under `unet/`, never `transformer/`. The readiness
+    // gate tested `transformer/` only, so a fully-installed SDXL tiered turnkey (Illustrious) read as
+    // un-installed forever and Training Studio blocked submit — while the resolver happily pointed at
+    // the bf16 tier. Krea/LTX never caught this: they are DiTs and really do have `transformer/`.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+
+    let mut target = super::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|t| t.base_model == "sdxl")
+        .expect("sdxl target");
+    // Repoint at the tiered-turnkey shape every SceneWorks SDXL re-host uses.
+    target.base_model_repo = Some("SceneWorks/illustrious-xl-v1-mlx".to_owned());
+    let repo = target.base_model_repo.clone().expect("repo set");
+
+    let repo_root = huggingface_repo_cache_path(&data_dir, &repo).expect("repo cache path");
+    let revision = "abc123";
+    let snapshot = repo_root.join("snapshots").join(revision);
+    // Only the q4 GENERATION tier installed so far (no dense weights).
+    std::fs::create_dir_all(snapshot.join("q4").join("unet")).expect("q4 tree");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("create refs");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("write refs/main");
+
+    assert_eq!(
+        resolve_base_model_path(&target, &data_dir),
+        snapshot.join("bf16").display().to_string(),
+        "an SDXL tiered turnkey must resolve training to its dense bf16 tier"
+    );
+    assert!(
+        !training_base_model_installed(&data_dir, &target),
+        "a q4-only SDXL turnkey carries no dense weights → not training-ready"
+    );
+
+    std::fs::create_dir_all(snapshot.join("bf16").join("unet")).expect("bf16 unet");
+    std::fs::create_dir_all(snapshot.join("bf16").join("text_encoder")).expect("bf16 te");
+    std::fs::create_dir_all(snapshot.join("bf16").join("vae")).expect("bf16 vae");
+    assert!(
+        training_base_model_installed(&data_dir, &target),
+        "a bf16 tier with a unet/ backbone is training-ready"
+    );
+}
+
+#[test]
+fn flat_sdxl_snapshot_is_not_treated_as_a_tiered_turnkey() {
+    // Backward-compat guard for sc-10613: `unet/` at the snapshot root marks a FLAT diffusers tree
+    // (stabilityai/stable-diffusion-xl-base-1.0, Kwai-Kolors/Kolors-diffusers). It must resolve
+    // unchanged, never descend into a `bf16/` subdir — even if a stray tier dir sits alongside it.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+
+    let target = super::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|t| t.base_model == "sdxl")
+        .expect("sdxl target");
+    assert_eq!(
+        target.base_model_repo.as_deref(),
+        Some("stabilityai/stable-diffusion-xl-base-1.0"),
+        "the stock SDXL target still trains off the flat upstream diffusers repo"
+    );
+    let repo = target.base_model_repo.clone().expect("repo set");
+
+    let repo_root = huggingface_repo_cache_path(&data_dir, &repo).expect("repo cache path");
+    let revision = "def456";
+    let snapshot = repo_root.join("snapshots").join(revision);
+    for component in ["unet", "text_encoder", "vae", "bf16"] {
+        std::fs::create_dir_all(snapshot.join(component)).expect("component dir");
+    }
+    std::fs::create_dir_all(repo_root.join("refs")).expect("create refs");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("write refs/main");
+
+    assert_eq!(
+        resolve_base_model_path(&target, &data_dir),
+        snapshot.display().to_string(),
+        "a flat SDXL snapshot resolves to the snapshot root, not a bf16 tier"
+    );
+}
+
+#[test]
 fn resolve_base_model_path_prefers_converted_mlx_dir_for_conversion_models() {
     // `requiresConversion` models (Wan) keep usable weights in <data>/models/mlx/<id>, while the
     // HF cache holds only the native *source* checkpoint the converter consumes. Resolving Wan
