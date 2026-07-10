@@ -564,12 +564,18 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // FLUX.2-dev (epic 5914 MLX / epic 6564 sc-7458 candle) — the guidance-distilled 32B flagship.
     // A SEPARATE candle engine from klein (Mistral3 TE + 48/48/15360 DiT); Q4-quantized at load off-Mac.
     ModelCaps::new("flux2_dev", true, true, false, false, false),
-    ModelCaps::new("sdxl", true, true, false, false, false),
-    ModelCaps::new("realvisxl", true, true, false, false, false),
+    // SDXL family (sc-10767, epic 9083 full-catalog parity): the candle lane serves the packed q4/q8
+    // MLX tiers end-to-end — packed UNet (sc-9416), packed dual-CLIP (sc-9527), and LoRA/LoKr fold on a
+    // packed tier (sc-9528) — and `candle-gen-sdxl` now advertises `supported_quants: [Q4, Q8]`. So
+    // BOTH a quant tier-select AND an inference LoRA stay on candle → `candle_quant_lora`. Previously
+    // `false, false, false` bounced quant requests (the sc-10726 q8 default) AND LoRA requests off the
+    // candle lane into the retired torch fallback. bf16 still resolves to Quant::None (dense), verbatim.
+    ModelCaps::new("sdxl", true, true, false, false, true),
+    ModelCaps::new("realvisxl", true, true, false, false, true),
     // Illustrious-XL v1.0 / v2.0 (epic 10609): vanilla-SDXL anime finetunes on the shared `sdxl`
-    // engine. Same routing surface as `realvisxl` — MLX + candle txt2img, dense (no candle quant).
-    ModelCaps::new("illustrious_xl_v1", true, true, false, false, false),
-    ModelCaps::new("illustrious_xl_v2", true, true, false, false, false),
+    // engine. Same routing surface as `realvisxl` — MLX + candle txt2img + packed q4/q8 (sc-10767).
+    ModelCaps::new("illustrious_xl_v1", true, true, false, false, true),
+    ModelCaps::new("illustrious_xl_v2", true, true, false, false, true),
     // RealVisXL Lightning (MLX sc-6075 / candle sc-7176): standalone few-step distilled SDXL checkpoint
     // on the shared `sdxl` engine, few-step `lightning` accel sampler. **txt2img only** on both backends —
     // edit / reference / mask / pose shapes fall back to torch (accel sampler is conditioning-incompatible).
@@ -1001,9 +1007,19 @@ mod tests {
 
     // sc-9983: Krea joins Lens as a BOTH-quant-and-LoRA candle family (sc-9607 flipped its
     // `supported_quants` to [Q4, Q8]; it already advertised inference LoRA via sc-7836). sc-9994 adds the
-    // Raw variant (candle-gen #350) with the same both-set advertisement.
-    const EXPECTED_CANDLE_QUANT_LORA_MODELS: &[&str] =
-        &["lens", "lens_turbo", "krea_2_turbo", "krea_2_raw"];
+    // Raw variant (candle-gen #350) with the same both-set advertisement. sc-10767: the SDXL family
+    // (sdxl/realvisxl/illustrious v1+v2) joins the both-set — the candle packed q4/q8 tier (sc-9416/9527)
+    // + adapter-on-packed fold (sc-9528) are wired and now advertised.
+    const EXPECTED_CANDLE_QUANT_LORA_MODELS: &[&str] = &[
+        "sdxl",
+        "realvisxl",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
+        "lens",
+        "lens_turbo",
+        "krea_2_turbo",
+        "krea_2_raw",
+    ];
 
     // sc-9983: ideogram/boogu join SD3.5 as quant-only candle families (sc-9607 flipped their
     // `supported_quants` to [Q4, Q8]; no inference LoRA on candle).
