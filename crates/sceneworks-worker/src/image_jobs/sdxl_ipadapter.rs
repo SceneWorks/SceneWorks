@@ -73,7 +73,9 @@ fn resolve_sdxl_ipadapter_base(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| sdxl_ipadapter_default_repo(&request.model));
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
+    // A tiered turnkey re-host has no component tree at its root — descend to the dense `bf16/`
+    // tier. Flat upstream diffusers snapshots pass through untouched (sc-10614).
+    Ok(huggingface_snapshot_dir(&settings.data_dir, repo).map(dense_tier_subdir))
 }
 
 /// True when this is a candle-eligible SDXL IP-Adapter job: an sdxl-family model with a reference image
