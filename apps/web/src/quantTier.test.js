@@ -143,15 +143,29 @@ describe("defaultTierSelection", () => {
     expect(defaultTierSelection(model, null)).toBe("q8");
   });
 
-  it("falls back to q4 when installed and no default/last-used applies", () => {
+  it("picks an installed declared default when there is no last-used tier", () => {
     const model = matrixModel({ installed: ["q4", "bf16"], defaultTier: "q4" });
-    // Declared default q4 is installed → picked.
+    // Declared default q4 is installed → picked (step 2, ahead of the base default).
     expect(defaultTierSelection(model, undefined)).toBe("q4");
   });
 
-  it("falls back to the first installed tier when neither default nor q4 is present", () => {
-    const model = matrixModel({ tiers: ["q8", "bf16"], installed: ["q8", "bf16"], defaultTier: "none" });
+  it("uses q8 as the base default when no last-used or declared default applies (epic 10721)", () => {
+    // No last-used, no installed declared default → the base generation default is q8, not the
+    // washed q4 (was q4 before epic 10721). Clamped to installed.
+    const model = matrixModel({ installed: ["q4", "q8", "bf16"], defaultTier: "none" });
     expect(defaultTierSelection(model, undefined)).toBe("q8");
+  });
+
+  it("clamps the q8 base default to the smallest installed tier when q8 is absent", () => {
+    // Only q4 (+bf16) on disk, no last-used / declared default → falls to the smallest installed
+    // tier (q4), never forcing a heavier tier the machine didn't install.
+    const model = matrixModel({ installed: ["q4", "bf16"], defaultTier: "none" });
+    expect(defaultTierSelection(model, undefined)).toBe("q4");
+  });
+
+  it("falls back to the first installed tier when neither default nor q8 is present", () => {
+    const model = matrixModel({ tiers: ["q4", "bf16"], installed: ["q4", "bf16"], defaultTier: "none" });
+    expect(defaultTierSelection(model, undefined)).toBe("q4");
   });
 
   it("returns null when nothing is installed", () => {

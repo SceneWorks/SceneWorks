@@ -132,8 +132,11 @@ function defaultInstalledTier(model, tiers) {
 // The tier the picker should start on for `model`. Preference order:
 //   1. `lastUsed` — the per-model last-used tier, when it is still installed (persistence).
 //   2. the model's declared default tier (`variant.default: true`), when installed.
-//   3. q4 if installed (the catalog's smallest/default convention).
-//   4. the first installed tier.
+//   3. q8 if installed — the base generation default (epic 10721: stop seeding the washed q4; Q8 is
+//      near-lossless). S4 (sc-10728) replaces this literal q8 with the global "Default generation
+//      quality" setting (whose own default is q8) and lifts it above the declared default (step 2).
+//   4. the first installed tier (smallest, per TIER_ORDER) — so with only q4 on disk it stays q4:
+//      the Q8 default is CLAMPED to what's installed, never forcing a heavier tier the machine lacks.
 // Returns null when nothing is installed (no picker will render anyway). `options` (sc-9300) forwards
 // the `convRotEligible` gate so a hidden INT8-ConvRot tier is never seeded as the selection.
 export function defaultTierSelection(model, lastUsed, options = {}) {
@@ -148,8 +151,8 @@ export function defaultTierSelection(model, lastUsed, options = {}) {
   if (declared) {
     return declared;
   }
-  if (tiers.includes("q4")) {
-    return "q4";
+  if (tiers.includes("q8")) {
+    return "q8";
   }
   return tiers[0];
 }

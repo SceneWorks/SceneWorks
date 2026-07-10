@@ -635,8 +635,10 @@ fn is_dense_te_tier(request: &ImageRequest) -> bool {
 
 /// Pick the engine-complete tier subdir of a standard SceneWorks quant-matrix turnkey `root`:
 /// `bf16/` when the request opts out of quantization (`advanced.mlxQuantize <= 0` / "none"), `q8/`
-/// when it opts into Q8 (`> 4`), else the default `q4/`. Falls back through q4 → q8 → bf16 → `root`
-/// so a partially-downloaded turnkey surfaces as a load error rather than a silent half-load.
+/// when it opts into Q8 (`> 4`), `q4/` on an explicit low pick (`1..=4`), else — no explicit
+/// `mlxQuantize` — the default `q8/` (epic 10721: stop hard-defaulting to the washed q4). Falls back
+/// clean-tiers-first (q8 → bf16 → q4 → `root`) so a partially-downloaded turnkey surfaces as a load
+/// error rather than a silent half-load, and Q8-default clamps to whatever tier is installed.
 ///
 /// Tier presence is filename-agnostic: a tier is "present" when its backbone component holds any
 /// `*.safetensors` (packed single-file OR a `*-00001-of-*.safetensors` shard) or a `*.index.json`
@@ -682,16 +684,21 @@ fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
             || component_has_weights(&dir);
         has_backbone.then_some(dir)
     };
-    // bits<=0 (advanced.mlxQuantize: 0 / "none") → bf16; bits>4 → q8; else the q4 default.
+    // Default (no explicit `mlxQuantize`) → Q8 (epic 10721: stop hard-defaulting to the washed q4;
+    // Q8 is near-lossless ≈ bf16). `<= 0` / "none" → bf16 (opt out of quant); `> 4` → q8; an explicit
+    // low pick (1..=4) → q4 is still honored. Fallback prefers the clean tiers (q8 → bf16 → q4) so a
+    // partial install never silently lands on q4 — and Q8-default is CLAMPED to what's installed, so a
+    // heavy model with only q4 on disk still resolves q4 (no blanket OOM risk).
     let preferred = match bits {
+        None => "q8",
         Some(b) if b <= 0 => "bf16",
         Some(b) if b > 4 => "q8",
         _ => "q4",
     };
     present(preferred)
-        .or_else(|| present("q4"))
         .or_else(|| present("q8"))
         .or_else(|| present("bf16"))
+        .or_else(|| present("q4"))
         .unwrap_or_else(|| root.to_path_buf())
 }
 
@@ -800,11 +807,14 @@ fn ideogram_tier_subdir(bits: Option<i64>) -> Option<&'static str> {
     }
 }
 
-/// Pick the engine-complete packed subdir of an Ideogram 4 turnkey `root`: `q8/` when the request
-/// opts into Q8 (`advanced.mlxQuantize: 8`) AND it is downloaded, else the default `q4/`. Falls back
-/// to `root` if neither subdir is present (a partially-downloaded bundle surfaces as a load error
-/// rather than a silent half-load). The non-default `q8/` tier is an on-demand download fetched by
-/// [`ensure_ideogram_tier_present`] before this resolves (sc-9607); `q4/` is the manifest default.
+/// Pick the engine-complete packed subdir of an Ideogram 4 turnkey `root`. Default (no explicit
+/// `mlxQuantize`) prefers an installed `q8/` (epic 10721: stop hard-defaulting to q4), else `q4/`; an
+/// explicit low pick (`1..=4`) is still honored → `q4/`; an explicit Q8 (`> 4`) → `q8/`. CLAMPED to
+/// what's installed — Q8-default only wins when `q8/` is on disk (it is an on-demand download fetched
+/// by [`ensure_ideogram_tier_present`] only on an EXPLICIT Q8 pick, sc-9607; the default path never
+/// triggers a fetch), otherwise it falls back to the shipped `q4/`, then `root` (a partial bundle
+/// surfaces as a load error, not a silent half-load). bf16 is a separate catalog repo, not a subdir
+/// here, so an `<= 0` request resolves the cleanest installed tier rather than a missing `bf16/`.
 fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let bits = request
         .advanced
@@ -816,13 +826,15 @@ fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
             .is_file()
             .then_some(dir)
     };
-    if let Some(tier) = ideogram_tier_subdir(bits) {
-        if let Some(dir) = present(tier) {
-            return dir;
-        }
-    }
-    present("q4")
+    // Only an explicit low pick (1..=4) prefers q4; the default and every other pick prefer q8 when
+    // installed (clamped: falls back to q4 if q8 isn't on disk).
+    let preferred = match bits {
+        Some(b) if (1..=4).contains(&b) => "q4",
+        _ => "q8",
+    };
+    present(preferred)
         .or_else(|| present("q8"))
+        .or_else(|| present("q4"))
         .unwrap_or_else(|| root.to_path_buf())
 }
 
@@ -4727,7 +4739,7 @@ mod standard_tier_tests {
     }
 
     #[test]
-    fn defaults_to_q4_and_honors_quantize_selection() {
+    fn defaults_to_q8_and_honors_quantize_selection() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         // Packed q4/q8 single-file + dense sharded bf16 (only the index.json shape).
@@ -4735,12 +4747,13 @@ mod standard_tier_tests {
         seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
         seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
 
-        // No selection → q4 default.
+        // No selection → q8 default (epic 10721; was the washed q4).
         assert_eq!(
             standard_tier_subdir(root, &request(json!({}))),
-            root.join("q4")
+            root.join("q8")
         );
-        // mlxQuantize 8 → q8; 0/"none" → bf16; numeric-string accepted.
+        // mlxQuantize 8 → q8; 0/"none" → bf16; an explicit low pick 1..=4 → q4 is still honored;
+        // numeric-string accepted.
         assert_eq!(
             standard_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
             root.join("q8")
@@ -4748,6 +4761,10 @@ mod standard_tier_tests {
         assert_eq!(
             standard_tier_subdir(root, &request(json!({ "mlxQuantize": 0 }))),
             root.join("bf16")
+        );
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({ "mlxQuantize": 4 }))),
+            root.join("q4")
         );
         assert_eq!(
             standard_tier_subdir(root, &request(json!({ "mlxQuantize": "8" }))),
@@ -4759,12 +4776,27 @@ mod standard_tier_tests {
     fn falls_back_when_preferred_tier_absent() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        // Only q4 downloaded: a q8/bf16 request still resolves to the present q4 rather than a
-        // half-empty subdir, so a partial turnkey surfaces as a load error, not a silent half-load.
+        // Only q4 downloaded: the Q8 default (and a q8/bf16 request) CLAMPS to the present q4 rather
+        // than a half-empty subdir — a partial/heavy turnkey surfaces as a load error or a smaller
+        // installed tier, never a silent half-load. This is the "q4 when only q4 installed" case.
         seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({}))),
+            root.join("q4")
+        );
         assert_eq!(
             standard_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
             root.join("q4")
+        );
+        // Clean-tiers-first fallback: with q4 + bf16 installed but no q8, the Q8 default lands on the
+        // clean bf16 before the washed q4.
+        let mixed = tempfile::tempdir().unwrap();
+        let mroot = mixed.path();
+        seed_tier(mroot, "q4", "diffusion_pytorch_model.safetensors");
+        seed_tier(mroot, "bf16", "diffusion_pytorch_model.safetensors.index.json");
+        assert_eq!(
+            standard_tier_subdir(mroot, &request(json!({}))),
+            mroot.join("bf16")
         );
         // Nothing present → the repo root (engine surfaces the missing-weights error).
         let empty = tempfile::tempdir().unwrap();
@@ -4788,10 +4820,10 @@ mod standard_tier_tests {
         seed_unet("q4");
         seed_unet("q8");
         seed_unet("bf16");
-        // Default q4, q8 selection, bf16 opt-out all resolve to the unet-backed tier subdir.
+        // Default q8, q8 selection, bf16 opt-out all resolve to the unet-backed tier subdir.
         assert_eq!(
             standard_tier_subdir(root, &request(json!({}))),
-            root.join("q4")
+            root.join("q8")
         );
         assert_eq!(
             standard_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
@@ -4821,7 +4853,7 @@ mod standard_tier_tests {
         seed_flat("bf16", "model.safetensors.index.json");
         assert_eq!(
             standard_tier_subdir(root, &request(json!({}))),
-            root.join("q4")
+            root.join("q8")
         );
         assert_eq!(
             standard_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
@@ -5238,11 +5270,13 @@ mod standard_tier_tests {
         seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
         seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
 
-        // A/B tier toggle: default (q4) / mlxQuantize:8 (q8) / mlxQuantize:0 (bf16) each resolve to
-        // their tier subdir — the same q4-default recipe the `lens` manifest declares (`mlx.quantize:4`).
+        // A/B tier toggle: default → q8 (epic 10721; was q4) / mlxQuantize:8 (q8) / mlxQuantize:0 (bf16)
+        // each resolve to their tier subdir. `standard_tier_subdir` reads only `advanced.mlxQuantize`,
+        // not the `lens` manifest's `mlx.quantize:4`, so the app-wide Q8 default applies here too (a real
+        // q4-only lens install still clamps to q4).
         assert_eq!(
             standard_tier_subdir(root, &lens_request(json!(null))),
-            root.join("q4")
+            root.join("q8")
         );
         assert_eq!(
             standard_tier_subdir(root, &lens_request(json!(8))),
@@ -5272,25 +5306,37 @@ mod standard_tier_tests {
             )
         };
 
-        // Ideogram turnkey (`SceneWorks/ideogram-4-mlx`): q4 default (candle off-Mac tier) + on-demand
-        // q8. `ideogram_model_subdir` probes `<tier>/transformer/model.safetensors`.
+        // Ideogram turnkey (`SceneWorks/ideogram-4-mlx`): q4 is the shipped off-Mac download tier, q8 an
+        // on-demand fetch. `ideogram_model_subdir` probes `<tier>/transformer/model.safetensors`.
         {
             let tmp = tempfile::tempdir().unwrap();
             let root = tmp.path();
             seed_tier(root, "q4", "model.safetensors");
             seed_tier(root, "q8", "model.safetensors");
             for model in ["ideogram_4", "ideogram_4_turbo"] {
-                // Default → q4 (the shipped off-Mac tier).
+                // Default → q8 when it's installed (epic 10721); an explicit low pick (1..=4) still
+                // resolves q4; an explicit q8 → q8.
                 assert_eq!(
                     ideogram_model_subdir(root, &model_request(model, json!(null))),
+                    root.join("q8")
+                );
+                assert_eq!(
+                    ideogram_model_subdir(root, &model_request(model, json!(4))),
                     root.join("q4")
                 );
-                // mlxQuantize:8 → q8 when present.
                 assert_eq!(
                     ideogram_model_subdir(root, &model_request(model, json!(8))),
                     root.join("q8")
                 );
             }
+            // Realistic install — the catalog pulls only `q4/` (q8 is on-demand, never auto-fetched by
+            // the default path): the Q8 default CLAMPS to the shipped q4, no silent OOM/half-load.
+            let q4_only = tempfile::tempdir().unwrap();
+            seed_tier(q4_only.path(), "q4", "model.safetensors");
+            assert_eq!(
+                ideogram_model_subdir(q4_only.path(), &model_request("ideogram_4", json!(null))),
+                q4_only.path().join("q4")
+            );
         }
 
         // Boogu turnkey (`SceneWorks/boogu-image-mlx`): Q8 `base/`/`turbo/`/`edit/` is the shipped
