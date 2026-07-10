@@ -3194,49 +3194,13 @@ label {
   align-content: start;
 }
 
-.training-summary-band {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(300px, 420px);
-  gap: 18px;
-  align-items: stretch;
-}
-
-.training-metrics {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.training-metrics > div,
-.training-empty-state,
-.training-panel,
-.training-step-block,
-.training-dataset-editor {
+.training-empty-state {
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   background: var(--surface-2);
 }
 
-.training-metrics > div {
-  display: grid;
-  align-content: center;
-  gap: 4px;
-  min-height: 84px;
-  padding: 12px;
-}
-
-.training-metrics strong {
-  overflow-wrap: anywhere;
-  color: var(--text);
-  font-size: 18px;
-  font-weight: 700;
-  line-height: 1.2;
-}
-
-.training-metrics span,
-.training-step-block span,
-.training-empty-state span,
-.training-tabs small {
+.training-empty-state span {
   color: var(--text-muted);
   font-size: 12px;
 }
@@ -3252,39 +3216,6 @@ label {
 .training-empty-state > div {
   display: grid;
   gap: 4px;
-}
-
-.training-tabs {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.training-tabs button {
-  display: grid;
-  min-height: 66px;
-  gap: 4px;
-  padding: 10px 12px;
-  text-align: left;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--surface-2);
-  color: var(--text);
-}
-
-.training-tabs button:hover {
-  border-color: var(--border-strong);
-  background: var(--surface-hover);
-}
-
-.training-tabs button.active {
-  border-color: color-mix(in oklch, var(--accent) 55%, var(--border));
-  background: var(--surface);
-  box-shadow: var(--shadow-sm);
-}
-
-.training-tabs span {
-  font-weight: 700;
 }
 
 /* Results zone: the live runs sit flush on the workspace canvas — only the
@@ -3321,31 +3252,6 @@ label {
   gap: 10px;
 }
 
-.training-panel {
-  display: grid;
-  gap: 14px;
-  padding: 16px;
-}
-
-.training-panel-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.training-head-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.training-panel-head h3 {
-  margin: 2px 0 0;
-  font-size: 18px;
-}
-
 .training-status-pill {
   display: inline-flex;
   align-items: center;
@@ -3358,9 +3264,6 @@ label {
   font-weight: 700;
 }
 
-.training-dataset-list,
-.training-workflow-grid,
-.training-config-preview,
 .training-config-form,
 .training-config-grid,
 .training-advanced-grid {
@@ -3368,36 +3271,170 @@ label {
   gap: 10px;
 }
 
-.training-dataset-workspace {
-  display: grid;
-  gap: 14px;
-  align-items: start;
-}
-
-.training-dataset-editor {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-  padding: 12px;
-}
-
-.training-step-block {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
-/* Dataset header fields aligned to the 4 health columns (sc-2025 polish):
-   row 1 = name | version | Add images, row 2 = prefix | Apply names | Caption all;
-   the health grid below (row 3) shares the same 4-column geometry. */
-/* Dataset editor controls (sc-10448) — replaces the crammed equal-weight
-   .training-dataset-fields grid: a primary row (the two inputs + the one filled
-   Save CTA) over a de-emphasized utility row (add / rename / caption + a live
-   count), inside a work-panel. */
-.dataset-primary-row {
+/* ---------- Data Sets hero (sc-10481) ----------
+   The Purpose zone of the Data Sets page: one work-panel whose rows — identity,
+   tools, health rail, Dataset Doctor — are separated by .work-panel-divider
+   hairlines. The dataset name is the panel's most prominent element; the selector
+   and Refresh sit above the Save CTA, with the save-state pill below it. */
+.dataset-identity-row {
   display: flex;
-  gap: 10px;
-  align-items: end;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--gap-4);
+  flex-wrap: wrap;
+}
+
+.dataset-identity {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.dataset-name-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.dataset-name-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 320px;
+  min-width: 0;
+  max-width: 560px;
+}
+
+/* Saved dataset: the name reads as a heading, not a form field, until focused.
+   Qualified with `input` so it outweighs the base `input:not([type])` control rule
+   (height / padding / 13px font), which is (0,1,1) — a bare class would lose. */
+input.dataset-name-input {
+  height: auto;
+  width: 100%;
+  min-width: 0;
+  padding: 2px 0;
+  border: none;
+  border-bottom: 1.5px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font: 600 22px/1.2 var(--font-ui);
+  letter-spacing: -0.01em;
+  transition: border-color var(--t-fast) var(--ease-out);
+}
+
+input.dataset-name-input:focus {
+  border-bottom-color: var(--accent);
+  outline: none;
+}
+
+/* Draft dataset: a boxed input, because there is nothing there to read yet. */
+input.dataset-name-input.boxed {
+  width: min(420px, 100%);
+  padding: 11px 15px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-2);
+  font-size: 18px;
+}
+
+input.dataset-name-input.boxed:focus {
+  border-color: var(--accent);
+}
+
+.dataset-rename-button {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color var(--t-fast), border-color var(--t-fast);
+}
+
+.dataset-rename-button:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.dataset-character-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.dataset-identity-copy {
+  margin: 8px 0 0;
+  max-width: 62ch;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.dataset-identity-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 9px;
+}
+
+.dataset-identity-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.dataset-save {
+  flex: 0 0 auto;
+  min-height: var(--control-h);
+  padding: 11px 22px;
+  border-radius: 11px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.dataset-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.dataset-status-pill.unsaved {
+  border-color: transparent;
+  background: var(--warn-soft);
+  color: color-mix(in oklch, var(--warn) 78%, var(--text));
+}
+
+.dataset-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+
+.dataset-tools-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
   flex-wrap: wrap;
 }
 
@@ -3410,174 +3447,115 @@ label {
   color: var(--text-muted);
 }
 
-.dataset-version {
-  align-self: center;
-  font-size: 12px;
-  font-weight: 600;
+.dataset-prefix-field {
+  flex: 0 0 180px;
+}
+
+.dataset-prefix-field > span {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
   color: var(--text-faint);
-  white-space: nowrap;
 }
 
-.dataset-save {
-  flex: 0 0 auto;
-  min-height: var(--control-h);
-}
-
-.dataset-utility-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
-
-.dataset-count {
-  font-size: 12.5px;
-  color: var(--text-muted);
+.dataset-prefix-field input {
   font-family: var(--font-mono);
+  font-size: 13px;
 }
 
-.dataset-utility-actions {
+.dataset-tools-actions {
   display: inline-flex;
   gap: 8px;
   margin-left: auto;
   flex-wrap: wrap;
 }
 
-.training-dataset-fields {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  align-items: end;
+/* A secondary button carrying primary weight — the recommended next action in a
+   row of equals (Add images; Re-Caption on a card). */
+.secondary-action.strong {
+  color: var(--text);
+  font-weight: 600;
 }
 
-.field-name,
-.field-prefix {
+/* The Preset editor's Name field — sole survivor of the old 4-column dataset header
+   grid, whose other cells died with it (sc-10497). Its `grid-column: 1 / span 2` went
+   with them: .preset-section-body is a single-column grid, so spanning two columns had
+   been opening an implicit second one that the other .field siblings auto-placed into.
+   The preset sections now stack, which the Presets redesign will settle properly. */
+.field-name {
   display: grid;
   gap: 7px;
-  grid-column: 1 / span 2;
   font-size: 12px;
   font-weight: 700;
   color: var(--text-muted);
 }
 
-.field-name {
-  grid-row: 1;
-}
-
-.field-prefix {
-  grid-row: 2;
-}
-
-.field-version {
-  grid-row: 1;
-  grid-column: 3;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 44px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-}
-
-.field-add {
-  grid-row: 1;
-  grid-column: 4;
-}
-
-.field-apply {
-  grid-row: 2;
-  grid-column: 3;
-}
-
-.field-caption {
-  grid-row: 2;
-  grid-column: 4;
-}
-
-/* Split the difference: inputs grow a touch (larger font), buttons shrink, both
-   land on a shared 44px control height. */
-.training-dataset-fields input {
-  height: 44px;
-  font-size: 15px;
-}
-
-.training-dataset-fields .primary-action {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  width: 100%;
-  height: 44px;
-  padding-top: 0;
-  padding-bottom: 0;
-}
-
+/* Health rail (sc-10481): three counts plus a wide tile carrying the readiness dot
+   and sentence, which used to sit in a separate row below the grid. */
 .training-health-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(230px, auto);
+  gap: 12px;
+  align-items: stretch;
 }
 
 .training-health-grid > div {
   display: grid;
-  gap: 3px;
-  min-height: 62px;
+  gap: 2px;
   align-content: center;
-  padding: 10px;
+  padding: 13px 16px;
   border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--surface);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
 }
 
 .training-health-grid strong {
-  font-size: 18px;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
-.training-health-grid span,
-.training-validity {
+.training-health-grid span {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
 .training-health-grid .needs-attention {
-  border-color: color-mix(in oklch, var(--danger) 42%, var(--border));
-  background: color-mix(in oklch, var(--danger) 8%, var(--surface));
+  border-color: color-mix(in oklch, var(--warn) 40%, var(--border));
 }
 
-/* Save lives in the health row (sc-2025) so a small edit needs no scroll. */
-/* Save sits in the health row's 4th column (sc-2025): no card chrome, button
-   bottom-aligned with the stat cards, same size as Add images / Caption all. */
-.training-health-action {
-  border: none !important;
-  background: none !important;
-  padding: 0 !important;
-  align-content: end !important;
+.training-health-grid .needs-attention strong {
+  color: color-mix(in oklch, var(--warn) 80%, var(--text));
 }
 
-.training-health-action button {
-  width: 100%;
-  height: 44px;
-  justify-content: center;
-}
-
-.training-validity {
+/* Vertical padding so the tile keeps its height when the rail stacks to one column
+   on narrow viewports; at rail width it stretches to match the stat tiles anyway. */
+.training-health-grid > div.training-health-status {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 11px;
+  padding: 13px 20px;
+}
+
+.training-health-grid .training-health-status-text {
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.35;
 }
 
 .training-valid-dot {
+  flex: none;
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  background: var(--danger);
+  background: var(--warn);
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--warn) 20%, transparent);
 }
 
 .training-valid-dot.valid {
   background: var(--success);
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--success) 20%, transparent);
 }
 
 .training-unavailable-list {
@@ -3623,19 +3601,6 @@ label {
   font-weight: 700;
 }
 
-.training-workflow-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.training-step-block {
-  padding: 14px;
-}
-
-.training-config-preview {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.training-config-preview label,
 .training-config-grid label,
 .training-advanced-grid label {
   display: grid;
@@ -9294,19 +9259,49 @@ details[open] > summary.lora-scope-group-heading::before,
 
 /* Unified image + caption cards (sc-2025): thumbnail + read-only name/source,
    editable caption underneath, actions at the bottom. Responsive auto-fill. */
-.training-caption-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 12px;
+/* ---------- Data Sets results zone (sc-10481) ---------- */
+.dataset-results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-3);
+  min-width: 0;
 }
 
+.dataset-results-head {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-3);
+  flex-wrap: wrap;
+}
+
+.dataset-results-head .section-heading {
+  margin-right: auto;
+}
+
+.dataset-results-head .section-heading h2 {
+  font-size: 16px;
+}
+
+.dataset-count {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.training-caption-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: var(--gap-3);
+}
+
+/* The card splits in half: image left, everything about it right (sc-10481). */
 .training-caption-card {
   display: grid;
-  gap: 8px;
-  align-content: start;
-  padding: 10px;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  align-items: stretch;
+  padding: 12px;
   border: 1px solid var(--border);
-  border-radius: var(--r-md);
+  border-radius: var(--r-lg);
   background: var(--surface);
 }
 
@@ -9314,28 +9309,30 @@ details[open] > summary.lora-scope-group-heading::before,
   opacity: 0.6;
 }
 
-.training-caption-card-head {
-  display: grid;
-  grid-template-columns: 72px minmax(0, 1fr);
-  gap: 10px;
-  align-items: center;
-}
-
 .training-caption-card-thumb {
   position: relative;
+  display: block;
+  min-height: 150px;
   padding: 0;
   border: none;
-  background: none;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-2);
   cursor: pointer;
 }
 
 .training-caption-card-thumb img,
 .training-caption-card-thumb video {
-  width: 72px;
-  height: 72px;
+  width: 100%;
+  height: 100%;
   object-fit: cover;
-  border-radius: var(--r-sm);
-  background: var(--bg-2);
+}
+
+.training-caption-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
 }
 
 .training-caption-card-meta {
@@ -9346,47 +9343,124 @@ details[open] > summary.lora-scope-group-heading::before,
 
 .training-caption-card-meta strong {
   overflow: hidden;
-  font-size: 13px;
+  font-size: 12.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* Caption provenance (sc-2025): Manual reads neutral, Auto is accented because the
+   model wrote it, Imported recedes. */
 .training-caption-source {
   justify-self: start;
-  padding: 1px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 600;
-  background: var(--surface-hover);
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: var(--surface-2);
   color: var(--text-muted);
 }
 
-.training-caption-source.source-imported {
-  background: color-mix(in oklch, var(--accent) 16%, transparent);
+.training-caption-source.source-auto {
+  background: var(--accent-soft);
   color: var(--accent-strong);
 }
 
-.training-caption-source.source-auto {
-  background: color-mix(in oklch, var(--warm) 22%, transparent);
+.training-caption-source.source-imported {
+  color: var(--text-faint);
 }
 
 .training-caption-card-text {
   width: 100%;
+  min-height: 56px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  font-size: 12px;
+  line-height: 1.5;
   resize: vertical;
+}
+
+/* An uncaptioned image is the one thing the page wants you to fix. */
+.training-caption-card-text.is-empty {
+  border-style: dashed;
+  border-color: color-mix(in oklch, var(--warn) 45%, var(--border));
+}
+
+.training-caption-card-text.is-empty::placeholder {
+  font-style: italic;
 }
 
 .training-caption-card-actions {
   display: flex;
   gap: 8px;
+  margin-top: auto;
 }
 
+/* The card's right half is only ~170px wide, so these two must not wrap. */
 .training-caption-card-actions button {
   flex: 1;
+  height: 32px;
+  min-height: 0;
+  padding: 0 8px;
+  justify-content: center;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* Quality findings sit in that same narrow column, so they read as compact chips
+   rather than the full-width rows they'd be at panel width. */
+.training-caption-card .dataset-doctor-flags li {
+  padding: 4px 7px;
+  font-size: 10.5px;
+}
+
+.training-caption-card .dataset-doctor-flags li.tone-warn {
+  background: var(--warn-soft);
 }
 
 /* Dataset Doctor — pre-training quality readout + per-thumbnail badges (sc-6534).
    Tone vocabulary: good = success, warn = amber (no global token), fatal = danger,
    pending = muted. Amber is defined inline so it reads on both light/dark surfaces. */
+/* Doctor band (sc-10481): the readout, near-duplicate clusters and the metric
+   distributions grouped under one labelled header inside the hero work-panel. */
+.dataset-doctor-band {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.dataset-doctor-band-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.dataset-doctor-band-head strong {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.dataset-doctor-band-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.dataset-doctor-band-count {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .dataset-doctor {
   --dd-tone: var(--text-muted);
   display: grid;
@@ -10181,14 +10255,8 @@ details[open] > summary.lora-scope-group-heading::before,
   .media-grid,
   .library-layout,
   .studio-layout,
-  .training-summary-band,
-  .training-tabs,
-  .training-metrics,
-  .training-dataset-workspace,
-  .training-dataset-fields,
   .training-health-grid,
-  .training-workflow-grid,
-  .training-config-preview,
+  .training-caption-card,
   .training-config-grid,
   .training-advanced-grid,
   .preset-layout,
