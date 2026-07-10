@@ -13,12 +13,24 @@ const imageModel = {
   downloadSizeLabel: "5.1 GB",
 };
 
+// A second image model whose manifest declares a narrow resolution menu — the source
+// the editor must derive the Aspect list from (sc-10589).
+const fluxModel = {
+  id: "flux_dev",
+  name: "FLUX [dev]",
+  type: "image",
+  family: "flux",
+  capabilities: ["text_to_image"],
+  limits: { resolutions: ["768x768", "1024x1024", "1280x720", "720x1280"] },
+};
+
 const videoModel = {
   id: "ltx_2_3",
   name: "LTX",
   type: "video",
   family: "ltx-video",
   capabilities: ["text_to_video", "image_to_video"],
+  limits: { resolutions: ["768x512", "1280x720"], durations: [4, 6, 8], fps: [24, 25] },
 };
 
 const presets = [
@@ -234,6 +246,70 @@ describe("PresetManagerScreen", () => {
       guidanceMethod: "cfg_pp",
       prompt: "a literal prompt",
     });
+  });
+
+  // sc-10589: the Aspect/Resolution/Duration/Frames menus come from the selected model's
+  // effective limits, so the editor can't offer a default the studio would clamp away.
+  it("derives the Aspect menu from the selected model's limits.resolutions", async () => {
+    await render(baseContext({ imageModels: [imageModel, fluxModel] }));
+    await clickButton("New preset");
+
+    // z_image_turbo declares no limits → the static fallback list.
+    const aspectValues = () => [...field(container, "Aspect").options].map((option) => option.value);
+    expect(aspectValues()).toEqual(["", "1024x1024", "1536x1024", "1024x1536", "2048x1152"]);
+
+    // flux_dev declares a narrower menu — the editor follows it.
+    await changeField(field(container, "Model"), "flux_dev");
+    expect(aspectValues()).toEqual(["", "768x768", "1024x1024", "1280x720", "720x1280"]);
+  });
+
+  it("derives video Resolution/Duration/Frames menus and clears a now-invalid value on switch", async () => {
+    await render();
+    await clickButton("New preset");
+    await changeField(field(container, "Model"), "ltx_2_3");
+
+    // The video model's manifest lists these exactly.
+    expect([...field(container, "Resolution").options].map((o) => o.value)).toEqual(["", "768x512", "1280x720"]);
+    expect([...field(container, "Duration").options].map((o) => o.value)).toEqual(["", "4", "6", "8"]);
+    expect([...field(container, "Frames").options].map((o) => o.value)).toEqual(["", "24", "25"]);
+  });
+
+  it("clears a resolution the newly selected same-type model no longer lists", async () => {
+    await render(baseContext({ imageModels: [imageModel, fluxModel] }));
+    await clickButton("New preset");
+
+    // 1536x1024 is in z_image_turbo's fallback menu but not in flux_dev's.
+    await changeField(field(container, "Aspect"), "1536x1024");
+    expect(field(container, "Aspect").value).toBe("1536x1024");
+
+    await changeField(field(container, "Model"), "flux_dev");
+    expect(field(container, "Aspect").value).toBe("");
+  });
+
+  it("flags an out-of-menu stored resolution and blocks the save until it's fixed", async () => {
+    const stale = {
+      id: "stale",
+      name: "Stale",
+      scope: "global",
+      workflow: "text_to_image",
+      model: "flux_dev",
+      defaults: { resolution: "2048x1152" },
+    };
+    await render(baseContext({ imageModels: [imageModel, fluxModel], presets: [stale] }));
+    await act(async () => {
+      container.querySelector(".preset-card .secondary-action").click();
+    });
+
+    const aspect = field(container, "Aspect");
+    // The stored value is shown and selected, flagged rather than blanked.
+    expect(aspect.value).toBe("2048x1152");
+    expect(aspect.textContent).toContain("not in this model");
+    expect(container.textContent).toContain("isn't one this model supports");
+    expect([...container.querySelectorAll("button[type='submit']")].every((b) => b.disabled)).toBe(true);
+
+    // Picking a supported option unblocks the save.
+    await changeField(aspect, "1024x1024");
+    expect([...container.querySelectorAll("button[type='submit']")].some((b) => !b.disabled)).toBe(true);
   });
 
   it("shows Draft for a new preset and Unsaved changes once an existing one is edited", async () => {
