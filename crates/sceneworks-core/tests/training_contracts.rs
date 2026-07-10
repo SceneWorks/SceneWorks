@@ -133,6 +133,10 @@ fn builtin_targets_gate_network_types() {
         [
             "z_image_turbo_lora",
             "sdxl_lora",
+            // Illustrious v1.0/v2.0 are vanilla-SDXL anime finetunes sharing the `sdxl_lora`
+            // kernel; both advertise native-MLX LoKr through the same SDXL trainer (epic 10609).
+            "illustrious_xl_v1_lora",
+            "illustrious_xl_v2_lora",
             "kolors_lora",
             "lens_turbo_lora",
             "krea_2_raw_lora",

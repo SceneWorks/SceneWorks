@@ -246,6 +246,14 @@ mod sd3_5_mlx_smoke;
 // non-degenerate AND specifically NOT all-zero (the retired Apple recipe's exact failure signature).
 #[cfg(all(test, target_os = "macos"))]
 mod sdxl_base_q8_mlx_smoke;
+// Real-weight MLX train→apply smoke for the Illustrious-XL SDXL-family lane (sc-10618, epic 10609).
+// Test-only + macOS-only; drives `mlx_gen_sdxl::load_trainer` from the Illustrious turnkey's dense
+// `bf16/` tier, trains a tiny LoRA/LoKr, then renders WITHOUT vs WITH the adapter via
+// `mlx_gen_sdxl::load(...).with_adapters` and asserts it visibly changes the output — the E2E evidence
+// (not a registry entry + a green unit test) the training half of the epic demands. For LoKr it also
+// asserts no `mid_block` factors were emitted (sc-2640: the SDXL LoKr surface is down/up attention only).
+#[cfg(all(test, target_os = "macos"))]
+mod illustrious_train_apply_mlx_smoke;
 // Real-weight MLX smoke for the Lens-Turbo Q4 worker lane (sc-8763, epic 8506 Group-B). Test-only +
 // macOS-only; drives `gen_core::load("lens_turbo")` with a Q4 LoadSpec against the packed `q4/` turnkey
 // subdir. On-device evidence that the SceneWorks/lens-turbo-mlx pre-quantized q4 tier loads through the

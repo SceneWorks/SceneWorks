@@ -187,6 +187,195 @@
       }
     },
     {
+      "id": "illustrious_xl_v1_lora",
+      "name": "Illustrious-XL v1.0 LoRA",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "sdxl",
+      "baseModel": "illustrious_xl_v1",
+      "baseModelRepo": "SceneWorks/illustrious-xl-v1-mlx",
+      "kernel": "sdxl_lora",
+      "defaults": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 1500,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 7.0,
+          "sampleSteps": 30,
+          "weightDecay": 0.0001
+        }
+      },
+      "limits": {
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          4
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "rank": [
+          4,
+          128
+        ],
+        "resolutions": [
+          768,
+          1024,
+          1536
+        ],
+        "steps": [
+          200,
+          6000
+        ]
+      },
+      "ui": {
+        "description": "Train an anime image LoRA for Illustrious-XL v1.0 (Danbooru-tag SDXL finetune). Shares the SDXL UNet trainer, so the output is an sdxl-family LoRA. Supports high-res 1536 training.",
+        "label": "Illustrious-XL v1.0 LoRA",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
+      }
+    },
+    {
+      "id": "illustrious_xl_v2_lora",
+      "name": "Illustrious-XL v2.0 LoRA",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "sdxl",
+      "baseModel": "illustrious_xl_v2",
+      "baseModelRepo": "SceneWorks/illustrious-xl-v2-mlx",
+      "kernel": "sdxl_lora",
+      "defaults": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 1500,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "loraTargetModules": [
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0"
+          ],
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 250,
+          "sampleGuidanceScale": 7.0,
+          "sampleSteps": 30,
+          "weightDecay": 0.0001
+        }
+      },
+      "limits": {
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          4
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "rank": [
+          4,
+          128
+        ],
+        "resolutions": [
+          768,
+          1024
+        ],
+        "steps": [
+          200,
+          6000
+        ]
+      },
+      "ui": {
+        "description": "Train an anime image LoRA for Illustrious-XL v2.0 (the more stable v2.0-STABLE snapshot). Shares the SDXL UNet trainer, so the output is an sdxl-family LoRA. Trains at 768/1024 (v2.0 duplicates the subject in larger frames).",
+        "label": "Illustrious-XL v2.0 LoRA",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
+      }
+    },
+    {
       "id": "kolors_lora",
       "name": "Kolors LoRA",
       "modality": "image",

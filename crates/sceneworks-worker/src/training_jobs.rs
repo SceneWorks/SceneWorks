@@ -2056,6 +2056,11 @@ mod tests {
         let cases: &[(&str, &str, Option<&str>)] = &[
             ("z_image_lora", "z_image_turbo", Some("z_image_turbo")),
             ("sdxl_lora", "sdxl", Some("sdxl")),
+            // Illustrious v1.0/v2.0 (epic 10609) share the `sdxl_lora` kernel — vanilla SDXL —
+            // so both base models resolve to the `sdxl` engine trainer with no branch here,
+            // unlike `sd3_lora`/`anima_lora` which split on base_model. Pin that.
+            ("sdxl_lora", "illustrious_xl_v1", Some("sdxl")),
+            ("sdxl_lora", "illustrious_xl_v2", Some("sdxl")),
             ("ltx_mlx_lora", "ltx_2_3", Some("ltx_2_3")),
             ("wan_lora", "wan_2_2", Some("wan2_2_ti2v_5b")),
             ("wan_moe_lora", "wan_2_2_t2v_14b", Some("wan2_2_t2v_14b")),
@@ -2918,6 +2923,37 @@ mod tests {
             512,
             false,
             "candle_sdxl_smoke.safetensors",
+        );
+    }
+
+    /// sc-10618 — the candle (CUDA) twin of the macOS Illustrious train smoke. Points the config-blind
+    /// `load_trainer("sdxl", …)` at an Illustrious turnkey's dense `bf16/` tier (the tier
+    /// `resolve_base_model_path` trains from) and runs a LoRA micro-step, proving the candle SDXL trainer
+    /// trains the Illustrious base on CUDA exactly as it trains stock SDXL — Illustrious differs only in
+    /// its base weights (the gen crates are config-blind). Upstream ships a single-file LDM (no plain
+    /// diffusers repo), so point `ILL_CANDLE_BF16_DIR` at the turnkey's `bf16/` tier on the RTX box:
+    /// `ILL_CANDLE_BF16_DIR=/hfcache/models--SceneWorks--illustrious-xl-v1-mlx/snapshots/<rev>/bf16 \
+    ///   cargo test -p sceneworks-worker --lib --features backend-candle --release -- \
+    ///   --ignored candle_illustrious_real_weights --nocapture`.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    #[ignore = "needs an Illustrious turnkey bf16 tier + a CUDA device; set ILL_CANDLE_BF16_DIR"]
+    fn candle_illustrious_real_weights_trains_a_lora_step() {
+        let Some(dir) = std::env::var_os("ILL_CANDLE_BF16_DIR")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.join("unet").is_dir())
+        else {
+            eprintln!(
+                "ILL_CANDLE_BF16_DIR unset or missing unet/ — skipping candle Illustrious smoke"
+            );
+            return;
+        };
+        candle_real_weights_smoke(
+            "sdxl",
+            &dir,
+            512,
+            false,
+            "candle_illustrious_lora.safetensors",
         );
     }
 
