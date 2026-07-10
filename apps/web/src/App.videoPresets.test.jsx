@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
-import { withAppContext, FakeEventSource, response, settle, field, changeField } from "./main.testSupport.jsx";
+import { withAppContext, FakeEventSource, response, settle, field, changeField, openAdvancedSection } from "./main.testSupport.jsx";
 
 describe("SceneWorks app shell", () => {
   let container;
@@ -40,6 +40,89 @@ describe("SceneWorks app shell", () => {
     });
     container.remove();
     vi.restoreAllMocks();
+  });
+
+  // sc-10516. A studio resolves `selectedPresetId` only against `availablePresets`, which
+  // filters on the current mode AND model — so a launch that carried just the id selected
+  // nothing and fell back to None. It must set all three together. And when a saved studio
+  // snapshot exists, the first hydrate pass used to be skipped wholesale, which swallowed
+  // the launched preset's defaults; only the snapshot's OWN preset may skip it.
+  it("launches a preset into Video Studio, switching mode + model and applying its defaults", async () => {
+    // A snapshot for a DIFFERENT preset — the launched one must still hydrate.
+    window.localStorage.setItem(
+      "sceneworks-studio-video-project-1",
+      JSON.stringify({ mode: "text_to_video", model: "ltx_2_3", selectedPresetId: "some_other_preset" }),
+    );
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            assets: [],
+            characters: [],
+            createPersonDetectionJob: () => {},
+            createPersonTrackJob: () => {},
+            createVideoJob: () => {},
+            gpuOptions: ["auto"],
+            latestVideoAssets: [],
+            loras: [],
+            setPreviewAsset: () => {},
+            rememberLocalGenerationJob: () => {},
+            personTracks: [],
+            purgeAsset: () => {},
+            presets: [
+              {
+                id: "bridge",
+                name: "Bridge Clip",
+                workflow: "image_to_video",
+                modes: ["image_to_video"],
+                model: "wan_i2v",
+                defaults: { mode: "image_to_video", duration: 8, fps: 30, resolution: "1280x720", steps: 41 },
+              },
+            ],
+            requestedGpu: "auto",
+            setRequestedGpu: () => {},
+            updateAssetStatus: () => {},
+            // The launch must move OFF the default model, not just off the default mode.
+            videoModels: [
+              {
+                id: "ltx_2_3",
+                name: "LTX",
+                type: "video",
+                capabilities: ["text_to_video", "image_to_video"],
+                limits: { durations: [4, 6, 8], fps: [24, 25, 30], resolutions: ["768x512", "1280x720"] },
+              },
+              {
+                id: "wan_i2v",
+                name: "Wan I2V",
+                type: "video",
+                capabilities: ["image_to_video", "text_to_video"],
+                limits: { durations: [4, 6, 8], fps: [24, 25, 30], resolutions: ["768x512", "1280x720"] },
+              },
+            ],
+            studioLaunch: {
+              id: "launch-1",
+              view: "Video",
+              presetId: "bridge",
+              presetModel: "wan_i2v",
+              presetMode: "image_to_video",
+            },
+          },
+          <VideoStudio />,
+        ),
+      );
+    });
+    await settle();
+
+    const activeChip = [...document.body.querySelectorAll(".preset-chip.active")].map((chip) => chip.textContent.trim());
+    expect(activeChip).toEqual(["Bridge Clip"]);
+    expect(field(container, "Model").value).toBe("wan_i2v");
+    expect(field(container, "Duration").value).toBe("8");
+
+    await openAdvancedSection();
+    expect(field(container, "Steps").value).toBe("41");
   });
 
   it("applies preset defaults to video jobs", async () => {

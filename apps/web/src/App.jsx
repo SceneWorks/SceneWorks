@@ -24,7 +24,7 @@ import { LogsScreen } from "./screens/LogsScreen.jsx";
 import { StatsScreen } from "./screens/StatsScreen.jsx";
 import { LicensesScreen } from "./screens/LicensesScreen.jsx";
 import { SetupWizard } from "./screens/SetupWizard.jsx";
-import { editModelForAsset } from "./presetUtils.js";
+import { editModelForAsset, workflowModelType } from "./presetUtils.js";
 import { sortNewest, sortWorkers, upsertJobNewest } from "./sorters.js";
 import { useCharacters } from "./hooks/useCharacters.js";
 import { usePresets } from "./hooks/usePresets.js";
@@ -1634,6 +1634,28 @@ export function App() {
     setActiveView("Image");
   }
 
+  // sc-10516: launch a saved preset straight into the studio that can run it.
+  //
+  // The id alone is not enough: a studio only resolves `selectedPresetId` against its
+  // `availablePresets`, which is filtered by the current mode AND model
+  // (generationStudio.jsx). So the launch carries the preset's model and sub-mode too,
+  // and the studio sets all three together. `presetId` and `recipe` are mutually
+  // exclusive — a recipe launch keeps clearing the preset.
+  const sendPresetToStudio = useCallback((preset) => {
+    if (!preset?.id) {
+      return;
+    }
+    const view = workflowModelType(preset.workflow) === "video" ? "Video" : "Image";
+    setStudioLaunch({
+      id: crypto.randomUUID(),
+      view,
+      presetId: preset.id,
+      presetModel: preset.model ?? null,
+      presetMode: preset.defaults?.mode ?? preset.workflow,
+    });
+    setActiveView(view);
+  }, []);
+
   const sendAssetToVideo = useCallback((asset, mode = null) => {
     if (!asset) {
       return;
@@ -2074,6 +2096,7 @@ export function App() {
     createCharacterTestJob,
     sendCharacterToImage,
     sendCharacterToVideo,
+    sendPresetToStudio,
     openDatasetInLibrary,
     // Global theme (sc-10244): exposed so the Image Editor's top-bar toggle
     // drives the app-wide data-theme rather than a screen-local override.
@@ -2106,7 +2129,7 @@ export function App() {
     addCharacterReference, updateCharacterReference,
     removeCharacterReference, createCharacterLook, updateCharacterLook, deleteCharacterLook,
     attachCharacterLora, updateCharacterLora, detachCharacterLora, createCharacterTestJob,
-    sendCharacterToImage, sendCharacterToVideo, openDatasetInLibrary, theme, changeTheme,
+    sendCharacterToImage, sendCharacterToVideo, sendPresetToStudio, openDatasetInLibrary, theme, changeTheme,
   ]);
 
   return (
