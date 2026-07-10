@@ -2838,6 +2838,41 @@ mod anima_convert_tests {
             )));
         }
     }
+
+    /// Equivalence pin for the DUPLICATED predicate (sc-10517). `anima_is_dit_quant_target` here is a
+    /// twin of `mlx_gen_anima::convert::is_dit_quant_target` — both feed `mlx_gen::quant::quantize_map`
+    /// the IDENTICAL `!base.contains("llm_adapter.")` rule, so the install-time worker pack and the
+    /// crate's own pack must partition the checkpoint the same way. The dedup is deferred to sc-10523's
+    /// rev bump (which deletes this copy for a direct crate call); UNTIL THEN the two can drift
+    /// silently, and a drift means the conditioner gets quantized on one path but not the other. This
+    /// pins the exact partition — DiT ⇒ quantize, bundled conditioner ⇒ dense — over BOTH checkpoint
+    /// roots (`net` = base, `model.diffusion_model` = aesthetic/turbo) and BOTH conditioner forms. If
+    /// you change this predicate, change the mlx-gen twin (and its test) in lockstep; see
+    /// `mlx-gen-anima/src/convert.rs`. Inverting the rule flips every expectation below, so a silent
+    /// swap of the sense fails here.
+    #[test]
+    fn anima_dit_quant_predicate_matches_mlx_gen_anima_twin() {
+        // (key minus `.weight`, expected) — true ⇒ pack as Cosmos DiT, false ⇒ keep dense.
+        let cases: &[(&str, bool)] = &[
+            // Bundled AnimaTextConditioner (`…llm_adapter.*`) — DENSE on BOTH roots / BOTH forms.
+            ("net.llm_adapter.blocks.0.self_attn.q_proj", false),
+            ("net.llm_adapter.out_proj", false),
+            ("model.diffusion_model.llm_adapter.blocks.0.mlp.fc1", false),
+            ("model.diffusion_model.llm_adapter.embed", false),
+            // Cosmos DiT — PACKED on BOTH roots.
+            ("net.blocks.0.self_attn.q_proj", true),
+            ("net.final_layer.linear", true),
+            ("model.diffusion_model.blocks.0.self_attn.q_proj", true),
+            ("model.diffusion_model.t_embedder.1.linear_1", true),
+        ];
+        for (key, expected) in cases {
+            assert_eq!(
+                anima_is_dit_quant_target(key),
+                *expected,
+                "partition drift for `{key}` — must match mlx_gen_anima::convert::is_dit_quant_target"
+            );
+        }
+    }
 }
 
 /// Offline quant-matrix tier builder (sc-8513, epic 8506) — the generalization of the FLUX.2-dev
