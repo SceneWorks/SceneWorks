@@ -4882,6 +4882,83 @@ mod standard_tier_tests {
         );
     }
 
+    /// Regression guard for **sc-10578** (epic 10512), pinning the worker HALF of the fix that mlx-gen
+    /// #681 (this pin bump → `a5c1fcd`) delivered.
+    ///
+    /// The bug: on mlx-gen ≤ `6a10ae1`, `mlx-gen-anima`'s `load` rejected
+    /// `spec.quantize.is_some() && !spec.adapters.is_empty()`. The worker defaults EVERY MLX model's
+    /// tier to Q8 ([`resolve_quant`]'s `None` arm), so `spec.quantize` is `Some(..)` on the default
+    /// path — which meant **every** Anima LoRA/LoKr generation failed at model load, at the DEFAULT
+    /// tier, with no tier selection by the user. The only escape was an explicit bf16 pick
+    /// (`mlxQuantize <= 0`). That combination — default tier + adapter — is exactly what no prior test
+    /// exercised, which is how the model shipped with `supports_lora`, an official style LoRA, and a
+    /// trainer whose output could not be loaded.
+    ///
+    /// This asserts the two worker-owned facts that made the bug fire, so a future change that
+    /// reintroduces either is caught here. The end-to-end proof that the engine now ACCEPTS this spec
+    /// lives in mlx-gen's real-weights `tests/packed_adapters.rs` (a Mac + weights are needed to run it,
+    /// so it cannot live in this crate).
+    #[test]
+    fn anima_default_tier_with_adapter_builds_loadable_spec() {
+        use gen_core::{AdapterKind, AdapterSpec, Quant};
+
+        // 1. A default Anima request IS quantized — the premise that made the guard fire everywhere.
+        let base_default =
+            ImageRequest::from_payload(json!({ "model": "anima_base" }).as_object().unwrap());
+        assert_eq!(
+            resolve_quant(&base_default),
+            (Some(Quant::Q8), Some(8)),
+            "anima_base with no mlxQuantize must default to Q8 — the reason adding an adapter used to \
+             fail at load on the DEFAULT tier"
+        );
+        // aesthetic/turbo ship manifest `mlx.quantize: 4`; still quantized, so still hit the guard.
+        let aesthetic = ImageRequest::from_payload(
+            json!({ "model": "anima_aesthetic", "modelManifestEntry": { "mlx": { "quantize": 4 } } })
+                .as_object()
+                .unwrap(),
+        );
+        assert_eq!(resolve_quant(&aesthetic), (Some(Quant::Q4), Some(4)));
+        // Only an explicit bf16 opt-out escaped the bug.
+        let bf16 = ImageRequest::from_payload(
+            json!({ "model": "anima_base", "advanced": { "mlxQuantize": 0 } })
+                .as_object()
+                .unwrap(),
+        );
+        assert_eq!(resolve_quant(&bf16), (None, None));
+
+        // 2. The LoadSpec the worker hands the engine carries a quant AND the adapter together — the
+        //    exact `quantize.is_some() && !adapters.is_empty()` shape mlx-gen-anima rejected on
+        //    `6a10ae1` and accepts on `a5c1fcd`.
+        let (quant, _) = resolve_quant(&base_default);
+        let adapters = vec![AdapterSpec::new(
+            PathBuf::from("/tmp/anima-style-lora.safetensors"),
+            1.0,
+            AdapterKind::Lora,
+        )];
+        let spec = load_spec(PathBuf::from("/tmp/anima-q8-tier"), quant, adapters, None);
+        assert!(
+            spec.quantize.is_some(),
+            "the default Anima tier is quantized, so the spec carries a quant"
+        );
+        assert!(
+            !spec.adapters.is_empty(),
+            "the adapter is present alongside the quant — the combination that used to fail"
+        );
+        // A dense-tier spec (the bf16 escape hatch) never carried a quant — documents the one path
+        // that worked before the fix.
+        let dense = load_spec(
+            PathBuf::from("/tmp/anima-bf16-tier"),
+            None,
+            vec![AdapterSpec::new(
+                PathBuf::from("/tmp/anima-style-lora.safetensors"),
+                1.0,
+                AdapterKind::Lora,
+            )],
+            None,
+        );
+        assert!(dense.quantize.is_none());
+    }
+
     /// sc-10676: off-Mac candle dense-load resolution. [`anima_dense_split_files_dir`] descends into the
     /// `split_files/` subdir of the HF snapshot (the raw dense DiT tree, NOT a converted q4/q8/bf16 tier),
     /// falling back to the snapshot root when `split_files/` is absent (the candle loader accepts the
