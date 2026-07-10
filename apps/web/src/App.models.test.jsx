@@ -197,6 +197,72 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Jobs and GPUs");
   });
 
+  it("flips the MLX button to ready when a model conversion completes", async () => {
+    // `mlxConversionState` is derived server-side from the converted artifact on disk, so the
+    // Models row only learns the conversion landed if the catalog is refetched when the
+    // model_convert job completes. Without that refetch the button stays on "Convert to MLX"
+    // until the app restarts.
+    let conversionState = "needs_conversion";
+    global.fetch.mockImplementation((url) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(
+          response([
+            {
+              id: "anima_2b",
+              name: "Anima 2B",
+              type: "image",
+              family: "anima",
+              installState: "installed",
+              mlxConversionState: conversionState,
+            },
+          ]),
+        );
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
+    });
+    await settle();
+
+    const mlxButton = () => [...container.querySelectorAll(".mlx-status button")][0];
+    expect(mlxButton().textContent).toBe("Convert to MLX");
+
+    conversionState = "converted";
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        data: JSON.stringify({
+          id: "convert-job-1",
+          type: "model_convert",
+          status: "completed",
+          payload: { modelId: "anima_2b", modelName: "Anima 2B" },
+        }),
+      });
+    });
+    await settle();
+    await settle();
+
+    expect(mlxButton().textContent).toBe("MLX ready");
+    expect(mlxButton().disabled).toBe(true);
+    expect(container.textContent).toContain("Converted to MLX and ready.");
+  });
+
   it("keeps LoRA imports on the Models page and shows local progress", async () => {
     const createdJobs = [];
     global.fetch.mockImplementation((url, options = {}) => {
