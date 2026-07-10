@@ -63,6 +63,26 @@ const SORT_CHOICES = [
 
 const scopeRank = { builtin: 0, global: 1, project: 2 };
 
+// The `defaults` keys this editor renders. Everything else a preset carries —
+// upscale*, ipAdapterScale, controlnetScale, guidanceMethod, trueCfgScale, viewAngle,
+// schedulerShift, precision, quantization, motion, the studios' literal `prompt`, … —
+// passes through untouched on save. PATCH replaces `defaults` wholesale (manifest.rs
+// `merge_object` is a top-level key replace), so rebuilding it from the form alone
+// silently destroys everything the studios' Save-as-Preset wrote (sc-10548).
+const EDITOR_OWNED_DEFAULTS = [
+  "mode",
+  "count",
+  "steps",
+  "guidanceScale",
+  "duration",
+  "fps",
+  "quality",
+  "resolution",
+  "negativePrompt",
+  "sampler",
+  "scheduler",
+];
+
 function segmentByKey(key) {
   return WORKFLOW_SEGMENTS.find((segment) => segment.key === key) ?? WORKFLOW_SEGMENTS[0];
 }
@@ -358,7 +378,13 @@ export function PresetManagerScreen() {
 
   function buildPayload() {
     const segment = segmentByKey(form.segment);
-    const defaults = { mode: segment.mode };
+    // Start from the preset's stored defaults so unrendered keys survive; drop the ones
+    // this form owns so clearing a field really clears it, then re-add from the form.
+    const defaults = { ...(selectedPreset?.defaults ?? {}) };
+    for (const key of EDITOR_OWNED_DEFAULTS) {
+      delete defaults[key];
+    }
+    defaults.mode = segment.mode;
     const numberInto = (key, value) => {
       if (value !== "") {
         defaults[key] = Number(value);

@@ -196,6 +196,46 @@ describe("PresetManagerScreen", () => {
     );
   });
 
+  // sc-10548: PATCH replaces `defaults` wholesale, so anything the editor doesn't render
+  // must be carried through explicitly or a rename destroys it.
+  it("preserves defaults the editor doesn't render, and still clears ones it does", async () => {
+    const studioAuthored = {
+      ...presets[0],
+      id: "studio_made",
+      name: "Studio Made",
+      loras: [],
+      defaults: {
+        mode: "text_to_image",
+        resolution: "1024x1024",
+        steps: 30,
+        // None of these have a control in the Preset editor.
+        upscaleFactor: 2,
+        ipAdapterScale: 0.6,
+        guidanceMethod: "cfg_pp",
+        prompt: "a literal prompt",
+      },
+    };
+    const context = await render(baseContext({ presets: [studioAuthored] }));
+
+    await act(async () => {
+      container.querySelector(".preset-card .secondary-action").click();
+    });
+    await changeField(field(container, "Name"), "Studio Made v2");
+    // Clear a field the editor DOES own — that must actually remove the key.
+    await changeField(field(container, "Aspect"), "");
+    await clickButton("Save preset");
+
+    const [, payload] = context.updatePreset.mock.calls[0];
+    expect(payload.defaults).toEqual({
+      mode: "text_to_image",
+      steps: 30,
+      upscaleFactor: 2,
+      ipAdapterScale: 0.6,
+      guidanceMethod: "cfg_pp",
+      prompt: "a literal prompt",
+    });
+  });
+
   it("shows Draft for a new preset and Unsaved changes once an existing one is edited", async () => {
     await render();
     await clickButton("New preset");
