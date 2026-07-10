@@ -656,16 +656,21 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // SANA 1600M + SANA-Sprint (epic 8485 / sc-8489 / sc-8490): MLX-only txt2img (no torch/candle backend).
     ModelCaps::new("sana_1600m", true, false, false, false, false),
     ModelCaps::new("sana_sprint_1600m", true, false, false, false, false),
-    // Anima base / aesthetic / turbo (epic 10512 / sc-10523): native-MLX anime txt2img. MLX-routed with
-    // install-time Q4/Q8 quant + inference LoRA/LoKr (advertised via the engine descriptor + manifest;
-    // quant+LoRA TOGETHER is unsupported, tracked sc-10578 — the engine `load()` errors on the combo).
-    // `candle_routed = false`: the candle port (sc-10525) is numerically CPU-validated but has NEVER been
-    // generated on real CUDA hardware, so no candle lane is advertised (all candle_* columns false, which
-    // also keeps the sc-9495 superset invariant trivially satisfied). Re-evaluate once sc-10525's
-    // hardware-gated acceptance passes on the NVIDIA rig.
-    ModelCaps::new("anima_base", true, false, false, false, false),
-    ModelCaps::new("anima_aesthetic", true, false, false, false, false),
-    ModelCaps::new("anima_turbo", true, false, false, false, false),
+    // Anima base / aesthetic / turbo (epic 10512): anime txt2img on BOTH backends — native-MLX (macOS,
+    // install-time Q4/Q8 quant) and the candle off-Mac lane (sc-10676), which sc-10625 GPU-validated on
+    // real CUDA (candle-gen #380). `candle_routed = true`; `candle_lora = true` because the candle engine
+    // dense-folds a LoRA/LoKr onto the split_files/ DiT (descriptor `supports_lora`/`supports_lokr`,
+    // validated in the anima GPU smoke). `candle_quant = false`: there is NO packed Q4/Q8 tier off-Mac —
+    // the `anima_quant` converter is macOS-only and the NC license bars publishing one, and the candle
+    // loader only CONSUMES an MLX-packed tier (it hard-rejects a quant request against the dense DiT). So
+    // a deliberate `mlxQuantize` request stays off candle (defers rather than silently running dense —
+    // the sc-10515 anti-lie posture); the worker also force-dense-loads Anima regardless of the manifest
+    // default. `candle_quant_lora = false`: quant+LoRA together is unsupported on both lanes (sc-10578 —
+    // folding an adapter into u32-packed codes is a separate additive-branch job). candle_lora ⟹
+    // candle_routed keeps the sc-9495 superset invariant satisfied.
+    ModelCaps::new("anima_base", true, true, false, true, false),
+    ModelCaps::new("anima_aesthetic", true, true, false, true, false),
+    ModelCaps::new("anima_turbo", true, true, false, true, false),
 ];
 
 /// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
@@ -981,6 +986,9 @@ mod tests {
         "sd3_5_large",
         "sd3_5_large_turbo",
         "sd3_5_medium",
+        "anima_base",
+        "anima_aesthetic",
+        "anima_turbo",
     ];
 
     // sc-9983: Krea joins Lens as a BOTH-quant-and-LoRA candle family (sc-9607 flipped its
@@ -1002,8 +1010,10 @@ mod tests {
         "boogu_image_edit",
     ];
 
-    // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH), so the LoRA-only list is now empty.
-    const EXPECTED_CANDLE_LORA_MODELS: &[&str] = &[];
+    // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH). sc-10676: Anima is the LoRA-only candle
+    // family — the off-Mac engine dense-folds a LoRA/LoKr onto the split_files/ DiT, but advertises NO
+    // candle quant (no packed tier off-Mac), so it is LoRA-only rather than BOTH.
+    const EXPECTED_CANDLE_LORA_MODELS: &[&str] = &["anima_base", "anima_aesthetic", "anima_turbo"];
 
     const EXPECTED_CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[
         "wan_2_2",

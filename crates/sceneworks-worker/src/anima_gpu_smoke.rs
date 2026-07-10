@@ -234,3 +234,104 @@ fn anima_candle_gpu_smoke() {
         png.display()
     );
 }
+
+/// sc-10676 worker-lane E2E: drive the ACTUAL worker weight-resolution + dense-load + render for all
+/// three Anima variants on real CUDA — the piece the engine-seam [`anima_candle_gpu_smoke`] above does
+/// NOT cover. Unlike that smoke (which hands the engine a hand-built `split_files/` path), this calls
+/// the WORKER's [`crate::image_jobs::resolve_weights_dir`] the way `generate_candle_stream` does, asserts
+/// it returns the dense `split_files/` dir off-Mac (NOT a converted q4/q8/bf16 tier), then loads DENSE
+/// (Quant `None` — the decision `generate_candle_stream` forces for Anima; passing a quant would hit the
+/// loader's dense-DiT reject) and renders a coherent image. Point the HF cache env at the real Anima
+/// snapshot — no `ANIMA_DIR` (the resolver finds it):
+/// ```text
+/// $env:HF_HUB_CACHE="D:\.cache\huggingface\hub"
+/// $env:ANIMA_OUT_DIR="D:\sceneworks-anima-validate"
+/// cargo test -p sceneworks-worker --no-default-features --features backend-candle --release \
+///   anima_worker_lane_gpu_smoke -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "real-weight worker-lane GPU smoke; needs the circlestone-labs/Anima snapshot in the HF cache \
+            (HF_HUB_CACHE/HF_HOME) + a CUDA device (cap=120)"]
+fn anima_worker_lane_gpu_smoke() {
+    use crate::image_jobs::resolve_weights_dir;
+    use crate::settings::Settings;
+    use gen_core::GenerationRequest;
+    use sceneworks_core::image_request::ImageRequest;
+    use serde_json::json;
+
+    let out_dir = PathBuf::from(env_or("ANIMA_OUT_DIR", "/tmp/anima_smoke"));
+    std::fs::create_dir_all(&out_dir).expect("create out dir");
+    let settings = Settings::from_env();
+    let prompt = "masterpiece, best quality, 1girl, silver hair, blue eyes, kimono, \
+                  cherry blossoms, standing, looking at viewer, detailed background";
+    let negative = "worst quality, low quality, blurry, jpeg artifacts";
+
+    // (id, steps, guidance, uses_cfg) — turbo is the merged CFG-free student (no negative / guidance).
+    for (id, steps, guidance, uses_cfg) in [
+        ("anima_base", 30u32, 4.5f32, true),
+        ("anima_aesthetic", 30, 4.5, true),
+        ("anima_turbo", 10, 1.0, false),
+    ] {
+        // A minimal job payload — resolve_weights_dir keys off `model` (+ absent modelPath), the exact
+        // shape the router hands `generate_candle_stream`. No `mlxQuantize`: the web UI never sends it.
+        let payload = json!({ "model": id, "prompt": prompt, "width": 1024, "height": 1024 });
+        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+
+        // THE worker resolver (my sc-10676 change): off-Mac Anima → the dense `split_files/` tree, never
+        // a converted tier (there is none off-Mac). This is the seam the engine-only smoke skips.
+        let dir = resolve_weights_dir(&request, &settings)
+            .expect("resolve_weights_dir")
+            .unwrap_or_else(|| {
+                panic!("{id}: Anima snapshot not in the HF cache — set HF_HUB_CACHE/HF_HOME")
+            });
+        assert!(
+            dir.ends_with("split_files") && dir.join("diffusion_models").is_dir(),
+            "{id}: worker must resolve the dense split_files/ dir, got {}",
+            dir.display()
+        );
+        println!(
+            "[worker-smoke] {id}: resolve_weights_dir -> {}",
+            dir.display()
+        );
+
+        // DENSE load (Quant None) — exactly what generate_candle_stream forces for Anima.
+        let spec = LoadSpec::new(WeightsSource::Dir(dir));
+        let generator = gen_core::load(id, &spec).unwrap_or_else(|e| panic!("load {id}: {e}"));
+        let req = GenerationRequest {
+            prompt: prompt.to_string(),
+            negative_prompt: uses_cfg.then(|| negative.to_string()),
+            width: 1024,
+            height: 1024,
+            count: 1,
+            seed: Some(42),
+            steps: Some(steps),
+            guidance: uses_cfg.then_some(guidance),
+            ..Default::default()
+        };
+        println!("[worker-smoke] {id}: rendering 1024x1024 @ {steps} steps ...");
+        let output = generator
+            .generate(&req, &mut |_| {})
+            .unwrap_or_else(|e| panic!("{id} generate: {e}"));
+        let image = match output {
+            GenerationOutput::Images(mut images) => images.pop().expect("engine returned no image"),
+            other => panic!("expected Images output, got {other:?}"),
+        };
+        let std = image_std(&image);
+        let png = out_dir.join(format!("{id}_worker_lane_1024.png"));
+        save_png(&image, &png);
+        println!(
+            "[worker-smoke] {id}: {}x{} mean {:.2} std {:.2} -> {}",
+            image.width,
+            image.height,
+            image_mean(&image),
+            std,
+            png.display()
+        );
+        assert_eq!((image.width, image.height), (1024, 1024));
+        assert!(
+            std > DEGENERATE_STD_FLOOR_DEFAULT,
+            "{id} render looks degenerate (std {std:.2})"
+        );
+    }
+    println!("[worker-smoke] DONE: all three Anima variants rendered through the worker resolver + dense lane");
+}

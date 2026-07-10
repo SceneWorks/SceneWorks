@@ -485,6 +485,19 @@ pub(crate) fn resolve_weights_dir(
     if request.model == "krea_2_turbo" || request.model == "krea_2_raw" {
         return Ok(snapshot.map(|root| krea_model_subdir(&root, request)));
     }
+    // Anima off-Mac (candle, sc-10676): dense bf16, NOT convert-at-install. There is no converted tier
+    // artifact off-Mac (the `anima_quant` converter is macOS-only), so point at the raw
+    // `circlestone-labs/Anima` `split_files/` root the candle loader reads directly (its DiT +
+    // `text_encoders/qwen_3_06b_base` + `vae/qwen_image_vae`, the exact dir the GPU-validated anima smoke
+    // used) and SKIP `anima_tier_subdir` — there are no bf16/q8/q4 tier subdirs off-Mac. The candle
+    // loader's `resolve_split_files` also accepts the snapshot parent, so fall back to the snapshot root
+    // if `split_files/` is somehow absent (a partial download then surfaces a loud load error, not a
+    // silently-wrong dir). macOS never reaches here: a converted Anima install injects `modelPath` and
+    // returns early via the `is_anima_model` tier-descent branch at the top of this fn.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if is_anima_model(&request.model) {
+        return Ok(snapshot.map(anima_dense_split_files_dir));
+    }
     // Catalog-wide quant-matrix models (sc-8513, epic 8506) ship as SceneWorks pre-quantized
     // turnkeys with self-contained `q4/` (default) + `q8/` + `bf16/` subdirs (replacing any
     // install-time convert); point the engine at the chosen tier's subdir rather than the repo root.
@@ -748,6 +761,23 @@ fn anima_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
         .or_else(|| present("q8"))
         .or_else(|| present("bf16"))
         .unwrap_or_else(|| root.to_path_buf())
+}
+
+/// The candle off-Mac Anima weights dir (sc-10676): the `split_files/` subdir of the HF snapshot `root`
+/// when it holds `diffusion_models/` (the dense DiT tree `candle_gen_anima::loader::resolve_split_files`
+/// reads — the exact dir the GPU-validated anima smoke used), else `root` itself. The candle loader also
+/// accepts the snapshot parent, so falling back to `root` keeps a partial download a loud load error, not
+/// a silently-wrong dir. Anima has NO convert-at-install tier off-Mac (the `anima_quant` converter is
+/// macOS-only), so this deliberately SKIPS [`anima_tier_subdir`]'s bf16/q8/q4 tier descent — off-Mac is
+/// always dense bf16.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn anima_dense_split_files_dir(root: PathBuf) -> PathBuf {
+    let split = root.join("split_files");
+    if split.join("diffusion_models").is_dir() {
+        split
+    } else {
+        root
+    }
 }
 
 /// The Ideogram 4 tier subdir a `mlxQuantize` request needs fetched ON DEMAND — `Some("q8")` when the
@@ -3555,6 +3585,16 @@ fn is_candle_engine(model: &str) -> bool {
             | "sd3_5_large"
             | "sd3_5_large_turbo"
             | "sd3_5_medium"
+            // Anima 2B base / aesthetic / turbo (sc-10676, epic 10512): the candle port (sc-10525,
+            // GPU-validated sc-10625) rides the generic candle txt2img lane off-Mac. `generate_candle_\
+            // stream` dense-loads bf16 from the raw `circlestone-labs/Anima` split_files/ tree (no
+            // convert-at-install off-Mac) and FORCES the load Quant to None — the descriptor advertises
+            // Q4/Q8 but there is no packed tier off-Mac, and the loader rejects a quant against the dense
+            // DiT. Inference LoRA/LoKr folds onto the dense DiT (`supports_lora`/`supports_lokr`); quant +
+            // LoRA together stays rejected (sc-10578). Pure txt2img (no edit/reference/control shapes).
+            | "anima_base"
+            | "anima_aesthetic"
+            | "anima_turbo"
     )
 }
 
@@ -3585,6 +3625,9 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "krea_2_turbo" | "krea_2_raw" => "candle_krea",
         // Stable Diffusion 3.5 (sc-7880): Large / Large Turbo / Medium share the candle SD3.5 engine.
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => "candle_sd3",
+        // Anima 2B (sc-10676): base / aesthetic / turbo share the candle Anima engine (the off-Mac
+        // sibling of the `mlx_anima` label).
+        "anima_base" | "anima_aesthetic" | "anima_turbo" => "candle_anima",
         // sdxl / realvisxl share the candle "sdxl" engine.
         _ => CANDLE_ADAPTER,
     }
@@ -3708,6 +3751,17 @@ async fn generate_candle_stream(
         // INT8-ConvRot (sc-9300): the int8 DiT replaces the dense transformer wholesale — a bits-based
         // load-time `Quant` is meaningless (and the candle-gen krea engine rejects a quant overlay on
         // the ConvRot path). Force dense-None; the recipe records no `mlxQuantize` bits for this tier.
+        (None, None)
+    } else if is_anima_model(&request.model) {
+        // Anima off-Mac (sc-10676): the descriptor advertises Q4/Q8, but there is NO packed tier off-Mac
+        // — the `anima_quant` converter is macOS-only and the NC license bars publishing one, and the
+        // candle loader only CONSUMES an MLX-packed tier (it hard-rejects a quant request against the
+        // dense split_files/ DiT: "the DiT checkpoint is DENSE … load the dense tier"). So force dense
+        // bf16 here, IGNORING the manifest `mlx.quantize: 4` default that `resolve_quant` would otherwise
+        // apply — else every plain candle Anima job would fail the loader's packed-detect. The router
+        // keeps `candle_quant = false`, so a deliberate `advanced.mlxQuantize > 0` never reaches this lane
+        // (it defers rather than silently running dense); this arm handles the default-quant case the
+        // router doesn't strip. A dense DiT + LoRA/LoKr still folds (Quant None ⇒ no sc-10578 reject).
         (None, None)
     } else if model.supports_quant() {
         resolve_quant(request)
@@ -4434,6 +4488,10 @@ mod candle_label_tests {
         assert_eq!(candle_adapter_label("sd3_5_large"), "candle_sd3");
         assert_eq!(candle_adapter_label("sd3_5_large_turbo"), "candle_sd3");
         assert_eq!(candle_adapter_label("sd3_5_medium"), "candle_sd3");
+        // Anima 2B (sc-10676): the candle asset stamp, the off-Mac sibling of `mlx_anima`.
+        assert_eq!(candle_adapter_label("anima_base"), "candle_anima");
+        assert_eq!(candle_adapter_label("anima_aesthetic"), "candle_anima");
+        assert_eq!(candle_adapter_label("anima_turbo"), "candle_anima");
     }
 
     #[test]
@@ -4475,6 +4533,10 @@ mod candle_label_tests {
             "sd3_5_large",
             "sd3_5_large_turbo",
             "sd3_5_medium",
+            // Anima 2B (sc-10676): base / aesthetic / turbo dense-load bf16 on the generic candle lane.
+            "anima_base",
+            "anima_aesthetic",
+            "anima_turbo",
         ] {
             assert!(is_candle_engine(model), "{model} should be a candle engine");
         }
@@ -4808,6 +4870,33 @@ mod standard_tier_tests {
         assert_eq!(
             anima_tier_subdir(tmp3.path(), &anima_request(json!(null))),
             tmp3.path().to_path_buf()
+        );
+    }
+
+    /// sc-10676: off-Mac candle dense-load resolution. [`anima_dense_split_files_dir`] descends into the
+    /// `split_files/` subdir of the HF snapshot (the raw dense DiT tree, NOT a converted q4/q8/bf16 tier),
+    /// falling back to the snapshot root when `split_files/` is absent (the candle loader accepts the
+    /// parent; a partial download stays a loud load error). This is the off-Mac counterpart to the mac
+    /// convert-at-install [`anima_tier_subdir`] — there are no tier subdirs off-Mac.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn anima_dense_split_files_dir_descends_into_split_files_else_root() {
+        // Snapshot holds `split_files/diffusion_models/...` → resolve there (the loader reads it directly).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("split_files").join("diffusion_models")).unwrap();
+        assert_eq!(
+            anima_dense_split_files_dir(root.to_path_buf()),
+            root.join("split_files"),
+            "descends into split_files/ when present"
+        );
+        // No `split_files/` yet (partial/absent download) → the snapshot root; the loader surfaces a
+        // clear "not an Anima split_files dir" error rather than this silently pointing at a wrong dir.
+        let tmp2 = tempfile::tempdir().unwrap();
+        assert_eq!(
+            anima_dense_split_files_dir(tmp2.path().to_path_buf()),
+            tmp2.path().to_path_buf(),
+            "falls back to the snapshot root when split_files/ is absent"
         );
     }
 
