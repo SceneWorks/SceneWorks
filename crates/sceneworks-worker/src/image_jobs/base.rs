@@ -727,11 +727,12 @@ fn is_anima_model(model: &str) -> bool {
 
 /// Pick the tier subdir of a converted Anima `root` (the injected `modelPath`, holding `bf16/ q8/ q4/`,
 /// each a `diffusion_models/<variant>.safetensors` + dense `text_encoders/` + `vae/` tree the Anima
-/// loader reads): `bf16/` when the request opts out of quantization (`advanced.mlxQuantize <= 0`), `q8/`
-/// when it opts into Q8 (`> 4`), else the default `q4/`. Falls back through q4 → q8 → bf16 → `root` so a
-/// partially-written artifact surfaces as a load error rather than a silent half-load. A tier is
-/// "present" when its `diffusion_models/` holds a `.safetensors` DiT (packed OR dense bf16). Mirrors
-/// [`standard_tier_subdir`], but keyed on Anima's `split_files` layout rather than `transformer/`.
+/// loader reads): `bf16/` when the request opts out of quantization (`advanced.mlxQuantize <= 0`), `q4/`
+/// when it opts into Q4 (`1..=4`), else the default **`q8/`** (sc-10714). Falls back through q8 → bf16 →
+/// q4 → `root` so a partially-written artifact surfaces as a load error rather than a silent half-load
+/// onto the low-fidelity q4. A tier is "present" when its `diffusion_models/` holds a `.safetensors` DiT
+/// (packed OR dense bf16). Mirrors [`standard_tier_subdir`], but keyed on Anima's `split_files` layout
+/// rather than `transformer/`, and — unlike the standard q4-first convention — defaults to q8 (below).
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn anima_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let bits = request
@@ -751,15 +752,22 @@ fn anima_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
             .unwrap_or(false);
         has_dit.then_some(dir)
     };
+    // Default (no explicit `mlxQuantize`) → Q8 (sc-10714 fix; aligns with epic 10721's "Q8 everywhere"
+    // default). q4 was the old blind default and it renders base/aesthetic WASHED — q4 weight-quant error
+    // is amplified by CFG 4.5 over 30 steps (turbo is CFG-free, so q4 is acceptable there). Q8 is
+    // near-lossless (≈bf16) and fixes the smudge at ~2.2 GB; bf16 (explicit `<= 0`) is there for max
+    // fidelity/speed on this small 2B DiT, and an explicit q4 pick is still honored. Fallback prefers the
+    // clean tiers (q8 → bf16 → q4) so a partial install never silently lands on the washed q4.
     let preferred = match bits {
+        None => "q8",
         Some(b) if b <= 0 => "bf16",
         Some(b) if b > 4 => "q8",
         _ => "q4",
     };
     present(preferred)
-        .or_else(|| present("q4"))
         .or_else(|| present("q8"))
         .or_else(|| present("bf16"))
+        .or_else(|| present("q4"))
         .unwrap_or_else(|| root.to_path_buf())
 }
 
@@ -4825,11 +4833,13 @@ mod standard_tier_tests {
         );
     }
 
-    /// sc-10517: Anima is convert-at-install with a q4/q8/bf16 MATRIX under the injected `modelPath`
-    /// root (`bf16/ q8/ q4/`, each a `diffusion_models/<variant>.safetensors` tree — NOT a `transformer/`
-    /// component). [`anima_tier_subdir`] picks the tier by `mlxQuantize` (default q4; `>4` → q8; `<=0` →
-    /// bf16) and falls back through q4 → q8 → bf16 → root so a partially-written artifact surfaces as a
-    /// load error, not a silent half-load. [`is_anima_model`] gates only the three catalog ids.
+    /// sc-10517 / sc-10714: Anima is convert-at-install with a q4/q8/bf16 MATRIX under the injected
+    /// `modelPath` root (`bf16/ q8/ q4/`, each a `diffusion_models/<variant>.safetensors` tree — NOT a
+    /// `transformer/` component). [`anima_tier_subdir`] picks the tier by `mlxQuantize`
+    /// (**default Q8**; `<= 0` → bf16; `1..=4` → q4; `> 4` → q8) and falls back clean-tiers-first through
+    /// q8 → bf16 → q4 → root, so a partial install surfaces as a load error, never a silent half-load onto
+    /// the washed q4. The Q8 default (sc-10714) is the fix for base/aesthetic rendering smudgy at q4 —
+    /// q4 × CFG amplifies quant error; Q8 is near-lossless. [`is_anima_model`] gates only the three ids.
     #[test]
     fn anima_tier_subdir_selects_and_falls_back() {
         let anima_request = |bits: serde_json::Value| {
@@ -4856,8 +4866,13 @@ mod standard_tier_tests {
         }
         assert_eq!(
             anima_tier_subdir(root, &anima_request(json!(null))),
+            root.join("q8"),
+            "no opt-in → the Q8 default (sc-10714), not the washed q4"
+        );
+        assert_eq!(
+            anima_tier_subdir(root, &anima_request(json!(4))),
             root.join("q4"),
-            "no opt-in → the q4 default"
+            "an explicit q4 pick is still honored"
         );
         assert_eq!(
             anima_tier_subdir(root, &anima_request(json!(8))),
@@ -4865,14 +4880,25 @@ mod standard_tier_tests {
         );
         assert_eq!(
             anima_tier_subdir(root, &anima_request(json!(0))),
-            root.join("bf16")
+            root.join("bf16"),
+            "explicit bf16 (mlxQuantize <= 0) is honored"
         );
-        // Only bf16 downloaded, but q4 (default) requested → falls through to bf16, never a bare root.
+        // Only q4 downloaded, but the default (q8) is requested → falls through clean-tiers-first to the
+        // present q4, never a bare root. (An all-tiers install lands on q8 above; this is the partial case.)
         let tmp2 = tempfile::tempdir().unwrap();
-        seed_tier(tmp2.path(), "bf16");
+        seed_tier(tmp2.path(), "q4");
         assert_eq!(
             anima_tier_subdir(tmp2.path(), &anima_request(json!(null))),
-            tmp2.path().join("bf16")
+            tmp2.path().join("q4")
+        );
+        // q8 default absent (only bf16 + q4 present) → fallback prefers the clean bf16 over the washed q4.
+        let tmp2b = tempfile::tempdir().unwrap();
+        seed_tier(tmp2b.path(), "bf16");
+        seed_tier(tmp2b.path(), "q4");
+        assert_eq!(
+            anima_tier_subdir(tmp2b.path(), &anima_request(json!(null))),
+            tmp2b.path().join("bf16"),
+            "q8 default absent → fallback prefers clean bf16 over washed q4"
         );
         // Nothing present → the root itself (the loader then surfaces a clear error).
         let tmp3 = tempfile::tempdir().unwrap();
