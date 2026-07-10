@@ -2272,7 +2272,9 @@ fn validate_lr_scheduler(config: &TrainingConfig) -> Result<(), TrainingPlanErro
 /// `apply_anima_adapters`. The native `mlx-gen-anima` trainer trains the 448 DiT targets **and** the
 /// 60 `llm_adapter` conditioner targets (508 total). mlx-only (no torch/candle Anima trainer). NB the
 /// `mlx-gen-anima` trainer does not yet honor gradient checkpointing or preview sampling (dense-only,
-/// no in-training previews), so those advanced knobs default off here.
+/// no in-training previews), so those advanced knobs default off here — that parity work (gradient
+/// checkpointing + OOM guard, in-training preview, mid-run resume, and the >1024 resolution ceiling)
+/// is tracked in sc-10576, not deferred in prose.
 fn anima_base_lora_target() -> TrainingTarget {
     TrainingTarget {
         id: "anima_base_lora".to_owned(),
@@ -2303,7 +2305,8 @@ fn anima_base_lora_target() -> TrainingTarget {
                 "cacheLatents": true,
                 "cacheTextEmbeddings": true,
                 // Dense-only for now (the mlx-gen-anima trainer does not implement block
-                // checkpointing yet — a follow-up); keep it off so the UI does not advertise a no-op.
+                // checkpointing yet — tracked in sc-10576); keep it off so the UI does not advertise
+                // a no-op.
                 "gradientCheckpointing": false,
                 "networkType": "lora",
                 // Flow-match noising: sigmoid timestep with a high-noise tilt, MSE on the velocity
@@ -2314,7 +2317,7 @@ fn anima_base_lora_target() -> TrainingTarget {
                 "weightDecay": 0.0001,
                 "lrScheduler": "constant",
                 // In-training preview sampling is not implemented in the mlx-gen-anima trainer yet
-                // (a follow-up), so sampling defaults off.
+                // (tracked in sc-10576), so sampling defaults off.
                 "sampleEvery": 0,
                 "sampleSteps": 10,
                 "sampleGuidanceScale": 4.5,
@@ -2329,7 +2332,7 @@ fn anima_base_lora_target() -> TrainingTarget {
             "alpha": [1, 128],
             "steps": [200, 6000],
             // Dense-only training (no memory guard/checkpointing yet), so the training-resolution
-            // ceiling stays at 1024 even though inference supports up to 1536 (a follow-up).
+            // ceiling stays at 1024 even though inference supports up to 1536 (tracked in sc-10576).
             "resolutions": [512, 768, 1024],
             "batchSize": [1, 4],
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
