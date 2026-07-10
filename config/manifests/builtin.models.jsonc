@@ -4802,7 +4802,7 @@
           "default": true,
           "files": ["q4/*"],
           "estimatedSizeBytes": 3911461825,
-          "footprint": { "diskSizeBytes": 3911461825, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "footprint": { "diskSizeBytes": 3911461825, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256 }
         },
         {
           "provider": "huggingface",
@@ -4810,7 +4810,7 @@
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 5385646417,
-          "footprint": { "diskSizeBytes": 5385646417, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "footprint": { "diskSizeBytes": 5385646417, "residentMemoryBytes": 5094661092, "peakMemoryBytes": 20166437656 }
         },
         {
           "provider": "huggingface",
@@ -4818,7 +4818,7 @@
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108498305,
-          "footprint": { "diskSizeBytes": 7108498305, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "footprint": { "diskSizeBytes": 7108498305, "residentMemoryBytes": 6954313820, "peakMemoryBytes": 22025741200 }
         }
       ],
       "paths": {
@@ -4893,7 +4893,7 @@
           "default": true,
           "files": ["q4/*"],
           "estimatedSizeBytes": 3911461501,
-          "footprint": { "diskSizeBytes": 3911461501, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "footprint": { "diskSizeBytes": 3911461501, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256 }
         },
         {
           "provider": "huggingface",
@@ -4901,7 +4901,7 @@
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 5385646137,
-          "footprint": { "diskSizeBytes": 5385646137, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "footprint": { "diskSizeBytes": 5385646137, "residentMemoryBytes": 5094546404, "peakMemoryBytes": 20166322968 }
         },
         {
           "provider": "huggingface",
@@ -4909,7 +4909,7 @@
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108498177,
-          "footprint": { "diskSizeBytes": 7108498177, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "footprint": { "diskSizeBytes": 7108498177, "residentMemoryBytes": 6954313820, "peakMemoryBytes": 22025741200 }
         }
       ],
       "paths": {
