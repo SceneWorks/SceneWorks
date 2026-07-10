@@ -118,8 +118,12 @@ fn max_tensor_data_end(header: &Value) -> u64 {
 /// Returns the first `.safetensors` file at or below `path`. When `path`
 /// itself is a `.safetensors` file it is returned directly. Returns `None`
 /// when no file is found or `path` is neither a file nor a directory.
+///
+/// Hidden entries are skipped ([`is_hidden_file`]) — the `read_dir` here is
+/// *unordered*, so an AppleDouble sidecar (`._adapter.safetensors`) could
+/// otherwise be returned in place of the real adapter (SceneWorks#1333).
 pub fn first_safetensors_path(path: &Path) -> Option<PathBuf> {
-    if path.is_file() && has_safetensors_extension(path) {
+    if path.is_file() && is_safetensors_file(path) {
         return Some(path.to_path_buf());
     }
     if !path.is_dir() {
@@ -132,12 +136,39 @@ pub fn first_safetensors_path(path: &Path) -> Option<PathBuf> {
             let entry_path = entry.path();
             if entry_path.is_dir() {
                 stack.push(entry_path);
-            } else if has_safetensors_extension(&entry_path) {
+            } else if is_safetensors_file(&entry_path) {
                 return Some(entry_path);
             }
         }
     }
     None
+}
+
+/// True when `path`'s file name begins with `.` — a hidden entry that is never
+/// a weight or adapter file.
+///
+/// macOS writes an **AppleDouble sidecar** (`._<name>`) beside a file whenever
+/// it must persist extended attributes on a volume with no native xattr support
+/// (exFAT/FAT drives, SMB/NFS shares, cloud-sync folders); they also survive a
+/// Finder copy or a zip round-trip. `._model.safetensors` has extension
+/// `safetensors`, so an extension-only filter admits it — and since `.` sorts
+/// first, a sorted loader opens it *before* the real file, hits its AppleDouble
+/// magic, and dies on a bogus header length (SceneWorks#1333). No legitimate
+/// weight file starts with `.`, so skipping hidden entries is exact.
+///
+/// Mirrors `gen_core::weightsmeta::is_hidden_file`, restated here because
+/// `sceneworks-core` deliberately carries no gen-core dependency.
+pub fn is_hidden_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with('.'))
+}
+
+/// True when `path` is a loadable `.safetensors` file: the extension matches
+/// (case-insensitively — some re-hosted checkpoints ship `.SAFETENSORS`) and the
+/// entry is not hidden.
+fn is_safetensors_file(path: &Path) -> bool {
+    has_safetensors_extension(path) && !is_hidden_file(path)
 }
 
 fn has_safetensors_extension(path: &Path) -> bool {
@@ -169,7 +200,7 @@ pub fn resolve_adapter_in_dir(dir: &Path, declared: Option<&str>) -> Option<Path
             && Path::new(name).file_name().and_then(|value| value.to_str()) == Some(name);
         if is_plain {
             let candidate = dir.join(name);
-            if candidate.is_file() && has_safetensors_extension(&candidate) {
+            if candidate.is_file() && is_safetensors_file(&candidate) {
                 return Some(candidate);
             }
         }
@@ -2959,5 +2990,54 @@ mod tests {
             Some(final_adapter)
         );
         let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn is_hidden_file_flags_dotfiles_and_appledouble_sidecars() {
+        assert!(is_hidden_file(Path::new("._adapter.safetensors")));
+        assert!(is_hidden_file(Path::new("/a/b/._model.safetensors")));
+        assert!(is_hidden_file(Path::new("/a/b/.DS_Store")));
+        assert!(!is_hidden_file(Path::new("adapter.safetensors")));
+        assert!(!is_hidden_file(Path::new("/a/b/model.safetensors")));
+        // A dot on a *directory* component is not a hidden file name.
+        assert!(!is_hidden_file(Path::new("/a/.cache/model.safetensors")));
+    }
+
+    /// SceneWorks#1333: `._adapter.safetensors` (a macOS AppleDouble sidecar) carries the
+    /// `.safetensors` extension, so the extension-only filter used to accept it. `first_safetensors_path`
+    /// scans with an *unordered* `read_dir` and returns the first match, so the sidecar could be
+    /// returned in place of the real adapter — nondeterministically, run to run.
+    #[test]
+    fn first_safetensors_path_skips_appledouble_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("adapter.safetensors");
+        touch(&dir.path().join("._adapter.safetensors"));
+        touch(&real);
+        assert_eq!(first_safetensors_path(dir.path()), Some(real));
+    }
+
+    /// A dir holding only a sidecar has no adapter at all.
+    #[test]
+    fn first_safetensors_path_ignores_a_lone_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        touch(&dir.path().join("._adapter.safetensors"));
+        assert_eq!(first_safetensors_path(dir.path()), None);
+    }
+
+    /// The sidecar must also be rejected on the *declared* path, and on a direct file argument.
+    #[test]
+    fn resolve_adapter_in_dir_rejects_a_declared_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("adapter.safetensors");
+        let sidecar = dir.path().join("._adapter.safetensors");
+        touch(&sidecar);
+        touch(&real);
+        // Declared name naming the sidecar → not accepted; falls back to the scan, which skips it.
+        assert_eq!(
+            resolve_adapter_in_dir(dir.path(), Some("._adapter.safetensors")),
+            Some(real)
+        );
+        // Passed directly as a file path, a sidecar is still not a safetensors file.
+        assert_eq!(first_safetensors_path(&sidecar), None);
     }
 }
