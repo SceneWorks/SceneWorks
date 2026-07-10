@@ -80,10 +80,13 @@ describe("loraMatchesModel", () => {
     expect(loraMatchesModel(familylessLora, sdxlModel)).toBe(false);
   });
 
-  it("fails closed when the model declares no LoRA families", () => {
-    // The API 400s ("Model … has no declared LoRA families") on any attached LoRA,
-    // so the picker must not offer one either.
-    expect(loraMatchesModel(sdxlLora, noFamilyModel)).toBe(false);
+  it("stays permissive when the model declares no LoRA families (can't gate)", () => {
+    // Model side is fail-open: a model that declares no families — or no model
+    // selected yet — can't be gated against, so the LoRA is still shown (preset
+    // application + the "still importing" warning rely on this). The LoRA-family
+    // gate only applies once the model actually declares families.
+    expect(loraMatchesModel(sdxlLora, noFamilyModel)).toBe(true);
+    expect(loraMatchesModel(familylessLora, noFamilyModel)).toBe(true);
   });
 
   it("normalizes separators/underscores on both sides before comparing", () => {

@@ -137,15 +137,19 @@ export function loraHasResolvableFamily(lora) {
 export function loraMatchesModel(lora, model) {
   const modelFamilies = modelLoraFamilies(model);
   const families = loraFamilies(lora);
-  // Fail closed, matching the API's `validate_lora_specs_for_model`: a LoRA that
-  // declares no family, or a model that declares none, can never pass the
-  // generate-time gate, so it is not compatible here either (sc-10509). Both
-  // branches were previously permissive (`!modelFamilies.length || !families.length`),
-  // so the picker offered a dead-end selection that 400d at generate.
-  if (!modelFamilies.length || !families.length) {
-    return false;
+  // Model side stays permissive: when no model is selected yet, or a model
+  // declares no LoRA families, we can't gate — keep showing the LoRA (preset
+  // application, the "still importing" warning, and the no-model picker all rely
+  // on this). LoRA side fails CLOSED (sc-10509): a LoRA that declares no
+  // resolvable family can never pass the API's `validate_lora_specs_for_model`
+  // (it 400s on an empty family), so — once there IS a model family to gate
+  // against — it is not offered, rather than the old fail-open that surfaced a
+  // dead-end selection. External ComfyUI scan rows are the first source to emit
+  // family-less LoRAs at scale.
+  if (!modelFamilies.length) {
+    return true;
   }
-  return families.some((family) => modelFamilies.includes(family));
+  return families.length > 0 && families.some((family) => modelFamilies.includes(family));
 }
 
 // Resolve an edit-capable model whose family matches the asset's generating model.
