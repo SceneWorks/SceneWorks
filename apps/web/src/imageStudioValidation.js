@@ -8,6 +8,7 @@
 // rule set is just the place they become blocking-or-not with a message. Pure functions
 // of their inputs, so the requirement/error split is unit-testable.
 
+import { presetLoraIssues } from "./generationValidation.js";
 import { issue } from "./validation/issues.js";
 
 // Single-image Generate. The conditions whose message already has a home stay OUT of
@@ -44,31 +45,7 @@ export function imageGenerateValidation({
   if (mode === "character_image" && !characterId) {
     issues.push(issue.requirement("character", "Choose a character"));
   }
-  const model = modelName ?? "the selected model";
-  if (presetMissing.length) {
-    issues.push(
-      issue.error(
-        null,
-        `Preset cannot run until LoRA import finishes: ${presetMissing.join(", ")}. Wait for the Queue or choose another preset.`,
-      ),
-    );
-  }
-  if (presetIncompatible.length) {
-    issues.push(
-      issue.error(
-        null,
-        `Preset cannot run with ${model} because these LoRAs are incompatible: ${presetIncompatible.join(", ")}. Choose another preset or model.`,
-      ),
-    );
-  }
-  if (loraIncompatible.length) {
-    issues.push(
-      issue.error(
-        null,
-        `Generate is blocked because these selected LoRAs are incompatible with ${model}: ${loraIncompatible.join(", ")}.`,
-      ),
-    );
-  }
+  issues.push(...presetLoraIssues({ presetMissing, presetIncompatible, loraIncompatible, modelName }));
   return issues;
 }
 

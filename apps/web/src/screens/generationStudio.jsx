@@ -685,21 +685,3 @@ export function PresetGuidanceStrip({ selectedPreset, presetPromptParts, presetL
     </div>
   );
 }
-
-// The preset "missing"/"incompatible" inline warnings shared by both studios.
-export function PresetValidationWarnings({ presetValidationResult, selectedModel }) {
-  return (
-    <>
-      {presetValidationResult.missing.length ? (
-        <p className="inline-warning">
-          Preset cannot run until LoRA import finishes: {presetValidationResult.missing.join(", ")}. Wait for the Queue or choose another preset.
-        </p>
-      ) : null}
-      {presetValidationResult.incompatible.length ? (
-        <p className="inline-warning">
-          Preset cannot run with {selectedModel?.name ?? "the selected model"} because these LoRAs are incompatible: {presetValidationResult.incompatible.join(", ")}. Choose another preset or model.
-        </p>
-      ) : null}
-    </>
-  );
-}
