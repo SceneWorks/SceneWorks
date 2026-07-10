@@ -451,3 +451,122 @@ fn illustrious_train_apply_mlx_smoke() {
          family=sdxl, delta={delta:.2}, train {train_secs:.1}s peak {train_peak_gb:.1}GB"
     );
 }
+
+/// sc-10616 — real THIRD-PARTY **kohya** LoRA inference validation. Distinct from the training smoke
+/// above: it loads a community Illustrious LoRA in kohya format (`lora_te1_`/`lora_te2_`/`lora_unet_`,
+/// the Civitai/HF convention — NOT the PEFT naming the trainer emits) and proves (a) `lora_family`
+/// classifies it as `sdxl` off the dual-text-encoder key split (the real detection path, not the
+/// happy path where metadata declares the family), and (b) it applies at generation and visibly
+/// changes output. Applies on the DENSE bf16 tier — a packed q4/q8 base fails `merge_dense_delta`
+/// (a pre-existing family-wide constraint, filed as the sc-10616 finding).
+///
+/// ```sh
+/// ILL_BF16_DIR=/path/ill-v1-fixed/bf16 ILL_MODEL=illustrious_xl_v1 \
+///   ILL_LORA_PATH="/path/The Artist - Style for Illustrious XL.safetensors" \
+///   RUST_TEST_THREADS=1 cargo test -p sceneworks-worker --lib \
+///   illustrious_external_kohya_lora_apply_mlx_smoke -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "real-weight MLX inference smoke (sc-10616); needs an Illustrious bf16 tier + a kohya LoRA. Set ILL_BF16_DIR, ILL_LORA_PATH"]
+fn illustrious_external_kohya_lora_apply_mlx_smoke() {
+    let bf16_dir = PathBuf::from(
+        std::env::var("ILL_BF16_DIR")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .expect("set ILL_BF16_DIR to the Illustrious dense bf16 tier")
+            .trim(),
+    );
+    assert!(
+        bf16_dir.join("unet").is_dir(),
+        "ILL_BF16_DIR must be a diffusers component tree with unet/; got {}",
+        bf16_dir.display()
+    );
+    let lora_path = PathBuf::from(
+        std::env::var("ILL_LORA_PATH")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .expect("set ILL_LORA_PATH to a kohya Illustrious LoRA .safetensors")
+            .trim(),
+    );
+    assert!(
+        lora_path.is_file(),
+        "ILL_LORA_PATH is not a file: {}",
+        lora_path.display()
+    );
+    let model = env_or("ILL_MODEL", "illustrious");
+    let res: u32 = env_or("ILL_RES", "1024").parse().expect("ILL_RES");
+    let seed: u64 = env_or("ILL_SEED", "7").parse().expect("ILL_SEED");
+    let scale: f32 = env_or("ILL_SCALE", "1.0").parse().expect("ILL_SCALE");
+    let out_dir = PathBuf::from(env_or("ILL_OUT_DIR", "/tmp/ill_ext_lora"));
+    std::fs::create_dir_all(&out_dir).expect("out dir");
+
+    // (1) Kohya dual-text-encoder format + the REAL family-detection path (not a declared-metadata
+    // shortcut): `detect_model_family` must classify it `sdxl` off the `lora_te1_`/`lora_te2_` split.
+    let names = safetensors_tensor_names(&lora_path);
+    let has_te1 = names.iter().any(|k| k.starts_with("lora_te1_"));
+    let has_te2 = names.iter().any(|k| k.starts_with("lora_te2_"));
+    let has_unet = names.iter().any(|k| k.starts_with("lora_unet_"));
+    println!(
+        "[ill-ext {model}] adapter {} tensors: kohya lora_te1_={has_te1} lora_te2_={has_te2} lora_unet_={has_unet}",
+        names.len()
+    );
+    assert!(
+        has_te1 && has_te2 && has_unet,
+        "expected a kohya SDXL dual-text-encoder LoRA (lora_te1_/lora_te2_/lora_unet_)"
+    );
+    let detected = sceneworks_core::lora_family::detect_model_family(&lora_path)
+        .expect("family detection reads the safetensors header");
+    assert_eq!(
+        detected.as_deref(),
+        Some("sdxl"),
+        "lora_family must classify a kohya dual-TE Illustrious LoRA as `sdxl` (got {detected:?})"
+    );
+    println!("[ill-ext {model}] lora_family detected: {detected:?}");
+
+    // (2) Apply at generation on the dense tier — same seed, without vs with the LoRA.
+    let prompt = env_or(
+        "ILL_PROMPT",
+        "1girl, solo, silver hair, anime portrait, detailed, masterpiece",
+    );
+    let baseline = render(&bf16_dir, None, None, &prompt, seed, res);
+    save_png(
+        &baseline,
+        &out_dir.join(format!("{model}_extlora_baseline.png")),
+    );
+    let with_lora = render(
+        &bf16_dir,
+        None,
+        Some(AdapterSpec::new(
+            lora_path.clone(),
+            scale,
+            AdapterKind::Lora,
+        )),
+        &prompt,
+        seed,
+        res,
+    );
+    let after_png = out_dir.join(format!("{model}_extlora_with.png"));
+    save_png(&with_lora, &after_png);
+
+    let (bstd, astd) = (image_std(&baseline), image_std(&with_lora));
+    let delta = mean_abs_delta(&baseline, &with_lora);
+    println!(
+        "[ill-ext {model}] base_std={bstd:.1} after_std={astd:.1} mean_abs_delta={delta:.2} -> {}",
+        after_png.display()
+    );
+    assert!(
+        !is_all_zero(&baseline) && !is_all_zero(&with_lora),
+        "a render is all-zero (broken decode)"
+    );
+    assert!(
+        bstd > DEGENERATE_STD_FLOOR_TIGHT && astd > DEGENERATE_STD_FLOOR_TIGHT,
+        "a render looks degenerate (base_std {bstd:.1}, after_std {astd:.1})"
+    );
+    assert!(
+        delta > 1.0,
+        "the kohya LoRA did not change output (mean_abs_delta {delta:.2}) — not applied at inference"
+    );
+    println!(
+        "[ill-ext-DONE {model}] third-party kohya LoRA: family=sdxl, applies on bf16, delta={delta:.2}"
+    );
+}
