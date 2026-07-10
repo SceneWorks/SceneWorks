@@ -12867,3 +12867,60 @@ async fn no_external_roots_leaves_the_lora_catalog_unchanged() {
         "no external rows without an operator-configured root"
     );
 }
+
+/// sc-10452: the whole point of detecting a family on a scanned adapter is that the
+/// existing compatibility gate then treats it exactly like a manifest LoRA. Nothing
+/// declares `families` on an external row — `families_from_value_chain` falls back to
+/// the singular `family` key and normalizes it — so assert the gate end-to-end rather
+/// than trusting that fallback to survive a refactor.
+#[test]
+fn external_lora_family_is_detected_and_gates_model_compatibility() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let comfy_root = temp_dir.path().join("models");
+    write_comfy_wan_adapter(
+        &comfy_root
+            .join("loras")
+            .join("Wan")
+            .join("detailz-wan.safetensors"),
+    );
+
+    let mut cache = crate::external_loras::ExternalLoraCache::default();
+    let catalog =
+        crate::external_loras::scan_external_loras(std::slice::from_ref(&comfy_root), &mut cache);
+    let lora = catalog.first().expect("one scanned adapter");
+    // Read from the tensor keys, not the filename or folder.
+    assert_eq!(lora["family"], "wan-video");
+
+    let lora_id = lora["id"].as_str().expect("id").to_owned();
+    let attached = vec![json!({ "id": lora_id, "weight": 0.8 })];
+
+    // A Wan model accepts it: the detected family matches `loraCompatibility.families`.
+    let wan = vec![json!({
+        "id": "wan_2_2",
+        "loraCompatibility": { "families": ["wan-video"], "types": ["style"] }
+    })];
+    let accepted =
+        super::validate_lora_specs_for_model(&wan, &catalog, "wan_2_2", &attached, false, "LoRA")
+            .expect("a wan-video adapter is compatible with a wan-video model");
+    assert_eq!(accepted.len(), 1);
+
+    // A Z-Image model rejects the same adapter, naming the detected family.
+    let z_image = vec![json!({
+        "id": "z_image_turbo",
+        "loraCompatibility": { "families": ["z-image"], "types": ["style"] }
+    })];
+    let error = super::validate_lora_specs_for_model(
+        &z_image,
+        &catalog,
+        "z_image_turbo",
+        &attached,
+        false,
+        "LoRA",
+    )
+    .expect_err("a wan-video adapter is not compatible with a z-image model");
+    assert!(
+        error.detail.contains("wan-video"),
+        "the rejection names the detected family: {}",
+        error.detail
+    );
+}
