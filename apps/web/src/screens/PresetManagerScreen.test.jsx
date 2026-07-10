@@ -29,6 +29,7 @@ const presets = [
     workflow: "text_to_image",
     model: "z_image_turbo",
     updatedAt: "2026-07-09T00:00:00Z",
+    lastUsedAt: "2026-07-06T00:00:00Z",
     prompt: { prefix: "cinematic portrait of", suffix: ", 85mm" },
     defaults: { resolution: "1024x1024", count: 4, quality: "balanced" },
     loras: [{ id: "global_detail", weight: 0.7 }],
@@ -40,6 +41,7 @@ const presets = [
     workflow: "edit_image",
     model: "z_image_turbo",
     updatedAt: "2026-07-05T00:00:00Z",
+    lastUsedAt: "2026-07-08T00:00:00Z",
     ui: { description: "cel shading" },
   },
   {
@@ -123,8 +125,7 @@ describe("PresetManagerScreen", () => {
     await render();
     const sortSelect = () => container.querySelector("select[aria-label='Sort presets']");
 
-    // Default sort is `updatedAt` descending — there is no lastUsedAt to sort on (sc-10520).
-    // Cinematic 07-09, Anime 07-05, Bridge 07-03.
+    // Default sort is `updatedAt` descending: Cinematic 07-09, Anime 07-05, Bridge 07-03.
     expect(cardNames()).toEqual(["Cinematic Portrait", "Anime Key Visual", "Bridge Clip"]);
 
     await changeField(sortSelect(), "name");
@@ -133,6 +134,16 @@ describe("PresetManagerScreen", () => {
     // global (Bridge, Cinematic) before project (Anime), name-tiebroken within a scope.
     await changeField(sortSelect(), "scope");
     expect(cardNames()).toEqual(["Bridge Clip", "Cinematic Portrait", "Anime Key Visual"]);
+  });
+
+  it("sorts by recently used, sinking never-used presets to the bottom (sc-10520)", async () => {
+    await render();
+    const sortSelect = () => container.querySelector("select[aria-label='Sort presets']");
+
+    // Anime used 07-08, Cinematic used 07-06, Bridge never used (no lastUsedAt) → last,
+    // even though Bridge's ordering differs under `updated`/`name`/`scope`.
+    await changeField(sortSelect(), "used");
+    expect(cardNames()).toEqual(["Anime Key Visual", "Cinematic Portrait", "Bridge Clip"]);
   });
 
   it("hands a preset to the studio that can run it", async () => {

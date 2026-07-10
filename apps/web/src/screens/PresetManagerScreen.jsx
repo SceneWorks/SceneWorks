@@ -56,6 +56,7 @@ const imageAspectChoices = ["1024x1024", "1536x1024", "1024x1536", "2048x1152"];
 const videoResolutionChoices = ["768x512", "1280x720", "720x1280"];
 
 const SORT_CHOICES = [
+  ["used", "Recently used"],
   ["updated", "Recently updated"],
   ["name", "Name"],
   ["scope", "Scope"],
@@ -547,6 +548,11 @@ export function PresetManagerScreen() {
       }
       if (sort === "scope") {
         return (scopeRank[a.scope] ?? 1) - (scopeRank[b.scope] ?? 1) || byName(a, b);
+      }
+      if (sort === "used") {
+        // Newest-used first; never-used presets (no lastUsedAt) sink to the bottom
+        // because "" sorts after any real timestamp under a descending compare.
+        return String(b.lastUsedAt ?? "").localeCompare(String(a.lastUsedAt ?? "")) || byName(a, b);
       }
       return String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")) || byName(a, b);
     });
