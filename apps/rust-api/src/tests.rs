@@ -6,12 +6,14 @@ use super::training::{
 use super::workers::person_readiness_from_workers;
 use super::{
     create_app, create_app_with_state, huggingface_repo_cache_path, inject_converted_model_path,
-    inprocess_worker_gpu_id, lora_artifact_paths, merge_model_manifest_entry, mlx_catalog_status,
-    open_bind_override_enabled, safe_download_dir, seed_mode_for_config_dir, serialize_job_lora,
-    should_warn_open_bind, strip_jsonc_comments, sweep_stale_asset_uploads_before,
-    sweep_stale_lora_uploads_before, sweep_stale_uploads, Settings, WorkerCapability,
-    WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, DEFAULT_API_HOST, EVENT_BUFFER_SIZE,
-    HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
+    inprocess_utility_worker_id, inprocess_worker_gpu_id, lora_artifact_paths,
+    merge_model_manifest_entry, mlx_catalog_status, open_bind_override_enabled,
+    parse_inprocess_utility_worker_count, safe_download_dir, seed_mode_for_config_dir,
+    serialize_job_lora, should_warn_open_bind, strip_jsonc_comments,
+    sweep_stale_asset_uploads_before, sweep_stale_lora_uploads_before, sweep_stale_uploads,
+    Settings, WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER,
+    DEFAULT_API_HOST, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE,
+    TEST_MAX_LORA_UPLOAD_BYTES,
 };
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -10699,6 +10701,64 @@ fn inprocess_worker_defaults_to_cpu_utility() {
     // Explicit override is honored.
     assert_eq!(inprocess_worker_gpu_id(Some("auto".to_owned())), "auto");
     assert_eq!(inprocess_worker_gpu_id(Some("0".to_owned())), "0");
+}
+
+#[test]
+fn inprocess_utility_worker_count_defaults_to_two() {
+    // Unset / blank / unparseable → 2 so desktop downloads run two-at-a-time
+    // (sc-10744) instead of serializing behind a single worker.
+    assert_eq!(parse_inprocess_utility_worker_count(None), 2);
+    assert_eq!(parse_inprocess_utility_worker_count(Some(String::new())), 2);
+    assert_eq!(
+        parse_inprocess_utility_worker_count(Some("   ".to_owned())),
+        2
+    );
+    assert_eq!(
+        parse_inprocess_utility_worker_count(Some("two".to_owned())),
+        2
+    );
+    // A set, parseable value wins; surrounding whitespace is tolerated.
+    assert_eq!(
+        parse_inprocess_utility_worker_count(Some("1".to_owned())),
+        1
+    );
+    assert_eq!(
+        parse_inprocess_utility_worker_count(Some("4".to_owned())),
+        4
+    );
+    assert_eq!(
+        parse_inprocess_utility_worker_count(Some(" 3 ".to_owned())),
+        3
+    );
+    // Never a zero-worker pool: 0 clamps up to 1.
+    assert_eq!(
+        parse_inprocess_utility_worker_count(Some("0".to_owned())),
+        1
+    );
+}
+
+#[test]
+fn inprocess_utility_worker_ids_are_distinct_and_stable() {
+    // Index 0 keeps the configured id unchanged (a single-worker setup registers
+    // exactly as before); each extra worker gets a unique `-N` suffix so two loops
+    // never collide on registration.
+    assert_eq!(
+        inprocess_utility_worker_id("rust-utility-worker", 0),
+        "rust-utility-worker"
+    );
+    assert_eq!(
+        inprocess_utility_worker_id("rust-utility-worker", 1),
+        "rust-utility-worker-1"
+    );
+    assert_eq!(
+        inprocess_utility_worker_id("rust-utility-worker", 2),
+        "rust-utility-worker-2"
+    );
+    // Distinctness across a small pool.
+    let ids: std::collections::HashSet<_> = (0..4)
+        .map(|index| inprocess_utility_worker_id("host-a", index))
+        .collect();
+    assert_eq!(ids.len(), 4);
 }
 
 #[tokio::test]
