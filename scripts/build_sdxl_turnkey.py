@@ -77,11 +77,74 @@ STATIC_TREES = ("scheduler", "tokenizer", "tokenizer_2")
 GROUP_SIZE = 64
 #: safetensors `__metadata__` on dense files; quantized files carry none (matches the published tiers).
 DENSE_METADATA = {"format": "pt"}
+#: `unet/config.json` keys that pin the architecture. If a reference turnkey agrees with the converted
+#: checkpoint on all of these, its descriptors describe the same UNet and are safe to adopt (sc-10666).
+ARCH_KEYS = (
+    "cross_attention_dim",
+    "addition_time_embed_dim",
+    "projection_class_embeddings_input_dim",
+    "block_out_channels",
+    "transformer_layers_per_block",
+    "attention_head_dim",
+    "down_block_types",
+    "up_block_types",
+    "in_channels",
+    "out_channels",
+)
 
 
 def quantizable(key: str, weight: mx.array) -> bool:
     """The published selection rule: rank-2 `.weight`, excluding the CLIP embedding lookups."""
     return key.endswith(".weight") and weight.ndim == 2 and "embeddings." not in key
+
+
+def resolve_config_source(dense: Path, reference: Path | None) -> Path:
+    """Which tree the tier descriptors are copied from: a known-good turnkey, or the converted one.
+
+    Returns `reference` once it is proven to describe the same UNet, else `dense`. Deliberately does
+    not mutate `dense` — with `--source <diffusers-dir>` that is the caller's own tree (sc-10666).
+
+    `from_single_file` reconstructs *weights* faithfully but emits descriptors that misdescribe them:
+    the text encoders get `CLIPModel` configs (`model_type: "clip"` + a nested `text_config`) though
+    the stored weights are a `CLIPTextModel`; the scheduler is written as `EulerDiscreteScheduler`
+    where the family uses `DDIMScheduler`; `vae/config.json` leaks diffusers' internal
+    `_name_or_path: "../sdxl-vae/"`; `unet/config.json` says `upcast_attention: null` not `false`.
+
+    None of it reaches our engines — `mlx-gen-sdxl` and `candle-gen-sdxl` hardcode the SDXL configs and
+    never read these files — which is exactly why it went unnoticed. It reaches everything else:
+    `transformers`/`diffusers` loading the published repo directly, and the ComfyUI external-roots
+    lane (epic 10451). A published artifact must not misdescribe itself just because our loader
+    doesn't look.
+
+    Every SDXL turnkey shares one architecture, so these descriptors are architecture-only and
+    identical across the family. Adopt the reference's verbatim — but only after proving the two
+    really are the same UNet. Importing a config for a *different* architecture would be a far worse
+    bug than the one this fixes.
+    """
+    if reference is None:
+        return dense
+    converted_unet = json.loads((dense / "unet" / "config.json").read_text())
+    reference_unet = json.loads((reference / "unet" / "config.json").read_text())
+    mismatched = {
+        key: (converted_unet.get(key), reference_unet.get(key))
+        for key in ARCH_KEYS
+        if converted_unet.get(key) != reference_unet.get(key)
+    }
+    if mismatched:
+        detail = "\n".join(f"    {k}: converted={c!r} reference={r!r}" for k, (c, r) in mismatched.items())
+        raise SystemExit(
+            f"--reference-configs {reference} describes a different UNet than the converted "
+            f"checkpoint; refusing to adopt its descriptors:\n{detail}"
+        )
+    missing = [
+        str(path)
+        for path in [reference / "model_index.json", *(reference / c / "config.json" for c in COMPONENTS)]
+        if not path.is_file()
+    ]
+    if missing:
+        raise SystemExit(f"--reference-configs {reference} is missing descriptors: {', '.join(missing)}")
+    print(f"[configs] adopting descriptors from {reference} ({len(ARCH_KEYS)} arch keys agree)", flush=True)
+    return reference
 
 
 def load_component(root: Path, subdir: str, stem: str) -> dict[str, mx.array]:
@@ -156,10 +219,10 @@ def copy_static(source: Path, tier: Path) -> None:
             shutil.copy2(config, tier / subdir / "config.json")
 
 
-def build_tier(source: Path, out: Path, tier: str) -> None:
-    """Emit one tier subdir from a dense diffusers tree."""
+def build_tier(source: Path, out: Path, tier: str, config_source: Path | None = None) -> None:
+    """Emit one tier subdir: weights from `source`, descriptors from `config_source` (default `source`)."""
     dest = out / tier
-    copy_static(source, dest)
+    copy_static(config_source or source, dest)
     bits = {"q4": 4, "q8": 8}.get(tier)
 
     for subdir, stem in COMPONENTS.items():
@@ -212,9 +275,12 @@ def cmd_build(args: argparse.Namespace) -> int:
     else:
         raise SystemExit(f"--source is neither a file nor a directory: {source}")
 
+    reference = Path(args.reference_configs).expanduser() if args.reference_configs else None
+    config_source = resolve_config_source(dense, reference)
+
     for tier in args.tiers:
         print(f"[leg 2] {tier}", flush=True)
-        build_tier(dense, out, tier)
+        build_tier(dense, out, tier, config_source)
 
     if args.prune_dense and source.is_file():
         shutil.rmtree(dense)
@@ -286,6 +352,13 @@ def main() -> int:
     b.add_argument("--out", required=True)
     b.add_argument("--tiers", nargs="+", default=["bf16", "q8", "q4"], choices=["bf16", "q8", "q4"])
     b.add_argument("--prune-dense", action="store_true", help="delete the leg-1 dense tree afterwards")
+    b.add_argument(
+        "--reference-configs",
+        help="tier dir of a known-good SDXL turnkey (e.g. <realvisxl-mlx>/bf16) whose component "
+        "configs, scheduler, tokenizers and model_index.json are adopted verbatim. Aborts unless its "
+        "unet/config.json agrees with the converted checkpoint on every architecture key. Use this "
+        "when publishing: `from_single_file` emits descriptors that misdescribe the weights (sc-10666).",
+    )
     b.set_defaults(fn=cmd_build)
 
     v = sub.add_parser("verify", help="diff a built turnkey against a published one")
