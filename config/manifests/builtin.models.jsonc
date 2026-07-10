@@ -4257,10 +4257,16 @@
       "licenseUrl": "https://huggingface.co/circlestone-labs/Anima",
       "ui": {
         "label": "Anima 2B",
-        "description": "CircleStone Labs Anima 2B — an anime text-to-image model ported natively to MLX (Apple Silicon only). A Cosmos-Predict2 diffusion transformer conditioned by a compact query-token text adapter over a Qwen3-0.6B encoder, decoded through the Qwen-Image VAE. Runs ~30 steps at guidance 4.5 (flow-match, ER-SDE-3 sampler, shift 3.0). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting works (e.g. `(chibi:2)`), applied to the text query tokens. Convert-at-install: the ~5.6 GB source is packed on-device into bf16 / q8 (default) / q4 tiers — q8 is the default (near-lossless, ≈bf16); pick bf16 for max fidelity (and, on this small 2B model, often the fastest on Apple Silicon), or q4 to save RAM. Distributed under the CircleStone Labs Non-Commercial License v1.2: generations are for non-commercial use only. Runs comfortably on a 16 GB-class Mac.",
+        "description": "CircleStone Labs Anima 2B — an anime text-to-image model ported natively to MLX (Apple Silicon only). A Cosmos-Predict2 diffusion transformer conditioned by a compact query-token text adapter over a Qwen3-0.6B encoder, decoded through the Qwen-Image VAE. Runs ~30 steps at guidance 4.5 (flow-match, ER-SDE-3 sampler, shift 3.0). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting works (e.g. `(chibi:2)`), applied to the text query tokens. Convert-at-install: the ~5.6 GB source is packed on-device into bf16 / q8 (default) / q4 tiers — q8 is the default (near-lossless, ≈bf16); pick bf16 for max fidelity (and, on this small 2B model, often the fastest on Apple Silicon), or q4 for a softer, more painterly look (and to save RAM). Distributed under the CircleStone Labs Non-Commercial License v1.2: generations are for non-commercial use only. Runs comfortably on a 16 GB-class Mac.",
         "recommendedFor": ["text_to_image"],
-        // Booru negative-prompt prefix (sc-10523). Image Studio seeds this into an empty negative box.
+        // Booru quality prefix + negative (sc-10523, sc-10760). Image Studio seeds `defaultPrompt` into an
+        // UNEDITED prompt box and `defaultNegativePrompt` into an EMPTY negative box (text-to-image AND
+        // character mode). Anima is a danbooru-tag model that renders low-effort art from a bare sentence, so
+        // opening the prompt with the quality prefix and building on it is what the model card recommends.
+        // `promptHint` shows the inline booru tip under the prompt box (and opens the prompt guide).
+        "defaultPrompt": "masterpiece, best quality, ",
         "defaultNegativePrompt": "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration",
+        "promptHint": "Booru-tag model: keep the quality prefix and describe your subject as comma-separated tags (e.g. 1girl, solo, pink hair, superhero costume, cape, dynamic pose). A plain sentence renders low-effort art.",
         "promptGuide": {
           "title": "Anima Prompt Guide",
           "path": "/prompt-guides/anima.md",
@@ -4341,9 +4347,12 @@
       "licenseUrl": "https://huggingface.co/circlestone-labs/Anima",
       "ui": {
         "label": "Anima 2B Aesthetic",
-        "description": "CircleStone Labs Anima 2B Aesthetic — the aesthetic fine-tune of Anima 2B, ported natively to MLX (Apple Silicon only). Same Cosmos-Predict2 transformer + query-token text adapter (Qwen3-0.6B) + Qwen-Image VAE as the base, tuned for a stronger aesthetic. Runs ~30 steps at guidance 4.5 (flow-match, ER-SDE-3 sampler, shift 3.0). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting (e.g. `(chibi:2)`) works. Convert-at-install into bf16 / q8 (default) / q4 tiers. Distributed under the CircleStone Labs Non-Commercial License v1.2: non-commercial use only. Runs comfortably on a 16 GB-class Mac.",
+        "description": "CircleStone Labs Anima 2B Aesthetic — the aesthetic fine-tune of Anima 2B, ported natively to MLX (Apple Silicon only). Same Cosmos-Predict2 transformer + query-token text adapter (Qwen3-0.6B) + Qwen-Image VAE as the base, tuned for a stronger aesthetic. Runs ~30 steps at guidance 4.5 (flow-match, ER-SDE-3 sampler, shift 3.0). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting (e.g. `(chibi:2)`) works. Convert-at-install into bf16 / q8 (default) / q4 (softer, painterly) tiers. Distributed under the CircleStone Labs Non-Commercial License v1.2: non-commercial use only. Runs comfortably on a 16 GB-class Mac.",
         "recommendedFor": ["text_to_image"],
+        // Booru quality prefix + negative (sc-10523, sc-10760) — same seams as anima_base.
+        "defaultPrompt": "masterpiece, best quality, ",
         "defaultNegativePrompt": "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration",
+        "promptHint": "Booru-tag model: keep the quality prefix and describe your subject as comma-separated tags (e.g. 1girl, solo, pink hair, superhero costume, cape, dynamic pose). A plain sentence renders low-effort art.",
         "promptGuide": {
           "title": "Anima Prompt Guide",
           "path": "/prompt-guides/anima.md",
@@ -4428,7 +4437,11 @@
         "label": "Anima 2B Turbo",
         "description": "CircleStone Labs Anima 2B Turbo — the merged few-step student of Anima 2B, ported natively to MLX (Apple Silicon only). Same Cosmos-Predict2 transformer + query-token text adapter (Qwen3-0.6B) + Qwen-Image VAE, guidance-distilled to run CFG-free in ~10 steps (much faster than the 30-step base). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting (e.g. `(chibi:2)`) works. Convert-at-install into bf16 / q8 (default) / q4 tiers. Distributed under the CircleStone Labs Non-Commercial License v1.2: non-commercial use only. Runs comfortably on a 16 GB-class Mac.",
         "recommendedFor": ["text_to_image"],
+        // Booru quality prefix + negative (sc-10523, sc-10760) — same seams as anima_base. (Turbo is CFG-free,
+        // so its q4 tier stays crisp — no painterly note in the description.)
+        "defaultPrompt": "masterpiece, best quality, ",
         "defaultNegativePrompt": "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration",
+        "promptHint": "Booru-tag model: keep the quality prefix and describe your subject as comma-separated tags (e.g. 1girl, solo, pink hair, superhero costume, cape, dynamic pose). A plain sentence renders low-effort art.",
         "promptGuide": {
           "title": "Anima Prompt Guide",
           "path": "/prompt-guides/anima.md",
