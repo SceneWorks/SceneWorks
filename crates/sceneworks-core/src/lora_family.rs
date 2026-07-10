@@ -343,6 +343,11 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
         // SCAIL-2 (epic 5439) is likewise macOS-only native MLX (engine id
         // "scail2_14b"); no Torch/diffusers adapter. Lineage label only.
         "scail2" => Some("scail2"),
+        // Anima (epic 10512) is macOS-only native MLX (Cosmos-Predict2 DiT + AnimaTextConditioner);
+        // there is no Torch/diffusers adapter — the job is MLX-routed by engine id (`anima_base` /
+        // `anima_aesthetic` / `anima_turbo`), never instantiated through a Torch adapter. Lineage
+        // label only (mirrors sd3 / bernini / scail2).
+        "anima" => Some("anima"),
         _ => None,
     }
 }
@@ -369,6 +374,11 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         // SceneWorks yet, so the family default advertises only what the native port
         // serves today (sc-7874 declares the LoRA-compatibility family).
         ("image", "sd3") => vec!["text_to_image", "style_variations"],
+        // Anima (epic 10512, native MLX) is an anime text-to-image DiT. LoRA-capable
+        // (`supports_lora`/`supports_lokr`, sc-10521); no edit/inpaint or reference/IP-Adapter
+        // surface, so the family default advertises only t2i + style variations (like z-image /
+        // qwen-image / lens / flux).
+        ("image", "anima") => vec!["text_to_image", "style_variations"],
         // Bernini still-image companion (epic 4699 / sc-5424): the same `Modality::Both`
         // engine the video `bernini` family uses, but the image-typed catalog id
         // (`bernini_image`) exposes only the still tasks — t2i (text→image) and i2i
@@ -500,6 +510,9 @@ pub fn diffusers_class_name_to_family(class_name: &str) -> Option<String> {
             Some("qwen-image".to_owned())
         }
         "lenspipeline" => Some("lens".to_owned()),
+        // Anima (epic 10512). Its diffusers modular pipeline (`AnimaModularPipeline`) is the
+        // `model_index.json` `_class_name` a diffusers-format Anima export would carry.
+        "animamodularpipeline" => Some("anima".to_owned()),
         "fluxpipeline" | "fluximg2imgpipeline" | "fluxinpaintpipeline" => Some("flux".to_owned()),
         "chromapipeline" | "chromaimg2imgpipeline" => Some("chroma".to_owned()),
         "kolorspipeline" | "kolorsimg2imgpipeline" => Some("kolors".to_owned()),
@@ -540,6 +553,7 @@ pub fn detect_lora_family(header: &Value) -> Option<String> {
         Bucket::LtxVideo => Some("ltx-video".to_owned()),
         Bucket::Sd3 => Some("sd3".to_owned()),
         Bucket::Ideogram => Some("ideogram".to_owned()),
+        Bucket::Anima => Some("anima".to_owned()),
         Bucket::Sdxl => Some("sdxl".to_owned()),
         Bucket::Sd15 => Some("sd1.5".to_owned()),
         Bucket::MmDit => disambiguate_mm_dit(&keys),
@@ -560,6 +574,24 @@ pub fn detect_lora_family(header: &Value) -> Option<String> {
 /// detect belong here, because a confident-but-wrong family is grounds to reject
 /// an import (see the module docs), which is worse than an inconclusive `None`.
 fn detect_unique_key_family(keys: &[String]) -> Option<String> {
+    // Anima (epic 10512). The Cosmos-Predict2 DiT bundles an `AnimaTextConditioner` under an
+    // `llm_adapter` sub-module — a name no other detected family uses. The **turbo** distillation LoRA
+    // (`anima-turbo-lora-v0.2`) trains 60 `diffusion_model.llm_adapter.blocks.<n>.…` targets alongside
+    // the DiT; a single such key unambiguously identifies Anima, ahead of (and exempt from) the
+    // `MIN_KEY_MATCHES` floor — so even a sparse LoKr that touches only the conditioner is detected
+    // (the Ideogram-LoKr precedent, where a below-floor adapter went undetected). The DiT-only style
+    // LoRA carries no `llm_adapter` key and is instead caught by the `Bucket::Anima` signature below on
+    // its Cosmos adaLN-modulation markers — so both official LoRA shapes classify as `anima`, and a
+    // signature that *required* `llm_adapter` (which the style LoRA lacks) is correctly avoided.
+    //
+    // Both the diffusers-dotted (`…llm_adapter.blocks…`) and kohya-flattened (`…_llm_adapter_blocks…`)
+    // spellings are matched. `llm_adapter` appears in no other family's LoRA keys.
+    if keys
+        .iter()
+        .any(|key| key.contains("llm_adapter.") || key.contains("_llm_adapter_"))
+    {
+        return Some("anima".to_owned());
+    }
     // Krea 2 (epic 7565). Its DiT carries a `text_fusion` Qwen3-VL-layer aggregator
     // and a gated single-stream attention whose projection is the leaf Linear
     // `attn.to_gate` — names that appear in no other family's LoRA keys (dual-stream
@@ -606,6 +638,14 @@ enum Bucket {
     /// family we detect. Metadata (`ss_base_model_version: ideogram4`) is the primary
     /// signal; this bucket catches metadata-less ComfyUI-style exports.
     Ideogram,
+    /// Anima (epic 10512): the Cosmos-Predict2 DiT anime T2I model. Its LoRAs prefix every DiT block
+    /// with `diffusion_model.blocks.<n>.` (shared with native/ComfyUI Wan) but carry the
+    /// Cosmos-specific `adaln_modulation_{self_attn,cross_attn,mlp}.{1,2}` down/up modulation pairs
+    /// (present in BOTH official shapes — the DiT-only style LoRA and the DiT+conditioner turbo LoRA)
+    /// that no other family uses. The turbo shape additionally trains `llm_adapter.*` conditioner
+    /// targets (caught earlier by `detect_unique_key_family`); this bucket keys on the adaLN markers so
+    /// the DiT-only shape — which has NO `llm_adapter` key — still classifies as `anima`.
+    Anima,
     MmDit,
     Sdxl,
     Sd15,
@@ -720,6 +760,14 @@ const SIGNATURES: &[BucketSignature] = &[
             "transformer.transformer_blocks.",
             "single_transformer_blocks.",
             "double_blocks.",
+            // Anima (Cosmos-Predict2) shares the `diffusion_model.blocks.` prefix and the
+            // `.self_attn.`/`.cross_attn.` module markers, but is a separate `Bucket::Anima`
+            // (sc-10521). Disqualify on its Cosmos adaLN-modulation naming — which no real Wan LoRA
+            // ever carries — so a native Anima LoRA never co-scores here and trips the runner-up
+            // margin against the Anima signature.
+            "adaln_modulation_self_attn",
+            "adaln_modulation_cross_attn",
+            "adaln_modulation_mlp",
         ],
         markers: &[
             "diffusion_model.blocks.",
@@ -811,6 +859,51 @@ const SIGNATURES: &[BucketSignature] = &[
             ".feed_forward.w2",
             ".feed_forward.w3",
             ".adaln_modulation",
+        ],
+    },
+    BucketSignature {
+        bucket: Bucket::Anima,
+        // Anima (epic 10512, sc-10521) native / ComfyUI export. Its Cosmos-Predict2 DiT prefixes every
+        // block with `diffusion_model.blocks.<n>.` — a prefix it SHARES with native/ComfyUI Wan — but
+        // its adaLN modulation is the Cosmos triple `adaln_modulation_{self_attn,cross_attn,mlp}.{1,2}`
+        // (down/up pairs), a naming no other detected family uses (Wan has none; Ideogram uses a bare
+        // `.adaln_modulation` with no `_self_attn`/`_cross_attn`/`_mlp` suffix). Requiring the prefix
+        // AND one Cosmos adaLN marker positively identifies BOTH official shapes: the DiT-only style
+        // LoRA (448 targets, no `llm_adapter`) lands here; the DiT+conditioner turbo LoRA is caught
+        // earlier by `detect_unique_key_family` on its `llm_adapter` keys (and would land here too).
+        //
+        // `llm_adapter` is a SCORING marker (only the turbo shape carries it), never REQUIRED — a
+        // signature that required it would misclassify the style LoRA (which has zero adapter tensors).
+        // The kohya-flattened underscore forms are matched alongside the dotted forms. Wan/Flux/LTX/
+        // Ideogram block-word forms are disqualified belt-and-braces; the colliding native-Wan
+        // signature additionally disqualifies on the Cosmos adaLN markers so the two never co-score.
+        require_all_of: &[
+            &["diffusion_model.blocks.", "diffusion_model_blocks_"],
+            &[
+                "adaln_modulation_self_attn",
+                "adaln_modulation_cross_attn",
+                "adaln_modulation_mlp",
+            ],
+        ],
+        disqualifiers: &[
+            ".ffn.",
+            "_ffn_",
+            "transformer_blocks.",
+            "double_blocks.",
+            "single_blocks",
+            "diffusion_model.layers.",
+        ],
+        markers: &[
+            "diffusion_model.blocks.",
+            "diffusion_model_blocks_",
+            "adaln_modulation_self_attn",
+            "adaln_modulation_cross_attn",
+            "adaln_modulation_mlp",
+            "llm_adapter.",
+            "_llm_adapter_",
+            ".self_attn.",
+            ".cross_attn.",
+            ".mlp.layer",
         ],
     },
     BucketSignature {
@@ -2079,6 +2172,140 @@ mod tests {
                 {"dtype": "BF16", "shape": [8, 1024], "data_offsets": [0, 16384]},
         });
         assert_eq!(detect_lora_family(&base_only).as_deref(), Some("krea_2"));
+    }
+
+    // ---- Anima (epic 10512, sc-10521) --------------------------------------------------------------
+
+    /// The 448-target DiT surface (16 per block) as the official Anima LoRAs spell it (ComfyUI
+    /// `diffusion_model.` prefix, PEFT `lora_A`/`lora_B`, original Cosmos module names).
+    fn anima_dit_keys(blocks: usize) -> Vec<String> {
+        let mut keys = Vec::new();
+        for b in 0..blocks {
+            for attn in ["self_attn", "cross_attn"] {
+                for proj in ["q_proj", "k_proj", "v_proj", "output_proj"] {
+                    for role in ["lora_A.weight", "lora_B.weight"] {
+                        keys.push(format!("diffusion_model.blocks.{b}.{attn}.{proj}.{role}"));
+                    }
+                }
+            }
+            for layer in ["mlp.layer1", "mlp.layer2"] {
+                for role in ["lora_A.weight", "lora_B.weight"] {
+                    keys.push(format!("diffusion_model.blocks.{b}.{layer}.{role}"));
+                }
+            }
+            // The Cosmos adaLN-modulation down/up pairs — the Anima-unique discriminator.
+            for adaln in [
+                "adaln_modulation_self_attn",
+                "adaln_modulation_cross_attn",
+                "adaln_modulation_mlp",
+            ] {
+                for updown in ["1", "2"] {
+                    for role in ["lora_A.weight", "lora_B.weight"] {
+                        keys.push(format!(
+                            "diffusion_model.blocks.{b}.{adaln}.{updown}.{role}"
+                        ));
+                    }
+                }
+            }
+        }
+        keys
+    }
+
+    /// The 60-target `AnimaTextConditioner` surface (10 per block) the turbo LoRA adds.
+    fn anima_adapter_keys(blocks: usize) -> Vec<String> {
+        let mut keys = Vec::new();
+        for b in 0..blocks {
+            for attn in ["self_attn", "cross_attn"] {
+                for proj in ["q_proj", "k_proj", "v_proj", "o_proj"] {
+                    for role in ["lora_A.weight", "lora_B.weight"] {
+                        keys.push(format!(
+                            "diffusion_model.llm_adapter.blocks.{b}.{attn}.{proj}.{role}"
+                        ));
+                    }
+                }
+            }
+            for m in ["mlp.0", "mlp.2"] {
+                for role in ["lora_A.weight", "lora_B.weight"] {
+                    keys.push(format!("diffusion_model.llm_adapter.blocks.{b}.{m}.{role}"));
+                }
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn detects_anima_style_lora_dit_only() {
+        // `anima-greg-rutkowski-style` shape: 448 DiT targets, ZERO `llm_adapter` — so it is caught
+        // by the `Bucket::Anima` signature on its Cosmos adaLN markers, NOT the unique-key path. A
+        // signature that required `llm_adapter` would misclassify this file (the crux of sc-10521).
+        let keys = anima_dit_keys(28);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("anima"));
+    }
+
+    #[test]
+    fn detects_anima_turbo_lora_with_adapter() {
+        // `anima-turbo-lora-v0.2` shape: 448 DiT + 60 `llm_adapter` = 508 targets. The `llm_adapter`
+        // key identifies it via the unique-key fast path.
+        let mut keys = anima_dit_keys(28);
+        keys.extend(anima_adapter_keys(6));
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("anima"));
+    }
+
+    #[test]
+    fn detects_sparse_anima_lokr_via_llm_adapter() {
+        // A sparse LoKr that touches only a couple conditioner modules (below the MIN_KEY_MATCHES=4
+        // marker floor) — the Ideogram-LoKr precedent where a below-floor adapter went undetected.
+        // The `llm_adapter` unique key identifies it regardless of the floor. LyCORIS `lokr_*` factors.
+        let header = header_from_keys(&[
+            "diffusion_model.llm_adapter.blocks.0.self_attn.q_proj.lokr_w1",
+            "diffusion_model.llm_adapter.blocks.0.self_attn.q_proj.lokr_w2",
+        ]);
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("anima"));
+    }
+
+    #[test]
+    fn anima_not_mistaken_for_wan_and_wan_still_detected() {
+        // Anima and native/ComfyUI Wan SHARE the `diffusion_model.blocks.` prefix + `.self_attn.`/
+        // `.cross_attn.` markers, so the collision must be resolved in Anima's favor for Anima keys...
+        let anima = anima_dit_keys(28);
+        let anima_header = header_from_keys(&anima.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&anima_header).as_deref(), Some("anima"));
+        assert_ne!(
+            detect_lora_family(&anima_header).as_deref(),
+            Some("wan-video")
+        );
+
+        // ...while a genuine native Wan LoRA (`.ffn.`, no Cosmos adaLN) still detects as wan-video.
+        let mut wan = Vec::new();
+        for b in 0..30 {
+            for m in ["self_attn.q", "self_attn.k", "cross_attn.v", "ffn.0"] {
+                for role in ["lora_A.weight", "lora_B.weight"] {
+                    wan.push(format!("diffusion_model.blocks.{b}.{m}.{role}"));
+                }
+            }
+        }
+        let wan_header = header_from_keys(&wan.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(
+            detect_lora_family(&wan_header).as_deref(),
+            Some("wan-video")
+        );
+    }
+
+    #[test]
+    fn anima_family_metadata_mappings() {
+        assert_eq!(super::model_adapter_for_family("anima"), Some("anima"));
+        assert_eq!(
+            super::model_capabilities_for_type_and_family("image", "anima"),
+            vec!["text_to_image", "style_variations"]
+        );
+        assert_eq!(
+            super::diffusers_class_name_to_family("AnimaModularPipeline").as_deref(),
+            Some("anima")
+        );
+        // The stored/canonical family token round-trips unchanged.
+        assert_eq!(super::canonical_lora_family("anima"), "anima");
     }
 
     /// kohya / musubi-tuner / LyCORIS export of a dual-stream MMDiT (Qwen-Image /
