@@ -6,6 +6,8 @@ import {
   clearPresetDefault,
   editModelForAsset,
   finiteNumberOrUndefined,
+  loraHasResolvableFamily,
+  loraMatchesModel,
   loraWeight,
   normalizeLoraFamily,
   presetMatchesModel,
@@ -56,6 +58,47 @@ describe("presetMatchesModel", () => {
 
   it("stays strict (no family fallback) when the catalog is unavailable", () => {
     expect(presetMatchesModel({ model: "ltx_2_3" }, ltxEros)).toBe(false);
+  });
+});
+
+describe("loraMatchesModel", () => {
+  const sdxlModel = { id: "sdxl", family: "sdxl", loraCompatibility: { families: ["sdxl"] } };
+  const noFamilyModel = { id: "some_model", loraCompatibility: { families: [] } };
+  const sdxlLora = { id: "l", family: "sdxl" };
+  const fluxLora = { id: "l", family: "flux" };
+  const familylessLora = { id: "l", name: "mystery.safetensors" };
+
+  it("matches when the LoRA family is one the model can load", () => {
+    expect(loraMatchesModel(sdxlLora, sdxlModel)).toBe(true);
+  });
+
+  it("does not match a known-but-different family", () => {
+    expect(loraMatchesModel(fluxLora, sdxlModel)).toBe(false);
+  });
+
+  it("fails closed on a family-less LoRA (was offered-then-400d before sc-10509)", () => {
+    expect(loraMatchesModel(familylessLora, sdxlModel)).toBe(false);
+  });
+
+  it("fails closed when the model declares no LoRA families", () => {
+    // The API 400s ("Model … has no declared LoRA families") on any attached LoRA,
+    // so the picker must not offer one either.
+    expect(loraMatchesModel(sdxlLora, noFamilyModel)).toBe(false);
+  });
+
+  it("normalizes separators/underscores on both sides before comparing", () => {
+    expect(loraMatchesModel({ id: "l", family: "Z_Image" }, { id: "z", loraCompatibility: { families: ["z-image"] } })).toBe(true);
+  });
+});
+
+describe("loraHasResolvableFamily", () => {
+  it("is true when the LoRA declares a family", () => {
+    expect(loraHasResolvableFamily({ id: "l", family: "sdxl" })).toBe(true);
+  });
+
+  it("is false when no family can be resolved (the unusable/escape-hatch guard)", () => {
+    expect(loraHasResolvableFamily({ id: "l", name: "mystery.safetensors" })).toBe(false);
+    expect(loraHasResolvableFamily({ id: "l", families: [] })).toBe(false);
   });
 });
 

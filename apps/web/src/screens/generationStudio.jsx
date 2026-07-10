@@ -7,6 +7,7 @@ import {
   applyPresetDefault,
   buildStudioPresetPayload,
   clearPresetDefault,
+  loraHasResolvableFamily,
   loraMatchesModel,
   loraWeight,
   noPresetId,
@@ -220,8 +221,11 @@ export function useGenerationStudio({
     if (lora.installState === "missing") {
       return false;
     }
+    // "Show incompatible" is an escape hatch for a known-but-mismatched family, not
+    // for an unknown one: a family-less LoRA can never generate (the API 400s), so it
+    // stays hidden even here — otherwise it's a dead-end selection (sc-10509).
     if (showIncompatibleLoras) {
-      return true;
+      return loraHasResolvableFamily(lora);
     }
     return loraMatchesModel(lora, selectedModel);
   }), [loras, selectedModel, showIncompatibleLoras]);

@@ -122,10 +122,30 @@ export function normalizeFamilies(values) {
     .filter(Boolean);
 }
 
+// True when a LoRA declares at least one resolvable architecture family. A
+// family-less LoRA — e.g. an external ComfyUI adapter whose on-disk format the
+// detector doesn't recognize (sc-10452 scan, sc-10509) — can never pass the API's
+// generate-time compatibility gate (`validate_lora_specs_for_model` 400s on an
+// empty family). It must not be selectable in any picker, not even under the
+// "Show incompatible" escape hatch, which overrides a known-but-mismatched family,
+// not an unknown one. Model Manager still lists it, flagged unusable, so the user
+// sees the file was found.
+export function loraHasResolvableFamily(lora) {
+  return loraFamilies(lora).length > 0;
+}
+
 export function loraMatchesModel(lora, model) {
   const modelFamilies = modelLoraFamilies(model);
   const families = loraFamilies(lora);
-  return !modelFamilies.length || !families.length || families.some((family) => modelFamilies.includes(family));
+  // Fail closed, matching the API's `validate_lora_specs_for_model`: a LoRA that
+  // declares no family, or a model that declares none, can never pass the
+  // generate-time gate, so it is not compatible here either (sc-10509). Both
+  // branches were previously permissive (`!modelFamilies.length || !families.length`),
+  // so the picker offered a dead-end selection that 400d at generate.
+  if (!modelFamilies.length || !families.length) {
+    return false;
+  }
+  return families.some((family) => modelFamilies.includes(family));
 }
 
 // Resolve an edit-capable model whose family matches the asset's generating model.
