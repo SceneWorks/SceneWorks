@@ -648,6 +648,13 @@ pub(crate) const TRAINER_IDS: &[&str] = &[
     "wan2_2_ti2v_5b",
     "wan2_2_t2v_14b",
     "wan2_2_i2v_14b",
+    // Anima (Cosmos-Predict2 DiT + AnimaTextConditioner; epic 10512, sc-10522): the `mlx-gen-anima`
+    // trainer registers LoRA/LoKr under the same ids as the inference generators of the three variants
+    // (base/aesthetic/turbo). mlx-only (no candle/torch Anima trainer). The trained adapter targets the
+    // DiT AND the bundled `llm_adapter` conditioner (508 targets), applying back via `apply_anima_adapters`.
+    "anima_base",
+    "anima_aesthetic",
+    "anima_turbo",
 ];
 
 /// A [`ModelRow`] paired with the linked gen_core descriptor for its engine id — the merged

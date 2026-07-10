@@ -816,6 +816,9 @@ pub(crate) const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "wan_lora",
     "wan_moe_lora",
     "ltx_mlx_lora",
+    // Anima (epic 10512, sc-10522): the native `mlx-gen-anima` LoRA/LoKr trainer (DiT + `llm_adapter`
+    // conditioner). No torch path, so it is also in `MLX_ONLY_TRAINING_KERNELS`.
+    "anima_lora",
 ];
 
 /// SceneWorks training kernels with a native candle trainer that needs no base-model disambiguation
@@ -842,7 +845,8 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] =
 /// [`CANDLE_ROUTED_TRAINING_KERNELS`]), while torch is still refused. `sd3_lora` (epic 7841 T3
 /// sc-7884) is MLX-native with no torch trainer and no candle trainer yet (the off-Mac/candle SD3.5
 /// trainer is epic 7982), so — like LTX — only an mlx worker runs it today.
-pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &["ltx_mlx_lora", "krea_lora", "sd3_lora"];
+pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] =
+    &["ltx_mlx_lora", "krea_lora", "sd3_lora", "anima_lora"];
 
 #[cfg(test)]
 mod tests {
@@ -1023,12 +1027,14 @@ mod tests {
         "wan_lora",
         "wan_moe_lora",
         "ltx_mlx_lora",
+        "anima_lora",
     ];
 
     const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] =
         &["z_image_lora", "sdxl_lora", "lens_lora", "krea_lora"];
 
-    const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] = &["ltx_mlx_lora", "krea_lora", "sd3_lora"];
+    const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] =
+        &["ltx_mlx_lora", "krea_lora", "sd3_lora", "anima_lora"];
 
     #[test]
     fn routed_model_lists_match_snapshot() {
