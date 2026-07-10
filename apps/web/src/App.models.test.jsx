@@ -263,6 +263,63 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Converted to MLX and ready.");
   });
 
+  it("adds the imported model's row when a model import completes", async () => {
+    // sc-10688, the same gap sc-10679 closed for `model_convert`. A completed model_import upserts
+    // the model into `user.models.jsonc`, and the catalog is derived from that manifest server-side.
+    // Without a refetch on the SSE `job.updated` the Models page never grows the imported row until
+    // the app restarts. (The import route is 403-gated today under sc-7081; this locks the wiring in
+    // so epic 7080's re-enable does not have to rediscover it.)
+    let models = [{ id: "anima_2b", name: "Anima 2B", type: "image", family: "anima", installState: "installed" }];
+    global.fetch.mockImplementation((url) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      }
+      if (path.endsWith("/models")) {
+        return Promise.resolve(response(models));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Models").click();
+    });
+    await settle();
+
+    const cardTitles = () => [...container.querySelectorAll(".model-card-title strong")].map((node) => node.textContent);
+    expect(cardTitles()).toEqual(["Anima 2B"]);
+
+    models = [
+      ...models,
+      { id: "imported_checkpoint", name: "Imported Checkpoint", type: "image", family: "anima", installState: "installed" },
+    ];
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({
+        data: JSON.stringify({
+          id: "import-job-1",
+          type: "model_import",
+          status: "completed",
+          payload: { modelId: "imported_checkpoint", modelName: "Imported Checkpoint" },
+        }),
+      });
+    });
+    await settle();
+    await settle();
+
+    expect(cardTitles()).toEqual(["Anima 2B", "Imported Checkpoint"]);
+  });
+
   it("keeps LoRA imports on the Models page and shows local progress", async () => {
     const createdJobs = [];
     global.fetch.mockImplementation((url, options = {}) => {
