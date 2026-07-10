@@ -7,6 +7,7 @@ import {
   applyPresetDefault,
   buildStudioPresetPayload,
   clearPresetDefault,
+  loraHasResolvableFamily,
   loraMatchesModel,
   loraWeight,
   noPresetId,
@@ -220,8 +221,11 @@ export function useGenerationStudio({
     if (lora.installState === "missing") {
       return false;
     }
+    // "Show incompatible" is an escape hatch for a known-but-mismatched family, not
+    // for an unknown one: a family-less LoRA can never generate (the API 400s), so it
+    // stays hidden even here — otherwise it's a dead-end selection (sc-10509).
     if (showIncompatibleLoras) {
-      return true;
+      return loraHasResolvableFamily(lora);
     }
     return loraMatchesModel(lora, selectedModel);
   }), [loras, selectedModel, showIncompatibleLoras]);
@@ -355,9 +359,15 @@ export function useSavePreset({
   );
 
   useEffect(() => {
+    // Only the snapshot's OWN preset skips the pass — its knob values are already
+    // restored. A different preset resolving first (e.g. Presets → "Use in Studio",
+    // sc-10516) must still apply its defaults, or the launch would select the preset
+    // and silently ignore everything it carries.
     if (skipPresetDefaultsOnHydrate.current && selectedPreset) {
       skipPresetDefaultsOnHydrate.current = false;
-      return;
+      if (selectedPreset.id === saved.selectedPresetId) {
+        return;
+      }
     }
     if (!selectedPreset) {
       for (const [key, setter] of presetDefaultFields) {

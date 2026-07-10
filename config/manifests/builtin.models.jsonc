@@ -4148,6 +4148,249 @@
       }
     },
     {
+      "id": "anima_base",
+      // Anima 2B (epic 10512 / sc-10523) — CircleStone Labs' anime text-to-image model, ported natively
+      // to mlx-gen (engine id `anima_base`). The Cosmos-Predict2 `CosmosTransformer3DModel` DiT (28
+      // layers, 17-channel patch-embed, 3-axis NTK RoPE) + the bundled `AnimaTextConditioner` (T5 query
+      // tokens cross-attending Qwen3-0.6B states) + the Qwen-Image VAE. Native MLX only (mlx-gen-anima;
+      // the candle port sc-10525 exists + is CPU-numerically-validated but has never run on real CUDA, so
+      // it is NOT catalog-routed yet) → macOnly. True-CFG text-to-image (30 steps / guidance 4.5).
+      //
+      // Non-commercial: distributed under the CircleStone Labs Non-Commercial License v1.2. The source
+      // repo `circlestone-labs/Anima` is UN-gated (freely downloadable) but NC — generations are for
+      // non-commercial use only. `nonCommercial: true` feeds the packaging NC-weights guard
+      // (scripts/check-no-nc-weights.mjs, sc-10526) its family tokens from THIS manifest entry.
+      //
+      // Convert-at-install (sc-10517): SceneWorks never redistributes converted Anima weights, so the
+      // worker packs the Cosmos DiT ON-DEVICE to the full q4/q8/bf16 matrix from the ungated `split_files/`
+      // source (the conditioner + Qwen3 TE + Qwen-Image VAE stay dense bf16 in every tier). `downloads`
+      // enumerate the THREE exact source files this variant needs (its DiT + the two shared components) —
+      // NEVER the bare repo, which holds SEVEN full bf16 DiTs (~30 GB vs ~5.6 GB). The 5 distinct source
+      // paths across the three variants match the `ANIMA_DIT_FILES`/`ANIMA_TE_FILE`/`ANIMA_VAE_FILE`
+      // constants asserted by `source_file_plan_is_five_exact_paths_never_the_bare_repo` (sc-10517).
+      "autoDownload": false,
+      "name": "Anima 2B",
+      "family": "anima",
+      "type": "image",
+      "adapter": "mlx_anima",
+      "capabilities": ["text_to_image"],
+      "macOnly": true,
+      "nonCommercial": true,
+      "gated": false,
+      "downloads": [
+        {
+          // The base variant's Cosmos DiT (the convert source). Pulling just this file (plus the two
+          // shared components below) avoids the ~30 GB whole-repo pull (7 bf16 DiTs).
+          "provider": "huggingface",
+          "repo": "circlestone-labs/Anima",
+          "files": [
+            "split_files/diffusion_models/anima-base-v1.0.safetensors",
+            "split_files/text_encoders/qwen_3_06b_base.safetensors",
+            "split_files/vae/qwen_image_vae.safetensors"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 5690000000
+        }
+      ],
+      "defaults": {
+        // diffusers FlowMatchEuler with static time-shift 3.0 (the orthogonal schedulerShift knob, epic
+        // 7114), 30 steps, true CFG 4.5. Default solver is the recommended ER-SDE-3 (`er_sde`, sc-10519).
+        "resolution": "1024x1024",
+        "steps": 30,
+        "guidanceScale": 4.5,
+        "count": 1,
+        "sampler": "er_sde",
+        "scheduler": "default",
+        "schedulerShift": 3.0
+      },
+      "limits": {
+        // Cosmos RoPE trained window → W×H in [512, 1536], multiples of 16 (descriptor RES_MULTIPLE=16;
+        // >1536/side is rejected, not clamped). Anima routes the per-generation sampler/scheduler knobs
+        // through the unified flow framework (epic 7114), so the `anima_base` descriptor advertises
+        // curated_sampler_names()/curated_scheduler_names() — this `limits` menu is a subset (the
+        // engines.rs `manifest_menu_is_subset_of_descriptor` drift guard). "default" is the native loop.
+        "resolutions": ["1024x1024", "832x1216", "1216x832", "896x1152", "1152x896", "768x1344", "1344x768", "1536x1536"],
+        "count": [1, 2, 4],
+        "samplers": ["default", "er_sde", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"]
+      },
+      "loraCompatibility": {
+        // Anima LoRA/LoKr (sc-10521): the trained adapter targets the Cosmos DiT AND the bundled
+        // `llm_adapter` conditioner, applied via `apply_anima_adapters`. Quant + LoRA TOGETHER is
+        // unsupported (sc-10578 — the engine `load()` errors on the combination).
+        "families": ["anima"],
+        "types": ["style", "character"]
+      },
+      "mlx": {
+        // 2B Cosmos DiT + 0.6B Qwen3 TE + Qwen-Image VAE — small. Convert-at-install packs the DiT to the
+        // q4/q8/bf16 matrix on-device (the offline 2B quantize peaks a few GB); default q4. minMemoryGb 16
+        // covers both the convert peak and a 1536² generate.
+        "minMemoryGb": 16,
+        "quantize": 4,
+        "requiresConversion": true,
+        "converter": "anima_quant",
+        "convertSourceRepo": "circlestone-labs/Anima",
+        // epic-10285 staleness: the converted artifact is stale (needs re-convert) once THIS source file
+        // is no longer in the HF cache. Must be one of `ANIMA_DIT_FILES` (validated by the convert plan).
+        "convertSourceFile": "split_files/diffusion_models/anima-base-v1.0.safetensors"
+      },
+      "licenseUrl": "https://huggingface.co/circlestone-labs/Anima",
+      "ui": {
+        "label": "Anima 2B",
+        "description": "CircleStone Labs Anima 2B — an anime text-to-image model ported natively to MLX (Apple Silicon only). A Cosmos-Predict2 diffusion transformer conditioned by a compact query-token text adapter over a Qwen3-0.6B encoder, decoded through the Qwen-Image VAE. Runs ~30 steps at guidance 4.5 (flow-match, ER-SDE-3 sampler, shift 3.0). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting works (e.g. `(chibi:2)`), applied to the text query tokens. Convert-at-install: the ~5.6 GB source is packed on-device into q4 (default) / q8 / bf16 tiers — pick per available RAM. Distributed under the CircleStone Labs Non-Commercial License v1.2: generations are for non-commercial use only. Runs comfortably on a 16 GB-class Mac.",
+        "recommendedFor": ["text_to_image"],
+        // Booru negative-prompt prefix (sc-10523). Image Studio seeds this into an empty negative box.
+        "defaultNegativePrompt": "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration",
+        "promptGuide": {
+          "title": "Anima Prompt Guide",
+          "path": "/prompt-guides/anima.md",
+          "sources": [
+            { "label": "Anima model card (CircleStone Labs)", "url": "https://huggingface.co/circlestone-labs/Anima" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "anima_aesthetic",
+      // Anima 2B Aesthetic (epic 10512 / sc-10523) — the aesthetic fine-tune of Anima 2B. Same
+      // architecture, sampler/scheduler menu, convert-at-install flow, and NC posture as `anima_base`;
+      // differs only in the DiT weights file + (nothing else — same 30 steps / guidance 4.5).
+      "autoDownload": false,
+      "name": "Anima 2B Aesthetic",
+      "family": "anima",
+      "type": "image",
+      "adapter": "mlx_anima",
+      "capabilities": ["text_to_image"],
+      "macOnly": true,
+      "nonCommercial": true,
+      "gated": false,
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "circlestone-labs/Anima",
+          "files": [
+            "split_files/diffusion_models/anima-aesthetic-v1.0.safetensors",
+            "split_files/text_encoders/qwen_3_06b_base.safetensors",
+            "split_files/vae/qwen_image_vae.safetensors"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 5690000000
+        }
+      ],
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 30,
+        "guidanceScale": 4.5,
+        "count": 1,
+        "sampler": "er_sde",
+        "scheduler": "default",
+        "schedulerShift": 3.0
+      },
+      "limits": {
+        "resolutions": ["1024x1024", "832x1216", "1216x832", "896x1152", "1152x896", "768x1344", "1344x768", "1536x1536"],
+        "count": [1, 2, 4],
+        "samplers": ["default", "er_sde", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"]
+      },
+      "loraCompatibility": {
+        "families": ["anima"],
+        "types": ["style", "character"]
+      },
+      "mlx": {
+        "minMemoryGb": 16,
+        "quantize": 4,
+        "requiresConversion": true,
+        "converter": "anima_quant",
+        "convertSourceRepo": "circlestone-labs/Anima",
+        "convertSourceFile": "split_files/diffusion_models/anima-aesthetic-v1.0.safetensors"
+      },
+      "licenseUrl": "https://huggingface.co/circlestone-labs/Anima",
+      "ui": {
+        "label": "Anima 2B Aesthetic",
+        "description": "CircleStone Labs Anima 2B Aesthetic — the aesthetic fine-tune of Anima 2B, ported natively to MLX (Apple Silicon only). Same Cosmos-Predict2 transformer + query-token text adapter (Qwen3-0.6B) + Qwen-Image VAE as the base, tuned for a stronger aesthetic. Runs ~30 steps at guidance 4.5 (flow-match, ER-SDE-3 sampler, shift 3.0). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting (e.g. `(chibi:2)`) works. Convert-at-install into q4 (default) / q8 / bf16 tiers. Distributed under the CircleStone Labs Non-Commercial License v1.2: non-commercial use only. Runs comfortably on a 16 GB-class Mac.",
+        "recommendedFor": ["text_to_image"],
+        "defaultNegativePrompt": "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration",
+        "promptGuide": {
+          "title": "Anima Prompt Guide",
+          "path": "/prompt-guides/anima.md",
+          "sources": [
+            { "label": "Anima model card (CircleStone Labs)", "url": "https://huggingface.co/circlestone-labs/Anima" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "anima_turbo",
+      // Anima 2B Turbo (epic 10512 / sc-10523) — the merged CFG-free few-step student of Anima 2B. Same
+      // architecture + convert-at-install flow + NC posture as the base; the guidance-distilled merged DiT
+      // runs in ~10 steps CFG-free (the `anima_turbo` descriptor advertises supports_guidance=false, so
+      // the 1.0 default is a nominal no-op — `resolve_guidance` returns None).
+      "autoDownload": false,
+      "name": "Anima 2B Turbo",
+      "family": "anima",
+      "type": "image",
+      "adapter": "mlx_anima",
+      "capabilities": ["text_to_image"],
+      "macOnly": true,
+      "nonCommercial": true,
+      "gated": false,
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "circlestone-labs/Anima",
+          "files": [
+            "split_files/diffusion_models/anima-turbo-v1.0.safetensors",
+            "split_files/text_encoders/qwen_3_06b_base.safetensors",
+            "split_files/vae/qwen_image_vae.safetensors"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 5690000000
+        }
+      ],
+      "defaults": {
+        // Merged CFG-free student: 10 steps, guidance INERT (nominal 1.0). Default solver er_sde.
+        "resolution": "1024x1024",
+        "steps": 10,
+        "guidanceScale": 1.0,
+        "count": 1,
+        "sampler": "er_sde",
+        "scheduler": "default",
+        "schedulerShift": 3.0
+      },
+      "limits": {
+        "resolutions": ["1024x1024", "832x1216", "1216x832", "896x1152", "1152x896", "768x1344", "1344x768", "1536x1536"],
+        "count": [1, 2, 4],
+        "samplers": ["default", "er_sde", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"]
+      },
+      "loraCompatibility": {
+        "families": ["anima"],
+        "types": ["style", "character"]
+      },
+      "mlx": {
+        "minMemoryGb": 16,
+        "quantize": 4,
+        "requiresConversion": true,
+        "converter": "anima_quant",
+        "convertSourceRepo": "circlestone-labs/Anima",
+        "convertSourceFile": "split_files/diffusion_models/anima-turbo-v1.0.safetensors"
+      },
+      "licenseUrl": "https://huggingface.co/circlestone-labs/Anima",
+      "ui": {
+        "label": "Anima 2B Turbo",
+        "description": "CircleStone Labs Anima 2B Turbo — the merged few-step student of Anima 2B, ported natively to MLX (Apple Silicon only). Same Cosmos-Predict2 transformer + query-token text adapter (Qwen3-0.6B) + Qwen-Image VAE, guidance-distilled to run CFG-free in ~10 steps (much faster than the 30-step base). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting (e.g. `(chibi:2)`) works. Convert-at-install into q4 (default) / q8 / bf16 tiers. Distributed under the CircleStone Labs Non-Commercial License v1.2: non-commercial use only. Runs comfortably on a 16 GB-class Mac.",
+        "recommendedFor": ["text_to_image"],
+        "defaultNegativePrompt": "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration",
+        "promptGuide": {
+          "title": "Anima Prompt Guide",
+          "path": "/prompt-guides/anima.md",
+          "sources": [
+            { "label": "Anima model card (CircleStone Labs)", "url": "https://huggingface.co/circlestone-labs/Anima" }
+          ]
+        }
+      }
+    },
+    {
       "id": "sdxl",
       "recommended": true,
       "name": "Stable Diffusion XL",

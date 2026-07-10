@@ -118,8 +118,12 @@ fn max_tensor_data_end(header: &Value) -> u64 {
 /// Returns the first `.safetensors` file at or below `path`. When `path`
 /// itself is a `.safetensors` file it is returned directly. Returns `None`
 /// when no file is found or `path` is neither a file nor a directory.
+///
+/// Hidden entries are skipped ([`is_hidden_file`]) — the `read_dir` here is
+/// *unordered*, so an AppleDouble sidecar (`._adapter.safetensors`) could
+/// otherwise be returned in place of the real adapter (SceneWorks#1333).
 pub fn first_safetensors_path(path: &Path) -> Option<PathBuf> {
-    if path.is_file() && has_safetensors_extension(path) {
+    if path.is_file() && is_safetensors_file(path) {
         return Some(path.to_path_buf());
     }
     if !path.is_dir() {
@@ -132,12 +136,42 @@ pub fn first_safetensors_path(path: &Path) -> Option<PathBuf> {
             let entry_path = entry.path();
             if entry_path.is_dir() {
                 stack.push(entry_path);
-            } else if has_safetensors_extension(&entry_path) {
+            } else if is_safetensors_file(&entry_path) {
                 return Some(entry_path);
             }
         }
     }
     None
+}
+
+/// True when `path`'s file name begins with `.` — a hidden entry that is never
+/// a weight or adapter file.
+///
+/// macOS writes an **AppleDouble sidecar** (`._<name>`) beside a file whenever
+/// it must persist extended attributes on a volume with no native xattr support
+/// (exFAT/FAT drives, SMB/NFS shares, cloud-sync folders); they also survive a
+/// Finder copy or a zip round-trip. `._model.safetensors` has extension
+/// `safetensors`, so an extension-only filter admits it — and since `.` sorts
+/// first, a sorted loader opens it *before* the real file, hits its AppleDouble
+/// magic, and dies on a bogus header length (SceneWorks#1333). No legitimate
+/// weight file starts with `.`, so skipping hidden entries is exact.
+///
+/// Mirrors `gen_core::weightsmeta::is_hidden_file`, restated here because
+/// `sceneworks-core` deliberately carries no gen-core dependency.
+pub fn is_hidden_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with('.'))
+}
+
+/// True when `path` is a loadable `.safetensors` file: the extension matches
+/// (case-insensitively — some re-hosted checkpoints ship `.SAFETENSORS`) and the
+/// entry is not hidden.
+///
+/// This is the predicate every directory scan should use. A bare extension test
+/// admits macOS AppleDouble sidecars — see [`is_hidden_file`].
+pub fn is_safetensors_file(path: &Path) -> bool {
+    has_safetensors_extension(path) && !is_hidden_file(path)
 }
 
 fn has_safetensors_extension(path: &Path) -> bool {
@@ -169,7 +203,7 @@ pub fn resolve_adapter_in_dir(dir: &Path, declared: Option<&str>) -> Option<Path
             && Path::new(name).file_name().and_then(|value| value.to_str()) == Some(name);
         if is_plain {
             let candidate = dir.join(name);
-            if candidate.is_file() && has_safetensors_extension(&candidate) {
+            if candidate.is_file() && is_safetensors_file(&candidate) {
                 return Some(candidate);
             }
         }
@@ -343,6 +377,11 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
         // SCAIL-2 (epic 5439) is likewise macOS-only native MLX (engine id
         // "scail2_14b"); no Torch/diffusers adapter. Lineage label only.
         "scail2" => Some("scail2"),
+        // Anima (epic 10512) is macOS-only native MLX (Cosmos-Predict2 DiT + AnimaTextConditioner);
+        // there is no Torch/diffusers adapter — the job is MLX-routed by engine id (`anima_base` /
+        // `anima_aesthetic` / `anima_turbo`), never instantiated through a Torch adapter. Lineage
+        // label only (mirrors sd3 / bernini / scail2).
+        "anima" => Some("anima"),
         _ => None,
     }
 }
@@ -369,6 +408,11 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         // SceneWorks yet, so the family default advertises only what the native port
         // serves today (sc-7874 declares the LoRA-compatibility family).
         ("image", "sd3") => vec!["text_to_image", "style_variations"],
+        // Anima (epic 10512, native MLX) is an anime text-to-image DiT. LoRA-capable
+        // (`supports_lora`/`supports_lokr`, sc-10521); no edit/inpaint or reference/IP-Adapter
+        // surface, so the family default advertises only t2i + style variations (like z-image /
+        // qwen-image / lens / flux).
+        ("image", "anima") => vec!["text_to_image", "style_variations"],
         // Bernini still-image companion (epic 4699 / sc-5424): the same `Modality::Both`
         // engine the video `bernini` family uses, but the image-typed catalog id
         // (`bernini_image`) exposes only the still tasks — t2i (text→image) and i2i
@@ -500,6 +544,9 @@ pub fn diffusers_class_name_to_family(class_name: &str) -> Option<String> {
             Some("qwen-image".to_owned())
         }
         "lenspipeline" => Some("lens".to_owned()),
+        // Anima (epic 10512). Its diffusers modular pipeline (`AnimaModularPipeline`) is the
+        // `model_index.json` `_class_name` a diffusers-format Anima export would carry.
+        "animamodularpipeline" => Some("anima".to_owned()),
         "fluxpipeline" | "fluximg2imgpipeline" | "fluxinpaintpipeline" => Some("flux".to_owned()),
         "chromapipeline" | "chromaimg2imgpipeline" => Some("chroma".to_owned()),
         "kolorspipeline" | "kolorsimg2imgpipeline" => Some("kolors".to_owned()),
@@ -540,6 +587,7 @@ pub fn detect_lora_family(header: &Value) -> Option<String> {
         Bucket::LtxVideo => Some("ltx-video".to_owned()),
         Bucket::Sd3 => Some("sd3".to_owned()),
         Bucket::Ideogram => Some("ideogram".to_owned()),
+        Bucket::Anima => Some("anima".to_owned()),
         Bucket::Sdxl => Some("sdxl".to_owned()),
         Bucket::Sd15 => Some("sd1.5".to_owned()),
         Bucket::MmDit => disambiguate_mm_dit(&keys),
@@ -560,6 +608,24 @@ pub fn detect_lora_family(header: &Value) -> Option<String> {
 /// detect belong here, because a confident-but-wrong family is grounds to reject
 /// an import (see the module docs), which is worse than an inconclusive `None`.
 fn detect_unique_key_family(keys: &[String]) -> Option<String> {
+    // Anima (epic 10512). The Cosmos-Predict2 DiT bundles an `AnimaTextConditioner` under an
+    // `llm_adapter` sub-module — a name no other detected family uses. The **turbo** distillation LoRA
+    // (`anima-turbo-lora-v0.2`) trains 60 `diffusion_model.llm_adapter.blocks.<n>.…` targets alongside
+    // the DiT; a single such key unambiguously identifies Anima, ahead of (and exempt from) the
+    // `MIN_KEY_MATCHES` floor — so even a sparse LoKr that touches only the conditioner is detected
+    // (the Ideogram-LoKr precedent, where a below-floor adapter went undetected). The DiT-only style
+    // LoRA carries no `llm_adapter` key and is instead caught by the `Bucket::Anima` signature below on
+    // its Cosmos adaLN-modulation markers — so both official LoRA shapes classify as `anima`, and a
+    // signature that *required* `llm_adapter` (which the style LoRA lacks) is correctly avoided.
+    //
+    // Both the diffusers-dotted (`…llm_adapter.blocks…`) and kohya-flattened (`…_llm_adapter_blocks…`)
+    // spellings are matched. `llm_adapter` appears in no other family's LoRA keys.
+    if keys
+        .iter()
+        .any(|key| key.contains("llm_adapter.") || key.contains("_llm_adapter_"))
+    {
+        return Some("anima".to_owned());
+    }
     // Krea 2 (epic 7565). Its DiT carries a `text_fusion` Qwen3-VL-layer aggregator
     // and a gated single-stream attention whose projection is the leaf Linear
     // `attn.to_gate` — names that appear in no other family's LoRA keys (dual-stream
@@ -606,6 +672,14 @@ enum Bucket {
     /// family we detect. Metadata (`ss_base_model_version: ideogram4`) is the primary
     /// signal; this bucket catches metadata-less ComfyUI-style exports.
     Ideogram,
+    /// Anima (epic 10512): the Cosmos-Predict2 DiT anime T2I model. Its LoRAs prefix every DiT block
+    /// with `diffusion_model.blocks.<n>.` (shared with native/ComfyUI Wan) but carry the
+    /// Cosmos-specific `adaln_modulation_{self_attn,cross_attn,mlp}.{1,2}` down/up modulation pairs
+    /// (present in BOTH official shapes — the DiT-only style LoRA and the DiT+conditioner turbo LoRA)
+    /// that no other family uses. The turbo shape additionally trains `llm_adapter.*` conditioner
+    /// targets (caught earlier by `detect_unique_key_family`); this bucket keys on the adaLN markers so
+    /// the DiT-only shape — which has NO `llm_adapter` key — still classifies as `anima`.
+    Anima,
     MmDit,
     Sdxl,
     Sd15,
@@ -720,6 +794,14 @@ const SIGNATURES: &[BucketSignature] = &[
             "transformer.transformer_blocks.",
             "single_transformer_blocks.",
             "double_blocks.",
+            // Anima (Cosmos-Predict2) shares the `diffusion_model.blocks.` prefix and the
+            // `.self_attn.`/`.cross_attn.` module markers, but is a separate `Bucket::Anima`
+            // (sc-10521). Disqualify on its Cosmos adaLN-modulation naming — which no real Wan LoRA
+            // ever carries — so a native Anima LoRA never co-scores here and trips the runner-up
+            // margin against the Anima signature.
+            "adaln_modulation_self_attn",
+            "adaln_modulation_cross_attn",
+            "adaln_modulation_mlp",
         ],
         markers: &[
             "diffusion_model.blocks.",
@@ -811,6 +893,51 @@ const SIGNATURES: &[BucketSignature] = &[
             ".feed_forward.w2",
             ".feed_forward.w3",
             ".adaln_modulation",
+        ],
+    },
+    BucketSignature {
+        bucket: Bucket::Anima,
+        // Anima (epic 10512, sc-10521) native / ComfyUI export. Its Cosmos-Predict2 DiT prefixes every
+        // block with `diffusion_model.blocks.<n>.` — a prefix it SHARES with native/ComfyUI Wan — but
+        // its adaLN modulation is the Cosmos triple `adaln_modulation_{self_attn,cross_attn,mlp}.{1,2}`
+        // (down/up pairs), a naming no other detected family uses (Wan has none; Ideogram uses a bare
+        // `.adaln_modulation` with no `_self_attn`/`_cross_attn`/`_mlp` suffix). Requiring the prefix
+        // AND one Cosmos adaLN marker positively identifies BOTH official shapes: the DiT-only style
+        // LoRA (448 targets, no `llm_adapter`) lands here; the DiT+conditioner turbo LoRA is caught
+        // earlier by `detect_unique_key_family` on its `llm_adapter` keys (and would land here too).
+        //
+        // `llm_adapter` is a SCORING marker (only the turbo shape carries it), never REQUIRED — a
+        // signature that required it would misclassify the style LoRA (which has zero adapter tensors).
+        // The kohya-flattened underscore forms are matched alongside the dotted forms. Wan/Flux/LTX/
+        // Ideogram block-word forms are disqualified belt-and-braces; the colliding native-Wan
+        // signature additionally disqualifies on the Cosmos adaLN markers so the two never co-score.
+        require_all_of: &[
+            &["diffusion_model.blocks.", "diffusion_model_blocks_"],
+            &[
+                "adaln_modulation_self_attn",
+                "adaln_modulation_cross_attn",
+                "adaln_modulation_mlp",
+            ],
+        ],
+        disqualifiers: &[
+            ".ffn.",
+            "_ffn_",
+            "transformer_blocks.",
+            "double_blocks.",
+            "single_blocks",
+            "diffusion_model.layers.",
+        ],
+        markers: &[
+            "diffusion_model.blocks.",
+            "diffusion_model_blocks_",
+            "adaln_modulation_self_attn",
+            "adaln_modulation_cross_attn",
+            "adaln_modulation_mlp",
+            "llm_adapter.",
+            "_llm_adapter_",
+            ".self_attn.",
+            ".cross_attn.",
+            ".mlp.layer",
         ],
     },
     BucketSignature {
@@ -909,8 +1036,21 @@ const SIGNATURES: &[BucketSignature] = &[
         // Dual-stream MMDiT covers Qwen-Image and Z-Image. They share a key
         // layout in current Diffusers releases; per-family disambiguation
         // happens after this bucket is selected.
+        //
+        // The block prefix is matched as the bare `transformer_blocks.` rather than
+        // the diffusers `transformer.transformer_blocks.` so that ComfyUI-distributed
+        // Qwen-Image / Qwen-Image-Edit adapters — which drop the `transformer.` module
+        // prefix and key their blocks as `transformer_blocks.<n>.attn.…` /
+        // `.img_mlp.` / `.txt_mlp.` / `.attn.add_{q,k}_proj.` — are detected instead of
+        // falling through as family-less (sc-10506). Diffusers keys still match (the
+        // dotted form contains the bare substring); the sibling variants that also
+        // contain `transformer_blocks.` as a substring — Flux's `single_transformer_blocks.`
+        // and LTX's `.attn2.` — are rejected by the disqualifiers below, and the required
+        // dual-stream group keeps single-stream families out. The dual-MLP requirement is
+        // what separates this from a bare-`transformer_blocks.` Krea adapter (attention-only,
+        // detected by its `family` metadata stamp).
         require_all_of: &[
-            &["transformer.transformer_blocks."],
+            &["transformer_blocks."],
             &[
                 ".img_mlp.",
                 ".txt_mlp.",
@@ -935,7 +1075,7 @@ const SIGNATURES: &[BucketSignature] = &[
             "context_embedder",
         ],
         markers: &[
-            "transformer.transformer_blocks.",
+            "transformer_blocks.",
             ".img_mlp.",
             ".txt_mlp.",
             "add_q_proj",
@@ -2081,6 +2221,140 @@ mod tests {
         assert_eq!(detect_lora_family(&base_only).as_deref(), Some("krea_2"));
     }
 
+    // ---- Anima (epic 10512, sc-10521) --------------------------------------------------------------
+
+    /// The 448-target DiT surface (16 per block) as the official Anima LoRAs spell it (ComfyUI
+    /// `diffusion_model.` prefix, PEFT `lora_A`/`lora_B`, original Cosmos module names).
+    fn anima_dit_keys(blocks: usize) -> Vec<String> {
+        let mut keys = Vec::new();
+        for b in 0..blocks {
+            for attn in ["self_attn", "cross_attn"] {
+                for proj in ["q_proj", "k_proj", "v_proj", "output_proj"] {
+                    for role in ["lora_A.weight", "lora_B.weight"] {
+                        keys.push(format!("diffusion_model.blocks.{b}.{attn}.{proj}.{role}"));
+                    }
+                }
+            }
+            for layer in ["mlp.layer1", "mlp.layer2"] {
+                for role in ["lora_A.weight", "lora_B.weight"] {
+                    keys.push(format!("diffusion_model.blocks.{b}.{layer}.{role}"));
+                }
+            }
+            // The Cosmos adaLN-modulation down/up pairs — the Anima-unique discriminator.
+            for adaln in [
+                "adaln_modulation_self_attn",
+                "adaln_modulation_cross_attn",
+                "adaln_modulation_mlp",
+            ] {
+                for updown in ["1", "2"] {
+                    for role in ["lora_A.weight", "lora_B.weight"] {
+                        keys.push(format!(
+                            "diffusion_model.blocks.{b}.{adaln}.{updown}.{role}"
+                        ));
+                    }
+                }
+            }
+        }
+        keys
+    }
+
+    /// The 60-target `AnimaTextConditioner` surface (10 per block) the turbo LoRA adds.
+    fn anima_adapter_keys(blocks: usize) -> Vec<String> {
+        let mut keys = Vec::new();
+        for b in 0..blocks {
+            for attn in ["self_attn", "cross_attn"] {
+                for proj in ["q_proj", "k_proj", "v_proj", "o_proj"] {
+                    for role in ["lora_A.weight", "lora_B.weight"] {
+                        keys.push(format!(
+                            "diffusion_model.llm_adapter.blocks.{b}.{attn}.{proj}.{role}"
+                        ));
+                    }
+                }
+            }
+            for m in ["mlp.0", "mlp.2"] {
+                for role in ["lora_A.weight", "lora_B.weight"] {
+                    keys.push(format!("diffusion_model.llm_adapter.blocks.{b}.{m}.{role}"));
+                }
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn detects_anima_style_lora_dit_only() {
+        // `anima-greg-rutkowski-style` shape: 448 DiT targets, ZERO `llm_adapter` — so it is caught
+        // by the `Bucket::Anima` signature on its Cosmos adaLN markers, NOT the unique-key path. A
+        // signature that required `llm_adapter` would misclassify this file (the crux of sc-10521).
+        let keys = anima_dit_keys(28);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("anima"));
+    }
+
+    #[test]
+    fn detects_anima_turbo_lora_with_adapter() {
+        // `anima-turbo-lora-v0.2` shape: 448 DiT + 60 `llm_adapter` = 508 targets. The `llm_adapter`
+        // key identifies it via the unique-key fast path.
+        let mut keys = anima_dit_keys(28);
+        keys.extend(anima_adapter_keys(6));
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("anima"));
+    }
+
+    #[test]
+    fn detects_sparse_anima_lokr_via_llm_adapter() {
+        // A sparse LoKr that touches only a couple conditioner modules (below the MIN_KEY_MATCHES=4
+        // marker floor) — the Ideogram-LoKr precedent where a below-floor adapter went undetected.
+        // The `llm_adapter` unique key identifies it regardless of the floor. LyCORIS `lokr_*` factors.
+        let header = header_from_keys(&[
+            "diffusion_model.llm_adapter.blocks.0.self_attn.q_proj.lokr_w1",
+            "diffusion_model.llm_adapter.blocks.0.self_attn.q_proj.lokr_w2",
+        ]);
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("anima"));
+    }
+
+    #[test]
+    fn anima_not_mistaken_for_wan_and_wan_still_detected() {
+        // Anima and native/ComfyUI Wan SHARE the `diffusion_model.blocks.` prefix + `.self_attn.`/
+        // `.cross_attn.` markers, so the collision must be resolved in Anima's favor for Anima keys...
+        let anima = anima_dit_keys(28);
+        let anima_header = header_from_keys(&anima.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&anima_header).as_deref(), Some("anima"));
+        assert_ne!(
+            detect_lora_family(&anima_header).as_deref(),
+            Some("wan-video")
+        );
+
+        // ...while a genuine native Wan LoRA (`.ffn.`, no Cosmos adaLN) still detects as wan-video.
+        let mut wan = Vec::new();
+        for b in 0..30 {
+            for m in ["self_attn.q", "self_attn.k", "cross_attn.v", "ffn.0"] {
+                for role in ["lora_A.weight", "lora_B.weight"] {
+                    wan.push(format!("diffusion_model.blocks.{b}.{m}.{role}"));
+                }
+            }
+        }
+        let wan_header = header_from_keys(&wan.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(
+            detect_lora_family(&wan_header).as_deref(),
+            Some("wan-video")
+        );
+    }
+
+    #[test]
+    fn anima_family_metadata_mappings() {
+        assert_eq!(super::model_adapter_for_family("anima"), Some("anima"));
+        assert_eq!(
+            super::model_capabilities_for_type_and_family("image", "anima"),
+            vec!["text_to_image", "style_variations"]
+        );
+        assert_eq!(
+            super::diffusers_class_name_to_family("AnimaModularPipeline").as_deref(),
+            Some("anima")
+        );
+        // The stored/canonical family token round-trips unchanged.
+        assert_eq!(super::canonical_lora_family("anima"), "anima");
+    }
+
     /// kohya / musubi-tuner / LyCORIS export of a dual-stream MMDiT (Qwen-Image /
     /// Z-Image) adapter: module paths flattened with underscores behind `prefix`,
     /// carrying LoKr (`lokr_w1`/`lokr_w2`/`alpha`) tensors. Mirrors the real
@@ -2136,6 +2410,75 @@ mod tests {
         // Same conservative block-count gate as the dotted path: too few blocks to
         // tell Qwen from Z-Image → inconclusive rather than a wrong guess.
         let keys = lycoris_underscore_mmdit_keys("lycoris", 24);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert!(detect_lora_family(&header).is_none());
+    }
+
+    /// ComfyUI-distributed dual-stream MMDiT (Qwen-Image / Qwen-Image-Edit) adapter:
+    /// the block keys carry NO `transformer.` module prefix (bare `transformer_blocks.
+    /// <n>.…`) and use kohya `lora_down`/`lora_up`/`alpha` factorization. Mirrors the
+    /// real `Qwen-Image-Lightning-4steps` / `Qwen-Image-Edit-2509-Lightning-4steps`
+    /// files (sc-10506).
+    fn comfyui_bare_prefix_mmdit_keys(block_count: usize) -> Vec<String> {
+        let mut keys = Vec::new();
+        for block in 0..block_count {
+            for module in [
+                "attn.to_q",
+                "attn.to_k",
+                "attn.to_v",
+                "attn.to_out.0",
+                "attn.add_q_proj",
+                "attn.add_k_proj",
+                "attn.add_v_proj",
+                "attn.to_add_out",
+                "img_mlp.net.0.proj",
+                "img_mlp.net.2",
+                "txt_mlp.net.0.proj",
+                "txt_mlp.net.2",
+            ] {
+                let base = format!("transformer_blocks.{block}.{module}");
+                keys.push(format!("{base}.lora_down.weight"));
+                keys.push(format!("{base}.lora_up.weight"));
+                keys.push(format!("{base}.alpha"));
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn detects_comfyui_bare_prefix_qwen_image() {
+        // The real failing rows from sc-10452's external-root scan (sc-10506):
+        // `Qwen-Image-Lightning-4steps` and `Qwen-Image-Edit-2509-Lightning-4steps`.
+        // Their keys drop the `transformer.` prefix the dotted MMDiT signature used
+        // to require, so before the fix both surfaced with no detected family and
+        // were offered-then-refused at generate. Both share this key shape and detect
+        // as `qwen-image` (Qwen-Image-Edit reuses the Qwen-Image transformer, and
+        // Edit models declare `qwen-image` LoRA compatibility).
+        let keys = comfyui_bare_prefix_mmdit_keys(60);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("qwen-image"));
+    }
+
+    #[test]
+    fn bare_prefix_attention_only_is_not_mistaken_for_qwen() {
+        // A bare-`transformer_blocks.` adapter that trains ONLY attention projections
+        // (no dual `img_mlp`/`txt_mlp`, no joint `add_{q,k}_proj`) is the Krea 2 target
+        // shape, NOT a dual-stream MMDiT. The relaxed prefix must not swallow it: the
+        // dual-stream require-group keeps it out, so it stays inconclusive here (a real
+        // Krea file is instead identified by its `family` metadata stamp).
+        let mut keys = Vec::new();
+        for block in 0..60 {
+            for module in ["attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out.0"] {
+                keys.push(format!(
+                    "transformer_blocks.{block}.{module}.lora_down.weight"
+                ));
+                keys.push(format!(
+                    "transformer_blocks.{block}.{module}.lora_up.weight"
+                ));
+            }
+        }
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
 
         assert!(detect_lora_family(&header).is_none());
@@ -2959,5 +3302,54 @@ mod tests {
             Some(final_adapter)
         );
         let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn is_hidden_file_flags_dotfiles_and_appledouble_sidecars() {
+        assert!(is_hidden_file(Path::new("._adapter.safetensors")));
+        assert!(is_hidden_file(Path::new("/a/b/._model.safetensors")));
+        assert!(is_hidden_file(Path::new("/a/b/.DS_Store")));
+        assert!(!is_hidden_file(Path::new("adapter.safetensors")));
+        assert!(!is_hidden_file(Path::new("/a/b/model.safetensors")));
+        // A dot on a *directory* component is not a hidden file name.
+        assert!(!is_hidden_file(Path::new("/a/.cache/model.safetensors")));
+    }
+
+    /// SceneWorks#1333: `._adapter.safetensors` (a macOS AppleDouble sidecar) carries the
+    /// `.safetensors` extension, so the extension-only filter used to accept it. `first_safetensors_path`
+    /// scans with an *unordered* `read_dir` and returns the first match, so the sidecar could be
+    /// returned in place of the real adapter — nondeterministically, run to run.
+    #[test]
+    fn first_safetensors_path_skips_appledouble_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("adapter.safetensors");
+        touch(&dir.path().join("._adapter.safetensors"));
+        touch(&real);
+        assert_eq!(first_safetensors_path(dir.path()), Some(real));
+    }
+
+    /// A dir holding only a sidecar has no adapter at all.
+    #[test]
+    fn first_safetensors_path_ignores_a_lone_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        touch(&dir.path().join("._adapter.safetensors"));
+        assert_eq!(first_safetensors_path(dir.path()), None);
+    }
+
+    /// The sidecar must also be rejected on the *declared* path, and on a direct file argument.
+    #[test]
+    fn resolve_adapter_in_dir_rejects_a_declared_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("adapter.safetensors");
+        let sidecar = dir.path().join("._adapter.safetensors");
+        touch(&sidecar);
+        touch(&real);
+        // Declared name naming the sidecar → not accepted; falls back to the scan, which skips it.
+        assert_eq!(
+            resolve_adapter_in_dir(dir.path(), Some("._adapter.safetensors")),
+            Some(real)
+        );
+        // Passed directly as a file path, a sidecar is still not a safetensors file.
+        assert_eq!(first_safetensors_path(&sidecar), None);
     }
 }

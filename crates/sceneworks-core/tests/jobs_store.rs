@@ -3099,6 +3099,13 @@ fn mac_rust_supported_convert_flux2_ok_else_python_gap() {
         json!({ "model": "flux2_dev", "converter": "flux2_dev_quant" }),
     );
     assert!(mac_rust_supported(&flux2_dev).is_ok());
+    // Anima (sc-10517) is an in-process Rust/MLX convert (the on-device q4/q8/bf16 matrix).
+    let anima = job_of(
+        &store,
+        JobType::ModelConvert,
+        json!({ "model": "anima_base", "converter": "anima_quant" }),
+    );
+    assert!(mac_rust_supported(&anima).is_ok());
     // The default/absent converter is the Python mlx-video Wan/LTX path → gap.
     let wan = job_of(&store, JobType::ModelConvert, json!({ "model": "wan_2_2" }));
     assert_eq!(

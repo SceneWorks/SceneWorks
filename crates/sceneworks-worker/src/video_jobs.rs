@@ -4455,25 +4455,80 @@ fn candle_video_default_repo(engine_id: &str) -> &'static str {
     }
 }
 
-/// The candle weights repo for a video engine: the manifest `repo` wins, else `ltx_2_3_eros` selects
-/// its own fine-tune repo (it shares the `ltx_2_3_distilled` engine id with the base), else the candle
-/// default repo for the engine.
+/// The candle weights repo for a video engine: the manifest `repo` wins, else — for the Wan
+/// quant-matrix models whose per-tier candle repos live in `downloads[]` with no top-level `repo`
+/// (`SceneWorks/wan2.2-*-candle`, sc-10027) — the platform-appropriate candle tier repo matching the
+/// requested tier (default q4), else `ltx_2_3_eros`'s own fine-tune repo, else the candle default repo.
+///
+/// Without the `downloads[]` resolution the Windows/Linux Wan-14B lane fell back to the DENSE
+/// `Wan-AI/*-Diffusers` default — a different (bf16, ~72 GB) repo that the packed-tier install never
+/// fetches — so a candle Wan-14B job errored "snapshot not found" even with the q4 tier present (sc-10539).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_video_repo(request: &VideoRequest, engine_id: &str) -> String {
-    request
+    if let Some(repo) = request
         .model_manifest_entry
         .get("repo")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            if request.model == "ltx_2_3_eros" {
-                CANDLE_LTX_EROS_REPO.to_owned()
-            } else {
-                candle_video_default_repo(engine_id).to_owned()
+    {
+        return repo.to_owned();
+    }
+    if let Some(repo) = candle_wan_tier_repo_from_downloads(request, engine_id) {
+        return repo;
+    }
+    if request.model == "ltx_2_3_eros" {
+        CANDLE_LTX_EROS_REPO.to_owned()
+    } else {
+        candle_video_default_repo(engine_id).to_owned()
+    }
+}
+
+/// The candle Wan tier repo from the manifest `downloads[]` for THIS platform (sc-10539). The Wan
+/// quant-matrix (sc-10027) hosts each candle tier as a per-`variant` download entry — `q4`/`q8` in the
+/// packed `SceneWorks/wan2.2-*-candle` repo, `bf16` in the dense `Wan-AI/*-Diffusers` repo — rather than
+/// a single top-level `repo`, so `candle_video_repo` must consult them. Picks the repo for the highest-
+/// preference tier present for this OS (default q4-first, mirroring [`candle_wan_tier_subdir`] so the
+/// resolved repo is the one whose tier subdir the loader then selects). `None` for non-Wan engines or a
+/// manifest without matching platform downloads.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_wan_tier_repo_from_downloads(request: &VideoRequest, engine_id: &str) -> Option<String> {
+    if !engine_id.starts_with("wan2_2") {
+        return None;
+    }
+    let downloads = request.model_manifest_entry.get("downloads")?.as_array()?;
+    let platform = if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    };
+    let order: &[&str] = match candle_wan_quant_bits(request) {
+        Some(bits) if bits <= 0 => &["bf16", "q8", "q4"],
+        Some(bits) if bits >= 8 => &["q8", "q4"],
+        _ => &["q4", "q8"],
+    };
+    order.iter().find_map(|&tier| {
+        downloads.iter().find_map(|download| {
+            if download.get("variant").and_then(Value::as_str) != Some(tier) {
+                return None;
             }
+            let on_platform = match download.get("platforms").and_then(Value::as_array) {
+                Some(platforms) => platforms
+                    .iter()
+                    .any(|value| value.as_str() == Some(platform)),
+                None => true,
+            };
+            if !on_platform {
+                return None;
+            }
+            download
+                .get("repo")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
         })
+    })
 }
 
 /// Resolve the candle weights snapshot dir for `repo`. Errors loudly (no procedural-stub fallback)

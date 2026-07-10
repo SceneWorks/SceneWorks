@@ -656,6 +656,16 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // SANA 1600M + SANA-Sprint (epic 8485 / sc-8489 / sc-8490): MLX-only txt2img (no torch/candle backend).
     ModelCaps::new("sana_1600m", true, false, false, false, false),
     ModelCaps::new("sana_sprint_1600m", true, false, false, false, false),
+    // Anima base / aesthetic / turbo (epic 10512 / sc-10523): native-MLX anime txt2img. MLX-routed with
+    // install-time Q4/Q8 quant + inference LoRA/LoKr (advertised via the engine descriptor + manifest;
+    // quant+LoRA TOGETHER is unsupported, tracked sc-10578 — the engine `load()` errors on the combo).
+    // `candle_routed = false`: the candle port (sc-10525) is numerically CPU-validated but has NEVER been
+    // generated on real CUDA hardware, so no candle lane is advertised (all candle_* columns false, which
+    // also keeps the sc-9495 superset invariant trivially satisfied). Re-evaluate once sc-10525's
+    // hardware-gated acceptance passes on the NVIDIA rig.
+    ModelCaps::new("anima_base", true, false, false, false, false),
+    ModelCaps::new("anima_aesthetic", true, false, false, false, false),
+    ModelCaps::new("anima_turbo", true, false, false, false, false),
 ];
 
 /// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
@@ -816,6 +826,9 @@ pub(crate) const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "wan_lora",
     "wan_moe_lora",
     "ltx_mlx_lora",
+    // Anima (epic 10512, sc-10522): the native `mlx-gen-anima` LoRA/LoKr trainer (DiT + `llm_adapter`
+    // conditioner). No torch path, so it is also in `MLX_ONLY_TRAINING_KERNELS`.
+    "anima_lora",
 ];
 
 /// SceneWorks training kernels with a native candle trainer that needs no base-model disambiguation
@@ -842,7 +855,8 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] =
 /// [`CANDLE_ROUTED_TRAINING_KERNELS`]), while torch is still refused. `sd3_lora` (epic 7841 T3
 /// sc-7884) is MLX-native with no torch trainer and no candle trainer yet (the off-Mac/candle SD3.5
 /// trainer is epic 7982), so — like LTX — only an mlx worker runs it today.
-pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &["ltx_mlx_lora", "krea_lora", "sd3_lora"];
+pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] =
+    &["ltx_mlx_lora", "krea_lora", "sd3_lora", "anima_lora"];
 
 #[cfg(test)]
 mod tests {
@@ -929,6 +943,9 @@ mod tests {
         "sd3_5_medium",
         "sana_1600m",
         "sana_sprint_1600m",
+        "anima_base",
+        "anima_aesthetic",
+        "anima_turbo",
     ];
 
     const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[
@@ -1023,12 +1040,14 @@ mod tests {
         "wan_lora",
         "wan_moe_lora",
         "ltx_mlx_lora",
+        "anima_lora",
     ];
 
     const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] =
         &["z_image_lora", "sdxl_lora", "lens_lora", "krea_lora"];
 
-    const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] = &["ltx_mlx_lora", "krea_lora", "sd3_lora"];
+    const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] =
+        &["ltx_mlx_lora", "krea_lora", "sd3_lora", "anima_lora"];
 
     #[test]
     fn routed_model_lists_match_snapshot() {

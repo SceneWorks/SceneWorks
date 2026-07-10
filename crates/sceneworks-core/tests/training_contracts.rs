@@ -138,6 +138,7 @@ fn builtin_targets_gate_network_types() {
             "krea_2_raw_lora",
             "sd3_5_large_lora",
             "sd3_5_medium_lora",
+            "anima_base_lora",
             "wan_lora"
         ]
     );

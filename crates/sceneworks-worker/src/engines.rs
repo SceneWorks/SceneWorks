@@ -607,6 +607,43 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 4.5,
         adapter_label: "mlx_sana",
     },
+    // Anima 2B anime t2i (epic 10512, sc-10523) — native MLX, CircleStone Labs Non-Commercial License
+    // v1.2. Cosmos-Predict2 `CosmosTransformer3DModel` DiT (28 layers, 17-ch patch-embed, 3-axis NTK
+    // RoPE) + the bundled `AnimaTextConditioner` (T5 query tokens → cross-attn into Qwen3-0.6B states)
+    // + the Qwen-Image VAE. Three variants share ONE architecture, differing only in the DiT weights
+    // file + defaults. **Convert-at-install** (NC — SceneWorks never redistributes converted weights):
+    // the worker packs the Cosmos DiT on-device to q4/q8/bf16 from the ungated `circlestone-labs/Anima`
+    // `split_files/` source (the conditioner + Qwen3 TE + Qwen-Image VAE stay dense bf16), so
+    // `default_repo` is that source repo, not a SceneWorks re-host. The engine descriptor advertises the
+    // full curated sampler/scheduler menu (er_sde default, sc-10519); the manifest `limits` menu is a
+    // subset (the drift guard). All three reach the generic `generate_stream` path via
+    // `use mlx_gen_anima as _;`. supports_lora/lokr = true; quant + LoRA together is unsupported (sc-10578).
+    ModelRow {
+        sceneworks_id: "anima_base",
+        engine_id: "anima_base",
+        default_repo: "circlestone-labs/Anima",
+        default_steps: 30,
+        default_guidance: 4.5,
+        adapter_label: "mlx_anima",
+    },
+    ModelRow {
+        sceneworks_id: "anima_aesthetic",
+        engine_id: "anima_aesthetic",
+        default_repo: "circlestone-labs/Anima",
+        default_steps: 30,
+        default_guidance: 4.5,
+        adapter_label: "mlx_anima",
+    },
+    // Turbo — the merged CFG-free few-step student: 10 steps, guidance INERT (the descriptor advertises
+    // supports_guidance=false, so `resolve_guidance` returns None; the 1.0 default is a nominal no-op).
+    ModelRow {
+        sceneworks_id: "anima_turbo",
+        engine_id: "anima_turbo",
+        default_repo: "circlestone-labs/Anima",
+        default_steps: 10,
+        default_guidance: 1.0,
+        adapter_label: "mlx_anima",
+    },
 ];
 
 /// The mlx-gen registry ids of the video generators this worker serves (the engine ids
@@ -648,6 +685,13 @@ pub(crate) const TRAINER_IDS: &[&str] = &[
     "wan2_2_ti2v_5b",
     "wan2_2_t2v_14b",
     "wan2_2_i2v_14b",
+    // Anima (Cosmos-Predict2 DiT + AnimaTextConditioner; epic 10512, sc-10522): the `mlx-gen-anima`
+    // trainer registers LoRA/LoKr under the same ids as the inference generators of the three variants
+    // (base/aesthetic/turbo). mlx-only (no candle/torch Anima trainer). The trained adapter targets the
+    // DiT AND the bundled `llm_adapter` conditioner (508 targets), applying back via `apply_anima_adapters`.
+    "anima_base",
+    "anima_aesthetic",
+    "anima_turbo",
 ];
 
 /// A [`ModelRow`] paired with the linked gen_core descriptor for its engine id — the merged

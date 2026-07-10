@@ -398,6 +398,13 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // supports_negative_prompt=false (the distilled-turbo "guidance is an embedding, no negative"
         // shape; cf. boogu_image_turbo's CFG-free-without-negative pattern).
         ("sana_sprint_1600m", true, false),
+        // Anima 2B anime t2i (epic 10512 / sc-10523): Base + Aesthetic run true classifier-free
+        // guidance — the descriptor derives supports_guidance = supports_negative_prompt = `uses_cfg()`,
+        // which is true for both (mlx-gen-anima `descriptor_for` / `Variant::uses_cfg`). Turbo is the
+        // merged CFG-free few-step student (`uses_cfg() == false`), so its descriptor drops both flags.
+        ("anima_base", true, true),
+        ("anima_aesthetic", true, true),
+        ("anima_turbo", false, false),
     ];
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());

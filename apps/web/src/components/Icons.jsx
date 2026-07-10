@@ -55,5 +55,9 @@ export const Icon = {
   Refresh: (p) => <I {...p} d="M21 12a9 9 0 11-3-6.7L21 8M21 3v5h-5" />,
   Pencil: (p) => <I {...p} d="M12 20h9M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z" />,
   Stethoscope: (p) => <I {...p} d="M6 3v5a4 4 0 008 0V3M10 15v-3M10 15a5 5 0 0010 0v-2M18 11a2 2 0 100-4 2 2 0 000 4z" />,
+  Duplicate: (p) => <I {...p} d="M9 9h11v11H9zM15 9V4H4v11h5" />,
+  Trash: (p) => <I {...p} d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6" />,
+  Save: (p) => <I {...p} d="M5 3h11l5 5v13H5zM8 21v-8h8v8M9 3v5h6" />,
+  Close: (p) => <I {...p} d="M18 6L6 18M6 6l12 12" />,
 };
 

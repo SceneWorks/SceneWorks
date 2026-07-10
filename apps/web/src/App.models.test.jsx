@@ -613,7 +613,18 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    expect(container.textContent).toContain("Preset Manager");
+    expect(container.textContent).toContain("Reusable generation setups");
+
+    // The LoRA stack (and its "go acquire one" empty state) lives in the editor now,
+    // so open the preset before asserting on it.
+    await act(async () => {
+      [...document.body.querySelectorAll(".preset-card")]
+        .find((card) => card.textContent.includes("Moody"))
+        .querySelector(".secondary-action")
+        .click();
+    });
+    await settle();
+
     expect(container.textContent).toContain("No uploaded LoRAs yet. Manage LoRAs on the Models page.");
     expect(container.textContent).not.toContain("Import LoRA");
     expect(container.textContent).not.toContain("Queue Import");

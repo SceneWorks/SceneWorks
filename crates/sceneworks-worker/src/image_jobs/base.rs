@@ -415,7 +415,16 @@ pub(crate) fn resolve_weights_dir(
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
     {
-        return resolve_app_managed_model_dir(settings, &path, "Image modelPath").map(Some);
+        let dir = resolve_app_managed_model_dir(settings, &path, "Image modelPath")?;
+        // Anima (epic 10512) is convert-at-install with a q4/q8/bf16 MATRIX: unlike other convert
+        // models (a single flat dir), its injected `modelPath` is the converted ROOT holding `bf16/`,
+        // `q8/`, `q4/` tier subdirs (written by `convert_anima_prequant`). Descend into the requested
+        // tier — bespoke, like Boogu/Ideogram — so the packed DiT loads at the chosen precision. Every
+        // other `modelPath` model resolves to the flat dir unchanged.
+        if is_anima_model(&request.model) {
+            return Ok(Some(anima_tier_subdir(&dir, request)));
+        }
+        return Ok(Some(dir));
     }
     let Some(model) = mlx_model(&request.model) else {
         return Ok(None);
@@ -633,11 +642,17 @@ fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
         .get("mlxQuantize")
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
     // A component dir "has weights" when it holds a packed/dense safetensors or a shard index.
+    // Hidden entries don't count: a dir holding only a `._model.safetensors` AppleDouble sidecar has
+    // no weights, and reporting otherwise routes the loader at a tier it cannot load
+    // (SceneWorks#1333).
     let component_has_weights = |dir: &Path| -> bool {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return false;
         };
         entries.flatten().any(|entry| {
+            if sceneworks_core::lora_family::is_hidden_file(&entry.path()) {
+                return false;
+            }
             let file = entry.file_name();
             let name = file.to_string_lossy();
             name.ends_with(".safetensors") || name.ends_with(".index.json")
@@ -688,6 +703,51 @@ fn dense_tier_subdir(root: PathBuf) -> PathBuf {
         return root.join("bf16");
     }
     root
+}
+
+/// Whether `model` is one of the three Anima catalog ids (epic 10512). Anima is convert-at-install with
+/// a bespoke tier resolver, so — like Ideogram/Boogu/Krea — it is NOT in [`STANDARD_TIER_MODELS`].
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn is_anima_model(model: &str) -> bool {
+    matches!(model, "anima_base" | "anima_aesthetic" | "anima_turbo")
+}
+
+/// Pick the tier subdir of a converted Anima `root` (the injected `modelPath`, holding `bf16/ q8/ q4/`,
+/// each a `diffusion_models/<variant>.safetensors` + dense `text_encoders/` + `vae/` tree the Anima
+/// loader reads): `bf16/` when the request opts out of quantization (`advanced.mlxQuantize <= 0`), `q8/`
+/// when it opts into Q8 (`> 4`), else the default `q4/`. Falls back through q4 → q8 → bf16 → `root` so a
+/// partially-written artifact surfaces as a load error rather than a silent half-load. A tier is
+/// "present" when its `diffusion_models/` holds a `.safetensors` DiT (packed OR dense bf16). Mirrors
+/// [`standard_tier_subdir`], but keyed on Anima's `split_files` layout rather than `transformer/`.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn anima_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
+    let bits = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let present = |name: &str| -> Option<PathBuf> {
+        let dir = root.join(name);
+        // A hidden `._*.safetensors` AppleDouble sidecar is not a DiT (SceneWorks#1333).
+        let has_dit = std::fs::read_dir(dir.join("diffusion_models"))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| !sceneworks_core::lora_family::is_hidden_file(&entry.path()))
+                    .any(|entry| entry.file_name().to_string_lossy().ends_with(".safetensors"))
+            })
+            .unwrap_or(false);
+        has_dit.then_some(dir)
+    };
+    let preferred = match bits {
+        Some(b) if b <= 0 => "bf16",
+        Some(b) if b > 4 => "q8",
+        _ => "q4",
+    };
+    present(preferred)
+        .or_else(|| present("q4"))
+        .or_else(|| present("q8"))
+        .or_else(|| present("bf16"))
+        .unwrap_or_else(|| root.to_path_buf())
 }
 
 /// The Ideogram 4 tier subdir a `mlxQuantize` request needs fetched ON DEMAND — `Some("q8")` when the
@@ -4691,6 +4751,63 @@ mod standard_tier_tests {
         assert_eq!(
             standard_tier_subdir(root, &request(json!({ "mlxQuantize": 0 }))),
             root.join("bf16")
+        );
+    }
+
+    /// sc-10517: Anima is convert-at-install with a q4/q8/bf16 MATRIX under the injected `modelPath`
+    /// root (`bf16/ q8/ q4/`, each a `diffusion_models/<variant>.safetensors` tree — NOT a `transformer/`
+    /// component). [`anima_tier_subdir`] picks the tier by `mlxQuantize` (default q4; `>4` → q8; `<=0` →
+    /// bf16) and falls back through q4 → q8 → bf16 → root so a partially-written artifact surfaces as a
+    /// load error, not a silent half-load. [`is_anima_model`] gates only the three catalog ids.
+    #[test]
+    fn anima_tier_subdir_selects_and_falls_back() {
+        let anima_request = |bits: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": "anima_base", "advanced": { "mlxQuantize": bits } })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        assert!(is_anima_model("anima_base"));
+        assert!(is_anima_model("anima_aesthetic") && is_anima_model("anima_turbo"));
+        assert!(!is_anima_model("sd3_5_large"));
+
+        let seed_tier = |root: &std::path::Path, tier: &str| {
+            let dir = root.join(tier).join("diffusion_models");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("anima-base-v1.0.safetensors"), b"x").unwrap();
+        };
+        // All three tiers present → exact selection.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for tier in ["bf16", "q8", "q4"] {
+            seed_tier(root, tier);
+        }
+        assert_eq!(
+            anima_tier_subdir(root, &anima_request(json!(null))),
+            root.join("q4"),
+            "no opt-in → the q4 default"
+        );
+        assert_eq!(
+            anima_tier_subdir(root, &anima_request(json!(8))),
+            root.join("q8")
+        );
+        assert_eq!(
+            anima_tier_subdir(root, &anima_request(json!(0))),
+            root.join("bf16")
+        );
+        // Only bf16 downloaded, but q4 (default) requested → falls through to bf16, never a bare root.
+        let tmp2 = tempfile::tempdir().unwrap();
+        seed_tier(tmp2.path(), "bf16");
+        assert_eq!(
+            anima_tier_subdir(tmp2.path(), &anima_request(json!(null))),
+            tmp2.path().join("bf16")
+        );
+        // Nothing present → the root itself (the loader then surfaces a clear error).
+        let tmp3 = tempfile::tempdir().unwrap();
+        assert_eq!(
+            anima_tier_subdir(tmp3.path(), &anima_request(json!(null))),
+            tmp3.path().to_path_buf()
         );
     }
 
