@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_GENERATION_QUALITY,
+  GENERATION_QUALITY_TIERS,
   defaultTierSelection,
   installedTiers,
   isConvRotTier,
@@ -169,6 +171,78 @@ describe("defaultTierSelection", () => {
   it("returns null when nothing is installed", () => {
     expect(defaultTierSelection(matrixModel({ installed: [] }), null)).toBe(null);
     expect(defaultTierSelection({ id: "x", hasVariantMatrix: false }, null)).toBe(null);
+  });
+});
+
+// Global "default generation quality" setting (epic 10721 / sc-10728): the app-wide base default is
+// no longer hardcoded q8 — the caller passes the user's persisted preference as options.defaultQuality
+// (precedence rung 3: below the per-(screen,model) sticky, above clamp-to-installed). Absent/invalid
+// falls back to q8 (the historical base + worker default), so every existing call site is unchanged.
+describe("defaultTierSelection — global defaultQuality setting (sc-10728)", () => {
+  it("exposes q8 as the app-wide default and bf16|q8|q4 as the setting's vocabulary", () => {
+    expect(DEFAULT_GENERATION_QUALITY).toBe("q8");
+    expect(GENERATION_QUALITY_TIERS).toEqual(["bf16", "q8", "q4"]);
+  });
+
+  it("defaults the base to q8 when no defaultQuality is supplied", () => {
+    const model = matrixModel({ installed: ["q4", "q8", "bf16"], defaultTier: "none" });
+    // No options / empty options → the q8 base default (unchanged legacy behavior).
+    expect(defaultTierSelection(model, null)).toBe("q8");
+    expect(defaultTierSelection(model, null, {})).toBe("q8");
+  });
+
+  it("uses the supplied global setting as the base default for a no-sticky model", () => {
+    const model = matrixModel({ installed: ["q4", "q8", "bf16"], defaultTier: "none" });
+    expect(defaultTierSelection(model, null, { defaultQuality: "bf16" })).toBe("bf16");
+    expect(defaultTierSelection(model, null, { defaultQuality: "q4" })).toBe("q4");
+    expect(defaultTierSelection(model, null, { defaultQuality: "q8" })).toBe("q8");
+  });
+
+  it("applies the global setting to convert-at-install (mlxTiers) models too", () => {
+    const model = convertModel({ mlxTiers: ["q4", "q8", "bf16"] });
+    expect(defaultTierSelection(model, null, { defaultQuality: "bf16" })).toBe("bf16");
+    expect(defaultTierSelection(model, null, { defaultQuality: "q4" })).toBe("q4");
+  });
+
+  it("lets a per-(screen,model) sticky (lastUsed) still beat the global setting", () => {
+    const model = matrixModel({ installed: ["q4", "q8", "bf16"], defaultTier: "none" });
+    // Global setting says bf16, but the user has a sticky q4 for this model → sticky wins (rung 2).
+    expect(defaultTierSelection(model, "q4", { defaultQuality: "bf16" })).toBe("q4");
+  });
+
+  it("clamps the global setting to installed (bf16 set, only q4 installed → q4)", () => {
+    const model = matrixModel({ tiers: ["q4", "q8", "bf16"], installed: ["q4"], defaultTier: "none" });
+    expect(defaultTierSelection(model, null, { defaultQuality: "bf16" })).toBe("q4");
+  });
+
+  it("falls up from an uninstalled global setting to the nearest clean installed tier", () => {
+    // Global setting q4, but only q8 + bf16 are installed → clamp up to the clean q8, never null.
+    const model = matrixModel({ tiers: ["q4", "q8", "bf16"], installed: ["q8", "bf16"], defaultTier: "none" });
+    expect(defaultTierSelection(model, null, { defaultQuality: "q4" })).toBe("q8");
+  });
+
+  it("ignores an invalid global setting and uses the q8 base default", () => {
+    const model = matrixModel({ installed: ["q4", "q8", "bf16"], defaultTier: "none" });
+    expect(defaultTierSelection(model, null, { defaultQuality: "int8-convrot" })).toBe("q8");
+    expect(defaultTierSelection(model, null, { defaultQuality: "bogus" })).toBe("q8");
+  });
+
+  it("still honors a manifest-declared default over the global setting", () => {
+    // The declared per-model default (rung above the base) is honored even when the global setting differs.
+    const model = matrixModel({ installed: ["q4", "q8", "bf16"], defaultTier: "q4" });
+    expect(defaultTierSelection(model, null, { defaultQuality: "bf16" })).toBe("q4");
+  });
+
+  it("does not let the global setting override an ineligible convrot host filter", () => {
+    // defaultQuality can only ever be bf16|q8|q4, so it never re-introduces a hidden convrot tier.
+    const model = matrixModel({
+      tiers: [INT8_CONVROT_TIER, "bf16"],
+      installed: [INT8_CONVROT_TIER, "bf16"],
+      defaultTier: "none",
+    });
+    expect(
+      defaultTierSelection(model, null, { defaultQuality: "q4", convRotEligible: false }),
+    ).toBe("bf16");
   });
 });
 

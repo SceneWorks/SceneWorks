@@ -130,6 +130,7 @@ import {
   tierLabel,
 } from "../quantTier.js";
 import { readLastTier, writeLastTier } from "../lastTierStore.js";
+import { readDefaultGenerationQuality } from "../generationQuality.js";
 import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO } from "../constants.js";
 import { pickClosestResolution } from "../resolutionMatch.js";
 import {
@@ -1152,7 +1153,13 @@ export function ImageStudio() {
       return;
     }
     setQuantTier(
-      defaultTierSelection(selectedModel, readLastTier(TIER_SCREEN, model), tierOptions) ?? "",
+      defaultTierSelection(selectedModel, readLastTier(TIER_SCREEN, model), {
+        ...tierOptions,
+        // Rung 3 (sc-10728): the app-wide default-generation-quality setting is the base default below
+        // the per-(screen,model) sticky. Read fresh here (like readLastTier) so a change made in Settings
+        // is picked up the next time this effect derives a default — no stale in-memory copy.
+        defaultQuality: readDefaultGenerationQuality(),
+      }) ?? "",
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model, availableTiersKey]);

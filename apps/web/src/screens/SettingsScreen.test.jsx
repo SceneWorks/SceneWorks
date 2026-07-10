@@ -376,3 +376,73 @@ describe("SettingsScreen GPU memory (desktop macOS)", () => {
     expect(container.textContent).toContain("applies within a couple of seconds");
   });
 });
+
+// Global "default generation quality" setting (epic 10721 / sc-10728). Purely client-side
+// (localStorage), so it renders in both desktop and web modes and needs no Tauri/REST round-trip.
+// These run in web (REST) mode with api.js mocked so refresh() resolves cleanly.
+describe("SettingsScreen default generation quality (sc-10728)", () => {
+  const STORAGE_KEY = "sceneworks-default-generation-quality";
+  let container;
+  let root;
+  let SettingsScreen;
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    delete window.__TAURI__;
+    window.localStorage.clear();
+    vi.resetModules();
+    vi.doMock("../api.js", () => ({
+      apiFetch: vi.fn(async () => []),
+      isAbortError: () => false,
+      API_BASE_URL: "",
+      eventUrl: () => "",
+    }));
+    ({ SettingsScreen } = await import("./SettingsScreen.jsx"));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    window.localStorage.clear();
+    vi.doUnmock("../api.js");
+    vi.restoreAllMocks();
+  });
+
+  async function render() {
+    await act(async () => {
+      root.render(<SettingsScreen />);
+    });
+    await act(async () => {});
+  }
+
+  const qualitySelect = () =>
+    container.querySelector('[aria-label="Default generation quality"]');
+
+  it("renders the control defaulting to Balanced (Q8) when nothing is stored", async () => {
+    await render();
+    expect(container.textContent).toContain("Generation quality");
+    const select = qualitySelect();
+    expect(select).toBeTruthy();
+    expect(select.value).toBe("q8");
+  });
+
+  it("persists a change to localStorage and confirms it in the status line", async () => {
+    await render();
+    await changeField(qualitySelect(), "bf16");
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBe("bf16");
+    expect(qualitySelect().value).toBe("bf16");
+    expect(container.textContent).toContain("High fidelity (bf16)");
+  });
+
+  it("seeds the control from a previously persisted value (persistence round-trip)", async () => {
+    // Simulate a prior session having written q4, then a fresh mount.
+    window.localStorage.setItem(STORAGE_KEY, "q4");
+    await render();
+    expect(qualitySelect().value).toBe("q4");
+  });
+});

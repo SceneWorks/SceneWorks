@@ -20,6 +20,17 @@ const TIER_QUANTIZE = {
   q4: 4,
 };
 
+// The three user-facing generation-quality tiers, in fidelity order — the vocabulary the global
+// "default generation quality" setting (epic 10721 / sc-10728) ranges over. int8-convrot is
+// intentionally excluded: it's a candle-only niche tier, not a sensible app-wide default.
+export const GENERATION_QUALITY_TIERS = ["bf16", "q8", "q4"];
+
+// The app-wide base default generation tier used when no global setting, sticky, or manifest default
+// applies (epic 10721 / sc-10726). Q8 matches the worker's generation default. `defaultTierSelection`
+// uses it as the fallback base whenever `options.defaultQuality` is absent or invalid, so every legacy
+// call site (and the worker) stays consistent on Q8.
+export const DEFAULT_GENERATION_QUALITY = "q8";
+
 // The candle-only Krea 2 INT8-ConvRot tier key (sc-9300, epic 9083). NOT a bits-based quant — the
 // online-rotation int8 DiT can't be expressed as an `mlxQuantize` value — so it is DELIBERATELY absent
 // from TIER_QUANTIZE and instead sends a distinct `advanced.convRot: true` signal (see
@@ -142,16 +153,19 @@ function defaultInstalledTier(model, tiers) {
   return declared ? declared.variant : null;
 }
 
-// The tier the picker should start on for `model`. Preference order:
-//   1. `lastUsed` — the per-model last-used tier, when it is still installed (persistence).
-//   2. the model's declared default tier (`variant.default: true`), when installed.
-//   3. q8 if installed (epic 10721 / sc-10726 — Q8 is the app-wide default generation tier, replacing
-//      the old q4 base convention; clamped to installed so it only wins when q8 is actually present).
-//      A later story (S4) sources this from a global user setting; here it is the hardcoded base default.
-//   4. q4 if installed (clean-tiers fallback so a q4-only install still seeds a real tier, not null).
-//   5. the first installed tier.
-// Returns null when nothing is installed (no picker will render anyway). `options` (sc-9300) forwards
-// the `convRotEligible` gate so a hidden INT8-ConvRot tier is never seeded as the selection.
+// The tier the picker should start on for `model`. Preference order (epic-locked, epic 10721):
+//   1. `lastUsed` — the per-(screen,model) sticky tier, when it is still installed (rung 2, sc-10727).
+//   2. the model's declared default tier (`variant.default: true`), when installed. (Dead against the
+//      real catalog — the backend never emits `default` — but kept so a manifest that does still wins.)
+//   3. the global "default generation quality" setting (rung 3, sc-10728) — `options.defaultQuality`,
+//      one of bf16|q8|q4. Absent/invalid falls back to `DEFAULT_GENERATION_QUALITY` (q8), matching the
+//      worker's generation default. Clamped to installed: the base leads a clean-tier fallback so an
+//      uninstalled base resolves to the nearest installed clean tier rather than null. Convert-at-install
+//      models (mlxTiers, sc-10730) fall through bf16 before q4; download-matrix models fall q8 → q4.
+//   4. the first installed tier.
+// Returns null when nothing is installed (no picker will render anyway). `options` also forwards the
+// `convRotEligible` gate (sc-9300) so a hidden INT8-ConvRot tier is never seeded as the selection —
+// and because `defaultQuality` can only ever be bf16|q8|q4, it never re-introduces a filtered tier.
 export function defaultTierSelection(model, lastUsed, options = {}) {
   const tiers = installedTiers(model, options);
   if (tiers.length === 0) {
@@ -164,14 +178,19 @@ export function defaultTierSelection(model, lastUsed, options = {}) {
   if (declared) {
     return declared;
   }
-  // Q8 is the app-wide base default (epic 10721 / sc-10726), matching the worker's Q8 generation
-  // default and replacing the old q4-hard-default so the picker never silently sends the washed q4.
-  // Clamped to installed. Convert-at-install models (mlxTiers, sc-10730) additionally prefer bf16
-  // over q4 as the clean-tier fallback when q8 isn't on disk; download-matrix models fall q8 → q4.
-  const preferred =
+  // Rung 3: the global default-generation-quality setting is the app-wide base default. The caller
+  // passes it as `options.defaultQuality`; an absent/invalid value falls back to Q8 (the historical
+  // base + worker default) so legacy call sites are unchanged. The base leads a clean-tier fallback so
+  // it is always clamped to what's installed — a base tier that isn't on disk resolves to the nearest
+  // installed clean tier (never the washed q4 unless that's all that's left), never null.
+  const base = GENERATION_QUALITY_TIERS.includes(options.defaultQuality)
+    ? options.defaultQuality
+    : DEFAULT_GENERATION_QUALITY;
+  const cleanFallback =
     !model?.hasVariantMatrix && Array.isArray(model?.mlxTiers)
       ? ["q8", "bf16", "q4"]
       : ["q8", "q4"];
+  const preferred = [base, ...cleanFallback.filter((tier) => tier !== base)];
   for (const tier of preferred) {
     if (tiers.includes(tier)) {
       return tier;
