@@ -1391,7 +1391,6 @@ label {
 .look-composer button,
 .test-result > button,
 .models-import-grid button,
-.lora-selection-actions button,
 .segmented-control button {
   display: inline-flex;
   align-items: center;
@@ -1430,7 +1429,6 @@ label {
 .look-composer button:hover:not(:disabled),
 .test-result > button:hover:not(:disabled),
 .models-import-grid button:hover:not(:disabled),
-.lora-selection-actions button:hover:not(:disabled),
 .segmented-control button:hover:not(:disabled) {
   background: var(--surface-hover);
 }
@@ -3479,10 +3477,10 @@ input.dataset-name-input.boxed:focus {
 }
 
 /* The Preset editor's Name field — sole survivor of the old 4-column dataset header
-   grid, whose other cells died with it (sc-10497). Its `grid-column: 1 / span 2` went
-   with them: .preset-section-body is a single-column grid, so spanning two columns had
-   been opening an implicit second one that the other .field siblings auto-placed into.
-   The preset sections now stack, which the Presets redesign will settle properly. */
+   grid, whose other cells died with it (sc-10497). The Presets redesign settled the
+   stacking this comment used to worry about: the editor's own `.preset-manager .field`
+   rules now own layout, and `.preset-manager .field-name:not(.preset-name-saved) input`
+   distinguishes the boxed "new" input from the borderless saved title. */
 .field-name {
   display: grid;
   gap: 7px;
@@ -3869,14 +3867,6 @@ input.dataset-name-input.boxed:focus {
 .advanced-toggle:hover:not(:disabled) {
   background: transparent;
   color: var(--text);
-}
-
-.advanced-toggle .chev-rotate {
-  transition: transform var(--t-fast) var(--ease-out);
-}
-
-.advanced-toggle .chev-rotate.open {
-  transform: rotate(180deg);
 }
 
 /* The video upscale sub-panel folds into Advanced; span the full 2-column grid so its
@@ -4798,9 +4788,6 @@ details[open] > summary.lora-scope-group-heading::before,
 .model-row,
 .lora-panel,
 .lora-row,
-.preset-list,
-.preset-editor,
-.preset-row,
 .character-editor,
 .character-section,
 .reference-card,
@@ -5945,272 +5932,659 @@ details[open] > summary.lora-scope-group-heading::before,
   font-size: 0.85em;
 }
 
-.preset-layout {
-  display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
-  gap: 16px;
-  align-items: start;
+/* ── Presets (page-frame standard, sc-10511 / sc-10514) ──────────────────────
+   Manager = one work-panel (intent + toolbar) over a bare-canvas card grid.
+   Editor  = one work-panel of hairline-separated sections. Both live under
+   `.preset-manager`, so these rules out-specify the legacy `.preset-*` block
+   below until the sweep (sc-10518) removes it. */
+
+.preset-manager .link-button {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  min-height: 0;
 }
 
-/* Preset create/edit share the same guided flow; edit keeps the selector rail. */
-.preset-layout.creating {
-  grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
+.preset-manager .link-button:hover {
+  color: var(--accent-strong);
+  background: none;
 }
 
-@media (max-width: 1200px) {
-  .preset-layout,
-  .preset-layout.creating {
-    grid-template-columns: minmax(200px, 240px) minmax(0, 1fr);
-  }
-
-  .preset-create-body {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .preset-summary {
-    grid-column: 1 / -1;
-    position: static;
-  }
-}
-
-@media (max-width: 860px) {
-  .preset-layout,
-  .preset-layout.creating {
-    grid-template-columns: 1fr;
-  }
-}
-
-/* ---------- New Preset (step-by-step preset form) ---------- */
-.preset-create-shell {
-  display: grid;
-  gap: var(--gap-3);
-  width: 100%;
-  max-width: 1120px;
-  min-width: 0;
-  align-content: start;
-}
-
-.preset-create-head {
+.preset-intro {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
+  gap: var(--gap-5);
+  flex-wrap: wrap;
+}
+
+.preset-intro-text {
+  flex: 1;
+  min-width: 280px;
+  display: grid;
+  gap: 7px;
+}
+
+.preset-intro-text h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.preset-intro-text > p:last-child {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  max-width: 64ch;
+}
+
+/* `.primary-action` / `.secondary-action` are display:block, so an icon + label button
+   needs to opt into flex before `gap` does anything. */
+.preset-new,
+.preset-card-actions .primary-action,
+.preset-card-actions .secondary-action,
+.preset-editor-actions .primary-action,
+.preset-editor-actions .secondary-action,
+.preset-recipe-footer .primary-action,
+.preset-recipe-footer .secondary-action,
+.preset-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.preset-new {
+  flex: none;
+  min-height: var(--control-h);
+}
+
+.preset-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+  flex-wrap: wrap;
+}
+
+.preset-search {
+  flex: 1;
+  min-width: 200px;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  height: var(--control-h);
+  box-sizing: border-box;
+  padding: 0 13px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-faint);
+}
+
+.preset-search:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-glow);
+}
+
+/* The base `select` rule is width:100%, which would push the type filter onto its
+   own row instead of sitting beside the search + scope controls. */
+.preset-toolbar select {
+  flex: none;
+  width: auto;
+  min-width: 150px;
+}
+
+.preset-search input {
+  flex: 1;
+  min-width: 0;
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.preset-search input:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+/* Results zone — bare canvas, no wrapping card. */
+.preset-results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-3);
+}
+
+.preset-results-head {
+  display: flex;
+  align-items: center;
   gap: var(--gap-3);
   flex-wrap: wrap;
 }
 
-.preset-create-back {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  border-radius: var(--r-sm);
-  color: var(--text-muted);
-  font-size: 13px;
-  font-weight: 500;
-  background: transparent;
-  border: 0;
-}
-
-.preset-create-back:hover {
-  color: var(--text);
-  background: var(--surface-hover);
-}
-
-.preset-create-actions {
-  display: inline-flex;
-  gap: 8px;
-}
-
-.preset-edit-context {
+.preset-results-head > div:first-child {
   display: grid;
-  gap: 3px;
-  min-width: 0;
+  gap: 2px;
 }
 
-.preset-edit-kicker {
-  color: var(--text-faint);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.preset-edit-context strong {
-  color: var(--text);
+.preset-results-head h2 {
+  margin: 0;
   font-size: 16px;
   font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
-.preset-edit-context small {
+.preset-results-count {
+  margin-left: auto;
+  font-size: 12px;
   color: var(--text-muted);
-  font-size: 12.5px;
 }
 
-.preset-create-actions .btn-secondary {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 36px;
-  padding: 0 14px;
-  border-radius: var(--r-sm);
-  border: 1px solid var(--border);
+.preset-results-head select {
+  flex: none;
+  width: auto;
+  height: 32px;
+  font-size: 12px;
+  background: var(--bg-2);
+}
+
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--gap-3);
+}
+
+.preset-card {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding: 16px 16px 14px;
   background: var(--surface);
-  color: var(--text);
-  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.preset-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--gap-2);
+}
+
+.preset-card-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.preset-card-title strong {
+  display: block;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preset-card-title div {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.preset-card-model {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.preset-scope-chip {
+  flex: none;
+  padding: 3px 9px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.preset-scope-chip.global {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent-strong);
+}
+
+.preset-card-preview {
+  padding: 9px 11px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  font: 400 11.5px/1.55 var(--font-mono);
+  color: var(--text-muted);
+  overflow: hidden;
+}
+
+.preset-card-preview .faint {
+  color: var(--text-faint);
+}
+
+.preset-card-preview .token,
+.preset-live-preview .token {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
   font-weight: 500;
 }
 
-.preset-create-actions .btn-secondary:hover:not(:disabled) {
-  background: var(--surface-hover);
+.preset-card-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
-.preset-create-actions .btn-primary {
+/* Scoped to the screen, not to the card row: the LoRA picker's family chip
+   (`.lora-pick-row .chip`) lives in the editor and there is no global `.chip` rule. */
+.preset-manager .chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 36px;
-  padding: 0 16px;
-  border-radius: var(--r-sm);
-  border: 0;
-  background: var(--accent);
-  color: var(--accent-fg);
-  font-size: 13.5px;
-  font-weight: 600;
-  box-shadow:
-    0 1px 2px color-mix(in oklch, var(--accent) 40%, transparent),
-    0 6px 18px color-mix(in oklch, var(--accent) 25%, transparent);
-}
-
-.preset-create-actions .btn-primary:hover:not(:disabled) {
-  background: var(--accent-strong);
-}
-
-.preset-create-actions .btn-primary:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-  box-shadow: none;
-}
-
-.preset-create-body {
-  display: grid;
-  grid-template-columns: minmax(0, 760px) minmax(260px, 320px);
-  gap: var(--gap-4);
-  align-items: start;
-}
-
-.preset-form-stack {
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
-  min-width: 0;
-}
-
-.preset-summary {
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-3);
-  position: sticky;
-  top: 86px;
-  min-width: 0;
-}
-
-@media (max-width: 1200px) {
-  .preset-create-body {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .preset-summary {
-    grid-column: 1 / -1;
-    position: static;
-  }
-}
-
-.preset-section {
-  display: grid;
-  grid-template-columns: 36px minmax(0, 1fr);
-  gap: 18px;
-  padding-bottom: 24px;
-  border-bottom: 1px dashed var(--border);
-}
-
-.preset-section:last-of-type {
-  border-bottom: 0;
-  padding-bottom: 0;
-}
-
-.preset-section header {
-  display: contents;
-}
-
-.preset-section .step {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
+  padding: 3px 9px;
   border-radius: var(--r-pill);
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  font-size: 12.5px;
-  font-weight: 700;
-  font-family: var(--font-mono);
-  align-self: start;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
-[data-theme="dark"] .preset-section .step {
+.preset-manager .chip.accent {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent-strong);
+}
+
+/* On the dark accent-soft fill, `--accent-strong` reads hot; the app dims accent
+   text to `--accent` in dark. Same tweak the old preset chips carried. */
+[data-theme="dark"] .preset-manager .chip.accent,
+[data-theme="dark"] .preset-scope-chip.global,
+[data-theme="dark"] .preset-card-preview .token,
+[data-theme="dark"] .preset-live-preview .token {
   color: var(--accent);
 }
 
-.preset-section h3 {
-  margin: 0 0 4px;
-  font-size: 16px;
+.preset-recipe-chips .chip {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.preset-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.preset-card-spacer {
+  flex: 1;
+}
+
+.preset-card-actions .primary-action,
+.preset-card-actions .secondary-action {
+  min-height: 34px;
+  padding: 0 14px;
+  font-size: 12.5px;
+  border-radius: var(--r-sm);
+  gap: 7px;
+}
+
+.preset-icon-button {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+.preset-icon-button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.preset-icon-button.danger:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+/* ── Editor ─────────────────────────────────────────────────────────────── */
+
+.preset-editor-panel {
+  gap: 0;
+}
+
+.preset-editor-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--gap-4);
+  flex-wrap: wrap;
+}
+
+.preset-editor-context {
+  min-width: 260px;
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
+.preset-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 0;
+  margin-left: -6px;
+  padding: 4px 9px 4px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  border-radius: 7px;
+}
+
+.preset-back:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.preset-editor-eyebrow {
+  color: var(--accent-strong);
+}
+
+.preset-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+}
+
+.preset-editor-actions .primary-action,
+.preset-editor-actions .secondary-action,
+.preset-recipe-footer .primary-action,
+.preset-recipe-footer .secondary-action {
+  min-height: var(--control-h);
+  padding: 0 18px;
+  font-size: 13px;
+  border-radius: 9px;
+}
+
+.preset-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.preset-status-pill.warn {
+  border-color: transparent;
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.preset-status-pill .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* Quiet section rhythm: title + one-line description + controls, hairline-split.
+   No numbered step circles. */
+.preset-form-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-3);
+  margin-top: var(--gap-4);
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.preset-form-section-head h3 {
+  margin: 0;
+  font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.005em;
 }
 
-.preset-section header p {
-  margin: 0;
-  font-size: 13px;
+.preset-form-section-head p {
+  margin: 3px 0 0;
+  font-size: 12.5px;
   color: var(--text-muted);
 }
 
-.preset-section .optional-tag {
+.preset-optional {
   margin-left: 8px;
+  font-size: 12px;
   font-weight: 400;
   color: var(--text-faint);
-  font-size: 12px;
 }
 
-.preset-section-body {
-  grid-column: 2;
+.preset-manager .field {
   display: grid;
-  gap: var(--gap-3);
-  margin-top: 12px;
+  gap: 6px;
   min-width: 0;
 }
 
-/* Field — used inside preset sections */
-.preset-section-body .field {
+.preset-manager .field > span {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.preset-identity-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--gap-5);
+  flex-wrap: wrap;
+}
+
+.preset-name-field {
+  flex: 1;
+  min-width: 260px;
+}
+
+.preset-name-saved-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Saved: a borderless 22px title. New: a boxed 18px input. Both live under
+   `.field-name`, so the saved rule must out-specify the boxed one. */
+.preset-manager .preset-name-saved-row input {
+  flex: 1;
+  min-width: 0;
+  height: auto;
+  padding: 2px 0;
+  border: none;
+  border-bottom: 1.5px solid transparent;
+  background: transparent;
+  font: 600 22px/1.2 var(--font-ui);
+  letter-spacing: -0.01em;
+}
+
+.preset-manager .preset-name-saved-row input:focus {
+  border-bottom-color: var(--accent);
+  box-shadow: none;
+  outline: none;
+}
+
+.preset-name-saved-row .preset-icon-button {
+  width: 28px;
+  height: 28px;
+}
+
+.preset-manager .field-name:not(.preset-name-saved) input {
+  font-size: 18px;
+  font-weight: 600;
+  height: 44px;
+}
+
+.preset-scope-field {
+  width: 300px;
+  flex: none;
+}
+
+.preset-identity-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: var(--gap-3);
+}
+
+.preset-identity-meta .field input {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.preset-identity-meta .field:last-child input {
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+
+.preset-model-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--gap-3);
+  align-items: end;
+}
+
+.preset-model-meta-line {
+  padding-bottom: 11px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.preset-workflow {
+  max-width: 540px;
+}
+
+.preset-workflow button {
+  flex: 1;
+}
+
+.preset-prompt-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--gap-3);
+}
+
+.preset-prompt-grid textarea {
+  min-height: 64px;
+  resize: vertical;
+  font: 400 13px/1.5 var(--font-mono);
+}
+
+.preset-live-preview {
   display: grid;
   gap: 6px;
+  padding: 12px 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
 }
 
-.preset-section-body .field > span {
-  font-size: 12px;
-  font-weight: 600;
+.preset-live-preview p {
+  margin: 0;
+  font: 400 13.5px/1.65 var(--font-mono);
+}
+
+.preset-live-preview .prefix {
+  color: var(--text);
+}
+
+.preset-live-preview .suffix {
   color: var(--text-muted);
-  letter-spacing: 0.01em;
 }
 
-.preset-section-body .field > small {
-  color: var(--text-faint);
-  font-family: var(--font-mono);
-  font-size: 11px;
+.preset-manager .preset-defaults-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.4fr;
+  gap: var(--gap-3);
+  align-items: end;
 }
 
-.preset-section-body .field-name input {
-  font-size: 16px;
-  font-weight: 500;
-  height: 44px;
+.preset-manager .preset-defaults-grid:has(> :nth-child(4)) {
+  grid-template-columns: repeat(3, 1fr) 1.4fr;
+}
+
+.lora-slot.warning {
+  border-color: var(--warn);
+}
+
+.preset-recipe-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+  margin-top: var(--gap-4);
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.preset-recipe-chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 1100px) {
+  .preset-grid,
+  .preset-prompt-grid,
+  .preset-identity-meta {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .preset-manager .preset-defaults-grid,
+  .preset-manager .preset-defaults-grid:has(> :nth-child(4)) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .preset-model-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .preset-model-meta-line {
+    padding-bottom: 0;
+  }
+
+  .preset-scope-field {
+    width: 100%;
+  }
 }
 
 /* Identity scope segmented control */
@@ -6250,227 +6624,18 @@ details[open] > summary.lora-scope-group-heading::before,
   box-shadow: var(--shadow-sm);
 }
 
-/* Workflow cards */
-.workflow-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 10px;
-}
-
-.workflow-card {
-  display: grid;
-  gap: 6px;
-  padding: 14px;
-  text-align: left;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  min-height: 132px;
-  align-content: start;
-  transition: border-color var(--t-fast), box-shadow var(--t-fast), transform var(--t-fast);
-  position: relative;
-}
-
-.workflow-card:hover {
-  border-color: var(--border-strong);
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-sm);
-}
-
-.workflow-card.active {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 18%, transparent);
-  background: color-mix(in oklch, var(--accent-soft) 60%, var(--surface));
-}
-
-.workflow-card:disabled,
-.preset-model-row:disabled,
 .scope-segment button:disabled,
 .quality-pick button:disabled {
   cursor: not-allowed;
   opacity: 0.58;
 }
 
-.workflow-card-icon {
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--r-sm);
-  background: var(--bg-2);
-  color: var(--text-muted);
-  margin-bottom: 4px;
-}
-
-.workflow-card.active .workflow-card-icon {
-  background: var(--accent);
-  color: var(--accent-fg);
-}
-
-.workflow-card strong {
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.workflow-card small {
-  color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.workflow-card .chip {
-  width: fit-content;
-  margin-top: auto;
-}
-
-/* Model cards (radio list) */
-.preset-model-cards {
-  display: grid;
-  gap: 8px;
-}
-
-.preset-model-row {
-  display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: center;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--surface);
-  text-align: left;
-  transition: border-color var(--t-fast), box-shadow var(--t-fast);
-}
-
-.preset-model-row:hover {
-  border-color: var(--border-strong);
-}
-
-.preset-model-row.active {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 18%, transparent);
-}
-
-.preset-model-radio {
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  border: 2px solid var(--border-strong);
-  position: relative;
-  flex: 0 0 auto;
-}
-
-.preset-model-radio.active {
-  border-color: var(--accent);
-  background: var(--accent);
-  box-shadow: inset 0 0 0 3px var(--surface);
-}
-
-.preset-model-meta {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.preset-model-meta strong {
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.preset-model-meta span {
-  font-size: 12.5px;
-  color: var(--text-muted);
-}
-
-.preset-model-tags {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-/* Chip used in preset form */
-.preset-section-body .chip,
-.preset-summary .chip {
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 9px;
-  border-radius: var(--r-pill);
-  font-size: 11.5px;
-  font-weight: 500;
-  background: var(--surface-2);
-  color: var(--text-muted);
-  border: 1px solid var(--border);
-  white-space: nowrap;
-}
-
-.preset-section-body .chip.accent,
-.preset-summary .chip.accent {
-  background: var(--accent-soft);
-  border-color: transparent;
-  color: var(--accent-strong);
-}
-
-[data-theme="dark"] .preset-section-body .chip.accent,
-[data-theme="dark"] .preset-summary .chip.accent {
-  color: var(--accent);
-}
-
-/* Prompt template + preview */
-.prompt-template {
-  display: grid;
-  gap: 14px;
-}
-
-.prompt-preview {
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  padding: 12px 14px;
-  display: grid;
-  gap: 6px;
-}
-
-.prompt-preview-label {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-faint);
-}
-
-.prompt-preview p {
-  margin: 0;
-  font-size: 13.5px;
-  line-height: 1.6;
-  font-family: var(--font-mono);
-}
-
-.prompt-preview .prefix,
-.prompt-preview .suffix {
-  color: var(--text-muted);
-}
-
-.prompt-preview .user-input {
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  font-weight: 500;
-}
-
-[data-theme="dark"] .prompt-preview .user-input {
-  color: var(--accent);
-}
 
 /* Defaults grid (Variations + Aspect, Duration + Frames, Quality) */
 .preset-defaults-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--gap-3);
-}
-
-.preset-defaults-grid > .field-span-2 {
-  grid-column: span 2;
 }
 
 .quality-pick {
@@ -6723,98 +6888,6 @@ details[open] > summary.lora-scope-group-heading::before,
   background: var(--surface-hover);
 }
 
-/* Preset summary cards (right column) */
-.preset-summary .summary-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  padding: 14px 16px;
-  display: grid;
-  gap: 10px;
-}
-
-.preset-summary .summary-card h2 {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.preset-summary .summary-card .meta {
-  color: var(--text-faint);
-  font-size: 11.5px;
-}
-
-.preset-summary .summary-section-title {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-
-.preset-summary .detail-stack {
-  display: grid;
-  gap: 8px;
-}
-
-.preset-summary .detail-row {
-  display: grid;
-  grid-template-columns: 100px 1fr;
-  gap: 8px;
-  font-size: 12.5px;
-}
-
-.preset-summary .detail-row dt {
-  margin: 0;
-  color: var(--text-muted);
-}
-
-.preset-summary .detail-row dd {
-  margin: 0;
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
-.preset-summary .summary-warning {
-  background: var(--warm-soft);
-  border-color: color-mix(in oklch, var(--warm) 45%, var(--border));
-  display: grid;
-  gap: 4px;
-}
-
-.preset-summary .summary-warning strong {
-  display: block;
-  font-size: 13px;
-  font-weight: 600;
-  margin-bottom: 2px;
-}
-
-.preset-summary .summary-warning span {
-  color: var(--text-muted);
-  font-size: 12.5px;
-}
-
-/* Advanced expander button */
-.preset-advanced-toggle {
-  align-self: start;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 13px;
-  font-weight: 500;
-  border-radius: var(--r-sm);
-  border: 0;
-}
-
-.preset-advanced-toggle:hover {
-  color: var(--text);
-}
-
 .reference-card span,
 .look-row span,
 .look-row small,
@@ -6972,78 +7045,6 @@ details[open] > summary.lora-scope-group-heading::before,
   padding: 10px;
 }
 
-.preset-list,
-.preset-editor {
-  display: grid;
-  gap: 10px;
-  align-content: start;
-  padding: 12px;
-}
-
-.preset-list {
-  max-height: 680px;
-  overflow: auto;
-}
-
-.preset-editor label {
-  display: grid;
-  gap: 7px;
-}
-
-.preset-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  width: 100%;
-  color: var(--text);
-  padding: 10px;
-  text-align: left;
-  background: var(--surface);
-}
-
-.preset-row.active {
-  border-color: transparent;
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-}
-
-[data-theme="dark"] .preset-row.active {
-  color: var(--text);
-}
-
-.preset-row span:first-child {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.preset-row strong,
-.preset-row small,
-.preset-row > span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.preset-row strong {
-  font-weight: 600;
-  font-size: 13px;
-}
-
-.preset-row small,
-.preset-row > span:last-child {
-  color: var(--text-muted);
-  font-size: 11.5px;
-}
-
-.preset-status.ok {
-  color: var(--success);
-}
-
-.preset-status.error {
-  color: var(--danger);
-}
-
 .compact-panel {
   min-height: auto;
   padding: 12px;
@@ -7098,7 +7099,6 @@ details[open] > summary.lora-scope-group-heading::before,
 .studio-controls label,
 .prompt-field,
 .editor-inspector label,
-.preset-editor label,
 .timeline-create label,
 .export-strip label,
 .bin-controls label {
@@ -7293,45 +7293,6 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.4;
-}
-
-.editable-lora-choice {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) max-content;
-  gap: 10px 14px;
-  align-items: center;
-}
-
-.lora-add-row {
-  grid-template-columns: minmax(0, 1fr) auto;
-}
-
-.lora-selection-actions {
-  display: grid;
-  grid-template-columns: 96px auto;
-  gap: 8px;
-  align-items: flex-end;
-}
-
-.lora-selection-actions label {
-  min-width: 0;
-  width: 96px;
-}
-
-.lora-selection-actions input[type="number"] {
-  width: 100%;
-  min-width: 0;
-  text-align: right;
-}
-
-.lora-selection-actions button {
-  white-space: nowrap;
-}
-
-.editable-lora-choice > label:first-child {
-  display: flex;
-  gap: 10px;
-  align-items: center;
 }
 
 .guidance-strip span,
@@ -10259,7 +10220,6 @@ details[open] > summary.lora-scope-group-heading::before,
   .training-caption-card,
   .training-config-grid,
   .training-advanced-grid,
-  .preset-layout,
   .character-layout,
   .queue-header,
   .job-composer,
@@ -10285,9 +10245,8 @@ details[open] > summary.lora-scope-group-heading::before,
   }
 
   .control-grid,
-  .advanced-panel,
-  .compact-controls,
-  .editable-lora-choice {
+.advanced-panel,
+.compact-controls {
     grid-template-columns: 1fr;
   }
 
