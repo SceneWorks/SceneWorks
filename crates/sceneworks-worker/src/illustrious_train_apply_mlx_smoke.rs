@@ -31,12 +31,12 @@
 //! ```
 //! Knobs: `ILL_STEPS` `ILL_RANK` `ILL_RES` `ILL_SEED` `ILL_SCALE` `ILL_OUT_DIR`.
 //!
-//! Apply tier — this smoke applies on the DENSE tier (`ILL_GEN_QUANT` defaults to `bf16`). Applying on a
-//! packed tier (`ILL_GEN_QUANT=q8`/`q4`) currently fails at load: mlx-gen-sdxl applies a LoRA by MERGING
-//! the delta into the base (`merge_dense_delta`), which requires a dense base and rejects a quantized one
-//! ("a LoRA must be merged before quantization"). That is a pre-existing SDXL-family limitation (not
-//! Illustrious-specific) and belongs to the LoRA-inference story (sc-10616), not this training E2E — so
-//! the packed knob exists for that investigation but is expected to fail until sc-10616 addresses it.
+//! Apply tier — this smoke defaults to the DENSE tier (`ILL_GEN_QUANT=bf16`), but `ILL_GEN_QUANT=q8`/`q4`
+//! now works too: the SDXL family used to MERGE a LoRA into the base (`merge_dense_delta`), which rejects
+//! a quantized weight, so packed-tier apply failed at load (sc-10734, family-wide). mlx-gen-sdxl now
+//! applies the LoRA additively (a forward-time `Adapter::Lora` residual) on a packed base, so a LoRA
+//! applies on q4/q8 at plain-LoRA memory. Validated on-device: `ILL_GEN_QUANT=q8` renders a coherent,
+//! LoRA-shifted image (mean_abs_delta 24.66). Needs the mlx-gen pin at ≥ the sc-10734 fix.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
