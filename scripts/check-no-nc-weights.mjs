@@ -182,11 +182,24 @@ const ALLOWLIST_BASENAMES = new Set(ALLOWLIST.map((entry) => entry.basename));
 // Bootstrap NC tokens for families that are not yet represented in the manifest.
 // Anima (epic 10512) is being ported now; until its manifest entry lands with a
 // repo + `nonCommercial: true`, seed its tokens here so the guard already names it.
-// REMOVE an entry once the corresponding family is in the manifest (the manifest is
-// the source of truth). This is not left to vigilance: the self-test asserts that
-// once the manifest itself yields an `anima` / `circlestone-labs` token, this array
-// MUST be empty — so the "temporary" seed cannot silently become permanent.
-const BOOTSTRAP_NC_TOKENS = ["circlestone-labs", "anima"];
+// These are exactly the tokens `repoToTokens("circlestone-labs/anima")` will emit
+// once sc-10523 wires the manifest entry — the two STRONG repo/cache forms
+// (`circlestone-labs/anima`, `models--circlestone-labs--anima`) plus the WEAK bare
+// name (`anima`). Seeding the strong forms is deliberate: it makes the header
+// comment's "any blob regardless of extension" guarantee (see scan() case (1)) TRUE
+// for Anima today, so an arbitrary-extension blob (e.g. `model.dat`) under a
+// redistributed `models--circlestone-labs--Anima/` directory fails right now, not
+// only after the manifest lands. Because the seed mirrors the manifest output
+// exactly, the guard behaves identically before and after sc-10523.
+// REMOVE every entry once the corresponding family is in the manifest (the manifest
+// is the source of truth). This is not left to vigilance: the self-test asserts that
+// once the manifest itself yields an `anima` / `circlestone` token, this array MUST
+// be empty — so the "temporary" seed cannot silently become permanent.
+const BOOTSTRAP_NC_TOKENS = [
+  "circlestone-labs/anima",
+  "models--circlestone-labs--anima",
+  "anima",
+];
 
 // -- JSONC parsing (manifests carry // comments). Mirrors scripts/check-scaffold.mjs. --
 function stripJsoncComments(body) {
@@ -735,9 +748,16 @@ async function selfTest() {
     families.some((f) => /flux|ideogram|krea|sana/i.test(f)) ||
       tokens.some((t) => /flux|ideogram|krea|sana/.test(t)),
   );
+  // Match on how the token ARRIVES, not an exact bootstrap string. The bootstrap
+  // seed and the eventual manifest wiring produce different literal tokens for the
+  // same family — the seed used to carry a bare `circlestone-labs`, but the manifest
+  // yields `circlestone-labs/anima` + `models--circlestone-labs--anima` + `anima` and
+  // NO bare `circlestone-labs`. Asserting on the exact bare token would fire a second,
+  // unadvertised failure the moment sc-10523 lands and an engineer (correctly) empties
+  // the seed per the tripwire below. A substring match is robust to both worlds.
   assert(
     "Anima is covered (bootstrap until epic 10512 lands in the manifest)",
-    tokens.includes("anima") && tokens.includes("circlestone-labs"),
+    tokens.some((t) => /anima/.test(t)) && tokens.some((t) => /circlestone/.test(t)),
   );
 
   // Bootstrap-seed redundancy: the moment the MANIFEST itself yields an Anima /
