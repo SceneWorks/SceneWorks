@@ -350,6 +350,15 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
             "wan_2_2_i2v_14b" => Some("wan2_2_i2v_14b"),
             _ => None,
         },
+        // Anima (epic 10512, sc-10522): the `mlx-gen-anima` LoRA/LoKr trainer registers under the same
+        // id as the inference generator of the training base. All three variants share one architecture,
+        // so a LoRA trained on any applies back to every variant via `apply_anima_adapters`; the base
+        // model selects which variant's dense weights the trainer loads (default `anima_base`).
+        "anima_lora" => match plan.target.base_model.as_str() {
+            "anima_aesthetic" => Some("anima_aesthetic"),
+            "anima_turbo" => Some("anima_turbo"),
+            _ => Some("anima_base"),
+        },
         _ => None,
     }
 }
@@ -2064,6 +2073,11 @@ mod tests {
             // registers under the inference-generator id of each base.
             ("sd3_lora", "sd3_5_large", Some("sd3_5_large")),
             ("sd3_lora", "sd3_5_medium", Some("sd3_5_medium")),
+            // Anima (sc-10522): the `anima_lora` kernel maps to the trainer registered under the
+            // inference-generator id of the training-base variant; `anima_base` is the default.
+            ("anima_lora", "anima_base", Some("anima_base")),
+            ("anima_lora", "anima_aesthetic", Some("anima_aesthetic")),
+            ("anima_lora", "anima_turbo", Some("anima_turbo")),
             // Unknown SD3.5 base model variant (e.g. Turbo is NOT a training base).
             ("sd3_lora", "sd3_5_large_turbo", None),
             // Unknown A14B base model variant.

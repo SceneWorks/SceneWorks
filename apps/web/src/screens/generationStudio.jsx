@@ -355,9 +355,15 @@ export function useSavePreset({
   );
 
   useEffect(() => {
+    // Only the snapshot's OWN preset skips the pass — its knob values are already
+    // restored. A different preset resolving first (e.g. Presets → "Use in Studio",
+    // sc-10516) must still apply its defaults, or the launch would select the preset
+    // and silently ignore everything it carries.
     if (skipPresetDefaultsOnHydrate.current && selectedPreset) {
       skipPresetDefaultsOnHydrate.current = false;
-      return;
+      if (selectedPreset.id === saved.selectedPresetId) {
+        return;
+      }
     }
     if (!selectedPreset) {
       for (const [key, setter] of presetDefaultFields) {
