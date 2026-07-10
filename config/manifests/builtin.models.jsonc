@@ -4802,7 +4802,7 @@
           "default": true,
           "files": ["q4/*"],
           "estimatedSizeBytes": 3911461825,
-          "footprint": { "diskSizeBytes": 3911461825, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "footprint": { "diskSizeBytes": 3911461825, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256 }
         },
         {
           "provider": "huggingface",
@@ -4810,7 +4810,7 @@
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 5385646417,
-          "footprint": { "diskSizeBytes": 5385646417, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "footprint": { "diskSizeBytes": 5385646417, "residentMemoryBytes": 5094661092, "peakMemoryBytes": 20166437656 }
         },
         {
           "provider": "huggingface",
@@ -4818,7 +4818,7 @@
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108498305,
-          "footprint": { "diskSizeBytes": 7108498305, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "footprint": { "diskSizeBytes": 7108498305, "residentMemoryBytes": 6954313820, "peakMemoryBytes": 22025741200 }
         }
       ],
       "paths": {
@@ -4856,6 +4856,9 @@
         "label": "Illustrious-XL v1.0 (anime)",
         "description": "Danbooru-tag anime SDXL finetune from OnomaAI, trained for high-resolution illustration. Same UNet and dual-CLIP as SDXL, so sdxl-family LoRAs apply and real CFG + negative prompt work as usual. Prompts blend Danbooru tags with natural language. Handles wide frames up to 1536x1536. SDXL license (openrail++), commercial use OK, ungated.",
         "recommendedFor": ["text_to_image", "style_variations"],
+        // Anime negative-prompt convention (sc-10621), matching the baseline in the prompt guide.
+        // Image Studio seeds this into an empty negative box.
+        "defaultNegativePrompt": "lowres, bad anatomy, bad hands, missing fingers, extra digits, worst quality, low quality, jpeg artifacts, signature, watermark, username, blurry",
         "pid": { "checkpointId": "pid_sdxl" },
         "promptGuide": {
           "title": "Illustrious Prompt Guide",
@@ -4890,7 +4893,7 @@
           "default": true,
           "files": ["q4/*"],
           "estimatedSizeBytes": 3911461501,
-          "footprint": { "diskSizeBytes": 3911461501, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "footprint": { "diskSizeBytes": 3911461501, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256 }
         },
         {
           "provider": "huggingface",
@@ -4898,7 +4901,7 @@
           "variant": "q8",
           "files": ["q8/*"],
           "estimatedSizeBytes": 5385646137,
-          "footprint": { "diskSizeBytes": 5385646137, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "footprint": { "diskSizeBytes": 5385646137, "residentMemoryBytes": 5094546404, "peakMemoryBytes": 20166322968 }
         },
         {
           "provider": "huggingface",
@@ -4906,7 +4909,7 @@
           "variant": "bf16",
           "files": ["bf16/*"],
           "estimatedSizeBytes": 7108498177,
-          "footprint": { "diskSizeBytes": 7108498177, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "footprint": { "diskSizeBytes": 7108498177, "residentMemoryBytes": 6954313820, "peakMemoryBytes": 22025741200 }
         }
       ],
       "paths": {
@@ -4946,6 +4949,9 @@
         "label": "Illustrious-XL v2.0 (anime)",
         "description": "The v2.0-STABLE snapshot of Illustrious-XL — subtler and more stable than v1.0, but with a narrower safe frame width: it tends to duplicate the subject in wide compositions, so the widest aspect buckets are not offered. Prefer square or tall framing. Same Danbooru-tag prompting and sdxl-family LoRA support. CreativeML OpenRAIL-M, commercial use OK, ungated.",
         "recommendedFor": ["text_to_image", "style_variations"],
+        // Anime negative-prompt convention (sc-10621), matching the baseline in the prompt guide.
+        // Image Studio seeds this into an empty negative box.
+        "defaultNegativePrompt": "lowres, bad anatomy, bad hands, missing fingers, extra digits, worst quality, low quality, jpeg artifacts, signature, watermark, username, blurry",
         "pid": { "checkpointId": "pid_sdxl" },
         "promptGuide": {
           "title": "Illustrious Prompt Guide",
