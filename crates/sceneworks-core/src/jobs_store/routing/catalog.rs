@@ -566,6 +566,10 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("flux2_dev", true, true, false, false, false),
     ModelCaps::new("sdxl", true, true, false, false, false),
     ModelCaps::new("realvisxl", true, true, false, false, false),
+    // Illustrious-XL v1.0 / v2.0 (epic 10609): vanilla-SDXL anime finetunes on the shared `sdxl`
+    // engine. Same routing surface as `realvisxl` — MLX + candle txt2img, dense (no candle quant).
+    ModelCaps::new("illustrious_xl_v1", true, true, false, false, false),
+    ModelCaps::new("illustrious_xl_v2", true, true, false, false, false),
     // RealVisXL Lightning (MLX sc-6075 / candle sc-7176): standalone few-step distilled SDXL checkpoint
     // on the shared `sdxl` engine, few-step `lightning` accel sampler. **txt2img only** on both backends —
     // edit / reference / mask / pose shapes fall back to torch (accel sampler is conditioning-incompatible).
@@ -922,6 +926,8 @@ mod tests {
         "flux2_dev",
         "sdxl",
         "realvisxl",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
         "realvisxl_lightning",
         "instantid_realvisxl",
         "pulid_flux_dev",
@@ -956,6 +962,8 @@ mod tests {
     const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[
         "sdxl",
         "realvisxl",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
         "realvisxl_lightning",
         "z_image_turbo",
         "z_image",

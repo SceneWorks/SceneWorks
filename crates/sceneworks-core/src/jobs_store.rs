@@ -5164,7 +5164,12 @@ mod candle_routing_tests {
         // A pure SDXL/RealVisXL reference (IP-Adapter) job routes to the candle lane (sc-5488) via the
         // bespoke branch, NOT the txt2img `image_request_candle_eligible` gate (which rejects
         // `referenceAssetId`).
-        for model in ["sdxl", "realvisxl"] {
+        for model in [
+            "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ] {
             let payload = json!({ "model": model, "referenceAssetId": "asset_1" });
             assert!(sdxl_ipadapter_candle_eligible(&object(payload.clone())));
             assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
@@ -5190,7 +5195,12 @@ mod candle_routing_tests {
         // SDXL/RealVisXL img2img / inpaint / outpaint edit jobs (sc-5487) route to the bespoke candle
         // `SdxlEdit` lane via the new branch, NOT the txt2img `image_request_candle_eligible` gate
         // (which rejects the whole `edit_image` family).
-        for model in ["sdxl", "realvisxl"] {
+        for model in [
+            "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ] {
             // img2img (source, no mask).
             let img2img = json!({ "model": model, "mode": "edit_image", "sourceAssetId": "src_1" });
             assert!(sdxl_edit_candle_eligible(&object(img2img.clone())));
