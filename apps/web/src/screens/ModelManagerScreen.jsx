@@ -5,6 +5,7 @@ import { terminalStatuses } from "../constants.js";
 import { hasPresentCredential, loadCredentials, serverToken } from "../credentials.js";
 import {
   extractFamilies,
+  loraHasResolvableFamily,
   modelLoraFamilies,
   normalizeLoraFamily,
   presetLoraId,
@@ -1240,6 +1241,13 @@ export function ModelManagerScreen() {
     const keywords = Array.isArray(lora.triggerWords) ? lora.triggerWords : [];
     const notes = typeof lora.notes === "string" ? lora.notes : "";
     const isEditing = editingLora === loraEditKey(lora);
+    // A LoRA whose architecture family couldn't be resolved (no manifest family, no
+    // detected signature — e.g. an external ComfyUI adapter in a format we don't yet
+    // recognize) is listed so the user sees the file was found, but flagged unusable:
+    // the generate-time gate refuses it for every model, so no picker offers it
+    // (sc-10509). Built-in catalog LoRAs always declare a family, so this only marks
+    // user/external rows.
+    const unusable = !isBuiltin && !loraHasResolvableFamily(lora);
     // Built-in entries are read-only (their manifest is compiled in); the backend
     // rejects PATCH on them, so no Edit affordance is offered.
     const canEdit = Boolean(onUpdateLora) && lora.scope !== "builtin";
@@ -1247,9 +1255,15 @@ export function ModelManagerScreen() {
       <article className={rowClass} key={lora.id ?? lora.name}>
         <span>
           <strong>{lora.name ?? lora.id}</strong>
-          <small>{[lora.scope, lora.family ?? "compatible"].filter(Boolean).join(" | ")}</small>
+          <small>{[lora.scope, unusable ? "unrecognized format" : lora.family ?? "compatible"].filter(Boolean).join(" | ")}</small>
         </span>
-        <span className={statusClass}>{statusText}</span>
+        {unusable ? (
+          <span className="status-badge warning" title="This file's architecture family couldn't be identified, so it can't be applied to any model.">
+            unusable
+          </span>
+        ) : (
+          <span className={statusClass}>{statusText}</span>
+        )}
         <span className="lora-row-actions">
           {canDownload ? (
             <button disabled={Boolean(downloadJob)} onClick={() => onDownloadLora(lora)} type="button">
