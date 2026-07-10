@@ -2056,6 +2056,11 @@ mod tests {
         let cases: &[(&str, &str, Option<&str>)] = &[
             ("z_image_lora", "z_image_turbo", Some("z_image_turbo")),
             ("sdxl_lora", "sdxl", Some("sdxl")),
+            // Illustrious v1.0/v2.0 (epic 10609) share the `sdxl_lora` kernel — vanilla SDXL —
+            // so both base models resolve to the `sdxl` engine trainer with no branch here,
+            // unlike `sd3_lora`/`anima_lora` which split on base_model. Pin that.
+            ("sdxl_lora", "illustrious_xl_v1", Some("sdxl")),
+            ("sdxl_lora", "illustrious_xl_v2", Some("sdxl")),
             ("ltx_mlx_lora", "ltx_2_3", Some("ltx_2_3")),
             ("wan_lora", "wan_2_2", Some("wan2_2_ti2v_5b")),
             ("wan_moe_lora", "wan_2_2_t2v_14b", Some("wan2_2_t2v_14b")),
