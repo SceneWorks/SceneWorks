@@ -497,24 +497,27 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
-    });
+    const clickButton = async (label) => {
+      await act(async () => {
+        [...document.body.querySelectorAll("button")].find((button) => button.textContent.trim() === label).click();
+      });
+    };
+    const cardFor = (name) =>
+      [...document.body.querySelectorAll(".preset-card")].find((card) => card.textContent.includes(name));
+    const loraWeightSlider = () => document.body.querySelector(".lora-slot-weight input[type=range]");
+
+    await clickButton("New preset");
     await changeField(field(container, "Name"), "Soft Morning");
-    // New flow: open the LoRA picker, then click the compatible LoRA row to add it.
-    await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
-    });
+    // Open the LoRA picker, then click the compatible LoRA row to add it.
+    await clickButton("Add LoRA");
     await act(async () => {
       [...document.body.querySelectorAll(".lora-pick-row")]
         .find((button) => button.textContent.includes("Global Detail"))
         .click();
     });
-    await changeField(field(container, "Weight"), "0.35");
+    await changeField(loraWeightSlider(), "0.35");
     expect(field(container, "ID").value).toBe("soft_morning");
-    await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Create Preset").click();
-    });
+    await clickButton("Create preset");
     expect(createPreset).toHaveBeenCalledWith(
       expect.objectContaining({
         id: "soft_morning",
@@ -522,59 +525,42 @@ describe("SceneWorks app shell", () => {
         scope: "global",
         loras: [{ id: "global_detail", weight: 0.35 }],
         modes: ["text_to_image", "character_image"],
+        // "Text" persists workflow + the sub-mode the studios restore (sc-10514).
+        workflow: "text_to_image",
+        defaults: expect.objectContaining({ mode: "text_to_image" }),
       }),
     );
-    expect(container.textContent).toContain("Ready");
+    // The Qwen LoRA doesn't share a family with Z-Image, so it never reaches the picker.
     expect(container.textContent).not.toContain("Qwen Only");
 
-    await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
-    });
-    await changeField(field(container, "Name"), "Plain Morning");
-    await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
-    });
-    await act(async () => {
-      [...document.body.querySelectorAll(".lora-pick-row")]
-        .find((button) => button.textContent.includes("Global Detail"))
-        .click();
-    });
-    expect(document.body.querySelector(".lora-choice-list").textContent).toContain("Global Detail");
-    await act(async () => {
-      [...document.body.querySelectorAll(".lora-choice button")].find((button) => button.textContent === "Remove").click();
-    });
-    expect(document.body.querySelector(".lora-choice-list")).toBeNull();
+    // Adding then removing a LoRA leaves no slot behind.
+    expect(document.body.querySelector(".lora-slot").textContent).toContain("Global Detail");
+    await clickButton("×");
+    expect(document.body.querySelector(".lora-slot")).toBeNull();
 
+    await clickButton("All presets");
     await act(async () => {
-      [...document.body.querySelectorAll(".preset-row")].find((button) => button.textContent.includes("Moody")).click();
+      cardFor("Moody").querySelector(".secondary-action").click();
     });
     await changeField(field(container, "Description"), "Richer low key color.");
-    expect(container.textContent).not.toContain("Queue Import");
-    expect(field(container, "Source URL")).toBeUndefined();
-    await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "New Preset").click();
-    });
-    await act(async () => {
-      [...document.body.querySelectorAll(".preset-row")].find((button) => button.textContent.includes("Moody")).click();
-    });
-    await changeField(field(container, "Description"), "Richer low key color.");
-    await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Save Preset").click();
-    });
+    await clickButton("Save preset");
     expect(updatePreset).toHaveBeenCalledWith("moody", expect.objectContaining({ ui: { description: "Richer low key color." } }), "global");
 
+    await clickButton("All presets");
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Duplicate").click();
+      cardFor("Moody").querySelector("[aria-label='Duplicate Moody']").click();
     });
     expect(duplicatePreset).toHaveBeenCalledWith("moody", "global");
 
     await act(async () => {
-      [...document.body.querySelectorAll(".preset-row")].find((button) => button.textContent.includes("Moody")).click();
-    });
-    await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Archive").click();
+      cardFor("Moody").querySelector("[aria-label='Archive Moody']").click();
     });
     expect(deletePreset).toHaveBeenCalledWith("moody", "global");
+
+    // Built-in presets stay read-only: duplicate only, no Edit and no Archive.
+    expect(cardFor("Cinematic").querySelector("[aria-label='Duplicate Cinematic']")).not.toBeNull();
+    expect(cardFor("Cinematic").querySelector("[aria-label='Archive Cinematic']")).toBeNull();
+    expect(cardFor("Cinematic").textContent).not.toContain("Edit");
   });
 
   it("explains preset save blockers and selected LoRA warning states", async () => {
@@ -609,13 +595,67 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    expect(container.textContent).toContain("No models");
-    expect(container.textContent).not.toContain("No model selected");
+    // The manager is the landing state now — open the blocked preset in the editor.
+    await act(async () => {
+      [...document.body.querySelectorAll(".preset-card")]
+        .find((card) => card.textContent.includes("Blocked"))
+        .querySelector(".secondary-action")
+        .click();
+    });
+
+    // The pinned model isn't in this install's catalog: say so instead of rendering an
+    // empty select that would silently rewrite the preset's model on save.
+    expect(field(container, "Model").textContent).toContain("z_image_turbo — not installed");
+    expect(container.textContent).toContain("declares no preset-capable workflow");
     expect(container.textContent).toContain("Pending Style");
     expect(container.textContent).toContain("Missing or still importing");
     expect(container.textContent).toContain("Save blocked: pending_style has not finished importing.");
-    expect(field(container, "Weight").disabled).toBe(true);
-    expect([...document.body.querySelectorAll("button")].find((button) => button.textContent === "Save Preset").disabled).toBe(true);
+    expect(document.body.querySelector(".lora-slot-weight input[type=range]").disabled).toBe(true);
+    expect([...document.body.querySelectorAll("button")].find((button) => button.textContent.trim() === "Save preset").disabled).toBe(true);
     expect(updatePreset).not.toHaveBeenCalled();
+  });
+
+  it("hides an unmet requirement but explains a broken value", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Noir" },
+            createPreset: () => {},
+            deletePreset: () => {},
+            duplicatePreset: () => {},
+            imageModels: [{ id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image", capabilities: ["text_to_image"] }],
+            loras: [],
+            presets: [],
+            updatePreset: () => {},
+            videoModels: [],
+            setActiveView: () => {},
+          },
+          <PresetManagerScreen />,
+        ),
+      );
+    });
+
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.trim() === "New preset").click();
+    });
+
+    const saveButton = () =>
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.trim() === "Create preset");
+
+    // A REQUIREMENT (empty name): the CTA is disabled, but the form already marks the
+    // field required — repeating it as a warning would be noise (sc-10500).
+    expect(saveButton().disabled).toBe(true);
+    expect(container.querySelector(".inline-warning")).toBeNull();
+
+    // An ERROR (a value that is present but out of the range the backend enforces):
+    // the CTA is disabled AND says why.
+    await changeField(field(container, "Name"), "Overcooked");
+    expect(saveButton().disabled).toBe(false);
+    await openAdvancedSection();
+    await changeField(field(container, "Steps"), "500");
+    expect(saveButton().disabled).toBe(true);
+    expect(container.textContent).toContain("Steps must be a whole number between 1 and 200.");
   });
 });

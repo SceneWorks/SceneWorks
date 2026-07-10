@@ -5980,6 +5980,661 @@ details[open] > summary.lora-scope-group-heading::before,
   font-size: 0.85em;
 }
 
+/* ── Presets (page-frame standard, sc-10511 / sc-10514) ──────────────────────
+   Manager = one work-panel (intent + toolbar) over a bare-canvas card grid.
+   Editor  = one work-panel of hairline-separated sections. Both live under
+   `.preset-manager`, so these rules out-specify the legacy `.preset-*` block
+   below until the sweep (sc-10518) removes it. */
+
+.preset-manager .link-button {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  min-height: 0;
+}
+
+.preset-manager .link-button:hover {
+  color: var(--accent-strong);
+  background: none;
+}
+
+.preset-intro {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--gap-5);
+  flex-wrap: wrap;
+}
+
+.preset-intro-text {
+  flex: 1;
+  min-width: 280px;
+  display: grid;
+  gap: 7px;
+}
+
+.preset-intro-text h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.preset-intro-text > p:last-child {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  max-width: 64ch;
+}
+
+/* `.primary-action` / `.secondary-action` are display:block, so an icon + label button
+   needs to opt into flex before `gap` does anything. */
+.preset-new,
+.preset-card-actions .primary-action,
+.preset-card-actions .secondary-action,
+.preset-editor-actions .primary-action,
+.preset-editor-actions .secondary-action,
+.preset-recipe-footer .primary-action,
+.preset-recipe-footer .secondary-action,
+.preset-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.preset-new {
+  flex: none;
+  min-height: var(--control-h);
+}
+
+.preset-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+  flex-wrap: wrap;
+}
+
+.preset-search {
+  flex: 1;
+  min-width: 200px;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  height: var(--control-h);
+  box-sizing: border-box;
+  padding: 0 13px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-faint);
+}
+
+.preset-search:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-glow);
+}
+
+/* The base `select` rule is width:100%, which would push the type filter onto its
+   own row instead of sitting beside the search + scope controls. */
+.preset-toolbar select {
+  flex: none;
+  width: auto;
+  min-width: 150px;
+}
+
+.preset-search input {
+  flex: 1;
+  min-width: 0;
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.preset-search input:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+/* Results zone — bare canvas, no wrapping card. */
+.preset-results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-3);
+}
+
+.preset-results-head {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-3);
+  flex-wrap: wrap;
+}
+
+.preset-results-head > div:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.preset-results-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.preset-results-count {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.preset-results-head select {
+  flex: none;
+  width: auto;
+  height: 32px;
+  font-size: 12px;
+  background: var(--bg-2);
+}
+
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--gap-3);
+}
+
+.preset-card {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding: 16px 16px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.preset-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--gap-2);
+}
+
+.preset-card-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.preset-card-title strong {
+  display: block;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preset-card-title div {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.preset-card-model {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.preset-scope-chip {
+  flex: none;
+  padding: 3px 9px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.preset-scope-chip.global {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent-strong);
+}
+
+.preset-card-preview {
+  padding: 9px 11px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  font: 400 11.5px/1.55 var(--font-mono);
+  color: var(--text-muted);
+  overflow: hidden;
+}
+
+.preset-card-preview .faint {
+  color: var(--text-faint);
+}
+
+.preset-card-preview .token,
+.preset-live-preview .token {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 500;
+}
+
+.preset-card-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* Scoped to the screen, not to the card row: the LoRA picker's family chip
+   (`.lora-pick-row .chip`) lives in the editor and there is no global `.chip` rule. */
+.preset-manager .chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.preset-manager .chip.accent {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent-strong);
+}
+
+/* On the dark accent-soft fill, `--accent-strong` reads hot; the app dims accent
+   text to `--accent` in dark. Same tweak the old preset chips carried. */
+[data-theme="dark"] .preset-manager .chip.accent,
+[data-theme="dark"] .preset-scope-chip.global,
+[data-theme="dark"] .preset-card-preview .token,
+[data-theme="dark"] .preset-live-preview .token {
+  color: var(--accent);
+}
+
+.preset-recipe-chips .chip {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.preset-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.preset-card-spacer {
+  flex: 1;
+}
+
+.preset-card-actions .primary-action,
+.preset-card-actions .secondary-action {
+  min-height: 34px;
+  padding: 0 14px;
+  font-size: 12.5px;
+  border-radius: var(--r-sm);
+  gap: 7px;
+}
+
+.preset-icon-button {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+.preset-icon-button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.preset-icon-button.danger:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+/* ── Editor ─────────────────────────────────────────────────────────────── */
+
+.preset-editor-panel {
+  gap: 0;
+}
+
+.preset-editor-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--gap-4);
+  flex-wrap: wrap;
+}
+
+.preset-editor-context {
+  min-width: 260px;
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
+.preset-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 0;
+  margin-left: -6px;
+  padding: 4px 9px 4px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  border-radius: 7px;
+}
+
+.preset-back:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.preset-editor-eyebrow {
+  color: var(--accent-strong);
+}
+
+.preset-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+}
+
+.preset-editor-actions .primary-action,
+.preset-editor-actions .secondary-action,
+.preset-recipe-footer .primary-action,
+.preset-recipe-footer .secondary-action {
+  min-height: var(--control-h);
+  padding: 0 18px;
+  font-size: 13px;
+  border-radius: 9px;
+}
+
+.preset-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.preset-status-pill.warn {
+  border-color: transparent;
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.preset-status-pill .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* Quiet section rhythm: title + one-line description + controls, hairline-split.
+   No numbered step circles. */
+.preset-form-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-3);
+  margin-top: var(--gap-4);
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.preset-form-section-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+
+.preset-form-section-head p {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.preset-optional {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-faint);
+}
+
+.preset-manager .field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.preset-manager .field > span {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.preset-identity-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--gap-5);
+  flex-wrap: wrap;
+}
+
+.preset-name-field {
+  flex: 1;
+  min-width: 260px;
+}
+
+.preset-name-saved-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Saved: a borderless 22px title. New: a boxed 18px input. Both live under
+   `.field-name`, so the saved rule must out-specify the boxed one. */
+.preset-manager .preset-name-saved-row input {
+  flex: 1;
+  min-width: 0;
+  height: auto;
+  padding: 2px 0;
+  border: none;
+  border-bottom: 1.5px solid transparent;
+  background: transparent;
+  font: 600 22px/1.2 var(--font-ui);
+  letter-spacing: -0.01em;
+}
+
+.preset-manager .preset-name-saved-row input:focus {
+  border-bottom-color: var(--accent);
+  box-shadow: none;
+  outline: none;
+}
+
+.preset-name-saved-row .preset-icon-button {
+  width: 28px;
+  height: 28px;
+}
+
+.preset-manager .field-name:not(.preset-name-saved) input {
+  font-size: 18px;
+  font-weight: 600;
+  height: 44px;
+}
+
+.preset-scope-field {
+  width: 300px;
+  flex: none;
+}
+
+.preset-identity-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: var(--gap-3);
+}
+
+.preset-identity-meta .field input {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.preset-identity-meta .field:last-child input {
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+
+.preset-model-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--gap-3);
+  align-items: end;
+}
+
+.preset-model-meta-line {
+  padding-bottom: 11px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.preset-workflow {
+  max-width: 540px;
+}
+
+.preset-workflow button {
+  flex: 1;
+}
+
+.preset-prompt-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--gap-3);
+}
+
+.preset-prompt-grid textarea {
+  min-height: 64px;
+  resize: vertical;
+  font: 400 13px/1.5 var(--font-mono);
+}
+
+.preset-live-preview {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.preset-live-preview p {
+  margin: 0;
+  font: 400 13.5px/1.65 var(--font-mono);
+}
+
+.preset-live-preview .prefix {
+  color: var(--text);
+}
+
+.preset-live-preview .suffix {
+  color: var(--text-muted);
+}
+
+.preset-manager .preset-defaults-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.4fr;
+  gap: var(--gap-3);
+  align-items: end;
+}
+
+.preset-manager .preset-defaults-grid:has(> :nth-child(4)) {
+  grid-template-columns: repeat(3, 1fr) 1.4fr;
+}
+
+.lora-slot.warning {
+  border-color: var(--warn);
+}
+
+.preset-recipe-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+  margin-top: var(--gap-4);
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.preset-recipe-chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 1100px) {
+  .preset-grid,
+  .preset-prompt-grid,
+  .preset-identity-meta {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .preset-manager .preset-defaults-grid,
+  .preset-manager .preset-defaults-grid:has(> :nth-child(4)) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .preset-model-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .preset-model-meta-line {
+    padding-bottom: 0;
+  }
+
+  .preset-scope-field {
+    width: 100%;
+  }
+}
+
 .preset-layout {
   display: grid;
   grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
