@@ -291,6 +291,7 @@ fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         mcp_api_url: "http://127.0.0.1:0".to_owned(),
         mcp_job_poll_interval: sceneworks_mcp::JobWaitConfig::default().poll_interval,
         mcp_job_timeout: sceneworks_mcp::JobWaitConfig::default().timeout,
+        external_model_roots: Vec::new(),
     }
 }
 
@@ -12761,4 +12762,108 @@ async fn update_lora_edits_trigger_words_and_notes() {
         .expect("seeded LoRA present");
     assert_eq!(entry["triggerWords"], json!(["fresh", "tokens"]));
     assert_eq!(entry["notes"], "revised note");
+}
+
+/// A ComfyUI-style Wan adapter (keys taken from a real
+/// `wan2.2_t2v_lightx2v_*.safetensors`) written at `path`, parent dirs included.
+fn write_comfy_wan_adapter(path: &std::path::Path) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("adapter parent dir");
+    }
+    let keys: Vec<String> = [
+        "diffusion_model.blocks.0.cross_attn.k.lora_down.weight",
+        "diffusion_model.blocks.0.cross_attn.k.lora_up.weight",
+        "diffusion_model.blocks.0.cross_attn.v.lora_down.weight",
+        "diffusion_model.blocks.0.cross_attn.v.lora_up.weight",
+        "diffusion_model.blocks.0.self_attn.q.lora_down.weight",
+        "diffusion_model.blocks.0.self_attn.q.lora_up.weight",
+        "diffusion_model.blocks.0.ffn.0.lora_down.weight",
+        "diffusion_model.blocks.0.ffn.0.lora_up.weight",
+    ]
+    .iter()
+    .map(|key| (*key).to_owned())
+    .collect();
+    write_test_safetensors_with_keys(path, &keys);
+}
+
+/// epic 10451 / sc-10452: with an operator-configured external root, the LoRAs in a
+/// ComfyUI `models/loras` tree are surfaced by `GET /api/v1/loras` — read in place,
+/// never copied — and are read-only: not removable, and `DELETE` refuses them. We
+/// borrowed the user's file; we must not offer to destroy it.
+#[tokio::test]
+async fn external_root_loras_are_listed_read_only() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let comfy_root = temp_dir.path().join("ComfyUI").join("models");
+    // Nested, like the real tree (`loras/Wan/…`).
+    let adapter = comfy_root
+        .join("loras")
+        .join("Wan")
+        .join("detailz-wan.safetensors");
+    write_comfy_wan_adapter(&adapter);
+
+    let mut settings = test_settings(&temp_dir);
+    settings.external_model_roots = vec![comfy_root];
+    let app = create_app(settings).expect("app creates");
+
+    let (status, loras) = request(app.clone(), "GET", "/api/v1/loras", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let external = loras
+        .as_array()
+        .expect("loras array")
+        .iter()
+        .find(|lora| lora["scope"] == "external")
+        .expect("the ComfyUI adapter is surfaced");
+
+    assert_eq!(external["name"], "Wan/detailz-wan");
+    assert_eq!(external["family"], "wan-video");
+    assert_eq!(external["installState"], "installed");
+    // Read in place: the catalog points at the operator's own file, not a copy.
+    assert_eq!(
+        external["installedPath"].as_str().expect("installedPath"),
+        adapter
+            .canonicalize()
+            .expect("canonicalize")
+            .display()
+            .to_string()
+    );
+    // Never offer to delete a file we do not own.
+    assert_eq!(external["removable"], false);
+
+    let id = external["id"].as_str().expect("id");
+    assert!(id.starts_with("external_"), "ids are namespaced: {id}");
+
+    let (status, _) = request(
+        app,
+        "DELETE",
+        &format!("/api/v1/loras/{id}?scope=external"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "deleting an external LoRA must be refused"
+    );
+}
+
+/// The feature is off unless an operator opts in: with no external roots configured
+/// (the default), the catalog is exactly what the manifests declare.
+#[tokio::test]
+async fn no_external_roots_leaves_the_lora_catalog_unchanged() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let comfy_root = temp_dir.path().join("ComfyUI").join("models");
+    write_comfy_wan_adapter(&comfy_root.join("loras").join("ignored.safetensors"));
+
+    // Settings default to no external roots; the tree above is simply not looked at.
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, loras) = request(app, "GET", "/api/v1/loras", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !loras
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .any(|lora| lora["scope"] == "external"),
+        "no external rows without an operator-configured root"
+    );
 }
