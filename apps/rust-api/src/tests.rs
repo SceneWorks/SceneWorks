@@ -12040,13 +12040,23 @@ fn sdxl_family_tiered_turnkey_trains_on_its_bf16_unet_tier() {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().join("data");
 
-    let mut target = super::builtin_training_targets()
+    // sc-10617: the real `illustrious_xl_v1_lora` registry target now bakes in the tiered-turnkey
+    // repo, so assert the registry entry itself — not a synthetic override — resolves to bf16 and
+    // gates on that tier. This pins that the shipped training target is training-ready off its turnkey.
+    let target = super::builtin_training_targets()
         .targets
         .into_iter()
-        .find(|t| t.base_model == "sdxl")
-        .expect("sdxl target");
-    // Repoint at the tiered-turnkey shape every SceneWorks SDXL re-host uses.
-    target.base_model_repo = Some("SceneWorks/illustrious-xl-v1-mlx".to_owned());
+        .find(|t| t.base_model == "illustrious_xl_v1")
+        .expect("illustrious_xl_v1 target");
+    assert_eq!(
+        target.base_model_repo.as_deref(),
+        Some("SceneWorks/illustrious-xl-v1-mlx"),
+        "the Illustrious v1 training target points at its tiered-turnkey re-host"
+    );
+    assert_eq!(
+        target.kernel, "sdxl_lora",
+        "Illustrious reuses the SDXL kernel"
+    );
     let repo = target.base_model_repo.clone().expect("repo set");
 
     let repo_root = huggingface_repo_cache_path(&data_dir, &repo).expect("repo cache path");
