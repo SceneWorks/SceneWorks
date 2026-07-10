@@ -92,10 +92,19 @@ export function useJobEvents({
         refreshAssetsRef.current?.(job.projectId);
       }
       // A completed download flips the catalog's `installState`; a completed conversion writes the
-      // MLX artifact that flips `mlxConversionState` to "converted". Both are derived server-side
-      // from the filesystem, so the catalog must be refetched or the Models row keeps offering
-      // "Convert to MLX" for an already-converted model until the app is restarted.
-      if (job.status === "completed" && (job.type === "model_download" || job.type === "model_convert")) {
+      // MLX artifact that flips `mlxConversionState` to "converted"; a completed import upserts the
+      // model into `user.models.jsonc` (sc-10688). All three are derived server-side from the
+      // filesystem/manifests, so the catalog must be refetched or the Models page keeps rendering
+      // the pre-job row — still offering "Convert to MLX" for an already-converted model, or
+      // omitting the imported one entirely — until the app is restarted.
+      //
+      // `model_import` cannot fire today: `create_model_import_job` 403s on every platform behind
+      // the sc-7081 kill-switch, so no such job is ever queued. It is wired here so 7080's P5
+      // re-enable flips the feature on complete, not one refresh short.
+      if (
+        job.status === "completed" &&
+        (job.type === "model_download" || job.type === "model_convert" || job.type === "model_import")
+      ) {
         refreshDataRef.current?.();
       }
       // A completed built-in LoRA download (sc-5944) flips the catalog entry to
