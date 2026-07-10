@@ -28,6 +28,12 @@ import {
 } from "../resolutionOverride.js";
 import { batchItemStatus, summarizeBatchRun } from "../batchOps.js";
 import {
+  DEFAULT_SCENE_PROMPT,
+  promptHintFor,
+  promptSeedFor,
+  seedsNegativeInMode,
+} from "../promptSeed.js";
+import {
   emptyCaption,
   orderCaption,
   parseMagicPromptCaption,
@@ -352,7 +358,7 @@ export function ImageStudio() {
   const [sceneSuggestions] = useState(() => pickSuggestions(4));
   const [characterSuggestions] = useState(() => pickSuggestions(4, CHARACTER_SUGGESTION_POOL));
   const [mode, setMode] = useState(() => normalizeImageMode(saved.mode));
-  const [prompt, setPrompt] = useState(saved.prompt ?? "A cinematic frame of a neon street at midnight");
+  const [prompt, setPrompt] = useState(saved.prompt ?? DEFAULT_SCENE_PROMPT);
   // True once the user types or picks a suggestion, so the character-mode default
   // prompt never clobbers their own wording. A restored prompt counts as edited so
   // re-entering character mode doesn't overwrite it.
@@ -766,6 +772,9 @@ export function ImageStudio() {
     }
   }, [pickerModels, model]);
   const selectedModel = imageModels.find((item) => item.id === model);
+  // Booru-convention prompt hint (sc-10760): non-null for danbooru-tag models (Anima, Illustrious)
+  // that declare `ui.promptHint`; rendered under the prompt box with a link into the prompt guide.
+  const promptHint = promptHintFor(selectedModel?.ui);
   // Prompt guide for the selected model; fall back to the generic image guide
   // when a model declares none, so the button is always useful (sc-1817).
   const promptGuide = selectedModel?.ui?.promptGuide ?? {
@@ -970,19 +979,33 @@ export function ImageStudio() {
       setPrompt(defaultCharacterPrompt(character));
     }
   }, [mode, characterId, characters]);
-  // Seed the model's curated default negative prompt when entering character mode
-  // with an empty box (sc-3857). InstantID/RealVisXL declares one to fight its
-  // shiny/over-saturated look; running character mode with an empty negative was
-  // the main reason Image Studio output trailed Character Studio. Only fills an
-  // empty box, so it never clobbers a typed, restored, or preset negative.
+  // Seed the model's curated default negative prompt into an EMPTY negative box (sc-3857, sc-10760).
+  // Originally character-mode only (InstantID/RealVisXL declares one to fight its shiny/over-saturated
+  // look); now also text-to-image, so booru models (Anima, Illustrious) get their booru negative there
+  // too — a bare negative was a big reason their anime renders looked worse. Only fills an empty box, so
+  // it never clobbers a typed, restored, or preset negative.
   useEffect(() => {
-    if (mode !== "character_image" || negativePrompt !== "") {
+    if (!seedsNegativeInMode(mode) || negativePrompt !== "") {
       return;
     }
     const ui = imageModels.find((item) => item.id === model)?.ui ?? {};
     if (typeof ui.defaultNegativePrompt === "string" && ui.defaultNegativePrompt) {
       setNegativePrompt(ui.defaultNegativePrompt);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, model]);
+  // Seed the model's booru quality prefix (`ui.defaultPrompt`) into an UNEDITED prompt box in
+  // text-to-image (sc-10760). Anima/Illustrious are danbooru-tag models that render low-effort art from a
+  // bare sentence; opening with `masterpiece, best quality,` and building on it is what their model cards
+  // recommend. Mirrors the character-mode prompt seed: only when `!promptEdited`, so it replaces the
+  // throwaway scene default, never the user's own wording. A model WITHOUT a defaultPrompt restores the
+  // generic scene default, so a stale prefix never lingers after switching to a non-booru model.
+  useEffect(() => {
+    if (mode !== "text_to_image" || promptEdited.current) {
+      return;
+    }
+    const ui = imageModels.find((item) => item.id === model)?.ui ?? {};
+    setPrompt(promptSeedFor(ui));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, model]);
   const resolutionOptions = useMemo(
@@ -2136,6 +2159,19 @@ export function ImageStudio() {
           {submitError ? (
             <p className="structured-error" role="alert">
               {submitError}
+            </p>
+          ) : null}
+
+          {/* Booru-convention prompt hint (sc-10760): danbooru-tag models (Anima, Illustrious) declare
+              `ui.promptHint`, so the studio nudges toward the quality prefix + tag-style prompting the model
+              was trained on (a bare sentence renders low-effort art). Opens the existing prompt-guide modal.
+              Free-text models only. */}
+          {!structuredPromptModel && promptHint ? (
+            <p className="prompt-hint">
+              {promptHint}{" "}
+              <button className="prompt-hint-link" onClick={() => setGuideOpen(true)} type="button">
+                Prompt guide →
+              </button>
             </p>
           ) : null}
 

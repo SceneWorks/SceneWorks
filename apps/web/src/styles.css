@@ -2424,6 +2424,30 @@ label {
   color: var(--danger);
 }
 
+/* Booru-convention prompt hint (sc-10760): a muted nudge under the prompt box for danbooru-tag
+   models (Anima, Illustrious), with an inline link into the prompt-guide modal. */
+.prompt-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.prompt-hint-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--text);
+  text-decoration: underline;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.prompt-hint-link:hover {
+  opacity: 0.8;
+}
+
 /* Palette editor (sc-5996): swatch chips + native color picker. */
 .palette-editor {
   display: flex;
