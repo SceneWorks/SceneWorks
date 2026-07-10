@@ -28,6 +28,7 @@ use sceneworks_core::project_store::ProjectStore;
 
 use crate::auth::AuthThrottle;
 use crate::events::EventHub;
+use crate::external_base_models::ExternalBaseModelCache;
 use crate::external_loras::ExternalLoraCache;
 use crate::manifest::ManifestCache;
 use crate::models::ModelSizeCache;
@@ -253,6 +254,11 @@ pub struct AppState {
     /// every job-create; without this, every generation would re-parse every ComfyUI
     /// adapter's safetensors header.
     pub(crate) external_lora_cache: Arc<Mutex<ExternalLoraCache>>,
+    /// sc-10667 — memoized base-weight detection for the transformer/encoder/VAE
+    /// files scanned out of the external roots' base subtrees, keyed by size +
+    /// mtime. `model_catalog` runs on every job-create; without this, every
+    /// generation would re-parse every ComfyUI base file's safetensors header.
+    pub(crate) external_base_model_cache: Arc<Mutex<ExternalBaseModelCache>>,
     pub(crate) http_client: reqwest::Client,
     pub(crate) interrupted_jobs_on_startup: usize,
 }

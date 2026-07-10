@@ -143,7 +143,11 @@ export function characterModelUsable(model, caps) {
 // installState !== "missing"), so a screen is never gated while its picker still shows a
 // model. Only a fully-missing catalog gates the screen.
 export function hasUsableModelFor(models, predicate, caps) {
-  return (models ?? []).some((model) => model?.installState !== "missing" && predicate(model, caps));
+  // `usable !== false` keeps the screen-gate in lockstep with the pickers, which
+  // exclude not-yet-runnable external base models (sc-10667).
+  return (models ?? []).some(
+    (model) => model?.installState !== "missing" && model?.usable !== false && predicate(model, caps),
+  );
 }
 
 // The models to OFFER for download when a screen is gated: catalog models usable on the

@@ -701,12 +701,20 @@ export function App() {
     createVideoJob,
   });
 
+  // `usable !== false` fails closed on external ComfyUI base models (sc-10667): they
+  // are surfaced in the catalog with a reason but not yet runnable (the per-family
+  // loaders are sc-10668+), so they must not be offered as a generation target.
+  // Manifest models never set `usable`, so they are unaffected.
   const imageModels = useMemo(() => {
-    const items = models.filter((model) => model.type === "image" && model.installState !== "missing");
+    const items = models.filter(
+      (model) => model.type === "image" && model.installState !== "missing" && model.usable !== false,
+    );
     return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "image");
   }, [models]);
   const videoModels = useMemo(() => {
-    const items = models.filter((model) => model.type === "video" && model.installState !== "missing");
+    const items = models.filter(
+      (model) => model.type === "video" && model.installState !== "missing" && model.usable !== false,
+    );
     return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "video");
   }, [models]);
   const selectedAsset = useMemo(

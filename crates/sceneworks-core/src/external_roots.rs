@@ -31,6 +31,20 @@ pub const EXTERNAL_MODEL_ROOTS_ENV: &str = "SCENEWORKS_EXTERNAL_MODEL_ROOTS";
 /// configured root. A root is expected to be a ComfyUI-style `models/` directory.
 pub const COMFYUI_LORA_SUBDIR: &str = "loras";
 
+/// The ComfyUI subdirectories holding **base** weights (epic 10451 Phase 2,
+/// sc-10667), relative to a configured root. Modern ComfyUI does not fuse
+/// components: the diffusion transformer lives in `diffusion_models/` or `unet/`,
+/// the prompt encoders in `text_encoders/`, the VAE in `vae/`. Only legacy
+/// SD1.5/SDXL-era all-in-one checkpoints sit in `checkpoints/`. All five are
+/// scanned so a virtual model can be assembled from the separate component files.
+pub const COMFYUI_BASE_SUBDIRS: &[&str] = &[
+    "diffusion_models",
+    "unet",
+    "text_encoders",
+    "vae",
+    "checkpoints",
+];
+
 /// Parse an OS path-list into external model roots.
 ///
 /// Entries must be **absolute**: a root is a deployment-level declaration, and a
@@ -80,6 +94,25 @@ pub fn comfyui_lora_dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
         .map(|root| root.join(COMFYUI_LORA_SUBDIR))
         .filter(|dir| dir.is_dir())
         .collect()
+}
+
+/// The existing base-weight subdirectories ([`COMFYUI_BASE_SUBDIRS`]) under each
+/// configured root, each paired with the subdirectory name it came from (so a
+/// scanner can record which component bucket a file was found in). Missing
+/// subdirectories contribute nothing — a tree with only some of the buckets, or a
+/// root on an unmounted drive, must not error. Order follows the roots, then
+/// [`COMFYUI_BASE_SUBDIRS`].
+pub fn comfyui_base_dirs(roots: &[PathBuf]) -> Vec<(&'static str, PathBuf)> {
+    let mut dirs = Vec::new();
+    for root in roots {
+        for subdir in COMFYUI_BASE_SUBDIRS {
+            let dir = root.join(subdir);
+            if dir.is_dir() {
+                dirs.push((*subdir, dir));
+            }
+        }
+    }
+    dirs
 }
 
 #[cfg(test)]
@@ -161,6 +194,25 @@ mod tests {
 
         let dirs = comfyui_lora_dirs(&[present.clone(), absent]);
         assert_eq!(dirs, vec![present.join(COMFYUI_LORA_SUBDIR)]);
+    }
+
+    #[test]
+    fn comfyui_base_dirs_returns_only_existing_buckets_tagged_by_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("models");
+        std::fs::create_dir_all(root.join("diffusion_models")).expect("mkdir");
+        std::fs::create_dir_all(root.join("vae")).expect("mkdir");
+        // `unet`, `text_encoders`, `checkpoints` absent → contribute nothing.
+
+        let dirs = comfyui_base_dirs(std::slice::from_ref(&root));
+        assert_eq!(
+            dirs,
+            vec![
+                ("diffusion_models", root.join("diffusion_models")),
+                ("vae", root.join("vae")),
+            ],
+            "only existing buckets, tagged by subdir name, in COMFYUI_BASE_SUBDIRS order"
+        );
     }
 
     /// macOS is gated off entirely, so the env var must not introduce roots there.
