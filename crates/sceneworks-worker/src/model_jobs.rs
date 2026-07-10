@@ -681,6 +681,143 @@ fn convert_sd3_prequant(
     Err("SD3.5 conversion requires macOS (mlx-gen-sd3); this model is macOS-only.".to_owned())
 }
 
+/// The THREE Anima variant DiTs (one per catalog id) under the ungated `circlestone-labs/Anima` repo,
+/// as repo-relative paths. A per-variant install/convert pulls exactly ONE of these + the two shared
+/// files below — three files, ~5.6 GB. Naming the bare repo would pull ~30 GB (it holds SEVEN full bf16
+/// DiTs: these three plus three `preview*` cuts and `aesthetic-v1.0b`, all out of scope). The manifest
+/// `downloads[].files` (sc-10523) MUST enumerate these exact paths and never the bare repo (the
+/// "30 GB trap"); `resolve_convert_plan` also validates a convert's `sourceFile` is one of these so a
+/// stray payload can't drag in an out-of-scope DiT.
+const ANIMA_DIT_FILES: &[&str] = &[
+    "split_files/diffusion_models/anima-base-v1.0.safetensors",
+    "split_files/diffusion_models/anima-aesthetic-v1.0.safetensors",
+    "split_files/diffusion_models/anima-turbo-v1.0.safetensors",
+];
+/// The shared dense Qwen3-0.6B text encoder, reused bf16 in every Anima tier (repo-relative).
+const ANIMA_TE_FILE: &str = "split_files/text_encoders/qwen_3_06b_base.safetensors";
+/// The shared dense Qwen-Image VAE, reused bf16 in every Anima tier (repo-relative).
+const ANIMA_VAE_FILE: &str = "split_files/vae/qwen_image_vae.safetensors";
+
+/// Whether an Anima DiT tensor `{base}` (a key minus its `.weight` suffix) is a quantization target —
+/// true UNLESS it is inside the bundled `AnimaTextConditioner` (`…llm_adapter.*`, kept dense bf16).
+/// **Prefix-agnostic**: the base cut roots the DiT at `net`, turbo/aesthetic at `model.diffusion_model`,
+/// so a hardcoded `net.llm_adapter.` predicate (the story's original, WRONG instruction) would leave
+/// the `model.diffusion_model.llm_adapter.*` conditioner UNPROTECTED and pack it to Q4 — this catches
+/// all three. Mirrors `mlx_gen_anima::is_dit_quant_target`; the crate can't be referenced until the
+/// sc-10523 rev bump, which replaces this + `quantize_anima_dit_to` with a direct crate call.
+#[cfg(any(target_os = "macos", test))]
+fn anima_is_dit_quant_target(base: &str) -> bool {
+    !base.contains("llm_adapter.")
+}
+
+/// Anima `split_files/` source → the local convert-at-install MLX artifact with the full q4/q8/bf16
+/// MATRIX (epic 10512, sc-10517). Anima is **convert-at-install**: SceneWorks never redistributes
+/// converted weights, so all three tiers are produced ON-DEVICE from the ungated source in ONE job (the
+/// 2B DiT is small; packing is quick). Unlike the single-tier converters above, this writes THREE tier
+/// subdirs — `bf16/ q8/ q4/` — each a `diffusion_models/ text_encoders/ vae/` tree the Anima loader
+/// reads; the bespoke `anima_tier_subdir` resolver (image_jobs/base.rs) picks one at gen time by
+/// `mlxQuantize`. Only the Cosmos DiT is packed (`anima_is_dit_quant_target`); the bundled
+/// `AnimaTextConditioner`, the Qwen3-0.6B TE, and the Qwen-Image VAE stay DENSE bf16 in every tier (the
+/// "dense-TE, transformer-only" quant policy the sibling converters share — a Q4 text-conditioning path
+/// degrades semantics). A top-level `model_index.json` marks the finished artifact so
+/// `mlx_catalog_status` injects `modelPath` (the converted ROOT holding the tier subdirs). The dense
+/// bf16 DiT + TE + VAE are ABSOLUTE symlinks (they survive the temp→final atomic rename). Runs MLX, so
+/// macOS-only.
+#[cfg(target_os = "macos")]
+fn convert_anima_prequant(
+    dit_source: &Path,
+    te_source: &Path,
+    vae_source: &Path,
+    dit_filename: &str,
+    out_dir: &Path,
+    group_size: i32,
+) -> Result<(), String> {
+    // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
+    for source in [dit_source, te_source, vae_source] {
+        if !source.is_file() {
+            return Err(format!(
+                "Anima source is missing `{}` — expected the ungated circlestone-labs/Anima \
+                 split_files/ (diffusion_models/<variant>.safetensors + the shared \
+                 text_encoders/qwen_3_06b_base.safetensors + vae/qwen_image_vae.safetensors).",
+                source.display()
+            ));
+        }
+    }
+    std::fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
+    // (subdir, None => dense bf16 passthrough | Some(bits) => pack the Cosmos DiT).
+    for (tier, bits) in [("bf16", None), ("q8", Some(8)), ("q4", Some(4))] {
+        let tier_dir = out_dir.join(tier);
+        for sub in ["diffusion_models", "text_encoders", "vae"] {
+            std::fs::create_dir_all(tier_dir.join(sub)).map_err(|error| error.to_string())?;
+        }
+        let dit_dst = tier_dir.join("diffusion_models").join(dit_filename);
+        match bits {
+            // Dense bf16: symlink the source DiT unchanged (absolute → survives the atomic rename).
+            None => {
+                let canonical =
+                    std::fs::canonicalize(dit_source).map_err(|error| error.to_string())?;
+                std::os::unix::fs::symlink(&canonical, &dit_dst)
+                    .map_err(|error| error.to_string())?;
+            }
+            // Packed: quantize ONLY the Cosmos DiT (the bundled conditioner stays dense).
+            Some(bits) => quantize_anima_dit_to(dit_source, &dit_dst, bits, group_size)?,
+        }
+        // Symlink the shared dense TE + VAE into every tier (absolute targets).
+        for (source, sub, name) in [
+            (te_source, "text_encoders", "qwen_3_06b_base.safetensors"),
+            (vae_source, "vae", "qwen_image_vae.safetensors"),
+        ] {
+            let canonical = std::fs::canonicalize(source).map_err(|error| error.to_string())?;
+            std::os::unix::fs::symlink(&canonical, tier_dir.join(sub).join(name))
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    // Diffusers-style marker so `mlx_catalog_status` treats the tree as a finished MLX artifact (it
+    // checks for `model_index.json` OR `config.json` at the converted root) and injects `modelPath`.
+    std::fs::write(
+        out_dir.join("model_index.json"),
+        "{\n  \"_class_name\": \"AnimaPipeline\"\n}\n",
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Pack one Anima DiT single file to Q`bits` (group `group_size`), writing a single packed
+/// `.safetensors` to `dst`. Reads the file into a key→`Array` map, packs ONLY the Cosmos DiT Linears
+/// (`anima_is_dit_quant_target` keeps the bundled conditioner dense), and writes via the shared
+/// `mlx_gen::quant` primitives — the SAME transformation as `mlx_gen_anima::quantize_anima_dit`, done
+/// with the pinned base-crate API so it needs no mlx-gen rev bump (sc-10523 replaces this with the
+/// direct crate call).
+#[cfg(target_os = "macos")]
+fn quantize_anima_dit_to(src: &Path, dst: &Path, bits: i32, group_size: i32) -> Result<(), String> {
+    use std::collections::HashMap;
+    let w = mlx_gen::weights::Weights::from_file(src).map_err(|error| error.to_string())?;
+    let map: HashMap<String, mlx_rs::Array> = w
+        .keys()
+        .map(|k| (k.to_string(), w.get(k).expect("listed key").clone()))
+        .collect();
+    let packed = mlx_gen::quant::quantize_map(map, bits, group_size, anima_is_dit_quant_target)
+        .map_err(|error| error.to_string())?;
+    mlx_gen::quant::save_map(dst, &packed).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
+fn convert_anima_prequant(
+    _dit_source: &Path,
+    _te_source: &Path,
+    _vae_source: &Path,
+    _dit_filename: &str,
+    _out_dir: &Path,
+    _group_size: i32,
+) -> Result<(), String> {
+    Err(
+        "Anima conversion requires macOS (mlx-gen quantization); this model is macOS-only."
+            .to_owned(),
+    )
+}
+
 /// The base `Lightricks/LTX-2.3` latent upsampler the LTX loader hard-requires (emitted as
 /// `upsampler.safetensors` in the converted dir). Neither the eros nor the base single-file
 /// checkpoint bundles it, so the converter merges it from the base repo at convert time.
@@ -752,6 +889,19 @@ enum ConvertPlan {
         source_dir: PathBuf,
         variant: Sd3Variant,
         bits: i32,
+        group_size: i32,
+    },
+    /// Anima `split_files/` source → the local q4/q8/bf16 MATRIX in ONE job (sc-10517, epic 10512):
+    /// pack the variant's Cosmos DiT at q8 + q4 and passthrough the dense bf16 DiT, symlinking the
+    /// shared dense Qwen3 TE + Qwen-Image VAE into all three tier subdirs. Convert-at-install (never
+    /// redistributed); the bespoke `anima_tier_subdir` resolver picks a tier at gen time. `dit_source`
+    /// is the variant DiT (payload `sourceFile`); `dit_filename` is preserved so the loader's
+    /// `Variant::dit_filename()` resolves it.
+    Anima {
+        dit_source: PathBuf,
+        te_source: PathBuf,
+        vae_source: PathBuf,
+        dit_filename: String,
         group_size: i32,
     },
 }
@@ -899,6 +1049,59 @@ async fn resolve_convert_plan(
                 source_dir: checkpoint_dir.to_path_buf(),
                 variant,
                 bits,
+                group_size,
+            }
+        }
+        // Anima (epic 10512, sc-10517) — convert-at-install with a q4/q8/bf16 MATRIX built in ONE job
+        // from the ungated circlestone-labs/Anima `split_files/`. `sourceFile` (= manifest
+        // `convertSourceFile`) is the variant's DiT repo-relative path; the Qwen3 TE + Qwen-Image VAE
+        // are the shared files reused dense in every tier. `quantizeBits` is IGNORED (the converter
+        // always emits all three tiers); the default group size is 64. Validate `sourceFile` is one of
+        // the three shipped DiTs so a stray payload can't pull an out-of-scope cut (preview*/aesthetic-b).
+        "anima_quant" => {
+            let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
+            if !ANIMA_DIT_FILES.contains(&source_file_name.as_str()) {
+                return Ok(Err(ConvertPlanError {
+                    message: "Unknown Anima source DiT.",
+                    detail: format!(
+                        "sourceFile '{source_file_name}' is not one of the three shipped Anima \
+                         variant DiTs (the preview cuts and aesthetic-v1.0b are out of scope)."
+                    ),
+                }));
+            }
+            let group_size = job
+                .payload
+                .get("quantizeGroupSize")
+                .and_then(Value::as_u64)
+                .map_or(64, |group| group as i32);
+            let dit_source = checkpoint_dir.join(&source_file_name);
+            let dit_filename = Path::new(&source_file_name)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&source_file_name)
+                .to_owned();
+            if !dit_source.is_file() {
+                return Ok(Err(ConvertPlanError {
+                    message: "Anima source DiT is missing.",
+                    detail: format!("Expected {source_file_name} in {source_repo}."),
+                }));
+            }
+            let te_source = checkpoint_dir.join(ANIMA_TE_FILE);
+            let vae_source = checkpoint_dir.join(ANIMA_VAE_FILE);
+            if !te_source.is_file() || !vae_source.is_file() {
+                return Ok(Err(ConvertPlanError {
+                    message: "Anima shared components are missing.",
+                    detail: format!(
+                        "Expected {ANIMA_TE_FILE} and {ANIMA_VAE_FILE} in {source_repo} (the shared \
+                         dense Qwen3 text encoder + Qwen-Image VAE reused in every tier)."
+                    ),
+                }));
+            }
+            ConvertPlan::Anima {
+                dit_source,
+                te_source,
+                vae_source,
+                dit_filename,
                 group_size,
             }
         }
@@ -1156,6 +1359,25 @@ pub(crate) async fn run_model_convert_job(
         } => {
             tokio::task::spawn_blocking(move || {
                 convert_sd3_prequant(&source_dir, &temp, variant, bits, group_size)
+            })
+            .await
+        }
+        ConvertPlan::Anima {
+            dit_source,
+            te_source,
+            vae_source,
+            dit_filename,
+            group_size,
+        } => {
+            tokio::task::spawn_blocking(move || {
+                convert_anima_prequant(
+                    &dit_source,
+                    &te_source,
+                    &vae_source,
+                    &dit_filename,
+                    &temp,
+                    group_size,
+                )
             })
             .await
         }
@@ -2536,6 +2758,85 @@ mod hardlink_tests {
             b"tokenizer-bytes",
             "the blob itself must be untouched"
         );
+    }
+}
+
+#[cfg(test)]
+mod anima_convert_tests {
+    use super::*;
+
+    /// The "30 GB trap" guard (sc-10517): an Anima install pulls EXACTLY the enumerated source files —
+    /// three variant DiTs + the two shared components — never the bare repo (which holds SEVEN full
+    /// bf16 DiTs, ~30 GB). Every path is a concrete file under `split_files/`, never an empty/repo-only
+    /// entry (a whole-snapshot pull), and the union is the FIVE distinct files the manifest
+    /// `downloads[].files` (sc-10523) must enumerate. A per-variant install is 3 of these (its DiT + the
+    /// two shared), ~5.6 GB.
+    #[test]
+    fn source_file_plan_is_five_exact_paths_never_the_bare_repo() {
+        let all: Vec<&str> = ANIMA_DIT_FILES
+            .iter()
+            .copied()
+            .chain([ANIMA_TE_FILE, ANIMA_VAE_FILE])
+            .collect();
+        assert_eq!(all.len(), 5, "exactly 5 source files (3 DiT + TE + VAE)");
+        for path in &all {
+            // A concrete nested file — never the bare repo (which a whole-snapshot pull, i.e. an empty
+            // `files` list, would be).
+            assert!(!path.trim().is_empty(), "no empty (bare-repo) path");
+            assert!(
+                path.starts_with("split_files/") && path.ends_with(".safetensors"),
+                "{path} must be a concrete split_files/*.safetensors path"
+            );
+        }
+        assert_eq!(ANIMA_DIT_FILES.len(), 3, "the three shipped variant DiTs");
+        for dit in ANIMA_DIT_FILES {
+            assert!(dit.contains("/diffusion_models/anima-"), "{dit}");
+            // The 3 preview cuts and aesthetic-v1.0b are explicitly out of scope.
+            assert!(
+                !dit.contains("preview") && !dit.contains("v1.0b"),
+                "{dit} is an out-of-scope cut"
+            );
+        }
+        let mut uniq = all.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(
+            uniq.len(),
+            5,
+            "the 5 source paths are distinct (no double-pull)"
+        );
+    }
+
+    /// The "prefix trap" guard (sc-10517): the DiT quant-target predicate keeps the bundled
+    /// `AnimaTextConditioner` DENSE for ALL THREE checkpoint roots — base roots the DiT at `net`,
+    /// turbo/aesthetic at `model.diffusion_model`. The story's original "split on `net.llm_adapter.`"
+    /// would have left the `model.diffusion_model.llm_adapter.*` conditioner UNPROTECTED (packed to Q4,
+    /// dropping 134.7M params to garbage). This exercises BOTH roots, so a test covering only `net`
+    /// would NOT have caught that hardcoded-prefix bug — this one does.
+    #[test]
+    fn quant_target_keeps_conditioner_dense_for_both_dit_roots() {
+        for root in ["net", "model.diffusion_model"] {
+            // Bundled conditioner projections — kept DENSE for both roots.
+            assert!(!anima_is_dit_quant_target(&format!(
+                "{root}.llm_adapter.blocks.0.self_attn.q_proj"
+            )));
+            assert!(!anima_is_dit_quant_target(&format!(
+                "{root}.llm_adapter.out_proj"
+            )));
+            assert!(!anima_is_dit_quant_target(&format!(
+                "{root}.llm_adapter.embed"
+            )));
+            // Cosmos DiT projections — PACKED for both roots.
+            assert!(anima_is_dit_quant_target(&format!(
+                "{root}.blocks.0.self_attn.q_proj"
+            )));
+            assert!(anima_is_dit_quant_target(&format!(
+                "{root}.final_layer.linear"
+            )));
+            assert!(anima_is_dit_quant_target(&format!(
+                "{root}.t_embedder.1.linear_1"
+            )));
+        }
     }
 }
 
