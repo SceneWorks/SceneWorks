@@ -159,3 +159,45 @@ describe("defaultTierSelection", () => {
     expect(defaultTierSelection({ id: "x", hasVariantMatrix: false }, null)).toBe(null);
   });
 });
+
+// Convert-at-install models (sc-10730): tiers are convert OUTPUTS surfaced as `mlxTiers` (a plain array
+// of installed tier keys), NOT the download variant-matrix. The Studio picker reads them so Anima et al.
+// get a generation-time tier selector without touching the Models download panel (`hasVariantMatrix`).
+function convertModel({ mlxTiers = ["bf16", "q8", "q4"] } = {}) {
+  return { id: "anima_base", hasVariantMatrix: false, mlxTiers };
+}
+
+describe("quantTier — convert-at-install mlxTiers (sc-10730)", () => {
+  it("installedTiers reads mlxTiers, smallest→largest", () => {
+    expect(installedTiers(convertModel({ mlxTiers: ["q4", "bf16", "q8"] }))).toEqual([
+      "q4",
+      "q8",
+      "bf16",
+    ]);
+  });
+
+  it("shows the picker when >1 convert-output tier is present", () => {
+    expect(shouldShowTierPicker(convertModel({ mlxTiers: ["bf16", "q8", "q4"] }))).toBe(true);
+    expect(shouldShowTierPicker(convertModel({ mlxTiers: ["q8"] }))).toBe(false);
+  });
+
+  it("preselects q8 (not q4) so the picker never silently re-sends the washed q4", () => {
+    expect(defaultTierSelection(convertModel(), null)).toBe("q8");
+    // bf16 when q8 absent (clean-tier fallback), never q4 by default
+    expect(defaultTierSelection(convertModel({ mlxTiers: ["bf16", "q4"] }), null)).toBe("bf16");
+  });
+
+  it("a last-used convert tier still wins over the q8 default", () => {
+    expect(defaultTierSelection(convertModel(), "q4")).toBe("q4");
+  });
+
+  it("does not touch download-matrix behavior (still preselects q4)", () => {
+    expect(installedTiers({ id: "x", hasVariantMatrix: false })).toEqual([]);
+    expect(
+      defaultTierSelection(
+        matrixModel({ installed: ["q4", "q8", "bf16"], defaultTier: "none" }),
+        null,
+      ),
+    ).toBe("q4");
+  });
+});

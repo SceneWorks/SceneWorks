@@ -1266,6 +1266,47 @@ fn apply_variant_fields(object: &mut JsonObject, data_dir: &FsPath) {
     object.insert("variants".to_owned(), Value::Array(variants));
 }
 
+/// The convert-output quant tiers present under a converted MLX dir (sc-10730), highest-fidelity first.
+/// Convert-at-install models (e.g. Anima) write `<converted>/<tier>/<backbone>/…` for each of
+/// bf16/q8/q4 in ONE convert job — the tiers are convert OUTPUTS, not per-tier downloads. This lets the
+/// Studio offer a generation-time tier picker via the decoupled `mlxTiers` catalog field WITHOUT the
+/// download variant-matrix (`hasVariantMatrix`), whose `QuantDownloadPanel` would render bogus per-tier
+/// download buttons for a model that has no per-tier download. Empty for a flat converted dir (no tier
+/// subdirs) → the web renders no picker. Mirrors the worker tier resolvers' "tier present" probe so the
+/// catalog and `anima_tier_subdir` agree on which tiers are loadable.
+fn mlx_convert_output_tiers(converted_dir: &FsPath) -> Vec<&'static str> {
+    ["bf16", "q8", "q4"]
+        .into_iter()
+        .filter(|tier| tier_subdir_has_weights(&converted_dir.join(tier)))
+        .collect()
+}
+
+/// Whether a converted tier subdir holds loadable weights: a non-hidden `.safetensors` / `.index.json`
+/// under a known backbone dir (`diffusion_models/` for Anima's Cosmos DiT, `transformer/` for other
+/// DiTs, `unet/` for SDXL) or flat in the tier dir. A hidden `._*` AppleDouble sidecar is not a weight
+/// (SceneWorks#1333), mirroring the worker resolvers.
+fn tier_subdir_has_weights(tier_dir: &FsPath) -> bool {
+    if !tier_dir.is_dir() {
+        return false;
+    }
+    let dir_has_weight = |dir: &FsPath| -> bool {
+        std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                !name.starts_with("._")
+                    && (name.ends_with(".safetensors") || name.ends_with(".index.json"))
+            })
+        })
+    };
+    // A known backbone subdir (`diffusion_models/` Anima, `transformer/` DiTs, `unet/` SDXL), or flat
+    // in the tier dir itself.
+    dir_has_weight(tier_dir)
+        || ["diffusion_models", "transformer", "unet"]
+            .into_iter()
+            .any(|sub| dir_has_weight(&tier_dir.join(sub)))
+}
+
 fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
     let mac_support = {
         let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
@@ -1284,6 +1325,15 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
         None
     };
     if let Some(status) = mlx_status {
+        // Generation-time tier picker for convert-at-install models (sc-10730): surface the on-disk
+        // convert-output tiers as `mlxTiers`, DECOUPLED from `hasVariantMatrix` so the Models download
+        // panel is untouched. Only when the model is actually converted (its tier subdirs exist).
+        if let Some(converted) = status.converted_path.as_deref() {
+            let tiers = mlx_convert_output_tiers(converted);
+            if !tiers.is_empty() {
+                object.insert("mlxTiers".to_owned(), json!(tiers));
+            }
+        }
         object.insert(
             "mlxInstallState".to_owned(),
             Value::String(status.install_state.to_owned()),
@@ -2636,5 +2686,102 @@ mod variant_install_tests {
                 .and_then(|d| d.get("variant").and_then(Value::as_str).map(str::to_owned)),
             Some("q4".to_owned())
         );
+    }
+}
+
+#[cfg(test)]
+mod mlx_tier_probe_tests {
+    use super::*;
+
+    fn write_weight(dir: &std::path::Path, backbone: &str, file: &str) {
+        let d = dir.join(backbone);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(file), b"x").unwrap();
+    }
+
+    #[test]
+    fn convert_output_tiers_probes_diffusion_models_highest_first_ignoring_appledouble() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Anima layout: <tier>/diffusion_models/<dit>.safetensors present for bf16 + q8; q4 has only a
+        // hidden `._` AppleDouble sidecar, which must NOT count as a loadable tier (SceneWorks#1333).
+        write_weight(
+            &root.join("bf16"),
+            "diffusion_models",
+            "anima-base-v1.0.safetensors",
+        );
+        write_weight(
+            &root.join("q8"),
+            "diffusion_models",
+            "anima-base-v1.0.safetensors",
+        );
+        write_weight(
+            &root.join("q4"),
+            "diffusion_models",
+            "._anima-base-v1.0.safetensors",
+        );
+        // Highest-fidelity first, q4 excluded.
+        assert_eq!(mlx_convert_output_tiers(root), vec!["bf16", "q8"]);
+    }
+
+    #[test]
+    fn convert_output_tiers_handles_transformer_flat_and_empty_layouts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_weight(&root.join("q8"), "transformer", "model.safetensors");
+        // Flat layout: a sharded index sits directly in the tier dir (no backbone subdir).
+        std::fs::create_dir_all(root.join("bf16")).unwrap();
+        std::fs::write(
+            root.join("bf16")
+                .join("diffusion_pytorch_model.safetensors.index.json"),
+            b"x",
+        )
+        .unwrap();
+        assert_eq!(mlx_convert_output_tiers(root), vec!["bf16", "q8"]);
+        // A flat converted dir (no tier subdirs) yields no tiers → the web renders no picker.
+        let flat = tempfile::tempdir().unwrap();
+        std::fs::write(flat.path().join("model_index.json"), b"{}").unwrap();
+        assert!(mlx_convert_output_tiers(flat.path()).is_empty());
+    }
+
+    // Full catalog path: a converted convert-at-install model (Anima) emits `mlxTiers` from
+    // `apply_mac_and_mlx_fields`, so /models carries the Studio picker data. macOS-only (the mlx status
+    // probe is `cfg!(target_os = "macos")`).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn catalog_emits_mlxtiers_for_converted_anima() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let converted = data_dir.join("models").join("mlx").join("anima_base");
+        std::fs::create_dir_all(&converted).unwrap();
+        std::fs::write(converted.join("model_index.json"), b"{}").unwrap();
+        for tier in ["bf16", "q8", "q4"] {
+            let dm = converted.join(tier).join("diffusion_models");
+            std::fs::create_dir_all(&dm).unwrap();
+            std::fs::write(dm.join("anima-base-v1.0.safetensors"), b"x").unwrap();
+        }
+        let mut object = json!({
+            "id": "anima_base",
+            "type": "image",
+            "mlx": { "requiresConversion": true }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        apply_mac_and_mlx_fields(&mut object, data_dir);
+        assert_eq!(
+            object.get("mlxConversionState").and_then(Value::as_str),
+            Some("converted")
+        );
+        let tiers: Vec<&str> = object
+            .get("mlxTiers")
+            .and_then(Value::as_array)
+            .expect("mlxTiers emitted")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(tiers, vec!["bf16", "q8", "q4"]);
+        // Decoupled from the download matrix — the picker must NOT flip `hasVariantMatrix`.
+        assert!(object.get("hasVariantMatrix").is_none());
     }
 }
