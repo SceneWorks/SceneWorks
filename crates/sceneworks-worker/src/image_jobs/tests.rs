@@ -8057,28 +8057,36 @@ fn candle_control_providers_resolve_models_and_repos() {
     // sc-8350 — qwen InstantX → 2512-Fun. sc-9870 — repointed to the SceneWorks PACKED tier: the default
     // control repo is the per-quant `SceneWorks/qwen-image-2512-fun-controlnet-union` matrix (NOT the dense
     // alibaba-pai overlay, and NOT the retired InstantX repo). sc-10726 — with no `mlxQuantize` the default
-    // control tier is now the q8 subdir's single `model.safetensors` (tracking the q8-default base tier;
-    // the whole matrix installs as co-requisites). The base repo is unchanged (2512 base).
+    // control tier is the q8 subdir's single `model.safetensors` (tracking the q8-default base tier; the
+    // whole matrix installs as co-requisites), CLAMPED to what's installed. This empty `data_dir` has no
+    // control snapshot cached, so `qwen_control_repo_file` sees no on-disk overlay and takes the
+    // fresh-install fallback (q8) — the exact tier the base download's co-requisite brings. The base repo
+    // is unchanged (2512 base). (The clamp-to-only-q4 behavior is proved directly in
+    // `qwen_control_tier_tests`.)
+    let empty_data = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = empty_data.path().to_path_buf();
     let qwen = request(json!({ "projectId": "p", "model": "qwen_image" }));
-    let (q_repo, q_file) = qwen_control_repo_file(&qwen).expect("defaults resolve");
+    let (q_repo, q_file) = qwen_control_repo_file(&qwen, &settings).expect("defaults resolve");
     assert_eq!(q_repo, "SceneWorks/qwen-image-2512-fun-controlnet-union");
     assert_eq!(q_file, "q8/model.safetensors");
     assert_eq!(QWEN_CONTROL_DEFAULT_REPO, "Qwen/Qwen-Image-2512");
     assert_ne!(q_repo, "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union");
     assert_ne!(q_repo, "InstantX/Qwen-Image-ControlNet-Union");
     // Tier tracks `advanced.mlxQuantize`: q8 selects the q8 subdir, bf16 opt-out selects the bf16 subdir.
+    // Explicit picks are honored verbatim (never clamped), so they resolve regardless of the empty cache.
     let qwen_q8 = request(
         json!({ "projectId": "p", "model": "qwen_image", "advanced": { "mlxQuantize": 8 } }),
     );
     assert_eq!(
-        qwen_control_repo_file(&qwen_q8).unwrap().1,
+        qwen_control_repo_file(&qwen_q8, &settings).unwrap().1,
         "q8/model.safetensors"
     );
     let qwen_bf16 = request(
         json!({ "projectId": "p", "model": "qwen_image", "advanced": { "mlxQuantize": 0 } }),
     );
     assert_eq!(
-        qwen_control_repo_file(&qwen_bf16).unwrap().1,
+        qwen_control_repo_file(&qwen_bf16, &settings).unwrap().1,
         "bf16/model.safetensors"
     );
 
@@ -8131,6 +8139,12 @@ fn candle_control_providers_resolve_models_and_repos() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_control_weight_filenames_reject_traversal() {
+    // The qwen resolver takes `settings` for its default-tier clamp (sc-10726), but a `filename`
+    // override rejects at `safe_weight_filename` BEFORE any snapshot probe, so an empty data_dir is
+    // never read here.
+    let empty_data = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = empty_data.path().to_path_buf();
     for filename in ["../../etc/hosts", "/etc/hosts", "sub/x.safetensors", ".."] {
         let req = request(json!({
             "projectId": "p",
@@ -8139,7 +8153,7 @@ fn candle_control_weight_filenames_reject_traversal() {
         for (label, error) in [
             (
                 "qwen",
-                qwen_control_repo_file(&req).expect_err("qwen rejects"),
+                qwen_control_repo_file(&req, &settings).expect_err("qwen rejects"),
             ),
             (
                 "kolors",

@@ -15,17 +15,47 @@ const QWEN_CONTROL_FILE: &str = "model.safetensors";
 /// `standard_tier_subdir` uses for the base transformer tier, so the control overlay tier tracks the
 /// base tier for a coherent A/B (a q8-default base pairs with the q8 control overlay). The whole control
 /// matrix (q4/q8/bf16) installs as co-requisites alongside the base, so the q8 overlay is on disk
-/// whenever the base is. Mirrors the candle `qwen_control_tier_subdir` (`qwen_control.rs`).
-fn qwen_control_tier_subdir(request: &ImageRequest) -> &'static str {
+/// whenever the base is.
+///
+/// The Q8 default is CLAMPED to what's installed (sc-10726): `snapshot` is the control repo's HF cache
+/// snapshot, and — with NO explicit pick — the resolver picks the highest CLEAN overlay tier whose
+/// `<tier>/model.safetensors` is actually on disk (q8 → bf16 → q4), so a legacy/partial install that
+/// carries only the q4 overlay resolves q4 rather than forcing a NEW ~1.87 GB q8 fetch on the plain
+/// default path. An EXPLICIT pick is returned as-is (it may legitimately fetch its tier on demand), and
+/// an absent `snapshot` (nothing cached yet) falls back to `q8`, the fresh-install co-requisite the base
+/// download brings. Mirrors the candle `qwen_control_tier_subdir` (`qwen_control.rs`).
+fn qwen_control_tier_subdir(request: &ImageRequest, snapshot: Option<&Path>) -> &'static str {
     let bits = request
         .advanced
         .get("mlxQuantize")
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
     match bits {
-        None => "q8",
         Some(b) if b <= 0 => "bf16",
         Some(b) if b > 4 => "q8",
-        _ => "q4",
+        Some(_) => "q4",
+        // Default: the app-wide Q8 default CLAMPED to the installed overlay — never a new fetch.
+        None => qwen_control_installed_default_tier(snapshot),
+    }
+}
+
+/// The highest CLEAN control overlay tier (q8 → bf16 → q4) whose `<tier>/model.safetensors` is present
+/// in the control repo `snapshot`, else `"q8"` (the fresh-install co-requisite default). Keeps a plain
+/// default job from forcing a NEW on-demand fetch on a legacy/partial install that carries only q4
+/// (sc-10726) — the default tier only wins when it is actually on disk.
+fn qwen_control_installed_default_tier(snapshot: Option<&Path>) -> &'static str {
+    let present = |tier: &str| {
+        snapshot
+            .map(|root| root.join(tier).join(QWEN_CONTROL_FILE).is_file())
+            .unwrap_or(false)
+    };
+    if present("q8") {
+        "q8"
+    } else if present("bf16") {
+        "bf16"
+    } else if present("q4") {
+        "q4"
+    } else {
+        "q8"
     }
 }
 
@@ -65,13 +95,19 @@ fn resolve_qwen_control_weights(
     };
     let repo =
         override_field("repo").unwrap_or_else(|| strict_control_default_repo(QWEN_CONTROL_ENGINE_ID).to_owned());
+    let snapshot = huggingface_snapshot_dir(&settings.data_dir, &repo);
     // Repo-relative path: an explicit override filename (plain component, no tier subdir) else the packed
-    // tier subdir `<tier>/model.safetensors` selected by `advanced.mlxQuantize`.
+    // tier subdir `<tier>/model.safetensors` selected by `advanced.mlxQuantize` — whose DEFAULT tier is
+    // clamped to the installed overlay (`snapshot`) so a plain default job never forces a new fetch
+    // (sc-10726).
     let rel = match override_field("filename") {
         Some(name) => safe_weight_filename(&name, "advanced.controlWeights.filename")?,
-        None => format!("{}/{QWEN_CONTROL_FILE}", qwen_control_tier_subdir(request)),
+        None => format!(
+            "{}/{QWEN_CONTROL_FILE}",
+            qwen_control_tier_subdir(request, snapshot.as_deref())
+        ),
     };
-    let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, &repo) else {
+    let Some(snapshot) = snapshot else {
         return Ok(None);
     };
     let path = snapshot.join(rel);
@@ -898,3 +934,94 @@ async fn generate_qwen_edit_stream(
 // ControlNet, so strict pose is excluded by `sensenova_mlx_eligible`. Mirrors
 // `generate_qwen_edit_stream`'s blocking-thread + streamed-events shape.
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod qwen_control_tier_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(advanced: serde_json::Value) -> ImageRequest {
+        ImageRequest::from_payload(
+            json!({ "model": "qwen_image", "advanced": advanced })
+                .as_object()
+                .unwrap(),
+        )
+    }
+
+    /// Write a present `<tier>/model.safetensors` overlay so [`qwen_control_tier_subdir`]'s clamp sees
+    /// the tier as installed.
+    fn seed_tier(root: &Path, tier: &str) {
+        let dir = root.join(tier);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(QWEN_CONTROL_FILE), b"x").unwrap();
+    }
+
+    /// sc-10726: the plain default (no `advanced.mlxQuantize`) resolves the app-wide Q8 default when the
+    /// q8 overlay is on disk, and every explicit pick is honored as-is (an explicit request may fetch its
+    /// tier on demand, so it is NOT clamped to what's installed).
+    #[test]
+    fn default_prefers_installed_q8_and_honors_explicit_picks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        seed_tier(root, "q4");
+        seed_tier(root, "q8");
+        seed_tier(root, "bf16");
+
+        // No selection → q8 default (epic 10721 / sc-10726), clamped to installed (q8 present).
+        assert_eq!(qwen_control_tier_subdir(&request(json!({})), Some(root)), "q8");
+        // Explicit picks are returned verbatim.
+        assert_eq!(
+            qwen_control_tier_subdir(&request(json!({ "mlxQuantize": 4 })), Some(root)),
+            "q4"
+        );
+        assert_eq!(
+            qwen_control_tier_subdir(&request(json!({ "mlxQuantize": 8 })), Some(root)),
+            "q8"
+        );
+        assert_eq!(
+            qwen_control_tier_subdir(&request(json!({ "mlxQuantize": 0 })), Some(root)),
+            "bf16"
+        );
+        // Numeric-string opt-out is accepted the same way.
+        assert_eq!(
+            qwen_control_tier_subdir(&request(json!({ "mlxQuantize": "0" })), Some(root)),
+            "bf16"
+        );
+    }
+
+    /// sc-10726 acceptance #3: on a legacy/partial install carrying ONLY the q4 overlay, the plain
+    /// default must resolve q4 — NOT the app-wide q8 default — so it never forces a NEW ~1.87 GB q8
+    /// on-demand fetch. An EXPLICIT q8 pick is still returned verbatim (it may legitimately fetch).
+    #[test]
+    fn default_clamps_to_only_installed_q4() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        seed_tier(root, "q4");
+
+        // Default clamps down to the only installed tier — no q8 fetch forced.
+        assert_eq!(qwen_control_tier_subdir(&request(json!({})), Some(root)), "q4");
+        // Clean-tier ranking prefers bf16 over q4 when both are present but q8 is not.
+        seed_tier(root, "bf16");
+        assert_eq!(
+            qwen_control_tier_subdir(&request(json!({})), Some(root)),
+            "bf16"
+        );
+        // An explicit q8 opt-in is honored even though only q4/bf16 are on disk.
+        assert_eq!(
+            qwen_control_tier_subdir(&request(json!({ "mlxQuantize": 8 })), Some(root)),
+            "q8"
+        );
+    }
+
+    /// With NO snapshot cached yet (or an empty snapshot), the default falls back to `q8` — the
+    /// fresh-install co-requisite the base download brings alongside the base tier.
+    #[test]
+    fn default_falls_back_to_q8_when_nothing_installed() {
+        assert_eq!(qwen_control_tier_subdir(&request(json!({})), None), "q8");
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            qwen_control_tier_subdir(&request(json!({})), Some(empty.path())),
+            "q8"
+        );
+    }
+}
