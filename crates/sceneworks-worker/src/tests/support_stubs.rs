@@ -354,6 +354,7 @@ fn test_settings(huggingface_base_url: String, huggingface_token: Option<&str>) 
         backend_mlx_enabled: true,
         backend_candle_enabled: false,
         gpu_memory_limit_bytes: 0,
+        external_model_roots: Vec::new(),
     }
 }
 

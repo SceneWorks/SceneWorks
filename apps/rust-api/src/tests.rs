@@ -291,6 +291,7 @@ fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         mcp_api_url: "http://127.0.0.1:0".to_owned(),
         mcp_job_poll_interval: sceneworks_mcp::JobWaitConfig::default().poll_interval,
         mcp_job_timeout: sceneworks_mcp::JobWaitConfig::default().timeout,
+        external_model_roots: Vec::new(),
     }
 }
 
@@ -12761,4 +12762,204 @@ async fn update_lora_edits_trigger_words_and_notes() {
         .expect("seeded LoRA present");
     assert_eq!(entry["triggerWords"], json!(["fresh", "tokens"]));
     assert_eq!(entry["notes"], "revised note");
+}
+
+/// A ComfyUI-style Wan adapter (keys taken from a real
+/// `wan2.2_t2v_lightx2v_*.safetensors`) written at `path`, parent dirs included.
+fn write_comfy_wan_adapter(path: &std::path::Path) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("adapter parent dir");
+    }
+    let keys: Vec<String> = [
+        "diffusion_model.blocks.0.cross_attn.k.lora_down.weight",
+        "diffusion_model.blocks.0.cross_attn.k.lora_up.weight",
+        "diffusion_model.blocks.0.cross_attn.v.lora_down.weight",
+        "diffusion_model.blocks.0.cross_attn.v.lora_up.weight",
+        "diffusion_model.blocks.0.self_attn.q.lora_down.weight",
+        "diffusion_model.blocks.0.self_attn.q.lora_up.weight",
+        "diffusion_model.blocks.0.ffn.0.lora_down.weight",
+        "diffusion_model.blocks.0.ffn.0.lora_up.weight",
+    ]
+    .iter()
+    .map(|key| (*key).to_owned())
+    .collect();
+    write_test_safetensors_with_keys(path, &keys);
+}
+
+/// epic 10451 / sc-10452: with an operator-configured external root, the LoRAs in a
+/// ComfyUI `models/loras` tree are surfaced by `GET /api/v1/loras` — read in place,
+/// never copied — and are read-only: not removable, and `DELETE` refuses them. We
+/// borrowed the user's file; we must not offer to destroy it.
+#[tokio::test]
+async fn external_root_loras_are_listed_read_only() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let comfy_root = temp_dir.path().join("ComfyUI").join("models");
+    // Nested, like the real tree (`loras/Wan/…`).
+    let adapter = comfy_root
+        .join("loras")
+        .join("Wan")
+        .join("detailz-wan.safetensors");
+    write_comfy_wan_adapter(&adapter);
+
+    let mut settings = test_settings(&temp_dir);
+    settings.external_model_roots = vec![comfy_root];
+    let app = create_app(settings).expect("app creates");
+
+    let (status, loras) = request(app.clone(), "GET", "/api/v1/loras", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let external = loras
+        .as_array()
+        .expect("loras array")
+        .iter()
+        .find(|lora| lora["scope"] == "external")
+        .expect("the ComfyUI adapter is surfaced");
+
+    assert_eq!(external["name"], "Wan/detailz-wan");
+    assert_eq!(external["family"], "wan-video");
+    assert_eq!(external["installState"], "installed");
+    // Read in place: the catalog points at the operator's own file, not a copy.
+    assert_eq!(
+        external["installedPath"].as_str().expect("installedPath"),
+        adapter
+            .canonicalize()
+            .expect("canonicalize")
+            .display()
+            .to_string()
+    );
+    // Never offer to delete a file we do not own.
+    assert_eq!(external["removable"], false);
+
+    let id = external["id"].as_str().expect("id");
+    assert!(id.starts_with("external_"), "ids are namespaced: {id}");
+
+    let (status, _) = request(
+        app,
+        "DELETE",
+        &format!("/api/v1/loras/{id}?scope=external"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "deleting an external LoRA must be refused"
+    );
+}
+
+/// The feature is off unless an operator opts in: with no external roots configured
+/// (the default), the catalog is exactly what the manifests declare.
+#[tokio::test]
+async fn no_external_roots_leaves_the_lora_catalog_unchanged() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let comfy_root = temp_dir.path().join("ComfyUI").join("models");
+    write_comfy_wan_adapter(&comfy_root.join("loras").join("ignored.safetensors"));
+
+    // Settings default to no external roots; the tree above is simply not looked at.
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, loras) = request(app, "GET", "/api/v1/loras", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !loras
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .any(|lora| lora["scope"] == "external"),
+        "no external rows without an operator-configured root"
+    );
+}
+
+/// sc-10452: the whole point of detecting a family on a scanned adapter is that the
+/// existing compatibility gate then treats it exactly like a manifest LoRA. Nothing
+/// declares `families` on an external row — `families_from_value_chain` falls back to
+/// the singular `family` key and normalizes it — so assert the gate end-to-end rather
+/// than trusting that fallback to survive a refactor.
+#[test]
+fn external_lora_family_is_detected_and_gates_model_compatibility() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let comfy_root = temp_dir.path().join("models");
+    write_comfy_wan_adapter(
+        &comfy_root
+            .join("loras")
+            .join("Wan")
+            .join("detailz-wan.safetensors"),
+    );
+
+    let mut cache = crate::external_loras::ExternalLoraCache::default();
+    let catalog =
+        crate::external_loras::scan_external_loras(std::slice::from_ref(&comfy_root), &mut cache);
+    let lora = catalog.first().expect("one scanned adapter");
+    // Read from the tensor keys, not the filename or folder.
+    assert_eq!(lora["family"], "wan-video");
+
+    let lora_id = lora["id"].as_str().expect("id").to_owned();
+    let attached = vec![json!({ "id": lora_id, "weight": 0.8 })];
+
+    // A Wan model accepts it: the detected family matches `loraCompatibility.families`.
+    let wan = vec![json!({
+        "id": "wan_2_2",
+        "loraCompatibility": { "families": ["wan-video"], "types": ["style"] }
+    })];
+    let accepted =
+        super::validate_lora_specs_for_model(&wan, &catalog, "wan_2_2", &attached, false, "LoRA")
+            .expect("a wan-video adapter is compatible with a wan-video model");
+    assert_eq!(accepted.len(), 1);
+
+    // A Z-Image model rejects the same adapter, naming the detected family.
+    let z_image = vec![json!({
+        "id": "z_image_turbo",
+        "loraCompatibility": { "families": ["z-image"], "types": ["style"] }
+    })];
+    let error = super::validate_lora_specs_for_model(
+        &z_image,
+        &catalog,
+        "z_image_turbo",
+        &attached,
+        false,
+        "LoRA",
+    )
+    .expect_err("a wan-video adapter is not compatible with a z-image model");
+    assert!(
+        error.detail.contains("wan-video"),
+        "the rejection names the detected family: {}",
+        error.detail
+    );
+}
+
+/// sc-10452: an adapter whose family the detector cannot identify (in the real tree:
+/// an LLM LoRA, and the ComfyUI Qwen-Image adapters of sc-10506) is still LISTED —
+/// the user pointed us at the folder and deserves to see we found the file — but the
+/// API **fails closed** when one is attached to a generation. We will not guess a
+/// family and load arbitrary tensors into a model.
+#[test]
+fn external_lora_without_a_detected_family_is_refused_at_job_create() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let comfy_root = temp_dir.path().join("models");
+    let adapter = comfy_root.join("loras").join("mystery.safetensors");
+    std::fs::create_dir_all(adapter.parent().expect("parent")).expect("mkdir");
+    write_test_safetensors_with_keys(&adapter, &["some.unknown.tensor".to_owned()]);
+
+    let mut cache = crate::external_loras::ExternalLoraCache::default();
+    let catalog =
+        crate::external_loras::scan_external_loras(std::slice::from_ref(&comfy_root), &mut cache);
+
+    // Listed, installed, but carrying no family.
+    let lora = catalog.first().expect("the adapter is still surfaced");
+    assert_eq!(lora["installState"], "installed");
+    assert!(lora.get("family").is_none(), "no family could be detected");
+
+    let attached = vec![json!({ "id": lora["id"].as_str().expect("id"), "weight": 0.8 })];
+    let models = vec![json!({
+        "id": "wan_2_2",
+        "loraCompatibility": { "families": ["wan-video"], "types": ["style"] }
+    })];
+
+    let error = super::validate_lora_specs_for_model(
+        &models, &catalog, "wan_2_2", &attached, false, "LoRA",
+    )
+    .expect_err("an unidentifiable adapter must not be loaded into a model");
+    assert!(
+        error.detail.contains("no declared family"),
+        "the refusal explains why: {}",
+        error.detail
+    );
 }
