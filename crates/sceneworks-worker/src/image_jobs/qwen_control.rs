@@ -118,15 +118,19 @@ fn qwen_control_guidance(request: &ImageRequest) -> f32 {
 }
 
 /// The packed control tier subdir the request's `advanced.mlxQuantize` selects (sc-9870): `bf16` (opt
-/// out of quantization, `<= 0` / "none"), `q8` (`> 4`), else the `q4` default — the SAME mapping
+/// out of quantization, `<= 0` / "none"), `q8` (`> 4`), `q4` for an explicit Q4 pick (`1..=4`), else —
+/// with NO explicit `mlxQuantize` — the **`q8`** default (sc-10726) — the SAME mapping
 /// [`standard_tier_subdir`] uses for the base transformer tier, so the control overlay tier tracks the
-/// base tier for a coherent A/B. Mirrors the MLX `qwen_control_tier_subdir`.
+/// base tier for a coherent A/B (a q8-default base pairs with the q8 control overlay). The whole control
+/// matrix (q4/q8/bf16) installs as co-requisites alongside the base, so the q8 overlay is on disk
+/// whenever the base is. Mirrors the MLX `qwen_control_tier_subdir`.
 fn qwen_control_tier_subdir(request: &ImageRequest) -> &'static str {
     let bits = request
         .advanced
         .get("mlxQuantize")
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
     match bits {
+        None => "q8",
         Some(b) if b <= 0 => "bf16",
         Some(b) if b > 4 => "q8",
         _ => "q4",

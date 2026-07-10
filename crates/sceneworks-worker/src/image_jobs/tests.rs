@@ -5613,13 +5613,14 @@ fn ideogram_engine_defaults_and_quant_resolution() {
     ));
 }
 
-/// `ideogram_model_subdir` picks the packed `q4/` subdir by default and `q8/` only when the request
-/// opts in (`mlxQuantize > 4`) AND q8 is downloaded, falling back to q4 (then the root, so a
-/// half-downloaded bundle surfaces as a load error rather than a silent half-load). This is the
-/// *effective* quant selection — the q4 default is why resolve_quant's generic Q8 is inert.
+/// `ideogram_model_subdir` prefers the packed `q8/` subdir by default (sc-10726, epic 10721) — CLAMPED
+/// to installed, so with only `q4/` on disk it resolves q4 — while an explicit Q4 pick (`1..=4`) stays
+/// q4 and an explicit Q8 opt-in (`mlxQuantize > 4`) takes q8 when downloaded (else falls back to q4,
+/// then the root, so a half-downloaded bundle surfaces as a load error). This is the *effective* quant
+/// selection — the q8 default now agrees with `resolve_quant`'s generic Q8.
 #[cfg(target_os = "macos")]
 #[test]
-fn ideogram_subdir_prefers_q4_and_opts_into_q8() {
+fn ideogram_subdir_prefers_q8_and_clamps_to_installed() {
     let root = tempfile::tempdir().unwrap();
     let touch = |sub: &str| {
         let dir = root.path().join(sub).join("transformer");
@@ -5636,26 +5637,32 @@ fn ideogram_subdir_prefers_q4_and_opts_into_q8() {
         ideogram_model_subdir(root.path(), &req(json!({}))),
         root.path()
     );
-    // q4 only → q4, even when q8 is requested but absent.
+    // q4 only → the default CLAMPS to q4 (q8 preferred but absent); a q8 opt-in also falls back to q4.
     touch("q4");
     assert_eq!(
         ideogram_model_subdir(root.path(), &req(json!({}))),
-        root.path().join("q4")
+        root.path().join("q4"),
+        "q8 default clamps to the only installed tier (q4)",
     );
     assert_eq!(
         ideogram_model_subdir(root.path(), &req(json!({ "mlxQuantize": 8 }))),
         root.path().join("q4"),
         "q8 opt-in falls back to q4 when q8 absent",
     );
-    // Both present → q4 by default, q8 only on opt-in.
+    // Both present → q8 by default (sc-10726); q8 on opt-in; an explicit q4 pick stays q4.
     touch("q8");
     assert_eq!(
         ideogram_model_subdir(root.path(), &req(json!({}))),
-        root.path().join("q4")
+        root.path().join("q8")
     );
     assert_eq!(
         ideogram_model_subdir(root.path(), &req(json!({ "mlxQuantize": 8 }))),
         root.path().join("q8"),
+    );
+    assert_eq!(
+        ideogram_model_subdir(root.path(), &req(json!({ "mlxQuantize": 4 }))),
+        root.path().join("q4"),
+        "explicit Q4 pick is honored over the q8 default",
     );
 }
 
@@ -8049,12 +8056,13 @@ fn candle_control_providers_resolve_models_and_repos() {
 
     // sc-8350 — qwen InstantX → 2512-Fun. sc-9870 — repointed to the SceneWorks PACKED tier: the default
     // control repo is the per-quant `SceneWorks/qwen-image-2512-fun-controlnet-union` matrix (NOT the dense
-    // alibaba-pai overlay, and NOT the retired InstantX repo), and the default file is the q4 tier subdir's
-    // single `model.safetensors` when no `mlxQuantize` is requested. The base repo is unchanged (2512 base).
+    // alibaba-pai overlay, and NOT the retired InstantX repo). sc-10726 — with no `mlxQuantize` the default
+    // control tier is now the q8 subdir's single `model.safetensors` (tracking the q8-default base tier;
+    // the whole matrix installs as co-requisites). The base repo is unchanged (2512 base).
     let qwen = request(json!({ "projectId": "p", "model": "qwen_image" }));
     let (q_repo, q_file) = qwen_control_repo_file(&qwen).expect("defaults resolve");
     assert_eq!(q_repo, "SceneWorks/qwen-image-2512-fun-controlnet-union");
-    assert_eq!(q_file, "q4/model.safetensors");
+    assert_eq!(q_file, "q8/model.safetensors");
     assert_eq!(QWEN_CONTROL_DEFAULT_REPO, "Qwen/Qwen-Image-2512");
     assert_ne!(q_repo, "alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union");
     assert_ne!(q_repo, "InstantX/Qwen-Image-ControlNet-Union");

@@ -2912,12 +2912,16 @@ fn wan_quant_bits(request: &VideoRequest) -> Option<i64> {
 
 /// The Wan2.2 quant-matrix tier search order for a request — preferred tier first, then the
 /// always-smaller fallback tiers so a repo missing the preferred subdir still loads (mirrors
-/// [`ltx_bundle_tier_order`]): `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, else the `q4` default.
-/// `bf16` is only ever tried when explicitly requested, so a default job never pulls the huge dense
-/// tier by accident.
+/// [`ltx_bundle_tier_order`]): no explicit pick ⇒ **`q8`** (the app-wide default, epic 10721 /
+/// sc-10726), `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, else an explicit `q4`. The Q8 default is
+/// CLAMPED to installed — the macOS base download ships only the lean `q4/` tier, so a default job
+/// resolves q4 unless the user opted into (and fetched) q8. `bf16` stays OUT of the default order
+/// entirely, so a default job never pulls the huge dense tier by accident (preserved from the old q4
+/// default; a heavy Wan model never OOMs on a tier the user didn't request).
 #[cfg(target_os = "macos")]
 fn wan_tier_order(request: &VideoRequest) -> &'static [&'static str] {
     match wan_quant_bits(request) {
+        None => &["q8", "q4"],
         Some(b) if b <= 0 => &["bf16", "q8", "q4"],
         Some(b) if b >= 8 => &["q8", "q4"],
         _ => &["q4", "q8"],
@@ -4488,7 +4492,8 @@ fn candle_video_repo(request: &VideoRequest, engine_id: &str) -> String {
 /// quant-matrix (sc-10027) hosts each candle tier as a per-`variant` download entry — `q4`/`q8` in the
 /// packed `SceneWorks/wan2.2-*-candle` repo, `bf16` in the dense `Wan-AI/*-Diffusers` repo — rather than
 /// a single top-level `repo`, so `candle_video_repo` must consult them. Picks the repo for the highest-
-/// preference tier present for this OS (default q4-first, mirroring [`candle_wan_tier_subdir`] so the
+/// preference tier present for this OS (default **q8-first** when the manifest lists it for the platform,
+/// clamping to q4 otherwise — epic 10721 / sc-10726 — mirroring [`candle_wan_tier_subdir`] so the
 /// resolved repo is the one whose tier subdir the loader then selects). `None` for non-Wan engines or a
 /// manifest without matching platform downloads.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -4503,6 +4508,7 @@ fn candle_wan_tier_repo_from_downloads(request: &VideoRequest, engine_id: &str) 
         "linux"
     };
     let order: &[&str] = match candle_wan_quant_bits(request) {
+        None => &["q8", "q4"],
         Some(bits) if bits <= 0 => &["bf16", "q8", "q4"],
         Some(bits) if bits >= 8 => &["q8", "q4"],
         _ => &["q4", "q8"],
@@ -4566,8 +4572,9 @@ fn candle_wan_tier_complete(dir: &Path, a14b: bool) -> bool {
 }
 
 /// (sc-10027) Resolve the candle wan quant tier subdir (`q4`/`q8`/`bf16`) + its quant marker under a
-/// `SceneWorks/wan2.2-*-candle` snapshot `root`, per `advanced.mlxQuantize` (default q4, falling back
-/// through the tier order), or `None` for a non-wan engine or a flat repo with no tier subdirs (e.g. the
+/// `SceneWorks/wan2.2-*-candle` snapshot `root`, per `advanced.mlxQuantize` (default **q8** when
+/// installed, clamping to q4 — epic 10721 / sc-10726 — falling back through the tier order), or `None`
+/// for a non-wan engine or a flat repo with no tier subdirs (e.g. the
 /// dense `Wan-AI/*-Diffusers` fallback, which loads as-is). A resolved subdir **is** the diffusers-layout
 /// snapshot the sc-10025 packed-detect seam loads — the quant is baked into the tier, so the `Quant`
 /// returned is a tier-select marker (`spec.quantize` is a no-op on the candle wan load). Candle analog of
@@ -4581,8 +4588,11 @@ fn candle_wan_tier_subdir(
     if !engine_id.starts_with("wan2_2") {
         return None;
     }
-    // Tier preference by requested bits (mirrors the macOS `wan_tier_order`): default / ≤4 → q4.
+    // Tier preference by requested bits (mirrors the macOS `wan_tier_order`): no explicit pick → q8
+    // (the app-wide default, clamped to the installed tier, so q4-only installs still resolve q4);
+    // explicit ≤4 → q4. `bf16` stays out of the default order (never auto-loaded on a default job).
     let order: &[&str] = match candle_wan_quant_bits(request) {
+        None => &["q8", "q4"],
         Some(b) if b <= 0 => &["bf16", "q8", "q4"],
         Some(b) if b >= 8 => &["q8", "q4"],
         _ => &["q4", "q8"],
@@ -5916,11 +5926,14 @@ const BERNINI_TIER_FILES: &[&str] = &[
 
 /// The Bernini quant-matrix tier search order for a request — preferred tier first, then the
 /// always-smaller fallback tiers so a repo missing the preferred subdir still loads (mirrors
-/// [`wan_tier_order`]): `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, else the `q4` default. `bf16` is
-/// only ever tried when explicitly requested, so a default job never pulls the huge dense tier.
+/// [`wan_tier_order`]): no explicit pick ⇒ **`q8`** (the app-wide default, epic 10721 / sc-10726,
+/// clamped to installed — the lean `q4/` base download still resolves q4 until q8 is fetched);
+/// `mlxQuantize <= 0` ⇒ `bf16`; `>= 8` ⇒ `q8`; else an explicit `q4`. `bf16` stays OUT of the default
+/// order, so a default job never pulls the huge dense tier by accident.
 #[cfg(target_os = "macos")]
 fn bernini_tier_order(bits: Option<i64>) -> &'static [&'static str] {
     match bits {
+        None => &["q8", "q4"],
         Some(b) if b <= 0 => &["bf16", "q8", "q4"],
         Some(b) if b >= 8 => &["q8", "q4"],
         _ => &["q4", "q8"],
@@ -6315,11 +6328,23 @@ fn scail2_tier_repo(model: &str) -> Option<(&'static str, &'static str)> {
 
 /// The SCAIL-2 quant-matrix tier search order for a request — preferred tier first, then the
 /// always-smaller fallback tiers so a repo missing the preferred subdir still loads (mirrors
-/// [`wan_tier_order`]): `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, else the `q4` default. `bf16` is
-/// only ever tried when explicitly requested, so a default job never pulls the huge dense tier by
-/// accident. Reuses [`resolve_scail2_quant`] (the shared `mlxQuantize` parse) as the selector.
+/// [`wan_tier_order`]): no explicit `mlxQuantize` ⇒ **`q8`** (the app-wide default, epic 10721 /
+/// sc-10726, clamped to installed — the lean `q4/` base download still resolves q4 until q8 is
+/// fetched); `<= 0` ⇒ `bf16`; `>= 8` ⇒ `q8`; else an explicit `q4`. `bf16` stays OUT of the default
+/// order, so a default job never pulls the huge dense tier by accident. A raw `mlxQuantize`-presence
+/// check distinguishes the default from an explicit Q4 pick — [`resolve_scail2_quant`] maps BOTH to
+/// `Some(Quant::Q4)`, so it can't tell them apart on its own.
 #[cfg(target_os = "macos")]
 fn scail2_tier_order(request: &VideoRequest) -> &'static [&'static str] {
+    // No explicit pick → prefer the clean q8 tier when installed (clamped to q4 otherwise).
+    let has_explicit_quant = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
+        .is_some();
+    if !has_explicit_quant {
+        return &["q8", "q4"];
+    }
     match resolve_scail2_quant(request) {
         None => &["bf16", "q8", "q4"],
         Some(Quant::Q8) => &["q8", "q4"],
@@ -6921,15 +6946,21 @@ fn ltx_wants_bf16(request: &VideoRequest) -> bool {
 
 /// The SceneWorks LTX bundle tier search order for a request — preferred tier first, then the
 /// always-smaller fallback tiers so a bundle missing the preferred subdir still loads (sc-8513):
-/// `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, else the `q4` default. bf16 is only ever tried when
-/// explicitly requested, so a default job never loads the huge dense tier by accident.
+/// `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, an explicit `1..=4` ⇒ `q4`, else — with NO explicit
+/// `mlxQuantize` — the **`q8`** default (epic 10721 / sc-10726), CLAMPED to installed (the lean `q4/`
+/// bundle download still resolves q4 until q8 is fetched). bf16 stays OUT of the default order, so a
+/// default job never loads the huge dense tier by accident.
 #[cfg(target_os = "macos")]
 fn ltx_bundle_tier_order(request: &VideoRequest) -> &'static [&'static str] {
     if ltx_wants_bf16(request) {
         &["bf16", "q8", "q4"]
     } else if ltx_wants_q8(request) {
         &["q8", "q4"]
+    } else if ltx_quant_bits(request).is_none() {
+        // No explicit pick → the q8 default, clamped to installed (q4-only bundles still resolve q4).
+        &["q8", "q4"]
     } else {
+        // An explicit Q4 pick (`1..=4`) stays q4-first.
         &["q4", "q8"]
     }
 }
@@ -10945,11 +10976,13 @@ mod tests {
         assert_eq!(wan_tier_order(&bf16), &["bf16", "q8", "q4"]);
         let q8 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
         assert_eq!(wan_tier_order(&q8), &["q8", "q4"]);
+        // An explicit Q4 pick stays q4-first (never overridden by the q8 default).
         let q4 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
         assert_eq!(wan_tier_order(&q4), &["q4", "q8"]);
-        // Absent knob defaults to the lean q4 tier; bf16 is never in a default job's search path.
+        // sc-10726: an absent knob now prefers the clean q8 tier (clamped to installed — q4-only
+        // installs still resolve q4); bf16 is never in a default job's search path (no OOM by accident).
         let absent = request(json!({ "projectId": "p" }));
-        assert_eq!(wan_tier_order(&absent), &["q4", "q8"]);
+        assert_eq!(wan_tier_order(&absent), &["q8", "q4"]);
     }
 
     /// [`wan_tier_subdir`] resolves the requested tier, falls back to a smaller COMPLETE
@@ -10972,11 +11005,14 @@ mod tests {
         std::fs::write(root.join("q8").join("config.json"), b"x").unwrap();
         assert_eq!(wan_tier_subdir(&root, &q8_req), Some(root.join("q4")));
 
-        // Completed q8 now wins for a q8 request; a default job still prefers q4.
+        // Completed q8 now wins for a q8 request; a default job also prefers the clean q8 default
+        // (sc-10726) now that q8 is installed, while an explicit q4 pick still resolves q4.
         write_complete_wan_tier(&root, "q8");
         assert_eq!(wan_tier_subdir(&root, &q8_req), Some(root.join("q8")));
         let default_req = request(json!({ "projectId": "p" }));
-        assert_eq!(wan_tier_subdir(&root, &default_req), Some(root.join("q4")));
+        assert_eq!(wan_tier_subdir(&root, &default_req), Some(root.join("q8")));
+        let q4_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
+        assert_eq!(wan_tier_subdir(&root, &q4_req), Some(root.join("q4")));
 
         // bf16 request with no bf16 tier falls back to q8 (never silently to a default).
         let bf16_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 0 } }));
@@ -11072,8 +11108,10 @@ mod tests {
         make_tier("q4");
         make_tier("q8");
 
-        // Default (no bits) → q4.
-        assert_eq!(bernini_tier_subdir(&root, None), Some(root.join("q4")));
+        // Default (no bits) → q8 when installed (sc-10726), clamped to what's on disk.
+        assert_eq!(bernini_tier_subdir(&root, None), Some(root.join("q8")));
+        // An explicit Q4 pick stays q4 (never overridden by the q8 default).
+        assert_eq!(bernini_tier_subdir(&root, Some(4)), Some(root.join("q4")));
         // Q8 (bits >= 8) → q8.
         assert_eq!(bernini_tier_subdir(&root, Some(8)), Some(root.join("q8")));
         // bf16 (bits <= 0) with no bf16 tier falls back to q8 (never silently to a default).
@@ -11128,11 +11166,14 @@ mod tests {
         assert_eq!(scail2_tier_order(&bf16), &["bf16", "q8", "q4"]);
         let q8 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
         assert_eq!(scail2_tier_order(&q8), &["q8", "q4"]);
+        // An explicit Q4 pick stays q4-first (resolve_scail2_quant maps both this and the default to
+        // Some(Q4), so the tier order tells them apart via raw mlxQuantize presence).
         let q4 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
         assert_eq!(scail2_tier_order(&q4), &["q4", "q8"]);
-        // Absent knob defaults to the lean q4 tier; bf16 is never in a default job's search path.
+        // sc-10726: an absent knob now prefers the clean q8 tier (clamped to installed); bf16 is never
+        // in a default job's search path (no OOM by accident).
         let absent = request(json!({ "projectId": "p" }));
-        assert_eq!(scail2_tier_order(&absent), &["q4", "q8"]);
+        assert_eq!(scail2_tier_order(&absent), &["q8", "q4"]);
     }
 
     /// [`scail2_tier_subdir`] resolves the requested tier, falls back to a smaller COMPLETE tier,
@@ -11155,14 +11196,17 @@ mod tests {
         std::fs::write(root.join("q8").join("config.json"), b"x").unwrap();
         assert_eq!(scail2_tier_subdir(&root, &q8_req), Some(root.join("q4")));
 
-        // Completed q8 now wins for a q8 request; a default job still prefers q4.
+        // Completed q8 now wins for a q8 request; a default job also prefers the clean q8 default
+        // (sc-10726) now that q8 is installed, while an explicit q4 pick still resolves q4.
         write_complete_scail2_tier(&root, "q8");
         assert_eq!(scail2_tier_subdir(&root, &q8_req), Some(root.join("q8")));
         let default_req = request(json!({ "projectId": "p" }));
         assert_eq!(
             scail2_tier_subdir(&root, &default_req),
-            Some(root.join("q4"))
+            Some(root.join("q8"))
         );
+        let q4_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
+        assert_eq!(scail2_tier_subdir(&root, &q4_req), Some(root.join("q4")));
 
         // bf16 request with no bf16 tier falls back to q8 (never silently to a default).
         let bf16_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 0 } }));
@@ -12847,7 +12891,14 @@ mod tests {
             ltx_bundle_tier_order(&with(json!({ "mlxQuantize": 8 }))),
             &["q8", "q4"]
         );
-        assert_eq!(ltx_bundle_tier_order(&plain), &["q4", "q8"]);
+        // sc-10726: a plain request (no mlxQuantize) prefers the clean q8 tier, clamped to installed
+        // (q4-only bundles still resolve q4); bf16 stays out of the default search path.
+        assert_eq!(ltx_bundle_tier_order(&plain), &["q8", "q4"]);
+        // An explicit Q4 pick stays q4-first.
+        assert_eq!(
+            ltx_bundle_tier_order(&with(json!({ "mlxQuantize": 4 }))),
+            &["q4", "q8"]
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -14136,9 +14187,9 @@ mod candle_video_label_tests {
         );
     }
 
-    /// (sc-10027) `candle_wan_tier_subdir` picks the q4/q8 subdir per `advanced.mlxQuantize` (default q4),
-    /// falls back through the tier order, requires a complete tier, and returns `None` for a non-wan
-    /// engine or a flat/dense repo with no tier subdirs.
+    /// (sc-10027 / sc-10726) `candle_wan_tier_subdir` picks the q4/q8 subdir per `advanced.mlxQuantize`
+    /// (default q8 when installed, clamped to q4), falls back through the tier order, requires a complete
+    /// tier, and returns `None` for a non-wan engine or a flat/dense repo with no tier subdirs.
     #[test]
     fn candle_wan_tier_subdir_resolves_by_mlx_quantize() {
         let root = std::env::temp_dir().join(format!("sc10027_wan_tier_{}", std::process::id()));
@@ -14159,8 +14210,14 @@ mod candle_video_label_tests {
             VideoRequest::from_payload(json!({ "advanced": adv }).as_object().unwrap())
         };
 
-        // Default (no mlxQuantize) → q4.
+        // Default (no mlxQuantize) → q8 when installed (sc-10726), clamped to what's on disk.
         let (d, q) = candle_wan_tier_subdir(&root, "wan2_2_t2v_14b", &req(json!({}))).unwrap();
+        assert!(d.ends_with("q8"));
+        assert_eq!(q, Some(Quant::Q8));
+        // An explicit Q4 pick stays q4 (never overridden by the q8 default).
+        let (d, q) =
+            candle_wan_tier_subdir(&root, "wan2_2_t2v_14b", &req(json!({ "mlxQuantize": 4 })))
+                .unwrap();
         assert!(d.ends_with("q4"));
         assert_eq!(q, Some(Quant::Q4));
         // mlxQuantize = 8 → q8.
