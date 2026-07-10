@@ -4152,9 +4152,11 @@
       // Anima 2B (epic 10512 / sc-10523) — CircleStone Labs' anime text-to-image model, ported natively
       // to mlx-gen (engine id `anima_base`). The Cosmos-Predict2 `CosmosTransformer3DModel` DiT (28
       // layers, 17-channel patch-embed, 3-axis NTK RoPE) + the bundled `AnimaTextConditioner` (T5 query
-      // tokens cross-attending Qwen3-0.6B states) + the Qwen-Image VAE. Native MLX only (mlx-gen-anima;
-      // the candle port sc-10525 exists + is CPU-numerically-validated but has never run on real CUDA, so
-      // it is NOT catalog-routed yet) → macOnly. True-CFG text-to-image (30 steps / guidance 4.5).
+      // tokens cross-attending Qwen3-0.6B states) + the Qwen-Image VAE. Runs on MLX (macOS) AND the candle
+      // off-Mac lane (Windows/Linux CUDA): the candle port sc-10525 is now GPU-validated on real CUDA
+      // (sc-10625) and catalog-routed off-Mac (sc-10676), so `macOnly: false` — availability is driven by
+      // the routing tables (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag. True-CFG
+      // text-to-image (30 steps / guidance 4.5).
       //
       // Non-commercial: distributed under the CircleStone Labs Non-Commercial License v1.2. The source
       // repo `circlestone-labs/Anima` is UN-gated (freely downloadable) but NC — generations are for
@@ -4174,13 +4176,14 @@
       "type": "image",
       "adapter": "mlx_anima",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      "macOnly": false,
       "nonCommercial": true,
       "gated": false,
       "downloads": [
         {
-          // The base variant's Cosmos DiT (the convert source). Pulling just this file (plus the two
-          // shared components below) avoids the ~30 GB whole-repo pull (7 bf16 DiTs).
+          // macOS convert source (sc-10517): the base variant's Cosmos DiT + the two shared components.
+          // Pulling just these three files avoids the ~30 GB whole-repo pull (7 bf16 DiTs). On macOS the
+          // worker packs this ON-DEVICE into the q4/q8/bf16 tier matrix (convert-at-install).
           "provider": "huggingface",
           "repo": "circlestone-labs/Anima",
           "files": [
@@ -4189,6 +4192,23 @@
             "split_files/vae/qwen_image_vae.safetensors"
           ],
           "platforms": ["macos"],
+          "estimatedSizeBytes": 5690000000
+        },
+        {
+          // Non-mac dense bf16 (sc-10676): the SAME three exact `split_files/` paths, for the candle
+          // off-Mac lane. There is NO convert-at-install off-Mac (the `anima_quant` converter is
+          // macOS-only), so the candle loader dense-loads bf16 straight from this raw `split_files/`
+          // tree (`candle_gen_anima::loader::resolve_split_files` → `diffusion_models/ text_encoders/
+          // vae/`). Mirrors the mac entry's "3 exact paths, never the bare repo" guard — enumerating
+          // the variant DiT + shared Qwen3 TE + Qwen-Image VAE, never the ~30 GB bare repo.
+          "provider": "huggingface",
+          "repo": "circlestone-labs/Anima",
+          "files": [
+            "split_files/diffusion_models/anima-base-v1.0.safetensors",
+            "split_files/text_encoders/qwen_3_06b_base.safetensors",
+            "split_files/vae/qwen_image_vae.safetensors"
+          ],
+          "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 5690000000
         }
       ],
@@ -4253,19 +4273,20 @@
     {
       "id": "anima_aesthetic",
       // Anima 2B Aesthetic (epic 10512 / sc-10523) — the aesthetic fine-tune of Anima 2B. Same
-      // architecture, sampler/scheduler menu, convert-at-install flow, and NC posture as `anima_base`;
-      // differs only in the DiT weights file + (nothing else — same 30 steps / guidance 4.5).
+      // architecture, sampler/scheduler menu, convert-at-install (mac) / dense candle (off-Mac) flow, and
+      // NC posture as `anima_base`; differs only in the DiT weights file (same 30 steps / guidance 4.5).
       "autoDownload": false,
       "name": "Anima 2B Aesthetic",
       "family": "anima",
       "type": "image",
       "adapter": "mlx_anima",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      "macOnly": false,
       "nonCommercial": true,
       "gated": false,
       "downloads": [
         {
+          // macOS convert source (sc-10517).
           "provider": "huggingface",
           "repo": "circlestone-labs/Anima",
           "files": [
@@ -4274,6 +4295,19 @@
             "split_files/vae/qwen_image_vae.safetensors"
           ],
           "platforms": ["macos"],
+          "estimatedSizeBytes": 5690000000
+        },
+        {
+          // Non-mac dense bf16 (sc-10676) — the candle off-Mac lane loads these raw `split_files/` paths
+          // directly (no convert-at-install off-Mac). Same 3-exact-paths guard as the mac entry.
+          "provider": "huggingface",
+          "repo": "circlestone-labs/Anima",
+          "files": [
+            "split_files/diffusion_models/anima-aesthetic-v1.0.safetensors",
+            "split_files/text_encoders/qwen_3_06b_base.safetensors",
+            "split_files/vae/qwen_image_vae.safetensors"
+          ],
+          "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 5690000000
         }
       ],
@@ -4331,11 +4365,12 @@
       "type": "image",
       "adapter": "mlx_anima",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      "macOnly": false,
       "nonCommercial": true,
       "gated": false,
       "downloads": [
         {
+          // macOS convert source (sc-10517).
           "provider": "huggingface",
           "repo": "circlestone-labs/Anima",
           "files": [
@@ -4344,6 +4379,19 @@
             "split_files/vae/qwen_image_vae.safetensors"
           ],
           "platforms": ["macos"],
+          "estimatedSizeBytes": 5690000000
+        },
+        {
+          // Non-mac dense bf16 (sc-10676) — the candle off-Mac lane loads these raw `split_files/` paths
+          // directly (no convert-at-install off-Mac). Same 3-exact-paths guard as the mac entry.
+          "provider": "huggingface",
+          "repo": "circlestone-labs/Anima",
+          "files": [
+            "split_files/diffusion_models/anima-turbo-v1.0.safetensors",
+            "split_files/text_encoders/qwen_3_06b_base.safetensors",
+            "split_files/vae/qwen_image_vae.safetensors"
+          ],
+          "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 5690000000
         }
       ],
