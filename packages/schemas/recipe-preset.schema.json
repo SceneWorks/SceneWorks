@@ -18,6 +18,11 @@
           "name": { "type": "string", "minLength": 1 },
           "scope": { "type": "string", "enum": ["builtin", "global", "project"] },
           "archived": { "type": "boolean" },
+          "lastUsedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 timestamp of the last time this preset was applied to a submitted job, powering the Manager's 'Recently used' sort. API-managed: sourced from a usage side-store and overlaid on read so read-only builtin presets can carry it too. Absent means never used (sorts last)."
+          },
           "order": {
             "type": "integer",
             "description": "Caller-owned display order. Values do not need to be unique; lists sort by scope (builtin, then global, then project), then order, then name."

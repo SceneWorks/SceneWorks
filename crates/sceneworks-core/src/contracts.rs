@@ -1591,6 +1591,12 @@ pub struct RecipePresetManifestEntry {
     pub archived: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<i64>,
+    /// RFC3339 timestamp of the last time this preset was applied to a submitted job.
+    /// Powers the Manager's "Recently used" sort. The API sources it from a usage
+    /// side-store and overlays it on read (so read-only builtin presets can carry it
+    /// too); `None` means never used and sorts last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<String>,
     pub workflow: RecipePresetWorkflow,
     pub model: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

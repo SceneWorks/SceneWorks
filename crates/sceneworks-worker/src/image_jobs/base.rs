@@ -682,6 +682,29 @@ fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
         .unwrap_or_else(|| root.to_path_buf())
 }
 
+/// The DENSE (`bf16/`) tier of a SceneWorks quant-matrix turnkey, or `root` unchanged for a flat
+/// diffusers snapshot (sc-10614).
+///
+/// The candle SDXL lanes (`sdxl_edit_candle.rs`, `sdxl_ipadapter.rs`) read dense weights —
+/// `IMAGE_MODEL_CAPS` marks the whole SDXL family `candle_quant: false` — so they always want
+/// `bf16/`, unlike [`standard_tier_subdir`], which honours `advanced.mlxQuantize`. They historically
+/// handed the snapshot ROOT straight to the loader, which works only because `sdxl` and `realvisxl`
+/// fall back to flat upstream diffusers repos (`stabilityai/stable-diffusion-xl-base-1.0`,
+/// `SG161222/RealVisXL_V5.0`). An SDXL model re-hosted as a tiered turnkey has no component tree at
+/// its root, so the loader would find no `unet/` at all.
+///
+/// A flat snapshot roots its backbone dir — `unet/` for the SDXL family, `transformer/` for the DiTs
+/// — and is returned untouched, so the existing two models keep resolving exactly as before. Same
+/// backbone split the `apps/rust-api` training-readiness gate keys on (sc-10613).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn dense_tier_subdir(root: PathBuf) -> PathBuf {
+    let roots_a_component_tree = root.join("unet").is_dir() || root.join("transformer").is_dir();
+    if !roots_a_component_tree && root.join("bf16").is_dir() {
+        return root.join("bf16");
+    }
+    root
+}
+
 /// Whether `model` is one of the three Anima catalog ids (epic 10512). Anima is convert-at-install with
 /// a bespoke tier resolver, so — like Ideogram/Boogu/Krea — it is NOT in [`STANDARD_TIER_MODELS`].
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
@@ -4899,6 +4922,50 @@ mod standard_tier_tests {
             json!({ "denseTextEncoderTier": true })
         )));
         assert!(!is_dense_te_tier(&manifest_request("flux2_dev", json!({}))));
+    }
+
+    /// sc-10614: the candle SDXL lanes (edit / IP-Adapter) read DENSE weights, so a tiered-turnkey
+    /// snapshot must resolve to its `bf16/` tier — its root holds no component tree, and the loader
+    /// would find no `unet/`. Flat upstream diffusers snapshots (what `sdxl` and `realvisxl` fall
+    /// back to today) must pass through untouched.
+    #[test]
+    fn dense_tier_subdir_descends_into_turnkeys_and_passes_flat_snapshots_through() {
+        // Tiered turnkey: tier subdirs, no backbone at the root.
+        let turnkey = tempfile::tempdir().unwrap();
+        for tier in ["q4", "q8", "bf16"] {
+            std::fs::create_dir_all(turnkey.path().join(tier).join("unet")).unwrap();
+        }
+        assert_eq!(
+            dense_tier_subdir(turnkey.path().to_path_buf()),
+            turnkey.path().join("bf16"),
+            "an SDXL turnkey resolves to its dense bf16 tier, never a quantized one"
+        );
+
+        // Flat SDXL diffusers snapshot: `unet/` at the root.
+        let flat_unet = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(flat_unet.path().join("unet")).unwrap();
+        assert_eq!(
+            dense_tier_subdir(flat_unet.path().to_path_buf()),
+            flat_unet.path().to_path_buf(),
+            "stabilityai/stable-diffusion-xl-base-1.0 and SG161222/RealVisXL_V5.0 pass through"
+        );
+
+        // Flat DiT snapshot: `transformer/` at the root — even alongside a stray `bf16/` dir.
+        let flat_dit = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(flat_dit.path().join("transformer")).unwrap();
+        std::fs::create_dir_all(flat_dit.path().join("bf16")).unwrap();
+        assert_eq!(
+            dense_tier_subdir(flat_dit.path().to_path_buf()),
+            flat_dit.path().to_path_buf(),
+            "a rooted component tree wins over a tier dir sitting beside it"
+        );
+
+        // Neither shape: return the root and let the loader raise a real load error.
+        let bare = tempfile::tempdir().unwrap();
+        assert_eq!(
+            dense_tier_subdir(bare.path().to_path_buf()),
+            bare.path().to_path_buf()
+        );
     }
 
     /// sc-9092 (epic 9083 gap #3): the candle Lens lane no longer resolves a SEPARATE bf16 diffusers

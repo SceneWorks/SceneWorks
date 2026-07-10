@@ -16,6 +16,7 @@ import {
 import {
   SAMPLER_LABELS,
   SCHEDULER_LABELS,
+  effectiveLimits,
   samplerOptionsFromModel,
   schedulerOptionsFromModel,
 } from "../samplerOptions.js";
@@ -52,10 +53,40 @@ const CAPABILITY_FLAGS = [
   ["first_last_frame", "first-last"],
 ];
 
-const imageAspectChoices = ["1024x1024", "1536x1024", "1024x1536", "2048x1152"];
-const videoResolutionChoices = ["768x512", "1280x720", "720x1280"];
+// Fallbacks for a model that declares no `limits.resolutions` / `.durations` / `.fps`
+// (e.g. a user-imported checkpoint). A model that DOES declare them drives the menu
+// instead — the studios read the same manifest keys, so the editor must not offer a
+// value the launched studio would silently clamp away (sc-10589).
+const imageAspectFallback = ["1024x1024", "1536x1024", "1024x1536", "2048x1152"];
+const videoResolutionFallback = ["768x512", "1280x720", "720x1280"];
+const durationFallback = [3, 4, 6, 8, 10, 12];
+const fpsFallback = [24, 25, 30];
+
+// The resolution/aspect menu the selected model honors. Reads the model's effective
+// `limits.resolutions` (base `limits`, since a preset is backend-agnostic — it can be
+// launched on either worker), falling back to the static list when the model is silent.
+function resolutionOptionsForModel(model, isVideo) {
+  const values = effectiveLimits(model)?.resolutions;
+  if (Array.isArray(values) && values.length) {
+    return values.map(String);
+  }
+  return isVideo ? videoResolutionFallback : imageAspectFallback;
+}
+
+// Video-only menus. Durations/fps are numbers in the manifest; the form stores them as
+// strings, so keep a numeric list here and stringify at the option boundary.
+function durationOptionsForModel(model) {
+  const values = effectiveLimits(model)?.durations;
+  return Array.isArray(values) && values.length ? values : durationFallback;
+}
+
+function fpsOptionsForModel(model) {
+  const values = effectiveLimits(model)?.fps;
+  return Array.isArray(values) && values.length ? values : fpsFallback;
+}
 
 const SORT_CHOICES = [
+  ["used", "Recently used"],
   ["updated", "Recently updated"],
   ["name", "Name"],
   ["scope", "Scope"],
@@ -85,6 +116,18 @@ const EDITOR_OWNED_DEFAULTS = [
 
 function segmentByKey(key) {
   return WORKFLOW_SEGMENTS.find((segment) => segment.key === key) ?? WORKFLOW_SEGMENTS[0];
+}
+
+// A stored default the selected model no longer lists (an in-the-wild preset, or a
+// same-type model switch that hasn't cleared yet) still has to be visible and selected
+// so the user sees what the preset carries. Flag it rather than blank the select; the
+// save stays blocked (defaultValueErrors) until they pick a supported option. Returns
+// null when the value is blank or already in the menu.
+function outOfMenuOption(value, menu, format) {
+  if (value === "" || menu.map(String).includes(String(value))) {
+    return null;
+  }
+  return <option value={value}>{format(value)} — not in this model’s list</option>;
 }
 
 // Invert the (workflow, defaults.mode) pair back into the segment the editor shows.
@@ -181,7 +224,11 @@ function loraLabel(lora) {
 // The knobs the backend range-checks (recipe_presets.rs validate_recipe_preset_defaults).
 // Catching them here means the CTA explains itself instead of the save round-tripping
 // into a 400. Blank always means "no default" and is dropped by buildPayload.
-function defaultValueErrors(form, isVideo) {
+//
+// `options` carries the menus the selected model actually honors. A stored value outside
+// its menu is a default the model would silently clamp away, so it blocks the save until
+// the user picks a supported one — the in-menu flag shows what's there but can't be kept.
+function defaultValueErrors(form, isVideo, options) {
   const errors = [];
   const checkNumber = (value, label, { min, max, integer = false }) => {
     if (value === "") {
@@ -192,12 +239,23 @@ function defaultValueErrors(form, isVideo) {
       errors.push(`${label} must be ${integer ? "a whole number " : ""}between ${min} and ${max}.`);
     }
   };
+  const checkInMenu = (value, label, menu) => {
+    if (value === "" || !menu) {
+      return;
+    }
+    if (!menu.map(String).includes(String(value))) {
+      errors.push(`${label} ${value} isn't one this model supports — pick a listed option.`);
+    }
+  };
   checkNumber(form.count, "Variations", { min: 1, max: 8, integer: true });
   checkNumber(form.steps, "Steps", { min: 1, max: 200, integer: true });
   checkNumber(form.guidanceScale, "Guidance", { min: 0, max: 60 });
+  checkInMenu(form.resolution, isVideo ? "Resolution" : "Aspect", options?.resolutions);
   if (isVideo) {
     checkNumber(form.duration, "Duration", { min: 1, max: 120 });
     checkNumber(form.fps, "Frames", { min: 1, max: 240 });
+    checkInMenu(form.duration, "Duration", options?.durations);
+    checkInMenu(form.fps, "Frames", options?.fps);
   }
   return errors;
 }
@@ -260,9 +318,17 @@ export function PresetManagerScreen() {
   const samplerMenu = selectedModel ? samplerOptionsFromModel(selectedModel) : [];
   const schedulerMenu = selectedModel ? schedulerOptionsFromModel(selectedModel) : [];
 
+  // Resolution/duration/fps menus come from the selected model's effective limits, the
+  // same source the studios read — so the editor can't offer a default the studio would
+  // silently clamp away (sc-10589).
+  const resolutionOptions = resolutionOptionsForModel(selectedModel, isVideo);
+  const durationOptions = durationOptionsForModel(selectedModel);
+  const fpsOptions = fpsOptionsForModel(selectedModel);
+  const defaultsOptions = { resolutions: resolutionOptions, durations: durationOptions, fps: fpsOptions };
+
   const validation = presetValidation({ loras: form.loras }, loras, selectedModel);
   const validationMessage = editable ? presetValidationMessage(validation) : "";
-  const valueErrors = defaultValueErrors(form, isVideo);
+  const valueErrors = defaultValueErrors(form, isVideo, defaultsOptions);
   const dirty = editing && !creating && JSON.stringify(form) !== JSON.stringify(baseline);
 
   // Two kinds of "can't save" (sc-10500 split). A REQUIREMENT is an unfilled field the
@@ -325,6 +391,11 @@ export function PresetManagerScreen() {
         const nextSegment = nextSegments.some((segment) => segment.key === current.segment)
           ? previousSegment
           : (nextSegments[0] ?? previousSegment);
+        const nextIsVideo = nextSegment.type === "video";
+        // Only the value survives a model switch if the new model still lists it; an
+        // out-of-menu default (blank untouched) would otherwise persist and be clamped.
+        const keepIfListed = (val, menu) => (val !== "" && menu.map(String).includes(String(val)) ? val : "");
+        const nextResolutions = resolutionOptionsForModel(nextModel, nextIsVideo);
         return {
           ...current,
           model: value,
@@ -341,8 +412,16 @@ export function PresetManagerScreen() {
           scheduler: "",
           // Image and video defaults don't transfer: an image resolution isn't in the
           // video resolution menu (and vice versa), and count/duration/fps are exclusive.
+          // On a same-type switch keep what the new model still lists and drop the rest,
+          // so switching to a model with a narrower menu clears a now-invalid default.
           ...(nextSegment.type === previousSegment.type
-            ? {}
+            ? nextIsVideo
+              ? {
+                  resolution: keepIfListed(current.resolution, nextResolutions),
+                  duration: keepIfListed(current.duration, durationOptionsForModel(nextModel)),
+                  fps: keepIfListed(current.fps, fpsOptionsForModel(nextModel)),
+                }
+              : { resolution: keepIfListed(current.resolution, nextResolutions) }
             : { resolution: "", count: "", duration: "", fps: "" }),
         };
       }
@@ -547,6 +626,11 @@ export function PresetManagerScreen() {
       }
       if (sort === "scope") {
         return (scopeRank[a.scope] ?? 1) - (scopeRank[b.scope] ?? 1) || byName(a, b);
+      }
+      if (sort === "used") {
+        // Newest-used first; never-used presets (no lastUsedAt) sink to the bottom
+        // because "" sorts after any real timestamp under a descending compare.
+        return String(b.lastUsedAt ?? "").localeCompare(String(a.lastUsedAt ?? "")) || byName(a, b);
       }
       return String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")) || byName(a, b);
     });
@@ -1018,7 +1102,6 @@ export function PresetManagerScreen() {
   }
 
   function renderDefaults() {
-    const resolutionChoices = isVideo ? videoResolutionChoices : imageAspectChoices;
     return (
       <div className="preset-form-section">
         {renderSectionHead("Defaults", "The settings the Studio starts on. All still editable per run.")}
@@ -1027,7 +1110,8 @@ export function PresetManagerScreen() {
             <span>{isVideo ? "Resolution" : "Aspect"}</span>
             <select disabled={!editable} onChange={(event) => updateField("resolution", event.target.value)} value={form.resolution}>
               <option value="">No default</option>
-              {resolutionChoices.map((value) => (
+              {outOfMenuOption(form.resolution, resolutionOptions, (value) => value.replace("x", " × "))}
+              {resolutionOptions.map((value) => (
                 <option key={value} value={value}>
                   {value.replace("x", " × ")}
                 </option>
@@ -1040,7 +1124,8 @@ export function PresetManagerScreen() {
                 <span>Duration</span>
                 <select disabled={!editable} onChange={(event) => updateField("duration", event.target.value)} value={form.duration}>
                   <option value="">No default</option>
-                  {[3, 4, 6, 8, 10, 12].map((d) => (
+                  {outOfMenuOption(form.duration, durationOptions, (value) => `${value}s`)}
+                  {durationOptions.map((d) => (
                     <option key={d} value={String(d)}>
                       {d}s
                     </option>
@@ -1051,7 +1136,8 @@ export function PresetManagerScreen() {
                 <span>Frames</span>
                 <select disabled={!editable} onChange={(event) => updateField("fps", event.target.value)} value={form.fps}>
                   <option value="">No default</option>
-                  {[24, 25, 30].map((f) => (
+                  {outOfMenuOption(form.fps, fpsOptions, (value) => `${value} fps`)}
+                  {fpsOptions.map((f) => (
                     <option key={f} value={String(f)}>
                       {f} fps
                     </option>

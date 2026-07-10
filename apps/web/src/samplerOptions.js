@@ -87,7 +87,7 @@ function uniqueOrdered(values, order) {
 // `candle.limits` override when present, else the base `limits` (epic 7114 P5
 // per-model-per-backend gating). `backend` is the active worker's backend
 // ("mlx" | "candle"); a null/unknown backend falls back to the base menu.
-function effectiveLimits(model, backend) {
+export function effectiveLimits(model, backend) {
   const override = backend ? model?.[backend]?.limits : null;
   return override ?? model?.limits;
 }

@@ -156,8 +156,9 @@ use dto::{
 };
 mod manifest;
 use manifest::{
-    load_manifest_entries, merge_entries_by_id, merge_object, mutate_manifest_entries,
-    remove_catalog_manifest_entry, ManifestCache,
+    acquire_manifest_file_lock, load_manifest_entries, manifest_write_lock, merge_entries_by_id,
+    merge_object, mutate_manifest_entries, remove_catalog_manifest_entry, write_manifest_atomic,
+    ManifestCache,
 };
 #[cfg(test)]
 use manifest::{strip_jsonc_comments, API_MANAGED_MANIFEST_HEADER};
@@ -186,7 +187,8 @@ mod recipe_presets;
 use recipe_presets::{
     create_recipe_preset, delete_recipe_preset, duplicate_recipe_preset, get_recipe_preset,
     list_recipe_presets, preset_lora_id, preset_lora_weight, preset_prompt, recipe_preset_catalog,
-    recipe_preset_catalog_with, recipe_preset_loras, serialize_preset_lora, update_recipe_preset,
+    recipe_preset_catalog_with, recipe_preset_loras, serialize_preset_lora,
+    stamp_recipe_preset_used, update_recipe_preset,
 };
 mod prompt_batches;
 use prompt_batches::{

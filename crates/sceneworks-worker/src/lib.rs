@@ -203,6 +203,13 @@ mod sdxl_edit_pid_gpu_smoke;
 // dense diffusers snapshot — the worker-lane validation backing the off-Mac candle routing wire.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod flux2_dev_gpu_smoke;
+// Real-weight GPU smoke for the candle Anima 2B lane (epic 10512, sc-10625 — the hardware-gated
+// acceptance extracted from sc-10525). Test-only + candle-only; drives `gen_core::load("anima_base" |
+// "anima_aesthetic" | "anima_turbo")` against the dense bf16 circlestone-labs/Anima split_files
+// snapshot (± an official LoRA/LoKr), proving the candle Anima port renders coherently on real CUDA —
+// the evidence that unblocks flipping `macOnly: false` / `candle_routed = true` (sc-10625).
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod anima_gpu_smoke;
 // Real-weight GPU smoke for the candle InstantID + PiD super-resolving decode (epic 7840, sc-8386).
 // Test-only + candle-only; drives the bespoke `candle_gen_instantid::InstantId` provider across
 // Identity/Angle/Pose with the `pid_sdxl` student attached, asserting the PiD decode 4×-super-resolves

@@ -1444,23 +1444,31 @@ pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath
         .to_string()
 }
 
+/// Whether a diffusers component tree roots here, keyed on its denoiser dir. DiT models (Krea 2 Raw,
+/// LTX, Z-Image) pack the backbone under `transformer/`; the SDXL family (SDXL, RealVisXL, Kolors,
+/// Illustrious) packs it under `unet/`, never `transformer/` — the same split
+/// `image_jobs::base::standard_tier_subdir` probes for on the generation side.
+fn has_backbone_dir(root: &FsPath) -> bool {
+    root.join("transformer").is_dir() || root.join("unet").is_dir()
+}
+
 /// Whether a resolved HF snapshot is a tiered-turnkey re-host (epic 9992): tier subdirs (`bf16/ q8/
 /// q4/`) with NO flat component tree at the root. A flat diffusers snapshot (z-image / lens / the
-/// retired `krea/Krea-2-Raw` tree) has `transformer/` at the root and is NOT tiered.
+/// retired `krea/Krea-2-Raw` tree, `stabilityai/stable-diffusion-xl-base-1.0`) roots its backbone
+/// dir and is NOT tiered.
 fn snapshot_is_tiered_turnkey(snapshot: &FsPath) -> bool {
-    !snapshot.join("transformer").is_dir()
+    !has_backbone_dir(snapshot)
         && (snapshot.join("bf16").is_dir()
             || snapshot.join("q8").is_dir()
             || snapshot.join("q4").is_dir())
 }
 
-/// Whether a `bf16/` tier holds the dense component tree the trainer needs (`transformer/`,
+/// Whether a `bf16/` tier holds the dense component tree the trainer needs (backbone,
 /// `text_encoder/`, `vae/`). The repo-level completion marker does NOT certify a tier (sc-9909), so
-/// check the actual dirs.
+/// check the actual dirs. Testing the backbone as `transformer/`-only silently reported every
+/// SDXL-family tiered turnkey as un-installed, since those pack `unet/` (sc-10613).
 fn bf16_component_tree_present(bf16: &FsPath) -> bool {
-    bf16.join("transformer").is_dir()
-        && bf16.join("text_encoder").is_dir()
-        && bf16.join("vae").is_dir()
+    has_backbone_dir(bf16) && bf16.join("text_encoder").is_dir() && bf16.join("vae").is_dir()
 }
 
 /// For a tiered-turnkey re-host (epic 9992 Krea 2 Raw: `SceneWorks/krea-2-raw-mlx` ships `bf16/ q8/ q4/`
