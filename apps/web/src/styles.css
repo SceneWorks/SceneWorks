@@ -12081,3 +12081,78 @@ details[open] > summary.lora-scope-group-heading::before,
   font-size: 13px;
   color: var(--text-muted);
 }
+
+/* ---------- App-wide form validation (epic 10644, sc-10646) ----------
+   One message channel: the chip row. A field carries the mark, never the text —
+   see apps/web/src/validation/issues.js. The per-screen predecessors
+   (.training-config-warnings, the .inline-warning preset paragraphs,
+   .structured-error, .refine-error, .batch-warning) retire in sc-10654. */
+
+.validation-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.validation-chip {
+  padding: 5px 8px;
+  border-radius: var(--r-pill);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* A value the user broke. Blocks the CTA, so it reads at full danger weight. */
+.validation-chip.tone-error {
+  border: 1px solid color-mix(in oklch, var(--danger) 40%, var(--border));
+  background: color-mix(in oklch, var(--danger) 8%, var(--surface));
+  color: color-mix(in oklch, var(--danger) 75%, var(--text));
+}
+
+/* Worth saying, doesn't block. Amber keeps it distinguishable from an error at a
+   glance — the two kinds sit side by side in the same row. */
+.validation-chip.tone-advisory {
+  border: 1px solid color-mix(in oklch, var(--warn) 40%, var(--border));
+  background: color-mix(in oklch, var(--warn) 10%, var(--surface));
+  color: color-mix(in oklch, var(--warn) 70%, var(--text));
+}
+
+/* The readiness pill. Its predecessor .training-status-pill was accent-toned in both
+   states, so "Needs input" was styled as success and only the text disagreed. These
+   two rules must never converge; validation/styles.test.js pins them apart. */
+.ready-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: var(--r-pill);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ready-pill.is-ready {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+/* Neutral, not danger: an unfilled form is not an error, it is unfinished. */
+.ready-pill.is-pending {
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+
+/* The mark on a broken input. An attribute selector rather than a class, because
+   `invalidProps` returns props for an existing input and never wraps it in a node —
+   a node added inside .training-config-grid would become a grid item (sc-10481). */
+input[aria-invalid="true"],
+select[aria-invalid="true"],
+textarea[aria-invalid="true"] {
+  border-color: color-mix(in oklch, var(--danger) 55%, var(--border));
+  background: color-mix(in oklch, var(--danger) 4%, var(--surface));
+}
+
+input[aria-invalid="true"]:focus,
+select[aria-invalid="true"]:focus,
+textarea[aria-invalid="true"]:focus {
+  outline-color: var(--danger);
+  border-color: var(--danger);
+}
