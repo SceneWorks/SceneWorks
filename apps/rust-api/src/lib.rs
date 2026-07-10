@@ -173,6 +173,7 @@ use models::{
     merge_model_manifest_entry, mlx_catalog_status, model_co_requisite_downloads, model_download,
     retain_downloads_for_os,
 };
+mod external_base_models;
 mod external_loras;
 mod loras;
 use loras::{
@@ -864,6 +865,9 @@ pub(crate) fn create_app_with_state(
         manifest_write_locks: Arc::new(Mutex::new(HashMap::new())),
         model_size_cache: Arc::new(Mutex::new(ModelSizeCache::default())),
         external_lora_cache: Arc::new(Mutex::new(external_loras::ExternalLoraCache::default())),
+        external_base_model_cache: Arc::new(Mutex::new(
+            external_base_models::ExternalBaseModelCache::default(),
+        )),
         http_client: reqwest::Client::new(),
         interrupted_jobs_on_startup,
     };

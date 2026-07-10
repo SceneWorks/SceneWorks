@@ -1346,6 +1346,11 @@ async fn model_catalog_inner(
     .await;
 
     let data_dir = state.settings.data_dir.clone();
+    // sc-10667: surface assembled external ComfyUI base models alongside the manifest
+    // catalog. Cloned before the blocking closure, mirroring the external-LoRA merge in
+    // `lora_catalog`; the scan is filesystem-bound and runs on the blocking pool below.
+    let external_roots = state.settings.external_model_roots.clone();
+    let external_base_cache = state.external_base_model_cache.clone();
     // sc-4202 (F-API-3): the per-model install-state probes below hit the filesystem
     // (huggingface_cache_health snapshot walks, model_is_installed, mlx_catalog_status)
     // for every model. Assemble the catalog on the blocking pool so these synchronous
@@ -1458,6 +1463,16 @@ async fn model_catalog_inner(
             apply_gating_fields(object);
             apply_mac_and_mlx_fields(object, &data_dir);
         }
+        // Append assembled external base models (empty unless external roots are
+        // configured; always empty on macOS). They carry their own catalogScope /
+        // installState / usable fields and deliberately skip the manifest
+        // install-state sweep above, exactly as external LoRAs skip
+        // `normalize_lora_entry` in `lora_catalog`.
+        let external = {
+            let mut cache = external_base_cache.lock();
+            crate::external_base_models::scan_external_base_models(&external_roots, &mut cache)
+        };
+        models.extend(external);
         models.sort_by(|left, right| {
             let left_key = (
                 left.get("type").and_then(Value::as_str).unwrap_or_default(),
