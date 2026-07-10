@@ -10,6 +10,11 @@ apps/web/node_modules
 apps/web/dist
 __pycache__
 *.pyc
+# Model weights are NEVER baked into a published image — SceneWorks converts at
+# install and pulls at runtime (sc-10526). Excluding these local model stores keeps
+# a developer's downloaded weights (including Non-Commercial families like Anima)
+# out of the image layers. The scripts/check-no-nc-weights.mjs guard enforces this
+# in CI. See docs/packaging-nc-weights-guard.md.
 data/projects/*
 !data/projects/.gitkeep
 data/models/*
