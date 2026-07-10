@@ -23,7 +23,9 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use sceneworks_core::external_roots::comfyui_lora_dirs;
-use sceneworks_core::lora_family::{detect_lora_family, read_safetensors_header};
+use sceneworks_core::lora_family::{
+    detect_lora_family, is_safetensors_file, read_safetensors_header,
+};
 use sceneworks_core::slug::slugify;
 use serde_json::{json, Value};
 
@@ -150,7 +152,11 @@ pub(crate) fn scan_external_loras(roots: &[PathBuf], cache: &mut ExternalLoraCac
 }
 
 /// Depth-bounded walk of `root` returning every `.safetensors` file whose
-/// canonical path is still under `root`.
+/// canonical path is still under `root`. Hidden entries are skipped: an external
+/// ComfyUI folder is exactly where macOS AppleDouble sidecars
+/// (`._adapter.safetensors`) turn up, and each one would otherwise cost a header
+/// read per catalog build and a slot against `MAX_ADAPTERS_PER_ROOT` — the cap
+/// that silently drops real adapters once reached (SceneWorks#1333).
 ///
 /// Symlinks are *followed*, then re-checked for containment: multi-install ComfyUI
 /// setups routinely symlink a shared weights directory in, so refusing to follow
@@ -187,18 +193,12 @@ fn collect_adapters(root: &Path) -> Vec<PathBuf> {
                 if depth < MAX_SCAN_DEPTH {
                     stack.push((canonical, depth + 1));
                 }
-            } else if has_safetensors_extension(&canonical) {
+            } else if is_safetensors_file(&canonical) {
                 adapters.push(canonical);
             }
         }
     }
     adapters
-}
-
-fn has_safetensors_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
 }
 
 /// Build one catalog row for `adapter`. `None` when the file has no readable
@@ -377,6 +377,41 @@ mod tests {
         assert!(
             names.contains("Wan/detailz-wan"),
             "subdir is kept in the name"
+        );
+    }
+
+    /// SceneWorks#1333: an external ComfyUI folder is a prime home for macOS AppleDouble
+    /// sidecars (`._adapter.safetensors`) — the folder is user-managed and often lives on
+    /// an external or network volume. A sidecar carries the `.safetensors` extension, so an
+    /// extension-only filter collects it. It then fails its header parse and is dropped, but
+    /// only after costing a header read per catalog build and, worse, a slot against
+    /// `MAX_ADAPTERS_PER_ROOT` — the cap that silently drops real adapters once reached.
+    #[test]
+    fn scan_skips_appledouble_sidecars() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = comfy_root(temp.path());
+        let loras = root.join("loras");
+        write_safetensors(&loras.join("detailz-wan.safetensors"), &wan_keys());
+        // A real AppleDouble header: magic 0x00051607, version 0x00020000.
+        std::fs::write(
+            loras.join("._detailz-wan.safetensors"),
+            [0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00],
+        )
+        .expect("write sidecar");
+
+        // The sidecar must never even reach the header parse.
+        let collected = collect_adapters(&std::fs::canonicalize(&loras).expect("canonical"));
+        assert_eq!(
+            collected.len(),
+            1,
+            "sidecar leaked into the adapter list: {collected:?}"
+        );
+
+        let rows = scan(&[root]);
+        assert_eq!(rows.len(), 1, "only the real adapter is surfaced");
+        assert_eq!(
+            rows[0].get("name").and_then(Value::as_str),
+            Some("detailz-wan")
         );
     }
 

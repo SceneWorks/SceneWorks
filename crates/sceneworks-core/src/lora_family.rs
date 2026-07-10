@@ -167,7 +167,10 @@ pub fn is_hidden_file(path: &Path) -> bool {
 /// True when `path` is a loadable `.safetensors` file: the extension matches
 /// (case-insensitively — some re-hosted checkpoints ship `.SAFETENSORS`) and the
 /// entry is not hidden.
-fn is_safetensors_file(path: &Path) -> bool {
+///
+/// This is the predicate every directory scan should use. A bare extension test
+/// admits macOS AppleDouble sidecars — see [`is_hidden_file`].
+pub fn is_safetensors_file(path: &Path) -> bool {
     has_safetensors_extension(path) && !is_hidden_file(path)
 }
 
