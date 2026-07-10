@@ -968,6 +968,60 @@ describe("ImageStudio model picker capability gating", () => {
     await click(generateButton());
     expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
   });
+
+  // Per-(screen, model) sticky last-tier (sc-10727 / epic 10721). An explicit pick is persisted and
+  // reused as the default on the next visit to that model on this screen, surviving app restarts.
+  it("persists the explicit tier pick per (screen, model) across a remount, above the declared default (sc-10727)", async () => {
+    // All three tiers installed; declared default is q4.
+    const model = matrixModel(["q4", "q8", "bf16"], "q4");
+    await render(baseContext({ imageModels: [model], macCapabilities: MAC_CAPS }));
+    await openAdvanced(container);
+    await act(async () => {});
+    // First visit: seeds on the declared default (no sticky stored yet).
+    expect(tierPicker(container).value).toBe("q4");
+    // User explicitly picks q8 → written to the persistent per-(screen, model) store.
+    setSelect(tierPicker(container), "q8");
+    await act(async () => {});
+    expect(tierPicker(container).value).toBe("q8");
+
+    // Simulate an app restart: tear the tree down and mount a FRESH one (React state is gone; only
+    // the persisted sticky survives), then re-render the SAME model. (The Advanced panel's open
+    // state persists in the studio-settings blob, so it may already be open — guard the toggle.)
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    await render(baseContext({ imageModels: [model], macCapabilities: MAC_CAPS }));
+    if (!tierPicker(container)) {
+      await openAdvanced(container);
+      await act(async () => {});
+    }
+    // The sticky q8 now seeds the picker, winning over the declared default q4 — persistence +
+    // precedence (sticky > declared/base default) proven end-to-end.
+    expect(tierPicker(container).value).toBe("q8");
+  });
+
+  it("keeps the sticky independent per model — a pick on model X does not affect model Y (sc-10727)", async () => {
+    const modelX = matrixModel(["q4", "q8", "bf16"], "q4");
+    const modelY = { ...matrixModel(["q4", "q8", "bf16"], "q4"), id: "other_model", name: "Other Model" };
+
+    await render(baseContext({ imageModels: [modelX], macCapabilities: MAC_CAPS }));
+    await openAdvanced(container);
+    await act(async () => {});
+    setSelect(tierPicker(container), "q8");
+    await act(async () => {});
+    expect(tierPicker(container).value).toBe("q8");
+
+    // Fresh mount, render a DIFFERENT model (Y). Its picker seeds on its OWN default (q4), untouched
+    // by X's q8 sticky — a global (non-model-keyed) store would wrongly surface q8 here. (Advanced
+    // may already be open from the persisted studio-settings blob — guard the toggle.)
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    await render(baseContext({ imageModels: [modelY], macCapabilities: MAC_CAPS }));
+    if (!tierPicker(container)) {
+      await openAdvanced(container);
+      await act(async () => {});
+    }
+    expect(tierPicker(container).value).toBe("q4");
+  });
 });
 
 describe("ImageStudio structured-prompt recipe round-trip (sc-6147)", () => {

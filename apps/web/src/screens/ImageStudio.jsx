@@ -123,6 +123,7 @@ import {
   shouldShowTierPicker,
   tierLabel,
 } from "../quantTier.js";
+import { readLastTier, writeLastTier } from "../lastTierStore.js";
 import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO } from "../constants.js";
 import { pickClosestResolution } from "../resolutionMatch.js";
 import {
@@ -157,6 +158,10 @@ import {
 
 // Used only for models that don't declare limits.resolutions (e.g. user-imported).
 const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x1280"];
+// Screen identity for the per-(screen, model) sticky quant-tier store (sc-10727). Matches this
+// studio's `loadStudioSettings`/`useStudioSettingsWriter` key so the sticky namespace is stable and
+// distinct from Video/Character studios. Change this and existing users lose their Image sticky.
+const TIER_SCREEN = "image";
 // Studio sub-modes a saved preset may restore (the "type") — the tabs the mode
 // segmented control actually exposes. Edit lives in its own workflow; text and
 // character share the text_to_image workflow.
@@ -566,11 +571,11 @@ export function ImageStudio() {
   // picker so the user can A/B a bf16 vs Q8 vs Q4 build. The picked tier rides
   // `advanced.mlxQuantize` (bf16→0, q8→8, q4→4); the worker's resolve_quant + generator cache
   // route to it (reload-always — the cache evicts + reloads on a heavy-tier switch). `quantTier`
-  // holds the selected tier key ("" = no picker / not applicable). Last-used is persisted PER
-  // MODEL in `lastUsedTiers` so re-entering a model restores the tier you last generated with.
-  const [lastUsedTiers, setLastUsedTiers] = useState(
-    saved.lastUsedTiers && typeof saved.lastUsedTiers === "object" ? saved.lastUsedTiers : {},
-  );
+  // holds the selected tier key ("" = no picker / not applicable). The user's last EXPLICIT pick is
+  // persisted per (screen, model) in `lastTierStore` (epic 10721 / sc-10727) — project-independent,
+  // so re-entering a model on this screen restores the tier you last generated with, in any
+  // workspace and across app restarts. It seeds the picker as the top rung below a same-session pick
+  // and above the model's base default (see the seed effect + `defaultTierSelection`).
   const [quantTier, setQuantTier] = useState("");
   // Brief "loading <tier>" hint shown right after a switch (reload-always): switching a heavy
   // tier evicts + reloads on the worker, so we surface a transient loading note rather than
@@ -1112,8 +1117,10 @@ export function ImageStudio() {
   }, [resolutionOptions, resolution, selectedModel]);
   // Keep the selected quant tier valid for the active model (sc-8515). When the current tier is
   // still installed for this model, leave it; otherwise snap to the model's default selection
-  // (last-used-for-this-model → declared default → q4 → first installed). Also clears to "" when
+  // (sticky-for-this-(screen,model) → declared default → q8 base → q4 → first installed). Clears "" when
   // no tier is installed / the model has no matrix, so a stale tier never leaks into the payload.
+  // The sticky rung (sc-10727) is read straight from the persistent per-(screen,model) store, so it
+  // survives restarts and is honored above the base default whenever that tier is still installed.
   // Keyed on `model` (not `selectedModel`) plus the installed-tier list so a catalog refresh that
   // newly installs a second tier re-derives the default without churning on every render.
   const availableTiersKey = availableTiers.join(",");
@@ -1121,12 +1128,14 @@ export function ImageStudio() {
     if (availableTiers.includes(quantTier)) {
       return;
     }
-    setQuantTier(defaultTierSelection(selectedModel, lastUsedTiers[model], tierOptions) ?? "");
+    setQuantTier(
+      defaultTierSelection(selectedModel, readLastTier(TIER_SCREEN, model), tierOptions) ?? "",
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model, availableTiersKey]);
-  // Switch the active quant tier (sc-8515): persist it as this model's last-used tier and surface
-  // a brief "loading <tier>" note (reload-always — the worker evicts + reloads a heavy tier on the
-  // next generation; there is no co-residence). The note is cosmetic and self-clears.
+  // Switch the active quant tier (sc-8515): persist it as this (screen, model)'s last EXPLICIT tier
+  // (sc-10727 — sticky) and surface a brief "loading <tier>" note (reload-always — the worker evicts
+  // + reloads a heavy tier on the next generation; there is no co-residence). The note self-clears.
   const tierSwitchTimer = useRef(null);
   useEffect(() => () => clearTimeout(tierSwitchTimer.current), []);
   const handleTierChange = useCallback(
@@ -1135,7 +1144,7 @@ export function ImageStudio() {
         return;
       }
       setQuantTier(nextTier);
-      setLastUsedTiers((prev) => ({ ...prev, [model]: nextTier }));
+      writeLastTier(TIER_SCREEN, model, nextTier);
       setTierSwitching(nextTier);
       clearTimeout(tierSwitchTimer.current);
       tierSwitchTimer.current = setTimeout(() => setTierSwitching(""), 1500);
@@ -1530,7 +1539,6 @@ export function ImageStudio() {
     bf16Precision,
     usePid,
     pidTarget,
-    lastUsedTiers,
   });
 
   // Each stacked run carries its already-resolved completed assets + the
