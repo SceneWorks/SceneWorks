@@ -79,34 +79,47 @@ export function isSelectableTier(tier) {
 // pre-Ada NVIDIA GPU that fails the sm_89 compute-cap probe), so the tier is HIDDEN on an ineligible
 // host even when its files happen to be present in the cache. Every other tier is unaffected. Default
 // true keeps existing single-lane call sites (and tests) unchanged.
+// Sort tier keys by display order (smallest → largest); unknown keys sort after, alphabetically.
+function sortByTierOrder(a, b) {
+  const ai = TIER_ORDER.indexOf(a);
+  const bi = TIER_ORDER.indexOf(b);
+  if (ai === -1 && bi === -1) {
+    return a.localeCompare(b);
+  }
+  if (ai === -1) {
+    return 1;
+  }
+  if (bi === -1) {
+    return -1;
+  }
+  return ai - bi;
+}
+
 export function installedTiers(model, options = {}) {
   const { convRotEligible = true } = options;
-  if (!model?.hasVariantMatrix || !Array.isArray(model.variants)) {
-    return [];
+  // Download-matrix models (sc-8508): per-tier DOWNLOAD entries, install-tracked individually.
+  if (model?.hasVariantMatrix && Array.isArray(model.variants)) {
+    return model.variants
+      .filter(
+        (variant) =>
+          variant &&
+          isSelectableTier(variant.variant) &&
+          (convRotEligible || !isConvRotTier(variant.variant)) &&
+          variant.installState === "installed",
+      )
+      .map((variant) => variant.variant)
+      .sort(sortByTierOrder);
   }
-  return model.variants
-    .filter(
-      (variant) =>
-        variant &&
-        isSelectableTier(variant.variant) &&
-        (convRotEligible || !isConvRotTier(variant.variant)) &&
-        variant.installState === "installed",
-    )
-    .map((variant) => variant.variant)
-    .sort((a, b) => {
-      const ai = TIER_ORDER.indexOf(a);
-      const bi = TIER_ORDER.indexOf(b);
-      if (ai === -1 && bi === -1) {
-        return a.localeCompare(b);
-      }
-      if (ai === -1) {
-        return 1;
-      }
-      if (bi === -1) {
-        return -1;
-      }
-      return ai - bi;
-    });
+  // Convert-at-install models (sc-10730): tiers are convert OUTPUTS on disk, surfaced by the catalog as
+  // `mlxTiers` — a plain array of installed tier keys, DECOUPLED from the download variant-matrix so the
+  // Models download panel (`hasVariantMatrix`) is untouched. Anima (and other convert-at-install models)
+  // get a Studio generation-time tier picker this way.
+  if (Array.isArray(model?.mlxTiers) && model.mlxTiers.length > 0) {
+    return model.mlxTiers
+      .filter((tier) => isSelectableTier(tier) && (convRotEligible || !isConvRotTier(tier)))
+      .sort(sortByTierOrder);
+  }
+  return [];
 }
 
 // Whether the studio should render the tier picker: only when MORE THAN ONE quant tier is
@@ -148,8 +161,15 @@ export function defaultTierSelection(model, lastUsed, options = {}) {
   if (declared) {
     return declared;
   }
-  if (tiers.includes("q4")) {
-    return "q4";
+  // Convert-at-install models (mlxTiers) preselect q8 — matching the worker's Q8 generation default
+  // (sc-10714 / epic 10721), so the picker's initial value never silently sends the washed q4.
+  // Download-matrix models keep the historical q4 (smallest) preselection.
+  const preferred =
+    !model?.hasVariantMatrix && Array.isArray(model?.mlxTiers) ? ["q8", "bf16", "q4"] : ["q4"];
+  for (const tier of preferred) {
+    if (tiers.includes(tier)) {
+      return tier;
+    }
   }
   return tiers[0];
 }
