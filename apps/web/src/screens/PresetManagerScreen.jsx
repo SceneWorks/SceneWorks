@@ -8,13 +8,15 @@ import {
   loraMatchesModel,
   presetLoraId,
   presetLoras,
+  presetSaveValidation,
   presetValidation,
-  presetValidationMessage,
   workflowModelType,
   workflowModes,
 } from "../presetUtils.js";
 import { useAppStatic } from "../context/AppContext.js";
 import { qualityChoices } from "../jobTypes.js";
+import { useValidation } from "../validation/useValidation.js";
+import { ValidationSummary } from "../validation/Validation.jsx";
 
 const workflowCards = [
   { id: "text_to_image", label: "Text → Image", desc: "Make stills from a description.", outputs: "Stills", icon: "Image" },
@@ -144,14 +146,11 @@ export function PresetManagerScreen() {
   const addableLoras = availableLoras.filter((lora) => !selectedIds.includes(lora.id));
   const showLoraEmptyState = !availableLoras.length && !form.loras.length;
   const validation = presetValidation({ ...selectedPreset, loras: form.loras }, loras, selectedModel);
-  const validationMessage = editable ? presetValidationMessage(validation) : "";
-  const saveDisabledReason = !editable
-    ? "Built-in presets are read-only."
-    : !form.name.trim()
-      ? "Name is required."
-      : !form.model
-        ? "Choose a model before saving."
-        : validationMessage;
+  // One summary gates Save and carries its reasons — replacing the saveDisabledReason
+  // ternary, whose string was computed apart from the disabled expression (epic 10644).
+  const saveDraft = useMemo(() => ({ editable, name: form.name, model: form.model }), [editable, form.name, form.model]);
+  const saveContext = useMemo(() => ({ validation }), [validation]);
+  const saveValidity = useValidation(presetSaveValidation, saveDraft, saveContext);
   const hasPendingCompatibleLoras = Boolean(selectedModel) && loras.some((lora) => lora.installState === "missing" && loraMatchesModel(lora, selectedModel));
   const loraEmptyMessage = !selectedModel
     ? "No model selected"
@@ -287,8 +286,14 @@ export function PresetManagerScreen() {
 
   async function savePreset(event) {
     event.preventDefault();
-    if (saveDisabledReason) {
-      setMessage({ tone: "error", text: saveDisabledReason });
+    if (!saveValidity.ready) {
+      // Submit via Enter can reach here past the disabled button. Surface the first
+      // real error; a bare unfilled field (a silent requirement) needs no banner — it
+      // is visibly empty.
+      const [firstError] = saveValidity.surfaced;
+      if (firstError) {
+        setMessage({ tone: "error", text: firstError.message });
+      }
       return;
     }
     setSaving(true);
@@ -458,7 +463,7 @@ export function PresetManagerScreen() {
             ) : null}
             <button
               className="btn-primary"
-              disabled={Boolean(saveDisabledReason) || busy}
+              disabled={!saveValidity.ready || busy}
               type="submit"
             >
               {isCreatingPreset ? <Icon.Plus size={14} /> : <Icon.Preset size={14} />}
@@ -894,7 +899,10 @@ export function PresetManagerScreen() {
               ),
             }) : null}
 
-            {saveDisabledReason ? <p className="inline-warning">{saveDisabledReason}</p> : null}
+            {/* Only the surfaced reasons — a read-only built-in, or the preset's own LoRA
+                problems. Name/model are silent requirements (sc-10651). The message banner
+                below is a submission result, left as-is (epic 10644, non-goals). */}
+            <ValidationSummary issues={saveValidity.surfaced} label="Save errors" />
             {message.text ? <p className={message.tone === "success" ? "inline-success" : "inline-warning"}>{message.text}</p> : null}
           </div>
 

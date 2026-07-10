@@ -5,6 +5,21 @@
 
 import { issue } from "./validation/issues.js";
 
+// The studios' inline "Save as Preset" dialog (epic 10644, sc-10651). A blank name is a
+// silent requirement; a mode the current studio can't save is an error whose message the
+// caller already supplies as a tooltip (`saveTitle`) — routed here so the reason is
+// always visible, not only on hover.
+export function savePresetDialogValidation({ presetName, saveDisabled, saveTitle } = {}) {
+  const issues = [];
+  if (!presetName?.trim()) {
+    issues.push(issue.requirement("name", "Name this setup"));
+  }
+  if (saveDisabled) {
+    issues.push(issue.error(null, saveTitle ?? "This mode can’t be saved as a preset."));
+  }
+  return issues;
+}
+
 export function presetLoraIssues({ presetMissing = [], presetIncompatible = [], loraIncompatible = [], modelName } = {}) {
   const issues = [];
   const model = modelName ?? "the selected model";
