@@ -4309,19 +4309,76 @@ mod candle_routing_tests {
                 "wan_2_2_t2v_14b conditioned shape must fall back to torch: {case}"
             );
         }
-        // The 14B I2V + SVD are image→video only: a txt2video shape, an i2v with no source, or a LoRA
-        // → torch (sc-5175 / sc-5493).
+        // The 14B I2V + SVD are image→video only: a txt2video shape or an i2v with no source → torch
+        // (sc-5175 / sc-5493).
         for model in ["wan_2_2_i2v_14b", "svd"] {
             for case in [
                 json!({ "mode": "text_to_video", "prompt": "p" }),
                 json!({ "mode": "image_to_video" }), // i2v but no source image
-                json!({ "mode": "image_to_video", "sourceAssetId": "a", "loras": [{ "name": "x" }] }),
             ] {
                 assert!(
                     !video_request_candle_eligible(model, &object(case.clone())),
-                    "{model} non-i2v / LoRA shape must fall back to torch: {case}"
+                    "{model} non-i2v shape must fall back to torch: {case}"
                 );
             }
+        }
+        // SVD has no candle LoRA slot, so a LoRA even on its valid i2v shape still falls back; the
+        // Wan-14B I2V now ACCEPTS a user LoRA on candle (sc-10539) — see `candle_wan_14b_video_accepts_user_loras`.
+        assert!(
+            !video_request_candle_eligible(
+                "svd",
+                &object(
+                    json!({ "mode": "image_to_video", "sourceAssetId": "a", "loras": [{ "name": "x" }] })
+                )
+            ),
+            "svd (no candle LoRA slot) must fall back to torch on an i2v+LoRA shape"
+        );
+    }
+
+    #[test]
+    fn candle_wan_14b_video_accepts_user_loras() {
+        // sc-10539: the Wan-14B MoE engines advertise `supports_lora` and their candle worker path
+        // (`candle_resolve_wan_adapters`) applies each user LoRA — including an external ComfyUI file
+        // read in place — so a LoRA-carrying job stays on candle instead of the old blanket exclusion
+        // (there is no torch fallback now; epic 8283). GPU-validated: an external `Wan/detailz-wan`
+        // adapter rendered a candle Wan-14B clip that differs from the no-LoRA baseline at the same seed.
+        assert!(
+            video_request_candle_eligible(
+                "wan_2_2_t2v_14b",
+                &object(json!({ "mode": "text_to_video", "loras": [{ "id": "external_x" }] }))
+            ),
+            "wan_2_2_t2v_14b text_to_video + user LoRA must stay on candle"
+        );
+        assert!(
+            video_request_candle_eligible(
+                "wan_2_2_i2v_14b",
+                &object(json!({
+                    "mode": "image_to_video",
+                    "sourceAssetId": "a",
+                    "loras": [{ "id": "external_x" }],
+                }))
+            ),
+            "wan_2_2_i2v_14b i2v + source + user LoRA must stay on candle"
+        );
+        // Families whose candle provider advertises no LoRA slot still refuse a LoRA (wan-5B TI2V / LTX / SVD).
+        for (model, payload) in [
+            (
+                "wan_2_2",
+                json!({ "mode": "text_to_video", "loras": [{ "id": "x" }] }),
+            ),
+            (
+                "ltx_2_3",
+                json!({ "mode": "text_to_video", "loras": [{ "id": "x" }] }),
+            ),
+            (
+                "svd",
+                json!({ "mode": "image_to_video", "sourceAssetId": "a", "loras": [{ "id": "x" }] }),
+            ),
+        ] {
+            assert!(
+                !video_request_candle_eligible(model, &object(payload.clone())),
+                "{model} has no candle LoRA slot — a LoRA job must not route to candle: {payload}"
+            );
         }
     }
 

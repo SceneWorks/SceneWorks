@@ -1036,8 +1036,21 @@ const SIGNATURES: &[BucketSignature] = &[
         // Dual-stream MMDiT covers Qwen-Image and Z-Image. They share a key
         // layout in current Diffusers releases; per-family disambiguation
         // happens after this bucket is selected.
+        //
+        // The block prefix is matched as the bare `transformer_blocks.` rather than
+        // the diffusers `transformer.transformer_blocks.` so that ComfyUI-distributed
+        // Qwen-Image / Qwen-Image-Edit adapters — which drop the `transformer.` module
+        // prefix and key their blocks as `transformer_blocks.<n>.attn.…` /
+        // `.img_mlp.` / `.txt_mlp.` / `.attn.add_{q,k}_proj.` — are detected instead of
+        // falling through as family-less (sc-10506). Diffusers keys still match (the
+        // dotted form contains the bare substring); the sibling variants that also
+        // contain `transformer_blocks.` as a substring — Flux's `single_transformer_blocks.`
+        // and LTX's `.attn2.` — are rejected by the disqualifiers below, and the required
+        // dual-stream group keeps single-stream families out. The dual-MLP requirement is
+        // what separates this from a bare-`transformer_blocks.` Krea adapter (attention-only,
+        // detected by its `family` metadata stamp).
         require_all_of: &[
-            &["transformer.transformer_blocks."],
+            &["transformer_blocks."],
             &[
                 ".img_mlp.",
                 ".txt_mlp.",
@@ -1062,7 +1075,7 @@ const SIGNATURES: &[BucketSignature] = &[
             "context_embedder",
         ],
         markers: &[
-            "transformer.transformer_blocks.",
+            "transformer_blocks.",
             ".img_mlp.",
             ".txt_mlp.",
             "add_q_proj",
@@ -2397,6 +2410,75 @@ mod tests {
         // Same conservative block-count gate as the dotted path: too few blocks to
         // tell Qwen from Z-Image → inconclusive rather than a wrong guess.
         let keys = lycoris_underscore_mmdit_keys("lycoris", 24);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert!(detect_lora_family(&header).is_none());
+    }
+
+    /// ComfyUI-distributed dual-stream MMDiT (Qwen-Image / Qwen-Image-Edit) adapter:
+    /// the block keys carry NO `transformer.` module prefix (bare `transformer_blocks.
+    /// <n>.…`) and use kohya `lora_down`/`lora_up`/`alpha` factorization. Mirrors the
+    /// real `Qwen-Image-Lightning-4steps` / `Qwen-Image-Edit-2509-Lightning-4steps`
+    /// files (sc-10506).
+    fn comfyui_bare_prefix_mmdit_keys(block_count: usize) -> Vec<String> {
+        let mut keys = Vec::new();
+        for block in 0..block_count {
+            for module in [
+                "attn.to_q",
+                "attn.to_k",
+                "attn.to_v",
+                "attn.to_out.0",
+                "attn.add_q_proj",
+                "attn.add_k_proj",
+                "attn.add_v_proj",
+                "attn.to_add_out",
+                "img_mlp.net.0.proj",
+                "img_mlp.net.2",
+                "txt_mlp.net.0.proj",
+                "txt_mlp.net.2",
+            ] {
+                let base = format!("transformer_blocks.{block}.{module}");
+                keys.push(format!("{base}.lora_down.weight"));
+                keys.push(format!("{base}.lora_up.weight"));
+                keys.push(format!("{base}.alpha"));
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn detects_comfyui_bare_prefix_qwen_image() {
+        // The real failing rows from sc-10452's external-root scan (sc-10506):
+        // `Qwen-Image-Lightning-4steps` and `Qwen-Image-Edit-2509-Lightning-4steps`.
+        // Their keys drop the `transformer.` prefix the dotted MMDiT signature used
+        // to require, so before the fix both surfaced with no detected family and
+        // were offered-then-refused at generate. Both share this key shape and detect
+        // as `qwen-image` (Qwen-Image-Edit reuses the Qwen-Image transformer, and
+        // Edit models declare `qwen-image` LoRA compatibility).
+        let keys = comfyui_bare_prefix_mmdit_keys(60);
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("qwen-image"));
+    }
+
+    #[test]
+    fn bare_prefix_attention_only_is_not_mistaken_for_qwen() {
+        // A bare-`transformer_blocks.` adapter that trains ONLY attention projections
+        // (no dual `img_mlp`/`txt_mlp`, no joint `add_{q,k}_proj`) is the Krea 2 target
+        // shape, NOT a dual-stream MMDiT. The relaxed prefix must not swallow it: the
+        // dual-stream require-group keeps it out, so it stays inconclusive here (a real
+        // Krea file is instead identified by its `family` metadata stamp).
+        let mut keys = Vec::new();
+        for block in 0..60 {
+            for module in ["attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out.0"] {
+                keys.push(format!(
+                    "transformer_blocks.{block}.{module}.lora_down.weight"
+                ));
+                keys.push(format!(
+                    "transformer_blocks.{block}.{module}.lora_up.weight"
+                ));
+            }
+        }
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
 
         assert!(detect_lora_family(&header).is_none());
