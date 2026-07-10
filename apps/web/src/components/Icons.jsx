@@ -52,5 +52,10 @@ export const Icon = {
   Wand: (p) => <I {...p} d="M15 4l5 5L9 20l-5-5zM14 5l5 5M3 14l3 3" />,
   Star: ({ filled = false, ...p }) => <I {...p} fill={filled} d="M12 2l2.4 7.4H22l-6.2 4.5L18 21l-6-4.4L6 21l2.2-7.1L2 9.4h7.6z" />,
   Stars: (p) => <I {...p} fill d="M12 2l2.4 7.4H22l-6.2 4.5L18 21l-6-4.4L6 21l2.2-7.1L2 9.4h7.6z" />,
+  Pencil: (p) => <I {...p} d="M12 20h9M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z" />,
+  Duplicate: (p) => <I {...p} d="M9 9h11v11H9zM15 9V4H4v11h5" />,
+  Trash: (p) => <I {...p} d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6" />,
+  Save: (p) => <I {...p} d="M5 3h11l5 5v13H5zM8 21v-8h8v8M9 3v5h6" />,
+  Close: (p) => <I {...p} d="M18 6L6 18M6 6l12 12" />,
 };
 
