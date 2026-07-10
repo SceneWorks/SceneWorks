@@ -140,7 +140,8 @@ describe("SceneWorks app shell", () => {
   });
 
   // sc-10492: the actions row carries exactly two buttons. The preset-value strip, the
-  // validation chips, the run-mode select and the dry-run explainer are all gone.
+  // run-mode select and the dry-run explainer are gone. Validation chips survive, but
+  // only for broken values (sc-10501) — asserted at the bottom of this test.
   it("closes the configure panel with only Reset defaults and Start training", async () => {
     root = createRoot(container);
     await act(async () => {
@@ -162,11 +163,15 @@ describe("SceneWorks app shell", () => {
     ]);
 
     expect(container.querySelector(".training-preset-summary")).toBeNull();
-    expect(container.querySelector(".training-config-warnings")).toBeNull();
     expect(container.querySelector(".training-run-mode")).toBeNull();
     expect(container.querySelector(".training-run-note")).toBeNull();
     expect(field(container, "Run mode")).toBeFalsy();
     expect(container.textContent).not.toContain("A dry run validates the training plan");
+
+    // Nothing is filled in, so every issue is a `requirement` — those stay silent
+    // (sc-10501). No dataset chip, no trigger-phrase chip.
+    expect(container.querySelector(".training-config-warnings")).toBeNull();
+    expect(container.textContent).not.toContain("Add a trigger phrase");
     // Readiness still has a home: the panel head's pill.
     expect(container.querySelector(".training-status-pill").textContent).toBe("Needs input");
   });
@@ -1331,11 +1336,12 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    // sc-10492 removed the validation chips. Readiness now shows only as the head pill
-    // plus a disabled Start button. ("Select a saved dataset" is still on the page — it's
-    // the Dataset select's placeholder option — so assert on the chip-only copy instead.)
+    // Unfilled fields are `requirement`s: silent, just the pill + a disabled button.
+    // ("Select a saved dataset" is still on the page — it's the Dataset select's
+    // placeholder option — so assert on the chip-only copy instead.)
     expect(container.querySelector(".training-status-pill").textContent).toBe("Needs input");
     expect(container.textContent).not.toContain("Add a trigger phrase");
+    expect(container.querySelector(".training-config-warnings")).toBeNull();
     expect([...document.body.querySelectorAll("button")].find((button) => button.textContent === "Start training").disabled).toBe(true);
 
     await changeField(field(container, "Dataset"), "dataset-a");
@@ -1343,9 +1349,11 @@ describe("SceneWorks app shell", () => {
     await changeField(field(container, "Trigger phrase"), "miraStyle");
     await changeField(field(container, "Checkpoint cadence"), "");
 
+    // Clearing a valid number is an `error` — the form shows nothing, so say why (sc-10501).
     const submitButton = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Start training");
     expect(container.querySelector(".training-status-pill").textContent).toBe("Needs input");
-    expect(container.textContent).not.toContain("Checkpoint cadence must be greater than zero");
+    expect(container.querySelector(".training-config-warnings")).toBeTruthy();
+    expect(container.textContent).toContain("Checkpoint cadence must be greater than zero");
     expect(submitButton.disabled).toBe(true);
 
     await act(async () => {

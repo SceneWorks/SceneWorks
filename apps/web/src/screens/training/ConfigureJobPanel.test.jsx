@@ -66,6 +66,7 @@ function baseProps(overrides = {}) {
     showTrainingAdapter: false,
     visibleTrainingAdapterVersions: [],
     visibleResolutionOptions: [],
+    configValueErrors: [],
     submittingJob: false,
     resetConfigDefaults: noop,
     submitTrainingJob: noop,

@@ -179,19 +179,30 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
   };
 }
 
+// Every issue blocks Start training, but they don't deserve the same screen space.
+//
+//   `requirement` — a field the user simply hasn't filled in yet. Which ones are empty
+//                   is obvious from the form, so the screen stays quiet and lets the
+//                   "Needs input" pill carry it.
+//   `error`       — a value the user actively broke (cleared or non-positive number).
+//                   Nothing on the form explains why Start is disabled, so these show.
+//
+// sc-10492 dropped both as noise; sc-10501 brought the errors back. A real app-wide
+// validation system is tracked separately — this split is the local stand-in.
 export function configValidation({ activeDataset, configDraft, selectedTarget }) {
-  const warnings = [];
+  const issues = [];
+  const requirement = (message) => issues.push({ kind: "requirement", message });
   if (!selectedTarget) {
-    warnings.push("Select a training target");
+    requirement("Select a training target");
   }
   if (!activeDataset?.id) {
-    warnings.push("Select a saved dataset");
+    requirement("Select a saved dataset");
   }
   if (!configDraft.outputName?.trim()) {
-    warnings.push(`Name the ${outputKindLabel(selectedTarget)} output`);
+    requirement(`Name the ${outputKindLabel(selectedTarget)} output`);
   }
   if (!configDraft.triggerWord?.trim()) {
-    warnings.push("Add a trigger phrase");
+    requirement("Add a trigger phrase");
   }
   for (const [field, label] of [
     ["rank", "Rank"],
@@ -205,10 +216,15 @@ export function configValidation({ activeDataset, configDraft, selectedTarget })
   ]) {
     const value = numberFromDraft(configDraft[field]);
     if (!value || value <= 0) {
-      warnings.push(`${label} must be greater than zero`);
+      issues.push({ kind: "error", message: `${label} must be greater than zero` });
     }
   }
-  return warnings;
+  return issues;
+}
+
+// The subset worth showing: values the user broke, not fields they haven't reached yet.
+export function configValueErrors(issues) {
+  return (issues ?? []).filter((issue) => issue.kind === "error").map((issue) => issue.message);
 }
 
 export function samplePromptsFromTrigger(triggerWord) {

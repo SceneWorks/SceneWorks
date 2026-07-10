@@ -28,9 +28,13 @@ import {
 // runtime routing knob rather than part of the plan, so it lives in Advanced.
 //
 // The actions row is deliberately just Reset defaults + Start training (sc-10492).
-// The preset-value strip, the validation chips, the run-mode select and the dry-run
-// explainer all read as noise around the one button that matters. Readiness is still
-// signalled by the head's Ready / Needs input pill and by the disabled Start button.
+// The preset-value strip, the run-mode select and the dry-run explainer all read as
+// noise around the one button that matters. Readiness shows in the head's Ready /
+// Needs input pill and in the disabled Start button.
+//
+// The one exception is `configValueErrors` (sc-10501): chips for values the user
+// actively broke. Missing-field hints stay suppressed — you can see an empty field —
+// but a cleared number leaves nothing on screen to explain the dead button.
 export function ConfigureJobPanel({
   setActiveView,
   configReady,
@@ -65,6 +69,7 @@ export function ConfigureJobPanel({
   showTrainingAdapter,
   visibleTrainingAdapterVersions,
   visibleResolutionOptions,
+  configValueErrors,
   submittingJob,
   resetConfigDefaults,
   submitTrainingJob,
@@ -425,6 +430,17 @@ export function ConfigureJobPanel({
             <p className="inline-warning">
               This dataset isn’t ready to train yet — open Data Sets to add or fix images.
             </p>
+          ) : null}
+
+          {/* Only broken values, never the "you haven't picked a dataset yet" hints —
+              those are obvious from the form. Sits against the actions row so it reads
+              as the reason Start training is dead (sc-10501). */}
+          {configValueErrors.length ? (
+            <div className="training-config-warnings" aria-label="Configuration errors">
+              {configValueErrors.map((warning) => (
+                <span key={warning}>{warning}</span>
+              ))}
+            </div>
           ) : null}
 
           <div className="training-config-actions">

@@ -3654,6 +3654,25 @@ label {
   grid-template-columns: repeat(4, minmax(120px, 1fr));
 }
 
+/* Chips for values the user actively broke, sitting against the actions row so they
+   read as the reason Start training is disabled (sc-10501). Missing-field hints are
+   deliberately NOT rendered here — an empty field speaks for itself. */
+.training-config-warnings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.training-config-warnings span {
+  padding: 5px 8px;
+  border: 1px solid color-mix(in oklch, var(--danger) 40%, var(--border));
+  border-radius: var(--r-pill);
+  background: color-mix(in oklch, var(--danger) 8%, var(--surface));
+  color: color-mix(in oklch, var(--danger) 75%, var(--text));
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .training-advanced-grid .training-checkbox-field,
 .training-advanced-toggles .training-checkbox-field {
   display: grid;

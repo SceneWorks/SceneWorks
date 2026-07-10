@@ -35,6 +35,7 @@ import {
 import {
   configDraftFromTarget,
   configValidation,
+  configValueErrors,
   defaultGpuOptions,
   defaultOptimizerOptions,
   defaultPresetForTarget,
@@ -601,9 +602,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
     [activeProject?.id, jobs],
   );
   const gpuOptionsKey = gpuOptions.join("\u0000");
-  // Validation no longer renders as chips (sc-10492); it only gates the Start button
-  // and the panel head's Ready / Needs input pill.
-  const configReady = configValidation({ activeDataset, configDraft, selectedTarget }).length === 0;
+  // Every issue gates Start training and the head's Ready / Needs input pill. Only the
+  // broken-value ones are worth a chip: an unfilled field is visible in the form, but a
+  // cleared number leaves no clue why Start went dead (sc-10492 → sc-10501).
+  const configIssues = configValidation({ activeDataset, configDraft, selectedTarget });
+  const configReady = configIssues.length === 0;
+  const configValueErrorMessages = configValueErrors(configIssues);
 
   // The dataset's character kind (person/style/object) — refines the readiness kind
   // and thus the blur floor. "" when the dataset isn't tied to a character.
@@ -1562,6 +1566,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   showTrainingAdapter={showTrainingAdapter}
                   visibleTrainingAdapterVersions={visibleTrainingAdapterVersions}
                   visibleResolutionOptions={visibleResolutionOptions}
+                  configValueErrors={configValueErrorMessages}
                   submittingJob={submittingJob}
                   resetConfigDefaults={resetConfigDefaults}
                   submitTrainingJob={submitTrainingJob}
