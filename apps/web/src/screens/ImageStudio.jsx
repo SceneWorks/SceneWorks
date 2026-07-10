@@ -1188,6 +1188,25 @@ export function ImageStudio() {
     initialLoraWeights: saved.loraWeights ?? {},
     initialShowIncompatibleLoras: saved.showIncompatibleLoras ?? false,
   });
+  // sc-10516: a preset launch (Presets → "Use in Studio"). `availablePresets` filters on
+  // mode + model, so the preset only resolves once both match — set them alongside the id.
+  // Changing the model otherwise wipes the steps/guidance overrides (the advanced-defaults
+  // reset effect above), which would clobber the very defaults the preset is about to
+  // apply, so suppress that reset exactly as the recipe path does.
+  // Kept separate from the recipe effect below, which clears the preset instead.
+  useEffect(() => {
+    if (launchRequest?.view !== "Image" || !launchRequest.presetId) {
+      return;
+    }
+    if (IMAGE_MODES.includes(launchRequest.presetMode)) {
+      setMode(launchRequest.presetMode);
+    }
+    if (launchRequest.presetModel && launchRequest.presetModel !== advancedDefaultsModel.current) {
+      skipAdvancedDefaultsReset.current = true;
+      setModel(launchRequest.presetModel);
+    }
+    setSelectedPresetId(launchRequest.presetId);
+  }, [launchRequest?.id]);
   useEffect(() => {
     if (launchRequest?.view !== "Image" || !launchRequest.recipe) {
       return;
