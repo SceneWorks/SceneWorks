@@ -2539,12 +2539,14 @@
       "family": "krea_2",
       "type": "image",
       "adapter": "mlx_krea",
-      // Text-to-image GENERATION model (mirrors Krea 2 Turbo). This top-level `capabilities` array is what
-      // the web layer keys on: ImageStudio/`imageModelServesMode` gates the model into the picker on
-      // `capabilities.includes("text_to_image")`, and the Model Manager renders the "Text to Image" chip
-      // from it. `ui.recommendedFor` is a separate recommendation hint and does NOT confer the capability —
-      // without this line Raw is invisible in Image Studio and untagged in the Model Manager (epic 9992).
-      "capabilities": ["text_to_image"],
+      // Text-to-image GENERATION model, PLUS the Kontext-style image-edit surface (epic 10871 — Raw only;
+      // the full-CFG variant the `krea2_identity_edit` LoRA targets, Turbo stays t2i-only). This top-level
+      // `capabilities` array is what the web layer keys on: ImageStudio/`imageModelServesMode` gates the
+      // model into the picker on `capabilities.includes("text_to_image")` and surfaces the Edit tab on
+      // `edit_image` (further gated by `macSupport.features.edit`, which the router probe flips true for
+      // Raw); the Model Manager renders the capability chips from it. `ui.recommendedFor` is a separate
+      // recommendation hint and does NOT confer the capability.
+      "capabilities": ["text_to_image", "edit_image"],
       // Routing (not this flag) drives availability: `krea_2_raw` is BOTH mlx- and candle-routed
       // (sc-9994). All-platform downloads serve generation on all three platforms + the candle trainer.
       "macOnly": false,

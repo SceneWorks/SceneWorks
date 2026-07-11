@@ -27,9 +27,17 @@ export function ControlOverlayPicker({ baseModel, selectedOverlayId, onOverlayCh
       signal: controller.signal,
     })
       .then((items) => {
+        // Show installed overlays (studio-trained/registered, or a cached hosted one) AND hosted
+        // overlays not yet on disk (the built-in beta) — the latter lazy-download on first use, so they
+        // are selectable. A studio-trained overlay that is merely "missing" (no HF repo) is hidden: the
+        // API would 400 it. sc-8466.
         setOverlays(
           Array.isArray(items)
-            ? items.filter((overlay) => overlay.installState === "installed")
+            ? items.filter(
+                (overlay) =>
+                  overlay.installState === "installed" ||
+                  overlay.source?.provider === "huggingface",
+              )
             : [],
         );
         setStatus("ready");
@@ -43,6 +51,10 @@ export function ControlOverlayPicker({ baseModel, selectedOverlayId, onOverlayCh
     return () => controller.abort();
   }, [baseModel, activeProject?.id, token]);
 
+  // A built-in (hosted) overlay ships with the app for this backbone, so leaving the picker unselected
+  // still gets pose control (the worker defaults to it); the picker is for choosing a specific overlay.
+  const hasBuiltin = overlays.some((overlay) => overlay.scope === "builtin");
+
   return (
     <div className="control-overlay-field">
       <label htmlFor="control-overlay-select">ControlNet overlay</label>
@@ -51,18 +63,29 @@ export function ControlOverlayPicker({ baseModel, selectedOverlayId, onOverlayCh
       ) : status === "error" ? (
         <p className="muted">Couldn&apos;t load control overlays.</p>
       ) : overlays.length ? (
-        <select
-          id="control-overlay-select"
-          onChange={(event) => onOverlayChange?.(event.target.value || null)}
-          value={selectedOverlayId ?? ""}
-        >
-          <option value="">Select a trained overlay…</option>
-          {overlays.map((overlay) => (
-            <option key={overlay.id} value={overlay.id}>
-              {overlay.name ?? overlay.id}
+        <>
+          <select
+            id="control-overlay-select"
+            onChange={(event) => onOverlayChange?.(event.target.value || null)}
+            value={selectedOverlayId ?? ""}
+          >
+            <option value="">
+              {hasBuiltin ? "Built-in beta overlay (default)" : "Select a trained overlay…"}
             </option>
-          ))}
-        </select>
+            {overlays.map((overlay) => (
+              <option key={overlay.id} value={overlay.id}>
+                {(overlay.name ?? overlay.id) +
+                  (overlay.installState === "installed" ? "" : " (downloads on first use)")}
+              </option>
+            ))}
+          </select>
+          {hasBuiltin ? (
+            <p className="muted">
+              Leave unselected to use the built-in beta pose overlay (an experimental feasibility
+              spike) — or train your own in the Training Studio for a custom one.
+            </p>
+          ) : null}
+        </>
       ) : (
         <p className="muted">
           No pose ControlNet installed for this model yet — train one in the Training Studio to

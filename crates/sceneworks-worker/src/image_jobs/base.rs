@@ -87,6 +87,7 @@ enum ImageRoute {
     Flux2DevControl,
     Flux2Edit,
     QwenEdit,
+    KreaEdit,
     InstantId,
     PulidFlux,
     SdxlAdvanced,
@@ -121,6 +122,11 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         Some(ImageRoute::Flux2Edit)
     } else if qwen_edit_available(request, settings) {
         Some(ImageRoute::QwenEdit)
+    } else if krea_edit_available(request, settings) {
+        // Krea 2 Raw Kontext-style edit (mode edit_image + a source) → the `krea_2_edit` engine
+        // (epic 10871). Wins over the generic MLX arm below — `krea_2_raw` is in MODEL_TABLE, so
+        // `mlx_available` would otherwise render it as plain t2i and silently drop the source.
+        Some(ImageRoute::KreaEdit)
     } else if instantid_available(request, settings) {
         Some(ImageRoute::InstantId)
     } else if pulid_flux_available(request, settings) {
@@ -161,10 +167,12 @@ impl ImageRoute {
                 EditGrouping::Poses(_) | EditGrouping::Plain => request.count,
             },
             // PuLID-FLUX is one identity image per seed (no angle/pose grouping) — like the base
-            // MLX + SDXL-advanced + Bernini paths, the effective count is the requested count.
+            // MLX + SDXL-advanced + Bernini paths, the effective count is the requested count. Krea
+            // edit (epic 10871) is likewise plain per-image: `count` edits of the one source.
             ImageRoute::PulidFlux
             | ImageRoute::SdxlAdvanced
             | ImageRoute::Bernini
+            | ImageRoute::KreaEdit
             | ImageRoute::Mlx => request.count,
         }
     }
