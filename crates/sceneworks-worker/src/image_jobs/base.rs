@@ -212,6 +212,9 @@ enum CandleImageRoute {
     Flux1Control,
     /// A strict-pose job on a candle model with NO pose lane → reject loudly, never silent T2I (sc-5968).
     PoseReject,
+    /// An in-place ComfyUI Z-Image base model (`external_base_*`) → `generate_candle_zimage_comfyui_stream`
+    /// (epic 10451 Phase 2, sc-10668). Not an `is_candle_engine` id — routed off the forwarded row.
+    ZimageComfyui,
     /// A plain candle txt2img engine id → `generate_candle_stream`.
     CandleTxt2Img,
 }
@@ -262,6 +265,10 @@ fn resolve_candle_image_route(
         Some(CandleImageRoute::Flux2Control)
     } else if flux1_control_candle_available(request, settings) {
         Some(CandleImageRoute::Flux1Control)
+    } else if zimage_comfyui_available(request, settings) {
+        // In-place ComfyUI Z-Image base (sc-10668): an `external_base_*` id, so it matches no
+        // `is_candle_engine` arm below — route it here off the forwarded `modelManifestEntry`.
+        Some(CandleImageRoute::ZimageComfyui)
     } else if is_candle_engine(&request.model)
         && !matches!(
             request.model.as_str(),
