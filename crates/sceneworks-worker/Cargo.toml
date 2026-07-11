@@ -1580,13 +1580,15 @@ mlx-gen-scail2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4df9
 # `--features backend-candle` still resolves the SINGLE gen-core rev `4df97dce` (skew gate green, no
 # testkit reconcile). ALL candle-gen-* move together. GPU-validated on RTX PRO 6000 (sm_120): kolors
 # q4/q8 render coherently at 640² with a −67%/−58% peak-VRAM drop vs bf16.
-# Bumped `5c27bf1` -> `103ee35a` (sc-10671, epic 10451 Phase 2c): candle-gen #399 adds
-# `candle_gen_wan::wan14b::load_from_comfyui_experts` — load a user's ComfyUI Wan2.2 A14B experts in
-# place (companion scaled-fp8 dequant `w = w_fp8·scale_weight` + native-Wan → diffusers key remap),
-# sourcing the UMT5 TE / VAE / tokenizer from a resident snapshot tier. Provider-only, touches ONLY
-# candle-gen-wan; every other candle-gen-* crate byte-identical to `5c27bf1`, so candle-gen's gen-core
-# stays mlx-gen `4df97dce` (skew gate green). `5c27bf1` is an ancestor of `103ee35a`, a clean forward
-# move; ALL candle-gen-* move together.
+# Bumped `5c27bf1` -> `103ee35a` (sc-10671, epic 10451 Phase 2c): candle-gen #399 (MERGED, reachable
+# from candle-gen main) adds `candle_gen_wan::wan14b::load_from_comfyui_experts` — load a user's ComfyUI
+# Wan2.2 A14B experts in place (companion scaled-fp8 dequant `w = w_fp8·scale_weight` + native-Wan →
+# diffusers key remap), sourcing the UMT5 TE / VAE / tokenizer from a resident snapshot tier. Pinned at
+# #399's own tip (NOT candle-gen main HEAD) deliberately: main HEAD also carries #398/#400, whose
+# worker-side wiring lands in their OWN SceneWorks PRs — folding them in here would break the build
+# against this branch's worker code. Provider-only, touches ONLY candle-gen-wan; every other candle-gen-*
+# crate byte-identical to `5c27bf1`, so candle-gen's gen-core stays mlx-gen `4df97dce` (skew gate green).
+# `5c27bf1` is an ancestor of `103ee35a`, a clean forward move; ALL candle-gen-* move together.
 candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "103ee35ab362791b68b88e5edd1758bbaf95c429", features = ["cuda"], optional = true }
 # Candle image providers (sc-5096) -- Windows/CUDA siblings of the mlx-gen image crates above. Each
 # self-registers its engine id into the shared gen_core inventory registry; force-linked in
