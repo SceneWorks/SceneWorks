@@ -91,8 +91,13 @@ use api_client::*;
 mod engines;
 mod gpu;
 use gpu::*;
+// CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired
+// into `generate_candle_stream`; gated to the same candle lane as that consumer so the pub(crate)
+// helpers aren't dead code (→ `-D warnings`) in the non-candle / macOS builds.
 mod job_metrics;
 mod supervisor;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+mod vram_gate;
 use supervisor::*;
 mod model_jobs;
 use model_jobs::*;
