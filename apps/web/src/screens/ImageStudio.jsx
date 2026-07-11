@@ -28,6 +28,12 @@ import {
 } from "../resolutionOverride.js";
 import { batchItemStatus, summarizeBatchRun } from "../batchOps.js";
 import {
+  DEFAULT_SCENE_PROMPT,
+  promptHintFor,
+  promptSeedFor,
+  seedsNegativeInMode,
+} from "../promptSeed.js";
+import {
   emptyCaption,
   orderCaption,
   parseMagicPromptCaption,
@@ -122,9 +128,13 @@ import { pidToggleVisible } from "../pidEligibility.js";
 import {
   defaultTierSelection,
   installedTiers,
+  isBelowFloor,
+  modelQualityFloor,
   shouldShowTierPicker,
   tierLabel,
 } from "../quantTier.js";
+import { readLastTier, writeLastTier } from "../lastTierStore.js";
+import { readDefaultGenerationQuality } from "../generationQuality.js";
 import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO } from "../constants.js";
 import { pickClosestResolution } from "../resolutionMatch.js";
 import {
@@ -159,6 +169,10 @@ import {
 
 // Used only for models that don't declare limits.resolutions (e.g. user-imported).
 const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x1280"];
+// Screen identity for the per-(screen, model) sticky quant-tier store (sc-10727). Matches this
+// studio's `loadStudioSettings`/`useStudioSettingsWriter` key so the sticky namespace is stable and
+// distinct from Video/Character studios. Change this and existing users lose their Image sticky.
+const TIER_SCREEN = "image";
 // Studio sub-modes a saved preset may restore (the "type") — the tabs the mode
 // segmented control actually exposes. Edit lives in its own workflow; text and
 // character share the text_to_image workflow.
@@ -354,7 +368,7 @@ export function ImageStudio() {
   const [sceneSuggestions] = useState(() => pickSuggestions(4));
   const [characterSuggestions] = useState(() => pickSuggestions(4, CHARACTER_SUGGESTION_POOL));
   const [mode, setMode] = useState(() => normalizeImageMode(saved.mode));
-  const [prompt, setPrompt] = useState(saved.prompt ?? "A cinematic frame of a neon street at midnight");
+  const [prompt, setPrompt] = useState(saved.prompt ?? DEFAULT_SCENE_PROMPT);
   // True once the user types or picks a suggestion, so the character-mode default
   // prompt never clobbers their own wording. A restored prompt counts as edited so
   // re-entering character mode doesn't overwrite it.
@@ -568,11 +582,11 @@ export function ImageStudio() {
   // picker so the user can A/B a bf16 vs Q8 vs Q4 build. The picked tier rides
   // `advanced.mlxQuantize` (bf16→0, q8→8, q4→4); the worker's resolve_quant + generator cache
   // route to it (reload-always — the cache evicts + reloads on a heavy-tier switch). `quantTier`
-  // holds the selected tier key ("" = no picker / not applicable). Last-used is persisted PER
-  // MODEL in `lastUsedTiers` so re-entering a model restores the tier you last generated with.
-  const [lastUsedTiers, setLastUsedTiers] = useState(
-    saved.lastUsedTiers && typeof saved.lastUsedTiers === "object" ? saved.lastUsedTiers : {},
-  );
+  // holds the selected tier key ("" = no picker / not applicable). The user's last EXPLICIT pick is
+  // persisted per (screen, model) in `lastTierStore` (epic 10721 / sc-10727) — project-independent,
+  // so re-entering a model on this screen restores the tier you last generated with, in any
+  // workspace and across app restarts. It seeds the picker as the top rung below a same-session pick
+  // and above the model's base default (see the seed effect + `defaultTierSelection`).
   const [quantTier, setQuantTier] = useState("");
   // Brief "loading <tier>" hint shown right after a switch (reload-always): switching a heavy
   // tier evicts + reloads on the worker, so we surface a transient loading note rather than
@@ -768,6 +782,9 @@ export function ImageStudio() {
     }
   }, [pickerModels, model]);
   const selectedModel = imageModels.find((item) => item.id === model);
+  // Booru-convention prompt hint (sc-10760): non-null for danbooru-tag models (Anima, Illustrious)
+  // that declare `ui.promptHint`; rendered under the prompt box with a link into the prompt guide.
+  const promptHint = promptHintFor(selectedModel?.ui);
   // Prompt guide for the selected model; fall back to the generic image guide
   // when a model declares none, so the button is always useful (sc-1817).
   const promptGuide = selectedModel?.ui?.promptGuide ?? {
@@ -859,6 +876,15 @@ export function ImageStudio() {
   const showTierPicker = useMemo(
     () => shouldShowTierPicker(selectedModel, tierOptions),
     [selectedModel, tierOptions],
+  );
+  // Per-model quality floor (sc-10731): the model's minimum-fidelity tier (`minQualityTier`) and whether
+  // the CURRENT pick sits below it. The DEFAULT is already clamped up to the floor (defaultTierSelection),
+  // so this only fires when the user EXPLICITLY picks a below-floor tier — a deliberate quality/creative
+  // choice we HONOR, but flag with a non-blocking advisory (never silently switch their tier).
+  const qualityFloor = useMemo(() => modelQualityFloor(selectedModel), [selectedModel]);
+  const tierBelowFloor = useMemo(
+    () => showTierPicker && isBelowFloor(quantTier, selectedModel),
+    [showTierPicker, quantTier, selectedModel],
   );
   // PiD decoder toggle visibility (epic 7840, sc-7851): the model's latent space has a PiD
   // backbone (ui.pid) AND that backbone's PiD checkpoint is installed. Hidden otherwise — for
@@ -972,19 +998,33 @@ export function ImageStudio() {
       setPrompt(defaultCharacterPrompt(character));
     }
   }, [mode, characterId, characters]);
-  // Seed the model's curated default negative prompt when entering character mode
-  // with an empty box (sc-3857). InstantID/RealVisXL declares one to fight its
-  // shiny/over-saturated look; running character mode with an empty negative was
-  // the main reason Image Studio output trailed Character Studio. Only fills an
-  // empty box, so it never clobbers a typed, restored, or preset negative.
+  // Seed the model's curated default negative prompt into an EMPTY negative box (sc-3857, sc-10760).
+  // Originally character-mode only (InstantID/RealVisXL declares one to fight its shiny/over-saturated
+  // look); now also text-to-image, so booru models (Anima, Illustrious) get their booru negative there
+  // too — a bare negative was a big reason their anime renders looked worse. Only fills an empty box, so
+  // it never clobbers a typed, restored, or preset negative.
   useEffect(() => {
-    if (mode !== "character_image" || negativePrompt !== "") {
+    if (!seedsNegativeInMode(mode) || negativePrompt !== "") {
       return;
     }
     const ui = imageModels.find((item) => item.id === model)?.ui ?? {};
     if (typeof ui.defaultNegativePrompt === "string" && ui.defaultNegativePrompt) {
       setNegativePrompt(ui.defaultNegativePrompt);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, model]);
+  // Seed the model's booru quality prefix (`ui.defaultPrompt`) into an UNEDITED prompt box in
+  // text-to-image (sc-10760). Anima/Illustrious are danbooru-tag models that render low-effort art from a
+  // bare sentence; opening with `masterpiece, best quality,` and building on it is what their model cards
+  // recommend. Mirrors the character-mode prompt seed: only when `!promptEdited`, so it replaces the
+  // throwaway scene default, never the user's own wording. A model WITHOUT a defaultPrompt restores the
+  // generic scene default, so a stale prefix never lingers after switching to a non-booru model.
+  useEffect(() => {
+    if (mode !== "text_to_image" || promptEdited.current) {
+      return;
+    }
+    const ui = imageModels.find((item) => item.id === model)?.ui ?? {};
+    setPrompt(promptSeedFor(ui));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, model]);
   const resolutionOptions = useMemo(
@@ -1114,8 +1154,10 @@ export function ImageStudio() {
   }, [resolutionOptions, resolution, selectedModel]);
   // Keep the selected quant tier valid for the active model (sc-8515). When the current tier is
   // still installed for this model, leave it; otherwise snap to the model's default selection
-  // (last-used-for-this-model → declared default → q4 → first installed). Also clears to "" when
+  // (sticky-for-this-(screen,model) → declared default → q8 base → q4 → first installed). Clears "" when
   // no tier is installed / the model has no matrix, so a stale tier never leaks into the payload.
+  // The sticky rung (sc-10727) is read straight from the persistent per-(screen,model) store, so it
+  // survives restarts and is honored above the base default whenever that tier is still installed.
   // Keyed on `model` (not `selectedModel`) plus the installed-tier list so a catalog refresh that
   // newly installs a second tier re-derives the default without churning on every render.
   const availableTiersKey = availableTiers.join(",");
@@ -1123,12 +1165,20 @@ export function ImageStudio() {
     if (availableTiers.includes(quantTier)) {
       return;
     }
-    setQuantTier(defaultTierSelection(selectedModel, lastUsedTiers[model], tierOptions) ?? "");
+    setQuantTier(
+      defaultTierSelection(selectedModel, readLastTier(TIER_SCREEN, model), {
+        ...tierOptions,
+        // Rung 3 (sc-10728): the app-wide default-generation-quality setting is the base default below
+        // the per-(screen,model) sticky. Read fresh here (like readLastTier) so a change made in Settings
+        // is picked up the next time this effect derives a default — no stale in-memory copy.
+        defaultQuality: readDefaultGenerationQuality(),
+      }) ?? "",
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model, availableTiersKey]);
-  // Switch the active quant tier (sc-8515): persist it as this model's last-used tier and surface
-  // a brief "loading <tier>" note (reload-always — the worker evicts + reloads a heavy tier on the
-  // next generation; there is no co-residence). The note is cosmetic and self-clears.
+  // Switch the active quant tier (sc-8515): persist it as this (screen, model)'s last EXPLICIT tier
+  // (sc-10727 — sticky) and surface a brief "loading <tier>" note (reload-always — the worker evicts
+  // + reloads a heavy tier on the next generation; there is no co-residence). The note self-clears.
   const tierSwitchTimer = useRef(null);
   useEffect(() => () => clearTimeout(tierSwitchTimer.current), []);
   const handleTierChange = useCallback(
@@ -1137,7 +1187,7 @@ export function ImageStudio() {
         return;
       }
       setQuantTier(nextTier);
-      setLastUsedTiers((prev) => ({ ...prev, [model]: nextTier }));
+      writeLastTier(TIER_SCREEN, model, nextTier);
       setTierSwitching(nextTier);
       clearTimeout(tierSwitchTimer.current);
       tierSwitchTimer.current = setTimeout(() => setTierSwitching(""), 1500);
@@ -1190,6 +1240,25 @@ export function ImageStudio() {
     initialLoraWeights: saved.loraWeights ?? {},
     initialShowIncompatibleLoras: saved.showIncompatibleLoras ?? false,
   });
+  // sc-10516: a preset launch (Presets → "Use in Studio"). `availablePresets` filters on
+  // mode + model, so the preset only resolves once both match — set them alongside the id.
+  // Changing the model otherwise wipes the steps/guidance overrides (the advanced-defaults
+  // reset effect above), which would clobber the very defaults the preset is about to
+  // apply, so suppress that reset exactly as the recipe path does.
+  // Kept separate from the recipe effect below, which clears the preset instead.
+  useEffect(() => {
+    if (launchRequest?.view !== "Image" || !launchRequest.presetId) {
+      return;
+    }
+    if (IMAGE_MODES.includes(launchRequest.presetMode)) {
+      setMode(launchRequest.presetMode);
+    }
+    if (launchRequest.presetModel && launchRequest.presetModel !== advancedDefaultsModel.current) {
+      skipAdvancedDefaultsReset.current = true;
+      setModel(launchRequest.presetModel);
+    }
+    setSelectedPresetId(launchRequest.presetId);
+  }, [launchRequest?.id]);
   useEffect(() => {
     if (launchRequest?.view !== "Image" || !launchRequest.recipe) {
       return;
@@ -1513,7 +1582,6 @@ export function ImageStudio() {
     bf16Precision,
     usePid,
     pidTarget,
-    lastUsedTiers,
   });
 
   // Each stacked run carries its already-resolved completed assets + the
@@ -2141,6 +2209,19 @@ export function ImageStudio() {
           {submitError ? (
             <p className="structured-error" role="alert">
               {submitError}
+            </p>
+          ) : null}
+
+          {/* Booru-convention prompt hint (sc-10760): danbooru-tag models (Anima, Illustrious) declare
+              `ui.promptHint`, so the studio nudges toward the quality prefix + tag-style prompting the model
+              was trained on (a bare sentence renders low-effort art). Opens the existing prompt-guide modal.
+              Free-text models only. */}
+          {!structuredPromptModel && promptHint ? (
+            <p className="prompt-hint">
+              {promptHint}{" "}
+              <button className="prompt-hint-link" onClick={() => setGuideOpen(true)} type="button">
+                Prompt guide →
+              </button>
             </p>
           ) : null}
 
@@ -2790,6 +2871,13 @@ export function ImageStudio() {
                   {tierSwitching ? (
                     <span className="field-hint" role="status">
                       Loading {tierLabel(tierSwitching)}…
+                    </span>
+                  ) : null}
+                  {tierBelowFloor ? (
+                    <span className="field-hint quant-tier-floor-note">
+                      {tierLabel(quantTier)} is below the {tierLabel(qualityFloor)} recommended for{" "}
+                      {selectedModel?.name ?? "this model"} — it can look washed or lose fine detail
+                      here (quantization error is amplified under CFG). Your pick is honored.
                     </span>
                   ) : null}
                 </label>

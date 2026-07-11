@@ -4,6 +4,7 @@
   "scope": "global",
   "archived": false,
   "order": 10,
+  "lastUsedAt": "2026-07-09T18:30:00Z",
   "workflow": "text_to_image",
   "model": "z_image_turbo",
   "modes": ["text_to_image"],

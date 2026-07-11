@@ -13,6 +13,10 @@ use sceneworks_core::contracts::{
     WorkerRegisterRequest, WorkerSnapshot, WorkerStatus, WorkerUtilizationSnapshot,
 };
 use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};
+// The single source of truth for which `mlx.converter` discriminators the native converters handle.
+// `resolve_convert_plan` rejects anything not on it up front so this worker's converter set can never
+// drift from the convert-gap gate that derives its allow-list from the same const (sc-10573).
+use sceneworks_core::jobs_store::NATIVE_CONVERTERS;
 use sceneworks_core::jsonc::strip_jsonc_comments;
 use sceneworks_core::lora_family::{
     apply_model_manifest_defaults, detect_lora_family, detect_model_family, first_safetensors_path,
@@ -91,8 +95,13 @@ use api_client::*;
 mod engines;
 mod gpu;
 use gpu::*;
+// CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired
+// into `generate_candle_stream`; gated to the same candle lane as that consumer so the pub(crate)
+// helpers aren't dead code (→ `-D warnings`) in the non-candle / macOS builds.
 mod job_metrics;
 mod supervisor;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+mod vram_gate;
 use supervisor::*;
 mod model_jobs;
 use model_jobs::*;
@@ -203,6 +212,13 @@ mod sdxl_edit_pid_gpu_smoke;
 // dense diffusers snapshot — the worker-lane validation backing the off-Mac candle routing wire.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod flux2_dev_gpu_smoke;
+// Real-weight GPU smoke for the candle Anima 2B lane (epic 10512, sc-10625 — the hardware-gated
+// acceptance extracted from sc-10525). Test-only + candle-only; drives `gen_core::load("anima_base" |
+// "anima_aesthetic" | "anima_turbo")` against the dense bf16 circlestone-labs/Anima split_files
+// snapshot (± an official LoRA/LoKr), proving the candle Anima port renders coherently on real CUDA —
+// the evidence that unblocks flipping `macOnly: false` / `candle_routed = true` (sc-10625).
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod anima_gpu_smoke;
 // Real-weight GPU smoke for the candle InstantID + PiD super-resolving decode (epic 7840, sc-8386).
 // Test-only + candle-only; drives the bespoke `candle_gen_instantid::InstantId` provider across
 // Identity/Angle/Pose with the `pid_sdxl` student attached, asserting the PiD decode 4×-super-resolves
@@ -239,6 +255,14 @@ mod sd3_5_mlx_smoke;
 // non-degenerate AND specifically NOT all-zero (the retired Apple recipe's exact failure signature).
 #[cfg(all(test, target_os = "macos"))]
 mod sdxl_base_q8_mlx_smoke;
+// Real-weight MLX train→apply smoke for the Illustrious-XL SDXL-family lane (sc-10618, epic 10609).
+// Test-only + macOS-only; drives `mlx_gen_sdxl::load_trainer` from the Illustrious turnkey's dense
+// `bf16/` tier, trains a tiny LoRA/LoKr, then renders WITHOUT vs WITH the adapter via
+// `mlx_gen_sdxl::load(...).with_adapters` and asserts it visibly changes the output — the E2E evidence
+// (not a registry entry + a green unit test) the training half of the epic demands. For LoKr it also
+// asserts no `mid_block` factors were emitted (sc-2640: the SDXL LoKr surface is down/up attention only).
+#[cfg(all(test, target_os = "macos"))]
+mod illustrious_train_apply_mlx_smoke;
 // Real-weight MLX smoke for the Lens-Turbo Q4 worker lane (sc-8763, epic 8506 Group-B). Test-only +
 // macOS-only; drives `gen_core::load("lens_turbo")` with a Q4 LoadSpec against the packed `q4/` turnkey
 // subdir. On-device evidence that the SceneWorks/lens-turbo-mlx pre-quantized q4 tier loads through the
@@ -358,6 +382,30 @@ mod depth;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 mod pose_jobs;
+// Control-type preprocessor registry (ControlNet Training Studio A1, sc-10160, epic 10159): the
+// single `ControlKind`-keyed mapping from a target image to its condition image, wrapping the
+// existing pose (pose_jobs + openpose_skeleton) / canny / depth preprocessors so train-prep
+// (folder-ingest A2, bring-your-own-dataset A3) and the strict-control inference lanes render the
+// condition with identical code (automatic convention-match). Cross-platform like `canny` (the
+// pose/depth arms are internally backend-gated).
+//
+// A1 lands this registry ahead of its first non-test consumer: the folder-ingest data-prep
+// pipeline (A2, sc-10161) is what resolves + drives a preprocessor over a dataset, and the
+// bring-your-own-dataset adapter (A3, sc-10171) reuses it for annotated-render/convention checks.
+// Until then only `control_kind_label` has a caller (the strict-control driver delegates to it), so
+// allow dead_code module-wide — remove when A2 wires `preprocessor_for` into ingest.
+#[allow(dead_code)]
+mod control_preprocess;
+// Folder-ingest control-dataset prep (Training Studio A2, sc-10161, epic 10159): the "create your
+// own" GENERATE core — raw target images → render each condition via the A1 `control_preprocess`
+// registry → square-canonical letterbox for alignment → write `(target, control, caption)` triples
+// + `manifest.jsonl` in the layout the Krea control trainer (B2) and the bring-your-own adapter (A3)
+// consume. Cross-platform for the canny path; pose/depth/person-filter resolve through the
+// backend-gated registry/detector. Lands ahead of its first non-test caller: the studio job type
+// (B1, sc-10162) dispatches it and feeds captions from the JoyCaption job; allow dead_code until
+// then.
+#[allow(dead_code)]
+mod control_dataset_prep;
 // CUDA execution-provider dependency preloading for the off-Mac candle `ort` paths
 // (sc-6209, epic 5482): `ort::ep::cuda::preload_dylibs` dlopens the CUDA-12 runtime +
 // cuDNN-9 DLLs the onnxruntime CUDA EP needs, so it engages the GPU regardless of PATH

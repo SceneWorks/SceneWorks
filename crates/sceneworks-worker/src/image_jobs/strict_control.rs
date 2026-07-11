@@ -144,14 +144,10 @@ fn validate_control_kind(engine_id: &str, kind: &ControlKind) -> WorkerResult<()
 }
 
 /// A stable lowercase label for a [`ControlKind`] (telemetry / error messages / the `controlMode` request
-/// field). `Other(name)` carries its bespoke name verbatim.
+/// field). `Other(name)` carries its bespoke name verbatim. Delegates to the preprocessor registry
+/// (sc-10160) so the label is one source of truth across train-prep and inference.
 fn control_kind_label(kind: &ControlKind) -> String {
-    match kind {
-        ControlKind::Pose => "pose".to_owned(),
-        ControlKind::Canny => "canny".to_owned(),
-        ControlKind::Depth => "depth".to_owned(),
-        ControlKind::Other(name) => name.clone(),
-    }
+    crate::control_preprocess::control_kind_label(kind)
 }
 
 /// Parse the requested control kind from the job. The default is [`ControlKind::Pose`] (the proven tier;

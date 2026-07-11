@@ -276,6 +276,31 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 7.0,
         adapter_label: "mlx_sdxl",
     },
+    // Illustrious-XL (epic 10609) — Danbooru-tag anime SDXL finetunes from OnomaAI. Architecturally
+    // vanilla SDXL (identical UNet shapes, dual CLIP-L + OpenCLIP-bigG, eps-pred, VAE
+    // scaling_factor 0.13025), so both share the `sdxl` engine via a weights swap. Upstream ships a
+    // SINGLE-FILE LDM checkpoint, which no gen crate can read — the turnkeys are built offline by
+    // `scripts/build_sdxl_turnkey.py` (sc-10610), not converted at install.
+    //
+    // v1.0 and v2.0 are SEPARATE ids, not a version toggle: v2.0 is the `v2.0-STABLE` snapshot of a
+    // cosine-annealing run, behaviourally distinct, and it duplicates the subject in wide frames
+    // where v1.0 does not (sc-10620 — hence their different `limits.resolutions`).
+    ModelRow {
+        sceneworks_id: "illustrious_xl_v1",
+        engine_id: "sdxl",
+        default_repo: "SceneWorks/illustrious-xl-v1-mlx",
+        default_steps: 30,
+        default_guidance: 7.0,
+        adapter_label: "mlx_sdxl",
+    },
+    ModelRow {
+        sceneworks_id: "illustrious_xl_v2",
+        engine_id: "sdxl",
+        default_repo: "SceneWorks/illustrious-xl-v2-mlx",
+        default_steps: 30,
+        default_guidance: 7.0,
+        adapter_label: "mlx_sdxl",
+    },
     // RealVisXL Lightning (sc-6075) — standalone few-step *distilled* sibling of RealVisXL_V5.0.
     // Same SDXL arch, so it shares the `sdxl` engine via a weights swap; differs only in the
     // distilled checkpoint + the few-step recipe: ~5 steps at guidance 1.0 (CFG off). The
@@ -607,6 +632,43 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 4.5,
         adapter_label: "mlx_sana",
     },
+    // Anima 2B anime t2i (epic 10512, sc-10523) — native MLX, CircleStone Labs Non-Commercial License
+    // v1.2. Cosmos-Predict2 `CosmosTransformer3DModel` DiT (28 layers, 17-ch patch-embed, 3-axis NTK
+    // RoPE) + the bundled `AnimaTextConditioner` (T5 query tokens → cross-attn into Qwen3-0.6B states)
+    // + the Qwen-Image VAE. Three variants share ONE architecture, differing only in the DiT weights
+    // file + defaults. **Convert-at-install** (NC — SceneWorks never redistributes converted weights):
+    // the worker packs the Cosmos DiT on-device to q4/q8/bf16 from the ungated `circlestone-labs/Anima`
+    // `split_files/` source (the conditioner + Qwen3 TE + Qwen-Image VAE stay dense bf16), so
+    // `default_repo` is that source repo, not a SceneWorks re-host. The engine descriptor advertises the
+    // full curated sampler/scheduler menu (er_sde default, sc-10519); the manifest `limits` menu is a
+    // subset (the drift guard). All three reach the generic `generate_stream` path via
+    // `use mlx_gen_anima as _;`. supports_lora/lokr = true; quant + LoRA together is unsupported (sc-10578).
+    ModelRow {
+        sceneworks_id: "anima_base",
+        engine_id: "anima_base",
+        default_repo: "circlestone-labs/Anima",
+        default_steps: 30,
+        default_guidance: 4.5,
+        adapter_label: "mlx_anima",
+    },
+    ModelRow {
+        sceneworks_id: "anima_aesthetic",
+        engine_id: "anima_aesthetic",
+        default_repo: "circlestone-labs/Anima",
+        default_steps: 30,
+        default_guidance: 4.5,
+        adapter_label: "mlx_anima",
+    },
+    // Turbo — the merged CFG-free few-step student: 10 steps, guidance INERT (the descriptor advertises
+    // supports_guidance=false, so `resolve_guidance` returns None; the 1.0 default is a nominal no-op).
+    ModelRow {
+        sceneworks_id: "anima_turbo",
+        engine_id: "anima_turbo",
+        default_repo: "circlestone-labs/Anima",
+        default_steps: 10,
+        default_guidance: 1.0,
+        adapter_label: "mlx_anima",
+    },
 ];
 
 /// The mlx-gen registry ids of the video generators this worker serves (the engine ids
@@ -648,6 +710,13 @@ pub(crate) const TRAINER_IDS: &[&str] = &[
     "wan2_2_ti2v_5b",
     "wan2_2_t2v_14b",
     "wan2_2_i2v_14b",
+    // Anima (Cosmos-Predict2 DiT + AnimaTextConditioner; epic 10512, sc-10522): the `mlx-gen-anima`
+    // trainer registers LoRA/LoKr under the same ids as the inference generators of the three variants
+    // (base/aesthetic/turbo). mlx-only (no candle/torch Anima trainer). The trained adapter targets the
+    // DiT AND the bundled `llm_adapter` conditioner (508 targets), applying back via `apply_anima_adapters`.
+    "anima_base",
+    "anima_aesthetic",
+    "anima_turbo",
 ];
 
 /// A [`ModelRow`] paired with the linked gen_core descriptor for its engine id — the merged
@@ -704,8 +773,9 @@ impl ResolvedModel {
     pub fn supports_negative_prompt(&self) -> bool {
         self.descriptor.capabilities.supports_negative_prompt
     }
-    /// Whether the engine advertises any on-the-fly Q4/Q8 quantization (descriptor-derived). The
-    /// candle SDXL / sc-5096 families advertise none (dense only); Lens advertises Q4/Q8 (sc-5126).
+    /// Whether the engine advertises any Q4/Q8 quantization (descriptor-derived). The candle SDXL
+    /// family advertises Q4/Q8 as of sc-10767 (it packed-detects the pre-quantized MLX tier from disk);
+    /// the remaining sc-5096 candle families advertise none (dense only). Lens advertises Q4/Q8 (sc-5126).
     /// Used on BOTH lanes: the candle lane has always gated quant on this; the MLX lane gates on it
     /// too as of sc-8489 so SANA (the lone generic-MLX family with `supported_quants: &[]`, whose
     /// `load` rejects any quant) loads dense, while every pre-existing family (all Q4/Q8) is
@@ -956,6 +1026,19 @@ mod tests {
         },
         CharacterEngineWiring {
             sceneworks_id: "realvisxl",
+            identity_engine: true,
+            control_net_pose_repo: None,
+        },
+        // Illustrious-XL (epic 10609): character_image via the shared SDXL IP-Adapter lane
+        // (is_sdxl_ipadapter_model), so identity_engine is true, like the rest of the plain SDXL
+        // family. No strict-pose ControlNet.
+        CharacterEngineWiring {
+            sceneworks_id: "illustrious_xl_v1",
+            identity_engine: true,
+            control_net_pose_repo: None,
+        },
+        CharacterEngineWiring {
+            sceneworks_id: "illustrious_xl_v2",
             identity_engine: true,
             control_net_pose_repo: None,
         },
@@ -1304,7 +1387,12 @@ mod tests {
     fn sdxl_family_advertises_cfgpp_on_mlx() {
         let manifest = parse_builtin_models();
         let models = manifest["models"].as_array().expect("models array");
-        for id in ["sdxl", "realvisxl"] {
+        for id in [
+            "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ] {
             let model = models
                 .iter()
                 .find(|m| m["id"].as_str() == Some(id))
@@ -1547,6 +1635,8 @@ mod tests {
             ("sdxl", "SceneWorks/sdxl-base-mlx"),
             ("realvisxl", "SceneWorks/realvisxl-mlx"),
             ("realvisxl_lightning", "SceneWorks/realvisxl-lightning-mlx"),
+            ("illustrious_xl_v1", "SceneWorks/illustrious-xl-v1-mlx"),
+            ("illustrious_xl_v2", "SceneWorks/illustrious-xl-v2-mlx"),
         ] {
             let row = MODEL_TABLE
                 .iter()

@@ -89,6 +89,12 @@ use mlx_gen_sd3 as _;
 // the generic MODEL_TABLE / `generate_stream` path like the other registry families.
 #[cfg(target_os = "macos")]
 use mlx_gen_sana as _;
+// Anima 2B (epic 10512 / sc-10523) — force-link so `register_generators!` registers `anima_base`,
+// `anima_aesthetic`, and `anima_turbo` into the gen-core inventory; else linker GC drops their
+// `ModelRegistration` and `gen_core::load("anima_base")` returns "no generator registered". All three
+// reach the generic MODEL_TABLE / `generate_stream` path (t2i, NC-gated, mac_only).
+#[cfg(target_os = "macos")]
+use mlx_gen_anima as _;
 // Lens / Lens-Turbo (epic 3164 engine / sc-5105) — an inventory-registered `Generator` under the ids
 // `lens` + `lens_turbo`, reached through the generic MODEL_TABLE / `generate_stream` path. Force-link
 // or the linker GCs its `ModelRegistration` and `gen_core::load("lens_turbo")` returns "no generator
@@ -137,6 +143,14 @@ use candle_gen_flux as _;
 use candle_gen_flux2 as _;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_qwen_image as _;
+// Candle Anima 2B (sc-10525, epic 10512): `anima_base` / `anima_aesthetic` / `anima_turbo` self-register
+// into the shared gen_core inventory; the `as _;` keeps the MSVC release linker from GC-ing the
+// `register_generators!` registrations (else `gen_core::load("anima_base")` returns "no generator
+// registered"). The Windows/CUDA sibling of the `mlx_gen_anima` anchor above. MANDATORY even though the
+// catalog leaves `candle_routed = false` (unvalidated on GPU) — linkage must survive for the future
+// hardware-gated bring-up; routing is a separate catalog decision, not a link-time one.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_anima as _;
 // Candle Stable Diffusion 3.5 (sc-7880, epic 7982): `sd3_5_large` / `sd3_5_large_turbo` / `sd3_5_medium`
 // self-register into the shared gen_core inventory; the `as _;` keeps the MSVC release linker from GC-ing
 // the `inventory::submit!` registrations (else `gen_core::load("sd3_5_large")` returns "no generator
@@ -713,6 +727,33 @@ pub(crate) async fn run_image_generate_job(
                 // `edit_image` job must divert here first (disjoint from the Z-Image control lane).
                 CandleImageRoute::ZimageEdit => {
                     generate_candle_zimage_edit_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // In-place ComfyUI Z-Image base (sc-10668, epic 10451): an `external_base_*` id whose
+                // forwarded row carries the DiT/TE/VAE component paths — render the user's ComfyUI weights
+                // in place via `candle_gen_z_image::load_from_comfyui_components`.
+                CandleImageRoute::ZimageComfyui => {
+                    generate_candle_zimage_comfyui_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                CandleImageRoute::QwenImageComfyui => {
+                    generate_candle_qwen_comfyui_stream(
                         api,
                         settings,
                         job,
@@ -1715,6 +1756,15 @@ include!("image_jobs/flux1_control_candle.rs");
 // is a bespoke provider.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 include!("image_jobs/zimage_edit_candle.rs");
+// In-place ComfyUI Z-Image base txt2img — Windows/CUDA candle lane ONLY (sc-10668, epic 10451). Renders
+// a user's ComfyUI Z-Image weights in place via `candle_gen_z_image::load_from_comfyui_components`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+include!("image_jobs/zimage_comfyui_candle.rs");
+// Qwen-Image txt2img from an in-place ComfyUI DiT (plain fp8_e4m3fn → bf16) — the Windows/CUDA candle
+// lane ONLY (sc-10670, epic 10451 Phase 2b). Sibling of the Z-Image comfyui lane; TE/VAE/tokenizer come
+// from a resident `SceneWorks/qwen-image-mlx` snapshot tier.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+include!("image_jobs/qwen_comfyui_candle.rs");
 // Z-Image identity-init for Image Studio "With Character" — the Windows/CUDA candle lane ONLY (sc-8409,
 // epic 4406). macOS keeps the MLX `z_image_turbo` generic-lane identity img2img (`generate_stream` ⇒
 // `resolve_zimage_identity_init`); off-Mac this bespoke lane reuses the candle `ZImageEdit` engine with

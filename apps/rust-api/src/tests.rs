@@ -6,12 +6,14 @@ use super::training::{
 use super::workers::person_readiness_from_workers;
 use super::{
     create_app, create_app_with_state, huggingface_repo_cache_path, inject_converted_model_path,
-    inprocess_worker_gpu_id, lora_artifact_paths, merge_model_manifest_entry, mlx_catalog_status,
-    open_bind_override_enabled, safe_download_dir, seed_mode_for_config_dir, serialize_job_lora,
-    should_warn_open_bind, strip_jsonc_comments, sweep_stale_asset_uploads_before,
-    sweep_stale_lora_uploads_before, sweep_stale_uploads, Settings, WorkerCapability,
-    WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER, DEFAULT_API_HOST, EVENT_BUFFER_SIZE,
-    HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
+    inprocess_utility_worker_id, inprocess_worker_gpu_id, lora_artifact_paths,
+    merge_model_manifest_entry, mlx_catalog_status, open_bind_override_enabled,
+    parse_inprocess_utility_worker_count, safe_download_dir, seed_mode_for_config_dir,
+    serialize_job_lora, should_warn_open_bind, strip_jsonc_comments,
+    sweep_stale_asset_uploads_before, sweep_stale_lora_uploads_before, sweep_stale_uploads,
+    Settings, WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER,
+    DEFAULT_API_HOST, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE,
+    TEST_MAX_LORA_UPLOAD_BYTES,
 };
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -291,6 +293,7 @@ fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         mcp_api_url: "http://127.0.0.1:0".to_owned(),
         mcp_job_poll_interval: sceneworks_mcp::JobWaitConfig::default().poll_interval,
         mcp_job_timeout: sceneworks_mcp::JobWaitConfig::default().timeout,
+        external_model_roots: Vec::new(),
     }
 }
 
@@ -5734,6 +5737,36 @@ async fn video_jobs_expand_recipe_presets_server_side() {
         video_job["payload"]["advanced"]["recipePresetId"],
         "dream_motion"
     );
+
+    // sc-10520: submitting the job stamped lastUsedAt into the usage side store, and it
+    // surfaces on the catalog read even though dream_motion is a read-only BUILTIN preset
+    // (its own manifest can't be rewritten). The store lives beside the manifests.
+    assert!(
+        config_dir.join("recipe-preset-usage.json").is_file(),
+        "job submit should create the recipe-preset usage store"
+    );
+    let (status, presets) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/recipe-presets?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let dream = presets
+        .as_array()
+        .expect("presets list")
+        .iter()
+        .find(|preset| preset["id"] == "dream_motion")
+        .expect("dream_motion present");
+    assert_eq!(dream["scope"], "builtin");
+    assert!(
+        dream["lastUsedAt"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()),
+        "builtin preset should carry lastUsedAt after use, got {:?}",
+        dream["lastUsedAt"]
+    );
 }
 
 #[tokio::test]
@@ -7458,6 +7491,42 @@ fn turbo_cache_health_flags_missing_lora_only_when_listed_explicitly() {
     assert!(
         fixed.installed && !fixed.incomplete && fixed.missing_files.is_empty(),
         "complete once the LoRA is present"
+    );
+}
+
+#[test]
+fn cache_health_does_not_let_an_appledouble_sidecar_satisfy_a_required_pattern() {
+    // SceneWorks#1333: `._model.safetensors` is a macOS AppleDouble sidecar, not weights. It
+    // carries the `.safetensors` extension, so a `*.safetensors` glob matched it and the model
+    // reported INSTALLED while the real weights file was absent — the worst failure mode here,
+    // because the load then dies at generation time with a corrupt-header error.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let repo_root = temp_dir.path().join("models--SceneWorks--boogu-image-mlx");
+    let mllm = repo_root.join("snapshots/abc123/base/mllm");
+    std::fs::create_dir_all(&mllm).expect("mllm creates");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("refs creates");
+    std::fs::write(repo_root.join("refs/main"), "abc123").expect("ref writes");
+    std::fs::write(mllm.join("config.json"), "{}").expect("config writes");
+    // A real AppleDouble header (magic 0x00051607, version 0x00020000) — and NO real weights.
+    std::fs::write(
+        mllm.join("._model.safetensors"),
+        [0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00],
+    )
+    .expect("sidecar writes");
+
+    let pattern = vec!["base/mllm/*.safetensors".to_owned()];
+    let health = super::models::huggingface_cache_health(&repo_root, &pattern);
+    assert!(
+        !health.installed,
+        "a lone AppleDouble sidecar must not satisfy `base/mllm/*.safetensors`"
+    );
+
+    // The real shard makes it complete.
+    std::fs::write(mllm.join("model.safetensors"), "weights").expect("weights write");
+    let fixed = super::models::huggingface_cache_health(&repo_root, &pattern);
+    assert!(
+        fixed.installed && !fixed.incomplete,
+        "complete once the real shard is present"
     );
 }
 
@@ -10551,6 +10620,65 @@ async fn ui_preferences_put_open_when_no_token_configured() {
     assert_eq!(saved["theme"], "dark");
 }
 
+#[tokio::test]
+async fn ui_preferences_default_generation_quality_round_trips_and_merges() {
+    // sc-10728: the app-wide default generation quality persists like theme/accent so it
+    // survives a desktop relaunch — the shell's per-launch 127.0.0.1:<port> origin wipes
+    // origin-keyed localStorage, so the durable copy must live server-side. GET resolves an
+    // unset value to the q8 default; PUT accepts bf16|q8|q4 and MERGES, so a theme-only
+    // write can't reset a previously-chosen quality, and an invalid value coerces to q8.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir); // no token configured ⇒ PUT is open
+    assert!(settings.access_token.is_empty());
+    let app = create_app(settings).expect("app creates");
+
+    // Fresh install: GET resolves the absent value to the q8 default so the web can seed it.
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["defaultGenerationQuality"], "q8");
+
+    // PUT a valid tier: persisted and echoed back.
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "defaultGenerationQuality": "q4" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["defaultGenerationQuality"], "q4");
+
+    // Survives a "relaunch": a fresh GET reads it back from disk.
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["defaultGenerationQuality"], "q4");
+
+    // A partial PUT (theme only) MERGES — it must not clobber the stored quality.
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "dark" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["defaultGenerationQuality"], "q4");
+    assert_eq!(prefs["theme"], "dark");
+
+    // A present-but-invalid tier coerces to the q8 default (defensive; the UI never sends one).
+    let (status, saved) = request(
+        app,
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "defaultGenerationQuality": "int8-convrot" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["defaultGenerationQuality"], "q8");
+}
+
 #[test]
 fn requires_token_only_gates_api_paths() {
     use axum::http::Method;
@@ -10632,6 +10760,64 @@ fn inprocess_worker_defaults_to_cpu_utility() {
     // Explicit override is honored.
     assert_eq!(inprocess_worker_gpu_id(Some("auto".to_owned())), "auto");
     assert_eq!(inprocess_worker_gpu_id(Some("0".to_owned())), "0");
+}
+
+#[test]
+fn inprocess_utility_worker_count_defaults_to_two() {
+    // Unset / blank / unparseable → 2 so desktop downloads run two-at-a-time
+    // (sc-10744) instead of serializing behind a single worker.
+    assert_eq!(parse_inprocess_utility_worker_count(None), 2);
+    assert_eq!(parse_inprocess_utility_worker_count(Some(String::new())), 2);
+    assert_eq!(
+        parse_inprocess_utility_worker_count(Some("   ".to_owned())),
+        2
+    );
+    assert_eq!(
+        parse_inprocess_utility_worker_count(Some("two".to_owned())),
+        2
+    );
+    // A set, parseable value wins; surrounding whitespace is tolerated.
+    assert_eq!(
+        parse_inprocess_utility_worker_count(Some("1".to_owned())),
+        1
+    );
+    assert_eq!(
+        parse_inprocess_utility_worker_count(Some("4".to_owned())),
+        4
+    );
+    assert_eq!(
+        parse_inprocess_utility_worker_count(Some(" 3 ".to_owned())),
+        3
+    );
+    // Never a zero-worker pool: 0 clamps up to 1.
+    assert_eq!(
+        parse_inprocess_utility_worker_count(Some("0".to_owned())),
+        1
+    );
+}
+
+#[test]
+fn inprocess_utility_worker_ids_are_distinct_and_stable() {
+    // Index 0 keeps the configured id unchanged (a single-worker setup registers
+    // exactly as before); each extra worker gets a unique `-N` suffix so two loops
+    // never collide on registration.
+    assert_eq!(
+        inprocess_utility_worker_id("rust-utility-worker", 0),
+        "rust-utility-worker"
+    );
+    assert_eq!(
+        inprocess_utility_worker_id("rust-utility-worker", 1),
+        "rust-utility-worker-1"
+    );
+    assert_eq!(
+        inprocess_utility_worker_id("rust-utility-worker", 2),
+        "rust-utility-worker-2"
+    );
+    // Distinctness across a small pool.
+    let ids: std::collections::HashSet<_> = (0..4)
+        .map(|index| inprocess_utility_worker_id("host-a", index))
+        .collect();
+    assert_eq!(ids.len(), 4);
 }
 
 #[tokio::test]
@@ -11965,6 +12151,97 @@ fn tiered_turnkey_base_trains_on_bf16_tier() {
 }
 
 #[test]
+fn sdxl_family_tiered_turnkey_trains_on_its_bf16_unet_tier() {
+    // sc-10613: the SDXL family packs its backbone under `unet/`, never `transformer/`. The readiness
+    // gate tested `transformer/` only, so a fully-installed SDXL tiered turnkey (Illustrious) read as
+    // un-installed forever and Training Studio blocked submit — while the resolver happily pointed at
+    // the bf16 tier. Krea/LTX never caught this: they are DiTs and really do have `transformer/`.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+
+    // sc-10617: the real `illustrious_xl_v1_lora` registry target now bakes in the tiered-turnkey
+    // repo, so assert the registry entry itself — not a synthetic override — resolves to bf16 and
+    // gates on that tier. This pins that the shipped training target is training-ready off its turnkey.
+    let target = super::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|t| t.base_model == "illustrious_xl_v1")
+        .expect("illustrious_xl_v1 target");
+    assert_eq!(
+        target.base_model_repo.as_deref(),
+        Some("SceneWorks/illustrious-xl-v1-mlx"),
+        "the Illustrious v1 training target points at its tiered-turnkey re-host"
+    );
+    assert_eq!(
+        target.kernel, "sdxl_lora",
+        "Illustrious reuses the SDXL kernel"
+    );
+    let repo = target.base_model_repo.clone().expect("repo set");
+
+    let repo_root = huggingface_repo_cache_path(&data_dir, &repo).expect("repo cache path");
+    let revision = "abc123";
+    let snapshot = repo_root.join("snapshots").join(revision);
+    // Only the q4 GENERATION tier installed so far (no dense weights).
+    std::fs::create_dir_all(snapshot.join("q4").join("unet")).expect("q4 tree");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("create refs");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("write refs/main");
+
+    assert_eq!(
+        resolve_base_model_path(&target, &data_dir),
+        snapshot.join("bf16").display().to_string(),
+        "an SDXL tiered turnkey must resolve training to its dense bf16 tier"
+    );
+    assert!(
+        !training_base_model_installed(&data_dir, &target),
+        "a q4-only SDXL turnkey carries no dense weights → not training-ready"
+    );
+
+    std::fs::create_dir_all(snapshot.join("bf16").join("unet")).expect("bf16 unet");
+    std::fs::create_dir_all(snapshot.join("bf16").join("text_encoder")).expect("bf16 te");
+    std::fs::create_dir_all(snapshot.join("bf16").join("vae")).expect("bf16 vae");
+    assert!(
+        training_base_model_installed(&data_dir, &target),
+        "a bf16 tier with a unet/ backbone is training-ready"
+    );
+}
+
+#[test]
+fn flat_sdxl_snapshot_is_not_treated_as_a_tiered_turnkey() {
+    // Backward-compat guard for sc-10613: `unet/` at the snapshot root marks a FLAT diffusers tree
+    // (stabilityai/stable-diffusion-xl-base-1.0, Kwai-Kolors/Kolors-diffusers). It must resolve
+    // unchanged, never descend into a `bf16/` subdir — even if a stray tier dir sits alongside it.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+
+    let target = super::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|t| t.base_model == "sdxl")
+        .expect("sdxl target");
+    assert_eq!(
+        target.base_model_repo.as_deref(),
+        Some("stabilityai/stable-diffusion-xl-base-1.0"),
+        "the stock SDXL target still trains off the flat upstream diffusers repo"
+    );
+    let repo = target.base_model_repo.clone().expect("repo set");
+
+    let repo_root = huggingface_repo_cache_path(&data_dir, &repo).expect("repo cache path");
+    let revision = "def456";
+    let snapshot = repo_root.join("snapshots").join(revision);
+    for component in ["unet", "text_encoder", "vae", "bf16"] {
+        std::fs::create_dir_all(snapshot.join(component)).expect("component dir");
+    }
+    std::fs::create_dir_all(repo_root.join("refs")).expect("create refs");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("write refs/main");
+
+    assert_eq!(
+        resolve_base_model_path(&target, &data_dir),
+        snapshot.display().to_string(),
+        "a flat SDXL snapshot resolves to the snapshot root, not a bf16 tier"
+    );
+}
+
+#[test]
 fn resolve_base_model_path_prefers_converted_mlx_dir_for_conversion_models() {
     // `requiresConversion` models (Wan) keep usable weights in <data>/models/mlx/<id>, while the
     // HF cache holds only the native *source* checkpoint the converter consumes. Resolving Wan
@@ -12761,4 +13038,204 @@ async fn update_lora_edits_trigger_words_and_notes() {
         .expect("seeded LoRA present");
     assert_eq!(entry["triggerWords"], json!(["fresh", "tokens"]));
     assert_eq!(entry["notes"], "revised note");
+}
+
+/// A ComfyUI-style Wan adapter (keys taken from a real
+/// `wan2.2_t2v_lightx2v_*.safetensors`) written at `path`, parent dirs included.
+fn write_comfy_wan_adapter(path: &std::path::Path) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("adapter parent dir");
+    }
+    let keys: Vec<String> = [
+        "diffusion_model.blocks.0.cross_attn.k.lora_down.weight",
+        "diffusion_model.blocks.0.cross_attn.k.lora_up.weight",
+        "diffusion_model.blocks.0.cross_attn.v.lora_down.weight",
+        "diffusion_model.blocks.0.cross_attn.v.lora_up.weight",
+        "diffusion_model.blocks.0.self_attn.q.lora_down.weight",
+        "diffusion_model.blocks.0.self_attn.q.lora_up.weight",
+        "diffusion_model.blocks.0.ffn.0.lora_down.weight",
+        "diffusion_model.blocks.0.ffn.0.lora_up.weight",
+    ]
+    .iter()
+    .map(|key| (*key).to_owned())
+    .collect();
+    write_test_safetensors_with_keys(path, &keys);
+}
+
+/// epic 10451 / sc-10452: with an operator-configured external root, the LoRAs in a
+/// ComfyUI `models/loras` tree are surfaced by `GET /api/v1/loras` — read in place,
+/// never copied — and are read-only: not removable, and `DELETE` refuses them. We
+/// borrowed the user's file; we must not offer to destroy it.
+#[tokio::test]
+async fn external_root_loras_are_listed_read_only() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let comfy_root = temp_dir.path().join("ComfyUI").join("models");
+    // Nested, like the real tree (`loras/Wan/…`).
+    let adapter = comfy_root
+        .join("loras")
+        .join("Wan")
+        .join("detailz-wan.safetensors");
+    write_comfy_wan_adapter(&adapter);
+
+    let mut settings = test_settings(&temp_dir);
+    settings.external_model_roots = vec![comfy_root];
+    let app = create_app(settings).expect("app creates");
+
+    let (status, loras) = request(app.clone(), "GET", "/api/v1/loras", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let external = loras
+        .as_array()
+        .expect("loras array")
+        .iter()
+        .find(|lora| lora["scope"] == "external")
+        .expect("the ComfyUI adapter is surfaced");
+
+    assert_eq!(external["name"], "Wan/detailz-wan");
+    assert_eq!(external["family"], "wan-video");
+    assert_eq!(external["installState"], "installed");
+    // Read in place: the catalog points at the operator's own file, not a copy.
+    assert_eq!(
+        external["installedPath"].as_str().expect("installedPath"),
+        adapter
+            .canonicalize()
+            .expect("canonicalize")
+            .display()
+            .to_string()
+    );
+    // Never offer to delete a file we do not own.
+    assert_eq!(external["removable"], false);
+
+    let id = external["id"].as_str().expect("id");
+    assert!(id.starts_with("external_"), "ids are namespaced: {id}");
+
+    let (status, _) = request(
+        app,
+        "DELETE",
+        &format!("/api/v1/loras/{id}?scope=external"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "deleting an external LoRA must be refused"
+    );
+}
+
+/// The feature is off unless an operator opts in: with no external roots configured
+/// (the default), the catalog is exactly what the manifests declare.
+#[tokio::test]
+async fn no_external_roots_leaves_the_lora_catalog_unchanged() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let comfy_root = temp_dir.path().join("ComfyUI").join("models");
+    write_comfy_wan_adapter(&comfy_root.join("loras").join("ignored.safetensors"));
+
+    // Settings default to no external roots; the tree above is simply not looked at.
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, loras) = request(app, "GET", "/api/v1/loras", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !loras
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .any(|lora| lora["scope"] == "external"),
+        "no external rows without an operator-configured root"
+    );
+}
+
+/// sc-10452: the whole point of detecting a family on a scanned adapter is that the
+/// existing compatibility gate then treats it exactly like a manifest LoRA. Nothing
+/// declares `families` on an external row — `families_from_value_chain` falls back to
+/// the singular `family` key and normalizes it — so assert the gate end-to-end rather
+/// than trusting that fallback to survive a refactor.
+#[test]
+fn external_lora_family_is_detected_and_gates_model_compatibility() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let comfy_root = temp_dir.path().join("models");
+    write_comfy_wan_adapter(
+        &comfy_root
+            .join("loras")
+            .join("Wan")
+            .join("detailz-wan.safetensors"),
+    );
+
+    let mut cache = crate::external_loras::ExternalLoraCache::default();
+    let catalog =
+        crate::external_loras::scan_external_loras(std::slice::from_ref(&comfy_root), &mut cache);
+    let lora = catalog.first().expect("one scanned adapter");
+    // Read from the tensor keys, not the filename or folder.
+    assert_eq!(lora["family"], "wan-video");
+
+    let lora_id = lora["id"].as_str().expect("id").to_owned();
+    let attached = vec![json!({ "id": lora_id, "weight": 0.8 })];
+
+    // A Wan model accepts it: the detected family matches `loraCompatibility.families`.
+    let wan = vec![json!({
+        "id": "wan_2_2",
+        "loraCompatibility": { "families": ["wan-video"], "types": ["style"] }
+    })];
+    let accepted =
+        super::validate_lora_specs_for_model(&wan, &catalog, "wan_2_2", &attached, false, "LoRA")
+            .expect("a wan-video adapter is compatible with a wan-video model");
+    assert_eq!(accepted.len(), 1);
+
+    // A Z-Image model rejects the same adapter, naming the detected family.
+    let z_image = vec![json!({
+        "id": "z_image_turbo",
+        "loraCompatibility": { "families": ["z-image"], "types": ["style"] }
+    })];
+    let error = super::validate_lora_specs_for_model(
+        &z_image,
+        &catalog,
+        "z_image_turbo",
+        &attached,
+        false,
+        "LoRA",
+    )
+    .expect_err("a wan-video adapter is not compatible with a z-image model");
+    assert!(
+        error.detail.contains("wan-video"),
+        "the rejection names the detected family: {}",
+        error.detail
+    );
+}
+
+/// sc-10452: an adapter whose family the detector cannot identify (in the real tree:
+/// an LLM LoRA, and the ComfyUI Qwen-Image adapters of sc-10506) is still LISTED —
+/// the user pointed us at the folder and deserves to see we found the file — but the
+/// API **fails closed** when one is attached to a generation. We will not guess a
+/// family and load arbitrary tensors into a model.
+#[test]
+fn external_lora_without_a_detected_family_is_refused_at_job_create() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let comfy_root = temp_dir.path().join("models");
+    let adapter = comfy_root.join("loras").join("mystery.safetensors");
+    std::fs::create_dir_all(adapter.parent().expect("parent")).expect("mkdir");
+    write_test_safetensors_with_keys(&adapter, &["some.unknown.tensor".to_owned()]);
+
+    let mut cache = crate::external_loras::ExternalLoraCache::default();
+    let catalog =
+        crate::external_loras::scan_external_loras(std::slice::from_ref(&comfy_root), &mut cache);
+
+    // Listed, installed, but carrying no family.
+    let lora = catalog.first().expect("the adapter is still surfaced");
+    assert_eq!(lora["installState"], "installed");
+    assert!(lora.get("family").is_none(), "no family could be detected");
+
+    let attached = vec![json!({ "id": lora["id"].as_str().expect("id"), "weight": 0.8 })];
+    let models = vec![json!({
+        "id": "wan_2_2",
+        "loraCompatibility": { "families": ["wan-video"], "types": ["style"] }
+    })];
+
+    let error = super::validate_lora_specs_for_model(
+        &models, &catalog, "wan_2_2", &attached, false, "LoRA",
+    )
+    .expect_err("an unidentifiable adapter must not be loaded into a model");
+    assert!(
+        error.detail.contains("no declared family"),
+        "the refusal explains why: {}",
+        error.detail
+    );
 }

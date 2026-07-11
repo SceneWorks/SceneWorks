@@ -58,7 +58,10 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" | "flux2_dev" => {
             flux2_mlx_eligible(payload)
         }
-        "sdxl" | "realvisxl" => sdxl_mlx_eligible(payload),
+        // Illustrious-XL shares the `sdxl` engine and its full conditioning surface (epic 10609).
+        "sdxl" | "realvisxl" | "illustrious_xl_v1" | "illustrious_xl_v2" => {
+            sdxl_mlx_eligible(payload)
+        }
         "realvisxl_lightning" => realvisxl_lightning_mlx_eligible(payload),
         "instantid_realvisxl" => instantid_mlx_eligible(payload),
         "pulid_flux_dev" => pulid_flux_mlx_eligible(payload),
@@ -75,7 +78,9 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "krea_2_turbo" | "krea_2_raw" => krea_mlx_eligible(payload),
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => sd3_5_mlx_eligible(payload),
         "sana_1600m" | "sana_sprint_1600m" => sana_mlx_eligible(payload),
-        // Every model in MLX_ROUTED_MODELS must have an arm.
+        "anima_base" | "anima_aesthetic" | "anima_turbo" => anima_mlx_eligible(payload),
+        // Every model in MLX_ROUTED_MODELS must have an arm — enforced by
+        // `every_mlx_routed_model_has_a_dispatch_arm` below, not just by this comment.
         _ => false,
     }
 }
@@ -97,7 +102,10 @@ pub(crate) fn image_detail_mlx_eligible(job: &JobSnapshot) -> bool {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("realvisxl");
-    matches!(model, "sdxl" | "realvisxl")
+    matches!(
+        model,
+        "sdxl" | "realvisxl" | "illustrious_xl_v1" | "illustrious_xl_v2"
+    )
 }
 
 /// Whether the in-process MLX worker can serve this GPU job (image_generate or image_detail).
@@ -452,6 +460,20 @@ pub(crate) fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
 
+/// Anima base / aesthetic / turbo (epic 10512 / sc-10523) MLX-eligibility. The native `mlx-gen-anima`
+/// engine serves the **text-to-image** surface only — the manifest declares `capabilities:
+/// ["text_to_image"]` and the Cosmos-Predict2 DiT has no source/reference/edit path — so an
+/// `edit_image` request is rejected, the same defensive shape SANA / SD3.5 / Krea / Lens use. All
+/// three variants share the engine and differ only in checkpoint + step/guidance defaults.
+///
+/// Anima is `mlx_routed` with `candle_routed = false`, so this predicate is the ONLY thing that can
+/// make an Anima job claimable: the mlx worker refuses a job it is not eligible for
+/// (`worker_supports_job`) and no candle/torch lane advertises the family. A missing arm here left
+/// every Anima job queued on "Waiting for an available worker." forever.
+pub(crate) fn anima_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+}
+
 /// Epic 3018 routing (sc-3036, the video sibling of [`image_job_is_mlx_eligible`]):
 /// does this video job belong on the in-process Rust MLX worker? Encodes today's
 /// Python `create_video_adapter` MLX-eligibility (video_adapters.py) at the claim
@@ -706,4 +728,54 @@ pub(crate) fn training_plan_is_lokr(plan: &Map<String, Value>) -> bool {
         .and_then(|advanced| advanced.get("networkType"))
         .and_then(Value::as_str)
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("lokr"))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Map, Value};
+
+    use super::{image_request_mlx_eligible, MLX_ROUTED_MODELS};
+
+    /// Every id in [`MLX_ROUTED_MODELS`] must have a real arm in [`image_request_mlx_eligible`]'s
+    /// dispatch. An id that falls through to the `_ => false` catch-all is never MLX-eligible for
+    /// ANY payload, so the mlx worker refuses to claim it (`worker_supports_job`) — and for an
+    /// `mlx_routed`-only family (no candle/torch lane) the job then sits on "Waiting for an
+    /// available worker." forever. That is exactly how three Anima ids shipped in sc-10523: the
+    /// caps table gained `mlx_routed = true` rows, but `image_request_mlx_eligible` gained no arm,
+    /// and only a prose comment guarded the invariant.
+    ///
+    /// Encoded as reachability rather than by inspecting the `match`: a model HAS an arm iff some
+    /// payload makes it eligible. The probes below cover every conditioning shape the arms gate on
+    /// (plain t2i, edit + source, character + reference), so a model that answers `false` to all
+    /// three has no arm — or has one that can never fire, which strands jobs just as badly.
+    #[test]
+    fn every_mlx_routed_model_has_a_dispatch_arm() {
+        let probes = |model: &str| -> Vec<Map<String, Value>> {
+            let shapes = [
+                json!({ "model": model, "mode": "text_to_image" }),
+                json!({ "model": model, "mode": "edit_image", "sourceAssetId": "asset-1" }),
+                json!({ "model": model, "mode": "character_image", "referenceAssetId": "asset-1" }),
+            ];
+            shapes
+                .into_iter()
+                .map(|shape| shape.as_object().expect("probe is an object").clone())
+                .collect()
+        };
+
+        let stranded: Vec<&str> = MLX_ROUTED_MODELS
+            .iter()
+            .copied()
+            .filter(|model| {
+                !probes(model)
+                    .iter()
+                    .any(|payload| image_request_mlx_eligible(model, payload))
+            })
+            .collect();
+
+        assert!(
+            stranded.is_empty(),
+            "MLX_ROUTED_MODELS ids with no reachable arm in `image_request_mlx_eligible` — the mlx \
+             worker can never claim these, so their jobs queue forever: {stranded:?}"
+        );
+    }
 }

@@ -681,6 +681,130 @@ fn convert_sd3_prequant(
     Err("SD3.5 conversion requires macOS (mlx-gen-sd3); this model is macOS-only.".to_owned())
 }
 
+/// The THREE Anima variant DiTs (one per catalog id) under the ungated `circlestone-labs/Anima` repo,
+/// as repo-relative paths. A per-variant install/convert pulls exactly ONE of these + the two shared
+/// files below — three files, ~5.6 GB. Naming the bare repo would pull ~30 GB (it holds SEVEN full bf16
+/// DiTs: these three plus three `preview*` cuts and `aesthetic-v1.0b`, all out of scope). The manifest
+/// `downloads[].files` (sc-10523) MUST enumerate these exact paths and never the bare repo (the
+/// "30 GB trap"); `resolve_convert_plan` also validates a convert's `sourceFile` is one of these so a
+/// stray payload can't drag in an out-of-scope DiT.
+const ANIMA_DIT_FILES: &[&str] = &[
+    "split_files/diffusion_models/anima-base-v1.0.safetensors",
+    "split_files/diffusion_models/anima-aesthetic-v1.0.safetensors",
+    "split_files/diffusion_models/anima-turbo-v1.0.safetensors",
+];
+/// The shared dense Qwen3-0.6B text encoder, reused bf16 in every Anima tier (repo-relative).
+const ANIMA_TE_FILE: &str = "split_files/text_encoders/qwen_3_06b_base.safetensors";
+/// The shared dense Qwen-Image VAE, reused bf16 in every Anima tier (repo-relative).
+const ANIMA_VAE_FILE: &str = "split_files/vae/qwen_image_vae.safetensors";
+
+/// Test-only hardcoded regression pin for the Anima DiT quant-target partition, mirroring
+/// `mlx_gen_anima::is_dit_quant_target` (`true` UNLESS the base — a key minus its `.weight` suffix — is
+/// inside the bundled `AnimaTextConditioner`, `…llm_adapter.*`, kept dense bf16). The converter itself
+/// no longer uses this: `convert_anima_prequant` calls `mlx_gen_anima::quantize_anima_dit` directly
+/// (sc-10580 dedup — single source of the quant policy is the crate). This copy survives ONLY so
+/// `anima_dit_quant_predicate_matches_mlx_gen_anima_twin` can pin the exact partition against a
+/// hand-written table and — on macOS, where the crate is linked — assert the real crate predicate still
+/// matches it, so a future mlx-gen rev can't silently diverge. **Prefix-agnostic**: the base cut roots
+/// the DiT at `net` (base) and `model.diffusion_model` (turbo/aesthetic), so a hardcoded
+/// `net.llm_adapter.` predicate would leave the `model.diffusion_model.llm_adapter.*` conditioner
+/// UNPROTECTED and pack it to Q4 — `!contains` catches all roots.
+#[cfg(test)]
+fn anima_is_dit_quant_target(base: &str) -> bool {
+    !base.contains("llm_adapter.")
+}
+
+/// Anima `split_files/` source → the local convert-at-install MLX artifact with the full q4/q8/bf16
+/// MATRIX (epic 10512, sc-10517). Anima is **convert-at-install**: SceneWorks never redistributes
+/// converted weights, so all three tiers are produced ON-DEVICE from the ungated source in ONE job (the
+/// 2B DiT is small; packing is quick). Unlike the single-tier converters above, this writes THREE tier
+/// subdirs — `bf16/ q8/ q4/` — each a `diffusion_models/ text_encoders/ vae/` tree the Anima loader
+/// reads; the bespoke `anima_tier_subdir` resolver (image_jobs/base.rs) picks one at gen time by
+/// `mlxQuantize`. Only the Cosmos DiT is packed (via `mlx_gen_anima::quantize_anima_dit`, whose
+/// `is_dit_quant_target` predicate keeps the conditioner dense); the bundled
+/// `AnimaTextConditioner`, the Qwen3-0.6B TE, and the Qwen-Image VAE stay DENSE bf16 in every tier (the
+/// "dense-TE, transformer-only" quant policy the sibling converters share — a Q4 text-conditioning path
+/// degrades semantics). A top-level `model_index.json` marks the finished artifact so
+/// `mlx_catalog_status` injects `modelPath` (the converted ROOT holding the tier subdirs). The dense
+/// bf16 DiT + TE + VAE are ABSOLUTE symlinks (they survive the temp→final atomic rename). Runs MLX, so
+/// macOS-only.
+#[cfg(target_os = "macos")]
+fn convert_anima_prequant(
+    dit_source: &Path,
+    te_source: &Path,
+    vae_source: &Path,
+    dit_filename: &str,
+    out_dir: &Path,
+    group_size: i32,
+) -> Result<(), String> {
+    // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
+    for source in [dit_source, te_source, vae_source] {
+        if !source.is_file() {
+            return Err(format!(
+                "Anima source is missing `{}` — expected the ungated circlestone-labs/Anima \
+                 split_files/ (diffusion_models/<variant>.safetensors + the shared \
+                 text_encoders/qwen_3_06b_base.safetensors + vae/qwen_image_vae.safetensors).",
+                source.display()
+            ));
+        }
+    }
+    std::fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
+    // (subdir, None => dense bf16 passthrough | Some(bits) => pack the Cosmos DiT).
+    for (tier, bits) in [("bf16", None), ("q8", Some(8)), ("q4", Some(4))] {
+        let tier_dir = out_dir.join(tier);
+        for sub in ["diffusion_models", "text_encoders", "vae"] {
+            std::fs::create_dir_all(tier_dir.join(sub)).map_err(|error| error.to_string())?;
+        }
+        let dit_dst = tier_dir.join("diffusion_models").join(dit_filename);
+        match bits {
+            // Dense bf16: symlink the source DiT unchanged (absolute → survives the atomic rename).
+            None => {
+                let canonical =
+                    std::fs::canonicalize(dit_source).map_err(|error| error.to_string())?;
+                std::os::unix::fs::symlink(&canonical, &dit_dst)
+                    .map_err(|error| error.to_string())?;
+            }
+            // Packed: quantize ONLY the Cosmos DiT (the bundled conditioner stays dense) via the
+            // crate's install-time quantizer — the single source of the quant policy (sc-10580).
+            Some(bits) => mlx_gen_anima::quantize_anima_dit(dit_source, &dit_dst, bits, group_size)
+                .map_err(|error| format!("quantize Anima DiT: {error}"))?,
+        }
+        // Symlink the shared dense TE + VAE into every tier (absolute targets).
+        for (source, sub, name) in [
+            (te_source, "text_encoders", "qwen_3_06b_base.safetensors"),
+            (vae_source, "vae", "qwen_image_vae.safetensors"),
+        ] {
+            let canonical = std::fs::canonicalize(source).map_err(|error| error.to_string())?;
+            std::os::unix::fs::symlink(&canonical, tier_dir.join(sub).join(name))
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    // Diffusers-style marker so `mlx_catalog_status` treats the tree as a finished MLX artifact (it
+    // checks for `model_index.json` OR `config.json` at the converted root) and injects `modelPath`.
+    std::fs::write(
+        out_dir.join("model_index.json"),
+        "{\n  \"_class_name\": \"AnimaPipeline\"\n}\n",
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
+fn convert_anima_prequant(
+    _dit_source: &Path,
+    _te_source: &Path,
+    _vae_source: &Path,
+    _dit_filename: &str,
+    _out_dir: &Path,
+    _group_size: i32,
+) -> Result<(), String> {
+    Err(
+        "Anima conversion requires macOS (mlx-gen quantization); this model is macOS-only."
+            .to_owned(),
+    )
+}
+
 /// The base `Lightricks/LTX-2.3` latent upsampler the LTX loader hard-requires (emitted as
 /// `upsampler.safetensors` in the converted dir). Neither the eros nor the base single-file
 /// checkpoint bundles it, so the converter merges it from the base repo at convert time.
@@ -754,6 +878,19 @@ enum ConvertPlan {
         bits: i32,
         group_size: i32,
     },
+    /// Anima `split_files/` source → the local q4/q8/bf16 MATRIX in ONE job (sc-10517, epic 10512):
+    /// pack the variant's Cosmos DiT at q8 + q4 and passthrough the dense bf16 DiT, symlinking the
+    /// shared dense Qwen3 TE + Qwen-Image VAE into all three tier subdirs. Convert-at-install (never
+    /// redistributed); the bespoke `anima_tier_subdir` resolver picks a tier at gen time. `dit_source`
+    /// is the variant DiT (payload `sourceFile`); `dit_filename` is preserved so the loader's
+    /// `Variant::dit_filename()` resolves it.
+    Anima {
+        dit_source: PathBuf,
+        te_source: PathBuf,
+        vae_source: PathBuf,
+        dit_filename: String,
+        group_size: i32,
+    },
 }
 
 /// A user-facing reason a conversion can't proceed (missing checkpoint, unknown converter, …). The
@@ -801,6 +938,17 @@ async fn resolve_convert_plan(
     let model_id = required_payload_string(&job.payload, "modelId")?;
     let source_repo = required_payload_string(&job.payload, "sourceRepo")?;
     let converter = optional_payload_string(&job.payload, "converter").unwrap_or_default();
+    // Reject any non-empty converter that is not in the shared registry up front, so this resolver's
+    // recognized set is derived from `NATIVE_CONVERTERS` — the same const the convert-gap gate derives
+    // its allow-list from. This guarantees the gate can never be stricter than the set of arms below,
+    // the exact drift that shipped as sc-10573 (`ltx_video` handled here but missing from the gate).
+    // The empty ("" = no converter configured) case still falls through to its own arm below.
+    if !converter.is_empty() && !NATIVE_CONVERTERS.contains(&converter) {
+        return Ok(Err(ConvertPlanError {
+            message: "Unknown MLX converter.",
+            detail: format!("Unrecognized mlx.converter '{converter}' for {model_id}."),
+        }));
+    }
     let plan = match converter {
         "flux2_klein_diffusers" => {
             let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
@@ -899,6 +1047,59 @@ async fn resolve_convert_plan(
                 source_dir: checkpoint_dir.to_path_buf(),
                 variant,
                 bits,
+                group_size,
+            }
+        }
+        // Anima (epic 10512, sc-10517) — convert-at-install with a q4/q8/bf16 MATRIX built in ONE job
+        // from the ungated circlestone-labs/Anima `split_files/`. `sourceFile` (= manifest
+        // `convertSourceFile`) is the variant's DiT repo-relative path; the Qwen3 TE + Qwen-Image VAE
+        // are the shared files reused dense in every tier. `quantizeBits` is IGNORED (the converter
+        // always emits all three tiers); the default group size is 64. Validate `sourceFile` is one of
+        // the three shipped DiTs so a stray payload can't pull an out-of-scope cut (preview*/aesthetic-b).
+        "anima_quant" => {
+            let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
+            if !ANIMA_DIT_FILES.contains(&source_file_name.as_str()) {
+                return Ok(Err(ConvertPlanError {
+                    message: "Unknown Anima source DiT.",
+                    detail: format!(
+                        "sourceFile '{source_file_name}' is not one of the three shipped Anima \
+                         variant DiTs (the preview cuts and aesthetic-v1.0b are out of scope)."
+                    ),
+                }));
+            }
+            let group_size = job
+                .payload
+                .get("quantizeGroupSize")
+                .and_then(Value::as_u64)
+                .map_or(64, |group| group as i32);
+            let dit_source = checkpoint_dir.join(&source_file_name);
+            let dit_filename = Path::new(&source_file_name)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&source_file_name)
+                .to_owned();
+            if !dit_source.is_file() {
+                return Ok(Err(ConvertPlanError {
+                    message: "Anima source DiT is missing.",
+                    detail: format!("Expected {source_file_name} in {source_repo}."),
+                }));
+            }
+            let te_source = checkpoint_dir.join(ANIMA_TE_FILE);
+            let vae_source = checkpoint_dir.join(ANIMA_VAE_FILE);
+            if !te_source.is_file() || !vae_source.is_file() {
+                return Ok(Err(ConvertPlanError {
+                    message: "Anima shared components are missing.",
+                    detail: format!(
+                        "Expected {ANIMA_TE_FILE} and {ANIMA_VAE_FILE} in {source_repo} (the shared \
+                         dense Qwen3 text encoder + Qwen-Image VAE reused in every tier)."
+                    ),
+                }));
+            }
+            ConvertPlan::Anima {
+                dit_source,
+                te_source,
+                vae_source,
+                dit_filename,
                 group_size,
             }
         }
@@ -1156,6 +1357,25 @@ pub(crate) async fn run_model_convert_job(
         } => {
             tokio::task::spawn_blocking(move || {
                 convert_sd3_prequant(&source_dir, &temp, variant, bits, group_size)
+            })
+            .await
+        }
+        ConvertPlan::Anima {
+            dit_source,
+            te_source,
+            vae_source,
+            dit_filename,
+            group_size,
+        } => {
+            tokio::task::spawn_blocking(move || {
+                convert_anima_prequant(
+                    &dit_source,
+                    &te_source,
+                    &vae_source,
+                    &dit_filename,
+                    &temp,
+                    group_size,
+                )
             })
             .await
         }
@@ -2536,6 +2756,247 @@ mod hardlink_tests {
             b"tokenizer-bytes",
             "the blob itself must be untouched"
         );
+    }
+}
+
+#[cfg(test)]
+mod anima_convert_tests {
+    use super::*;
+
+    /// The "30 GB trap" guard (sc-10517): an Anima install pulls EXACTLY the enumerated source files —
+    /// three variant DiTs + the two shared components — never the bare repo (which holds SEVEN full
+    /// bf16 DiTs, ~30 GB). Every path is a concrete file under `split_files/`, never an empty/repo-only
+    /// entry (a whole-snapshot pull), and the union is the FIVE distinct files the manifest
+    /// `downloads[].files` (sc-10523) must enumerate. A per-variant install is 3 of these (its DiT + the
+    /// two shared), ~5.6 GB.
+    #[test]
+    fn source_file_plan_is_five_exact_paths_never_the_bare_repo() {
+        let all: Vec<&str> = ANIMA_DIT_FILES
+            .iter()
+            .copied()
+            .chain([ANIMA_TE_FILE, ANIMA_VAE_FILE])
+            .collect();
+        assert_eq!(all.len(), 5, "exactly 5 source files (3 DiT + TE + VAE)");
+        for path in &all {
+            // A concrete nested file — never the bare repo (which a whole-snapshot pull, i.e. an empty
+            // `files` list, would be).
+            assert!(!path.trim().is_empty(), "no empty (bare-repo) path");
+            assert!(
+                path.starts_with("split_files/") && path.ends_with(".safetensors"),
+                "{path} must be a concrete split_files/*.safetensors path"
+            );
+        }
+        assert_eq!(ANIMA_DIT_FILES.len(), 3, "the three shipped variant DiTs");
+        for dit in ANIMA_DIT_FILES {
+            assert!(dit.contains("/diffusion_models/anima-"), "{dit}");
+            // The 3 preview cuts and aesthetic-v1.0b are explicitly out of scope.
+            assert!(
+                !dit.contains("preview") && !dit.contains("v1.0b"),
+                "{dit} is an out-of-scope cut"
+            );
+        }
+        let mut uniq = all.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(
+            uniq.len(),
+            5,
+            "the 5 source paths are distinct (no double-pull)"
+        );
+    }
+
+    /// The "prefix trap" guard (sc-10517): the DiT quant-target predicate keeps the bundled
+    /// `AnimaTextConditioner` DENSE for ALL THREE checkpoint roots — base roots the DiT at `net`,
+    /// turbo/aesthetic at `model.diffusion_model`. The story's original "split on `net.llm_adapter.`"
+    /// would have left the `model.diffusion_model.llm_adapter.*` conditioner UNPROTECTED (packed to Q4,
+    /// dropping 134.7M params to garbage). This exercises BOTH roots, so a test covering only `net`
+    /// would NOT have caught that hardcoded-prefix bug — this one does.
+    #[test]
+    fn quant_target_keeps_conditioner_dense_for_both_dit_roots() {
+        for root in ["net", "model.diffusion_model"] {
+            // Bundled conditioner projections — kept DENSE for both roots.
+            assert!(!anima_is_dit_quant_target(&format!(
+                "{root}.llm_adapter.blocks.0.self_attn.q_proj"
+            )));
+            assert!(!anima_is_dit_quant_target(&format!(
+                "{root}.llm_adapter.out_proj"
+            )));
+            assert!(!anima_is_dit_quant_target(&format!(
+                "{root}.llm_adapter.embed"
+            )));
+            // Cosmos DiT projections — PACKED for both roots.
+            assert!(anima_is_dit_quant_target(&format!(
+                "{root}.blocks.0.self_attn.q_proj"
+            )));
+            assert!(anima_is_dit_quant_target(&format!(
+                "{root}.final_layer.linear"
+            )));
+            assert!(anima_is_dit_quant_target(&format!(
+                "{root}.t_embedder.1.linear_1"
+            )));
+        }
+    }
+
+    /// Equivalence pin for the Anima DiT quant-target partition. The worker no longer duplicates the
+    /// packer: `convert_anima_prequant` calls `mlx_gen_anima::quantize_anima_dit` directly (sc-10580),
+    /// so the crate's `is_dit_quant_target` is now the single source of the "DiT ⇒ quantize, bundled
+    /// conditioner ⇒ dense" policy. This test keeps a hand-written table as an INDEPENDENT pin and, on
+    /// macOS (where the crate is linked), asserts the real `mlx_gen_anima::is_dit_quant_target` still
+    /// matches it — so a future mlx-gen rev bump that silently repartitions the checkpoint (e.g. drops
+    /// the `!contains("llm_adapter.")` rule and packs the conditioner to Q4) fails HERE. The
+    /// `anima_is_dit_quant_target` local copy is the platform-independent half of the pin. Covers BOTH
+    /// checkpoint roots (`net` = base, `model.diffusion_model` = aesthetic/turbo) and BOTH conditioner
+    /// forms; see `mlx-gen-anima/src/convert.rs`.
+    #[test]
+    fn anima_dit_quant_predicate_matches_mlx_gen_anima_twin() {
+        // (key minus `.weight`, expected) — true ⇒ pack as Cosmos DiT, false ⇒ keep dense.
+        let cases: &[(&str, bool)] = &[
+            // Bundled AnimaTextConditioner (`…llm_adapter.*`) — DENSE on BOTH roots / BOTH forms.
+            ("net.llm_adapter.blocks.0.self_attn.q_proj", false),
+            ("net.llm_adapter.out_proj", false),
+            ("model.diffusion_model.llm_adapter.blocks.0.mlp.fc1", false),
+            ("model.diffusion_model.llm_adapter.embed", false),
+            // Cosmos DiT — PACKED on BOTH roots.
+            ("net.blocks.0.self_attn.q_proj", true),
+            ("net.final_layer.linear", true),
+            ("model.diffusion_model.blocks.0.self_attn.q_proj", true),
+            ("model.diffusion_model.t_embedder.1.linear_1", true),
+        ];
+        for (key, expected) in cases {
+            assert_eq!(
+                anima_is_dit_quant_target(key),
+                *expected,
+                "partition drift for `{key}` — must match mlx_gen_anima::convert::is_dit_quant_target"
+            );
+            // On macOS the crate is linked: assert the REAL predicate the converter now delegates to
+            // (`convert_anima_prequant` → `mlx_gen_anima::quantize_anima_dit` → this) still matches the
+            // pinned table, so a future mlx-gen rev can't silently repartition the checkpoint.
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                mlx_gen_anima::is_dit_quant_target(key),
+                *expected,
+                "crate drift for `{key}` — mlx_gen_anima::is_dit_quant_target diverged from the pin"
+            );
+        }
+    }
+}
+
+/// sc-10573 drift guard (the worker half of the convert-gap allow-list check). Pins the shared
+/// `NATIVE_CONVERTERS` registry to the actual `resolve_convert_plan` arms so the two can never drift:
+/// the convert-gap gate in `sceneworks-core` derives its allow-list from that same const, so keeping
+/// it in lockstep with the arms here keeps the gate no stricter (and no looser) than what the worker
+/// can really convert.
+#[cfg(test)]
+mod convert_registry_tests {
+    use super::*;
+
+    /// A `Settings` with just enough to construct an `ApiClient`; every download/limit field is inert
+    /// for `resolve_convert_plan`'s converter-recognition path (no network is reached — each arm
+    /// returns its own missing-source error before any fetch).
+    fn minimal_settings(data_dir: PathBuf) -> Settings {
+        Settings {
+            api_url: "http://127.0.0.1:0".to_owned(),
+            access_token: None,
+            data_dir,
+            config_dir: PathBuf::from("config"),
+            worker_id: "test-worker".to_owned(),
+            gpu_id: "cpu".to_owned(),
+            is_child_worker: true,
+            poll_seconds: 1,
+            heartbeat_seconds: 5,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            // Values irrelevant to this test (no URL work happens); the byte-limit defaults.
+            max_lora_url_bytes: 8u64 * 1024 * 1024 * 1024,
+            max_model_url_bytes: 256u64 * 1024 * 1024 * 1024,
+            allow_private_lora_urls: true,
+            utility_workers: 1,
+            backend_mlx_enabled: true,
+            backend_candle_enabled: false,
+            gpu_memory_limit_bytes: 0,
+            external_model_roots: Vec::new(),
+        }
+    }
+
+    /// A `model_convert` `JobSnapshot` carrying `converter`. It also carries `sourceFile`/`baseRepo`
+    /// so the arms that `required_payload_string(..)` those before their existence checks reach their
+    /// own (converter-specific) failure — never an infra `?` error out of `resolve_convert_plan`.
+    fn convert_job(converter: &str) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job-convert-registry-test",
+            "type": "model_convert",
+            "status": "running",
+            "projectId": null,
+            "projectName": null,
+            "payload": {
+                "modelId": "test_model",
+                "sourceRepo": "org/test-repo",
+                "converter": converter,
+                "sourceFile": "model.safetensors",
+                "baseRepo": "org/base-repo"
+            },
+            "result": {},
+            "requestedGpu": "auto",
+            "assignedGpu": null,
+            "workerId": null,
+            "progress": 0.0,
+            "stage": "queued",
+            "message": "",
+            "error": null,
+            "etaSeconds": null,
+            "elapsedSeconds": null,
+            "attempts": 0,
+            "sourceJobId": null,
+            "duplicateOfJobId": null,
+            "cancelRequested": false,
+            "createdAt": "2026-07-10T00:00:00Z",
+            "updatedAt": "2026-07-10T00:00:00Z",
+            "startedAt": null,
+            "completedAt": null,
+            "canceledAt": null,
+            "lastHeartbeatAt": null
+        }))
+        .expect("valid model_convert JobSnapshot")
+    }
+
+    /// Every id in `NATIVE_CONVERTERS` is a REAL `resolve_convert_plan` arm — it resolves to a plan or
+    /// an arm-specific error, never the "Unknown MLX converter." fallback — and a bogus id IS rejected
+    /// as unknown. Failure-capable: adding a nonexistent id to the const (no arm) makes it fall to the
+    /// "Unknown MLX converter." path and this test goes RED; the bogus-id case proves the check isn't
+    /// vacuously accepting every string.
+    #[tokio::test]
+    async fn native_converters_match_resolve_convert_plan_arms() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let settings = minimal_settings(tmp.path().to_path_buf());
+        let api = ApiClient::new(&settings);
+        let checkpoint_dir = tmp.path();
+
+        for &converter in NATIVE_CONVERTERS {
+            let job = convert_job(converter);
+            let resolved = resolve_convert_plan(&api, &settings, &job, checkpoint_dir, None)
+                .await
+                .expect("resolver runs without an infra error");
+            if let Err(err) = &resolved {
+                assert_ne!(
+                    err.message, "Unknown MLX converter.",
+                    "'{converter}' is in NATIVE_CONVERTERS but resolve_convert_plan has no arm for it \
+                     — the gate would allow a convert the worker rejects (sc-10573)"
+                );
+            }
+        }
+
+        // A converter NOT in the registry is rejected as unknown — proving the check above is
+        // meaningful and that the fallback still fires.
+        let bogus = convert_job("definitely_not_a_real_converter");
+        let resolved = resolve_convert_plan(&api, &settings, &bogus, checkpoint_dir, None)
+            .await
+            .expect("resolver runs without an infra error");
+        match resolved {
+            Err(err) => assert_eq!(err.message, "Unknown MLX converter."),
+            Ok(_) => panic!("a bogus converter must not resolve to a plan"),
+        }
     }
 }
 

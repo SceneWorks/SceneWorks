@@ -1,6 +1,7 @@
 use super::*;
 
 use sceneworks_core::credentials::normalize_host;
+use sceneworks_core::lora_family::is_hidden_file;
 
 const ALLOWED_MODEL_TYPES: &[&str] = &["image", "video", "utility"];
 const MODEL_SIZE_CACHE_LIMIT: usize = 64;
@@ -1265,7 +1266,66 @@ fn apply_variant_fields(object: &mut JsonObject, data_dir: &FsPath) {
     object.insert("variants".to_owned(), Value::Array(variants));
 }
 
+/// The convert-output quant tiers present under a converted MLX dir (sc-10730), highest-fidelity first.
+/// Convert-at-install models (e.g. Anima) write `<converted>/<tier>/<backbone>/…` for each of
+/// bf16/q8/q4 in ONE convert job — the tiers are convert OUTPUTS, not per-tier downloads. This lets the
+/// Studio offer a generation-time tier picker via the decoupled `mlxTiers` catalog field WITHOUT the
+/// download variant-matrix (`hasVariantMatrix`), whose `QuantDownloadPanel` would render bogus per-tier
+/// download buttons for a model that has no per-tier download. Empty for a flat converted dir (no tier
+/// subdirs) → the web renders no picker. Mirrors the worker tier resolvers' "tier present" probe so the
+/// catalog and `anima_tier_subdir` agree on which tiers are loadable.
+fn mlx_convert_output_tiers(converted_dir: &FsPath) -> Vec<&'static str> {
+    ["bf16", "q8", "q4"]
+        .into_iter()
+        .filter(|tier| tier_subdir_has_weights(&converted_dir.join(tier)))
+        .collect()
+}
+
+/// Whether a converted tier subdir holds loadable weights: a non-hidden `.safetensors` / `.index.json`
+/// under a known backbone dir (`diffusion_models/` for Anima's Cosmos DiT, `transformer/` for other
+/// DiTs, `unet/` for SDXL) or flat in the tier dir. A hidden `._*` AppleDouble sidecar is not a weight
+/// (SceneWorks#1333), mirroring the worker resolvers.
+fn tier_subdir_has_weights(tier_dir: &FsPath) -> bool {
+    if !tier_dir.is_dir() {
+        return false;
+    }
+    let dir_has_weight = |dir: &FsPath| -> bool {
+        std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                !name.starts_with("._")
+                    && (name.ends_with(".safetensors") || name.ends_with(".index.json"))
+            })
+        })
+    };
+    // A known backbone subdir (`diffusion_models/` Anima, `transformer/` DiTs, `unet/` SDXL), or flat
+    // in the tier dir itself.
+    dir_has_weight(tier_dir)
+        || ["diffusion_models", "transformer", "unet"]
+            .into_iter()
+            .any(|sub| dir_has_weight(&tier_dir.join(sub)))
+}
+
 fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
+    // Per-model quality FLOOR (sc-10731, epic 10721): surface the manifest `mlx.minQualityTier` as a
+    // top-level `minQualityTier` so the web `defaultTierSelection` can clamp the DEFAULT generation tier
+    // UP to it (a floored model — Anima base/aesthetic = q8 — never lets a low global "default quality"
+    // setting land the default on the washed q4). An EXPLICIT picker pick below the floor is still
+    // honored, with a non-blocking advisory. Decoupled top-level field, mirroring `mlxTiers` — the web
+    // reads one stable key rather than reaching into the passed-through `mlx` sub-object. Emitted on every
+    // platform where the manifest declares it (the picker only renders where >1 tier installs, but the
+    // field is cheap and lets any surface read the floor). Only bf16/q8/q4 are valid; others are dropped.
+    if let Some(floor) = object
+        .get("mlx")
+        .and_then(|mlx| mlx.get("minQualityTier"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|tier| matches!(*tier, "bf16" | "q8" | "q4"))
+        .map(str::to_owned)
+    {
+        object.insert("minQualityTier".to_owned(), Value::String(floor));
+    }
     let mac_support = {
         let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
         let model_type = object
@@ -1283,6 +1343,15 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
         None
     };
     if let Some(status) = mlx_status {
+        // Generation-time tier picker for convert-at-install models (sc-10730): surface the on-disk
+        // convert-output tiers as `mlxTiers`, DECOUPLED from `hasVariantMatrix` so the Models download
+        // panel is untouched. Only when the model is actually converted (its tier subdirs exist).
+        if let Some(converted) = status.converted_path.as_deref() {
+            let tiers = mlx_convert_output_tiers(converted);
+            if !tiers.is_empty() {
+                object.insert("mlxTiers".to_owned(), json!(tiers));
+            }
+        }
         object.insert(
             "mlxInstallState".to_owned(),
             Value::String(status.install_state.to_owned()),
@@ -1345,6 +1414,11 @@ async fn model_catalog_inner(
     .await;
 
     let data_dir = state.settings.data_dir.clone();
+    // sc-10667: surface assembled external ComfyUI base models alongside the manifest
+    // catalog. Cloned before the blocking closure, mirroring the external-LoRA merge in
+    // `lora_catalog`; the scan is filesystem-bound and runs on the blocking pool below.
+    let external_roots = state.settings.external_model_roots.clone();
+    let external_base_cache = state.external_base_model_cache.clone();
     // sc-4202 (F-API-3): the per-model install-state probes below hit the filesystem
     // (huggingface_cache_health snapshot walks, model_is_installed, mlx_catalog_status)
     // for every model. Assemble the catalog on the blocking pool so these synchronous
@@ -1457,6 +1531,16 @@ async fn model_catalog_inner(
             apply_gating_fields(object);
             apply_mac_and_mlx_fields(object, &data_dir);
         }
+        // Append assembled external base models (empty unless external roots are
+        // configured; always empty on macOS). They carry their own catalogScope /
+        // installState / usable fields and deliberately skip the manifest
+        // install-state sweep above, exactly as external LoRAs skip
+        // `normalize_lora_entry` in `lora_catalog`.
+        let external = {
+            let mut cache = external_base_cache.lock();
+            crate::external_base_models::scan_external_base_models(&external_roots, &mut cache)
+        };
+        models.extend(external);
         models.sort_by(|left, right| {
             let left_key = (
                 left.get("type").and_then(Value::as_str).unwrap_or_default(),
@@ -1491,6 +1575,27 @@ pub(crate) async fn resolve_model_manifest_entry(
     state: &AppState,
     model_id: &str,
 ) -> Result<Value, ApiError> {
+    // External ComfyUI base models (epic 10451 Phase 2, sc-10667/10668) are synthesized in the
+    // catalog, not declared in a jsonc manifest, so the jsonc lookup below would return `{}` and
+    // the worker would never receive their `components[]` (the DiT/TE/VAE paths). Forward the
+    // assembled row for an `external_base_*` id instead, so the worker can load them in place.
+    // Blocking FS scan → run on the blocking pool, mirroring `model_catalog`.
+    if model_id.starts_with(crate::external_base_models::EXTERNAL_ID_PREFIX) {
+        let roots = state.settings.external_model_roots.clone();
+        let cache = state.external_base_model_cache.clone();
+        let id = model_id.to_owned();
+        let row = tokio::task::spawn_blocking(move || {
+            let mut cache = cache.lock();
+            crate::external_base_models::scan_external_base_models(&roots, &mut cache)
+                .into_iter()
+                .find(|row| row.get("id").and_then(Value::as_str) == Some(id.as_str()))
+        })
+        .await
+        .map_err(|err| ApiError::internal(format!("external base scan task failed: {err}")))?;
+        // Absent (root unconfigured, file vanished) → `{}`, the same fall-back the worker already
+        // handles for an unknown model id.
+        return Ok(row.unwrap_or_else(|| json!({})));
+    }
     let manifest_dir = state.settings.config_dir.join("manifests");
     let builtin =
         load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
@@ -1905,9 +2010,10 @@ fn diffusers_component_requires_weights(component: &str, class_name: &str) -> bo
 fn diffusers_component_dir_nonempty(snapshot: &FsPath, component: &str) -> bool {
     std::fs::read_dir(snapshot.join(component))
         .map(|entries| {
-            entries
-                .flatten()
-                .any(|entry| path_is_readable_file(&entry.path()))
+            entries.flatten().any(|entry| {
+                let path = entry.path();
+                !is_hidden_file(&path) && path_is_readable_file(&path)
+            })
         })
         .unwrap_or(false)
 }
@@ -1924,7 +2030,8 @@ fn diffusers_component_has_weight_file(snapshot: &FsPath, component: &str) -> bo
             .and_then(|value| value.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        path_is_readable_file(&path)
+        !is_hidden_file(&path)
+            && path_is_readable_file(&path)
             && (name.ends_with(".safetensors")
                 || name.ends_with(".bin")
                 || name.ends_with(".msgpack")
@@ -1943,6 +2050,12 @@ fn snapshot_has_payload_file(snapshot: &FsPath) -> bool {
     })
 }
 
+/// Every readable file under `snapshot`, snapshot-relative, `/`-separated.
+///
+/// Hidden entries are excluded. They are not payload, and — because this list backs
+/// [`snapshot_contains_pattern`]'s glob branch — a `._model.safetensors` sidecar would
+/// otherwise satisfy a required `*.safetensors` pattern, reporting a model installed
+/// while its real weights file is absent (SceneWorks#1333).
 fn snapshot_files(snapshot: &FsPath) -> Vec<String> {
     let mut output = Vec::new();
     let mut stack = vec![snapshot.to_path_buf()];
@@ -1954,6 +2067,8 @@ fn snapshot_files(snapshot: &FsPath) -> Vec<String> {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
+            } else if is_hidden_file(&path) {
+                continue;
             } else if path_is_readable_file(&path) {
                 if let Ok(relative) = path.strip_prefix(snapshot) {
                     output.push(relative.to_string_lossy().replace('\\', "/"));
@@ -2610,5 +2725,132 @@ mod variant_install_tests {
                 .and_then(|d| d.get("variant").and_then(Value::as_str).map(str::to_owned)),
             Some("q4".to_owned())
         );
+    }
+}
+
+#[cfg(test)]
+mod mlx_tier_probe_tests {
+    use super::*;
+
+    fn write_weight(dir: &std::path::Path, backbone: &str, file: &str) {
+        let d = dir.join(backbone);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(file), b"x").unwrap();
+    }
+
+    #[test]
+    fn convert_output_tiers_probes_diffusion_models_highest_first_ignoring_appledouble() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Anima layout: <tier>/diffusion_models/<dit>.safetensors present for bf16 + q8; q4 has only a
+        // hidden `._` AppleDouble sidecar, which must NOT count as a loadable tier (SceneWorks#1333).
+        write_weight(
+            &root.join("bf16"),
+            "diffusion_models",
+            "anima-base-v1.0.safetensors",
+        );
+        write_weight(
+            &root.join("q8"),
+            "diffusion_models",
+            "anima-base-v1.0.safetensors",
+        );
+        write_weight(
+            &root.join("q4"),
+            "diffusion_models",
+            "._anima-base-v1.0.safetensors",
+        );
+        // Highest-fidelity first, q4 excluded.
+        assert_eq!(mlx_convert_output_tiers(root), vec!["bf16", "q8"]);
+    }
+
+    #[test]
+    fn convert_output_tiers_handles_transformer_flat_and_empty_layouts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_weight(&root.join("q8"), "transformer", "model.safetensors");
+        // Flat layout: a sharded index sits directly in the tier dir (no backbone subdir).
+        std::fs::create_dir_all(root.join("bf16")).unwrap();
+        std::fs::write(
+            root.join("bf16")
+                .join("diffusion_pytorch_model.safetensors.index.json"),
+            b"x",
+        )
+        .unwrap();
+        assert_eq!(mlx_convert_output_tiers(root), vec!["bf16", "q8"]);
+        // A flat converted dir (no tier subdirs) yields no tiers → the web renders no picker.
+        let flat = tempfile::tempdir().unwrap();
+        std::fs::write(flat.path().join("model_index.json"), b"{}").unwrap();
+        assert!(mlx_convert_output_tiers(flat.path()).is_empty());
+    }
+
+    // Full catalog path: a converted convert-at-install model (Anima) emits `mlxTiers` from
+    // `apply_mac_and_mlx_fields`, so /models carries the Studio picker data. macOS-only (the mlx status
+    // probe is `cfg!(target_os = "macos")`).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn catalog_emits_mlxtiers_for_converted_anima() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let converted = data_dir.join("models").join("mlx").join("anima_base");
+        std::fs::create_dir_all(&converted).unwrap();
+        std::fs::write(converted.join("model_index.json"), b"{}").unwrap();
+        for tier in ["bf16", "q8", "q4"] {
+            let dm = converted.join(tier).join("diffusion_models");
+            std::fs::create_dir_all(&dm).unwrap();
+            std::fs::write(dm.join("anima-base-v1.0.safetensors"), b"x").unwrap();
+        }
+        let mut object = json!({
+            "id": "anima_base",
+            "type": "image",
+            "mlx": { "requiresConversion": true }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        apply_mac_and_mlx_fields(&mut object, data_dir);
+        assert_eq!(
+            object.get("mlxConversionState").and_then(Value::as_str),
+            Some("converted")
+        );
+        let tiers: Vec<&str> = object
+            .get("mlxTiers")
+            .and_then(Value::as_array)
+            .expect("mlxTiers emitted")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(tiers, vec!["bf16", "q8", "q4"]);
+        // Decoupled from the download matrix — the picker must NOT flip `hasVariantMatrix`.
+        assert!(object.get("hasVariantMatrix").is_none());
+    }
+
+    // Per-model quality floor (sc-10731): `apply_mac_and_mlx_fields` surfaces the manifest
+    // `mlx.minQualityTier` as a top-level `minQualityTier` so the web can clamp the DEFAULT tier up to
+    // it. Platform-independent (not gated on the macOS mlx-status probe), and only a valid bf16/q8/q4
+    // value is emitted — a bogus floor is dropped, an absent floor emits nothing.
+    #[test]
+    fn catalog_emits_min_quality_floor_from_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let apply = |mlx: Value| {
+            let mut object = json!({ "id": "anima_base", "type": "image", "mlx": mlx })
+                .as_object()
+                .unwrap()
+                .clone();
+            apply_mac_and_mlx_fields(&mut object, data_dir);
+            object
+                .get("minQualityTier")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        // A declared q8 floor is surfaced verbatim as a top-level field.
+        assert_eq!(
+            apply(json!({ "minQualityTier": "q8" })),
+            Some("q8".to_owned())
+        );
+        // A model with no floor emits nothing (default absent = q4-tolerant, no clamp).
+        assert_eq!(apply(json!({ "requiresConversion": true })), None);
+        // An invalid floor value is dropped rather than surfaced.
+        assert_eq!(apply(json!({ "minQualityTier": "q2" })), None);
     }
 }

@@ -22,15 +22,29 @@ const SDXL_EDIT_CANDLE_DEFAULT_GUIDANCE: f32 = 5.0;
 /// `candle_sdxl` and the `candle_sdxl_ipadapter` lanes).
 const SDXL_EDIT_CANDLE_ENGINE: &str = "candle_sdxl_edit";
 
-/// SDXL model ids the candle edit route accepts (the txt2img-eligible SDXL family).
+/// SDXL model ids the candle edit route accepts (the txt2img-eligible SDXL family). Must stay in
+/// lockstep with `jobs_store::routing::candle::image_request_candle_lane`'s `sdxl_edit_candle_eligible`
+/// guard — a model the router sends here but this rejects lands in a lane that then refuses it.
 fn is_sdxl_edit_candle_model(model: &str) -> bool {
-    matches!(model, "sdxl" | "realvisxl")
+    matches!(
+        model,
+        "sdxl" | "realvisxl" | "illustrious_xl_v1" | "illustrious_xl_v2"
+    )
 }
 
 /// Default SDXL base repo for a model id when the manifest omits `repo`.
+///
+/// `sdxl` and `realvisxl` name FLAT upstream diffusers snapshots (the conditioning fallback when the
+/// manifest omits `repo`, per sc-10614). Illustrious has no such upstream — OnomaAI ship a single-file
+/// LDM checkpoint — so it names its tiered turnkey. In practice the built-in SDXL family points `repo`
+/// at the SceneWorks quant-matrix turnkey (`mlx.standardTierLayout`), and — as of sc-10813 — this edit
+/// lane packed-detects + serves the request's q4/q8 tier through `standard_tier_subdir`, exactly like
+/// the txt2img lane (sc-10767); this default is only the flat-repo fallback.
 fn sdxl_edit_candle_default_repo(model: &str) -> &'static str {
     match model {
         "realvisxl" => "SG161222/RealVisXL_V5.0",
+        "illustrious_xl_v1" => "SceneWorks/illustrious-xl-v1-mlx",
+        "illustrious_xl_v2" => "SceneWorks/illustrious-xl-v2-mlx",
         _ => "stabilityai/stable-diffusion-xl-base-1.0",
     }
 }
@@ -89,7 +103,19 @@ fn resolve_sdxl_edit_candle_base(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| sdxl_edit_candle_default_repo(&request.model));
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
+    // sc-10813: a standard-tier turnkey (`mlx.standardTierLayout`, e.g. `SceneWorks/sdxl-base-mlx`)
+    // descends into the request's packed q4/q8 tier (or bf16) via `standard_tier_subdir` — the SAME
+    // resolver the txt2img lane uses (base.rs `resolve_base_model_dir`) — now that `load_instantid_unet`
+    // packed-detects the tier. A flat upstream diffusers snapshot (no q4/q8/bf16 subdirs) has no present
+    // tier, so `standard_tier_subdir` returns its root untouched; a NON-standard tiered turnkey keeps the
+    // dense `bf16/` descent (sc-10614). Both fall through `dense_tier_subdir` on the non-standard branch.
+    Ok(huggingface_snapshot_dir(&settings.data_dir, repo).map(|root| {
+        if uses_standard_tier_layout(request) {
+            standard_tier_subdir(&root, request)
+        } else {
+            dense_tier_subdir(root)
+        }
+    }))
 }
 
 /// True when this is a candle-eligible SDXL edit job: an sdxl-family `edit_image` job with a source (an

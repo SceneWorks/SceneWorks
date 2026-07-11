@@ -210,8 +210,10 @@ tempCodeRunnerFile.py
 .ruff_cache/
 
 # Node / web
-node_modules/
-apps/web/node_modules/
+# No trailing slash: a git worktree commonly symlinks node_modules back to the main
+# checkout, and git sees a symlink as a file — `node_modules/` would not match it.
+node_modules
+apps/web/node_modules
 apps/web/dist/
 
 # Tauri desktop shell generated artifacts

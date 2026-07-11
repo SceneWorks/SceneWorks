@@ -262,6 +262,10 @@ fn turbo_request(steps: u32, guidance: Option<f32>) -> GenerationRequest {
 }
 
 const SDXL_SENTINEL: &str = "unet/diffusion_pytorch_model.safetensors";
+// The dense bf16 tier packs the UNet under the `.fp16.safetensors` variant filename (the turnkey
+// recipe: quantized tiers use the plain name, the dense tier uses `.fp16`). `resolve_weight_file`
+// tries both at load, but the tier-presence sentinel must name the file that actually exists.
+const SDXL_BF16_SENTINEL: &str = "unet/diffusion_pytorch_model.fp16.safetensors";
 // Lens turnkeys pack the DiT under transformer/diffusion_pytorch_model.safetensors …
 const LENS_SENTINEL: &str = "transformer/diffusion_pytorch_model.safetensors";
 // … while Z-Image turnkeys pack it under transformer/model.safetensors.
@@ -301,6 +305,84 @@ fn footprint_sdxl_bf16() {
         SDXL_SENTINEL,
     );
     measure_footprint("sdxl", "bf16", "sdxl", &dir, sdxl_request());
+}
+
+// Illustrious-XL v1.0 / v2.0 (epic 10609, sc-10619): SDXL-family turnkeys, so the same `sdxl` engine,
+// the same `unet/` sentinel, and the same per-tier resolution as sdxl-base. `FP_ILL_V{1,2}_DIR` points
+// at the turnkey ROOT (the dir holding q4/ q8/ bf16/); resolve_tier_dir joins the tier. Set an anime
+// `FP_PROMPT` for a representative render — the footprint is prompt-independent, but the non-degenerate
+// gate is more meaningful on an in-distribution image. One tier per process (the process-global MLX
+// counter invariant), so run these one `-- --ignored footprint_illustrious_<x>` at a time.
+#[test]
+#[ignore = "footprint measurement; needs SceneWorks/illustrious-xl-v1-mlx q4 cached + an Apple-Silicon Mac"]
+fn footprint_illustrious_v1_q4() {
+    let dir = resolve_tier_dir(
+        "FP_ILL_V1_DIR",
+        "SceneWorks/illustrious-xl-v1-mlx",
+        "q4",
+        SDXL_SENTINEL,
+    );
+    measure_footprint("illustrious_xl_v1", "q4", "sdxl", &dir, sdxl_request());
+}
+
+#[test]
+#[ignore = "footprint measurement; needs SceneWorks/illustrious-xl-v1-mlx q8 cached + an Apple-Silicon Mac"]
+fn footprint_illustrious_v1_q8() {
+    let dir = resolve_tier_dir(
+        "FP_ILL_V1_DIR",
+        "SceneWorks/illustrious-xl-v1-mlx",
+        "q8",
+        SDXL_SENTINEL,
+    );
+    measure_footprint("illustrious_xl_v1", "q8", "sdxl", &dir, sdxl_request());
+}
+
+#[test]
+#[ignore = "footprint measurement; needs SceneWorks/illustrious-xl-v1-mlx bf16 cached + an Apple-Silicon Mac"]
+fn footprint_illustrious_v1_bf16() {
+    let dir = resolve_tier_dir(
+        "FP_ILL_V1_DIR",
+        "SceneWorks/illustrious-xl-v1-mlx",
+        "bf16",
+        SDXL_BF16_SENTINEL,
+    );
+    measure_footprint("illustrious_xl_v1", "bf16", "sdxl", &dir, sdxl_request());
+}
+
+#[test]
+#[ignore = "footprint measurement; needs SceneWorks/illustrious-xl-v2-mlx q4 cached + an Apple-Silicon Mac"]
+fn footprint_illustrious_v2_q4() {
+    let dir = resolve_tier_dir(
+        "FP_ILL_V2_DIR",
+        "SceneWorks/illustrious-xl-v2-mlx",
+        "q4",
+        SDXL_SENTINEL,
+    );
+    measure_footprint("illustrious_xl_v2", "q4", "sdxl", &dir, sdxl_request());
+}
+
+#[test]
+#[ignore = "footprint measurement; needs SceneWorks/illustrious-xl-v2-mlx q8 cached + an Apple-Silicon Mac"]
+fn footprint_illustrious_v2_q8() {
+    let dir = resolve_tier_dir(
+        "FP_ILL_V2_DIR",
+        "SceneWorks/illustrious-xl-v2-mlx",
+        "q8",
+        SDXL_SENTINEL,
+    );
+    measure_footprint("illustrious_xl_v2", "q8", "sdxl", &dir, sdxl_request());
+}
+
+#[test]
+#[ignore = "footprint measurement; needs SceneWorks/illustrious-xl-v2-mlx bf16 cached + an Apple-Silicon Mac"]
+fn footprint_illustrious_v2_bf16() {
+    let dir = resolve_tier_dir(
+        "FP_ILL_V2_DIR",
+        "SceneWorks/illustrious-xl-v2-mlx",
+        "bf16",
+        SDXL_BF16_SENTINEL,
+    );
+    measure_footprint("illustrious_xl_v2", "bf16", "sdxl", &dir, sdxl_request());
 }
 
 #[test]

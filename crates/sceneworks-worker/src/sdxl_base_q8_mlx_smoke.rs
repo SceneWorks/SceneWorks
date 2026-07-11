@@ -19,7 +19,7 @@
 //! Override `SDXL_Q8_DIR` to point at a snapshot root or a `q8/`-bearing dir directly.
 //! ```text
 //! # optional: SDXL_Q8_DIR=/path/to/sdxl-base-mlx  (root containing q8/, or the q8/ dir itself)
-//! # optional: SDXL_STEPS=30 SDXL_W=768 SDXL_H=768 SDXL_PROMPT="..." SDXL_OUT_DIR=/tmp/sdxl_q8_smoke
+//! # optional: SDXL_STEPS=30 SDXL_W=768 SDXL_H=768 SDXL_SEED=42 SDXL_PROMPT="..." SDXL_OUT_DIR=/tmp/sdxl_q8_smoke
 //! cargo test -p sceneworks-worker --release sdxl_base_q8_mlx_gpu_smoke -- --ignored --nocapture
 //! ```
 
@@ -89,6 +89,10 @@ fn sdxl_base_q8_mlx_gpu_smoke() {
     let steps: u32 = env_or("SDXL_STEPS", "30").parse().expect("SDXL_STEPS");
     let w: u32 = env_or("SDXL_W", "768").parse().expect("SDXL_W");
     let h: u32 = env_or("SDXL_H", "768").parse().expect("SDXL_H");
+    // Overridable so a resolution/quality sweep can vary the sample rather than read one draw as if
+    // it were the model's behaviour (sc-10620). Defaults to the pinned 42, so the smoke itself is
+    // unchanged and still deterministic.
+    let seed: u64 = env_or("SDXL_SEED", "42").parse().expect("SDXL_SEED");
     let prompt = env_or(
         "SDXL_PROMPT",
         "a photorealistic portrait of a red fox sitting in a sunlit autumn forest, sharp focus, \
@@ -110,7 +114,7 @@ fn sdxl_base_q8_mlx_gpu_smoke() {
         width: w,
         height: h,
         count: 1,
-        seed: Some(42),
+        seed: Some(seed),
         steps: Some(steps),
         guidance: Some(7.0),
         ..Default::default()

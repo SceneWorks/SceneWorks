@@ -88,6 +88,23 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm --prefix apps/desktop run build -- --config updater.release.conf.json
 
+      # License guard (sc-10526 + sc-10551): scan the freshly-built bundle tree for
+      # model weights. The previous step already signed, notarized & stapled the .app,
+      # so this runs AFTER signing but BEFORE the DMG is stapled, the release is
+      # drafted, and anything is uploaded — a weight in the bundle still fails the job
+      # before any artifact is published. This is the real-artifact form of the
+      # check.yml source-tree scan — the DMG is opaque, but the .app under bundle/macos/
+      # carries the exact Contents/Resources payload the DMG wraps, so a weight baked
+      # into the bundle is caught by the loose-tree walk.
+      # --scan-archives (sc-10551) additionally DECOMPRESSES the archives Tauri emits —
+      # here the `bundle/macos/*.app.tar.gz` updater payload — and scans the files
+      # inside for NC weights, with archive-bomb guards. --skip-uninspectable downgrades
+      # the opaque `.dmg` (no pure-JS reader) from a hard failure to a warning: its
+      # contents are the same .app the loose-tree walk already covered. NC weights
+      # (Anima / CircleStone, FLUX NC, Ideogram, Krea, SANA, …) must never ship.
+      - name: Guard against NC model weights in the desktop bundle (sc-10526, sc-10551)
+        run: node scripts/check-no-nc-weights.mjs --dir target/release/bundle --scan-archives --skip-uninspectable
+
       # Tauri staples the .app but not the wrapping .dmg — staple the DMG so the
       # downloaded artifact verifies offline (shared script; same as `release:mac`).
       - name: Staple the DMG
@@ -216,6 +233,22 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm --prefix apps/desktop run build -- --bundles nsis,msi --config updater.release.conf.json
+      # License guard (sc-10526 + sc-10551): scan the built Windows bundle tree for
+      # model weights before publishing. Any loose resource weight Tauri stages under
+      # bundle/ is caught by the loose-tree walk; the exhaustive resource-source scan
+      # runs in check.yml over apps/. --scan-archives (sc-10551) DECOMPRESSES the
+      # archive containers Tauri emits — here the `*.nsis.zip` updater payload — and
+      # scans the entry paths inside, with archive-bomb guards. It does NOT crack open
+      # the Windows installer internals: a `-setup.exe` is not an archive candidate at
+      # all (`.exe` is not a scanned archive extension), and `--skip-uninspectable` only
+      # downgrades the `.msi` "no pure-JS reader" refusal to a warning. Those opaque
+      # installer internals are covered instead by the always-on Tauri resource-config
+      # check and the source-tree scan in check.yml (a weight cannot reach an installer
+      # without first tripping one of those), NOT by decompression. NC weights must
+      # never ship.
+      - name: Guard against NC model weights in the desktop bundle (sc-10526, sc-10551)
+        shell: bash
+        run: node scripts/check-no-nc-weights.mjs --dir target/release/bundle --scan-archives --skip-uninspectable
       # Upload to the draft release the macos job created. The user ships the MSI
       # (per desktop-windows.yml); the NSIS .exe is attached too as an alternative.
       # --clobber so re-running the job replaces rather than 409s. Then merge the

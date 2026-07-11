@@ -36,7 +36,9 @@ pub(crate) use routing::mlx::*;
 pub use routing::catalog::{
     mac_capabilities, model_mac_support, MacCapabilities, MAC_NOT_AVAILABLE_LABEL,
 };
-pub use routing::gaps::{candle_supported, mac_rust_supported, UnsupportedReason};
+pub use routing::gaps::{
+    candle_supported, mac_rust_supported, UnsupportedReason, NATIVE_CONVERTERS,
+};
 
 pub const ACTIVE_STATUSES: &[&str] = &[
     "preparing",
@@ -3721,10 +3723,12 @@ mod candle_routing_tests {
 
     #[test]
     fn explicit_quantization_falls_back_to_torch_image_and_video() {
-        // sc-5099: the candle providers are dense (supported_quants: &[]); an explicit
-        // `advanced.mlxQuantize > 0` must route to Python rather than silently running dense.
+        // sc-5099: a candle provider that advertises NO quant (supported_quants: &[]) must route an
+        // explicit `advanced.mlxQuantize > 0` to Python rather than silently running dense. chroma1_hd
+        // is such a dense-only candle family (contrast the SDXL family, sc-10767, which now advertises
+        // Q4/Q8 packed tiers and stays on candle — covered by `sdxl_family_quant_and_lora_stay_on_candle`).
         assert!(!image_request_candle_eligible(
-            "sdxl",
+            "chroma1_hd",
             &object(json!({ "advanced": { "mlxQuantize": 8 } }))
         ));
         assert!(!image_request_candle_eligible(
@@ -3735,15 +3739,50 @@ mod candle_routing_tests {
             "wan_2_2",
             &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } }))
         ));
-        // Dense (<= 0) or absent quant leaves candle on its native dense path → still eligible.
+        // Dense (<= 0) or absent quant leaves a dense candle family on its native path → still eligible.
         assert!(image_request_candle_eligible(
-            "sdxl",
+            "chroma1_hd",
             &object(json!({ "advanced": { "mlxQuantize": 0 } }))
         ));
         assert!(image_request_candle_eligible(
-            "sdxl",
+            "chroma1_hd",
             &object(json!({ "advanced": { "steps": 30 } }))
         ));
+    }
+
+    #[test]
+    fn sdxl_family_quant_and_lora_stay_on_candle() {
+        // sc-10767 (epic 9083): the SDXL family advertises Q4/Q8 packed tiers (candle-gen sc-9416/9527)
+        // AND inference LoRA/LoKr on a packed tier (sc-9528), so a quant tier-select AND a LoRA both
+        // stay on the candle lane rather than deferring to the retired torch fallback. Mirrors the
+        // boogu/lens quant-stays coverage; the inverse of the old dense-only behavior.
+        //
+        // sc-10812: realvisxl_lightning (the few-step distilled sibling on the SAME `sdxl` engine /
+        // descriptor) joins the family — same quant + LoRA stay-on-candle for its plain txt2img shape.
+        for model in [
+            "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+            "realvisxl_lightning",
+        ] {
+            for bits in [8, 4] {
+                assert!(
+                    image_request_candle_eligible(
+                        model,
+                        &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": bits } }))
+                    ),
+                    "{model} Q{bits} tier-select should stay on candle (sc-10767)"
+                );
+            }
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
+                ),
+                "{model} with a LoRA should stay on candle (sc-10767)"
+            );
+        }
     }
 
     #[test]
@@ -3889,12 +3928,14 @@ mod candle_routing_tests {
 
     #[test]
     fn sdxl_advanced_shapes_fall_back_to_torch() {
-        // Every conditioning shape the txt2img candle lane can't honor must be ineligible.
+        // Every conditioning shape the txt2img candle lane can't honor must be ineligible. A LoRA is NOT
+        // in this set anymore (sc-10767): the SDXL family advertises inference LoRA on candle, so a plain
+        // LoRA txt2img stays on the candle lane (see `sdxl_family_quant_and_lora_stay_on_candle`). Only
+        // the genuine conditioning shapes (img2img / reference / mask / strict-pose) fall back.
         let cases = [
             json!({ "mode": "edit_image", "sourceAssetId": "asset_1" }), // img2img / inpaint / outpaint
             json!({ "referenceAssetId": "asset_1" }),                    // IP-Adapter reference
             json!({ "mode": "edit_image", "sourceAssetId": "a", "maskAssetId": "m" }), // inpaint
-            json!({ "loras": [{ "name": "x" }] }),                       // LoRA
             json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),    // strict-pose ControlNet
         ];
         for case in cases {
@@ -4309,19 +4350,76 @@ mod candle_routing_tests {
                 "wan_2_2_t2v_14b conditioned shape must fall back to torch: {case}"
             );
         }
-        // The 14B I2V + SVD are image→video only: a txt2video shape, an i2v with no source, or a LoRA
-        // → torch (sc-5175 / sc-5493).
+        // The 14B I2V + SVD are image→video only: a txt2video shape or an i2v with no source → torch
+        // (sc-5175 / sc-5493).
         for model in ["wan_2_2_i2v_14b", "svd"] {
             for case in [
                 json!({ "mode": "text_to_video", "prompt": "p" }),
                 json!({ "mode": "image_to_video" }), // i2v but no source image
-                json!({ "mode": "image_to_video", "sourceAssetId": "a", "loras": [{ "name": "x" }] }),
             ] {
                 assert!(
                     !video_request_candle_eligible(model, &object(case.clone())),
-                    "{model} non-i2v / LoRA shape must fall back to torch: {case}"
+                    "{model} non-i2v shape must fall back to torch: {case}"
                 );
             }
+        }
+        // SVD has no candle LoRA slot, so a LoRA even on its valid i2v shape still falls back; the
+        // Wan-14B I2V now ACCEPTS a user LoRA on candle (sc-10539) — see `candle_wan_14b_video_accepts_user_loras`.
+        assert!(
+            !video_request_candle_eligible(
+                "svd",
+                &object(
+                    json!({ "mode": "image_to_video", "sourceAssetId": "a", "loras": [{ "name": "x" }] })
+                )
+            ),
+            "svd (no candle LoRA slot) must fall back to torch on an i2v+LoRA shape"
+        );
+    }
+
+    #[test]
+    fn candle_wan_14b_video_accepts_user_loras() {
+        // sc-10539: the Wan-14B MoE engines advertise `supports_lora` and their candle worker path
+        // (`candle_resolve_wan_adapters`) applies each user LoRA — including an external ComfyUI file
+        // read in place — so a LoRA-carrying job stays on candle instead of the old blanket exclusion
+        // (there is no torch fallback now; epic 8283). GPU-validated: an external `Wan/detailz-wan`
+        // adapter rendered a candle Wan-14B clip that differs from the no-LoRA baseline at the same seed.
+        assert!(
+            video_request_candle_eligible(
+                "wan_2_2_t2v_14b",
+                &object(json!({ "mode": "text_to_video", "loras": [{ "id": "external_x" }] }))
+            ),
+            "wan_2_2_t2v_14b text_to_video + user LoRA must stay on candle"
+        );
+        assert!(
+            video_request_candle_eligible(
+                "wan_2_2_i2v_14b",
+                &object(json!({
+                    "mode": "image_to_video",
+                    "sourceAssetId": "a",
+                    "loras": [{ "id": "external_x" }],
+                }))
+            ),
+            "wan_2_2_i2v_14b i2v + source + user LoRA must stay on candle"
+        );
+        // Families whose candle provider advertises no LoRA slot still refuse a LoRA (wan-5B TI2V / LTX / SVD).
+        for (model, payload) in [
+            (
+                "wan_2_2",
+                json!({ "mode": "text_to_video", "loras": [{ "id": "x" }] }),
+            ),
+            (
+                "ltx_2_3",
+                json!({ "mode": "text_to_video", "loras": [{ "id": "x" }] }),
+            ),
+            (
+                "svd",
+                json!({ "mode": "image_to_video", "sourceAssetId": "a", "loras": [{ "id": "x" }] }),
+            ),
+        ] {
+            assert!(
+                !video_request_candle_eligible(model, &object(payload.clone())),
+                "{model} has no candle LoRA slot — a LoRA job must not route to candle: {payload}"
+            );
         }
     }
 
@@ -5107,7 +5205,12 @@ mod candle_routing_tests {
         // A pure SDXL/RealVisXL reference (IP-Adapter) job routes to the candle lane (sc-5488) via the
         // bespoke branch, NOT the txt2img `image_request_candle_eligible` gate (which rejects
         // `referenceAssetId`).
-        for model in ["sdxl", "realvisxl"] {
+        for model in [
+            "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ] {
             let payload = json!({ "model": model, "referenceAssetId": "asset_1" });
             assert!(sdxl_ipadapter_candle_eligible(&object(payload.clone())));
             assert!(image_job_is_candle_eligible(&image_generate_job(payload)));
@@ -5133,7 +5236,12 @@ mod candle_routing_tests {
         // SDXL/RealVisXL img2img / inpaint / outpaint edit jobs (sc-5487) route to the bespoke candle
         // `SdxlEdit` lane via the new branch, NOT the txt2img `image_request_candle_eligible` gate
         // (which rejects the whole `edit_image` family).
-        for model in ["sdxl", "realvisxl"] {
+        for model in [
+            "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ] {
             // img2img (source, no mask).
             let img2img = json!({ "model": model, "mode": "edit_image", "sourceAssetId": "src_1" });
             assert!(sdxl_edit_candle_eligible(&object(img2img.clone())));

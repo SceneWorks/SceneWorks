@@ -156,8 +156,9 @@ use dto::{
 };
 mod manifest;
 use manifest::{
-    load_manifest_entries, merge_entries_by_id, merge_object, mutate_manifest_entries,
-    remove_catalog_manifest_entry, ManifestCache,
+    acquire_manifest_file_lock, load_manifest_entries, manifest_write_lock, merge_entries_by_id,
+    merge_object, mutate_manifest_entries, remove_catalog_manifest_entry, write_manifest_atomic,
+    ManifestCache,
 };
 #[cfg(test)]
 use manifest::{strip_jsonc_comments, API_MANAGED_MANIFEST_HEADER};
@@ -172,6 +173,8 @@ use models::{
     merge_model_manifest_entry, mlx_catalog_status, model_co_requisite_downloads, model_download,
     retain_downloads_for_os,
 };
+mod external_base_models;
+mod external_loras;
 mod loras;
 use loras::{
     create_lora_download_job, create_lora_import_job, delete_lora, list_loras, lora_catalog,
@@ -185,7 +188,8 @@ mod recipe_presets;
 use recipe_presets::{
     create_recipe_preset, delete_recipe_preset, duplicate_recipe_preset, get_recipe_preset,
     list_recipe_presets, preset_lora_id, preset_lora_weight, preset_prompt, recipe_preset_catalog,
-    recipe_preset_catalog_with, recipe_preset_loras, serialize_preset_lora, update_recipe_preset,
+    recipe_preset_catalog_with, recipe_preset_loras, serialize_preset_lora,
+    stamp_recipe_preset_used, update_recipe_preset,
 };
 mod prompt_batches;
 use prompt_batches::{
@@ -434,25 +438,73 @@ pub fn gpu_check() -> Result<(), String> {
     sceneworks_worker::metal_preflight()
 }
 
-/// Spawns the utility worker loop ([`sceneworks_worker::run_worker_loop`]) as a
-/// tokio task in this process, pointed at the local API over loopback. The loop
-/// observes the same Ctrl+C/SIGTERM as the HTTP server (via the worker's own
-/// shutdown handling), so `shutdown()` only bounds the wait by the worker's
-/// configured grace period.
+/// Spawns the in-process CPU utility worker pool ([`sceneworks_worker::run_worker_loop`])
+/// as tokio tasks in this process, pointed at the local API over loopback. Each loop
+/// observes the same Ctrl+C/SIGTERM as the HTTP server (via the worker's own shutdown
+/// handling), so `shutdown()` only bounds the wait by the worker's configured grace
+/// period.
+///
+/// The count comes from [`inprocess_utility_worker_count`] (default 2). A single worker
+/// claims one job at a time, so a lone in-process worker serialized *all* CPU utility
+/// work — most visibly, model/LoRA downloads queued one-at-a-time on the desktop
+/// (sc-10723). Running ≥2 loops lets independent downloads proceed in parallel; the
+/// per-file `DownloadLock` (sc-8900) still serializes two jobs resolving the *same*
+/// cache target, so concurrency never corrupts a shared file.
 fn spawn_inprocess_utility_worker(port: u16) -> InProcessUtilityWorker {
     let mut worker_settings = sceneworks_worker::Settings::from_env();
     worker_settings.api_url = format!("http://127.0.0.1:{port}");
     worker_settings.gpu_id =
         inprocess_worker_gpu_id(std::env::var("SCENEWORKS_RUST_WORKER_GPU_ID").ok());
     let grace = Duration::from_secs(worker_settings.shutdown_timeout_seconds.max(1));
-    tracing::info!(
-        event = "utility_worker_inprocess",
-        apiUrl = %worker_settings.api_url,
-        "SceneWorks utility worker running in-process (loopback)"
-    );
-    let handle =
-        tokio::spawn(async move { sceneworks_worker::run_worker_loop(worker_settings).await });
-    InProcessUtilityWorker { handle, grace }
+    let count = inprocess_utility_worker_count();
+    let base_worker_id = worker_settings.worker_id.clone();
+    let handles = (0..count)
+        .map(|index| {
+            let mut settings = worker_settings.clone();
+            settings.worker_id = inprocess_utility_worker_id(&base_worker_id, index);
+            tracing::info!(
+                event = "utility_worker_inprocess",
+                apiUrl = %settings.api_url,
+                workerId = %settings.worker_id,
+                index,
+                count,
+                "SceneWorks utility worker running in-process (loopback)"
+            );
+            tokio::spawn(async move { sceneworks_worker::run_worker_loop(settings).await })
+        })
+        .collect();
+    InProcessUtilityWorker { handles, grace }
+}
+
+/// Number of in-process CPU utility worker loops to run. Defaults to **2** so desktop
+/// model/LoRA downloads (and other CPU utility jobs) run two-at-a-time instead of
+/// serializing behind a single worker; `SCENEWORKS_UTILITY_WORKERS` overrides it
+/// (clamped to >= 1). This default is intentionally more conservative than the
+/// standalone/Docker worker pool's `Settings::utility_workers` default of 4, because the
+/// same knob also governs CPU/RAM-heavy conversions/imports that share this pool.
+fn inprocess_utility_worker_count() -> usize {
+    parse_inprocess_utility_worker_count(std::env::var("SCENEWORKS_UTILITY_WORKERS").ok())
+}
+
+/// Pure parser behind [`inprocess_utility_worker_count`] (env split out so it is unit
+/// testable): a present, parseable value wins (clamped to >= 1 so `0`/negative-ish input
+/// never yields a zero-worker pool); a missing/blank/unparseable value falls back to 2.
+fn parse_inprocess_utility_worker_count(raw: Option<String>) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(2)
+        .max(1)
+}
+
+/// Distinct worker id for the `index`-th in-process utility worker. Index 0 keeps the
+/// configured `worker_id` unchanged (so a single-worker setup registers exactly as
+/// before); each additional worker is suffixed `-1`, `-2`, ... to avoid a registration
+/// collision. Mirrors the standalone pool's `utility_worker_id` scheme.
+fn inprocess_utility_worker_id(base_worker_id: &str, index: usize) -> String {
+    if index == 0 {
+        base_worker_id.to_owned()
+    } else {
+        format!("{base_worker_id}-{index}")
+    }
 }
 
 /// GPU id for the in-process utility worker. Defaults to `cpu` so the embedded
@@ -469,29 +521,35 @@ fn inprocess_worker_gpu_id(override_var: Option<String>) -> String {
 }
 
 struct InProcessUtilityWorker {
-    handle: tokio::task::JoinHandle<sceneworks_worker::WorkerResult<()>>,
+    handles: Vec<tokio::task::JoinHandle<sceneworks_worker::WorkerResult<()>>>,
     grace: Duration,
 }
 
 impl InProcessUtilityWorker {
     async fn shutdown(self) {
-        match tokio::time::timeout(self.grace, self.handle).await {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(error))) => tracing::error!(
-                event = "in_process_worker_exited_error",
-                error = %error,
-                "in-process utility worker exited with error"
-            ),
-            Ok(Err(join_error)) => tracing::error!(
-                event = "in_process_worker_task_failed",
-                error = %join_error,
-                "in-process utility worker task failed"
-            ),
-            Err(_) => tracing::warn!(
-                event = "in_process_worker_shutdown_timeout",
-                graceSeconds = self.grace.as_secs(),
-                "in-process utility worker did not stop within the grace period"
-            ),
+        let InProcessUtilityWorker { handles, grace } = self;
+        // The loops observe the shared shutdown signal concurrently, so awaiting them
+        // in sequence just collects results — each is already stopping (or stopped) by
+        // the time we reach it. The per-handle timeout bounds a stuck loop.
+        for handle in handles {
+            match tokio::time::timeout(grace, handle).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(error))) => tracing::error!(
+                    event = "in_process_worker_exited_error",
+                    error = %error,
+                    "in-process utility worker exited with error"
+                ),
+                Ok(Err(join_error)) => tracing::error!(
+                    event = "in_process_worker_task_failed",
+                    error = %join_error,
+                    "in-process utility worker task failed"
+                ),
+                Err(_) => tracing::warn!(
+                    event = "in_process_worker_shutdown_timeout",
+                    graceSeconds = grace.as_secs(),
+                    "in-process utility worker did not stop within the grace period"
+                ),
+            }
         }
     }
 }
@@ -860,6 +918,10 @@ pub(crate) fn create_app_with_state(
         manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
         manifest_write_locks: Arc::new(Mutex::new(HashMap::new())),
         model_size_cache: Arc::new(Mutex::new(ModelSizeCache::default())),
+        external_lora_cache: Arc::new(Mutex::new(external_loras::ExternalLoraCache::default())),
+        external_base_model_cache: Arc::new(Mutex::new(
+            external_base_models::ExternalBaseModelCache::default(),
+        )),
         http_client: reqwest::Client::new(),
         interrupted_jobs_on_startup,
     };

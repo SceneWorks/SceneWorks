@@ -8,6 +8,11 @@ import {
 } from "../credentials.js";
 import { apiFetch } from "../api.js";
 import { isDesktop, tauriInvoke as invoke } from "../runtime.js";
+import {
+  generationQualityLabel,
+  readDefaultGenerationQuality,
+  writeDefaultGenerationQuality,
+} from "../generationQuality.js";
 
 // The data-dir / GPU / worker / wizard / remote-access controls are desktop-only
 // (backed by Tauri commands in the shell) and are gated behind `isDesktop` so a
@@ -51,6 +56,14 @@ export function SettingsScreen() {
   // Live MLX memory telemetry (epic 7819, sc-7825). The worker's latest snapshot, polled while the
   // GPU card is visible; null until the first sample arrives (or on platforms without it).
   const [gpuTelemetry, setGpuTelemetry] = useState(null);
+  // Global "default generation quality" (epic 10721 / sc-10728): the app-wide baseline quant tier new
+  // generations use when a model has no per-(screen,model) sticky pick, read at generation time by
+  // `defaultTierSelection` (precedence rung 3). Persisted like theme/accent — a durable server copy in
+  // `ui-preferences.json` (write-through PUT in `changeDefaultQuality`) plus a localStorage instant-paint
+  // cache — because on the desktop shell the UI's `127.0.0.1:<port>` origin changes each launch and wipes
+  // origin-keyed localStorage. Seeded here from the cache (App.jsx re-primes it from the server on launch);
+  // q8 by default.
+  const [defaultQuality, setDefaultQuality] = useState(readDefaultGenerationQuality);
 
   const refresh = useCallback(async () => {
     try {
@@ -161,6 +174,21 @@ export function SettingsScreen() {
     }
   }
 
+  // Persist the global default generation quality (sc-10728). Write-through: the localStorage cache gives
+  // an instant read for the studio, and the PUT makes it durable across desktop relaunches (the shell's
+  // 127.0.0.1:<port> origin changes each launch, wiping origin-keyed localStorage). Same contract as
+  // theme/accent in App.jsx — the endpoint MERGES, so sending only this field can't disturb theme/accent.
+  // Token is "" because ui-preferences is a public route (like /health); mirrors App.jsx's PUT.
+  function changeDefaultQuality(value) {
+    const next = writeDefaultGenerationQuality(value);
+    setDefaultQuality(next);
+    apiFetch("/api/v1/ui-preferences", "", {
+      method: "PUT",
+      body: JSON.stringify({ defaultGenerationQuality: next }),
+    }).catch(() => {});
+    setStatus(`Default generation quality set to ${generationQualityLabel(next)}.`);
+  }
+
   async function restartWorker() {
     try {
       // Desktop kills the worker child directly via Tauri; a remote admin restarts it
@@ -262,6 +290,29 @@ export function SettingsScreen() {
   return (
     <div className="settings-screen">
       {status ? <p className="settings-status">{status}</p> : null}
+
+      <section className="settings-card">
+        <h3>Generation quality</h3>
+        <p className="settings-muted">
+          The default quality tier new generations use for a model you haven’t picked a
+          tier for yet. Higher fidelity looks best but uses more memory and is slower;
+          smaller tiers are faster and lighter. You can still override this per model in
+          the studio, and your per-model picks are remembered.
+        </p>
+        <div className="settings-actions">
+          <label htmlFor="default-generation-quality">Default quality</label>
+          <select
+            id="default-generation-quality"
+            value={defaultQuality}
+            onChange={(event) => changeDefaultQuality(event.target.value)}
+            aria-label="Default generation quality"
+          >
+            <option value="bf16">High fidelity (bf16)</option>
+            <option value="q8">Balanced (Q8)</option>
+            <option value="q4">Fast (Q4)</option>
+          </select>
+        </div>
+      </section>
 
       {isDesktop ? (
         <section className="settings-card">

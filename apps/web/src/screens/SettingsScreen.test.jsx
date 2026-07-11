@@ -376,3 +376,95 @@ describe("SettingsScreen GPU memory (desktop macOS)", () => {
     expect(container.textContent).toContain("applies within a couple of seconds");
   });
 });
+
+// Global "default generation quality" setting (epic 10721 / sc-10728). Persisted like theme/accent:
+// a durable server copy (PUT /api/v1/ui-preferences) plus a localStorage instant-paint cache, so it
+// survives a desktop relaunch (the shell's 127.0.0.1:<port> origin changes each launch and wipes
+// origin-keyed localStorage). Renders in both desktop and web modes. These run in web (REST) mode with
+// api.js mocked so refresh() resolves cleanly and the write-through PUT is observable.
+describe("SettingsScreen default generation quality (sc-10728)", () => {
+  const STORAGE_KEY = "sceneworks-default-generation-quality";
+  let container;
+  let root;
+  let SettingsScreen;
+  let apiFetch;
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    delete window.__TAURI__;
+    window.localStorage.clear();
+    vi.resetModules();
+    apiFetch = vi.fn(async () => []);
+    vi.doMock("../api.js", () => ({
+      apiFetch,
+      isAbortError: () => false,
+      API_BASE_URL: "",
+      eventUrl: () => "",
+    }));
+    ({ SettingsScreen } = await import("./SettingsScreen.jsx"));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    window.localStorage.clear();
+    vi.doUnmock("../api.js");
+    vi.restoreAllMocks();
+  });
+
+  async function render() {
+    await act(async () => {
+      root.render(<SettingsScreen />);
+    });
+    await act(async () => {});
+  }
+
+  const qualitySelect = () =>
+    container.querySelector('[aria-label="Default generation quality"]');
+
+  it("renders the control defaulting to Balanced (Q8) when nothing is stored", async () => {
+    await render();
+    expect(container.textContent).toContain("Generation quality");
+    const select = qualitySelect();
+    expect(select).toBeTruthy();
+    expect(select.value).toBe("q8");
+  });
+
+  it("writes a change to the localStorage instant-paint cache and confirms it in the status line (cache path)", async () => {
+    await render();
+    await changeField(qualitySelect(), "bf16");
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBe("bf16");
+    expect(qualitySelect().value).toBe("bf16");
+    expect(container.textContent).toContain("High fidelity (bf16)");
+  });
+
+  it("writes the change through to the durable server copy via PUT /api/v1/ui-preferences (durable path)", async () => {
+    // The acceptance criterion is "persists across sessions". On the desktop shell the localStorage
+    // cache alone does NOT survive a relaunch (the origin changes), so the change must also PUT to the
+    // durable ui-preferences store — same contract as theme/accent in App.jsx. Sending only this field
+    // relies on the endpoint MERGING, so theme/accent can't be clobbered.
+    await render();
+    await changeField(qualitySelect(), "q4");
+    expect(apiFetch).toHaveBeenCalledWith(
+      "/api/v1/ui-preferences",
+      "",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ defaultGenerationQuality: "q4" }),
+      }),
+    );
+  });
+
+  it("seeds the control from the instant-paint cache on mount (cache round-trip)", async () => {
+    // App.jsx re-primes this cache from the durable server copy on launch (covered in App.shell.test.jsx);
+    // here we assert the control reflects whatever the cache holds on mount.
+    window.localStorage.setItem(STORAGE_KEY, "q4");
+    await render();
+    expect(qualitySelect().value).toBe("q4");
+  });
+});

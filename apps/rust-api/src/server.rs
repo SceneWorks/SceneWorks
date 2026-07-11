@@ -28,6 +28,8 @@ use sceneworks_core::project_store::ProjectStore;
 
 use crate::auth::AuthThrottle;
 use crate::events::EventHub;
+use crate::external_base_models::ExternalBaseModelCache;
+use crate::external_loras::ExternalLoraCache;
 use crate::manifest::ManifestCache;
 use crate::models::ModelSizeCache;
 use crate::tickets::TicketStore;
@@ -108,6 +110,14 @@ pub struct Settings {
     /// `SCENEWORKS_MCP_JOB_TIMEOUT` (whole seconds); defaults to the
     /// `JobWaitConfig` default (30 min). Clamped to ≥ the poll interval.
     pub mcp_job_timeout: Duration,
+    /// Epic 10451 (sc-10452) — operator-configured directories outside the app data dir
+    /// that hold model weights the user already has, typically a ComfyUI `models/` tree.
+    /// The API scans each root's `loras/` subdirectory to surface those adapters in the
+    /// LoRA catalog (read in place, never copied); the worker holds the same list and
+    /// admits it in its adapter-path confinement. Read from
+    /// `SCENEWORKS_EXTERNAL_MODEL_ROOTS`; empty (feature off) by default and always empty
+    /// on macOS — see `sceneworks_core::external_roots`.
+    pub external_model_roots: Vec<PathBuf>,
 }
 
 impl Settings {
@@ -178,6 +188,7 @@ impl Settings {
                 "SCENEWORKS_MCP_JOB_TIMEOUT",
                 sceneworks_mcp::JobWaitConfig::default().timeout,
             ),
+            external_model_roots: sceneworks_core::external_roots::external_model_roots_from_env(),
         }
     }
 
@@ -238,6 +249,16 @@ pub struct AppState {
     pub(crate) manifest_cache: Arc<Mutex<ManifestCache>>,
     pub(crate) manifest_write_locks: Arc<Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>>,
     pub(crate) model_size_cache: Arc<Mutex<ModelSizeCache>>,
+    /// sc-10452 — memoized family detection for adapters scanned out of the operator's
+    /// external model roots, keyed by each file's size + mtime. `lora_catalog` runs on
+    /// every job-create; without this, every generation would re-parse every ComfyUI
+    /// adapter's safetensors header.
+    pub(crate) external_lora_cache: Arc<Mutex<ExternalLoraCache>>,
+    /// sc-10667 — memoized base-weight detection for the transformer/encoder/VAE
+    /// files scanned out of the external roots' base subtrees, keyed by size +
+    /// mtime. `model_catalog` runs on every job-create; without this, every
+    /// generation would re-parse every ComfyUI base file's safetensors header.
+    pub(crate) external_base_model_cache: Arc<Mutex<ExternalBaseModelCache>>,
     pub(crate) http_client: reqwest::Client,
     pub(crate) interrupted_jobs_on_startup: usize,
 }

@@ -331,6 +331,9 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
         // Krea trains the undistilled `krea/Krea-2-Raw` DiT; the engine registers its LoRA/LoKr
         // trainer under the base id `"krea_2_raw"` (arch-identical to krea_2_turbo), sc-7577/7578.
         "krea_lora" => Some("krea_2_raw"),
+        // Krea pose-ControlNet: trains a control branch on the frozen Krea base; the engine registers
+        // its control trainer under `"krea_2_control"` (candle-gen-krea, sc-10163 / epic 10159 B2).
+        "krea_control" => Some("krea_2_control"),
         // SD3.5 (epic 7841, T3 sc-7884): the engine registers its LoRA/LoKr trainer under the same
         // id as the inference generator of the training base — `sd3_5_large` (T2 sc-7883) and the
         // MMDiT-X `sd3_5_medium` (T4 sc-7885). The trained adapter records `family: sd3` and applies
@@ -349,6 +352,15 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
             "wan_2_2_t2v_14b" => Some("wan2_2_t2v_14b"),
             "wan_2_2_i2v_14b" => Some("wan2_2_i2v_14b"),
             _ => None,
+        },
+        // Anima (epic 10512, sc-10522): the `mlx-gen-anima` LoRA/LoKr trainer registers under the same
+        // id as the inference generator of the training base. All three variants share one architecture,
+        // so a LoRA trained on any applies back to every variant via `apply_anima_adapters`; the base
+        // model selects which variant's dense weights the trainer loads (default `anima_base`).
+        "anima_lora" => match plan.target.base_model.as_str() {
+            "anima_aesthetic" => Some("anima_aesthetic"),
+            "anima_turbo" => Some("anima_turbo"),
+            _ => Some("anima_base"),
         },
         _ => None,
     }
@@ -508,6 +520,13 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // training path — default `false` preserves the current from-scratch behavior. Wiring the
         // resume toggle from the plan's `advanced` bag is a separate training-feature story.
         resume: false,
+        // ControlNet control type (sc-10163) — set by a control-branch target's `advanced.controlType`
+        // (e.g. "pose"); absent for LoRA/LoKr targets ⇒ None. Drives the control trainer's overlay
+        // `kind` metadata and is required by its validate; ignored by LoRA trainers.
+        control_type: advanced
+            .get("controlType")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         // sc-8671 — the engine renders one preview per prompt, capped at `sampleCount` (default 4 =
         // the historical fixed `[:4]` cap). The UI always supplies `samplePrompts` (prefilled from the
         // trigger phrase); an absent/empty pool ⇒ no previews, exactly as before (sampling is gated by
@@ -571,6 +590,9 @@ fn candle_requires_gradient_checkpointing(plan: &TrainingPlan) -> bool {
         // Krea 2 Raw is a 12B DiT — a dense backward materializes ~another model of frozen-weight
         // grads on candle and OOMs, so force checkpointing on (sc-8614 / sc-7900 backstop).
         "krea_lora" => true,
+        // Krea pose-ControlNet trains a control branch on the same frozen 12B DiT — same OOM risk,
+        // so force checkpointing on (sc-10163).
+        "krea_control" => true,
         "wan_moe_lora" => plan.target.base_model == "wan_2_2_t2v_14b",
         _ => false,
     }
@@ -707,6 +729,20 @@ async fn run_training_execution(
                     "Training dataset imagePath",
                 )?,
                 caption: item.caption.clone(),
+                // ControlNet training: resolve the per-item conditioning image the same way as the
+                // target (None for LoRA — the control trainer's validate rejects a missing one).
+                control_image_path: item
+                    .control_image_path
+                    .as_ref()
+                    .map(|p| {
+                        resolve_dataset_item_path(
+                            settings,
+                            &plan.dataset.root_path,
+                            p,
+                            "Training dataset controlImagePath",
+                        )
+                    })
+                    .transpose()?,
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
@@ -1516,6 +1552,7 @@ mod tests {
             backend_mlx_enabled: true,
             backend_candle_enabled: false,
             gpu_memory_limit_bytes: 0,
+            external_model_roots: Vec::new(),
         }
     }
 
@@ -2046,6 +2083,11 @@ mod tests {
         let cases: &[(&str, &str, Option<&str>)] = &[
             ("z_image_lora", "z_image_turbo", Some("z_image_turbo")),
             ("sdxl_lora", "sdxl", Some("sdxl")),
+            // Illustrious v1.0/v2.0 (epic 10609) share the `sdxl_lora` kernel — vanilla SDXL —
+            // so both base models resolve to the `sdxl` engine trainer with no branch here,
+            // unlike `sd3_lora`/`anima_lora` which split on base_model. Pin that.
+            ("sdxl_lora", "illustrious_xl_v1", Some("sdxl")),
+            ("sdxl_lora", "illustrious_xl_v2", Some("sdxl")),
             ("ltx_mlx_lora", "ltx_2_3", Some("ltx_2_3")),
             ("wan_lora", "wan_2_2", Some("wan2_2_ti2v_5b")),
             ("wan_moe_lora", "wan_2_2_t2v_14b", Some("wan2_2_t2v_14b")),
@@ -2063,6 +2105,11 @@ mod tests {
             // registers under the inference-generator id of each base.
             ("sd3_lora", "sd3_5_large", Some("sd3_5_large")),
             ("sd3_lora", "sd3_5_medium", Some("sd3_5_medium")),
+            // Anima (sc-10522): the `anima_lora` kernel maps to the trainer registered under the
+            // inference-generator id of the training-base variant; `anima_base` is the default.
+            ("anima_lora", "anima_base", Some("anima_base")),
+            ("anima_lora", "anima_aesthetic", Some("anima_aesthetic")),
+            ("anima_lora", "anima_turbo", Some("anima_turbo")),
             // Unknown SD3.5 base model variant (e.g. Turbo is NOT a training base).
             ("sd3_lora", "sd3_5_large_turbo", None),
             // Unknown A14B base model variant.
@@ -2472,11 +2519,13 @@ mod tests {
             sample_steps: 20,
             sample_guidance_scale: 1.0,
             resume: false,
+            control_type: None,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
+                control_image_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -2577,11 +2626,13 @@ mod tests {
             sample_steps: 20,
             sample_guidance_scale: 1.0,
             resume: false,
+            control_type: None,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
+                control_image_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -2685,11 +2736,13 @@ mod tests {
             sample_steps: 20,
             sample_guidance_scale: 1.0,
             resume: false,
+            control_type: None,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
+                control_image_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -2832,11 +2885,13 @@ mod tests {
             sample_steps: 20,
             sample_guidance_scale: 1.0,
             resume: false,
+            control_type: None,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
+                control_image_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -2903,6 +2958,37 @@ mod tests {
             512,
             false,
             "candle_sdxl_smoke.safetensors",
+        );
+    }
+
+    /// sc-10618 — the candle (CUDA) twin of the macOS Illustrious train smoke. Points the config-blind
+    /// `load_trainer("sdxl", …)` at an Illustrious turnkey's dense `bf16/` tier (the tier
+    /// `resolve_base_model_path` trains from) and runs a LoRA micro-step, proving the candle SDXL trainer
+    /// trains the Illustrious base on CUDA exactly as it trains stock SDXL — Illustrious differs only in
+    /// its base weights (the gen crates are config-blind). Upstream ships a single-file LDM (no plain
+    /// diffusers repo), so point `ILL_CANDLE_BF16_DIR` at the turnkey's `bf16/` tier on the RTX box:
+    /// `ILL_CANDLE_BF16_DIR=/hfcache/models--SceneWorks--illustrious-xl-v1-mlx/snapshots/<rev>/bf16 \
+    ///   cargo test -p sceneworks-worker --lib --features backend-candle --release -- \
+    ///   --ignored candle_illustrious_real_weights --nocapture`.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    #[ignore = "needs an Illustrious turnkey bf16 tier + a CUDA device; set ILL_CANDLE_BF16_DIR"]
+    fn candle_illustrious_real_weights_trains_a_lora_step() {
+        let Some(dir) = std::env::var_os("ILL_CANDLE_BF16_DIR")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.join("unet").is_dir())
+        else {
+            eprintln!(
+                "ILL_CANDLE_BF16_DIR unset or missing unet/ — skipping candle Illustrious smoke"
+            );
+            return;
+        };
+        candle_real_weights_smoke(
+            "sdxl",
+            &dir,
+            512,
+            false,
+            "candle_illustrious_lora.safetensors",
         );
     }
 
@@ -2988,6 +3074,7 @@ mod tests {
             items: vec![TrainingItem {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
+                control_image_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -3128,6 +3215,128 @@ mod tests {
             256,
             true,
             "candle_krea_smoke.safetensors",
+        );
+    }
+
+    /// sc-10163 (epic 10159 B2) — the candle Krea pose-**ControlNet** training smoke. Drives the exact
+    /// studio path — `gen_core::load_trainer("krea_2_control", …).train(req)` — over real (target, pose
+    /// skeleton, caption) triples from the COCO-pose dataset, proving the control trainer is reachable
+    /// through the worker's registry, trains a control branch end-to-end on the frozen 12B Krea base
+    /// (checkpointing forced on), and emits an overlay whose meta `kind` is derived from `control_type`
+    /// (sc-10722). Uses the S0-validated Krea-2-Turbo base. Run on demand on the RTX box (one per GPU):
+    /// `CONTROL_DATA=D:\sceneworks-pose-controlnet\spike cargo test -p sceneworks-worker --lib \
+    ///    --features backend-candle --release -- --ignored candle_krea_control_real_weights --nocapture`
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    #[ignore = "needs real Krea-2-Turbo weights + the COCO-pose dataset + a CUDA device (12B DiT). Set CONTROL_DATA"]
+    fn candle_krea_control_real_weights_trains_a_branch_step() {
+        let snapshot = candle_hf_snapshot("models--krea--Krea-2-Turbo", "transformer");
+        let data = std::path::PathBuf::from(
+            std::env::var("CONTROL_DATA").expect("set CONTROL_DATA to the pose dataset dir"),
+        );
+        let steps = std::env::var("KC_STEPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8u32);
+        let max_items = std::env::var("KC_ITEMS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(32usize);
+
+        // Read the control manifest → (target, control image, caption) triples. The A2 folder-ingest
+        // pipeline (sc-10161) emits the canonical `control` key + `kind`; the older COCO-pose spike
+        // datasets keyed the condition as `pose`, so accept `control` first and fall back to `pose`.
+        let manifest =
+            std::fs::read_to_string(data.join("manifest.jsonl")).expect("read manifest.jsonl");
+        let items: Vec<TrainingItem> = manifest
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .take(max_items)
+            .map(|l| {
+                let v: serde_json::Value = serde_json::from_str(l).expect("manifest row");
+                let field = |k: &str| {
+                    v.get(k)
+                        .and_then(|s| s.as_str())
+                        .unwrap_or_else(|| panic!("manifest row missing {k}"))
+                        .to_string()
+                };
+                let control = v
+                    .get("control")
+                    .or_else(|| v.get("pose"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_else(|| panic!("manifest row missing control/pose"))
+                    .to_string();
+                TrainingItem::with_control(
+                    data.join(field("target")),
+                    field("caption"),
+                    data.join(control),
+                )
+            })
+            .collect();
+        assert!(!items.is_empty(), "no items in {}", data.display());
+        eprintln!("krea_control smoke: {} items, {steps} steps", items.len());
+
+        let output_dir = std::env::temp_dir().join("krea-control-smoke");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let config = TrainingConfig {
+            steps,
+            resolution: 512,
+            gradient_accumulation: 1,
+            gradient_checkpointing: true,
+            train_dtype: "bf16".to_owned(),
+            control_type: Some("pose".to_owned()),
+            save_every: 0,
+            seed: 42,
+            ..Default::default()
+        };
+        let request = TrainingRequest {
+            items,
+            config,
+            output_dir: output_dir.clone(),
+            file_name: "krea_pose_control.safetensors".to_owned(),
+            trigger_words: Vec::new(),
+            cancel: CancelFlag::new(),
+        };
+
+        let mut trainer = gen_core::load_trainer(
+            "krea_2_control",
+            &LoadSpec::new(WeightsSource::Dir(snapshot)),
+        )
+        .expect("candle krea_2_control trainer loads (candle_gen_krea linked)");
+        trainer
+            .validate(&request)
+            .expect("control trainer accepts the request");
+
+        let mut last_loss = f32::NAN;
+        let out = trainer
+            .train(&request, &mut |progress| match progress {
+                TrainingProgress::Caching { current, total }
+                    if current == 1 || current == total =>
+                {
+                    eprintln!("caching {current}/{total}");
+                }
+                TrainingProgress::Training { step, total, loss } => {
+                    last_loss = loss;
+                    eprintln!("step {step}/{total} loss {loss:.5}");
+                }
+                _ => {}
+            })
+            .expect("control training runs");
+
+        eprintln!(
+            "DONE overlay={} steps={} final_loss={} (last {last_loss:.5})",
+            out.adapter_path.display(),
+            out.steps,
+            out.final_loss
+        );
+        assert!(out.adapter_path.exists(), "overlay written");
+        assert!(out.final_loss.is_finite(), "final loss finite");
+        // The overlay meta records the control `kind` derived from control_type (sc-10722).
+        let meta = std::fs::read_to_string(out.adapter_path.with_extension("json"))
+            .expect("overlay meta sidecar");
+        assert!(
+            meta.contains("pose_control_branch"),
+            "overlay kind must derive from control_type: {meta}"
         );
     }
 }

@@ -945,6 +945,64 @@ describe("ImageStudio model picker capability gating", () => {
     expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(8);
   });
 
+  // Per-model quality floor (sc-10731). A floored convert-at-install model (Anima base = q8 floor) is a
+  // decoupled `mlxTiers` model: the DEFAULT clamps UP to the floor, and an EXPLICIT below-floor pick is
+  // honored (never silently switched) but flagged with a non-blocking advisory.
+  // `floor` is passed explicitly (no default) so `undefined` yields a genuinely non-floored model.
+  const flooredModel = (mlxTiers, floor) => ({
+    ...Z_IMAGE,
+    id: "anima_base",
+    name: "Anima 2B",
+    hasVariantMatrix: false,
+    variants: undefined,
+    mlxTiers,
+    minQualityTier: floor,
+  });
+  const floorNote = () => container.querySelector(".quant-tier-floor-note");
+
+  it("floors the default tier to q8 and flags an explicit below-floor pick (sc-10731)", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    // Even with the global default set to q4, the q8-floored model clamps the DEFAULT up to q8.
+    window.localStorage.setItem("sceneworks-default-generation-quality", "q4");
+    await render(
+      baseContext({
+        createImageJob,
+        imageModels: [flooredModel(["q4", "q8"], "q8")],
+        macCapabilities: MAC_CAPS,
+      }),
+    );
+    await openAdvanced(container);
+    await act(async () => {});
+    const picker = tierPicker(container);
+    expect(picker).toBeTruthy();
+    // Acceptance #1: global q4 + floored model → q8 (floored), and no advisory at the floor.
+    expect(picker.value).toBe("q8");
+    expect(floorNote()).toBeFalsy();
+    // Acceptance #2: explicitly pick the below-floor q4 → honored (value stays q4) + advisory appears.
+    setSelect(picker, "q4");
+    await act(async () => {});
+    expect(tierPicker(container).value).toBe("q4");
+    expect(floorNote()).toBeTruthy();
+    // The explicit q4 is honored on Generate (not switched back to the floor).
+    await click(generateButton());
+    expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
+  });
+
+  it("does not flag or clamp a NON-floored model's q4 default (sc-10731, acceptance #3)", async () => {
+    // Same convert-at-install shape but no floor → the global q4 default is honored, no advisory.
+    window.localStorage.setItem("sceneworks-default-generation-quality", "q4");
+    await render(
+      baseContext({
+        imageModels: [flooredModel(["q4", "q8"], undefined)],
+        macCapabilities: MAC_CAPS,
+      }),
+    );
+    await openAdvanced(container);
+    await act(async () => {});
+    expect(tierPicker(container).value).toBe("q4");
+    expect(floorNote()).toBeFalsy();
+  });
+
   // Disjointness guard (sc-8515): the tier picker and Boogu's ui.precisionToggle both write
   // advanced.mlxQuantize and MUST never co-render/co-emit. In the catalog they are disjoint —
   // Boogu downloads via `base/`-style subfolder globs (no downloads[].variant keys), so it is
@@ -967,6 +1025,60 @@ describe("ImageStudio model picker capability gating", () => {
     // Default tier q4 → mlxQuantize 4, NOT the precision-toggle's bf16 sentinel 0.
     await click(generateButton());
     expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
+  });
+
+  // Per-(screen, model) sticky last-tier (sc-10727 / epic 10721). An explicit pick is persisted and
+  // reused as the default on the next visit to that model on this screen, surviving app restarts.
+  it("persists the explicit tier pick per (screen, model) across a remount, above the declared default (sc-10727)", async () => {
+    // All three tiers installed; declared default is q4.
+    const model = matrixModel(["q4", "q8", "bf16"], "q4");
+    await render(baseContext({ imageModels: [model], macCapabilities: MAC_CAPS }));
+    await openAdvanced(container);
+    await act(async () => {});
+    // First visit: seeds on the declared default (no sticky stored yet).
+    expect(tierPicker(container).value).toBe("q4");
+    // User explicitly picks q8 → written to the persistent per-(screen, model) store.
+    setSelect(tierPicker(container), "q8");
+    await act(async () => {});
+    expect(tierPicker(container).value).toBe("q8");
+
+    // Simulate an app restart: tear the tree down and mount a FRESH one (React state is gone; only
+    // the persisted sticky survives), then re-render the SAME model. (The Advanced panel's open
+    // state persists in the studio-settings blob, so it may already be open — guard the toggle.)
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    await render(baseContext({ imageModels: [model], macCapabilities: MAC_CAPS }));
+    if (!tierPicker(container)) {
+      await openAdvanced(container);
+      await act(async () => {});
+    }
+    // The sticky q8 now seeds the picker, winning over the declared default q4 — persistence +
+    // precedence (sticky > declared/base default) proven end-to-end.
+    expect(tierPicker(container).value).toBe("q8");
+  });
+
+  it("keeps the sticky independent per model — a pick on model X does not affect model Y (sc-10727)", async () => {
+    const modelX = matrixModel(["q4", "q8", "bf16"], "q4");
+    const modelY = { ...matrixModel(["q4", "q8", "bf16"], "q4"), id: "other_model", name: "Other Model" };
+
+    await render(baseContext({ imageModels: [modelX], macCapabilities: MAC_CAPS }));
+    await openAdvanced(container);
+    await act(async () => {});
+    setSelect(tierPicker(container), "q8");
+    await act(async () => {});
+    expect(tierPicker(container).value).toBe("q8");
+
+    // Fresh mount, render a DIFFERENT model (Y). Its picker seeds on its OWN default (q4), untouched
+    // by X's q8 sticky — a global (non-model-keyed) store would wrongly surface q8 here. (Advanced
+    // may already be open from the persisted studio-settings blob — guard the toggle.)
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    await render(baseContext({ imageModels: [modelY], macCapabilities: MAC_CAPS }));
+    if (!tierPicker(container)) {
+      await openAdvanced(container);
+      await act(async () => {});
+    }
+    expect(tierPicker(container).value).toBe("q4");
   });
 });
 

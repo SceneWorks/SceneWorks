@@ -378,6 +378,20 @@ export function VideoStudio() {
     if (launchRequest?.view !== "Video") {
       return;
     }
+    // sc-10516: a preset launch. `availablePresets` filters on mode + model, so the
+    // preset only resolves once both match — set them alongside the id, then let
+    // useSavePreset's hydrate effect apply its `defaults`. Returns before the asset
+    // paths below, which would otherwise fall through to setMode(undefined).
+    if (launchRequest.presetId) {
+      if (VIDEO_PRESET_MODES.includes(launchRequest.presetMode)) {
+        setMode(launchRequest.presetMode);
+      }
+      if (launchRequest.presetModel) {
+        setModel(launchRequest.presetModel);
+      }
+      setSelectedPresetId(launchRequest.presetId);
+      return;
+    }
     if (launchRequest.characterId) {
       setMode(launchRequest.mode ?? "text_to_video");
       setCharacterId(launchRequest.characterId);

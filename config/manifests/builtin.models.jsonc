@@ -1507,6 +1507,20 @@
         "minMemoryGb": 42,
         "quantize": 4
       },
+      // candle/CUDA VRAM gate (epic 10765 sc-10856). schnell shares FLUX.1's EXACT packed architecture
+      // with dev — same 12B MMDiT, T5-XXL, CLIP-L, VAE (schnell only omits the tiny guidance embedding),
+      // and peak VRAM is set by tensor/activation shapes at 1024², not weight values — so the packed q4/q8
+      // peaks are the dev measurement (flux1-dev-mlx, RTX PRO 6000 sm_120: q4 resident 21.3 / sequential
+      // 18.4 GB, q8 31.8 / 26.4 GB). `measured: false` records that these were carried from the identical-
+      // architecture dev sibling rather than run against flux1-schnell-mlx directly (the offload harness
+      // hardcodes load_dev and can't load schnell weights). Same reject-when-even-sequential-won't-fit gate
+      // (sc-10856). bf16 omitted for the same diffusers-dense candle load gap as dev (sc-10888).
+      "candle": {
+        "minMemoryGb": 24,
+        "vramGbByTier": { "q4": 21.3, "q8": 31.8 },
+        "sequentialPeakGb": { "q4": 18.4, "q8": 26.4 },
+        "measured": false
+      },
       "ui": {
         "label": "FLUX.1 [schnell]",
         "description": "Black Forest Labs FLUX.1 [schnell] — fast ~4-step distilled text-to-image, Apache-2.0 (commercial-safe). 12B transformer + T5-XXL text encoder; ~34GB bf16 VRAM, needs a large-VRAM GPU.",
@@ -1594,6 +1608,25 @@
       "mlx": {
         "minMemoryGb": 42,
         "quantize": 4
+      },
+      // candle/CUDA VRAM gate (epic 10765 sc-10856) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
+      // 1024²/8-step via the candle-gen-flux offload A/B harness (flux_dev_probed_generate_for_offload_ab,
+      // device-level nvidia-smi peak on an idle GPU 0), pointed at each packed `SceneWorks/flux1-dev-mlx`
+      // tier. Two peaks per tier: `vramGbByTier` = RESIDENT (T5+CLIP+DiT+VAE co-resident, the default
+      // cross-request-cached path); `sequentialPeakGb` = SEQUENTIAL residency (the ~3–5 GB text encoders
+      // dropped before the DiT loads, sc-10769) — always lower, and the resident/sequential pixels are
+      // byte-identical. The fit-gate compares the resident peak against free VRAM to choose sequential-
+      // offload vs reject, then (sc-10856) REJECTS if even the sequential peak won't fit rather than OOM.
+      // minMemoryGb 24 gates the DEFAULT (q4) tier with headroom (q4 resident 21.3 GB). Only q4/q8 are
+      // recorded: the packed tiers load via the diffusers packed-detect path (a `quantization` block in
+      // config.json). The `bf16/` tier is diffusers-layout DENSE (sharded `transformer/`, no quantization
+      // block) which the candle FLUX loader does NOT read — it wants the black-forest-labs single-file
+      // `flux1-dev.safetensors` — so bf16 off-Mac candle is a separate load gap (sc-10888), not gated here.
+      "candle": {
+        "minMemoryGb": 24,
+        "vramGbByTier": { "q4": 21.3, "q8": 31.8 },
+        "sequentialPeakGb": { "q4": 18.4, "q8": 26.4 },
+        "measured": true
       },
       // sc-8669: re-hosted ungated on SceneWorks (FLUX.1 [dev] Non-Commercial License redistributed
       // with LICENSE + NOTICE, the flux2_dev re-host precedent) — no HF token / license-accept gate.
@@ -4148,6 +4181,323 @@
       }
     },
     {
+      "id": "anima_base",
+      // Anima 2B (epic 10512 / sc-10523) — CircleStone Labs' anime text-to-image model, ported natively
+      // to mlx-gen (engine id `anima_base`). The Cosmos-Predict2 `CosmosTransformer3DModel` DiT (28
+      // layers, 17-channel patch-embed, 3-axis NTK RoPE) + the bundled `AnimaTextConditioner` (T5 query
+      // tokens cross-attending Qwen3-0.6B states) + the Qwen-Image VAE. Runs on MLX (macOS) AND the candle
+      // off-Mac lane (Windows/Linux CUDA): the candle port sc-10525 is now GPU-validated on real CUDA
+      // (sc-10625) and catalog-routed off-Mac (sc-10676), so `macOnly: false` — availability is driven by
+      // the routing tables (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag. True-CFG
+      // text-to-image (30 steps / guidance 4.5).
+      //
+      // Non-commercial: distributed under the CircleStone Labs Non-Commercial License v1.2. The source
+      // repo `circlestone-labs/Anima` is UN-gated (freely downloadable) but NC — generations are for
+      // non-commercial use only. `nonCommercial: true` feeds the packaging NC-weights guard
+      // (scripts/check-no-nc-weights.mjs, sc-10526) its family tokens from THIS manifest entry.
+      //
+      // Convert-at-install (sc-10517): SceneWorks never redistributes converted Anima weights, so the
+      // worker packs the Cosmos DiT ON-DEVICE to the full q4/q8/bf16 matrix from the ungated `split_files/`
+      // source (the conditioner + Qwen3 TE + Qwen-Image VAE stay dense bf16 in every tier). `downloads`
+      // enumerate the THREE exact source files this variant needs (its DiT + the two shared components) —
+      // NEVER the bare repo, which holds SEVEN full bf16 DiTs (~30 GB vs ~5.6 GB). The 5 distinct source
+      // paths across the three variants match the `ANIMA_DIT_FILES`/`ANIMA_TE_FILE`/`ANIMA_VAE_FILE`
+      // constants asserted by `source_file_plan_is_five_exact_paths_never_the_bare_repo` (sc-10517).
+      "autoDownload": false,
+      "name": "Anima 2B",
+      "family": "anima",
+      "type": "image",
+      "adapter": "mlx_anima",
+      "capabilities": ["text_to_image"],
+      "macOnly": false,
+      "nonCommercial": true,
+      "gated": false,
+      "downloads": [
+        {
+          // macOS convert source (sc-10517): the base variant's Cosmos DiT + the two shared components.
+          // Pulling just these three files avoids the ~30 GB whole-repo pull (7 bf16 DiTs). On macOS the
+          // worker packs this ON-DEVICE into the q4/q8/bf16 tier matrix (convert-at-install).
+          "provider": "huggingface",
+          "repo": "circlestone-labs/Anima",
+          "files": [
+            "split_files/diffusion_models/anima-base-v1.0.safetensors",
+            "split_files/text_encoders/qwen_3_06b_base.safetensors",
+            "split_files/vae/qwen_image_vae.safetensors"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 5690000000
+        },
+        {
+          // Non-mac dense bf16 (sc-10676): the SAME three exact `split_files/` paths, for the candle
+          // off-Mac lane. There is NO convert-at-install off-Mac (the `anima_quant` converter is
+          // macOS-only), so the candle loader dense-loads bf16 straight from this raw `split_files/`
+          // tree (`candle_gen_anima::loader::resolve_split_files` → `diffusion_models/ text_encoders/
+          // vae/`). Mirrors the mac entry's "3 exact paths, never the bare repo" guard — enumerating
+          // the variant DiT + shared Qwen3 TE + Qwen-Image VAE, never the ~30 GB bare repo.
+          "provider": "huggingface",
+          "repo": "circlestone-labs/Anima",
+          "files": [
+            "split_files/diffusion_models/anima-base-v1.0.safetensors",
+            "split_files/text_encoders/qwen_3_06b_base.safetensors",
+            "split_files/vae/qwen_image_vae.safetensors"
+          ],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 5690000000
+        }
+      ],
+      "defaults": {
+        // diffusers FlowMatchEuler with static time-shift 3.0 (the orthogonal schedulerShift knob, epic
+        // 7114), 30 steps, true CFG 4.5. Default solver is the recommended ER-SDE-3 (`er_sde`, sc-10519).
+        "resolution": "1024x1024",
+        "steps": 30,
+        "guidanceScale": 4.5,
+        "count": 1,
+        "sampler": "er_sde",
+        "scheduler": "default",
+        "schedulerShift": 3.0
+      },
+      "limits": {
+        // Cosmos RoPE trained window → W×H in [512, 1536], multiples of 16 (descriptor RES_MULTIPLE=16;
+        // >1536/side is rejected, not clamped). Anima routes the per-generation sampler/scheduler knobs
+        // through the unified flow framework (epic 7114), so the `anima_base` descriptor advertises
+        // curated_sampler_names()/curated_scheduler_names() — this `limits` menu is a subset (the
+        // engines.rs `manifest_menu_is_subset_of_descriptor` drift guard). "default" is the native loop.
+        "resolutions": ["1024x1024", "832x1216", "1216x832", "896x1152", "1152x896", "768x1344", "1344x768", "1536x1536"],
+        "count": [1, 2, 4],
+        "samplers": ["default", "er_sde", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"]
+      },
+      "loraCompatibility": {
+        // Anima LoRA/LoKr (sc-10521): the trained adapter targets the Cosmos DiT AND the bundled
+        // `llm_adapter` conditioner, applied via `apply_anima_adapters`. Quant + LoRA TOGETHER is
+        // unsupported (sc-10578 — the engine `load()` errors on the combination).
+        "families": ["anima"],
+        "types": ["style", "character"]
+      },
+      "mlx": {
+        // 2B Cosmos DiT + 0.6B Qwen3 TE + Qwen-Image VAE — small. Convert-at-install packs the DiT to the
+        // q4/q8/bf16 matrix on-device (the offline 2B quantize peaks a few GB); default q4. minMemoryGb 16
+        // covers both the convert peak and a 1536² generate.
+        "minMemoryGb": 16,
+        "quantize": 4,
+        // Per-model quality FLOOR (sc-10731, epic 10721): the minimum-fidelity tier the DEFAULT resolution
+        // may land on. Anima base renders WASHED/smudged at q4 under CFG 4.5 × 30 steps (sc-10714 — q4
+        // weight-quant error is amplified), so the app-wide default (and a low global "default quality"
+        // setting) clamps UP to q8 here rather than silently landing on q4. This REPLACES the sc-10714
+        // `anima_tier_subdir` q8 hardcode: the q8 default is now floor-driven, not a resolver special-case.
+        // An EXPLICIT q4 pick in the Studio picker is still honored (a quant tier is a creative choice) —
+        // the web surfaces a non-blocking advisory instead. Turbo omits this floor (it is CFG-free, so q4
+        // is acceptable there).
+        "minQualityTier": "q8",
+        "requiresConversion": true,
+        "converter": "anima_quant",
+        "convertSourceRepo": "circlestone-labs/Anima",
+        // epic-10285 staleness: the converted artifact is stale (needs re-convert) once THIS source file
+        // is no longer in the HF cache. Must be one of `ANIMA_DIT_FILES` (validated by the convert plan).
+        "convertSourceFile": "split_files/diffusion_models/anima-base-v1.0.safetensors"
+      },
+      "licenseUrl": "https://huggingface.co/circlestone-labs/Anima",
+      "ui": {
+        "label": "Anima 2B",
+        "description": "CircleStone Labs Anima 2B — an anime text-to-image model ported natively to MLX (Apple Silicon only). A Cosmos-Predict2 diffusion transformer conditioned by a compact query-token text adapter over a Qwen3-0.6B encoder, decoded through the Qwen-Image VAE. Runs ~30 steps at guidance 4.5 (flow-match, ER-SDE-3 sampler, shift 3.0). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting works (e.g. `(chibi:2)`), applied to the text query tokens. Convert-at-install: the ~5.6 GB source is packed on-device into bf16 / q8 (default) / q4 tiers — q8 is the default (near-lossless, ≈bf16); pick bf16 for max fidelity (and, on this small 2B model, often the fastest on Apple Silicon), or q4 for a softer, more painterly look (and to save RAM). Distributed under the CircleStone Labs Non-Commercial License v1.2: generations are for non-commercial use only. Runs comfortably on a 16 GB-class Mac.",
+        "recommendedFor": ["text_to_image"],
+        // Booru quality prefix + negative (sc-10523, sc-10760). Image Studio seeds `defaultPrompt` into an
+        // UNEDITED prompt box and `defaultNegativePrompt` into an EMPTY negative box (text-to-image AND
+        // character mode). Anima is a danbooru-tag model that renders low-effort art from a bare sentence, so
+        // opening the prompt with the quality prefix and building on it is what the model card recommends.
+        // `promptHint` shows the inline booru tip under the prompt box (and opens the prompt guide).
+        "defaultPrompt": "masterpiece, best quality, ",
+        "defaultNegativePrompt": "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration",
+        "promptHint": "Booru-tag model: keep the quality prefix and describe your subject as comma-separated tags (e.g. 1girl, solo, pink hair, superhero costume, cape, dynamic pose). A plain sentence renders low-effort art.",
+        "promptGuide": {
+          "title": "Anima Prompt Guide",
+          "path": "/prompt-guides/anima.md",
+          "sources": [
+            { "label": "Anima model card (CircleStone Labs)", "url": "https://huggingface.co/circlestone-labs/Anima" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "anima_aesthetic",
+      // Anima 2B Aesthetic (epic 10512 / sc-10523) — the aesthetic fine-tune of Anima 2B. Same
+      // architecture, sampler/scheduler menu, convert-at-install (mac) / dense candle (off-Mac) flow, and
+      // NC posture as `anima_base`; differs only in the DiT weights file (same 30 steps / guidance 4.5).
+      "autoDownload": false,
+      "name": "Anima 2B Aesthetic",
+      "family": "anima",
+      "type": "image",
+      "adapter": "mlx_anima",
+      "capabilities": ["text_to_image"],
+      "macOnly": false,
+      "nonCommercial": true,
+      "gated": false,
+      "downloads": [
+        {
+          // macOS convert source (sc-10517).
+          "provider": "huggingface",
+          "repo": "circlestone-labs/Anima",
+          "files": [
+            "split_files/diffusion_models/anima-aesthetic-v1.0.safetensors",
+            "split_files/text_encoders/qwen_3_06b_base.safetensors",
+            "split_files/vae/qwen_image_vae.safetensors"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 5690000000
+        },
+        {
+          // Non-mac dense bf16 (sc-10676) — the candle off-Mac lane loads these raw `split_files/` paths
+          // directly (no convert-at-install off-Mac). Same 3-exact-paths guard as the mac entry.
+          "provider": "huggingface",
+          "repo": "circlestone-labs/Anima",
+          "files": [
+            "split_files/diffusion_models/anima-aesthetic-v1.0.safetensors",
+            "split_files/text_encoders/qwen_3_06b_base.safetensors",
+            "split_files/vae/qwen_image_vae.safetensors"
+          ],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 5690000000
+        }
+      ],
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 30,
+        "guidanceScale": 4.5,
+        "count": 1,
+        "sampler": "er_sde",
+        "scheduler": "default",
+        "schedulerShift": 3.0
+      },
+      "limits": {
+        "resolutions": ["1024x1024", "832x1216", "1216x832", "896x1152", "1152x896", "768x1344", "1344x768", "1536x1536"],
+        "count": [1, 2, 4],
+        "samplers": ["default", "er_sde", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"]
+      },
+      "loraCompatibility": {
+        "families": ["anima"],
+        "types": ["style", "character"]
+      },
+      "mlx": {
+        "minMemoryGb": 16,
+        "quantize": 4,
+        // Per-model quality FLOOR (sc-10731, epic 10721): same q8 floor as `anima_base` — the aesthetic
+        // fine-tune shares the base's washed-at-q4-under-CFG behavior (sc-10714), so the DEFAULT clamps UP
+        // to q8. Floor-driven, not the old resolver hardcode; an explicit q4 pick is honored + flagged.
+        "minQualityTier": "q8",
+        "requiresConversion": true,
+        "converter": "anima_quant",
+        "convertSourceRepo": "circlestone-labs/Anima",
+        "convertSourceFile": "split_files/diffusion_models/anima-aesthetic-v1.0.safetensors"
+      },
+      "licenseUrl": "https://huggingface.co/circlestone-labs/Anima",
+      "ui": {
+        "label": "Anima 2B Aesthetic",
+        "description": "CircleStone Labs Anima 2B Aesthetic — the aesthetic fine-tune of Anima 2B, ported natively to MLX (Apple Silicon only). Same Cosmos-Predict2 transformer + query-token text adapter (Qwen3-0.6B) + Qwen-Image VAE as the base, tuned for a stronger aesthetic. Runs ~30 steps at guidance 4.5 (flow-match, ER-SDE-3 sampler, shift 3.0). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting (e.g. `(chibi:2)`) works. Convert-at-install into bf16 / q8 (default) / q4 (softer, painterly) tiers. Distributed under the CircleStone Labs Non-Commercial License v1.2: non-commercial use only. Runs comfortably on a 16 GB-class Mac.",
+        "recommendedFor": ["text_to_image"],
+        // Booru quality prefix + negative (sc-10523, sc-10760) — same seams as anima_base.
+        "defaultPrompt": "masterpiece, best quality, ",
+        "defaultNegativePrompt": "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration",
+        "promptHint": "Booru-tag model: keep the quality prefix and describe your subject as comma-separated tags (e.g. 1girl, solo, pink hair, superhero costume, cape, dynamic pose). A plain sentence renders low-effort art.",
+        "promptGuide": {
+          "title": "Anima Prompt Guide",
+          "path": "/prompt-guides/anima.md",
+          "sources": [
+            { "label": "Anima model card (CircleStone Labs)", "url": "https://huggingface.co/circlestone-labs/Anima" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "anima_turbo",
+      // Anima 2B Turbo (epic 10512 / sc-10523) — the merged CFG-free few-step student of Anima 2B. Same
+      // architecture + convert-at-install flow + NC posture as the base; the guidance-distilled merged DiT
+      // runs in ~10 steps CFG-free (the `anima_turbo` descriptor advertises supports_guidance=false, so
+      // the 1.0 default is a nominal no-op — `resolve_guidance` returns None).
+      "autoDownload": false,
+      "name": "Anima 2B Turbo",
+      "family": "anima",
+      "type": "image",
+      "adapter": "mlx_anima",
+      "capabilities": ["text_to_image"],
+      "macOnly": false,
+      "nonCommercial": true,
+      "gated": false,
+      "downloads": [
+        {
+          // macOS convert source (sc-10517).
+          "provider": "huggingface",
+          "repo": "circlestone-labs/Anima",
+          "files": [
+            "split_files/diffusion_models/anima-turbo-v1.0.safetensors",
+            "split_files/text_encoders/qwen_3_06b_base.safetensors",
+            "split_files/vae/qwen_image_vae.safetensors"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 5690000000
+        },
+        {
+          // Non-mac dense bf16 (sc-10676) — the candle off-Mac lane loads these raw `split_files/` paths
+          // directly (no convert-at-install off-Mac). Same 3-exact-paths guard as the mac entry.
+          "provider": "huggingface",
+          "repo": "circlestone-labs/Anima",
+          "files": [
+            "split_files/diffusion_models/anima-turbo-v1.0.safetensors",
+            "split_files/text_encoders/qwen_3_06b_base.safetensors",
+            "split_files/vae/qwen_image_vae.safetensors"
+          ],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 5690000000
+        }
+      ],
+      "defaults": {
+        // Merged CFG-free student: 10 steps, guidance INERT (nominal 1.0). Default solver er_sde.
+        "resolution": "1024x1024",
+        "steps": 10,
+        "guidanceScale": 1.0,
+        "count": 1,
+        "sampler": "er_sde",
+        "scheduler": "default",
+        "schedulerShift": 3.0
+      },
+      "limits": {
+        "resolutions": ["1024x1024", "832x1216", "1216x832", "896x1152", "1152x896", "768x1344", "1344x768", "1536x1536"],
+        "count": [1, 2, 4],
+        "samplers": ["default", "er_sde", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"]
+      },
+      "loraCompatibility": {
+        "families": ["anima"],
+        "types": ["style", "character"]
+      },
+      "mlx": {
+        "minMemoryGb": 16,
+        "quantize": 4,
+        "requiresConversion": true,
+        "converter": "anima_quant",
+        "convertSourceRepo": "circlestone-labs/Anima",
+        "convertSourceFile": "split_files/diffusion_models/anima-turbo-v1.0.safetensors"
+      },
+      "licenseUrl": "https://huggingface.co/circlestone-labs/Anima",
+      "ui": {
+        "label": "Anima 2B Turbo",
+        "description": "CircleStone Labs Anima 2B Turbo — the merged few-step student of Anima 2B, ported natively to MLX (Apple Silicon only). Same Cosmos-Predict2 transformer + query-token text adapter (Qwen3-0.6B) + Qwen-Image VAE, guidance-distilled to run CFG-free in ~10 steps (much faster than the 30-step base). Uses the danbooru/booru tag convention — comma-separated lowercase tags, spaces not underscores, artists prefixed with `@`; strong prompt weighting (e.g. `(chibi:2)`) works. Convert-at-install into bf16 / q8 (default) / q4 tiers. Distributed under the CircleStone Labs Non-Commercial License v1.2: non-commercial use only. Runs comfortably on a 16 GB-class Mac.",
+        "recommendedFor": ["text_to_image"],
+        // Booru quality prefix + negative (sc-10523, sc-10760) — same seams as anima_base. (Turbo is CFG-free,
+        // so its q4 tier stays crisp — no painterly note in the description.)
+        "defaultPrompt": "masterpiece, best quality, ",
+        "defaultNegativePrompt": "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration",
+        "promptHint": "Booru-tag model: keep the quality prefix and describe your subject as comma-separated tags (e.g. 1girl, solo, pink hair, superhero costume, cape, dynamic pose). A plain sentence renders low-effort art.",
+        "promptGuide": {
+          "title": "Anima Prompt Guide",
+          "path": "/prompt-guides/anima.md",
+          "sources": [
+            { "label": "Anima model card (CircleStone Labs)", "url": "https://huggingface.co/circlestone-labs/Anima" }
+          ]
+        }
+      }
+    },
+    {
       "id": "sdxl",
       "recommended": true,
       "name": "Stable Diffusion XL",
@@ -4484,6 +4834,189 @@
           "sources": [
             { "label": "RealVisXL_V5.0_Lightning model card", "url": "https://huggingface.co/SG161222/RealVisXL_V5.0_Lightning" },
             { "label": "SDXL-Lightning (distillation method)", "url": "https://huggingface.co/ByteDance/SDXL-Lightning" },
+            { "label": "SDXL technical report", "url": "https://arxiv.org/abs/2307.01952" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "illustrious_xl_v1",
+      "name": "Illustrious-XL v1.0 (anime)",
+      "family": "sdxl",
+      "type": "image",
+      "adapter": "sdxl_diffusers",
+      // Danbooru-tag anime SDXL finetune (OnomaAI). Architecturally vanilla SDXL — identical UNet,
+      // dual CLIP-L + OpenCLIP-bigG, eps-pred, VAE scaling_factor 0.13025 — so it reuses the `sdxl`
+      // engine and the whole sdxl-family LoRA/LoKr stack unchanged (epic 10609).
+      "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image", "style_variations"],
+      "downloads": [
+        // SceneWorks turnkey re-host (sc-10611). Upstream OnomaAIResearch/Illustrious-XL-v1.0 ships a
+        // SINGLE-FILE LDM checkpoint, which neither mlx-gen-sdxl nor candle-gen-sdxl can read — it is
+        // converted to a tiered diffusers turnkey offline by `scripts/build_sdxl_turnkey.py`
+        // (sc-10610). Sizes measured on the built trees, not extrapolated.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/illustrious-xl-v1-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 3911461825,
+          "footprint": { "diskSizeBytes": 3911461825, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/illustrious-xl-v1-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 5385646417,
+          "footprint": { "diskSizeBytes": 5385646417, "residentMemoryBytes": 5094661092, "peakMemoryBytes": 20166437656 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/illustrious-xl-v1-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 7108498305,
+          "footprint": { "diskSizeBytes": 7108498305, "residentMemoryBytes": 6954313820, "peakMemoryBytes": 22025741200 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/illustrious-xl-v1-mlx"
+      },
+      "gated": false,
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 30,
+        "guidanceScale": 7.0,
+        "count": 4
+      },
+      "limits": {
+        // MEASURED, not taken from the model card (sc-10620). v1.0 tolerates wide frames: 0/3 seeds
+        // duplicated the subject at 1536x1536, and 1248x1824 rendered cleanly. The card's "native
+        // 1536x1536" claim holds; the checkpoint's own `modelspec.resolution: 1024x1024` is a stale
+        // training-harness stamp. NOTE v2.0 does NOT share this list — see that entry.
+        "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344", "1536x1536"],
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
+      },
+      "loraCompatibility": {
+        "families": ["sdxl"],
+        "types": ["style", "enhance", "character"]
+      },
+      "mlx": {
+        "quantize": 4,
+        "standardTierLayout": true,
+        "limits": {
+          "guidanceMethods": ["cfg", "cfg_pp"]
+        }
+      },
+      "ui": {
+        "label": "Illustrious-XL v1.0 (anime)",
+        "description": "Danbooru-tag anime SDXL finetune from OnomaAI, trained for high-resolution illustration. Same UNet and dual-CLIP as SDXL, so sdxl-family LoRAs apply and real CFG + negative prompt work as usual. Prompts blend Danbooru tags with natural language. Handles wide frames up to 1536x1536. SDXL license (openrail++), commercial use OK, ungated.",
+        "recommendedFor": ["text_to_image", "style_variations"],
+        // Anime negative-prompt convention (sc-10621), matching the baseline in the prompt guide.
+        // Image Studio seeds this into an empty negative box.
+        "defaultNegativePrompt": "lowres, bad anatomy, bad hands, missing fingers, extra digits, worst quality, low quality, jpeg artifacts, signature, watermark, username, blurry",
+        "pid": { "checkpointId": "pid_sdxl" },
+        "promptGuide": {
+          "title": "Illustrious Prompt Guide",
+          "path": "/prompt-guides/illustrious.md",
+          "sources": [
+            { "label": "Illustrious-XL v1.0 model card", "url": "https://huggingface.co/OnomaAIResearch/Illustrious-XL-v1.0" },
+            { "label": "SDXL technical report", "url": "https://arxiv.org/abs/2307.01952" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "illustrious_xl_v2",
+      "name": "Illustrious-XL v2.0 (anime)",
+      "family": "sdxl",
+      "type": "image",
+      "adapter": "sdxl_diffusers",
+      // The `v2.0-STABLE` last-annealing-phase snapshot of a cosine-annealing run. A SEPARATE
+      // catalog id, not a replacement for v1.0: upstream describe it as behaviourally distinct, and
+      // it has a materially narrower safe resolution range (see `limits`). Same vanilla-SDXL
+      // architecture, and it ships no checkpoint metadata at all — `prediction_type: epsilon` was
+      // read off the conversion, not the file (epic 10609).
+      "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image", "style_variations"],
+      "downloads": [
+        // SceneWorks turnkey re-host (sc-10612). As with v1.0, upstream ships a single-file LDM
+        // checkpoint converted offline by `scripts/build_sdxl_turnkey.py`. v2.0 additionally carries a
+        // stray I64 `position_ids` buffer and a BF16 VAE, both normalized by the conversion.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/illustrious-xl-v2-mlx",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 3911461501,
+          "footprint": { "diskSizeBytes": 3911461501, "residentMemoryBytes": 3624606692, "peakMemoryBytes": 18696383256 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/illustrious-xl-v2-mlx",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 5385646137,
+          "footprint": { "diskSizeBytes": 5385646137, "residentMemoryBytes": 5094546404, "peakMemoryBytes": 20166322968 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/illustrious-xl-v2-mlx",
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          "estimatedSizeBytes": 7108498177,
+          "footprint": { "diskSizeBytes": 7108498177, "residentMemoryBytes": 6954313820, "peakMemoryBytes": 22025741200 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/illustrious-xl-v2-mlx"
+      },
+      "gated": false,
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 30,
+        "guidanceScale": 7.0,
+        "count": 4
+      },
+      "limits": {
+        // DELIBERATELY NARROWER THAN v1.0 — do not "unify" these two lists (sc-10620).
+        // v2.0 duplicates the subject in WIDE frames: a `1girl, solo` prompt renders two girls on
+        // 1/2 seeds at 1344 wide and 3/4 at 1536 wide, while v1.0 is 0/3 at 1536. The failure tracks
+        // horizontal extent, not pixel count — v2 @1536x1024 duplicates while v2 @1024x1536 (same
+        // 1.57 MP) is clean. So `1344x768` (a STOCK SDXL bucket) and `1536x1536` are both omitted,
+        // while the tall `768x1344` is kept: only wide frames fail.
+        "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "768x1344"],
+        "count": [1, 2, 4],
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
+      },
+      "loraCompatibility": {
+        "families": ["sdxl"],
+        "types": ["style", "enhance", "character"]
+      },
+      "mlx": {
+        "quantize": 4,
+        "standardTierLayout": true,
+        "limits": {
+          "guidanceMethods": ["cfg", "cfg_pp"]
+        }
+      },
+      "ui": {
+        "label": "Illustrious-XL v2.0 (anime)",
+        "description": "The v2.0-STABLE snapshot of Illustrious-XL — subtler and more stable than v1.0, but with a narrower safe frame width: it tends to duplicate the subject in wide compositions, so the widest aspect buckets are not offered. Prefer square or tall framing. Same Danbooru-tag prompting and sdxl-family LoRA support. CreativeML OpenRAIL-M, commercial use OK, ungated.",
+        "recommendedFor": ["text_to_image", "style_variations"],
+        // Anime negative-prompt convention (sc-10621), matching the baseline in the prompt guide.
+        // Image Studio seeds this into an empty negative box.
+        "defaultNegativePrompt": "lowres, bad anatomy, bad hands, missing fingers, extra digits, worst quality, low quality, jpeg artifacts, signature, watermark, username, blurry",
+        "pid": { "checkpointId": "pid_sdxl" },
+        "promptGuide": {
+          "title": "Illustrious Prompt Guide",
+          "path": "/prompt-guides/illustrious.md",
+          "sources": [
+            { "label": "Illustrious-XL v2.0 model card", "url": "https://huggingface.co/OnomaAIResearch/Illustrious-XL-v2.0" },
             { "label": "SDXL technical report", "url": "https://arxiv.org/abs/2307.01952" }
           ]
         }

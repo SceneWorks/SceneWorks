@@ -338,6 +338,9 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("flux2_dev", true, false),
         ("sdxl", true, true),
         ("realvisxl", true, true),
+        // Illustrious-XL v1.0 / v2.0 (epic 10609): plain SDXL engine, real CFG + negative prompt.
+        ("illustrious_xl_v1", true, true),
+        ("illustrious_xl_v2", true, true),
         // RealVisXL Lightning (sc-6075): shares the `sdxl` engine id, whose descriptor advertises
         // guidance + negative prompt (true, true). The few-step recipe runs CFG-off (guidance 1.0,
         // negative inert) via the worker-forced `lightning` sampler, but that's a recipe default,
@@ -398,6 +401,13 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // supports_negative_prompt=false (the distilled-turbo "guidance is an embedding, no negative"
         // shape; cf. boogu_image_turbo's CFG-free-without-negative pattern).
         ("sana_sprint_1600m", true, false),
+        // Anima 2B anime t2i (epic 10512 / sc-10523): Base + Aesthetic run true classifier-free
+        // guidance — the descriptor derives supports_guidance = supports_negative_prompt = `uses_cfg()`,
+        // which is true for both (mlx-gen-anima `descriptor_for` / `Variant::uses_cfg`). Turbo is the
+        // merged CFG-free few-step student (`uses_cfg() == false`), so its descriptor drops both flags.
+        ("anima_base", true, true),
+        ("anima_aesthetic", true, true),
+        ("anima_turbo", false, false),
     ];
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());

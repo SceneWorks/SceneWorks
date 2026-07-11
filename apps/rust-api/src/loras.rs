@@ -180,6 +180,14 @@ pub(crate) async fn delete_lora(
             vec![state.settings.data_dir.join("loras")],
             state.settings.data_dir.clone(),
         ),
+        // sc-10452: the file lives in the operator's own external tree (e.g. ComfyUI).
+        // We read it in place and never took ownership, so deletion is not ours to do.
+        crate::external_loras::EXTERNAL_SCOPE => {
+            return Err(ApiError::bad_request(
+                "This LoRA lives in an external model folder and is read-only. \
+                 Delete it from that folder directly.",
+            ));
+        }
         _ => return Err(ApiError::bad_request("Unsupported LoRA scope")),
     };
     let permanent = query.permanent.unwrap_or(false);
@@ -293,6 +301,13 @@ pub(crate) async fn update_lora(
         "builtin" => {
             return Err(ApiError::bad_request(
                 "Built-in LoRA metadata is read-only. Import a copy to add trigger keywords or notes.",
+            ));
+        }
+        // sc-10452: no manifest backs an external row, so there is nothing to write to.
+        crate::external_loras::EXTERNAL_SCOPE => {
+            return Err(ApiError::bad_request(
+                "LoRAs discovered in an external model folder are read-only. \
+                 Import a copy to add trigger keywords or notes.",
             ));
         }
         _ => return Err(ApiError::bad_request("Unsupported LoRA scope")),
@@ -527,6 +542,12 @@ pub(crate) async fn lora_catalog(
     let user_manifest = manifest_dir.join("user.loras.jsonc");
     // sc-4202 (F-API-3): normalize_lora_entry probes the filesystem for installed
     // artifact paths; run the builtin+user normalize off the async executor.
+    // Epic 10451 / sc-10452: adapters an operator already has on disk (a ComfyUI
+    // `models/loras` tree). Empty unless `SCENEWORKS_EXTERNAL_MODEL_ROOTS` is set, so
+    // the default catalog is unchanged. Scanned inside the same blocking task as the
+    // manifest normalize sweep — both are filesystem-bound.
+    let external_roots = state.settings.external_model_roots.clone();
+    let external_cache = state.external_lora_cache.clone();
     let mut loras = {
         let data_dir = data_dir.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<Value>, ApiError> {
@@ -546,7 +567,16 @@ pub(crate) async fn lora_catalog(
                     normalize_lora_entry(lora, "global", &user_manifest, &data_dir, &data_dir)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(merge_entries_by_id(loras, user))
+            let loras = merge_entries_by_id(loras, user);
+            // External rows carry their own `installedPath`/`installState` (the scan
+            // proved the file exists), so they skip `normalize_lora_entry` — there is no
+            // manifest behind them to resolve a relative path against. Merged last of the
+            // global sources; their `external_…` ids cannot collide with a manifest entry.
+            let external = {
+                let mut cache = external_cache.lock();
+                crate::external_loras::scan_external_loras(&external_roots, &mut cache)
+            };
+            Ok(merge_entries_by_id(loras, external))
         })
         .await
         .map_err(|err| ApiError::internal(format!("LoRA catalog normalize task failed: {err}")))??
@@ -588,10 +618,17 @@ pub(crate) async fn lora_catalog(
             .get("installState")
             .and_then(Value::as_str)
             .is_some_and(|state| state == "installed");
-        object.insert(
-            "removable".to_owned(),
-            Value::Bool(scope != "builtin" || installed),
-        );
+        let removable = match scope {
+            // An external adapter lives in the user's own ComfyUI tree; we borrowed it,
+            // we do not own it. `delete_lora` refuses the scope, so a Delete button here
+            // could only ever 400 — and offering to remove someone else's file at all is
+            // the wrong promise (epic 10451 / sc-10452).
+            crate::external_loras::EXTERNAL_SCOPE => false,
+            // A built-in is only removable once its weights are actually on disk.
+            "builtin" => installed,
+            _ => true,
+        };
+        object.insert("removable".to_owned(), Value::Bool(removable));
     }
     loras.sort_by(|left, right| {
         let left_key = (

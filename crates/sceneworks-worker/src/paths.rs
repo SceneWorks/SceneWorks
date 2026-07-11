@@ -179,12 +179,22 @@ pub(crate) fn normalize_app_managed_model_path(
     let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
     let canonical_hf_cache =
         normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let mut roots = vec![data_dir, canonical_data_dir, hf_cache, canonical_hf_cache];
+    // Additionally admit the operator's external model roots (epic 10451 / sc-10668). Phase 1
+    // widened only the LoRA lane; Phase 2 reads an external ComfyUI **base** model's component
+    // files (DiT / text-encoder / VAE) in place from the configured tree, so those paths must
+    // resolve under a declared root too. Same posture as `normalize_app_managed_lora_path`: the
+    // roots come only from the process env (never a payload — a LAN caller, epic 4484, cannot
+    // widen the allow-list), and the list is empty by default and on macOS, so confinement is
+    // unchanged for every install that has not opted in. Both lexical + canonical forms are added.
+    for root in &settings.external_model_roots {
+        roots.push(normalize_absolute_path(root)?);
+        if let Ok(canonical) = normalize_existing_or_absolute(root) {
+            roots.push(canonical);
+        }
+    }
     let path = normalize_existing_or_absolute(Path::new(raw_path))?;
-    ensure_path_under(
-        path,
-        &[data_dir, canonical_data_dir, hf_cache, canonical_hf_cache],
-        label,
-    )
+    ensure_path_under(path, &roots, label)
 }
 
 /// Confine a LoRA adapter path taken from a job payload to an app-managed root
@@ -195,7 +205,15 @@ pub(crate) fn normalize_app_managed_model_path(
 /// a project tree under `<data>`; HF-cached adapters live in the hub cache).
 /// Without this a crafted payload could point a LoRA at any `.safetensors` on the
 /// host, giving the worker an arbitrary-file read primitive across the API boundary.
-/// Mirrors `normalize_app_managed_model_path` (model weights share the same roots).
+///
+/// Additionally admits `settings.external_model_roots` (epic 10451 / sc-10452) — an
+/// operator's existing ComfyUI `models/` tree, read in place. Those roots come only
+/// from the process environment, never from a payload, so a LAN caller (epic 4484)
+/// still cannot widen the allow-list; they merely name directories the deployment
+/// has already declared readable. The list is empty by default and on macOS, so the
+/// confinement is unchanged for every install that has not opted in. Phase 2 (sc-10668)
+/// widened `normalize_app_managed_model_path` the same way for external ComfyUI **base**
+/// model component files; both lanes now admit the declared external roots.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn normalize_app_managed_lora_path(
     settings: &Settings,
@@ -206,13 +224,21 @@ pub(crate) fn normalize_app_managed_lora_path(
     let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
     let canonical_hf_cache =
         normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let mut roots = vec![data_dir, canonical_data_dir, hf_cache, canonical_hf_cache];
+    // Both the lexical and canonical form of each external root, matching the posture
+    // above: `resolved` is canonical, and a canonical path never `starts_with` a
+    // lexical root when the two differ (a symlinked or `..`-bearing root, macOS
+    // `/var` -> `/private/var`). A root that cannot be canonicalized (unmounted drive)
+    // contributes its lexical form only, and simply never matches.
+    for root in &settings.external_model_roots {
+        roots.push(normalize_absolute_path(root)?);
+        if let Ok(canonical) = normalize_existing_or_absolute(root) {
+            roots.push(canonical);
+        }
+    }
     let normalized = normalize_absolute_path(path)?;
     let resolved = normalize_existing_or_absolute(&normalized)?;
-    ensure_path_under(
-        resolved,
-        &[data_dir, canonical_data_dir, hf_cache, canonical_hf_cache],
-        "LoRA path",
-    )
+    ensure_path_under(resolved, &roots, "LoRA path")
 }
 
 pub(crate) fn normalize_existing_or_absolute(path: &Path) -> WorkerResult<PathBuf> {

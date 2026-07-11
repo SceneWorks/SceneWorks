@@ -564,12 +564,27 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // FLUX.2-dev (epic 5914 MLX / epic 6564 sc-7458 candle) — the guidance-distilled 32B flagship.
     // A SEPARATE candle engine from klein (Mistral3 TE + 48/48/15360 DiT); Q4-quantized at load off-Mac.
     ModelCaps::new("flux2_dev", true, true, false, false, false),
-    ModelCaps::new("sdxl", true, true, false, false, false),
-    ModelCaps::new("realvisxl", true, true, false, false, false),
+    // SDXL family (sc-10767, epic 9083 full-catalog parity): the candle lane serves the packed q4/q8
+    // MLX tiers end-to-end — packed UNet (sc-9416), packed dual-CLIP (sc-9527), and LoRA/LoKr fold on a
+    // packed tier (sc-9528) — and `candle-gen-sdxl` now advertises `supported_quants: [Q4, Q8]`. So
+    // BOTH a quant tier-select AND an inference LoRA stay on candle → `candle_quant_lora`. Previously
+    // `false, false, false` bounced quant requests (the sc-10726 q8 default) AND LoRA requests off the
+    // candle lane into the retired torch fallback. bf16 still resolves to Quant::None (dense), verbatim.
+    ModelCaps::new("sdxl", true, true, false, false, true),
+    ModelCaps::new("realvisxl", true, true, false, false, true),
+    // Illustrious-XL v1.0 / v2.0 (epic 10609): vanilla-SDXL anime finetunes on the shared `sdxl`
+    // engine. Same routing surface as `realvisxl` — MLX + candle txt2img + packed q4/q8 (sc-10767).
+    ModelCaps::new("illustrious_xl_v1", true, true, false, false, true),
+    ModelCaps::new("illustrious_xl_v2", true, true, false, false, true),
     // RealVisXL Lightning (MLX sc-6075 / candle sc-7176): standalone few-step distilled SDXL checkpoint
     // on the shared `sdxl` engine, few-step `lightning` accel sampler. **txt2img only** on both backends —
     // edit / reference / mask / pose shapes fall back to torch (accel sampler is conditioning-incompatible).
-    ModelCaps::new("realvisxl_lightning", true, true, false, false, false),
+    // sc-10812 (epic 9083): shares `candle-gen-sdxl`, which advertises `supported_quants: [Q4, Q8]` +
+    // inference LoRA-on-packed after sc-10767 (packed UNet sc-9416 / dual-CLIP sc-9527 / adapter fold
+    // sc-9528). Its `SceneWorks/realvisxl-lightning-mlx` turnkey ships the standard q4/q8/bf16 tiers
+    // (standard_tier_subdir), so a quant tier-select AND a LoRA both stay on the candle lane for the
+    // plain few-step txt2img shape → `candle_quant_lora`. bf16 still resolves to Quant::None (dense).
+    ModelCaps::new("realvisxl_lightning", true, true, false, false, true),
     // InstantID on RealVisXL (sc-3345): MLX-only id — single-identity + the 11-view angle set route to
     // the native `mlx-gen-instantid` provider (candle serves it via the bespoke `instantid_candle_eligible`
     // lane, not the txt2img gate, so it is NOT a candle-routed txt2img id).
@@ -604,8 +619,13 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
         false,
     ),
     // Kolors (epic 3090): full surface on the Rust `kolors` engine (SDXL-family U-Net + ChatGLM3);
-    // candle serves txt2img + bespoke IP/pose lanes (sc-5488/sc-5489).
-    ModelCaps::new("kolors", true, true, false, false, false),
+    // candle serves txt2img + bespoke IP/pose lanes (sc-5488/sc-5489). sc-10819 (epic 9083): the candle
+    // `candle-gen-kolors` lane now serves the packed q4/q8 `SceneWorks/kolors-mlx` tiers end-to-end —
+    // packed ChatGLM3 (the four GLM projections) + the vendored packed-detecting SDXL UNet, VAE dense —
+    // and advertises `supported_quants: [Q4, Q8]`. So a quant tier-select stays on candle → `candle_quant`.
+    // NOT `candle_quant_lora`: kolors advertises NO candle inference LoRA (`supports_lora: false`), so a
+    // LoRA still defers to torch. bf16 still resolves to Quant::None (dense), verbatim.
+    ModelCaps::new("kolors", true, true, true, false, false),
     // Microsoft Lens / Lens-Turbo (epic 3164 / sc-5105 MLX; sc-5126 candle): pure T2I family. UNLIKE the
     // other candle families it DOES advertise on-the-fly quant AND LoRA/LoKr, so `candle_quant_lora` is
     // set — the first (and, with SD3.5/Krea, one of the) candle families exempt from the quant/LoRA → torch
@@ -656,6 +676,21 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // SANA 1600M + SANA-Sprint (epic 8485 / sc-8489 / sc-8490): MLX-only txt2img (no torch/candle backend).
     ModelCaps::new("sana_1600m", true, false, false, false, false),
     ModelCaps::new("sana_sprint_1600m", true, false, false, false, false),
+    // Anima base / aesthetic / turbo (epic 10512): anime txt2img on BOTH backends — native-MLX (macOS,
+    // install-time Q4/Q8 quant) and the candle off-Mac lane (sc-10676), which sc-10625 GPU-validated on
+    // real CUDA (candle-gen #380). `candle_routed = true`; `candle_lora = true` because the candle engine
+    // dense-folds a LoRA/LoKr onto the split_files/ DiT (descriptor `supports_lora`/`supports_lokr`,
+    // validated in the anima GPU smoke). `candle_quant = false`: there is NO packed Q4/Q8 tier off-Mac —
+    // the `anima_quant` converter is macOS-only and the NC license bars publishing one, and the candle
+    // loader only CONSUMES an MLX-packed tier (it hard-rejects a quant request against the dense DiT). So
+    // a deliberate `mlxQuantize` request stays off candle (defers rather than silently running dense —
+    // the sc-10515 anti-lie posture); the worker also force-dense-loads Anima regardless of the manifest
+    // default. `candle_quant_lora = false`: quant+LoRA together is unsupported on both lanes (sc-10578 —
+    // folding an adapter into u32-packed codes is a separate additive-branch job). candle_lora ⟹
+    // candle_routed keeps the sc-9495 superset invariant satisfied.
+    ModelCaps::new("anima_base", true, true, false, true, false),
+    ModelCaps::new("anima_aesthetic", true, true, false, true, false),
+    ModelCaps::new("anima_turbo", true, true, false, true, false),
 ];
 
 /// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
@@ -816,6 +851,9 @@ pub(crate) const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "wan_lora",
     "wan_moe_lora",
     "ltx_mlx_lora",
+    // Anima (epic 10512, sc-10522): the native `mlx-gen-anima` LoRA/LoKr trainer (DiT + `llm_adapter`
+    // conditioner). No torch path, so it is also in `MLX_ONLY_TRAINING_KERNELS`.
+    "anima_lora",
 ];
 
 /// SceneWorks training kernels with a native candle trainer that needs no base-model disambiguation
@@ -842,7 +880,8 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] =
 /// [`CANDLE_ROUTED_TRAINING_KERNELS`]), while torch is still refused. `sd3_lora` (epic 7841 T3
 /// sc-7884) is MLX-native with no torch trainer and no candle trainer yet (the off-Mac/candle SD3.5
 /// trainer is epic 7982), so — like LTX — only an mlx worker runs it today.
-pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &["ltx_mlx_lora", "krea_lora", "sd3_lora"];
+pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] =
+    &["ltx_mlx_lora", "krea_lora", "sd3_lora", "anima_lora"];
 
 #[cfg(test)]
 mod tests {
@@ -903,6 +942,8 @@ mod tests {
         "flux2_dev",
         "sdxl",
         "realvisxl",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
         "realvisxl_lightning",
         "instantid_realvisxl",
         "pulid_flux_dev",
@@ -929,11 +970,16 @@ mod tests {
         "sd3_5_medium",
         "sana_1600m",
         "sana_sprint_1600m",
+        "anima_base",
+        "anima_aesthetic",
+        "anima_turbo",
     ];
 
     const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[
         "sdxl",
         "realvisxl",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
         "realvisxl_lightning",
         "z_image_turbo",
         "z_image",
@@ -964,16 +1010,34 @@ mod tests {
         "sd3_5_large",
         "sd3_5_large_turbo",
         "sd3_5_medium",
+        "anima_base",
+        "anima_aesthetic",
+        "anima_turbo",
     ];
 
     // sc-9983: Krea joins Lens as a BOTH-quant-and-LoRA candle family (sc-9607 flipped its
     // `supported_quants` to [Q4, Q8]; it already advertised inference LoRA via sc-7836). sc-9994 adds the
-    // Raw variant (candle-gen #350) with the same both-set advertisement.
-    const EXPECTED_CANDLE_QUANT_LORA_MODELS: &[&str] =
-        &["lens", "lens_turbo", "krea_2_turbo", "krea_2_raw"];
+    // Raw variant (candle-gen #350) with the same both-set advertisement. sc-10767: the SDXL family
+    // (sdxl/realvisxl/illustrious v1+v2) joins the both-set — the candle packed q4/q8 tier (sc-9416/9527)
+    // + adapter-on-packed fold (sc-9528) are wired and now advertised. sc-10812: realvisxl_lightning (the
+    // few-step distilled sibling on the SAME `sdxl` engine / descriptor) joins the both-set too — quant +
+    // LoRA stay on candle for its plain txt2img shape.
+    const EXPECTED_CANDLE_QUANT_LORA_MODELS: &[&str] = &[
+        "sdxl",
+        "realvisxl",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
+        "realvisxl_lightning",
+        "lens",
+        "lens_turbo",
+        "krea_2_turbo",
+        "krea_2_raw",
+    ];
 
     // sc-9983: ideogram/boogu join SD3.5 as quant-only candle families (sc-9607 flipped their
-    // `supported_quants` to [Q4, Q8]; no inference LoRA on candle).
+    // `supported_quants` to [Q4, Q8]; no inference LoRA on candle). sc-10819: kolors joins the quant-only
+    // set — the candle `candle-gen-kolors` lane now serves the packed q4/q8 `SceneWorks/kolors-mlx` tiers
+    // (packed ChatGLM3 + vendored SDXL UNet) and advertises [Q4, Q8], but NO candle inference LoRA.
     const EXPECTED_CANDLE_QUANT_MODELS: &[&str] = &[
         "sd3_5_large",
         "sd3_5_large_turbo",
@@ -983,10 +1047,13 @@ mod tests {
         "boogu_image",
         "boogu_image_turbo",
         "boogu_image_edit",
+        "kolors",
     ];
 
-    // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH), so the LoRA-only list is now empty.
-    const EXPECTED_CANDLE_LORA_MODELS: &[&str] = &[];
+    // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH). sc-10676: Anima is the LoRA-only candle
+    // family — the off-Mac engine dense-folds a LoRA/LoKr onto the split_files/ DiT, but advertises NO
+    // candle quant (no packed tier off-Mac), so it is LoRA-only rather than BOTH.
+    const EXPECTED_CANDLE_LORA_MODELS: &[&str] = &["anima_base", "anima_aesthetic", "anima_turbo"];
 
     const EXPECTED_CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[
         "wan_2_2",
@@ -1023,12 +1090,14 @@ mod tests {
         "wan_lora",
         "wan_moe_lora",
         "ltx_mlx_lora",
+        "anima_lora",
     ];
 
     const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] =
         &["z_image_lora", "sdxl_lora", "lens_lora", "krea_lora"];
 
-    const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] = &["ltx_mlx_lora", "krea_lora", "sd3_lora"];
+    const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] =
+        &["ltx_mlx_lora", "krea_lora", "sd3_lora", "anima_lora"];
 
     #[test]
     fn routed_model_lists_match_snapshot() {

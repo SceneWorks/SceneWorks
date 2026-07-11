@@ -24,7 +24,7 @@ import { LogsScreen } from "./screens/LogsScreen.jsx";
 import { StatsScreen } from "./screens/StatsScreen.jsx";
 import { LicensesScreen } from "./screens/LicensesScreen.jsx";
 import { SetupWizard } from "./screens/SetupWizard.jsx";
-import { editModelForAsset } from "./presetUtils.js";
+import { editModelForAsset, workflowModelType } from "./presetUtils.js";
 import { sortNewest, sortWorkers, upsertJobNewest } from "./sorters.js";
 import { useCharacters } from "./hooks/useCharacters.js";
 import { usePresets } from "./hooks/usePresets.js";
@@ -39,6 +39,7 @@ import { useJobEvents } from "./hooks/useJobEvents.js";
 import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import { isAccentId } from "./accents.js";
+import { writeDefaultGenerationQuality } from "./generationQuality.js";
 import {
   dropUpscaledVariants,
   findFoldedAssetById,
@@ -701,12 +702,20 @@ export function App() {
     createVideoJob,
   });
 
+  // `usable !== false` fails closed on external ComfyUI base models (sc-10667): they
+  // are surfaced in the catalog with a reason but not yet runnable (the per-family
+  // loaders are sc-10668+), so they must not be offered as a generation target.
+  // Manifest models never set `usable`, so they are unaffected.
   const imageModels = useMemo(() => {
-    const items = models.filter((model) => model.type === "image" && model.installState !== "missing");
+    const items = models.filter(
+      (model) => model.type === "image" && model.installState !== "missing" && model.usable !== false,
+    );
     return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "image");
   }, [models]);
   const videoModels = useMemo(() => {
-    const items = models.filter((model) => model.type === "video" && model.installState !== "missing");
+    const items = models.filter(
+      (model) => model.type === "video" && model.installState !== "missing" && model.usable !== false,
+    );
     return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "video");
   }, [models]);
   const selectedAsset = useMemo(
@@ -890,6 +899,14 @@ export function App() {
         }
         if (isAccentId(prefs?.accent)) {
           setAccent(prefs.accent);
+        }
+        // Re-prime the default-generation-quality cache from the durable server copy (sc-10728).
+        // It isn't React state here — the studio reads it fresh from localStorage via
+        // readDefaultGenerationQuality() — so seeding the cache is all that's needed for it to
+        // survive a desktop relaunch (the GET always resolves a concrete tier). writeDefault…
+        // normalizes, so an absent/legacy value lands on q8. No PUT: this is a read-only seed.
+        if (prefs?.defaultGenerationQuality) {
+          writeDefaultGenerationQuality(prefs.defaultGenerationQuality);
         }
       })
       .catch(() => {});
@@ -1634,6 +1651,28 @@ export function App() {
     setActiveView("Image");
   }
 
+  // sc-10516: launch a saved preset straight into the studio that can run it.
+  //
+  // The id alone is not enough: a studio only resolves `selectedPresetId` against its
+  // `availablePresets`, which is filtered by the current mode AND model
+  // (generationStudio.jsx). So the launch carries the preset's model and sub-mode too,
+  // and the studio sets all three together. `presetId` and `recipe` are mutually
+  // exclusive — a recipe launch keeps clearing the preset.
+  const sendPresetToStudio = useCallback((preset) => {
+    if (!preset?.id) {
+      return;
+    }
+    const view = workflowModelType(preset.workflow) === "video" ? "Video" : "Image";
+    setStudioLaunch({
+      id: crypto.randomUUID(),
+      view,
+      presetId: preset.id,
+      presetModel: preset.model ?? null,
+      presetMode: preset.defaults?.mode ?? preset.workflow,
+    });
+    setActiveView(view);
+  }, []);
+
   const sendAssetToVideo = useCallback((asset, mode = null) => {
     if (!asset) {
       return;
@@ -2074,6 +2113,7 @@ export function App() {
     createCharacterTestJob,
     sendCharacterToImage,
     sendCharacterToVideo,
+    sendPresetToStudio,
     openDatasetInLibrary,
     // Global theme (sc-10244): exposed so the Image Editor's top-bar toggle
     // drives the app-wide data-theme rather than a screen-local override.
@@ -2106,7 +2146,7 @@ export function App() {
     addCharacterReference, updateCharacterReference,
     removeCharacterReference, createCharacterLook, updateCharacterLook, deleteCharacterLook,
     attachCharacterLora, updateCharacterLora, detachCharacterLora, createCharacterTestJob,
-    sendCharacterToImage, sendCharacterToVideo, openDatasetInLibrary, theme, changeTheme,
+    sendCharacterToImage, sendCharacterToVideo, sendPresetToStudio, openDatasetInLibrary, theme, changeTheme,
   ]);
 
   return (

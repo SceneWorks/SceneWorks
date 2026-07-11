@@ -360,6 +360,11 @@ pub struct TrainingPlanItem {
     /// Absolute image path resolved by Rust.
     pub image_path: String,
     pub caption: String,
+    /// Absolute path to the per-item control-conditioning image (rendered pose/canny/depth) for a
+    /// ControlNet training run — `None` for LoRA training. Threaded into the engine `TrainingItem`'s
+    /// `control_image_path`; a control-branch kernel requires it on every item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_image_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -424,11 +429,14 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
         targets: vec![
             z_image_turbo_lora_target(),
             sdxl_lora_target(),
+            illustrious_xl_v1_lora_target(),
+            illustrious_xl_v2_lora_target(),
             kolors_lora_target(),
             lens_turbo_lora_target(),
             krea_raw_lora_target(),
             sd3_large_lora_target(),
             sd3_medium_lora_target(),
+            anima_base_lora_target(),
             ltx_video_lora_target(),
             wan_lora_target(),
             wan_t2v_14b_lora_target(),
@@ -442,8 +450,11 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
 pub fn builtin_training_presets() -> TrainingPresetRegistry {
     let target = z_image_turbo_lora_target();
     let sdxl_target = sdxl_lora_target();
+    let illustrious_v1_target = illustrious_xl_v1_lora_target();
+    let illustrious_v2_target = illustrious_xl_v2_lora_target();
     let kolors_target = kolors_lora_target();
     let krea_target = krea_raw_lora_target();
+    let anima_target = anima_base_lora_target();
     let wan_target = wan_lora_target();
     let wan_t2v_14b_target = wan_t2v_14b_lora_target();
     let wan_i2v_14b_target = wan_i2v_14b_lora_target();
@@ -628,6 +639,138 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 },
                 object(json!({
                     "description": "768px preset for tighter-VRAM SDXL training.",
+                    "order": 40
+                })),
+            ),
+            // Illustrious v1.0/v2.0 reuse the SDXL preset recipe wholesale — same UNet,
+            // same `sdxl_lora` kernel — differing only in the base model they train against.
+            // Built through the same `sdxl_preset` helper; training quality tiers derive from
+            // this preset registry, they are not a separate axis.
+            sdxl_preset(
+                &illustrious_v1_target,
+                "illustrious_xl_v1_lora.character.adamw8bit.balanced",
+                "Character balanced",
+                &["character"],
+                ("adamw8bit", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for 12-25 clean character images on Illustrious v1.0.",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            sdxl_preset(
+                &illustrious_v1_target,
+                "illustrious_xl_v1_lora.character.adamw8bit.conservative",
+                "Character conservative",
+                &["character"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.learning_rate = number(0.00005);
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR character preset for tight identity datasets.",
+                    "order": 20
+                })),
+            ),
+            sdxl_preset(
+                &illustrious_v1_target,
+                "illustrious_xl_v1_lora.style.adamw8bit.balanced",
+                "Style balanced",
+                &["style"],
+                ("adamw8bit", "balanced"),
+                |mut config| {
+                    config.rank = 32;
+                    config.alpha = 16;
+                    config
+                },
+                object(json!({
+                    "description": "Higher-capacity style LoRA defaults for anime look and texture transfer.",
+                    "order": 30
+                })),
+            ),
+            sdxl_preset(
+                &illustrious_v1_target,
+                "illustrious_xl_v1_lora.character.adamw8bit.low_vram",
+                "Low VRAM character",
+                &["character"],
+                ("adamw8bit", "low_vram"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.resolution = 768;
+                    config.steps = 1200;
+                    config
+                },
+                object(json!({
+                    "description": "768px preset for tighter-VRAM Illustrious v1.0 training.",
+                    "order": 40
+                })),
+            ),
+            sdxl_preset(
+                &illustrious_v2_target,
+                "illustrious_xl_v2_lora.character.adamw8bit.balanced",
+                "Character balanced",
+                &["character"],
+                ("adamw8bit", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for 12-25 clean character images on Illustrious v2.0.",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            sdxl_preset(
+                &illustrious_v2_target,
+                "illustrious_xl_v2_lora.character.adamw8bit.conservative",
+                "Character conservative",
+                &["character"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.learning_rate = number(0.00005);
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR character preset for tight identity datasets.",
+                    "order": 20
+                })),
+            ),
+            sdxl_preset(
+                &illustrious_v2_target,
+                "illustrious_xl_v2_lora.style.adamw8bit.balanced",
+                "Style balanced",
+                &["style"],
+                ("adamw8bit", "balanced"),
+                |mut config| {
+                    config.rank = 32;
+                    config.alpha = 16;
+                    config
+                },
+                object(json!({
+                    "description": "Higher-capacity style LoRA defaults for anime look and texture transfer.",
+                    "order": 30
+                })),
+            ),
+            sdxl_preset(
+                &illustrious_v2_target,
+                "illustrious_xl_v2_lora.character.adamw8bit.low_vram",
+                "Low VRAM character",
+                &["character"],
+                ("adamw8bit", "low_vram"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.resolution = 768;
+                    config.steps = 1200;
+                    config
+                },
+                object(json!({
+                    "description": "768px preset for tighter-VRAM Illustrious v2.0 training.",
                     "order": 40
                 })),
             ),
@@ -842,6 +985,57 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 object(json!({
                     "description": "Higher-step style LoRA for Wan2.2 14B I2V.",
                     "order": 20
+                })),
+            ),
+            anima_preset(
+                &anima_target,
+                "anima_base_lora.character.adamw8bit.balanced",
+                "Character balanced",
+                &["character"],
+                ("adamw8bit", "balanced"),
+                |mut config| {
+                    config.steps = 3000;
+                    config
+                },
+                object(json!({
+                    "description": "Balanced first run for 12-25 clean character images on the Anima base model (trains the DiT + llm_adapter conditioner).",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            anima_preset(
+                &anima_target,
+                "anima_base_lora.character.adamw8bit.conservative",
+                "Character conservative",
+                &["character"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.learning_rate = number(0.00005);
+                    config.steps = 3000;
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR Anima character preset for tight identity datasets.",
+                    "order": 20
+                })),
+            ),
+            anima_preset(
+                &anima_target,
+                "anima_base_lora.style.adamw8bit.balanced",
+                "Style balanced",
+                &["style"],
+                ("adamw8bit", "balanced"),
+                |mut config| {
+                    config.rank = 32;
+                    config.alpha = 16;
+                    config.steps = 3000;
+                    config
+                },
+                object(json!({
+                    "description": "Higher-capacity Anima style LoRA for anime texture and visual-language transfer.",
+                    "order": 30
                 })),
             ),
         ],
@@ -1848,6 +2042,158 @@ fn sdxl_lora_target() -> TrainingTarget {
     }
 }
 
+/// Illustrious-XL v1.0 LoRA training target (epic 10609).
+///
+/// Illustrious-XL is a Danbooru-tag anime finetune of **vanilla SDXL** (OnomaAI) —
+/// identical U-Net + dual-CLIP shapes and the same eps objective as the base, so it
+/// reuses the SDXL trainer wholesale through the **same `sdxl_lora` kernel** (unlike
+/// Kolors, which needs its own kernel to swap the ChatGLM3 encoder). `engine_trainer_id`
+/// keys on that kernel and already maps `"sdxl_lora" => "sdxl"`, so no kernel or engine
+/// wiring changes: only `base_model_repo` differs, pointing the SDXL trainer at the
+/// Illustrious turnkey instead of stock SDXL. The output registers as an `sdxl` family
+/// LoRA the shared `sdxl_diffusers` adapter loads back at generation.
+///
+/// `base_model_repo` is the tiered-turnkey re-host (upstream ships a single-file LDM
+/// checkpoint the trainer can't read); `resolve_base_model_path` descends into its dense
+/// `bf16/` tier — never q4/q8 — and `training_base_model_installed` gates on that tier's
+/// component tree via the `bf16_component_tree_present` fix (sc-10613).
+fn illustrious_xl_v1_lora_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "illustrious_xl_v1_lora".to_owned(),
+        name: "Illustrious-XL v1.0 LoRA".to_owned(),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: "sdxl".to_owned(),
+        base_model: "illustrious_xl_v1".to_owned(),
+        base_model_repo: Some("SceneWorks/illustrious-xl-v1-mlx".to_owned()),
+        kernel: "sdxl_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: 16,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 1500,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 1024,
+            save_every: 250,
+            seed: 42,
+            optimizer: "adamw8bit".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                "mixedPrecision": "bf16",
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                "gradientCheckpointing": true,
+                "networkType": "lora",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                "lrScheduler": "constant",
+                // Same SDXL UNet attention modules as the base target.
+                "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
+                // Real CFG (not a distilled base): previews at positive guidance.
+                "sampleEvery": 250,
+                "sampleSteps": 30,
+                "sampleGuidanceScale": 7.0,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 6000],
+            // MEASURED, not from the model card (sc-10620): v1.0 renders cleanly at 1536x1536
+            // (0/3 seeds duplicated), so it earns the high-res training option the base SDXL
+            // target omits. v2.0 does NOT — see that target; do not unify the two lists.
+            "resolutions": [768, 1024, 1536],
+            "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            "networkTypes": ["lora", "lokr"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "outputScopes": ["project", "global"]
+        })),
+        ui: object(json!({
+            "label": "Illustrious-XL v1.0 LoRA",
+            "description": "Train an anime image LoRA for Illustrious-XL v1.0 (Danbooru-tag SDXL finetune). Shares the SDXL UNet trainer, so the output is an sdxl-family LoRA. Supports high-res 1536 training.",
+            "recommendedFor": ["character", "style"]
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
+/// Illustrious-XL v2.0 LoRA training target (epic 10609).
+///
+/// v2.0 is the `v2.0-STABLE` cosine-annealing snapshot — behaviourally distinct from
+/// v1.0 but architecturally the same vanilla SDXL, so it reuses the `sdxl_lora` kernel
+/// exactly as [`illustrious_xl_v1_lora_target`] does. The only per-version difference is
+/// `base_model_repo` and the training-resolution ceiling: v2.0 duplicates the subject in
+/// wide/large frames (sc-10620), so — unlike v1.0 — it does **not** advertise 1536.
+fn illustrious_xl_v2_lora_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "illustrious_xl_v2_lora".to_owned(),
+        name: "Illustrious-XL v2.0 LoRA".to_owned(),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: "sdxl".to_owned(),
+        base_model: "illustrious_xl_v2".to_owned(),
+        base_model_repo: Some("SceneWorks/illustrious-xl-v2-mlx".to_owned()),
+        kernel: "sdxl_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: 16,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 1500,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 1024,
+            save_every: 250,
+            seed: 42,
+            optimizer: "adamw8bit".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                "mixedPrecision": "bf16",
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                "gradientCheckpointing": true,
+                "networkType": "lora",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                "lrScheduler": "constant",
+                "loraTargetModules": ["to_q", "to_k", "to_v", "to_out.0"],
+                "sampleEvery": 250,
+                "sampleSteps": 30,
+                "sampleGuidanceScale": 7.0,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 6000],
+            // DELIBERATELY NARROWER THAN v1.0 — do not unify (sc-10620). v2.0 duplicates the
+            // subject once the frame gets large: 3/4 seeds render two girls at 1536x1536, so
+            // 1536 is withheld as a training resolution (its previews would duplicate too).
+            "resolutions": [768, 1024],
+            "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            "networkTypes": ["lora", "lokr"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "outputScopes": ["project", "global"]
+        })),
+        ui: object(json!({
+            "label": "Illustrious-XL v2.0 LoRA",
+            "description": "Train an anime image LoRA for Illustrious-XL v2.0 (the more stable v2.0-STABLE snapshot). Shares the SDXL UNet trainer, so the output is an sdxl-family LoRA. Trains at 768/1024 (v2.0 duplicates the subject in larger frames).",
+            "recommendedFor": ["character", "style"]
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
 /// Kolors LoRA training target (epic 1929).
 ///
 /// Kolors (Kwai-Kolors) is an SDXL-architecture U-Net with a ChatGLM3-6B text
@@ -2026,6 +2372,7 @@ pub fn build_training_plan(
                 width: item.width,
                 height: item.height,
                 extra: ExtraFields::new(),
+                control_image_path: None,
             })
         })
         .collect::<Result<Vec<_>, TrainingPlanError>>()?;
@@ -2211,6 +2558,129 @@ fn validate_lr_scheduler(config: &TrainingConfig) -> Result<(), TrainingPlanErro
         }
     }
     Ok(())
+}
+
+/// The Anima (Cosmos-Predict2 DiT + `AnimaTextConditioner`) image LoRA/LoKr training target (epic
+/// 10512, sc-10522). Trained on the undistilled `anima_base` (like Krea Raw→Turbo / SD3 Large→turbo);
+/// the family-arch-identical aesthetic/turbo variants apply the same adapter back via
+/// `apply_anima_adapters`. The native `mlx-gen-anima` trainer trains the 448 DiT targets **and** the
+/// 60 `llm_adapter` conditioner targets (508 total). mlx-only (no torch/candle Anima trainer). NB the
+/// `mlx-gen-anima` trainer does not yet honor gradient checkpointing or preview sampling (dense-only,
+/// no in-training previews), so those advanced knobs default off here — that parity work (gradient
+/// checkpointing + OOM guard, in-training preview, mid-run resume, and the >1024 resolution ceiling)
+/// is tracked in sc-10576, not deferred in prose.
+fn anima_base_lora_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "anima_base_lora".to_owned(),
+        name: "Anima LoRA".to_owned(),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: "anima".to_owned(),
+        base_model: "anima_base".to_owned(),
+        base_model_repo: Some("circlestone-labs/Anima".to_owned()),
+        kernel: "anima_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: 16,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 3000,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 1024,
+            save_every: 250,
+            seed: 42,
+            optimizer: "adamw8bit".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                // Anima's base is bf16 on disk; the trainer runs bf16 mixed-precision (frozen base +
+                // activations bf16, trainable factors/optimizer f32). VAE latents + the Qwen3
+                // conditioner inputs are cached; the trained conditioner is re-run per step.
+                "mixedPrecision": "bf16",
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                // Dense-only for now (the mlx-gen-anima trainer does not implement block
+                // checkpointing yet — tracked in sc-10576); keep it off so the UI does not advertise
+                // a no-op.
+                "gradientCheckpointing": false,
+                "networkType": "lora",
+                // Flow-match noising: sigmoid timestep with a high-noise tilt, MSE on the velocity
+                // target (ε − x0), static schedule shift 3.0 baked into the trainer.
+                "timestepType": "sigmoid",
+                "timestepBias": "high_noise",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                "lrScheduler": "constant",
+                // In-training preview sampling is not implemented in the mlx-gen-anima trainer yet
+                // (tracked in sc-10576), so sampling defaults off.
+                "sampleEvery": 0,
+                "sampleSteps": 10,
+                "sampleGuidanceScale": 4.5,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 6000],
+            // Dense-only training (no memory guard/checkpointing yet), so the training-resolution
+            // ceiling stays at 1024 even though inference supports up to 1536 (tracked in sc-10576).
+            "resolutions": [512, 768, 1024],
+            "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            // The native mlx-gen-anima trainer reports `supports_lokr`; the inference loader applies
+            // LoKr through the shared `apply_anima_adapters` seam (sc-10521).
+            "networkTypes": ["lora", "lokr"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "outputScopes": ["project", "global"]
+        })),
+        ui: object(json!({
+            "label": "Anima LoRA",
+            "description": "Train an anime image LoRA for the Anima base model (Cosmos-Predict2 DiT + text conditioner).",
+            "recommendedFor": ["character", "style"]
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
+/// Build an Anima image LoRA/LoKr preset. The flow-match sampling + caching knobs live on the target
+/// defaults, so the preset overrides only the optimizer + quality label and whatever the `mutate`
+/// closure tweaks (rank/alpha/steps/LR).
+fn anima_preset<F>(
+    target: &TrainingTarget,
+    id: &str,
+    name: &str,
+    recommended_for: &[&str],
+    optimizer_quality: (&str, &str),
+    mutate: F,
+    ui: JsonObject,
+) -> TrainingPreset
+where
+    F: FnOnce(TrainingConfig) -> TrainingConfig,
+{
+    let (optimizer, quality_preset) = optimizer_quality;
+    let mut config = mutate(target.defaults.clone());
+    config.optimizer = optimizer.to_owned();
+    config
+        .advanced
+        .insert("qualityPreset".to_owned(), json!(quality_preset));
+    TrainingPreset {
+        id: id.to_owned(),
+        version: 1,
+        target_id: target.id.clone(),
+        name: name.to_owned(),
+        recommended_for: recommended_for
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect(),
+        optimizer: optimizer.to_owned(),
+        quality_preset: quality_preset.to_owned(),
+        config,
+        ui,
+        extra: ExtraFields::new(),
+    }
 }
 
 #[cfg(test)]

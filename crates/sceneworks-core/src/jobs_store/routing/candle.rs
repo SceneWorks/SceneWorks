@@ -14,6 +14,14 @@ use crate::jobs_store::routing::mlx::{
     video_upscale_job_is_mlx_eligible,
 };
 
+/// Candle video models whose provider descriptor advertises user-LoRA inference, so a video job
+/// carrying `request.loras` stays on the candle lane instead of being refused. Today only the Wan-14B
+/// MoE engines qualify: `candle-gen-wan`'s `wan14b` descriptor sets `supports_lora`, and the worker's
+/// `candle_resolve_wan_adapters` applies each LoRA (including an external ComfyUI file) per MoE expert.
+/// The wan-5B TI2V / LTX / SVD providers advertise no LoRA slot (sc-10539). Mirror of the candle-gen
+/// descriptors — kept in lockstep the same way `CANDLE_VIDEO_ROUTED_MODELS` mirrors the routed engines.
+pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"];
+
 /// Does this image job belong on the candle (Windows/CUDA) image lane (epic 3672, sc-3678)? The base
 /// `generate_candle_stream` drives plain text-to-image, and the bespoke lanes branched out below add
 /// the conditioned shapes ported under epic 5480 — SDXL/FLUX.2/Qwen `edit_image` (sc-5487), IP-Adapter
@@ -51,7 +59,7 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     // txt2img — the `image_request_candle_eligible` gate below rejects the whole `edit_image` family.
     // Branch it out first (disjoint from the IP-Adapter lane below, which is reference-only and not
     // `edit_image`). Mirrors the worker's `sdxl_edit_candle_available` gate.
-    if matches!(model, "sdxl" | "realvisxl") && sdxl_edit_candle_eligible(&job.payload) {
+    if is_sdxl_family_candle_model(model) && sdxl_edit_candle_eligible(&job.payload) {
         return true;
     }
     // FLUX.2-klein reference / img2img edit (sc-5487, epic 5480): a klein-family `edit_image` job with a
@@ -139,7 +147,7 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     // the `image_request_candle_eligible` gate below rejects `referenceAssetId`. Branch it out first
     // (pure IP only; img2img/inpaint/edit shapes are the SDXL edit lane above). Mirrors the worker's
     // `sdxl_ipadapter_available` gate.
-    if matches!(model, "sdxl" | "realvisxl") && sdxl_ipadapter_candle_eligible(&job.payload) {
+    if is_sdxl_family_candle_model(model) && sdxl_ipadapter_candle_eligible(&job.payload) {
         return true;
     }
     // Kolors IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): the `kolors` family with a
@@ -386,11 +394,16 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
     if has_nonempty_id("referenceAssetId") || has_nonempty_id("maskAssetId") {
         return false;
     }
-    // LoRAs are not in the candle video lane (the providers advertise none).
-    if payload
-        .get("loras")
-        .and_then(Value::as_array)
-        .is_some_and(|loras| !loras.is_empty())
+    // User LoRAs on the candle video lane are gated by the provider descriptor: the Wan-14B MoE
+    // engines (`wan_2_2_t2v_14b` / `wan_2_2_i2v_14b`) advertise `supports_lora` and their worker path
+    // (`candle_resolve_wan_adapters`) applies each `request.loras` entry from its file path — so a wan-14B
+    // job carrying user LoRAs stays on candle. Every other candle video provider (wan-5B TI2V, LTX, SVD)
+    // advertises no LoRA slot, so a LoRA there is refused here (no torch fallback — epic 8283). sc-10539.
+    if !CANDLE_VIDEO_LORA_MODELS.contains(&model)
+        && payload
+            .get("loras")
+            .and_then(Value::as_array)
+            .is_some_and(|loras| !loras.is_empty())
     {
         return false;
     }
@@ -554,6 +567,20 @@ pub(crate) fn instantid_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// with the FLUX XLabs IP-Adapter lane.
 pub(crate) fn pulid_flux_candle_eligible(payload: &Map<String, Value>) -> bool {
     pulid_flux_mlx_eligible(payload)
+}
+
+/// The SDXL-family model ids whose conditioning shapes have a bespoke candle lane (edit + IP-Adapter).
+///
+/// NOT every id on the `sdxl` engine: `realvisxl_lightning` is txt2img-only (its accel sampler is
+/// engine-incompatible with reference/img2img conditioning) and `instantid_realvisxl` has its own
+/// bespoke lane. Must stay in lockstep with the worker's `is_sdxl_edit_candle_model` /
+/// `is_sdxl_ipadapter_model` — a model the router sends to a lane the worker then rejects fails the
+/// job rather than falling back.
+pub(crate) fn is_sdxl_family_candle_model(model: &str) -> bool {
+    matches!(
+        model,
+        "sdxl" | "realvisxl" | "illustrious_xl_v1" | "illustrious_xl_v2"
+    )
 }
 
 /// SDXL img2img / inpaint / outpaint candle-routing conditions (sc-5487, epic 5480). The candle

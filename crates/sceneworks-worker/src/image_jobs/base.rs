@@ -212,6 +212,12 @@ enum CandleImageRoute {
     Flux1Control,
     /// A strict-pose job on a candle model with NO pose lane → reject loudly, never silent T2I (sc-5968).
     PoseReject,
+    /// An in-place ComfyUI Z-Image base model (`external_base_*`) → `generate_candle_zimage_comfyui_stream`
+    /// (epic 10451 Phase 2, sc-10668). Not an `is_candle_engine` id — routed off the forwarded row.
+    ZimageComfyui,
+    /// An in-place ComfyUI Qwen-Image base model (`external_base_*`) → `generate_candle_qwen_comfyui_stream`
+    /// (epic 10451 Phase 2b, sc-10670). Not an `is_candle_engine` id — routed off the forwarded row.
+    QwenImageComfyui,
     /// A plain candle txt2img engine id → `generate_candle_stream`.
     CandleTxt2Img,
 }
@@ -262,6 +268,14 @@ fn resolve_candle_image_route(
         Some(CandleImageRoute::Flux2Control)
     } else if flux1_control_candle_available(request, settings) {
         Some(CandleImageRoute::Flux1Control)
+    } else if zimage_comfyui_available(request, settings) {
+        // In-place ComfyUI Z-Image base (sc-10668): an `external_base_*` id, so it matches no
+        // `is_candle_engine` arm below — route it here off the forwarded `modelManifestEntry`.
+        Some(CandleImageRoute::ZimageComfyui)
+    } else if qwen_comfyui_available(request, settings) {
+        // In-place ComfyUI Qwen-Image base (sc-10670): sibling of the Z-Image comfyui lane — an
+        // `external_base_*` id routed off the forwarded row (family=="qwen-image", usable).
+        Some(CandleImageRoute::QwenImageComfyui)
     } else if is_candle_engine(&request.model)
         && !matches!(
             request.model.as_str(),
@@ -415,7 +429,16 @@ pub(crate) fn resolve_weights_dir(
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
     {
-        return resolve_app_managed_model_dir(settings, &path, "Image modelPath").map(Some);
+        let dir = resolve_app_managed_model_dir(settings, &path, "Image modelPath")?;
+        // Anima (epic 10512) is convert-at-install with a q4/q8/bf16 MATRIX: unlike other convert
+        // models (a single flat dir), its injected `modelPath` is the converted ROOT holding `bf16/`,
+        // `q8/`, `q4/` tier subdirs (written by `convert_anima_prequant`). Descend into the requested
+        // tier — bespoke, like Boogu/Ideogram — so the packed DiT loads at the chosen precision. Every
+        // other `modelPath` model resolves to the flat dir unchanged.
+        if is_anima_model(&request.model) {
+            return Ok(Some(anima_tier_subdir(&dir, request)));
+        }
+        return Ok(Some(dir));
     }
     let Some(model) = mlx_model(&request.model) else {
         return Ok(None);
@@ -475,6 +498,19 @@ pub(crate) fn resolve_weights_dir(
     // row already documents this resolver, but the branch was never added).
     if request.model == "krea_2_turbo" || request.model == "krea_2_raw" {
         return Ok(snapshot.map(|root| krea_model_subdir(&root, request)));
+    }
+    // Anima off-Mac (candle, sc-10676): dense bf16, NOT convert-at-install. There is no converted tier
+    // artifact off-Mac (the `anima_quant` converter is macOS-only), so point at the raw
+    // `circlestone-labs/Anima` `split_files/` root the candle loader reads directly (its DiT +
+    // `text_encoders/qwen_3_06b_base` + `vae/qwen_image_vae`, the exact dir the GPU-validated anima smoke
+    // used) and SKIP `anima_tier_subdir` — there are no bf16/q8/q4 tier subdirs off-Mac. The candle
+    // loader's `resolve_split_files` also accepts the snapshot parent, so fall back to the snapshot root
+    // if `split_files/` is somehow absent (a partial download then surfaces a loud load error, not a
+    // silently-wrong dir). macOS never reaches here: a converted Anima install injects `modelPath` and
+    // returns early via the `is_anima_model` tier-descent branch at the top of this fn.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if is_anima_model(&request.model) {
+        return Ok(snapshot.map(anima_dense_split_files_dir));
     }
     // Catalog-wide quant-matrix models (sc-8513, epic 8506) ship as SceneWorks pre-quantized
     // turnkeys with self-contained `q4/` (default) + `q8/` + `bf16/` subdirs (replacing any
@@ -611,10 +647,79 @@ fn is_dense_te_tier(request: &ImageRequest) -> bool {
             .unwrap_or(false)
 }
 
+/// Quality rank of a generation quant tier: higher = more faithful (`bf16` = 3, `q8` = 2, `q4` = 1,
+/// anything else = 0). Used to CLAMP a resolver's DEFAULT tier UP to a model's per-model quality floor
+/// (`mlx.minQualityTier`, sc-10731) — the clamp only ever RAISES, never lowers.
+fn tier_quality_rank(tier: &str) -> u8 {
+    match tier {
+        "bf16" => 3,
+        "q8" => 2,
+        "q4" => 1,
+        _ => 0,
+    }
+}
+
+/// Normalize a floor tier string to its canonical `&'static str` name (`bf16`/`q8`/`q4`), so a floor
+/// borrowed from the request manifest can be returned as a static tier subdir name. An unknown value
+/// falls to `q4` (harmless — it never outranks the `q8` default, so it is never actually selected).
+fn tier_static_name(tier: &str) -> &'static str {
+    match tier {
+        "bf16" => "bf16",
+        "q8" => "q8",
+        _ => "q4",
+    }
+}
+
+/// The tier subdir name a request prefers, given its explicit `advanced.mlxQuantize` `bits` and the
+/// model's per-model quality `floor` (`mlx.minQualityTier`, sc-10731 — `None` = no floor).
+///
+/// An EXPLICIT pick maps directly (`<= 0` → bf16, `> 4` → q8, `1..=4` → q4) and is HONORED even below
+/// the floor — a quant tier is a deliberate quality/creative choice, so the worker never silently
+/// overrides it (the web surfaces a non-blocking advisory on a below-floor pick instead). With NO
+/// explicit pick, the app-wide default (Q8, epic 10721 / sc-10726) is CLAMPED UP to the floor: a floored
+/// model (Anima base/aesthetic = q8) never lets the plain default land below the floor. The floor only
+/// ever RAISES the default — a floor at or below Q8 leaves the Q8 default unchanged — and the caller's
+/// clean-tier fallback chain still caps the result at what's installed (a floor tier not on disk falls
+/// to the best installed tier). This is the SHARED default-tier logic behind both [`standard_tier_subdir`]
+/// and [`anima_tier_subdir`]; it REPLACES the sc-10714 anima-specific `None => "q8"` hardcode so Anima's
+/// q8 default is now floor-driven from the manifest, not a resolver special-case.
+fn preferred_tier(bits: Option<i64>, floor: Option<&str>) -> &'static str {
+    match bits {
+        Some(b) if b <= 0 => "bf16",
+        Some(b) if b > 4 => "q8",
+        Some(_) => "q4",
+        None => match floor {
+            Some(f) if tier_quality_rank(f) > tier_quality_rank("q8") => tier_static_name(f),
+            _ => "q8",
+        },
+    }
+}
+
+/// The model's per-model quality FLOOR (`mlx.minQualityTier`, sc-10731): the MINIMUM-fidelity tier a
+/// DEFAULT resolution may land on, read from the request's forwarded manifest entry. `None` (field
+/// absent) means no floor — the app-wide default stands (e.g. Anima turbo is q4-tolerant and declares
+/// none). Only `bf16`/`q8`/`q4` are honored; any other value is ignored. Ungated (like
+/// [`standard_tier_subdir`], its ungated caller) so every build config that compiles the resolver also
+/// compiles this.
+fn min_quality_floor(request: &ImageRequest) -> Option<&str> {
+    request
+        .model_manifest_entry
+        .get("mlx")
+        .and_then(|mlx| mlx.get("minQualityTier"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|tier| tier_quality_rank(tier) > 0)
+}
+
 /// Pick the engine-complete tier subdir of a standard SceneWorks quant-matrix turnkey `root`:
 /// `bf16/` when the request opts out of quantization (`advanced.mlxQuantize <= 0` / "none"), `q8/`
-/// when it opts into Q8 (`> 4`), else the default `q4/`. Falls back through q4 → q8 → bf16 → `root`
-/// so a partially-downloaded turnkey surfaces as a load error rather than a silent half-load.
+/// when it opts into Q8 (`> 4`), `q4/` for an explicit Q4 pick (`1..=4`), else — with NO explicit
+/// `mlxQuantize` — the **`q8/`** default (epic 10721 / sc-10726: the app-wide gen-time default tier,
+/// matching [`resolve_quant`]'s Q8 default and [`anima_tier_subdir`], replacing the old blind q4).
+/// Falls back through the clean tiers first (q8 → bf16 → q4 → `root`) so a partial install never
+/// silently lands on the low-fidelity q4 (and a fully-absent turnkey surfaces as a load error). The
+/// Q8 default is CLAMPED to what's installed: with only `q4/` on disk it resolves q4, so a heavy model
+/// never OOMs on a tier the user didn't download.
 ///
 /// Tier presence is filename-agnostic: a tier is "present" when its backbone component holds any
 /// `*.safetensors` (packed single-file OR a `*-00001-of-*.safetensors` shard) or a `*.index.json`
@@ -633,11 +738,17 @@ fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
         .get("mlxQuantize")
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
     // A component dir "has weights" when it holds a packed/dense safetensors or a shard index.
+    // Hidden entries don't count: a dir holding only a `._model.safetensors` AppleDouble sidecar has
+    // no weights, and reporting otherwise routes the loader at a tier it cannot load
+    // (SceneWorks#1333).
     let component_has_weights = |dir: &Path| -> bool {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return false;
         };
         entries.flatten().any(|entry| {
+            if sceneworks_core::lora_family::is_hidden_file(&entry.path()) {
+                return false;
+            }
             let file = entry.file_name();
             let name = file.to_string_lossy();
             name.ends_with(".safetensors") || name.ends_with(".index.json")
@@ -654,24 +765,121 @@ fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
             || component_has_weights(&dir);
         has_backbone.then_some(dir)
     };
-    // bits<=0 (advanced.mlxQuantize: 0 / "none") → bf16; bits>4 → q8; else the q4 default.
-    let preferred = match bits {
-        Some(b) if b <= 0 => "bf16",
-        Some(b) if b > 4 => "q8",
-        _ => "q4",
-    };
+    // No explicit selection → the app-wide q8 default (epic 10721 / sc-10726), CLAMPED UP to the model's
+    // per-model quality floor (`mlx.minQualityTier`, sc-10731 — raises only, never lowers); bits<=0
+    // (advanced.mlxQuantize: 0 / "none") → bf16; bits>4 → q8; else (an explicit 1..=4) the q4 the user
+    // asked for (an explicit below-floor pick is honored — the web flags it, the worker never overrides).
+    // Fallback prefers the clean tiers (q8 → bf16 → q4) so a partial install never silently lands on the
+    // washed q4, and the (possibly floored) default is clamped to what's on disk.
+    let preferred = preferred_tier(bits, min_quality_floor(request));
     present(preferred)
-        .or_else(|| present("q4"))
         .or_else(|| present("q8"))
         .or_else(|| present("bf16"))
+        .or_else(|| present("q4"))
         .unwrap_or_else(|| root.to_path_buf())
+}
+
+/// The DENSE (`bf16/`) tier of a SceneWorks quant-matrix turnkey, or `root` unchanged for a flat
+/// diffusers snapshot (sc-10614).
+///
+/// The FALLBACK tier resolver for the candle SDXL edit / IP-Adapter lanes (`sdxl_edit_candle.rs`,
+/// `sdxl_ipadapter.rs`) on a NON-standard-layout repo. As of sc-10813 those lanes packed-detect and,
+/// for a standard-tier turnkey (`mlx.standardTierLayout`), descend through [`standard_tier_subdir`]
+/// (honouring `advanced.mlxQuantize`, exactly like the txt2img lane, sc-10767) — so the packed q4/q8
+/// tiers now serve edit / inpaint / IP-Adapter, not just txt2img. This helper stays the else-branch:
+/// a flat upstream diffusers repo (`stabilityai/stable-diffusion-xl-base-1.0`, `SG161222/RealVisXL_V5.0`)
+/// roots its `unet/` and is returned untouched, and a non-standard tiered turnkey resolves its dense
+/// `bf16/` (an SDXL turnkey has no component tree at its root, so the loader would find no `unet/`).
+///
+/// A flat snapshot roots its backbone dir — `unet/` for the SDXL family, `transformer/` for the DiTs
+/// — and is returned untouched, so the existing two models keep resolving exactly as before. Same
+/// backbone split the `apps/rust-api` training-readiness gate keys on (sc-10613).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn dense_tier_subdir(root: PathBuf) -> PathBuf {
+    let roots_a_component_tree = root.join("unet").is_dir() || root.join("transformer").is_dir();
+    if !roots_a_component_tree && root.join("bf16").is_dir() {
+        return root.join("bf16");
+    }
+    root
+}
+
+/// Whether `model` is one of the three Anima catalog ids (epic 10512). Anima is convert-at-install with
+/// a bespoke tier resolver, so — like Ideogram/Boogu/Krea — it is NOT in [`STANDARD_TIER_MODELS`].
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn is_anima_model(model: &str) -> bool {
+    matches!(model, "anima_base" | "anima_aesthetic" | "anima_turbo")
+}
+
+/// Pick the tier subdir of a converted Anima `root` (the injected `modelPath`, holding `bf16/ q8/ q4/`,
+/// each a `diffusion_models/<variant>.safetensors` + dense `text_encoders/` + `vae/` tree the Anima
+/// loader reads): `bf16/` when the request opts out of quantization (`advanced.mlxQuantize <= 0`), `q4/`
+/// when it opts into Q4 (`1..=4`), else the default **`q8/`** (sc-10714). Falls back through q8 → bf16 →
+/// q4 → `root` so a partially-written artifact surfaces as a load error rather than a silent half-load
+/// onto the low-fidelity q4. A tier is "present" when its `diffusion_models/` holds a `.safetensors` DiT
+/// (packed OR dense bf16). Mirrors [`standard_tier_subdir`], but keyed on Anima's `split_files` layout
+/// rather than `transformer/`, and — unlike the standard q4-first convention — defaults to q8 (below).
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn anima_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
+    let bits = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let present = |name: &str| -> Option<PathBuf> {
+        let dir = root.join(name);
+        // A hidden `._*.safetensors` AppleDouble sidecar is not a DiT (SceneWorks#1333).
+        let has_dit = std::fs::read_dir(dir.join("diffusion_models"))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| !sceneworks_core::lora_family::is_hidden_file(&entry.path()))
+                    .any(|entry| entry.file_name().to_string_lossy().ends_with(".safetensors"))
+            })
+            .unwrap_or(false);
+        has_dit.then_some(dir)
+    };
+    // Default (no explicit `mlxQuantize`) → the app-wide Q8 default (epic 10721 / sc-10726), CLAMPED UP
+    // to the model's per-model quality floor (`mlx.minQualityTier`, sc-10731). This REPLACES the sc-10714
+    // anima-specific `None => "q8"` hardcode with the SHARED, floor-driven [`preferred_tier`]: Anima
+    // base/aesthetic declare `minQualityTier: q8` in the manifest, so their default is now floor-derived
+    // — the fix for base/aesthetic rendering WASHED at q4 (q4 weight-quant error amplified by CFG 4.5 over
+    // 30 steps) is a general mechanism, not a resolver special-case. Turbo declares NO floor (it is
+    // CFG-free, so q4 is acceptable there) and rides the plain q8 default. bf16 (explicit `<= 0`) is there
+    // for max fidelity/speed on this small 2B DiT, and an explicit q4 pick is still honored (the web
+    // flags a below-floor pick with an advisory). Fallback prefers the clean tiers (q8 → bf16 → q4) so a
+    // partial install never silently lands on the washed q4.
+    let preferred = preferred_tier(bits, min_quality_floor(request));
+    present(preferred)
+        .or_else(|| present("q8"))
+        .or_else(|| present("bf16"))
+        .or_else(|| present("q4"))
+        .unwrap_or_else(|| root.to_path_buf())
+}
+
+/// The candle off-Mac Anima weights dir (sc-10676): the `split_files/` subdir of the HF snapshot `root`
+/// when it holds `diffusion_models/` (the dense DiT tree `candle_gen_anima::loader::resolve_split_files`
+/// reads — the exact dir the GPU-validated anima smoke used), else `root` itself. The candle loader also
+/// accepts the snapshot parent, so falling back to `root` keeps a partial download a loud load error, not
+/// a silently-wrong dir. Anima has NO convert-at-install tier off-Mac (the `anima_quant` converter is
+/// macOS-only), so this deliberately SKIPS [`anima_tier_subdir`]'s bf16/q8/q4 tier descent — off-Mac is
+/// always dense bf16.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn anima_dense_split_files_dir(root: PathBuf) -> PathBuf {
+    let split = root.join("split_files");
+    if split.join("diffusion_models").is_dir() {
+        split
+    } else {
+        root
+    }
 }
 
 /// The Ideogram 4 tier subdir a `mlxQuantize` request needs fetched ON DEMAND — `Some("q8")` when the
 /// request opts into Q8 (`> 4`), else `None` (the shipped default `q4/`, which the catalog download
 /// pulls; bf16 is a SEPARATE catalog repo the user opts into on the Models page, never an on-demand
-/// fetch). Shared by [`ideogram_model_subdir`] (which subdir to load) and [`ensure_ideogram_tier_present`]
-/// (which to fetch) so the two stay in lockstep, mirroring [`boogu_tier_subdir`].
+/// fetch). The FETCH-side helper for [`ensure_ideogram_tier_present`] (which tier to pull). The LOAD-side
+/// resolver [`ideogram_model_subdir`] no longer shares this: as of sc-10777 it routes its default through
+/// the floor-aware [`preferred_tier`] (so a floored default clamps up to `mlx.minQualityTier`, capped by
+/// installed), while this fetch helper stays keyed on the explicit pick only — no shipping Ideogram model
+/// declares a floor, so the two still agree for every current model. Mirrors [`boogu_tier_subdir`].
 fn ideogram_tier_subdir(bits: Option<i64>) -> Option<&'static str> {
     match bits {
         Some(b) if b > 4 => Some("q8"),
@@ -680,10 +888,16 @@ fn ideogram_tier_subdir(bits: Option<i64>) -> Option<&'static str> {
 }
 
 /// Pick the engine-complete packed subdir of an Ideogram 4 turnkey `root`: `q8/` when the request
-/// opts into Q8 (`advanced.mlxQuantize: 8`) AND it is downloaded, else the default `q4/`. Falls back
-/// to `root` if neither subdir is present (a partially-downloaded bundle surfaces as a load error
-/// rather than a silent half-load). The non-default `q8/` tier is an on-demand download fetched by
-/// [`ensure_ideogram_tier_present`] before this resolves (sc-9607); `q4/` is the manifest default.
+/// opts into Q8 (`advanced.mlxQuantize: 8`) AND it is downloaded, `q4/` for an explicit Q4 pick
+/// (`1..=4`), else — with NO explicit `mlxQuantize` — the **`q8/`** default (epic 10721 / sc-10726),
+/// CLAMPED UP to the model's per-model quality floor (`mlx.minQualityTier`, sc-10731 via the shared
+/// [`preferred_tier`], sc-10777) and DOWN to what's installed (only `q4/` on disk ⇒ q4). Falls back to
+/// `root` if neither subdir is present (a partially-downloaded bundle surfaces as a load error rather
+/// than a silent half-load). The `q8/` tier is an on-demand download fetched by
+/// [`ensure_ideogram_tier_present`] on an explicit opt-in (sc-9607); this resolver never triggers that
+/// fetch for the plain default — it simply prefers q8 when it happens to be on disk. Ideogram's turnkey
+/// carries only `q4/`/`q8/` (bf16 is a separate catalog repo), so the clean-tiers fallback here is
+/// q8 ⇆ q4 and a bf16 floor has no in-turnkey tier to land on (it falls through to the best installed).
 fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let bits = request
         .advanced
@@ -695,21 +909,32 @@ fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
             .is_file()
             .then_some(dir)
     };
-    if let Some(tier) = ideogram_tier_subdir(bits) {
-        if let Some(dir) = present(tier) {
-            return dir;
-        }
-    }
-    present("q4")
+    // The tier the request prefers: an explicit `mlxQuantize` pick maps directly (`<=0` → bf16, `>4` →
+    // q8, `1..=4` → q4), else the app-wide q8 default (epic 10721 / sc-10726) CLAMPED UP to the model's
+    // per-model quality floor (`mlx.minQualityTier`, sc-10731) — the SAME shared, floor-aware logic as
+    // [`standard_tier_subdir`] / [`anima_tier_subdir`] (sc-10777, routing this resolver through
+    // [`preferred_tier`] instead of its own non-floor-aware q8 default). No shipping Ideogram model
+    // declares a floor, so this is byte-identical to the prior q8-first default for every current model —
+    // it just keeps the worker default path from silently landing below a floor should one ever be
+    // declared. Ideogram's turnkey carries only `q4/`/`q8/` (bf16 is the separate `SceneWorks/ideogram-4`
+    // catalog repo, never an in-turnkey subdir), so a preferred `bf16` — an explicit `<=0` pick, or a
+    // hypothetical bf16 floor — simply isn't present and falls through the clean-tiers chain (q8 → q4) to
+    // the best installed tier, exactly as the prior resolver did.
+    let preferred = preferred_tier(bits, min_quality_floor(request));
+    present(preferred)
         .or_else(|| present("q8"))
+        .or_else(|| present("q4"))
         .unwrap_or_else(|| root.to_path_buf())
 }
 
-/// The Boogu subfolder for a `mlxQuantize` request — `None` keeps the Q8 default. Shared by
-/// [`boogu_model_subdir`] (which subfolder to load) and [`ensure_boogu_tier_present`] (which to
-/// fetch on demand): `<=0` → `<variant>-bf16/` (dense full precision), `1..=4` → `<variant>-q4/`
-/// (packed Q4, sc-8513), anything else → the default `<variant>/` (packed Q8). Returns the subfolder
-/// name relative to the turnkey root.
+/// The Boogu subfolder for a `mlxQuantize` request — `None` keeps the Q8 default. The FETCH-side helper
+/// for [`ensure_boogu_tier_present`] (which non-default tier to pull on demand): `<=0` → `<variant>-bf16/`
+/// (dense full precision), `1..=4` → `<variant>-q4/` (packed Q4, sc-8513), anything else → `None` (the
+/// default `<variant>/` packed Q8 ships in the catalog download). Returns the subfolder name relative to
+/// the turnkey root. The LOAD-side resolver [`boogu_model_subdir`] no longer shares this: as of sc-10777 it
+/// routes its default through the floor-aware [`preferred_tier`] (so a floored default clamps up to
+/// `mlx.minQualityTier`, capped by installed), while this fetch helper stays keyed on the explicit pick
+/// only — no shipping Boogu model declares a floor, so the two still agree for every current model.
 fn boogu_tier_subdir(variant: &str, bits: Option<i64>) -> Option<String> {
     match bits {
         Some(b) if b <= 0 => Some(format!("{variant}-bf16")),
@@ -720,12 +945,14 @@ fn boogu_tier_subdir(variant: &str, bits: Option<i64>) -> Option<String> {
 
 /// Pick the engine-complete subfolder of a Boogu turnkey `root` for the requested variant. Each
 /// catalog id maps to a variant folder: `boogu_image`→`base`, `boogu_image_turbo`→`turbo`,
-/// `boogu_image_edit`→`edit`. **Q8 is the shipped default** (the pre-packed `<variant>/` folder); an
+/// `boogu_image_edit`→`edit`. **Q8 is the shipped default** (the pre-packed `<variant>/` folder),
+/// CLAMPED UP to the model's per-model quality floor (`mlx.minQualityTier`, sc-10731 via the shared
+/// [`preferred_tier`], sc-10777 — a bf16 floor raises the picker-less default to `<variant>-bf16/`); an
 /// explicit advanced `mlxQuantize` selects another tier (sc-8513, epic 8506): `<=0` → the dense
 /// `<variant>-bf16/`, `1..=4` → the packed `<variant>-q4/`. Falls back through Q8 → q4 → bf16 → `root`
 /// when the requested tier isn't downloaded, so a partial bundle surfaces as a load error rather than
-/// a silent half-load. (The non-default tiers are on-demand downloads fetched by
-/// [`ensure_boogu_tier_present`] before this resolves, sc-6568/sc-8513.)
+/// a silent half-load (a floor tier not on disk falls to the best installed). (The non-default tiers are
+/// on-demand downloads fetched by [`ensure_boogu_tier_present`] before this resolves, sc-6568/sc-8513.)
 fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let variant = match request.model.as_str() {
         "boogu_image_turbo" => "turbo",
@@ -750,12 +977,27 @@ fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     };
     let q4 = format!("{variant}-q4");
     let bf16 = format!("{variant}-bf16");
-    if let Some(tier) = boogu_tier_subdir(variant, bits) {
-        if let Some(dir) = present(&tier) {
-            return dir;
+    // Boogu names its tiers `<variant>` (the packed Q8 shipped default), `<variant>-q4` and
+    // `<variant>-bf16` — map a generic [`preferred_tier`] tier name onto that layout.
+    let variant_folder = |tier: &str| -> String {
+        match tier {
+            "q8" => variant.to_owned(),
+            other => format!("{variant}-{other}"),
         }
-    }
-    present(variant)
+    };
+    // The tier the request prefers: an explicit `mlxQuantize` pick maps directly (`<=0` → bf16, `1..=4` →
+    // q4, else Q8 — the same mapping the old `boogu_tier_subdir` load-path branch used), else the app-wide
+    // Q8 default (epic 10721 / sc-10726) CLAMPED UP to the model's per-model quality floor
+    // (`mlx.minQualityTier`, sc-10731) — the SAME shared, floor-aware logic as [`standard_tier_subdir`] /
+    // [`anima_tier_subdir`] (sc-10777, routing this resolver through [`preferred_tier`] instead of its own
+    // non-floor-aware Q8 default). No shipping Boogu model declares a floor, so this is byte-identical to
+    // the prior Q8-first default for every current variant; the routing keeps the resolver from silently
+    // landing below a floor should one ever be declared — a bf16 floor would raise the picker-less default
+    // from the packed Q8 up to the dense `<variant>-bf16`, capped by what's installed. The clean-tiers
+    // fallback (Q8 → q4 → bf16) is unchanged, so a partial bundle still surfaces as a load error.
+    let preferred = preferred_tier(bits, min_quality_floor(request));
+    present(&variant_folder(preferred))
+        .or_else(|| present(variant))
         .or_else(|| present(&q4))
         .or_else(|| present(&bf16))
         .unwrap_or_else(|| root.to_path_buf())
@@ -763,12 +1005,15 @@ fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
 
 /// Pick the engine-complete packed subdir of a Krea 2 Turbo turnkey `root`: `q4/` when the request opts
 /// into Q4 (`advanced.mlxQuantize <= 4`) AND it is downloaded, else the default `q8/` (the shipped
-/// default — the P1-validated near-lossless quant). Falls back to whichever subdir is present, then
-/// `root`, so a partially-downloaded bundle surfaces as a load error rather than a silent half-load. The
-/// turnkey (`SceneWorks/krea-2-turbo-mlx`, sc-7573) carries one `from_snapshot`-loadable subdir per quant
-/// (each with a packed `transformer/diffusion_pytorch_model.safetensors`); the loader auto-detects the
-/// packed quant, so the resolved `spec.quantize` is a no-op on it. Mirrors [`ideogram_model_subdir`]
-/// (q4/q8 subdirs) with Boogu's packed-transformer filename and a Q8-default selection.
+/// default — the P1-validated near-lossless quant), CLAMPED UP to the model's per-model quality floor
+/// (`mlx.minQualityTier`, sc-10731 via the shared [`preferred_tier`], sc-10845 — a bf16 floor raises the
+/// picker-less default to the dense `bf16/`). Falls back to whichever subdir is present, then `root`, so
+/// a partially-downloaded bundle surfaces as a load error rather than a silent half-load (a floor tier not
+/// on disk falls to the best installed). The turnkey (`SceneWorks/krea-2-turbo-mlx`, sc-7573) carries one
+/// `from_snapshot`-loadable subdir per quant (each with a packed
+/// `transformer/diffusion_pytorch_model.safetensors`); the loader auto-detects the packed quant, so the
+/// resolved `spec.quantize` is a no-op on it. Mirrors [`ideogram_model_subdir`] (q4/q8 subdirs) with
+/// Boogu's packed-transformer filename and a Q8-default selection.
 fn krea_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let bits = request
         .advanced
@@ -786,13 +1031,18 @@ fn krea_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
             .is_file();
         (packed || sharded).then_some(dir)
     };
-    // bits<=0 → bf16 (the dense base; krea's loader takes it with no quantize); bits<=4 → q4; else the
-    // default q8 (the P1-validated near-lossless quant).
-    let preferred = match bits {
-        Some(b) if b <= 0 => "bf16",
-        Some(b) if b <= 4 => "q4",
-        _ => "q8",
-    };
+    // The tier the request prefers: an explicit `mlxQuantize` pick maps directly (`<=0` → bf16 the dense
+    // base which krea's loader takes with no quantize, `>4` → q8, `1..=4` → q4 — the SAME mapping krea's
+    // own match used), else the app-wide q8 default (epic 10721 / sc-10726, the P1-validated near-lossless
+    // quant) CLAMPED UP to the model's per-model quality floor (`mlx.minQualityTier`, sc-10731) — the SAME
+    // shared, floor-aware logic as `standard_tier_subdir` / `anima_tier_subdir` / `ideogram_model_subdir` /
+    // `boogu_model_subdir` (sc-10845, routing this last bespoke resolver through [`preferred_tier`] instead
+    // of its own non-floor-aware q8 default). No shipping Krea model declares a floor, so this is
+    // byte-identical to the prior q8 default; the routing keeps the resolver from silently landing below a
+    // floor should one ever be declared (a bf16 floor would raise the picker-less default from q8 to the
+    // dense bf16, capped by what's installed). Fallback stays krea's q8 → q4 → bf16 (bf16 last — it is the
+    // heaviest dense tree), so a partial bundle still surfaces as a load error.
+    let preferred = preferred_tier(bits, min_quality_floor(request));
     present(preferred)
         .or_else(|| present("q8"))
         .or_else(|| present("q4"))
@@ -1141,8 +1391,10 @@ fn resolve_quant(request: &ImageRequest) -> (Option<Quant>, Option<i64>) {
 
 /// The transformer-tier bit count a dense-TE turnkey (FLUX.2-klein, the [`DENSE_TE_TIER_MODELS`]
 /// class) actually asked for, derived from `advanced.mlxQuantize` the SAME way [`standard_tier_subdir`]
-/// picks its `bf16`/`q8`/`q4` tier (`<=0 → bf16`, `>4 → q8`, else the q4 default). Returns the recipe
-/// bit count of the REQUESTED tier: `None` (bf16) / `Some(8)` / `Some(4)`.
+/// picks its `bf16`/`q8`/`q4` tier (no explicit pick → `q8`; `<=0 → bf16`; `>4 → q8`; else `q4`).
+/// Returns the recipe bit count of the REQUESTED tier: `None` (bf16) / `Some(8)` / `Some(4)`. Kept in
+/// lockstep with the q8 default (sc-10726) so a straight default dense-TE job that resolves the q8 tier
+/// isn't mis-reported as a bf16/q4→q8 tier change by [`reconcile_resolved_tier_quant`].
 ///
 /// sc-9362 (F-018 follow-up): [`resolve_quant`] returns `(None, None)` for every dense-TE job (the
 /// load quant must stay `None` so the deliberately-dense bf16 text encoder is never re-quantized), so
@@ -1163,6 +1415,7 @@ fn dense_te_requested_tier_bits(request: &ImageRequest) -> Option<i64> {
         .get("mlxQuantize")
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
     match bits {
+        None => Some(8),
         Some(b) if b <= 0 => None,
         Some(b) if b > 4 => Some(8),
         _ => Some(4),
@@ -3409,6 +3662,10 @@ fn is_candle_engine(model: &str) -> bool {
         model,
         "sdxl"
             | "realvisxl"
+            // Illustrious-XL (epic 10609): vanilla-SDXL anime finetunes on the shared candle `sdxl`
+            // engine. Their turnkeys are tiered, so the dense lanes resolve `bf16/` (dense_tier_subdir).
+            | "illustrious_xl_v1"
+            | "illustrious_xl_v2"
             // RealVisXL Lightning (sc-7176): shares the candle `sdxl` engine via a weights swap; the
             // few-step `lightning` sampler is forced in `generate_candle_stream`. txt2img-only (the
             // router defers its conditioning shapes to torch), so it rides the base candle txt2img lane.
@@ -3472,6 +3729,16 @@ fn is_candle_engine(model: &str) -> bool {
             | "sd3_5_large"
             | "sd3_5_large_turbo"
             | "sd3_5_medium"
+            // Anima 2B base / aesthetic / turbo (sc-10676, epic 10512): the candle port (sc-10525,
+            // GPU-validated sc-10625) rides the generic candle txt2img lane off-Mac. `generate_candle_\
+            // stream` dense-loads bf16 from the raw `circlestone-labs/Anima` split_files/ tree (no
+            // convert-at-install off-Mac) and FORCES the load Quant to None — the descriptor advertises
+            // Q4/Q8 but there is no packed tier off-Mac, and the loader rejects a quant against the dense
+            // DiT. Inference LoRA/LoKr folds onto the dense DiT (`supports_lora`/`supports_lokr`); quant +
+            // LoRA together stays rejected (sc-10578). Pure txt2img (no edit/reference/control shapes).
+            | "anima_base"
+            | "anima_aesthetic"
+            | "anima_turbo"
     )
 }
 
@@ -3502,6 +3769,9 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "krea_2_turbo" | "krea_2_raw" => "candle_krea",
         // Stable Diffusion 3.5 (sc-7880): Large / Large Turbo / Medium share the candle SD3.5 engine.
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => "candle_sd3",
+        // Anima 2B (sc-10676): base / aesthetic / turbo share the candle Anima engine (the off-Mac
+        // sibling of the `mlx_anima` label).
+        "anima_base" | "anima_aesthetic" | "anima_turbo" => "candle_anima",
         // sdxl / realvisxl share the candle "sdxl" engine.
         _ => CANDLE_ADAPTER,
     }
@@ -3611,7 +3881,12 @@ async fn generate_candle_stream(
         .unwrap_or(true);
     match request.model.as_str() {
         // realvisxl_lightning shares the candle `sdxl` engine (sc-7176), so the SDXL flash toggle applies.
-        "sdxl" | "realvisxl" | "realvisxl_lightning" => candle_gen_sdxl::set_flash_attn(flash_attn),
+        // So do the Illustrious-XL finetunes (epic 10609).
+        "sdxl"
+        | "realvisxl"
+        | "realvisxl_lightning"
+        | "illustrious_xl_v1"
+        | "illustrious_xl_v2" => candle_gen_sdxl::set_flash_attn(flash_attn),
         // Base z_image (sc-8679) shares the candle z-image accel-attention toggle with Turbo.
         "z_image_turbo" | "z_image" => candle_gen_z_image::set_accel_attn(flash_attn),
         _ => {}
@@ -3625,6 +3900,17 @@ async fn generate_candle_stream(
         // INT8-ConvRot (sc-9300): the int8 DiT replaces the dense transformer wholesale — a bits-based
         // load-time `Quant` is meaningless (and the candle-gen krea engine rejects a quant overlay on
         // the ConvRot path). Force dense-None; the recipe records no `mlxQuantize` bits for this tier.
+        (None, None)
+    } else if is_anima_model(&request.model) {
+        // Anima off-Mac (sc-10676): the descriptor advertises Q4/Q8, but there is NO packed tier off-Mac
+        // — the `anima_quant` converter is macOS-only and the NC license bars publishing one, and the
+        // candle loader only CONSUMES an MLX-packed tier (it hard-rejects a quant request against the
+        // dense split_files/ DiT: "the DiT checkpoint is DENSE … load the dense tier"). So force dense
+        // bf16 here, IGNORING the manifest `mlx.quantize: 4` default that `resolve_quant` would otherwise
+        // apply — else every plain candle Anima job would fail the loader's packed-detect. The router
+        // keeps `candle_quant = false`, so a deliberate `advanced.mlxQuantize > 0` never reaches this lane
+        // (it defers rather than silently running dense); this arm handles the default-quant case the
+        // router doesn't strip. A dense DiT + LoRA/LoKr still folds (Quant None ⇒ no sc-10578 reject).
         (None, None)
     } else if model.supports_quant() {
         resolve_quant(request)
@@ -3753,7 +4039,85 @@ async fn generate_candle_stream(
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
+    // VRAM fit-gate (epic 10765, sc-10766 Phase 0 + sc-10821 Phase 1b + sc-10856): when the selected
+    // tier's predicted resident peak won't fit the card, either RUN SEQUENTIALLY (a provider that
+    // supports sequential component residency — the candle FLUX lane, sc-10769 — drops the text encoders
+    // before the DiT so peak = DiT+VAE, not TE+DiT+VAE) or, for a family that has not wired it, reject-
+    // before-OOM with an actionable message. sc-10856 adds a second stage on the sequential path: when
+    // the tier's MEASURED sequential peak (`candle.sequentialPeakGb`) is known and STILL won't fit, reject
+    // instead of running into a reactive OOM. Honors `SCENEWORKS_CUDA_VRAM_CAP_GB` to emulate a small
+    // card. Unmeasured models (no `candle` block) and non-NVIDIA hosts yield `Unknown` → never block.
+    let use_sequential = {
+        let budget = crate::vram_gate::apply_vram_cap(
+            crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+            crate::vram_gate::cuda_vram_cap_gb(),
+        );
+        let tier =
+            crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
+        let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
+        // Only the candle FLUX lane has wired sequential residency (sc-10769); other families reject.
+        let sequential_capable = matches!(engine_id, "flux1_dev" | "flux1_schnell");
+        match crate::vram_gate::resolve_offload(
+            crate::vram_gate::fit_decision(needed, budget),
+            sequential_capable,
+        ) {
+            crate::vram_gate::FitDecision::Offload {
+                needed_gb,
+                available_gb,
+            } => {
+                // Second-stage gate (sc-10856): sequential residency was selected because the resident
+                // peak won't fit. If this tier's MEASURED sequential peak is known and STILL exceeds the
+                // budget, reject before load instead of running into a reactive OOM. Absent the number
+                // (unmeasured tier) keep the best-effort run — the reactive OOM containment backstops it.
+                let sequential_needed = crate::vram_gate::predicted_sequential_peak_gb(
+                    &request.model_manifest_entry,
+                    tier,
+                );
+                if let Some(seq_gb) =
+                    crate::vram_gate::sequential_overflow_gb(sequential_needed, budget)
+                {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "{model} at the {tier} tier needs ~{seq} GB of VRAM even with sequential \
+                         component residency (loading one component at a time), but GPU {gpu} has \
+                         ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output \
+                         resolution, or run on a card with more VRAM.",
+                        model = request.model,
+                        seq = seq_gb.round() as i64,
+                        available = available_gb.round() as i64,
+                        gpu = settings.gpu_id,
+                    )));
+                }
+                tracing::info!(
+                    model = %request.model,
+                    needed_gb = needed_gb.round() as i64,
+                    available_gb = available_gb.round() as i64,
+                    "candle VRAM fit-gate: resident peak exceeds free VRAM — loading with sequential \
+                     component residency (text encoders dropped before the DiT)"
+                );
+                true
+            }
+            crate::vram_gate::FitDecision::TooBig {
+                needed_gb,
+                available_gb,
+            } => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{model} at the {tier} tier needs ~{needed} GB of VRAM (with headroom) but GPU \
+                     {gpu} has ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output \
+                     resolution, or run on a card with more VRAM.",
+                    model = request.model,
+                    needed = needed_gb.round() as i64,
+                    available = available_gb.round() as i64,
+                    gpu = settings.gpu_id,
+                )));
+            }
+            _ => false,
+        }
+    };
     let mut spec = load_spec(weights_dir, quant, adapters, None);
+    if use_sequential {
+        // Ask the provider (candle FLUX) to load→use→drop each component in phase order (sc-10821).
+        spec = spec.with_offload_policy(gen_core::OffloadPolicy::Sequential);
+    }
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
@@ -4351,6 +4715,10 @@ mod candle_label_tests {
         assert_eq!(candle_adapter_label("sd3_5_large"), "candle_sd3");
         assert_eq!(candle_adapter_label("sd3_5_large_turbo"), "candle_sd3");
         assert_eq!(candle_adapter_label("sd3_5_medium"), "candle_sd3");
+        // Anima 2B (sc-10676): the candle asset stamp, the off-Mac sibling of `mlx_anima`.
+        assert_eq!(candle_adapter_label("anima_base"), "candle_anima");
+        assert_eq!(candle_adapter_label("anima_aesthetic"), "candle_anima");
+        assert_eq!(candle_adapter_label("anima_turbo"), "candle_anima");
     }
 
     #[test]
@@ -4392,6 +4760,10 @@ mod candle_label_tests {
             "sd3_5_large",
             "sd3_5_large_turbo",
             "sd3_5_medium",
+            // Anima 2B (sc-10676): base / aesthetic / turbo dense-load bf16 on the generic candle lane.
+            "anima_base",
+            "anima_aesthetic",
+            "anima_turbo",
         ] {
             assert!(is_candle_engine(model), "{model} should be a candle engine");
         }
@@ -4565,7 +4937,7 @@ mod standard_tier_tests {
     }
 
     #[test]
-    fn defaults_to_q4_and_honors_quantize_selection() {
+    fn defaults_to_q8_and_honors_quantize_selection() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         // Packed q4/q8 single-file + dense sharded bf16 (only the index.json shape).
@@ -4573,9 +4945,14 @@ mod standard_tier_tests {
         seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
         seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
 
-        // No selection → q4 default.
+        // No selection → q8 default (epic 10721 / sc-10726), clamped to installed.
         assert_eq!(
             standard_tier_subdir(root, &request(json!({}))),
+            root.join("q8")
+        );
+        // An explicit Q4 pick is still honored (never overridden by the q8 default).
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({ "mlxQuantize": 4 }))),
             root.join("q4")
         );
         // mlxQuantize 8 → q8; 0/"none" → bf16; numeric-string accepted.
@@ -4593,6 +4970,69 @@ mod standard_tier_tests {
         );
     }
 
+    /// **sc-10732 — acceptance #1: the app-wide default-tier revert guard.**
+    ///
+    /// Epic 10721 moved the gen-time default tier off the old blind `q4` to `q8` (sc-10726): the shared
+    /// [`preferred_tier`] returns `"q8"` with no explicit `mlxQuantize` pick and no per-model floor, and
+    /// BOTH tier resolvers ([`standard_tier_subdir`] and [`anima_tier_subdir`]) inherit it. If a future
+    /// change reverts that default back to `q4` — in `preferred_tier`'s `None => …` arm, or a resolver
+    /// special-case — this test FAILS LOUDLY. That is the whole point of the sc-10732 lock: the finer
+    /// resolver/floor tests each imply it, but this one names it at the revert site so the intent is
+    /// unmissable. Deliberately redundant.
+    #[test]
+    fn default_tier_is_q8_not_q4_regression() {
+        // The shared default-tier primitive: no explicit `mlxQuantize`, no per-model floor → q8, never q4.
+        assert_eq!(
+            preferred_tier(None, None),
+            "q8",
+            "app-wide gen default MUST be q8 (epic 10721 / sc-10726) — a revert to q4 is the regression \
+             this guards"
+        );
+        assert_ne!(
+            preferred_tier(None, None),
+            "q4",
+            "the pre-epic-10721 blind-q4 default has been reverted — do NOT reinstate it (sc-10726/sc-10732)"
+        );
+
+        // Disk-backed through the standard resolver: a default job (no mlxQuantize) with ALL tiers
+        // installed resolves the q8 subdir, not the washed q4 — the revert is caught end-to-end too.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for tier in ["bf16", "q8", "q4"] {
+            seed_tier(root, tier, "diffusion_pytorch_model.safetensors");
+        }
+        let default_job = request(json!({}));
+        assert_eq!(
+            standard_tier_subdir(root, &default_job),
+            root.join("q8"),
+            "standard_tier_subdir default MUST land on q8 (not q4) when all tiers are installed"
+        );
+        assert_ne!(standard_tier_subdir(root, &default_job), root.join("q4"));
+
+        // The Anima resolver shares the same default (sc-10714 → sc-10731): its no-pick default is q8 too,
+        // so a revert to q4 also washes Anima — the exact quality bug epic 10721 fixed.
+        #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+        {
+            let anima_root = tempfile::tempdir().unwrap();
+            for tier in ["bf16", "q8", "q4"] {
+                let dir = anima_root.path().join(tier).join("diffusion_models");
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("anima-base-v1.0.safetensors"), b"x").unwrap();
+            }
+            let anima_default =
+                ImageRequest::from_payload(json!({ "model": "anima_base" }).as_object().unwrap());
+            assert_eq!(
+                anima_tier_subdir(anima_root.path(), &anima_default),
+                anima_root.path().join("q8"),
+                "anima_tier_subdir default MUST be q8 (sc-10714), never the washed q4"
+            );
+            assert_ne!(
+                anima_tier_subdir(anima_root.path(), &anima_default),
+                anima_root.path().join("q4")
+            );
+        }
+    }
+
     #[test]
     fn falls_back_when_preferred_tier_absent() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4602,6 +5042,12 @@ mod standard_tier_tests {
         seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
         assert_eq!(
             standard_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
+            root.join("q4")
+        );
+        // sc-10726: the q8 default is CLAMPED to installed — with only q4 on disk a default job
+        // (no mlxQuantize) resolves q4, never a tier the user didn't download (no OOM risk).
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({}))),
             root.join("q4")
         );
         // Nothing present → the repo root (engine surfaces the missing-weights error).
@@ -4626,10 +5072,10 @@ mod standard_tier_tests {
         seed_unet("q4");
         seed_unet("q8");
         seed_unet("bf16");
-        // Default q4, q8 selection, bf16 opt-out all resolve to the unet-backed tier subdir.
+        // Default q8, q8 selection, bf16 opt-out all resolve to the unet-backed tier subdir.
         assert_eq!(
             standard_tier_subdir(root, &request(json!({}))),
-            root.join("q4")
+            root.join("q8")
         );
         assert_eq!(
             standard_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
@@ -4659,7 +5105,7 @@ mod standard_tier_tests {
         seed_flat("bf16", "model.safetensors.index.json");
         assert_eq!(
             standard_tier_subdir(root, &request(json!({}))),
-            root.join("q4")
+            root.join("q8")
         );
         assert_eq!(
             standard_tier_subdir(root, &request(json!({ "mlxQuantize": 8 }))),
@@ -4668,6 +5114,334 @@ mod standard_tier_tests {
         assert_eq!(
             standard_tier_subdir(root, &request(json!({ "mlxQuantize": 0 }))),
             root.join("bf16")
+        );
+    }
+
+    /// sc-10517 / sc-10714 / sc-10731: Anima is convert-at-install with a q4/q8/bf16 MATRIX under the
+    /// injected `modelPath` root (`bf16/ q8/ q4/`, each a `diffusion_models/<variant>.safetensors` tree —
+    /// NOT a `transformer/` component). [`anima_tier_subdir`] picks the tier by `mlxQuantize`
+    /// (**default Q8**; `<= 0` → bf16; `1..=4` → q4; `> 4` → q8) and falls back clean-tiers-first through
+    /// q8 → bf16 → q4 → root, so a partial install surfaces as a load error, never a silent half-load onto
+    /// the washed q4. The Q8 default (sc-10714) is the fix for base/aesthetic rendering smudgy at q4 —
+    /// q4 × CFG amplifies quant error; Q8 is near-lossless. [`is_anima_model`] gates only the three ids.
+    ///
+    /// sc-10731 reconciled the old anima-specific `None => "q8"` hardcode into the shared, floor-driven
+    /// [`preferred_tier`]: with no manifest floor the app-wide q8 default still stands (the assertions
+    /// above), and the added assertions below prove the floor now DRIVES the default — a manifest
+    /// `mlx.minQualityTier` clamps the default UP (capped by installed), while an explicit pick is honored.
+    #[test]
+    fn anima_tier_subdir_selects_and_falls_back() {
+        let anima_request = |bits: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": "anima_base", "advanced": { "mlxQuantize": bits } })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        assert!(is_anima_model("anima_base"));
+        assert!(is_anima_model("anima_aesthetic") && is_anima_model("anima_turbo"));
+        assert!(!is_anima_model("sd3_5_large"));
+
+        let seed_tier = |root: &std::path::Path, tier: &str| {
+            let dir = root.join(tier).join("diffusion_models");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("anima-base-v1.0.safetensors"), b"x").unwrap();
+        };
+        // All three tiers present → exact selection.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for tier in ["bf16", "q8", "q4"] {
+            seed_tier(root, tier);
+        }
+        assert_eq!(
+            anima_tier_subdir(root, &anima_request(json!(null))),
+            root.join("q8"),
+            "no opt-in → the Q8 default (sc-10714), not the washed q4"
+        );
+        assert_eq!(
+            anima_tier_subdir(root, &anima_request(json!(4))),
+            root.join("q4"),
+            "an explicit q4 pick is still honored"
+        );
+        assert_eq!(
+            anima_tier_subdir(root, &anima_request(json!(8))),
+            root.join("q8")
+        );
+        assert_eq!(
+            anima_tier_subdir(root, &anima_request(json!(0))),
+            root.join("bf16"),
+            "explicit bf16 (mlxQuantize <= 0) is honored"
+        );
+        // Only q4 downloaded, but the default (q8) is requested → falls through clean-tiers-first to the
+        // present q4, never a bare root. (An all-tiers install lands on q8 above; this is the partial case.)
+        let tmp2 = tempfile::tempdir().unwrap();
+        seed_tier(tmp2.path(), "q4");
+        assert_eq!(
+            anima_tier_subdir(tmp2.path(), &anima_request(json!(null))),
+            tmp2.path().join("q4")
+        );
+        // q8 default absent (only bf16 + q4 present) → fallback prefers the clean bf16 over the washed q4.
+        let tmp2b = tempfile::tempdir().unwrap();
+        seed_tier(tmp2b.path(), "bf16");
+        seed_tier(tmp2b.path(), "q4");
+        assert_eq!(
+            anima_tier_subdir(tmp2b.path(), &anima_request(json!(null))),
+            tmp2b.path().join("bf16"),
+            "q8 default absent → fallback prefers clean bf16 over washed q4"
+        );
+        // Nothing present → the root itself (the loader then surfaces a clear error).
+        let tmp3 = tempfile::tempdir().unwrap();
+        assert_eq!(
+            anima_tier_subdir(tmp3.path(), &anima_request(json!(null))),
+            tmp3.path().to_path_buf()
+        );
+
+        // sc-10731 — the per-model quality FLOOR now DRIVES the anima default (was a hardcode).
+        // A floored request carries `advanced.mlxQuantize` AND the forwarded manifest floor.
+        let floored_request = |bits: serde_json::Value, floor: &str| {
+            ImageRequest::from_payload(
+                json!({
+                    "model": "anima_base",
+                    "advanced": { "mlxQuantize": bits },
+                    "modelManifestEntry": { "mlx": { "minQualityTier": floor } }
+                })
+                .as_object()
+                .unwrap(),
+            )
+        };
+        // Anima base's PRODUCTION shape: floor q8, all tiers present, no explicit pick → the default is
+        // q8 — now floor-DERIVED (the hardcode is gone), not a resolver special-case.
+        assert_eq!(
+            anima_tier_subdir(root, &floored_request(json!(null), "q8")),
+            root.join("q8"),
+            "floor q8 drives the default to q8 (reconciled from the sc-10714 hardcode)"
+        );
+        // Floor CAPPED by installed: floor q8 but only q4 on disk → q4 (the floor never selects an
+        // uninstalled tier — a heavy model never resolves a tier the user didn't download).
+        assert_eq!(
+            anima_tier_subdir(tmp2.path(), &floored_request(json!(null), "q8")),
+            tmp2.path().join("q4"),
+            "floor q8 but only q4 installed → q4 (floor capped by installed)"
+        );
+        // Floor RAISES above the q8 default: a synthetic bf16 floor + no explicit pick → bf16 (proves the
+        // clamp genuinely lifts the default, not just coincides with the app-wide q8).
+        assert_eq!(
+            anima_tier_subdir(root, &floored_request(json!(null), "bf16")),
+            root.join("bf16"),
+            "floored default → the floor tier (bf16 floor raises above the q8 default)"
+        );
+        // An EXPLICIT below-floor pick is HONORED even against a q8 floor — the worker never overrides a
+        // deliberate quant choice (the web surfaces the advisory instead).
+        assert_eq!(
+            anima_tier_subdir(root, &floored_request(json!(4), "q8")),
+            root.join("q4"),
+            "explicit q4 honored despite the q8 floor (below-floor pick is the user's choice)"
+        );
+    }
+
+    /// sc-10731: the shared, floor-aware default-tier logic behind both [`standard_tier_subdir`] and
+    /// [`anima_tier_subdir`]. An explicit `mlxQuantize` pick maps directly and is honored regardless of
+    /// the floor; with NO pick, the app-wide q8 default is clamped UP to the floor (never DOWN).
+    #[test]
+    fn preferred_tier_clamps_default_up_to_the_floor_only() {
+        // No explicit pick, no floor → the app-wide q8 default (unchanged, non-floored models).
+        assert_eq!(preferred_tier(None, None), "q8");
+        // Floor at/below q8 leaves the q8 default untouched (the floor only ever RAISES).
+        assert_eq!(preferred_tier(None, Some("q8")), "q8");
+        assert_eq!(preferred_tier(None, Some("q4")), "q8");
+        // A floor ABOVE q8 raises the default to the floor tier.
+        assert_eq!(preferred_tier(None, Some("bf16")), "bf16");
+        // Explicit picks map directly and are HONORED even below the floor (no clamp on an explicit pick).
+        assert_eq!(preferred_tier(Some(4), Some("q8")), "q4");
+        assert_eq!(preferred_tier(Some(0), Some("q8")), "bf16");
+        assert_eq!(preferred_tier(Some(8), None), "q8");
+        assert_eq!(preferred_tier(Some(2), None), "q4");
+        // Rank order + normalization helpers.
+        assert!(tier_quality_rank("bf16") > tier_quality_rank("q8"));
+        assert!(tier_quality_rank("q8") > tier_quality_rank("q4"));
+        assert_eq!(tier_quality_rank("mystery"), 0);
+    }
+
+    /// sc-10731: [`min_quality_floor`] reads the forwarded manifest `mlx.minQualityTier`, honoring only a
+    /// valid bf16/q8/q4 value and treating an absent/bogus one as no floor.
+    #[test]
+    fn min_quality_floor_reads_valid_manifest_values_only() {
+        let with_floor = |mlx: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": "anima_base", "modelManifestEntry": { "mlx": mlx } })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        assert_eq!(
+            min_quality_floor(&with_floor(json!({ "minQualityTier": "q8" }))),
+            Some("q8")
+        );
+        assert_eq!(min_quality_floor(&with_floor(json!({ "quantize": 4 }))), None);
+        assert_eq!(
+            min_quality_floor(&with_floor(json!({ "minQualityTier": "q2" }))),
+            None
+        );
+        // No manifest entry at all → no floor.
+        assert_eq!(min_quality_floor(&request(json!({}))), None);
+    }
+
+    /// sc-10731: [`standard_tier_subdir`] applies the same floor clamp — a floored standard-tier model's
+    /// DEFAULT lands at the floor (capped by installed), while a non-floored one is unchanged and an
+    /// explicit below-floor pick is honored.
+    #[test]
+    fn standard_tier_subdir_clamps_default_to_the_floor() {
+        let floored = |bits: Option<i64>, floor: &str| {
+            let advanced = match bits {
+                Some(b) => json!({ "mlxQuantize": b }),
+                None => json!({}),
+            };
+            ImageRequest::from_payload(
+                json!({
+                    "model": "some_matrix_model",
+                    "advanced": advanced,
+                    "modelManifestEntry": { "mlx": { "minQualityTier": floor } }
+                })
+                .as_object()
+                .unwrap(),
+            )
+        };
+        // All three tiers present.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for tier in ["bf16", "q8", "q4"] {
+            seed_tier(root, tier, "diffusion_pytorch_model.safetensors");
+        }
+        // Floor bf16, no explicit pick → bf16 (floored default → floor tier).
+        assert_eq!(
+            standard_tier_subdir(root, &floored(None, "bf16")),
+            root.join("bf16")
+        );
+        // Floor q8, no explicit pick → q8; a non-floored default is q8 too, but here it is floor-driven.
+        assert_eq!(
+            standard_tier_subdir(root, &floored(None, "q8")),
+            root.join("q8")
+        );
+        // Explicit q4 honored despite a bf16 floor (below-floor pick is the user's choice).
+        assert_eq!(
+            standard_tier_subdir(root, &floored(Some(4), "bf16")),
+            root.join("q4")
+        );
+        // Floor capped by installed: floor bf16 but only q4 on disk → q4.
+        let only_q4 = tempfile::tempdir().unwrap();
+        seed_tier(only_q4.path(), "q4", "diffusion_pytorch_model.safetensors");
+        assert_eq!(
+            standard_tier_subdir(only_q4.path(), &floored(None, "bf16")),
+            only_q4.path().join("q4")
+        );
+        // Non-floored model unaffected — the plain q8 default still stands (acceptance #3).
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({}))),
+            root.join("q8")
+        );
+    }
+
+    /// Regression guard for **sc-10578** (epic 10512), pinning the worker HALF of the fix that mlx-gen
+    /// #681 (this pin bump → `a5c1fcd`) delivered.
+    ///
+    /// The bug: on mlx-gen ≤ `6a10ae1`, `mlx-gen-anima`'s `load` rejected
+    /// `spec.quantize.is_some() && !spec.adapters.is_empty()`. The worker defaults EVERY MLX model's
+    /// tier to Q8 ([`resolve_quant`]'s `None` arm), so `spec.quantize` is `Some(..)` on the default
+    /// path — which meant **every** Anima LoRA/LoKr generation failed at model load, at the DEFAULT
+    /// tier, with no tier selection by the user. The only escape was an explicit bf16 pick
+    /// (`mlxQuantize <= 0`). That combination — default tier + adapter — is exactly what no prior test
+    /// exercised, which is how the model shipped with `supports_lora`, an official style LoRA, and a
+    /// trainer whose output could not be loaded.
+    ///
+    /// This asserts the two worker-owned facts that made the bug fire, so a future change that
+    /// reintroduces either is caught here. The end-to-end proof that the engine now ACCEPTS this spec
+    /// lives in mlx-gen's real-weights `tests/packed_adapters.rs` (a Mac + weights are needed to run it,
+    /// so it cannot live in this crate).
+    #[test]
+    fn anima_default_tier_with_adapter_builds_loadable_spec() {
+        use gen_core::{AdapterKind, AdapterSpec, Quant};
+
+        // 1. A default Anima request IS quantized — the premise that made the guard fire everywhere.
+        let base_default =
+            ImageRequest::from_payload(json!({ "model": "anima_base" }).as_object().unwrap());
+        assert_eq!(
+            resolve_quant(&base_default),
+            (Some(Quant::Q8), Some(8)),
+            "anima_base with no mlxQuantize must default to Q8 — the reason adding an adapter used to \
+             fail at load on the DEFAULT tier"
+        );
+        // aesthetic/turbo ship manifest `mlx.quantize: 4`; still quantized, so still hit the guard.
+        let aesthetic = ImageRequest::from_payload(
+            json!({ "model": "anima_aesthetic", "modelManifestEntry": { "mlx": { "quantize": 4 } } })
+                .as_object()
+                .unwrap(),
+        );
+        assert_eq!(resolve_quant(&aesthetic), (Some(Quant::Q4), Some(4)));
+        // Only an explicit bf16 opt-out escaped the bug.
+        let bf16 = ImageRequest::from_payload(
+            json!({ "model": "anima_base", "advanced": { "mlxQuantize": 0 } })
+                .as_object()
+                .unwrap(),
+        );
+        assert_eq!(resolve_quant(&bf16), (None, None));
+
+        // 2. The LoadSpec the worker hands the engine carries a quant AND the adapter together — the
+        //    exact `quantize.is_some() && !adapters.is_empty()` shape mlx-gen-anima rejected on
+        //    `6a10ae1` and accepts on `a5c1fcd`.
+        let (quant, _) = resolve_quant(&base_default);
+        let adapters = vec![AdapterSpec::new(
+            PathBuf::from("/tmp/anima-style-lora.safetensors"),
+            1.0,
+            AdapterKind::Lora,
+        )];
+        let spec = load_spec(PathBuf::from("/tmp/anima-q8-tier"), quant, adapters, None);
+        assert!(
+            spec.quantize.is_some(),
+            "the default Anima tier is quantized, so the spec carries a quant"
+        );
+        assert!(
+            !spec.adapters.is_empty(),
+            "the adapter is present alongside the quant — the combination that used to fail"
+        );
+        // A dense-tier spec (the bf16 escape hatch) never carried a quant — documents the one path
+        // that worked before the fix.
+        let dense = load_spec(
+            PathBuf::from("/tmp/anima-bf16-tier"),
+            None,
+            vec![AdapterSpec::new(
+                PathBuf::from("/tmp/anima-style-lora.safetensors"),
+                1.0,
+                AdapterKind::Lora,
+            )],
+            None,
+        );
+        assert!(dense.quantize.is_none());
+    }
+
+    /// sc-10676: off-Mac candle dense-load resolution. [`anima_dense_split_files_dir`] descends into the
+    /// `split_files/` subdir of the HF snapshot (the raw dense DiT tree, NOT a converted q4/q8/bf16 tier),
+    /// falling back to the snapshot root when `split_files/` is absent (the candle loader accepts the
+    /// parent; a partial download stays a loud load error). This is the off-Mac counterpart to the mac
+    /// convert-at-install [`anima_tier_subdir`] — there are no tier subdirs off-Mac.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn anima_dense_split_files_dir_descends_into_split_files_else_root() {
+        // Snapshot holds `split_files/diffusion_models/...` → resolve there (the loader reads it directly).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("split_files").join("diffusion_models")).unwrap();
+        assert_eq!(
+            anima_dense_split_files_dir(root.to_path_buf()),
+            root.join("split_files"),
+            "descends into split_files/ when present"
+        );
+        // No `split_files/` yet (partial/absent download) → the snapshot root; the loader surfaces a
+        // clear "not an Anima split_files dir" error rather than this silently pointing at a wrong dir.
+        let tmp2 = tempfile::tempdir().unwrap();
+        assert_eq!(
+            anima_dense_split_files_dir(tmp2.path().to_path_buf()),
+            tmp2.path().to_path_buf(),
+            "falls back to the snapshot root when split_files/ is absent"
         );
     }
 
@@ -4692,7 +5466,9 @@ mod standard_tier_tests {
                 .expect("set SDXL_TIER_ROOT to the downloaded realvisxl-mlx tier root")
                 .trim(),
         );
-        // The worker resolution: a `realvisxl` request (q4 default, no mlxQuantize) must land on q4/.
+        // The worker resolution: a default `realvisxl` request (no mlxQuantize) prefers the q8 default
+        // (sc-10726) but CLAMPS to installed — only the q4 tier was downloaded here (`--include "q4/*"`),
+        // so it lands on q4/.
         let req = ImageRequest::from_payload(
             json!({ "model": "realvisxl", "advanced": {} })
                 .as_object()
@@ -4784,6 +5560,50 @@ mod standard_tier_tests {
         assert!(!is_dense_te_tier(&manifest_request("flux2_dev", json!({}))));
     }
 
+    /// sc-10614: the candle SDXL lanes (edit / IP-Adapter) read DENSE weights, so a tiered-turnkey
+    /// snapshot must resolve to its `bf16/` tier — its root holds no component tree, and the loader
+    /// would find no `unet/`. Flat upstream diffusers snapshots (what `sdxl` and `realvisxl` fall
+    /// back to today) must pass through untouched.
+    #[test]
+    fn dense_tier_subdir_descends_into_turnkeys_and_passes_flat_snapshots_through() {
+        // Tiered turnkey: tier subdirs, no backbone at the root.
+        let turnkey = tempfile::tempdir().unwrap();
+        for tier in ["q4", "q8", "bf16"] {
+            std::fs::create_dir_all(turnkey.path().join(tier).join("unet")).unwrap();
+        }
+        assert_eq!(
+            dense_tier_subdir(turnkey.path().to_path_buf()),
+            turnkey.path().join("bf16"),
+            "an SDXL turnkey resolves to its dense bf16 tier, never a quantized one"
+        );
+
+        // Flat SDXL diffusers snapshot: `unet/` at the root.
+        let flat_unet = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(flat_unet.path().join("unet")).unwrap();
+        assert_eq!(
+            dense_tier_subdir(flat_unet.path().to_path_buf()),
+            flat_unet.path().to_path_buf(),
+            "stabilityai/stable-diffusion-xl-base-1.0 and SG161222/RealVisXL_V5.0 pass through"
+        );
+
+        // Flat DiT snapshot: `transformer/` at the root — even alongside a stray `bf16/` dir.
+        let flat_dit = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(flat_dit.path().join("transformer")).unwrap();
+        std::fs::create_dir_all(flat_dit.path().join("bf16")).unwrap();
+        assert_eq!(
+            dense_tier_subdir(flat_dit.path().to_path_buf()),
+            flat_dit.path().to_path_buf(),
+            "a rooted component tree wins over a tier dir sitting beside it"
+        );
+
+        // Neither shape: return the root and let the loader raise a real load error.
+        let bare = tempfile::tempdir().unwrap();
+        assert_eq!(
+            dense_tier_subdir(bare.path().to_path_buf()),
+            bare.path().to_path_buf()
+        );
+    }
+
     /// sc-9092 (epic 9083 gap #3): the candle Lens lane no longer resolves a SEPARATE bf16 diffusers
     /// rehost (`SceneWorks/Lens{,-Turbo}`, the retired `candle_lens_repo`) — it packed-loads the SAME
     /// `SceneWorks/lens{,-turbo}-mlx` MLX turnkey the macOS path uses, routed through the shared
@@ -4837,6 +5657,71 @@ mod standard_tier_tests {
         );
     }
 
+    /// sc-10845 (epic 10721): [`krea_model_subdir`] — the last bespoke tier resolver — routes its DEFAULT
+    /// through the shared, floor-aware [`preferred_tier`]`(bits, `[`min_quality_floor`]`(request))`, exactly
+    /// like [`standard_tier_subdir`] / [`anima_tier_subdir`] / [`ideogram_model_subdir`] /
+    /// [`boogu_model_subdir`], so a floored model's picker-less default clamps UP to `mlx.minQualityTier`
+    /// (capped by installed) instead of blindly landing on the q8 default. No shipping Krea model declares
+    /// a floor today, so every current model is byte-identical to the prior q8 default; this pins the
+    /// generality. Mirrors [`standard_tier_subdir_clamps_default_to_the_floor`].
+    #[test]
+    fn krea_default_tier_clamps_to_the_floor() {
+        // A krea request with the given `bits` (null = no explicit pick) and an optional per-model quality
+        // floor forwarded via `modelManifestEntry.mlx.minQualityTier`.
+        let floored = |bits: serde_json::Value, floor: Option<&str>| {
+            let payload = match floor {
+                Some(f) => json!({
+                    "model": "krea_2_raw",
+                    "advanced": { "mlxQuantize": bits },
+                    "modelManifestEntry": { "mlx": { "minQualityTier": f } },
+                }),
+                None => json!({
+                    "model": "krea_2_raw",
+                    "advanced": { "mlxQuantize": bits },
+                }),
+            };
+            ImageRequest::from_payload(payload.as_object().unwrap())
+        };
+        // Krea turnkey carries packed q4/q8 + dense sharded bf16.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
+
+        // Floor bf16, no explicit pick → the dense bf16 (raised above the q8 default).
+        assert_eq!(
+            krea_model_subdir(root, &floored(json!(null), Some("bf16"))),
+            root.join("bf16"),
+            "floored Krea default → the bf16 floor tier (raised above the q8 default)"
+        );
+        // Floor q8 (at the default) → q8, unchanged (the floor only ever RAISES).
+        assert_eq!(
+            krea_model_subdir(root, &floored(json!(null), Some("q8"))),
+            root.join("q8")
+        );
+        // An explicit below-floor q4 pick is HONORED even against a bf16 floor (the worker never overrides
+        // a deliberate quant choice — the web surfaces the advisory instead).
+        assert_eq!(
+            krea_model_subdir(root, &floored(json!(4), Some("bf16"))),
+            root.join("q4")
+        );
+        // Non-floored default is unchanged — the q8 default still stands.
+        assert_eq!(
+            krea_model_subdir(root, &floored(json!(null), None)),
+            root.join("q8")
+        );
+
+        // Floor capped by installed: bf16 floor but only q8 on disk → q8.
+        let only_q8 = tempfile::tempdir().unwrap();
+        seed_tier(only_q8.path(), "q8", "diffusion_pytorch_model.safetensors");
+        assert_eq!(
+            krea_model_subdir(only_q8.path(), &floored(json!(null), Some("bf16"))),
+            only_q8.path().join("q8"),
+            "bf16 floor with only q8 installed → q8 (a floor tier not on disk falls to the best installed)"
+        );
+    }
+
     #[test]
     fn candle_lens_resolves_packed_turnkey_tier_subdir() {
         let lens_request = |bits: serde_json::Value| {
@@ -4853,11 +5738,12 @@ mod standard_tier_tests {
         seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
         seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
 
-        // A/B tier toggle: default (q4) / mlxQuantize:8 (q8) / mlxQuantize:0 (bf16) each resolve to
-        // their tier subdir — the same q4-default recipe the `lens` manifest declares (`mlx.quantize:4`).
+        // A/B tier toggle: default (q8, sc-10726) / mlxQuantize:8 (q8) / mlxQuantize:0 (bf16) each
+        // resolve to their tier subdir — the default now prefers the clean q8 tier (clamped to
+        // installed), matching `resolve_quant`'s Q8 default.
         assert_eq!(
             standard_tier_subdir(root, &lens_request(json!(null))),
-            root.join("q4")
+            root.join("q8")
         );
         assert_eq!(
             standard_tier_subdir(root, &lens_request(json!(8))),
@@ -4887,23 +5773,28 @@ mod standard_tier_tests {
             )
         };
 
-        // Ideogram turnkey (`SceneWorks/ideogram-4-mlx`): q4 default (candle off-Mac tier) + on-demand
-        // q8. `ideogram_model_subdir` probes `<tier>/transformer/model.safetensors`.
+        // Ideogram turnkey (`SceneWorks/ideogram-4-mlx`): q4 + q8 tiers. `ideogram_model_subdir` probes
+        // `<tier>/transformer/model.safetensors`.
         {
             let tmp = tempfile::tempdir().unwrap();
             let root = tmp.path();
             seed_tier(root, "q4", "model.safetensors");
             seed_tier(root, "q8", "model.safetensors");
             for model in ["ideogram_4", "ideogram_4_turbo"] {
-                // Default → q4 (the shipped off-Mac tier).
+                // Default (no mlxQuantize) → q8 when installed (epic 10721 / sc-10726).
                 assert_eq!(
                     ideogram_model_subdir(root, &model_request(model, json!(null))),
-                    root.join("q4")
+                    root.join("q8")
                 );
                 // mlxQuantize:8 → q8 when present.
                 assert_eq!(
                     ideogram_model_subdir(root, &model_request(model, json!(8))),
                     root.join("q8")
+                );
+                // An explicit Q4 pick is still honored.
+                assert_eq!(
+                    ideogram_model_subdir(root, &model_request(model, json!(4))),
+                    root.join("q4")
                 );
             }
         }
@@ -4927,6 +5818,127 @@ mod standard_tier_tests {
                     root.join(variant)
                 );
             }
+        }
+    }
+
+    /// sc-10777 (epic 10721): [`ideogram_model_subdir`] / [`boogu_model_subdir`] route their DEFAULT tier
+    /// through the shared, floor-aware [`preferred_tier`]`(bits, `[`min_quality_floor`]`(request))` — the
+    /// same clamp [`standard_tier_subdir`] / [`anima_tier_subdir`] use — so a floored model's picker-less
+    /// default clamps UP to `mlx.minQualityTier` (capped by installed) instead of blindly landing on the
+    /// per-family q8/Q8 default. No shipping Ideogram/Boogu model declares a floor today, so every current
+    /// model is byte-identical to the prior default; this pins the generality so a future floored model
+    /// can't silently regress below its floor on the worker default path. Mirrors
+    /// [`standard_tier_subdir_clamps_default_to_the_floor`].
+    #[test]
+    fn ideogram_boogu_default_tier_clamps_to_the_floor() {
+        // A request for `model` with the given `bits` (null = no explicit pick) and an optional per-model
+        // quality floor forwarded via `modelManifestEntry.mlx.minQualityTier`.
+        let floored = |model: &str, bits: serde_json::Value, floor: Option<&str>| {
+            let payload = match floor {
+                Some(f) => json!({
+                    "model": model,
+                    "advanced": { "mlxQuantize": bits },
+                    "modelManifestEntry": { "mlx": { "minQualityTier": f } },
+                }),
+                None => json!({
+                    "model": model,
+                    "advanced": { "mlxQuantize": bits },
+                }),
+            };
+            ImageRequest::from_payload(payload.as_object().unwrap())
+        };
+
+        // --- Boogu: a bf16 floor RAISES the picker-less default above the packed Q8 (the meaningful case,
+        // since Boogu's turnkey carries a bf16 tier above its Q8 default). ---
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            seed_tier(root, "base", "diffusion_pytorch_model.safetensors");
+            seed_tier(root, "base-q4", "diffusion_pytorch_model.safetensors");
+            // bf16 ships as the dense diffusers tree (SHARDED → only the `.index.json`), like the loader.
+            seed_tier(
+                root,
+                "base-bf16",
+                "diffusion_pytorch_model.safetensors.index.json",
+            );
+            // Floor bf16, no explicit pick → the dense `base-bf16` (raised above the Q8 default).
+            assert_eq!(
+                boogu_model_subdir(root, &floored("boogu_image", json!(null), Some("bf16"))),
+                root.join("base-bf16"),
+                "floored Boogu default → the bf16 floor tier (raised above the packed Q8 default)"
+            );
+            // Floor q8 (at the default) → the packed Q8 `base/`, unchanged (the floor only ever RAISES).
+            assert_eq!(
+                boogu_model_subdir(root, &floored("boogu_image", json!(null), Some("q8"))),
+                root.join("base")
+            );
+            // An explicit below-floor q4 pick is HONORED even against a bf16 floor (the worker never
+            // overrides a deliberate quant choice — the web surfaces the advisory instead).
+            assert_eq!(
+                boogu_model_subdir(root, &floored("boogu_image", json!(4), Some("bf16"))),
+                root.join("base-q4")
+            );
+            // Non-floored default is unchanged — the packed Q8 default still stands (acceptance #3).
+            assert_eq!(
+                boogu_model_subdir(root, &floored("boogu_image", json!(null), None)),
+                root.join("base")
+            );
+        }
+        // Boogu floor capped by installed: bf16 floor but only the packed Q8 `base/` on disk → Q8.
+        {
+            let only_q8 = tempfile::tempdir().unwrap();
+            seed_tier(only_q8.path(), "base", "diffusion_pytorch_model.safetensors");
+            assert_eq!(
+                boogu_model_subdir(
+                    only_q8.path(),
+                    &floored("boogu_image", json!(null), Some("bf16"))
+                ),
+                only_q8.path().join("base"),
+                "bf16 floor with only Q8 installed → Q8 (a floor tier not on disk falls to the best installed)"
+            );
+        }
+
+        // --- Ideogram: the turnkey carries only `q4/`/`q8/` (bf16 is a separate repo) and the default
+        // already prefers q8, so the floor routing is inert for every in-turnkey floor — but it must still
+        // resolve correctly and stay capped by installed. ---
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            seed_tier(root, "q4", "model.safetensors");
+            seed_tier(root, "q8", "model.safetensors");
+            // Floor q8, no explicit pick → q8 (the default already prefers q8; confirms the floor routing
+            // resolves through the shared helper).
+            assert_eq!(
+                ideogram_model_subdir(root, &floored("ideogram_4", json!(null), Some("q8"))),
+                root.join("q8")
+            );
+            // A bf16 floor has NO in-turnkey tier → falls through the clean q8 → q4 chain to the best
+            // installed (q8), never erroring on the absent bf16.
+            assert_eq!(
+                ideogram_model_subdir(root, &floored("ideogram_4", json!(null), Some("bf16"))),
+                root.join("q8"),
+                "bf16 floor with no in-turnkey bf16 tier → best installed (q8)"
+            );
+            // An explicit below-floor q4 pick is HONORED even against a q8 floor.
+            assert_eq!(
+                ideogram_model_subdir(root, &floored("ideogram_4", json!(4), Some("q8"))),
+                root.join("q4")
+            );
+            // Non-floored default is unchanged — q8 when installed (acceptance #3).
+            assert_eq!(
+                ideogram_model_subdir(root, &floored("ideogram_4", json!(null), None)),
+                root.join("q8")
+            );
+        }
+        // Ideogram floor capped by installed: q8 floor but only the shipped q4 on disk → q4.
+        {
+            let only_q4 = tempfile::tempdir().unwrap();
+            seed_tier(only_q4.path(), "q4", "model.safetensors");
+            assert_eq!(
+                ideogram_model_subdir(only_q4.path(), &floored("ideogram_4", json!(null), Some("q8"))),
+                only_q4.path().join("q4"),
+                "q8 floor with only q4 installed → q4 (a floor tier not on disk falls to the best installed)"
+            );
         }
     }
 }
@@ -5063,10 +6075,10 @@ mod quant_tier_reconcile_tests {
     }
 
     /// sc-9362 (F-018 follow-up): the dense-TE transformer tier the request asks for is derived from
-    /// `advanced.mlxQuantize` exactly like [`standard_tier_subdir`] — `<=0 → bf16 (None)`, `>4 → q8`,
-    /// else the q4 default — regardless of the always-`None` load quant `resolve_quant` returns for
-    /// dense-TE. This is what reconcile compares the resolved tier against so a straight job isn't a
-    /// spurious downgrade.
+    /// `advanced.mlxQuantize` exactly like [`standard_tier_subdir`] — no explicit pick → `q8` (sc-10726),
+    /// `<=0 → bf16 (None)`, `>4 → q8`, else `q4` — regardless of the always-`None` load quant
+    /// `resolve_quant` returns for dense-TE. This is what reconcile compares the resolved tier against so
+    /// a straight default job (resolving the q8 tier) isn't flagged as a spurious downgrade.
     #[test]
     fn dense_te_requested_tier_bits_mirrors_standard_tier_mapping() {
         let req = |mlx_quantize: serde_json::Value| {
@@ -5079,45 +6091,47 @@ mod quant_tier_reconcile_tests {
         let default = ImageRequest::from_payload(
             json!({ "model": "flux2_klein_9b" }).as_object().unwrap(),
         );
-        // No selection → the q4 default (matches standard_tier_subdir's preferred).
-        assert_eq!(dense_te_requested_tier_bits(&default), Some(4));
+        // No selection → the q8 default (matches standard_tier_subdir's preferred, sc-10726).
+        assert_eq!(dense_te_requested_tier_bits(&default), Some(8));
         assert_eq!(dense_te_requested_tier_bits(&req(json!(0))), None); // bf16 opt-out
-        assert_eq!(dense_te_requested_tier_bits(&req(json!(4))), Some(4));
+        assert_eq!(dense_te_requested_tier_bits(&req(json!(4))), Some(4)); // explicit q4 honored
         assert_eq!(dense_te_requested_tier_bits(&req(json!(8))), Some(8));
         assert_eq!(dense_te_requested_tier_bits(&req(json!("8"))), Some(8)); // numeric-string
         assert_eq!(dense_te_requested_tier_bits(&req(json!(-1))), None);
     }
 
-    /// sc-9362 (F-018 follow-up): a straight (no-fallback) dense-TE job — its q4 transformer tier is
-    /// downloaded and resolves as requested — records the ACTUAL transformer tier (Q4) while keeping
-    /// the load quant `None` (the dense bf16 TE is never re-quantized). Before the fix the request
-    /// derived `(None, None)` and — since dense-TE always requests bf16 in `resolve_quant` — the
-    /// resolved q4 tier read as a bf16→q4 downgrade; now the requested tier is the q4 the request
-    /// actually asked for, so the resolved tier MATCHES and reconcile pass-throughs it with no event.
+    /// sc-9362 (F-018 follow-up) + sc-10726: a straight (no-fallback) dense-TE default job — its q8
+    /// transformer tier is downloaded and resolves as the new q8 default — records the ACTUAL
+    /// transformer tier (Q8) while keeping the load quant `None` (the dense bf16 TE is never
+    /// re-quantized). The requested tier ([`dense_te_requested_tier_bits`], now q8 by default) MATCHES
+    /// the resolved q8 tier, so reconcile pass-throughs it with no spurious `quant_tier_downgraded`.
     #[test]
     fn dense_te_no_fallback_records_transformer_tier() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        // The klein q4 transformer tier is present (dense bf16 TE lives alongside in the same tier).
-        let dir = root.join("q4").join("transformer");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("diffusion_pytorch_model.safetensors"), b"x").unwrap();
+        // The klein q4 + q8 transformer tiers are present (dense bf16 TE lives alongside in each tier);
+        // a default job takes the q8 default.
+        for tier in ["q4", "q8"] {
+            let dir = root.join(tier).join("transformer");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("diffusion_pytorch_model.safetensors"), b"x").unwrap();
+        }
 
         let req = ImageRequest::from_payload(
             json!({ "model": "flux2_klein_9b", "advanced": {} })
                 .as_object()
                 .unwrap(),
         );
-        // The tier resolver lands on the requested q4 tier (no fallback).
+        // The tier resolver lands on the q8 default tier (no fallback).
         let resolved = standard_tier_subdir(root, &req);
-        assert_eq!(resolved, root.join("q4"));
+        assert_eq!(resolved, root.join("q8"));
         // resolve_quant keeps dense-TE at `(None, None)` (never re-quantize the dense bf16 TE)…
         assert_eq!(resolve_quant(&req), (None, None));
-        // …but reconcile against the REQUESTED transformer tier (q4) records the real transformer
-        // precision (Q4) with the load quant still `None`, and — since resolved == requested — with no
+        // …but reconcile against the REQUESTED transformer tier (q8) records the real transformer
+        // precision (Q8) with the load quant still `None`, and — since resolved == requested — with no
         // downgrade (the requested/resolved tiers match, so it's a clean pass-through).
         let requested_for_reconcile = (None, dense_te_requested_tier_bits(&req));
-        assert_eq!(requested_for_reconcile, (None, Some(4)));
+        assert_eq!(requested_for_reconcile, (None, Some(8)));
         let (quant, bits) = reconcile_resolved_tier_quant(
             requested_for_reconcile,
             &resolved,
@@ -5128,8 +6142,8 @@ mod quant_tier_reconcile_tests {
         );
         assert_eq!(
             (quant, bits),
-            (None, Some(4)),
-            "records the actual q4 transformer tier, load quant stays None"
+            (None, Some(8)),
+            "records the actual q8 transformer tier, load quant stays None"
         );
     }
 

@@ -20,7 +20,18 @@ describe("presetSaveValidation", () => {
     const issues = presetSaveValidation({ editable: false, name: "", model: "" }, clean);
     expect(issues).toHaveLength(1);
     expect(issues[0].kind).toBe("error");
-    expect(issues[0].message).toBe("Built-in presets are read-only.");
+    expect(issues[0].message).toContain("Built-in presets are read-only");
+  });
+
+  it("surfaces each broken default value (valueErrors) as its own error", () => {
+    const summary = summarize(
+      presetSaveValidation(whole, { validation: { missing: [], incompatible: [] }, valueErrors: ["Steps must be a whole number between 1 and 200.", "Aspect 99x99 isn't one this model supports — pick a listed option."] }),
+    );
+    expect(summary.surfaced).toHaveLength(2);
+    expect(summary.surfaced.every((i) => i.kind === "error")).toBe(true);
+    expect(summary.surfaced[0].message).toContain("Steps must be");
+    expect(summary.surfaced[1].message).toContain("isn't one this model supports");
+    expect(summary.ready).toBe(false);
   });
 
   it("keeps name and model silent", () => {

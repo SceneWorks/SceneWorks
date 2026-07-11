@@ -1660,7 +1660,8 @@ mod tests {
     #[ignore = "real-weight MLX smoke; needs the SceneWorks/sensenova-u1-8b-mlx q4 tier cached + a Metal device"]
     fn sensenova_q4_tier_real_weights_produces_image() {
         // Resolve the packed `q4/` tier subdir from the turnkey root — the same selection the worker's
-        // `standard_tier_subdir` makes for the manifest default (`mlx.standardTierLayout` + q4 default).
+        // `standard_tier_subdir` makes for a default job when only the q4 tier is installed (the q8
+        // default, sc-10726, clamps down to the sole installed tier here).
         let root = hf_snapshot("models--SceneWorks--sensenova-u1-8b-mlx");
         let q4_dir = root.join("q4");
         assert!(

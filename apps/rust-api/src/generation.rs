@@ -232,6 +232,10 @@ pub(crate) async fn apply_recipe_preset_to_image_payload(
         .find(|item| item.get("id").and_then(Value::as_str) == Some(preset_id))
         .ok_or_else(|| ApiError::bad_request("Recipe preset not found"))?;
 
+    // Submitting a job with a preset is the strong "used" signal, and the one place the
+    // backend already sees the resolved preset id — stamp lastUsedAt now (sc-10520).
+    stamp_recipe_preset_used(state, preset_id).await;
+
     let expanded_prompt = preset_prompt(&payload.prompt, preset);
     job_payload.insert("prompt".to_owned(), Value::String(expanded_prompt));
     if payload.model == default_image_model() {
@@ -383,6 +387,10 @@ pub(crate) async fn apply_recipe_preset_to_video_payload(
         .iter()
         .find(|item| item.get("id").and_then(Value::as_str) == Some(preset_id))
         .ok_or_else(|| ApiError::bad_request("Recipe preset not found"))?;
+
+    // Submitting a job with a preset is the strong "used" signal, and the one place the
+    // backend already sees the resolved preset id — stamp lastUsedAt now (sc-10520).
+    stamp_recipe_preset_used(state, preset_id).await;
 
     let expanded_prompt = preset_prompt(&payload.prompt, preset);
     job_payload.insert("prompt".to_owned(), Value::String(expanded_prompt));

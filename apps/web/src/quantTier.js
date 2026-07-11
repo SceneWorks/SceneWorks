@@ -20,6 +20,17 @@ const TIER_QUANTIZE = {
   q4: 4,
 };
 
+// The three user-facing generation-quality tiers, in fidelity order — the vocabulary the global
+// "default generation quality" setting (epic 10721 / sc-10728) ranges over. int8-convrot is
+// intentionally excluded: it's a candle-only niche tier, not a sensible app-wide default.
+export const GENERATION_QUALITY_TIERS = ["bf16", "q8", "q4"];
+
+// The app-wide base default generation tier used when no global setting, sticky, or manifest default
+// applies (epic 10721 / sc-10726). Q8 matches the worker's generation default. `defaultTierSelection`
+// uses it as the fallback base whenever `options.defaultQuality` is absent or invalid, so every legacy
+// call site (and the worker) stays consistent on Q8.
+export const DEFAULT_GENERATION_QUALITY = "q8";
+
 // The candle-only Krea 2 INT8-ConvRot tier key (sc-9300, epic 9083). NOT a bits-based quant — the
 // online-rotation int8 DiT can't be expressed as an `mlxQuantize` value — so it is DELIBERATELY absent
 // from TIER_QUANTIZE and instead sends a distinct `advanced.convRot: true` signal (see
@@ -79,34 +90,80 @@ export function isSelectableTier(tier) {
 // pre-Ada NVIDIA GPU that fails the sm_89 compute-cap probe), so the tier is HIDDEN on an ineligible
 // host even when its files happen to be present in the cache. Every other tier is unaffected. Default
 // true keeps existing single-lane call sites (and tests) unchanged.
+// Sort tier keys by display order (smallest → largest); unknown keys sort after, alphabetically.
+function sortByTierOrder(a, b) {
+  const ai = TIER_ORDER.indexOf(a);
+  const bi = TIER_ORDER.indexOf(b);
+  if (ai === -1 && bi === -1) {
+    return a.localeCompare(b);
+  }
+  if (ai === -1) {
+    return 1;
+  }
+  if (bi === -1) {
+    return -1;
+  }
+  return ai - bi;
+}
+
 export function installedTiers(model, options = {}) {
   const { convRotEligible = true } = options;
-  if (!model?.hasVariantMatrix || !Array.isArray(model.variants)) {
-    return [];
+  // Download-matrix models (sc-8508): per-tier DOWNLOAD entries, install-tracked individually.
+  if (model?.hasVariantMatrix && Array.isArray(model.variants)) {
+    return model.variants
+      .filter(
+        (variant) =>
+          variant &&
+          isSelectableTier(variant.variant) &&
+          (convRotEligible || !isConvRotTier(variant.variant)) &&
+          variant.installState === "installed",
+      )
+      .map((variant) => variant.variant)
+      .sort(sortByTierOrder);
   }
-  return model.variants
-    .filter(
-      (variant) =>
-        variant &&
-        isSelectableTier(variant.variant) &&
-        (convRotEligible || !isConvRotTier(variant.variant)) &&
-        variant.installState === "installed",
-    )
-    .map((variant) => variant.variant)
-    .sort((a, b) => {
-      const ai = TIER_ORDER.indexOf(a);
-      const bi = TIER_ORDER.indexOf(b);
-      if (ai === -1 && bi === -1) {
-        return a.localeCompare(b);
-      }
-      if (ai === -1) {
-        return 1;
-      }
-      if (bi === -1) {
-        return -1;
-      }
-      return ai - bi;
-    });
+  // Convert-at-install models (sc-10730): tiers are convert OUTPUTS on disk, surfaced by the catalog as
+  // `mlxTiers` — a plain array of installed tier keys, DECOUPLED from the download variant-matrix so the
+  // Models download panel (`hasVariantMatrix`) is untouched. Anima (and other convert-at-install models)
+  // get a Studio generation-time tier picker this way.
+  if (Array.isArray(model?.mlxTiers) && model.mlxTiers.length > 0) {
+    return model.mlxTiers
+      .filter((tier) => isSelectableTier(tier) && (convRotEligible || !isConvRotTier(tier)))
+      .sort(sortByTierOrder);
+  }
+  return [];
+}
+
+// Quality rank of a generation quant tier: higher = more faithful (bf16 > q8 > q4). Derived from
+// GENERATION_QUALITY_TIERS (highest-fidelity first), so it stays in lockstep with that vocabulary.
+// Unknown / non-quality tiers (e.g. int8-convrot, "training") rank 0 so they never take part in a floor
+// comparison — a below-floor advisory or default clamp only ever fires between two known quality tiers.
+function tierQualityRank(tier) {
+  const i = GENERATION_QUALITY_TIERS.indexOf(tier);
+  return i === -1 ? 0 : GENERATION_QUALITY_TIERS.length - i;
+}
+
+// Whether tier `a` is LOWER fidelity than tier `b`. Both must be known quality tiers (else false).
+function isTierBelow(a, b) {
+  const ra = tierQualityRank(a);
+  const rb = tierQualityRank(b);
+  return ra > 0 && rb > 0 && ra < rb;
+}
+
+// The model's per-model quality FLOOR (sc-10731, epic 10721): the backend surfaces the manifest
+// `mlx.minQualityTier` as a top-level `minQualityTier`. Returns the floor tier (bf16|q8|q4) when declared
+// and valid, else null (default absent = no floor, q4-tolerant). A floored model's DEFAULT tier is
+// clamped UP to this (see `defaultTierSelection`); an EXPLICIT picker pick below it is honored + flagged.
+export function modelQualityFloor(model) {
+  return GENERATION_QUALITY_TIERS.includes(model?.minQualityTier) ? model.minQualityTier : null;
+}
+
+// Whether `tier` is BELOW the model's quality floor (sc-10731): true only when the model declares a floor
+// AND `tier` is a lower-fidelity quality tier than it. Drives the Studio's non-blocking advisory when a
+// user EXPLICITLY picks a below-floor tier — the pick is honored (a quant tier is a deliberate creative
+// choice) but flagged as a quality caution, never silently switched.
+export function isBelowFloor(tier, model) {
+  const floor = modelQualityFloor(model);
+  return !!floor && isTierBelow(tier, floor);
 }
 
 // Whether the studio should render the tier picker: only when MORE THAN ONE quant tier is
@@ -129,13 +186,24 @@ function defaultInstalledTier(model, tiers) {
   return declared ? declared.variant : null;
 }
 
-// The tier the picker should start on for `model`. Preference order:
-//   1. `lastUsed` — the per-model last-used tier, when it is still installed (persistence).
-//   2. the model's declared default tier (`variant.default: true`), when installed.
-//   3. q4 if installed (the catalog's smallest/default convention).
+// The tier the picker should start on for `model`. Preference order (epic-locked, epic 10721):
+//   1. `lastUsed` — the per-(screen,model) sticky tier, when it is still installed (rung 2, sc-10727).
+//   2. the model's declared default tier (`variant.default: true`), when installed. (Dead against the
+//      real catalog — the backend never emits `default` — but kept so a manifest that does still wins.)
+//   3. the global "default generation quality" setting (rung 3, sc-10728) — `options.defaultQuality`,
+//      one of bf16|q8|q4. Absent/invalid falls back to `DEFAULT_GENERATION_QUALITY` (q8), matching the
+//      worker's generation default. Clamped to installed: the base leads a clean-tier fallback so an
+//      uninstalled base resolves to the nearest installed clean tier rather than null. Convert-at-install
+//      models (mlxTiers, sc-10730) fall through bf16 before q4; download-matrix models fall q8 → q4.
 //   4. the first installed tier.
-// Returns null when nothing is installed (no picker will render anyway). `options` (sc-9300) forwards
-// the `convRotEligible` gate so a hidden INT8-ConvRot tier is never seeded as the selection.
+// Rungs 2–4 (the derived DEFAULT) are then CLAMPED UP to the model's per-model quality floor
+// (`minQualityTier`, sc-10731): a floored model (Anima base/aesthetic = q8) never lets a low global
+// setting / fallback land the default below the floor. The sticky (rung 1) is NOT floored — it was a
+// prior explicit pick, honored as-is. The clamp is capped by clamp-to-installed (a floor tier not on
+// disk resolves to the nearest installed clean tier).
+// Returns null when nothing is installed (no picker will render anyway). `options` also forwards the
+// `convRotEligible` gate (sc-9300) so a hidden INT8-ConvRot tier is never seeded as the selection —
+// and because `defaultQuality` can only ever be bf16|q8|q4, it never re-introduces a filtered tier.
 export function defaultTierSelection(model, lastUsed, options = {}) {
   const tiers = installedTiers(model, options);
   if (tiers.length === 0) {
@@ -144,12 +212,41 @@ export function defaultTierSelection(model, lastUsed, options = {}) {
   if (lastUsed && tiers.includes(lastUsed)) {
     return lastUsed;
   }
+  // The per-model quality FLOOR (sc-10731): the DEFAULT derivation below (rungs 2–4) is clamped UP to
+  // this tier. A floored model (Anima base/aesthetic = q8) never lets a declared default, a low global
+  // "default quality" setting, or the fallback land the default below the floor. NOT applied to the
+  // sticky (rung 1) above — that was a prior EXPLICIT pick, honored as-is (the picker re-surfaces the
+  // advisory). Capped by clamp-to-installed (the clean-tier fallback), so a floor tier not on disk
+  // resolves to the nearest installed clean tier, never null.
+  const floor = modelQualityFloor(model);
+  // Rung 2: the model's declared default tier (`variant.default`), when installed. Dead against the real
+  // catalog (no `default` emitted), kept so a manifest that does declare one still wins — subject to the
+  // floor below (a declared q4 on a q8-floored model still starts at q8).
   const declared = defaultInstalledTier(model, tiers);
-  if (declared) {
-    return declared;
+  // Rung 3: the global default-generation-quality setting is the app-wide base default. The caller
+  // passes it as `options.defaultQuality`; an absent/invalid value falls back to Q8 (the historical
+  // base + worker default) so legacy call sites are unchanged. The base leads a clean-tier fallback so
+  // it is always clamped to what's installed — a base tier that isn't on disk resolves to the nearest
+  // installed clean tier (never the washed q4 unless that's all that's left), never null.
+  let base =
+    declared ??
+    (GENERATION_QUALITY_TIERS.includes(options.defaultQuality)
+      ? options.defaultQuality
+      : DEFAULT_GENERATION_QUALITY);
+  // Clamp the default UP to the model's quality floor (raises only — a base at/above the floor is
+  // untouched; the below fallback still caps it at what's installed).
+  if (floor && isTierBelow(base, floor)) {
+    base = floor;
   }
-  if (tiers.includes("q4")) {
-    return "q4";
+  const cleanFallback =
+    !model?.hasVariantMatrix && Array.isArray(model?.mlxTiers)
+      ? ["q8", "bf16", "q4"]
+      : ["q8", "q4"];
+  const preferred = [base, ...cleanFallback.filter((tier) => tier !== base)];
+  for (const tier of preferred) {
+    if (tiers.includes(tier)) {
+      return tier;
+    }
   }
   return tiers[0];
 }

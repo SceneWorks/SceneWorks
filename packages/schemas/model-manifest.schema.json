@@ -222,7 +222,12 @@
               },
               "vramGbByTier": {
                 "type": "object",
-                "description": "Measured (or explicitly-estimated) candle/CUDA overall-peak VRAM (GB) at 1024², keyed by quant tier (q4 / q8 / bf16). The peak is the max across the whole generate (load + denoise + VAE decode); candle loads weights lazily on first forward, so load-peak is negligible and the denoise peak dominates (sc-9094).",
+                "description": "Measured (or explicitly-estimated) candle/CUDA overall-peak VRAM (GB) at 1024², keyed by quant tier (q4 / q8 / bf16). The peak is the max across the whole generate (load + denoise + VAE decode); candle loads weights lazily on first forward, so load-peak is negligible and the denoise peak dominates (sc-9094). This is the RESIDENT peak (all components co-resident) that the fit-gate compares against free VRAM to pick sequential offload vs reject.",
+                "additionalProperties": { "type": "number" }
+              },
+              "sequentialPeakGb": {
+                "type": "object",
+                "description": "Measured candle/CUDA SEQUENTIAL-residency peak VRAM (GB) at 1024², keyed by quant tier — the largest single working set when the provider loads→uses→drops each component in phase order (text encoders dropped before the DiT). Always ≤ the resident vramGbByTier. Present only for sequential-capable providers (the candle FLUX lane, epic 10765 sc-10769). The fit-gate consults it as the SECOND-stage check (sc-10856): when the resident peak forces sequential offload but this measured sequential peak still exceeds free VRAM, reject before load instead of running into a reactive OOM. Absent this number the gate keeps its best-effort behavior (run sequentially, reactive-OOM backstop).",
                 "additionalProperties": { "type": "number" }
               },
               "measured": {

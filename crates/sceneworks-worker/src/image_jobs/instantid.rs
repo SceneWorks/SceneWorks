@@ -187,10 +187,12 @@ fn instantid_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     // `unet/`, never `transformer/` — so this one-component probe covers every tier.
     let present = |name: &str| -> Option<PathBuf> {
         let unet = root.join(name).join("unet");
+        // A hidden `._*.safetensors` AppleDouble sidecar is not a backbone (SceneWorks#1333).
         let has_backbone = std::fs::read_dir(&unet)
             .into_iter()
             .flatten()
             .flatten()
+            .filter(|entry| !sceneworks_core::lora_family::is_hidden_file(&entry.path()))
             .any(|entry| entry.file_name().to_string_lossy().ends_with(".safetensors"));
         has_backbone.then(|| root.join(name))
     };
