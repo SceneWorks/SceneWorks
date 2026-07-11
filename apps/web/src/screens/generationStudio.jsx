@@ -19,6 +19,9 @@ import {
   presetValidation,
   slugifyPresetId,
 } from "../presetUtils.js";
+import { savePresetDialogValidation } from "../generationValidation.js";
+import { useValidation } from "../validation/useValidation.js";
+import { ValidationSummary } from "../validation/Validation.jsx";
 
 const completedResultFallbackMs = 30000;
 
@@ -614,6 +617,10 @@ export function SavePresetPanel({
   saveDisabled = false,
   saveTitle = undefined,
 }) {
+  // Button gate and its reason from one summary (epic 10644). A blank name stays silent;
+  // an unsaveable mode surfaces the tooltip as an always-visible chip.
+  const saveDraft = useMemo(() => ({ presetName, saveDisabled, saveTitle }), [presetName, saveDisabled, saveTitle]);
+  const saveValidity = useValidation(savePresetDialogValidation, saveDraft, undefined);
   return (
     <div className="save-preset">
       <div className="save-preset-row">
@@ -638,7 +645,7 @@ export function SavePresetPanel({
         />
         <button
           className="save-preset-btn"
-          disabled={savingPreset || !presetName.trim() || saveDisabled}
+          disabled={savingPreset || !saveValidity.ready}
           onClick={onSave}
           title={saveTitle}
           type="button"
@@ -646,6 +653,7 @@ export function SavePresetPanel({
           <Icon.Preset size={14} /> {savingPreset ? "Saving…" : "Save as Preset"}
         </button>
       </div>
+      <ValidationSummary issues={saveValidity.surfaced} label="Save-preset errors" />
       <div className="save-preset-scope scope-segment" role="radiogroup" aria-label="Preset scope">
         <button
           aria-checked={presetScope === "project"}
@@ -693,23 +701,5 @@ export function PresetGuidanceStrip({ selectedPreset, presetPromptParts, presetL
         {presetLoraDetails.some((lora) => lora.missing) ? " | Import still pending" : ""}
       </span>
     </div>
-  );
-}
-
-// The preset "missing"/"incompatible" inline warnings shared by both studios.
-export function PresetValidationWarnings({ presetValidationResult, selectedModel }) {
-  return (
-    <>
-      {presetValidationResult.missing.length ? (
-        <p className="inline-warning">
-          Preset cannot run until LoRA import finishes: {presetValidationResult.missing.join(", ")}. Wait for the Queue or choose another preset.
-        </p>
-      ) : null}
-      {presetValidationResult.incompatible.length ? (
-        <p className="inline-warning">
-          Preset cannot run with {selectedModel?.name ?? "the selected model"} because these LoRAs are incompatible: {presetValidationResult.incompatible.join(", ")}. Choose another preset or model.
-        </p>
-      ) : null}
-    </>
   );
 }

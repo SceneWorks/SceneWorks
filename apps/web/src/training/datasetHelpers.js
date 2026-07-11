@@ -3,6 +3,8 @@
 // owned-asset/asset-id normalizers, dataset-health math, and the save payload
 // builder. No React, no app state — just data shaping over dataset records.
 
+import { issue } from "../validation/issues.js";
+
 export function imageAssetName(asset) {
   const path = asset?.file?.path ?? asset?.path ?? asset?.displayName ?? asset?.id ?? "asset";
   return String(path).replaceAll("\\", "/").split("/").pop() || "asset";
@@ -124,6 +126,36 @@ export function datasetHealth({ activeDataset, imageAssets, selectedAssetIds }) 
     missingCaptions,
     valid,
   };
+}
+
+// What gates Save on the dataset editor, in the app-wide vocabulary (epic 10644). The
+// `health` counts (missing captions, duplicate filenames) are deliberately NOT issues:
+// they're advisory in nature but the DatasetHealth grid already renders them as counts,
+// so a chip would just repeat what the grid shows. This rule set carries only what
+// blocks Save.
+//
+// A missing name or empty selection is a `requirement` — the empty field speaks for
+// itself. `disabledItems` is the one real `error`: assets that got rejected, trashed, or
+// deleted after they were selected. Before this, that only dimmed Save and left the
+// health dot reading "Add image assets to build this dataset" — wrong, since the set is
+// full of the wrong images. The error says so.
+export function datasetSaveValidation({ name, selectedAssetIds }, { health } = {}) {
+  const issues = [];
+  if (!name?.trim()) {
+    issues.push(issue.requirement("datasetName", "Name the dataset"));
+  }
+  if (!selectedAssetIds?.length) {
+    issues.push(issue.requirement("assets", "Add at least one image"));
+  } else if (health?.disabledItems > 0) {
+    const n = health.disabledItems;
+    issues.push(
+      issue.error(
+        null,
+        `Remove ${n} unavailable image${n === 1 ? "" : "s"} — ${n === 1 ? "it has" : "they have"} been rejected, trashed, or deleted`,
+      ),
+    );
+  }
+  return issues;
 }
 
 export function datasetPayload({ activeDataset, assetsById, associatedCharacterId, captionDraftById = {}, name, selectedAssetIds }) {

@@ -41,7 +41,6 @@ import {
   LoraPickerSection,
   onPromptKeyDown,
   PresetGuidanceStrip,
-  PresetValidationWarnings,
   SavePresetPanel,
   useGenerationStudio,
   useSavePreset,
@@ -49,6 +48,9 @@ import {
 import { ReplacePersonPanel } from "./ReplacePersonPanel.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
+import { videoGenerateValidation } from "../videoStudioValidation.js";
+import { useValidation } from "../validation/useValidation.js";
+import { ValidationSummary } from "../validation/Validation.jsx";
 import { downloadOffersFor, videoModelUsable } from "../modelEligibility.js";
 import { PROMPT_REFINE_MODEL_ID, WAN_A14B_LIGHTNING_MODEL_IDS } from "../constants.js";
 import {
@@ -659,17 +661,41 @@ export function VideoStudio() {
   // Image-conditioned models (e.g. Stable Video Diffusion) take no text prompt;
   // they animate the source image, so don't gate submission on prompt text.
   const promptless = Boolean(selectedModel?.promptless);
-  const canSubmit = Boolean(
-    activeProject &&
-      (promptless || prompt.trim()) &&
-      supportsMode &&
-      implementedMode &&
-      hasInputs &&
-      presetValidationResult.ok &&
-      selectedLoraValidationResult.ok &&
-      (!requiresLtxIcLora || hasLtxIcLora) &&
+  // One summary gates Generate and carries every reason it might be dead, so the button
+  // and the messages can't drift — the bug this screen used to embody, where `canSubmit`
+  // and `blockedMessage` re-derived the same rules side by side (epic 10644).
+  const videoDraft = useMemo(
+    () => ({
+      activeProject,
+      promptless,
+      prompt,
+      supportsMode,
+      implementedMode,
+      hasInputs,
+      requiresLtxIcLora,
+      hasLtxIcLora,
       replaceReady,
+      modelName: selectedModel?.name,
+      presetMissing: presetValidationResult.missing,
+      presetIncompatible: presetValidationResult.incompatible,
+      loraIncompatible: selectedLoraValidationResult.incompatible,
+    }),
+    [
+      activeProject,
+      promptless,
+      prompt,
+      supportsMode,
+      implementedMode,
+      hasInputs,
+      requiresLtxIcLora,
+      hasLtxIcLora,
+      replaceReady,
+      selectedModel,
+      presetValidationResult,
+      selectedLoraValidationResult,
+    ],
   );
+  const videoValidity = useValidation(videoGenerateValidation, videoDraft, undefined);
   const [width, height] = resolution.split("x").map((value) => Number(value));
   const durationOptions = selectedModel?.limits?.durations ?? [4, 6, 8, 10];
   const resolutionOptions = selectedModel?.limits?.resolutions ?? ["768x512", "640x640", "1280x720", "720x1280"];
@@ -677,17 +703,6 @@ export function VideoStudio() {
   const durationHint =
     selectedModel?.ui?.durationHint ??
     (selectedModel?.limits?.recommendedMaxDuration ? `Recommended: ${selectedModel.limits.recommendedMaxDuration}s or less.` : "");
-  const blockedMessage = !supportsMode
-    ? `${selectedModel?.name ?? "Selected model"} does not support this mode.`
-    : !implementedMode
-      ? "This entry point is reserved for the next runtime slice."
-      : !hasInputs
-        ? "Required inputs are missing."
-        : requiresLtxIcLora && !hasLtxIcLora
-          ? "LTX video-conditioned generation needs an installed IC-LoRA preset."
-          : !replaceReady
-            ? "No live GPU worker can run person replacement yet."
-            : "";
   const replacementModeLabels = {
     face_only: "Face Only",
     full_person_keep_outfit: "Full Person, Keep Outfit",
@@ -819,7 +834,7 @@ export function VideoStudio() {
     }
   }
 
-  const generateDisabled = submitting || !canSubmit;
+  const generateDisabled = submitting || !videoValidity.ready;
   const renderLabel = mode === "replace_person" ? "Replace person" : "Render clip";
 
   return (
@@ -1471,13 +1486,10 @@ export function VideoStudio() {
             </div>
           </AdvancedSection>
 
-          <PresetValidationWarnings presetValidationResult={presetValidationResult} selectedModel={selectedModel} />
-          {blockedMessage ? <p className="inline-warning">{blockedMessage}</p> : null}
-          {selectedLoraValidationResult.incompatible.length ? (
-            <p className="inline-warning">
-              Generate is blocked because these selected LoRAs are incompatible with {selectedModel?.name ?? "the selected model"}: {selectedLoraValidationResult.incompatible.join(", ")}.
-            </p>
-          ) : null}
+          {/* Every reason Generate is dead — mode/preset/LoRA/worker problems — in one chip
+              row, from the same summary that gates the button (sc-10650). Project, prompt
+              and inputs are silent requirements: their empty fields show it. */}
+          <ValidationSummary issues={videoValidity.surfaced} label="Generate errors" />
 
         </WorkPanel>
 
