@@ -698,14 +698,18 @@ const ANIMA_TE_FILE: &str = "split_files/text_encoders/qwen_3_06b_base.safetenso
 /// The shared dense Qwen-Image VAE, reused bf16 in every Anima tier (repo-relative).
 const ANIMA_VAE_FILE: &str = "split_files/vae/qwen_image_vae.safetensors";
 
-/// Whether an Anima DiT tensor `{base}` (a key minus its `.weight` suffix) is a quantization target —
-/// true UNLESS it is inside the bundled `AnimaTextConditioner` (`…llm_adapter.*`, kept dense bf16).
-/// **Prefix-agnostic**: the base cut roots the DiT at `net`, turbo/aesthetic at `model.diffusion_model`,
-/// so a hardcoded `net.llm_adapter.` predicate (the story's original, WRONG instruction) would leave
-/// the `model.diffusion_model.llm_adapter.*` conditioner UNPROTECTED and pack it to Q4 — this catches
-/// all three. Mirrors `mlx_gen_anima::is_dit_quant_target`; the crate can't be referenced until the
-/// sc-10523 rev bump, which replaces this + `quantize_anima_dit_to` with a direct crate call.
-#[cfg(any(target_os = "macos", test))]
+/// Test-only hardcoded regression pin for the Anima DiT quant-target partition, mirroring
+/// `mlx_gen_anima::is_dit_quant_target` (`true` UNLESS the base — a key minus its `.weight` suffix — is
+/// inside the bundled `AnimaTextConditioner`, `…llm_adapter.*`, kept dense bf16). The converter itself
+/// no longer uses this: `convert_anima_prequant` calls `mlx_gen_anima::quantize_anima_dit` directly
+/// (sc-10580 dedup — single source of the quant policy is the crate). This copy survives ONLY so
+/// `anima_dit_quant_predicate_matches_mlx_gen_anima_twin` can pin the exact partition against a
+/// hand-written table and — on macOS, where the crate is linked — assert the real crate predicate still
+/// matches it, so a future mlx-gen rev can't silently diverge. **Prefix-agnostic**: the base cut roots
+/// the DiT at `net` (base) and `model.diffusion_model` (turbo/aesthetic), so a hardcoded
+/// `net.llm_adapter.` predicate would leave the `model.diffusion_model.llm_adapter.*` conditioner
+/// UNPROTECTED and pack it to Q4 — `!contains` catches all roots.
+#[cfg(test)]
 fn anima_is_dit_quant_target(base: &str) -> bool {
     !base.contains("llm_adapter.")
 }
@@ -716,7 +720,8 @@ fn anima_is_dit_quant_target(base: &str) -> bool {
 /// 2B DiT is small; packing is quick). Unlike the single-tier converters above, this writes THREE tier
 /// subdirs — `bf16/ q8/ q4/` — each a `diffusion_models/ text_encoders/ vae/` tree the Anima loader
 /// reads; the bespoke `anima_tier_subdir` resolver (image_jobs/base.rs) picks one at gen time by
-/// `mlxQuantize`. Only the Cosmos DiT is packed (`anima_is_dit_quant_target`); the bundled
+/// `mlxQuantize`. Only the Cosmos DiT is packed (via `mlx_gen_anima::quantize_anima_dit`, whose
+/// `is_dit_quant_target` predicate keeps the conditioner dense); the bundled
 /// `AnimaTextConditioner`, the Qwen3-0.6B TE, and the Qwen-Image VAE stay DENSE bf16 in every tier (the
 /// "dense-TE, transformer-only" quant policy the sibling converters share — a Q4 text-conditioning path
 /// degrades semantics). A top-level `model_index.json` marks the finished artifact so
@@ -759,8 +764,10 @@ fn convert_anima_prequant(
                 std::os::unix::fs::symlink(&canonical, &dit_dst)
                     .map_err(|error| error.to_string())?;
             }
-            // Packed: quantize ONLY the Cosmos DiT (the bundled conditioner stays dense).
-            Some(bits) => quantize_anima_dit_to(dit_source, &dit_dst, bits, group_size)?,
+            // Packed: quantize ONLY the Cosmos DiT (the bundled conditioner stays dense) via the
+            // crate's install-time quantizer — the single source of the quant policy (sc-10580).
+            Some(bits) => mlx_gen_anima::quantize_anima_dit(dit_source, &dit_dst, bits, group_size)
+                .map_err(|error| format!("quantize Anima DiT: {error}"))?,
         }
         // Symlink the shared dense TE + VAE into every tier (absolute targets).
         for (source, sub, name) in [
@@ -779,26 +786,6 @@ fn convert_anima_prequant(
         "{\n  \"_class_name\": \"AnimaPipeline\"\n}\n",
     )
     .map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-/// Pack one Anima DiT single file to Q`bits` (group `group_size`), writing a single packed
-/// `.safetensors` to `dst`. Reads the file into a key→`Array` map, packs ONLY the Cosmos DiT Linears
-/// (`anima_is_dit_quant_target` keeps the bundled conditioner dense), and writes via the shared
-/// `mlx_gen::quant` primitives — the SAME transformation as `mlx_gen_anima::quantize_anima_dit`, done
-/// with the pinned base-crate API so it needs no mlx-gen rev bump (sc-10523 replaces this with the
-/// direct crate call).
-#[cfg(target_os = "macos")]
-fn quantize_anima_dit_to(src: &Path, dst: &Path, bits: i32, group_size: i32) -> Result<(), String> {
-    use std::collections::HashMap;
-    let w = mlx_gen::weights::Weights::from_file(src).map_err(|error| error.to_string())?;
-    let map: HashMap<String, mlx_rs::Array> = w
-        .keys()
-        .map(|k| (k.to_string(), w.get(k).expect("listed key").clone()))
-        .collect();
-    let packed = mlx_gen::quant::quantize_map(map, bits, group_size, anima_is_dit_quant_target)
-        .map_err(|error| error.to_string())?;
-    mlx_gen::quant::save_map(dst, &packed).map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -2839,17 +2826,16 @@ mod anima_convert_tests {
         }
     }
 
-    /// Equivalence pin for the DUPLICATED predicate (sc-10517). `anima_is_dit_quant_target` here is a
-    /// twin of `mlx_gen_anima::convert::is_dit_quant_target` — both feed `mlx_gen::quant::quantize_map`
-    /// the IDENTICAL `!base.contains("llm_adapter.")` rule, so the install-time worker pack and the
-    /// crate's own pack must partition the checkpoint the same way. The dedup is deferred to sc-10523's
-    /// rev bump (which deletes this copy for a direct crate call); UNTIL THEN the two can drift
-    /// silently, and a drift means the conditioner gets quantized on one path but not the other. This
-    /// pins the exact partition — DiT ⇒ quantize, bundled conditioner ⇒ dense — over BOTH checkpoint
-    /// roots (`net` = base, `model.diffusion_model` = aesthetic/turbo) and BOTH conditioner forms. If
-    /// you change this predicate, change the mlx-gen twin (and its test) in lockstep; see
-    /// `mlx-gen-anima/src/convert.rs`. Inverting the rule flips every expectation below, so a silent
-    /// swap of the sense fails here.
+    /// Equivalence pin for the Anima DiT quant-target partition. The worker no longer duplicates the
+    /// packer: `convert_anima_prequant` calls `mlx_gen_anima::quantize_anima_dit` directly (sc-10580),
+    /// so the crate's `is_dit_quant_target` is now the single source of the "DiT ⇒ quantize, bundled
+    /// conditioner ⇒ dense" policy. This test keeps a hand-written table as an INDEPENDENT pin and, on
+    /// macOS (where the crate is linked), asserts the real `mlx_gen_anima::is_dit_quant_target` still
+    /// matches it — so a future mlx-gen rev bump that silently repartitions the checkpoint (e.g. drops
+    /// the `!contains("llm_adapter.")` rule and packs the conditioner to Q4) fails HERE. The
+    /// `anima_is_dit_quant_target` local copy is the platform-independent half of the pin. Covers BOTH
+    /// checkpoint roots (`net` = base, `model.diffusion_model` = aesthetic/turbo) and BOTH conditioner
+    /// forms; see `mlx-gen-anima/src/convert.rs`.
     #[test]
     fn anima_dit_quant_predicate_matches_mlx_gen_anima_twin() {
         // (key minus `.weight`, expected) — true ⇒ pack as Cosmos DiT, false ⇒ keep dense.
@@ -2870,6 +2856,15 @@ mod anima_convert_tests {
                 anima_is_dit_quant_target(key),
                 *expected,
                 "partition drift for `{key}` — must match mlx_gen_anima::convert::is_dit_quant_target"
+            );
+            // On macOS the crate is linked: assert the REAL predicate the converter now delegates to
+            // (`convert_anima_prequant` → `mlx_gen_anima::quantize_anima_dit` → this) still matches the
+            // pinned table, so a future mlx-gen rev can't silently repartition the checkpoint.
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                mlx_gen_anima::is_dit_quant_target(key),
+                *expected,
+                "crate drift for `{key}` — mlx_gen_anima::is_dit_quant_target diverged from the pin"
             );
         }
     }
