@@ -752,6 +752,18 @@ pub(crate) async fn run_image_generate_job(
                     )
                     .await?;
                 }
+                CandleImageRoute::QwenImageComfyui => {
+                    generate_candle_qwen_comfyui_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
                 // Z-Image identity-init for Image Studio "With Character" (sc-8409, epic 4406) — the
                 // off-Mac sibling of the macOS generic lane's Z-Image identity img2img; reuses the candle
                 // ZImageEdit engine with the identity `referenceAssetId` as the source-latent init + wires
@@ -1748,6 +1760,11 @@ include!("image_jobs/zimage_edit_candle.rs");
 // a user's ComfyUI Z-Image weights in place via `candle_gen_z_image::load_from_comfyui_components`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 include!("image_jobs/zimage_comfyui_candle.rs");
+// Qwen-Image txt2img from an in-place ComfyUI DiT (plain fp8_e4m3fn → bf16) — the Windows/CUDA candle
+// lane ONLY (sc-10670, epic 10451 Phase 2b). Sibling of the Z-Image comfyui lane; TE/VAE/tokenizer come
+// from a resident `SceneWorks/qwen-image-mlx` snapshot tier.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+include!("image_jobs/qwen_comfyui_candle.rs");
 // Z-Image identity-init for Image Studio "With Character" — the Windows/CUDA candle lane ONLY (sc-8409,
 // epic 4406). macOS keeps the MLX `z_image_turbo` generic-lane identity img2img (`generate_stream` ⇒
 // `resolve_zimage_identity_init`); off-Mac this bespoke lane reuses the candle `ZImageEdit` engine with

@@ -215,6 +215,9 @@ enum CandleImageRoute {
     /// An in-place ComfyUI Z-Image base model (`external_base_*`) → `generate_candle_zimage_comfyui_stream`
     /// (epic 10451 Phase 2, sc-10668). Not an `is_candle_engine` id — routed off the forwarded row.
     ZimageComfyui,
+    /// An in-place ComfyUI Qwen-Image base model (`external_base_*`) → `generate_candle_qwen_comfyui_stream`
+    /// (epic 10451 Phase 2b, sc-10670). Not an `is_candle_engine` id — routed off the forwarded row.
+    QwenImageComfyui,
     /// A plain candle txt2img engine id → `generate_candle_stream`.
     CandleTxt2Img,
 }
@@ -269,6 +272,10 @@ fn resolve_candle_image_route(
         // In-place ComfyUI Z-Image base (sc-10668): an `external_base_*` id, so it matches no
         // `is_candle_engine` arm below — route it here off the forwarded `modelManifestEntry`.
         Some(CandleImageRoute::ZimageComfyui)
+    } else if qwen_comfyui_available(request, settings) {
+        // In-place ComfyUI Qwen-Image base (sc-10670): sibling of the Z-Image comfyui lane — an
+        // `external_base_*` id routed off the forwarded row (family=="qwen-image", usable).
+        Some(CandleImageRoute::QwenImageComfyui)
     } else if is_candle_engine(&request.model)
         && !matches!(
             request.model.as_str(),
@@ -775,16 +782,14 @@ fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
 /// The DENSE (`bf16/`) tier of a SceneWorks quant-matrix turnkey, or `root` unchanged for a flat
 /// diffusers snapshot (sc-10614).
 ///
-/// The candle SDXL edit / IP-Adapter lanes (`sdxl_edit_candle.rs`, `sdxl_ipadapter.rs`) have only a
-/// DENSE implementation — their conditioning paths read dense weights — so they always want `bf16/`,
-/// unlike [`standard_tier_subdir`], which honours `advanced.mlxQuantize`. (The plain txt2img lane DOES
-/// serve the packed q4/q8 tiers as of sc-10767 — the SDXL family is `candle_quant_lora` — but that goes
-/// through `standard_tier_subdir`; these two bespoke sub-mode lanes stay dense-only for now.) They
-/// historically
-/// handed the snapshot ROOT straight to the loader, which works only because `sdxl` and `realvisxl`
-/// fall back to flat upstream diffusers repos (`stabilityai/stable-diffusion-xl-base-1.0`,
-/// `SG161222/RealVisXL_V5.0`). An SDXL model re-hosted as a tiered turnkey has no component tree at
-/// its root, so the loader would find no `unet/` at all.
+/// The FALLBACK tier resolver for the candle SDXL edit / IP-Adapter lanes (`sdxl_edit_candle.rs`,
+/// `sdxl_ipadapter.rs`) on a NON-standard-layout repo. As of sc-10813 those lanes packed-detect and,
+/// for a standard-tier turnkey (`mlx.standardTierLayout`), descend through [`standard_tier_subdir`]
+/// (honouring `advanced.mlxQuantize`, exactly like the txt2img lane, sc-10767) — so the packed q4/q8
+/// tiers now serve edit / inpaint / IP-Adapter, not just txt2img. This helper stays the else-branch:
+/// a flat upstream diffusers repo (`stabilityai/stable-diffusion-xl-base-1.0`, `SG161222/RealVisXL_V5.0`)
+/// roots its `unet/` and is returned untouched, and a non-standard tiered turnkey resolves its dense
+/// `bf16/` (an SDXL turnkey has no component tree at its root, so the loader would find no `unet/`).
 ///
 /// A flat snapshot roots its backbone dir — `unet/` for the SDXL family, `transformer/` for the DiTs
 /// — and is returned untouched, so the existing two models keep resolving exactly as before. Same
@@ -870,8 +875,11 @@ fn anima_dense_split_files_dir(root: PathBuf) -> PathBuf {
 /// The Ideogram 4 tier subdir a `mlxQuantize` request needs fetched ON DEMAND — `Some("q8")` when the
 /// request opts into Q8 (`> 4`), else `None` (the shipped default `q4/`, which the catalog download
 /// pulls; bf16 is a SEPARATE catalog repo the user opts into on the Models page, never an on-demand
-/// fetch). Shared by [`ideogram_model_subdir`] (which subdir to load) and [`ensure_ideogram_tier_present`]
-/// (which to fetch) so the two stay in lockstep, mirroring [`boogu_tier_subdir`].
+/// fetch). The FETCH-side helper for [`ensure_ideogram_tier_present`] (which tier to pull). The LOAD-side
+/// resolver [`ideogram_model_subdir`] no longer shares this: as of sc-10777 it routes its default through
+/// the floor-aware [`preferred_tier`] (so a floored default clamps up to `mlx.minQualityTier`, capped by
+/// installed), while this fetch helper stays keyed on the explicit pick only — no shipping Ideogram model
+/// declares a floor, so the two still agree for every current model. Mirrors [`boogu_tier_subdir`].
 fn ideogram_tier_subdir(bits: Option<i64>) -> Option<&'static str> {
     match bits {
         Some(b) if b > 4 => Some("q8"),
@@ -882,12 +890,14 @@ fn ideogram_tier_subdir(bits: Option<i64>) -> Option<&'static str> {
 /// Pick the engine-complete packed subdir of an Ideogram 4 turnkey `root`: `q8/` when the request
 /// opts into Q8 (`advanced.mlxQuantize: 8`) AND it is downloaded, `q4/` for an explicit Q4 pick
 /// (`1..=4`), else — with NO explicit `mlxQuantize` — the **`q8/`** default (epic 10721 / sc-10726),
-/// CLAMPED to what's installed (only `q4/` on disk ⇒ q4). Falls back to `root` if neither subdir is
-/// present (a partially-downloaded bundle surfaces as a load error rather than a silent half-load).
-/// The `q8/` tier is an on-demand download fetched by [`ensure_ideogram_tier_present`] on an explicit
-/// opt-in (sc-9607); this resolver never triggers that fetch for the plain default — it simply prefers
-/// q8 when it happens to be on disk. Ideogram's turnkey carries only `q4/`/`q8/` (bf16 is a separate
-/// catalog repo), so the clean-tiers fallback here is q8 ⇆ q4.
+/// CLAMPED UP to the model's per-model quality floor (`mlx.minQualityTier`, sc-10731 via the shared
+/// [`preferred_tier`], sc-10777) and DOWN to what's installed (only `q4/` on disk ⇒ q4). Falls back to
+/// `root` if neither subdir is present (a partially-downloaded bundle surfaces as a load error rather
+/// than a silent half-load). The `q8/` tier is an on-demand download fetched by
+/// [`ensure_ideogram_tier_present`] on an explicit opt-in (sc-9607); this resolver never triggers that
+/// fetch for the plain default — it simply prefers q8 when it happens to be on disk. Ideogram's turnkey
+/// carries only `q4/`/`q8/` (bf16 is a separate catalog repo), so the clean-tiers fallback here is
+/// q8 ⇆ q4 and a bf16 floor has no in-turnkey tier to land on (it falls through to the best installed).
 fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let bits = request
         .advanced
@@ -899,27 +909,32 @@ fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
             .is_file()
             .then_some(dir)
     };
-    if let Some(tier) = ideogram_tier_subdir(bits) {
-        if let Some(dir) = present(tier) {
-            return dir;
-        }
-    }
-    // An explicit Q4 pick (`1..=4`) stays q4-first; the default (no `mlxQuantize`) and any other
-    // non-q8-opt-in prefer the clean q8 tier when installed, clamping to q4 otherwise.
-    let prefer_q4 = matches!(bits, Some(b) if (1..=4).contains(&b));
-    if prefer_q4 {
-        present("q4").or_else(|| present("q8"))
-    } else {
-        present("q8").or_else(|| present("q4"))
-    }
-    .unwrap_or_else(|| root.to_path_buf())
+    // The tier the request prefers: an explicit `mlxQuantize` pick maps directly (`<=0` → bf16, `>4` →
+    // q8, `1..=4` → q4), else the app-wide q8 default (epic 10721 / sc-10726) CLAMPED UP to the model's
+    // per-model quality floor (`mlx.minQualityTier`, sc-10731) — the SAME shared, floor-aware logic as
+    // [`standard_tier_subdir`] / [`anima_tier_subdir`] (sc-10777, routing this resolver through
+    // [`preferred_tier`] instead of its own non-floor-aware q8 default). No shipping Ideogram model
+    // declares a floor, so this is byte-identical to the prior q8-first default for every current model —
+    // it just keeps the worker default path from silently landing below a floor should one ever be
+    // declared. Ideogram's turnkey carries only `q4/`/`q8/` (bf16 is the separate `SceneWorks/ideogram-4`
+    // catalog repo, never an in-turnkey subdir), so a preferred `bf16` — an explicit `<=0` pick, or a
+    // hypothetical bf16 floor — simply isn't present and falls through the clean-tiers chain (q8 → q4) to
+    // the best installed tier, exactly as the prior resolver did.
+    let preferred = preferred_tier(bits, min_quality_floor(request));
+    present(preferred)
+        .or_else(|| present("q8"))
+        .or_else(|| present("q4"))
+        .unwrap_or_else(|| root.to_path_buf())
 }
 
-/// The Boogu subfolder for a `mlxQuantize` request — `None` keeps the Q8 default. Shared by
-/// [`boogu_model_subdir`] (which subfolder to load) and [`ensure_boogu_tier_present`] (which to
-/// fetch on demand): `<=0` → `<variant>-bf16/` (dense full precision), `1..=4` → `<variant>-q4/`
-/// (packed Q4, sc-8513), anything else → the default `<variant>/` (packed Q8). Returns the subfolder
-/// name relative to the turnkey root.
+/// The Boogu subfolder for a `mlxQuantize` request — `None` keeps the Q8 default. The FETCH-side helper
+/// for [`ensure_boogu_tier_present`] (which non-default tier to pull on demand): `<=0` → `<variant>-bf16/`
+/// (dense full precision), `1..=4` → `<variant>-q4/` (packed Q4, sc-8513), anything else → `None` (the
+/// default `<variant>/` packed Q8 ships in the catalog download). Returns the subfolder name relative to
+/// the turnkey root. The LOAD-side resolver [`boogu_model_subdir`] no longer shares this: as of sc-10777 it
+/// routes its default through the floor-aware [`preferred_tier`] (so a floored default clamps up to
+/// `mlx.minQualityTier`, capped by installed), while this fetch helper stays keyed on the explicit pick
+/// only — no shipping Boogu model declares a floor, so the two still agree for every current model.
 fn boogu_tier_subdir(variant: &str, bits: Option<i64>) -> Option<String> {
     match bits {
         Some(b) if b <= 0 => Some(format!("{variant}-bf16")),
@@ -930,12 +945,14 @@ fn boogu_tier_subdir(variant: &str, bits: Option<i64>) -> Option<String> {
 
 /// Pick the engine-complete subfolder of a Boogu turnkey `root` for the requested variant. Each
 /// catalog id maps to a variant folder: `boogu_image`→`base`, `boogu_image_turbo`→`turbo`,
-/// `boogu_image_edit`→`edit`. **Q8 is the shipped default** (the pre-packed `<variant>/` folder); an
+/// `boogu_image_edit`→`edit`. **Q8 is the shipped default** (the pre-packed `<variant>/` folder),
+/// CLAMPED UP to the model's per-model quality floor (`mlx.minQualityTier`, sc-10731 via the shared
+/// [`preferred_tier`], sc-10777 — a bf16 floor raises the picker-less default to `<variant>-bf16/`); an
 /// explicit advanced `mlxQuantize` selects another tier (sc-8513, epic 8506): `<=0` → the dense
 /// `<variant>-bf16/`, `1..=4` → the packed `<variant>-q4/`. Falls back through Q8 → q4 → bf16 → `root`
 /// when the requested tier isn't downloaded, so a partial bundle surfaces as a load error rather than
-/// a silent half-load. (The non-default tiers are on-demand downloads fetched by
-/// [`ensure_boogu_tier_present`] before this resolves, sc-6568/sc-8513.)
+/// a silent half-load (a floor tier not on disk falls to the best installed). (The non-default tiers are
+/// on-demand downloads fetched by [`ensure_boogu_tier_present`] before this resolves, sc-6568/sc-8513.)
 fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let variant = match request.model.as_str() {
         "boogu_image_turbo" => "turbo",
@@ -960,12 +977,27 @@ fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     };
     let q4 = format!("{variant}-q4");
     let bf16 = format!("{variant}-bf16");
-    if let Some(tier) = boogu_tier_subdir(variant, bits) {
-        if let Some(dir) = present(&tier) {
-            return dir;
+    // Boogu names its tiers `<variant>` (the packed Q8 shipped default), `<variant>-q4` and
+    // `<variant>-bf16` — map a generic [`preferred_tier`] tier name onto that layout.
+    let variant_folder = |tier: &str| -> String {
+        match tier {
+            "q8" => variant.to_owned(),
+            other => format!("{variant}-{other}"),
         }
-    }
-    present(variant)
+    };
+    // The tier the request prefers: an explicit `mlxQuantize` pick maps directly (`<=0` → bf16, `1..=4` →
+    // q4, else Q8 — the same mapping the old `boogu_tier_subdir` load-path branch used), else the app-wide
+    // Q8 default (epic 10721 / sc-10726) CLAMPED UP to the model's per-model quality floor
+    // (`mlx.minQualityTier`, sc-10731) — the SAME shared, floor-aware logic as [`standard_tier_subdir`] /
+    // [`anima_tier_subdir`] (sc-10777, routing this resolver through [`preferred_tier`] instead of its own
+    // non-floor-aware Q8 default). No shipping Boogu model declares a floor, so this is byte-identical to
+    // the prior Q8-first default for every current variant; the routing keeps the resolver from silently
+    // landing below a floor should one ever be declared — a bf16 floor would raise the picker-less default
+    // from the packed Q8 up to the dense `<variant>-bf16`, capped by what's installed. The clean-tiers
+    // fallback (Q8 → q4 → bf16) is unchanged, so a partial bundle still surfaces as a load error.
+    let preferred = preferred_tier(bits, min_quality_floor(request));
+    present(&variant_folder(preferred))
+        .or_else(|| present(variant))
         .or_else(|| present(&q4))
         .or_else(|| present(&bf16))
         .unwrap_or_else(|| root.to_path_buf())
@@ -973,12 +1005,15 @@ fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
 
 /// Pick the engine-complete packed subdir of a Krea 2 Turbo turnkey `root`: `q4/` when the request opts
 /// into Q4 (`advanced.mlxQuantize <= 4`) AND it is downloaded, else the default `q8/` (the shipped
-/// default — the P1-validated near-lossless quant). Falls back to whichever subdir is present, then
-/// `root`, so a partially-downloaded bundle surfaces as a load error rather than a silent half-load. The
-/// turnkey (`SceneWorks/krea-2-turbo-mlx`, sc-7573) carries one `from_snapshot`-loadable subdir per quant
-/// (each with a packed `transformer/diffusion_pytorch_model.safetensors`); the loader auto-detects the
-/// packed quant, so the resolved `spec.quantize` is a no-op on it. Mirrors [`ideogram_model_subdir`]
-/// (q4/q8 subdirs) with Boogu's packed-transformer filename and a Q8-default selection.
+/// default — the P1-validated near-lossless quant), CLAMPED UP to the model's per-model quality floor
+/// (`mlx.minQualityTier`, sc-10731 via the shared [`preferred_tier`], sc-10845 — a bf16 floor raises the
+/// picker-less default to the dense `bf16/`). Falls back to whichever subdir is present, then `root`, so
+/// a partially-downloaded bundle surfaces as a load error rather than a silent half-load (a floor tier not
+/// on disk falls to the best installed). The turnkey (`SceneWorks/krea-2-turbo-mlx`, sc-7573) carries one
+/// `from_snapshot`-loadable subdir per quant (each with a packed
+/// `transformer/diffusion_pytorch_model.safetensors`); the loader auto-detects the packed quant, so the
+/// resolved `spec.quantize` is a no-op on it. Mirrors [`ideogram_model_subdir`] (q4/q8 subdirs) with
+/// Boogu's packed-transformer filename and a Q8-default selection.
 fn krea_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let bits = request
         .advanced
@@ -996,13 +1031,18 @@ fn krea_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
             .is_file();
         (packed || sharded).then_some(dir)
     };
-    // bits<=0 → bf16 (the dense base; krea's loader takes it with no quantize); bits<=4 → q4; else the
-    // default q8 (the P1-validated near-lossless quant).
-    let preferred = match bits {
-        Some(b) if b <= 0 => "bf16",
-        Some(b) if b <= 4 => "q4",
-        _ => "q8",
-    };
+    // The tier the request prefers: an explicit `mlxQuantize` pick maps directly (`<=0` → bf16 the dense
+    // base which krea's loader takes with no quantize, `>4` → q8, `1..=4` → q4 — the SAME mapping krea's
+    // own match used), else the app-wide q8 default (epic 10721 / sc-10726, the P1-validated near-lossless
+    // quant) CLAMPED UP to the model's per-model quality floor (`mlx.minQualityTier`, sc-10731) — the SAME
+    // shared, floor-aware logic as `standard_tier_subdir` / `anima_tier_subdir` / `ideogram_model_subdir` /
+    // `boogu_model_subdir` (sc-10845, routing this last bespoke resolver through [`preferred_tier`] instead
+    // of its own non-floor-aware q8 default). No shipping Krea model declares a floor, so this is
+    // byte-identical to the prior q8 default; the routing keeps the resolver from silently landing below a
+    // floor should one ever be declared (a bf16 floor would raise the picker-less default from q8 to the
+    // dense bf16, capped by what's installed). Fallback stays krea's q8 → q4 → bf16 (bf16 last — it is the
+    // heaviest dense tree), so a partial bundle still surfaces as a load error.
+    let preferred = preferred_tier(bits, min_quality_floor(request));
     present(preferred)
         .or_else(|| present("q8"))
         .or_else(|| present("q4"))
@@ -3999,36 +4039,85 @@ async fn generate_candle_stream(
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
-    // VRAM fit-gate (epic 10765 Phase 0, sc-10766): reject-before-OOM when the selected tier can't fit
-    // the card, and honor `SCENEWORKS_CUDA_VRAM_CAP_GB` to emulate a small card on big hardware. Models
-    // with no measured `candle` VRAM block, and non-NVIDIA hosts, yield `FitDecision::Unknown` → never
-    // block (mirrors the flux2 edit guard's `None` short-circuit). Auto-downtier / CPU-offload is Phase
-    // 1 (sc-10769); today a too-big model is rejected with an actionable message instead of a mid-render
-    // Metal/CUDA OOM.
-    {
+    // VRAM fit-gate (epic 10765, sc-10766 Phase 0 + sc-10821 Phase 1b + sc-10856): when the selected
+    // tier's predicted resident peak won't fit the card, either RUN SEQUENTIALLY (a provider that
+    // supports sequential component residency — the candle FLUX lane, sc-10769 — drops the text encoders
+    // before the DiT so peak = DiT+VAE, not TE+DiT+VAE) or, for a family that has not wired it, reject-
+    // before-OOM with an actionable message. sc-10856 adds a second stage on the sequential path: when
+    // the tier's MEASURED sequential peak (`candle.sequentialPeakGb`) is known and STILL won't fit, reject
+    // instead of running into a reactive OOM. Honors `SCENEWORKS_CUDA_VRAM_CAP_GB` to emulate a small
+    // card. Unmeasured models (no `candle` block) and non-NVIDIA hosts yield `Unknown` → never block.
+    let use_sequential = {
         let budget = crate::vram_gate::apply_vram_cap(
             crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
             crate::vram_gate::cuda_vram_cap_gb(),
         );
-        let tier = crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
+        let tier =
+            crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
         let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
-        if let crate::vram_gate::FitDecision::TooBig {
-            needed_gb,
-            available_gb,
-        } = crate::vram_gate::fit_decision(needed, budget)
-        {
-            return Err(WorkerError::InvalidPayload(format!(
-                "{model} at the {tier} tier needs ~{needed} GB of VRAM (with headroom) but GPU {gpu} \
-                 has ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output resolution, \
-                 or run on a card with more VRAM.",
-                model = request.model,
-                needed = needed_gb.round() as i64,
-                available = available_gb.round() as i64,
-                gpu = settings.gpu_id,
-            )));
+        // Only the candle FLUX lane has wired sequential residency (sc-10769); other families reject.
+        let sequential_capable = matches!(engine_id, "flux1_dev" | "flux1_schnell");
+        match crate::vram_gate::resolve_offload(
+            crate::vram_gate::fit_decision(needed, budget),
+            sequential_capable,
+        ) {
+            crate::vram_gate::FitDecision::Offload {
+                needed_gb,
+                available_gb,
+            } => {
+                // Second-stage gate (sc-10856): sequential residency was selected because the resident
+                // peak won't fit. If this tier's MEASURED sequential peak is known and STILL exceeds the
+                // budget, reject before load instead of running into a reactive OOM. Absent the number
+                // (unmeasured tier) keep the best-effort run — the reactive OOM containment backstops it.
+                let sequential_needed = crate::vram_gate::predicted_sequential_peak_gb(
+                    &request.model_manifest_entry,
+                    tier,
+                );
+                if let Some(seq_gb) =
+                    crate::vram_gate::sequential_overflow_gb(sequential_needed, budget)
+                {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "{model} at the {tier} tier needs ~{seq} GB of VRAM even with sequential \
+                         component residency (loading one component at a time), but GPU {gpu} has \
+                         ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output \
+                         resolution, or run on a card with more VRAM.",
+                        model = request.model,
+                        seq = seq_gb.round() as i64,
+                        available = available_gb.round() as i64,
+                        gpu = settings.gpu_id,
+                    )));
+                }
+                tracing::info!(
+                    model = %request.model,
+                    needed_gb = needed_gb.round() as i64,
+                    available_gb = available_gb.round() as i64,
+                    "candle VRAM fit-gate: resident peak exceeds free VRAM — loading with sequential \
+                     component residency (text encoders dropped before the DiT)"
+                );
+                true
+            }
+            crate::vram_gate::FitDecision::TooBig {
+                needed_gb,
+                available_gb,
+            } => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{model} at the {tier} tier needs ~{needed} GB of VRAM (with headroom) but GPU \
+                     {gpu} has ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output \
+                     resolution, or run on a card with more VRAM.",
+                    model = request.model,
+                    needed = needed_gb.round() as i64,
+                    available = available_gb.round() as i64,
+                    gpu = settings.gpu_id,
+                )));
+            }
+            _ => false,
         }
-    }
+    };
     let mut spec = load_spec(weights_dir, quant, adapters, None);
+    if use_sequential {
+        // Ask the provider (candle FLUX) to load→use→drop each component in phase order (sc-10821).
+        spec = spec.with_offload_policy(gen_core::OffloadPolicy::Sequential);
+    }
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
@@ -4881,6 +4970,69 @@ mod standard_tier_tests {
         );
     }
 
+    /// **sc-10732 — acceptance #1: the app-wide default-tier revert guard.**
+    ///
+    /// Epic 10721 moved the gen-time default tier off the old blind `q4` to `q8` (sc-10726): the shared
+    /// [`preferred_tier`] returns `"q8"` with no explicit `mlxQuantize` pick and no per-model floor, and
+    /// BOTH tier resolvers ([`standard_tier_subdir`] and [`anima_tier_subdir`]) inherit it. If a future
+    /// change reverts that default back to `q4` — in `preferred_tier`'s `None => …` arm, or a resolver
+    /// special-case — this test FAILS LOUDLY. That is the whole point of the sc-10732 lock: the finer
+    /// resolver/floor tests each imply it, but this one names it at the revert site so the intent is
+    /// unmissable. Deliberately redundant.
+    #[test]
+    fn default_tier_is_q8_not_q4_regression() {
+        // The shared default-tier primitive: no explicit `mlxQuantize`, no per-model floor → q8, never q4.
+        assert_eq!(
+            preferred_tier(None, None),
+            "q8",
+            "app-wide gen default MUST be q8 (epic 10721 / sc-10726) — a revert to q4 is the regression \
+             this guards"
+        );
+        assert_ne!(
+            preferred_tier(None, None),
+            "q4",
+            "the pre-epic-10721 blind-q4 default has been reverted — do NOT reinstate it (sc-10726/sc-10732)"
+        );
+
+        // Disk-backed through the standard resolver: a default job (no mlxQuantize) with ALL tiers
+        // installed resolves the q8 subdir, not the washed q4 — the revert is caught end-to-end too.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for tier in ["bf16", "q8", "q4"] {
+            seed_tier(root, tier, "diffusion_pytorch_model.safetensors");
+        }
+        let default_job = request(json!({}));
+        assert_eq!(
+            standard_tier_subdir(root, &default_job),
+            root.join("q8"),
+            "standard_tier_subdir default MUST land on q8 (not q4) when all tiers are installed"
+        );
+        assert_ne!(standard_tier_subdir(root, &default_job), root.join("q4"));
+
+        // The Anima resolver shares the same default (sc-10714 → sc-10731): its no-pick default is q8 too,
+        // so a revert to q4 also washes Anima — the exact quality bug epic 10721 fixed.
+        #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+        {
+            let anima_root = tempfile::tempdir().unwrap();
+            for tier in ["bf16", "q8", "q4"] {
+                let dir = anima_root.path().join(tier).join("diffusion_models");
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("anima-base-v1.0.safetensors"), b"x").unwrap();
+            }
+            let anima_default =
+                ImageRequest::from_payload(json!({ "model": "anima_base" }).as_object().unwrap());
+            assert_eq!(
+                anima_tier_subdir(anima_root.path(), &anima_default),
+                anima_root.path().join("q8"),
+                "anima_tier_subdir default MUST be q8 (sc-10714), never the washed q4"
+            );
+            assert_ne!(
+                anima_tier_subdir(anima_root.path(), &anima_default),
+                anima_root.path().join("q4")
+            );
+        }
+    }
+
     #[test]
     fn falls_back_when_preferred_tier_absent() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5505,6 +5657,71 @@ mod standard_tier_tests {
         );
     }
 
+    /// sc-10845 (epic 10721): [`krea_model_subdir`] — the last bespoke tier resolver — routes its DEFAULT
+    /// through the shared, floor-aware [`preferred_tier`]`(bits, `[`min_quality_floor`]`(request))`, exactly
+    /// like [`standard_tier_subdir`] / [`anima_tier_subdir`] / [`ideogram_model_subdir`] /
+    /// [`boogu_model_subdir`], so a floored model's picker-less default clamps UP to `mlx.minQualityTier`
+    /// (capped by installed) instead of blindly landing on the q8 default. No shipping Krea model declares
+    /// a floor today, so every current model is byte-identical to the prior q8 default; this pins the
+    /// generality. Mirrors [`standard_tier_subdir_clamps_default_to_the_floor`].
+    #[test]
+    fn krea_default_tier_clamps_to_the_floor() {
+        // A krea request with the given `bits` (null = no explicit pick) and an optional per-model quality
+        // floor forwarded via `modelManifestEntry.mlx.minQualityTier`.
+        let floored = |bits: serde_json::Value, floor: Option<&str>| {
+            let payload = match floor {
+                Some(f) => json!({
+                    "model": "krea_2_raw",
+                    "advanced": { "mlxQuantize": bits },
+                    "modelManifestEntry": { "mlx": { "minQualityTier": f } },
+                }),
+                None => json!({
+                    "model": "krea_2_raw",
+                    "advanced": { "mlxQuantize": bits },
+                }),
+            };
+            ImageRequest::from_payload(payload.as_object().unwrap())
+        };
+        // Krea turnkey carries packed q4/q8 + dense sharded bf16.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
+
+        // Floor bf16, no explicit pick → the dense bf16 (raised above the q8 default).
+        assert_eq!(
+            krea_model_subdir(root, &floored(json!(null), Some("bf16"))),
+            root.join("bf16"),
+            "floored Krea default → the bf16 floor tier (raised above the q8 default)"
+        );
+        // Floor q8 (at the default) → q8, unchanged (the floor only ever RAISES).
+        assert_eq!(
+            krea_model_subdir(root, &floored(json!(null), Some("q8"))),
+            root.join("q8")
+        );
+        // An explicit below-floor q4 pick is HONORED even against a bf16 floor (the worker never overrides
+        // a deliberate quant choice — the web surfaces the advisory instead).
+        assert_eq!(
+            krea_model_subdir(root, &floored(json!(4), Some("bf16"))),
+            root.join("q4")
+        );
+        // Non-floored default is unchanged — the q8 default still stands.
+        assert_eq!(
+            krea_model_subdir(root, &floored(json!(null), None)),
+            root.join("q8")
+        );
+
+        // Floor capped by installed: bf16 floor but only q8 on disk → q8.
+        let only_q8 = tempfile::tempdir().unwrap();
+        seed_tier(only_q8.path(), "q8", "diffusion_pytorch_model.safetensors");
+        assert_eq!(
+            krea_model_subdir(only_q8.path(), &floored(json!(null), Some("bf16"))),
+            only_q8.path().join("q8"),
+            "bf16 floor with only q8 installed → q8 (a floor tier not on disk falls to the best installed)"
+        );
+    }
+
     #[test]
     fn candle_lens_resolves_packed_turnkey_tier_subdir() {
         let lens_request = |bits: serde_json::Value| {
@@ -5601,6 +5818,127 @@ mod standard_tier_tests {
                     root.join(variant)
                 );
             }
+        }
+    }
+
+    /// sc-10777 (epic 10721): [`ideogram_model_subdir`] / [`boogu_model_subdir`] route their DEFAULT tier
+    /// through the shared, floor-aware [`preferred_tier`]`(bits, `[`min_quality_floor`]`(request))` — the
+    /// same clamp [`standard_tier_subdir`] / [`anima_tier_subdir`] use — so a floored model's picker-less
+    /// default clamps UP to `mlx.minQualityTier` (capped by installed) instead of blindly landing on the
+    /// per-family q8/Q8 default. No shipping Ideogram/Boogu model declares a floor today, so every current
+    /// model is byte-identical to the prior default; this pins the generality so a future floored model
+    /// can't silently regress below its floor on the worker default path. Mirrors
+    /// [`standard_tier_subdir_clamps_default_to_the_floor`].
+    #[test]
+    fn ideogram_boogu_default_tier_clamps_to_the_floor() {
+        // A request for `model` with the given `bits` (null = no explicit pick) and an optional per-model
+        // quality floor forwarded via `modelManifestEntry.mlx.minQualityTier`.
+        let floored = |model: &str, bits: serde_json::Value, floor: Option<&str>| {
+            let payload = match floor {
+                Some(f) => json!({
+                    "model": model,
+                    "advanced": { "mlxQuantize": bits },
+                    "modelManifestEntry": { "mlx": { "minQualityTier": f } },
+                }),
+                None => json!({
+                    "model": model,
+                    "advanced": { "mlxQuantize": bits },
+                }),
+            };
+            ImageRequest::from_payload(payload.as_object().unwrap())
+        };
+
+        // --- Boogu: a bf16 floor RAISES the picker-less default above the packed Q8 (the meaningful case,
+        // since Boogu's turnkey carries a bf16 tier above its Q8 default). ---
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            seed_tier(root, "base", "diffusion_pytorch_model.safetensors");
+            seed_tier(root, "base-q4", "diffusion_pytorch_model.safetensors");
+            // bf16 ships as the dense diffusers tree (SHARDED → only the `.index.json`), like the loader.
+            seed_tier(
+                root,
+                "base-bf16",
+                "diffusion_pytorch_model.safetensors.index.json",
+            );
+            // Floor bf16, no explicit pick → the dense `base-bf16` (raised above the Q8 default).
+            assert_eq!(
+                boogu_model_subdir(root, &floored("boogu_image", json!(null), Some("bf16"))),
+                root.join("base-bf16"),
+                "floored Boogu default → the bf16 floor tier (raised above the packed Q8 default)"
+            );
+            // Floor q8 (at the default) → the packed Q8 `base/`, unchanged (the floor only ever RAISES).
+            assert_eq!(
+                boogu_model_subdir(root, &floored("boogu_image", json!(null), Some("q8"))),
+                root.join("base")
+            );
+            // An explicit below-floor q4 pick is HONORED even against a bf16 floor (the worker never
+            // overrides a deliberate quant choice — the web surfaces the advisory instead).
+            assert_eq!(
+                boogu_model_subdir(root, &floored("boogu_image", json!(4), Some("bf16"))),
+                root.join("base-q4")
+            );
+            // Non-floored default is unchanged — the packed Q8 default still stands (acceptance #3).
+            assert_eq!(
+                boogu_model_subdir(root, &floored("boogu_image", json!(null), None)),
+                root.join("base")
+            );
+        }
+        // Boogu floor capped by installed: bf16 floor but only the packed Q8 `base/` on disk → Q8.
+        {
+            let only_q8 = tempfile::tempdir().unwrap();
+            seed_tier(only_q8.path(), "base", "diffusion_pytorch_model.safetensors");
+            assert_eq!(
+                boogu_model_subdir(
+                    only_q8.path(),
+                    &floored("boogu_image", json!(null), Some("bf16"))
+                ),
+                only_q8.path().join("base"),
+                "bf16 floor with only Q8 installed → Q8 (a floor tier not on disk falls to the best installed)"
+            );
+        }
+
+        // --- Ideogram: the turnkey carries only `q4/`/`q8/` (bf16 is a separate repo) and the default
+        // already prefers q8, so the floor routing is inert for every in-turnkey floor — but it must still
+        // resolve correctly and stay capped by installed. ---
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            seed_tier(root, "q4", "model.safetensors");
+            seed_tier(root, "q8", "model.safetensors");
+            // Floor q8, no explicit pick → q8 (the default already prefers q8; confirms the floor routing
+            // resolves through the shared helper).
+            assert_eq!(
+                ideogram_model_subdir(root, &floored("ideogram_4", json!(null), Some("q8"))),
+                root.join("q8")
+            );
+            // A bf16 floor has NO in-turnkey tier → falls through the clean q8 → q4 chain to the best
+            // installed (q8), never erroring on the absent bf16.
+            assert_eq!(
+                ideogram_model_subdir(root, &floored("ideogram_4", json!(null), Some("bf16"))),
+                root.join("q8"),
+                "bf16 floor with no in-turnkey bf16 tier → best installed (q8)"
+            );
+            // An explicit below-floor q4 pick is HONORED even against a q8 floor.
+            assert_eq!(
+                ideogram_model_subdir(root, &floored("ideogram_4", json!(4), Some("q8"))),
+                root.join("q4")
+            );
+            // Non-floored default is unchanged — q8 when installed (acceptance #3).
+            assert_eq!(
+                ideogram_model_subdir(root, &floored("ideogram_4", json!(null), None)),
+                root.join("q8")
+            );
+        }
+        // Ideogram floor capped by installed: q8 floor but only the shipped q4 on disk → q4.
+        {
+            let only_q4 = tempfile::tempdir().unwrap();
+            seed_tier(only_q4.path(), "q4", "model.safetensors");
+            assert_eq!(
+                ideogram_model_subdir(only_q4.path(), &floored("ideogram_4", json!(null), Some("q8"))),
+                only_q4.path().join("q4"),
+                "q8 floor with only q4 installed → q4 (a floor tier not on disk falls to the best installed)"
+            );
         }
     }
 }

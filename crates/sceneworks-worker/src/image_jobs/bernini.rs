@@ -182,8 +182,14 @@ async fn generate_bernini_image_stream(
         .get("mlxQuantize")
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
     crate::video_jobs::ensure_bernini_tier_present(api, settings, job, tier_bits).await?;
-    let (weights_dir, quant) =
-        crate::video_jobs::resolve_bernini_tier_dir_and_quant(settings, tier_bits, quant)?;
+    // Image lane keeps the epic-10721 app-wide Q8 default on a no-explicit-pick (sc-10726); only the
+    // video lane reverts to q4-first (sc-10859), so pass the image default order explicitly.
+    let (weights_dir, quant) = crate::video_jobs::resolve_bernini_tier_dir_and_quant(
+        settings,
+        tier_bits,
+        quant,
+        crate::video_jobs::BERNINI_IMAGE_DEFAULT_TIER_ORDER,
+    )?;
     let steps = resolve_steps(request, &model);
     // Standard guidance family: `guidance` carries the CFG scale (engine `omega_txt`); the negative
     // prompt is forwarded (descriptor advertises both). No true-CFG.
