@@ -1,0 +1,287 @@
+// Candle (Windows/CUDA) Krea 2 pose-ControlNet route (sc-8464, epic 8459) — `krea_2_turbo` +
+// `advanced.poses` off-Mac via `candle_gen_krea::Krea2Control`. The first Krea backbone control lane and
+// the deployable form of the sc-8460 spike: a trained control-branch overlay loaded on the frozen Krea 2
+// Turbo base (dense bf16), rendering one image per library pose, each conditioned on a full DWPose
+// skeleton (rendered cross-platform by `openpose_skeleton::draw_wholebody`, the SAME renderer training
+// used). True pose lock via a residual added to the single CFG-free guidance forward, scaled by
+// `control_scale`; `control_scale = 0` is engine-proven byte-identical to base txt2img.
+//
+// **Candle-only.** There is no MLX Krea control twin yet (8459 S5 / sc-8465); this whole file is gated to
+// the Windows/CUDA candle build (the `include!` in image_jobs.rs carries the cfg). It is `include!`d into
+// the `image_jobs` module, so it shares that module's imports (`parse_poses`/`pose_entries`/`Settings`/
+// `WorkerResult`/`huggingface_snapshot_dir`/`start_gen_stream`/… all in scope unqualified).
+//
+// Krea 2 Turbo needs the DENSE diffusers snapshot (`transformer/ text_encoder/ vae/ tokenizer/`), NOT the
+// packed q8 turnkey the registered `krea_2_turbo` txt2img generator loads: the control branch is a
+// composable-forward overlay (`KreaTrainDit`), and it was trained against the bf16 base. Base + branch +
+// TE + VAE are dense on a single 96 GB card.
+
+/// The dense Krea 2 Turbo diffusers repo when the manifest omits `repo`. Distinct from the packed q8
+/// turnkey (`SceneWorks/krea-2-turbo-mlx`) the txt2img lane uses — the control provider loads the dense
+/// bf16 composable base the overlay applies on.
+const KREA_CONTROL_BASE_REPO: &str = "krea/Krea-2-Turbo";
+/// Pose ControlNet conditioning-scale default (candle-gen `Krea2Control::DEFAULT_CONTROL_SCALE`). The S0
+/// spike found the usable band ~0.5–0.85 for the distilled CFG-free base; ship a comfortable mid.
+const KREA_CONTROL_DEFAULT_SCALE: f32 = candle_gen_krea::DEFAULT_CONTROL_SCALE;
+/// Hard cap on the exposed `control_scale` — above ~0.85 the frozen CFG-free base over-drives to halftone
+/// (S0 finding: graceful soft-haze, never confetti, but not a usable range).
+const KREA_CONTROL_SCALE_CAP: f32 = 0.85;
+/// Denoise-steps default — the distilled Turbo schedule (8-step CFG-free).
+const KREA_CONTROL_DEFAULT_STEPS: u32 = 8;
+/// The adapter/engine id recorded on candle Krea control assets (distinct from the `candle_krea` txt2img
+/// lane).
+const KREA_CONTROL_ENGINE: &str = "candle_krea_control";
+/// The [`STRICT_CONTROL_ENGINES`] catalog id this lane validates `advanced.controlMode` against (the Krea
+/// pose-only row — `{Pose}`).
+const KREA_CONTROL_ENGINE_ID: &str = "krea_2_turbo_control";
+/// Env override pointing directly at a Krea 2 Turbo dense diffusers snapshot dir (validation / bring-your-
+/// own base) — bypasses the HF-cache resolve.
+const KREA_CONTROL_BASE_ENV: &str = "SCENEWORKS_KREA_CONTROL_BASE";
+/// Env override pointing directly at a trained control-branch overlay `.safetensors` (validation against
+/// the spike checkpoint; no published overlay repo exists yet — the studio-trained overlay + a hosted
+/// catalog are B4/sc-10165 + sc-8466).
+const KREA_CONTROL_WEIGHTS_ENV: &str = "SCENEWORKS_CONTROLNET_KREA";
+
+/// Model ids the candle Krea strict-pose control route accepts (the deployed base the overlay applies on).
+fn is_krea_control_model(model: &str) -> bool {
+    model == "krea_2_turbo"
+}
+
+/// Resolve the Krea 2 Turbo dense diffusers snapshot: the `SCENEWORKS_KREA_CONTROL_BASE` env → an explicit
+/// `modelPath` (advanced or manifest) → the HF cache snapshot for the manifest `repo` (default
+/// `krea/Krea-2-Turbo`). `None` ⇒ not present locally (the job is not candle-runnable). Mirrors
+/// `resolve_flux2_control_base`.
+fn resolve_krea_control_base(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
+    if let Ok(env_dir) = std::env::var(KREA_CONTROL_BASE_ENV) {
+        let p = PathBuf::from(env_dir.trim());
+        if p.is_dir() {
+            return Ok(Some(p));
+        }
+    }
+    if let Some(path) = request
+        .advanced
+        .get("modelPath")
+        .or_else(|| request.model_manifest_entry.get("modelPath"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+    {
+        return resolve_app_managed_model_dir(settings, &path, "Krea control modelPath").map(Some);
+    }
+    let repo = request
+        .model_manifest_entry
+        .get("repo")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(KREA_CONTROL_BASE_REPO);
+    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
+}
+
+/// True when this is a candle-eligible Krea 2 strict-pose job: `krea_2_turbo` with a non-empty
+/// `advanced.poses`, not edit mode, whose dense base resolves locally. Mirrors
+/// `jobs_store::krea_control_candle_eligible` so the worker and router agree. The overlay weights are NOT
+/// part of the gate: they are resolved on first use in the stream.
+fn krea_control_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
+    is_krea_control_model(&request.model)
+        && request.mode != "edit_image"
+        && !pose_entries(request).is_empty()
+        && matches!(resolve_krea_control_base(request, settings), Ok(Some(_)))
+}
+
+/// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → default (8).
+fn krea_control_candle_steps(request: &ImageRequest) -> u32 {
+    resolve_advanced_or_manifest_u32(request, "steps", KREA_CONTROL_DEFAULT_STEPS, 1..=50)
+}
+
+/// Resolve the control-branch overlay checkpoint the `Krea2Control` provider loads. Order: the
+/// `SCENEWORKS_CONTROLNET_KREA` env → an `advanced.controlWeights.path` override → error. There is no
+/// published default Krea overlay repo yet (a studio-trained overlay registered via B4/sc-10165 or a
+/// hosted catalog via sc-8466 will supply it), so a job that reaches here without one fails loudly rather
+/// than silently rendering an un-conditioned base image.
+fn ensure_krea_control_weights(request: &ImageRequest) -> WorkerResult<PathBuf> {
+    if let Ok(p) = std::env::var(KREA_CONTROL_WEIGHTS_ENV) {
+        let p = PathBuf::from(p.trim());
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    if let Some(path) = request
+        .advanced
+        .get("controlWeights")
+        .and_then(Value::as_object)
+        .and_then(|cw| cw.get("path"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let p = PathBuf::from(path);
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    Err(WorkerError::InvalidPayload(
+        "Krea 2 pose control requires a trained control-branch overlay; set SCENEWORKS_CONTROLNET_KREA \
+         or advanced.controlWeights.path (no hosted Krea overlay is published yet)"
+            .to_owned(),
+    ))
+}
+
+/// Flat telemetry recorded on candle Krea control assets.
+fn krea_control_candle_raw_settings(
+    request: &ImageRequest,
+    repo: &str,
+    steps: u32,
+    control_scale: f32,
+    pose_count: usize,
+) -> JsonObject {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
+    raw.insert("numInferenceSteps".to_owned(), json!(steps));
+    raw.insert("controlScale".to_owned(), json!(control_scale));
+    raw.insert("poseCount".to_owned(), json!(pose_count));
+    raw.insert(
+        "controlEngine".to_owned(),
+        Value::String(KREA_CONTROL_ENGINE.to_owned()),
+    );
+    raw
+}
+
+/// The per-lane half of the candle Krea strict-control [`CandleStrictControl`] driver: the resolved base +
+/// overlay paths + request numerics. Krea 2 Turbo is CFG-free (no guidance / negative pass) and bf16
+/// (no quant tier). Moved onto the blocking thread, loaded once, drives every pose.
+struct KreaStrictControl {
+    base: PathBuf,
+    control: PathBuf,
+    prompt: String,
+    width: u32,
+    height: u32,
+    steps: u32,
+    control_scale: f32,
+}
+
+impl CandleStrictControl for KreaStrictControl {
+    type Model = candle_gen_krea::Krea2Control;
+
+    fn engine_id(&self) -> &'static str {
+        KREA_CONTROL_ENGINE_ID
+    }
+
+    fn engine_label(&self) -> &'static str {
+        KREA_CONTROL_ENGINE
+    }
+
+    fn stream_tag(&self) -> &'static str {
+        "krea_control"
+    }
+
+    fn out_width(&self) -> u32 {
+        self.width
+    }
+
+    fn out_height(&self) -> u32 {
+        self.height
+    }
+
+    fn load(&self) -> WorkerResult<Self::Model> {
+        let paths = candle_gen_krea::Krea2ControlPaths {
+            root: self.base.clone(),
+            control: self.control.clone(),
+        };
+        candle_gen_krea::Krea2Control::load(&paths).map_err(|error| {
+            WorkerError::Engine(format!("Krea 2 strict-pose control load failed: {error}"))
+        })
+    }
+
+    fn generate_one(
+        &self,
+        model: &Self::Model,
+        control: &Image,
+        seed: u64,
+        cancel: &CancelFlag,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> WorkerResult<Image> {
+        let req = candle_gen_krea::Krea2ControlRequest {
+            prompt: self.prompt.clone(),
+            width: self.width,
+            height: self.height,
+            steps: self.steps as usize,
+            control_scale: self.control_scale,
+            seed,
+            cancel: cancel.clone(),
+        };
+        model.generate(&req, control, on_progress).map_err(|error| {
+            WorkerError::Engine(format!("Krea 2 strict-pose generation failed: {error}"))
+        })
+    }
+}
+
+/// Real candle Krea 2 strict-pose generation: one image per pose, each conditioned on a full DWPose
+/// skeleton (`controlMode` unset ⇒ pose) via a trained control-branch overlay on the frozen Turbo base
+/// (sc-8464; engine sc-8462). Resolves the dense base + the overlay, then hands a [`KreaStrictControl`] to
+/// the shared [`run_candle_strict_control`] driver (validation against `krea_2_turbo_control`'s
+/// `supported_kinds` = {Pose}, per-pose skeleton rendering, scoring). Krea is CFG-free bf16. The pose path
+/// is byte-preserved; `control_scale = 0` is byte-identical to base.
+async fn generate_candle_krea_control_stream(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    let request = &plan.request;
+    let base = resolve_krea_control_base(request, settings)?.ok_or_else(|| {
+        WorkerError::InvalidPayload("Krea 2 Turbo base (krea/Krea-2-Turbo) weights not found".to_owned())
+    })?;
+    let control = ensure_krea_control_weights(request)?;
+
+    let steps = krea_control_candle_steps(request);
+    let control_scale = advanced::f32_clamped(
+        &request.advanced,
+        "controlScale",
+        KREA_CONTROL_DEFAULT_SCALE,
+        0.0..=KREA_CONTROL_SCALE_CAP,
+    );
+    let repo = request
+        .model_manifest_entry
+        .get("repo")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(KREA_CONTROL_BASE_REPO)
+        .to_owned();
+
+    let pose_count = pose_entries(request).len();
+    let raw_settings =
+        krea_control_candle_raw_settings(request, &repo, steps, control_scale, pose_count);
+
+    let provider = KreaStrictControl {
+        base,
+        control,
+        prompt: request.prompt.clone(),
+        width: request.width,
+        height: request.height,
+        steps,
+        control_scale,
+    };
+
+    run_candle_strict_control(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        backend,
+        provider,
+        raw_settings,
+        asset_writes,
+    )
+    .await
+}
