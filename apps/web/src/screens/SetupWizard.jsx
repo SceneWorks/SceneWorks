@@ -2,12 +2,25 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { Logo } from "../components/Logo.jsx";
 import { terminalStatuses } from "../constants.js";
+import { issue } from "../validation/issues.js";
+import { useValidation } from "../validation/useValidation.js";
 
 // The curated "getting started" set is catalog-driven: a model is recommended when
 // its manifest entry carries `recommended: true` (config/manifests/builtin.models.jsonc).
 // Recommended models are pre-checked for download — unless the entry sets
 // `autoDownload: false` (e.g. LTX-2.3, ~146 GB), which keeps it badged-but-unchecked so
 // a new user opts into the big download deliberately instead of having it auto-queued.
+// The wizard's two silent gates in the app-wide vocabulary (epic 10644, sc-10652): a
+// download needs at least one model checked, and finishing needs a project name. Both are
+// requirements — the empty selection and the empty field speak for themselves.
+export function downloadSelectionValidation({ selectionCount } = {}) {
+  return selectionCount > 0 ? [] : [issue.requirement("models", "Select at least one model to download")];
+}
+
+export function firstProjectValidation({ projectName } = {}) {
+  return projectName?.trim() ? [] : [issue.requirement("projectName", "Name your first project")];
+}
+
 function isRecommended(model) {
   return model.recommended === true;
 }
@@ -85,6 +98,12 @@ export function SetupWizard({ models, jobs, onDownloadModel, onCreateProject, on
       ),
     [downloadable, selected, started],
   );
+  // Gates expressed in the shared vocabulary (epic 10644). Both requirement-only, so
+  // nothing surfaces; the buttons behave exactly as before.
+  const downloadDraft = useMemo(() => ({ selectionCount: pendingSelection.length }), [pendingSelection.length]);
+  const downloadValidity = useValidation(downloadSelectionValidation, downloadDraft, undefined);
+  const projectDraft = useMemo(() => ({ projectName }), [projectName]);
+  const projectValidity = useValidation(firstProjectValidation, projectDraft, undefined);
 
   function toggle(model) {
     setSelected((current) => {
@@ -186,7 +205,7 @@ export function SetupWizard({ models, jobs, onDownloadModel, onCreateProject, on
             <div className="setup-wizard-actions">
               <button
                 className="setup-wizard-secondary"
-                disabled={pendingSelection.length === 0}
+                disabled={!downloadValidity.ready}
                 onClick={downloadSelected}
                 type="button"
               >
@@ -213,7 +232,7 @@ export function SetupWizard({ models, jobs, onDownloadModel, onCreateProject, on
                 placeholder="e.g. My First Project"
                 value={projectName}
               />
-              <button className="setup-wizard-cta" disabled={submitting || !projectName.trim()} type="submit">
+              <button className="setup-wizard-cta" disabled={submitting || !projectValidity.ready} type="submit">
                 {submitting ? "Setting up…" : "Finish setup"}
               </button>
             </form>

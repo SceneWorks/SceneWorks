@@ -4,6 +4,8 @@ import { DocumentView } from "../components/DocumentView.jsx";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
+import { issue } from "../validation/issues.js";
+import { useValidation } from "../validation/useValidation.js";
 import {
   DEFAULT_INTERLEAVE_RESOLUTION,
   DEFAULT_INTERLEAVE_SYSTEM_MESSAGE,
@@ -16,6 +18,24 @@ import { selectStackedJobs } from "./generationStudio.jsx";
 
 const MAX_IMAGES_DEFAULT = 6;
 const MAX_IMAGES_LIMIT = 10;
+
+// What gates Compose, in the app-wide vocabulary (epic 10644, sc-10652). All silent
+// requirements: an empty project/prompt shows itself, and the no-model case never reaches
+// this button — ModelAvailabilityGate replaces the whole form with a download prompt — so
+// `hasModel` is a belt-and-suspenders guard that mirrors the gate, never a surfaced error.
+export function documentComposeValidation({ activeProject, hasModel, prompt } = {}) {
+  const issues = [];
+  if (!activeProject) {
+    issues.push(issue.requirement("project", "Open a project"));
+  }
+  if (!hasModel) {
+    issues.push(issue.requirement("model", "A compatible model is required"));
+  }
+  if (!prompt?.trim()) {
+    issues.push(issue.requirement("prompt", "Write a prompt"));
+  }
+  return issues;
+}
 
 function modelSupportsInterleave(model) {
   return Array.isArray(model?.capabilities) && model.capabilities.includes("interleave");
@@ -97,8 +117,13 @@ export function DocumentStudio() {
   // each run streams its output beneath it, mirroring the Image and Video studios.
   const localJobs = useMemo(() => selectStackedJobs(documentLocalJobs), [documentLocalJobs]);
 
-  const ready = Boolean(activeProject) && interleaveModels.length > 0;
-  const canSubmit = ready && prompt.trim().length > 0 && !submitting;
+  // One summary gates Compose (epic 10644); `submitting` stays a plain busy gate.
+  const composeDraft = useMemo(
+    () => ({ activeProject, hasModel: interleaveModels.length > 0, prompt }),
+    [activeProject, interleaveModels.length, prompt],
+  );
+  const composeValidity = useValidation(documentComposeValidation, composeDraft, undefined);
+  const canSubmit = composeValidity.ready && !submitting;
 
   async function submit(event) {
     event.preventDefault();

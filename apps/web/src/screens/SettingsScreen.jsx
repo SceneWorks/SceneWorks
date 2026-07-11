@@ -1,4 +1,6 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { issue } from "../validation/issues.js";
+import { useValidation } from "../validation/useValidation.js";
 import {
   SCHEME_LABELS,
   loadCredentials,
@@ -16,6 +18,24 @@ import { isDesktop, tauriInvoke as invoke } from "../runtime.js";
 // shared ../credentials.js transport (keychain on desktop, authed REST on the
 // server / remote browser). `isDesktop`/`invoke` come from the unified runtime
 // helper (story 6).
+
+// The two Settings gates in the app-wide vocabulary (epic 10644, sc-10652). Both
+// requirement-only — the empty fields show what's missing — so nothing surfaces and the
+// buttons behave exactly as before.
+export function credentialValidation({ host, token } = {}) {
+  const issues = [];
+  if (!host?.trim()) {
+    issues.push(issue.requirement("host", "Enter the service host"));
+  }
+  if (!token?.trim()) {
+    issues.push(issue.requirement("token", "Enter the access token"));
+  }
+  return issues;
+}
+
+export function remotePasswordValidation({ password } = {}) {
+  return password?.trim() ? [] : [issue.requirement("password", "Enter a password")];
+}
 
 // GPU memory cap (epic 7819). The persisted value is a fraction (0.1–0.99) of total unified
 // memory, or null/absent for "no limit". The slider works in whole percent; 100% means Off.
@@ -257,7 +277,10 @@ export function SettingsScreen() {
     }
   }
 
-  const canSaveCredential = newHost.trim() && newToken.trim();
+  const credentialDraft = useMemo(() => ({ host: newHost, token: newToken }), [newHost, newToken]);
+  const credentialValidity = useValidation(credentialValidation, credentialDraft, undefined);
+  const remotePasswordDraft = useMemo(() => ({ password: remotePassword }), [remotePassword]);
+  const remotePasswordValidity = useValidation(remotePasswordValidation, remotePasswordDraft, undefined);
 
   return (
     <div className="settings-screen">
@@ -302,7 +325,7 @@ export function SettingsScreen() {
             <button
               type="button"
               onClick={saveRemotePassword}
-              disabled={!remotePassword.trim()}
+              disabled={!remotePasswordValidity.ready}
             >
               {remote.passwordSet ? "Change password" : "Set password"}
             </button>
@@ -452,7 +475,7 @@ export function SettingsScreen() {
             onChange={(event) => setNewToken(event.target.value)}
             aria-label="Credential token"
           />
-          <button type="button" onClick={addCredential} disabled={!canSaveCredential}>
+          <button type="button" onClick={addCredential} disabled={!credentialValidity.ready}>
             Save token
           </button>
         </div>

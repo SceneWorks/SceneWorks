@@ -1,5 +1,7 @@
 import React, { useMemo, useRef, useState } from "react";
 
+import { issue } from "../validation/issues.js";
+import { useValidation } from "../validation/useValidation.js";
 import {
   cardinality,
   extractKeys,
@@ -18,6 +20,21 @@ import { Icon } from "./Icons.jsx";
 // controls. Pure UI over slice 1's engine (promptBatch.js) and slice 2's persistence
 // (usePromptBatches via callbacks + promptBatchIO for the portable file). The actual
 // fan-out on "Run batch" is wired by the parent (slice 4, sc-9956).
+
+// What gates Save on the batch panel, in the app-wide vocabulary (epic 10644, sc-10652).
+// Both requirement-only: an unnamed batch and an empty prompt list show themselves in the
+// name field and the textarea, so nothing surfaces. (The template-variable and linked-group
+// warnings the panel renders are about the prompts' content, not this Save gate.)
+export function batchSaveValidation({ name, promptCount } = {}) {
+  const issues = [];
+  if (!name?.trim()) {
+    issues.push(issue.requirement("name", "Name this batch"));
+  }
+  if (!(promptCount > 0)) {
+    issues.push(issue.requirement("prompts", "Add at least one prompt"));
+  }
+  return issues;
+}
 
 // One variable's value editor: an auto-expanding list of inputs. A typed value counts
 // LIVE (no "press Enter to commit" step — that stranded a typed value as 0 values); a
@@ -161,7 +178,10 @@ export default function BatchPromptPanel({
   };
 
   const promptCount = prompts.length;
-  const saveDisabled = busy || !name.trim() || promptCount === 0;
+  // One summary gates Save (epic 10644); `busy` stays a plain gate. Requirement-only.
+  const saveDraft = useMemo(() => ({ name, promptCount }), [name, promptCount]);
+  const saveValidity = useValidation(batchSaveValidation, saveDraft, undefined);
+  const saveDisabled = busy || !saveValidity.ready;
 
   return (
     <div className="batch-panel">
