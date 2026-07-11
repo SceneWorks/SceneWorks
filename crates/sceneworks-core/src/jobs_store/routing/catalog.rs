@@ -619,8 +619,13 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
         false,
     ),
     // Kolors (epic 3090): full surface on the Rust `kolors` engine (SDXL-family U-Net + ChatGLM3);
-    // candle serves txt2img + bespoke IP/pose lanes (sc-5488/sc-5489).
-    ModelCaps::new("kolors", true, true, false, false, false),
+    // candle serves txt2img + bespoke IP/pose lanes (sc-5488/sc-5489). sc-10819 (epic 9083): the candle
+    // `candle-gen-kolors` lane now serves the packed q4/q8 `SceneWorks/kolors-mlx` tiers end-to-end —
+    // packed ChatGLM3 (the four GLM projections) + the vendored packed-detecting SDXL UNet, VAE dense —
+    // and advertises `supported_quants: [Q4, Q8]`. So a quant tier-select stays on candle → `candle_quant`.
+    // NOT `candle_quant_lora`: kolors advertises NO candle inference LoRA (`supports_lora: false`), so a
+    // LoRA still defers to torch. bf16 still resolves to Quant::None (dense), verbatim.
+    ModelCaps::new("kolors", true, true, true, false, false),
     // Microsoft Lens / Lens-Turbo (epic 3164 / sc-5105 MLX; sc-5126 candle): pure T2I family. UNLIKE the
     // other candle families it DOES advertise on-the-fly quant AND LoRA/LoKr, so `candle_quant_lora` is
     // set — the first (and, with SD3.5/Krea, one of the) candle families exempt from the quant/LoRA → torch
@@ -1030,7 +1035,9 @@ mod tests {
     ];
 
     // sc-9983: ideogram/boogu join SD3.5 as quant-only candle families (sc-9607 flipped their
-    // `supported_quants` to [Q4, Q8]; no inference LoRA on candle).
+    // `supported_quants` to [Q4, Q8]; no inference LoRA on candle). sc-10819: kolors joins the quant-only
+    // set — the candle `candle-gen-kolors` lane now serves the packed q4/q8 `SceneWorks/kolors-mlx` tiers
+    // (packed ChatGLM3 + vendored SDXL UNet) and advertises [Q4, Q8], but NO candle inference LoRA.
     const EXPECTED_CANDLE_QUANT_MODELS: &[&str] = &[
         "sd3_5_large",
         "sd3_5_large_turbo",
@@ -1040,6 +1047,7 @@ mod tests {
         "boogu_image",
         "boogu_image_turbo",
         "boogu_image_edit",
+        "kolors",
     ];
 
     // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH). sc-10676: Anima is the LoRA-only candle
