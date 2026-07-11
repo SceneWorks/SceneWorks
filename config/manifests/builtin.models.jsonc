@@ -483,14 +483,25 @@
           "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
         }
       },
-      // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
-      // 1024²/10-step via the candle-gen nvidia-smi peak monitor: q4 packed overall-peak 56.3 GB (the
-      // 20B DiT + Qwen2.5-VL TE + Qwen-Image VAE; the heaviest measured image tier). minMemoryGb 64
-      // covers it with headroom; q8/bf16 ESTIMATED (~66 / ~80 GB) pending measurement.
+      // candle/CUDA VRAM gate (epic 10765 sc-10969, superseding the sc-9094 estimate) — MEASURED on an
+      // RTX PRO 6000 (Blackwell sm_120) at 1024²/8-step via the candle-gen-qwen-image offload A/B harness
+      // (qwen_image_probed_generate_for_offload_ab, device-level nvidia-smi peak on an idle GPU 0), pointed
+      // at each staged `SceneWorks/qwen-image-mlx` tier. Two peaks per tier: `vramGbByTier` = RESIDENT
+      // (Qwen2.5-VL TE + 20B DiT + Qwen-Image VAE co-resident, the default cross-request-cached path);
+      // `sequentialPeakGb` = SEQUENTIAL residency (the ~8 GB Qwen2.5-VL text encoder + its f32 activations
+      // dropped before the DiT loads, sc-10867) — always lower, and the resident/sequential pixels are
+      // byte-identical (q4 sha 7ba5d5d2…, q8 sha 533f81b0…). The fit-gate compares the resident peak
+      // against free VRAM to choose sequential-offload vs reject, then (sc-10856) REJECTS if even the
+      // sequential peak won't fit rather than run into a reactive OOM. minMemoryGb 56 gates the DEFAULT
+      // (q4) tier with headroom (q4 resident 53.7 GB). All three hosted tiers load via the diffusers
+      // packed-detect path (a `quantization` block in transformer/config.json for q4/q8; bf16 is dense-
+      // readable by the candle Qwen loader, unlike FLUX). bf16 resident/sequential from the sc-10867 GPU
+      // A/B on the same harness.
       "candle": {
-        "minMemoryGb": 64,
-        "vramGbByTier": { "q4": 56.3, "q8": 66.0, "bf16": 80.0 },
-        "measured": false
+        "minMemoryGb": 56,
+        "vramGbByTier": { "q4": 53.7, "q8": 65.3, "bf16": 82.5 },
+        "sequentialPeakGb": { "q4": 30.3, "q8": 38.7, "bf16": 71.7 },
+        "measured": true
       },
       "ui": {
         "label": "Qwen Image",
