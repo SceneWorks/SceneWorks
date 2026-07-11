@@ -284,6 +284,13 @@ fn release_backend_cache_after_evict() {
     mlx_rs::memory::clear_cache();
 }
 
+/// Off-Mac (candle/CUDA) this is intentionally a no-op (epic 10765, sc-10766). candle's CUDA backend
+/// uses cudarc's stream-ordered caching allocator, which exposes no `empty_cache` and does not reclaim
+/// on `Device::synchronize()`: dropping the evicted generator already returns its pages to candle's
+/// in-process pool (where the next load reuses them), but there is no supported way to hand those pages
+/// back to the driver — so `nvidia-smi` resident VRAM stays flat across an evict regardless. A real
+/// driver-level trim would need a candle/cudarc fork (tracked as a separate optional spike under epic
+/// 10765), not this seam. The VRAM fit-gate therefore budgets on predicted peak, not resident deltas.
 #[cfg(any(not(target_os = "macos"), test))]
 fn release_backend_cache_after_evict() {}
 

@@ -3929,6 +3929,35 @@ async fn generate_candle_stream(
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
+    // VRAM fit-gate (epic 10765 Phase 0, sc-10766): reject-before-OOM when the selected tier can't fit
+    // the card, and honor `SCENEWORKS_CUDA_VRAM_CAP_GB` to emulate a small card on big hardware. Models
+    // with no measured `candle` VRAM block, and non-NVIDIA hosts, yield `FitDecision::Unknown` → never
+    // block (mirrors the flux2 edit guard's `None` short-circuit). Auto-downtier / CPU-offload is Phase
+    // 1 (sc-10769); today a too-big model is rejected with an actionable message instead of a mid-render
+    // Metal/CUDA OOM.
+    {
+        let budget = crate::vram_gate::apply_vram_cap(
+            crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+            crate::vram_gate::cuda_vram_cap_gb(),
+        );
+        let tier = crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
+        let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
+        if let crate::vram_gate::FitDecision::TooBig {
+            needed_gb,
+            available_gb,
+        } = crate::vram_gate::fit_decision(needed, budget)
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{model} at the {tier} tier needs ~{needed} GB of VRAM (with headroom) but GPU {gpu} \
+                 has ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output resolution, \
+                 or run on a card with more VRAM.",
+                model = request.model,
+                needed = needed_gb.round() as i64,
+                available = available_gb.round() as i64,
+                gpu = settings.gpu_id,
+            )));
+        }
+    }
     let mut spec = load_spec(weights_dir, quant, adapters, None);
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);

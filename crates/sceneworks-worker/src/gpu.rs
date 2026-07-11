@@ -357,6 +357,32 @@ pub(crate) async fn gpu_utilization(gpu_id: &str) -> Option<WorkerUtilizationSna
         .and_then(|gpu| gpu.utilization)
 }
 
+/// Live per-GPU VRAM budget (free/total, GB) for the candle/CUDA fit-gate (epic 10765 Phase 0,
+/// sc-10766). Reuses the same `nvidia-smi` snapshot the utilization heartbeat parses
+/// (`memory.free`/`memory.total`, MiB → GiB). `None` off-NVIDIA (CPU / macOS with no visible NVIDIA
+/// GPU) or when the probe fails — the gate then no-ops.
+///
+/// NOTE (caching allocator): candle's CUDA backend uses cudarc's stream-ordered caching allocator with
+/// no `empty_cache`, so `memory.free` reflects DRIVER-resident free and does NOT drop back after an
+/// in-process component is freed. Treat this as a pre-load admission signal, not a post-free accounting
+/// number (see `crate::vram_gate` module docs).
+///
+/// Gated to the candle lane (its only consumer, `generate_candle_stream`) so it isn't dead code under
+/// `-D warnings` in the non-candle / macOS builds.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) async fn nvidia_vram_budget_gb(gpu_id: &str) -> Option<crate::vram_gate::VramBudget> {
+    if gpu_id == "cpu" {
+        return None;
+    }
+    let snapshot = gpu_utilization(gpu_id).await?;
+    let total_mb = snapshot.memory_total_mb?;
+    let free_mb = snapshot.memory_free_mb?;
+    Some(crate::vram_gate::VramBudget {
+        free_gb: free_mb as f64 / 1024.0,
+        total_gb: total_mb as f64 / 1024.0,
+    })
+}
+
 /// Apple-Silicon unified-memory + GPU-load snapshot for the `mlx` worker, shaped
 /// like the nvidia path. Total = the machine's unified RAM (`sysctl hw.memsize`).
 /// Used = **system-wide** memory pressure from `vm_stat` (App + Wired + Compressed,
