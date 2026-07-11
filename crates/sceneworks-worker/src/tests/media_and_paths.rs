@@ -286,6 +286,42 @@ fn lora_paths_admit_operator_configured_external_roots() {
     );
 }
 
+/// Phase 2 (sc-10668) widened the **base-model** confinement the same way: an external
+/// ComfyUI base component (DiT / text-encoder / VAE) is read in place from a configured
+/// root. Off by default it rejects; opted in it resolves; a sibling stays rejected.
+#[test]
+fn model_paths_admit_operator_configured_external_roots() {
+    let temp = tempdir().expect("tempdir creates");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("data dir creates");
+    let comfy_root = temp.path().join("ComfyUI").join("models");
+    let unet = comfy_root.join("unet");
+    std::fs::create_dir_all(&unet).expect("unet dir creates");
+    let dit = unet.join("z_image_turbo_bf16.safetensors");
+    std::fs::write(&dit, b"weights").expect("dit writes");
+    let dit_str = dit.display().to_string();
+
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.data_dir = data_dir;
+
+    // Off by default: the ComfyUI base file is outside every managed root.
+    let error = super::normalize_app_managed_model_path(&settings, &dit_str, "Model")
+        .expect_err("external base path rejects while the feature is off");
+    assert!(error.to_string().contains("must be inside"), "{error}");
+
+    // Operator opts in: the same path now resolves, canonicalized.
+    settings.external_model_roots = vec![comfy_root];
+    let normalized = super::normalize_app_managed_model_path(&settings, &dit_str, "Model")
+        .expect("base component under an external root is accepted");
+    assert_eq!(normalized, dit.canonicalize().expect("dit canonicalizes"));
+
+    // A sibling outside the root stays rejected — no arbitrary-file-read widening.
+    let secret = temp.path().join("secret.safetensors");
+    std::fs::write(&secret, b"secret").expect("secret writes");
+    super::normalize_app_managed_model_path(&settings, &secret.display().to_string(), "Model")
+        .expect_err("a sibling of the external root is still rejected");
+}
+
 /// Configuring an external root must widen the allow-list to *that root only* — a
 /// sibling directory stays rejected. Without this, "point at my ComfyUI folder"
 /// would quietly become "read anything on the host", which is the arbitrary-file-read

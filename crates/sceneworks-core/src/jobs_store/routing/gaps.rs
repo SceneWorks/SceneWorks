@@ -780,14 +780,47 @@ pub(crate) fn classify_training_gap(payload: &Map<String, Value>) -> Unsupported
     }
 }
 
-/// `model_convert` is supported for the in-process Rust converters (FLUX.2-klein `flux2_klein_diffusers`
-/// sc-3136; FLUX.2-dev `flux2_dev_quant`; Anima `anima_quant`, sc-10517 — the on-device q4/q8/bf16
-/// matrix). The default/absent converter is the retired Python mlx-video path (sc-3491 / sc-3224).
+/// The `mlx.converter` discriminators the native, in-process mlx-gen converters handle — the single
+/// source of truth the convert-gap gate derives its allow-list from, mirroring the
+/// `resolve_convert_plan` match arms in `sceneworks-worker` (each id here is a real arm there).
+///
+/// A `model_convert` job copies its `converter` payload verbatim from a model's `mlx.converter`
+/// manifest field (`create_model_convert_job` in `apps/rust-api`), so every reachable converter — a
+/// builtin model's OR a user model's — is either named here or is genuinely unsupported. Deriving the
+/// gate from this const (rather than a second, hand-maintained copy of the list inside the gate) is
+/// what fixes sc-10573: `ltx_video` was a live, shipped converter (the LTX-2.3 "10 Eros"
+/// install-convert) yet the gate's old hardcoded list omitted it, so `mac_rust_supported`
+/// mis-classified a valid LTX conversion as an mlx gap — a spurious `mlx_unsupported` warn event
+/// today, and a wrongful terminal failure once enforce mode ships (sc-3492).
+///
+/// Two drift guards (see their tests) keep this list honest so it can't go stale again:
+/// - `sceneworks-core` (`every_builtin_manifest_converter_is_in_the_convert_gap_allowlist`): every
+///   `mlx.converter` in the embedded `builtin.models.jsonc` is listed here.
+/// - `sceneworks-worker` (`native_converters_match_resolve_convert_plan_arms`): every id here is a
+///   real `resolve_convert_plan` arm (not its "Unknown MLX converter." fallback), and a bogus id is
+///   rejected — so the list can neither omit a live arm nor over-claim a nonexistent one.
+pub const NATIVE_CONVERTERS: &[&str] = &[
+    "flux2_klein_diffusers",
+    "ltx_video",
+    "flux2_dev_quant",
+    "sd3_5_large_quant",
+    "sd3_5_large_turbo_quant",
+    "sd3_5_medium_quant",
+    "anima_quant",
+];
+
+/// `model_convert` is supported for the in-process Rust converters enumerated in
+/// [`NATIVE_CONVERTERS`] (FLUX.2-klein `flux2_klein_diffusers` sc-3136; LTX-2.3 `ltx_video` sc-3240;
+/// FLUX.2-dev `flux2_dev_quant` sc-5921; the SD3.5 `sd3_5_*_quant` variants sc-7871; Anima
+/// `anima_quant` sc-10517). The allow-list is derived from that const so it can never drift from the
+/// worker's real converter set again (sc-10573). The default/absent converter is the retired Python
+/// mlx-video path (sc-3491 / sc-3224) — still a gap.
 pub(crate) fn classify_convert_gap(payload: &Map<String, Value>) -> Result<(), UnsupportedReason> {
-    if matches!(
-        payload.get("converter").and_then(Value::as_str),
-        Some("flux2_klein_diffusers") | Some("flux2_dev_quant") | Some("anima_quant")
-    ) {
+    let converter = payload
+        .get("converter")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if NATIVE_CONVERTERS.contains(&converter) {
         return Ok(());
     }
     Err(UnsupportedReason::new(

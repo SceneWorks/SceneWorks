@@ -3106,6 +3106,25 @@ fn mac_rust_supported_convert_flux2_ok_else_python_gap() {
         json!({ "model": "anima_base", "converter": "anima_quant" }),
     );
     assert!(mac_rust_supported(&anima).is_ok());
+    // LTX-2.3 (mlx-gen-ltx, sc-3240) is a live in-process convert — the sc-10573 regression: it
+    // ships in the builtin manifest yet the gate's old hardcoded list omitted it, so a valid LTX
+    // install-convert was mis-classified as an mlx gap.
+    let ltx = job_of(
+        &store,
+        JobType::ModelConvert,
+        json!({ "model": "ltx_2_3_eros", "converter": "ltx_video" }),
+    );
+    assert!(
+        mac_rust_supported(&ltx).is_ok(),
+        "ltx_video is a native in-process convert (sc-10573)"
+    );
+    // SD3.5 transformer pre-quantization (sc-7871) is likewise a native convert.
+    let sd3 = job_of(
+        &store,
+        JobType::ModelConvert,
+        json!({ "model": "sd3_5_medium", "converter": "sd3_5_medium_quant" }),
+    );
+    assert!(mac_rust_supported(&sd3).is_ok());
     // The default/absent converter is the Python mlx-video Wan/LTX path → gap.
     let wan = job_of(&store, JobType::ModelConvert, json!({ "model": "wan_2_2" }));
     assert_eq!(
@@ -3114,6 +3133,97 @@ fn mac_rust_supported_convert_flux2_ok_else_python_gap() {
             .suggested_epic
             .as_deref(),
         Some("sc-3491 / sc-3224")
+    );
+    // A genuinely unknown converter (not in NATIVE_CONVERTERS) is still a gap.
+    let bogus = job_of(
+        &store,
+        JobType::ModelConvert,
+        json!({ "model": "whatever", "converter": "not_a_real_converter" }),
+    );
+    assert!(mac_rust_supported(&bogus).is_err());
+}
+
+/// sc-10573 drift guard (the core half): every converter a shipped builtin model declares in
+/// `mlx.converter` MUST be covered by the convert-gap allow-list ([`NATIVE_CONVERTERS`]) — otherwise
+/// its install-convert job is misclassified as an mlx gap by [`mac_rust_supported`]. That is exactly
+/// the bug that shipped: `ltx_video` was a live builtin converter absent from the gate's old
+/// hardcoded list. This test goes RED if a manifest converter is missing from the const (verified by
+/// temporarily dropping `ltx_video` from `NATIVE_CONVERTERS`).
+#[test]
+fn every_builtin_manifest_converter_is_in_the_convert_gap_allowlist() {
+    let manifest = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc is embedded in BUILTIN_MANIFESTS");
+    let parsed: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(manifest))
+            .expect("builtin.models.jsonc parses after comment stripping");
+    let models = parsed
+        .get("models")
+        .and_then(Value::as_array)
+        .expect("manifest has a models array");
+    let declared: std::collections::BTreeSet<String> = models
+        .iter()
+        .filter_map(|model| {
+            model
+                .get("mlx")
+                .and_then(Value::as_object)
+                .and_then(|mlx| mlx.get("converter"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|converter| !converter.is_empty())
+                .map(str::to_owned)
+        })
+        .collect();
+    // Guard against the test silently rotting into a no-op if the manifest ever stops declaring any
+    // `mlx.converter` (or the parse shape drifts): the guard is only meaningful with something to check.
+    assert!(
+        !declared.is_empty(),
+        "expected builtin.models.jsonc to declare at least one mlx.converter"
+    );
+    for converter in &declared {
+        assert!(
+            sceneworks_core::jobs_store::NATIVE_CONVERTERS.contains(&converter.as_str()),
+            "builtin converter '{converter}' is not covered by NATIVE_CONVERTERS (the convert-gap \
+             allow-list) — its install-convert job would be misclassified as an mlx gap (sc-10573)"
+        );
+    }
+}
+
+/// sc-10573 arm→const drift guard for the LATENT (manifest-absent) converters. The sibling
+/// `every_builtin_manifest_converter_is_in_the_convert_gap_allowlist` only covers converters a
+/// shipped builtin declares in `mlx.converter`; `flux2_dev_quant` and the `sd3_5_*_quant` set ship
+/// turnkey (no `mlx.converter` in the builtin manifest), so that guard can't see them. Silently
+/// dropping one of those from the const would disable it — the gate and the worker would both reject
+/// the convert consistently (a latent regression, not a runtime lie) — and NO other test would fail.
+/// Pinning the exact set here forces every edit (add OR remove, including the latent ones) to be a
+/// deliberate, reviewed change: additions MUST also gain a `resolve_convert_plan` arm (enforced by
+/// the worker's `native_converters_match_resolve_convert_plan_arms` guard), and removals MUST be
+/// intentional (the converter is truly retired, not merely absent from the manifest).
+#[test]
+fn native_converters_registry_contents_are_pinned() {
+    use std::collections::BTreeSet;
+    let expected: BTreeSet<&str> = [
+        "flux2_klein_diffusers",
+        "ltx_video",
+        "flux2_dev_quant",
+        "sd3_5_large_quant",
+        "sd3_5_large_turbo_quant",
+        "sd3_5_medium_quant",
+        "anima_quant",
+    ]
+    .into_iter()
+    .collect();
+    let actual: BTreeSet<&str> = sceneworks_core::jobs_store::NATIVE_CONVERTERS
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "NATIVE_CONVERTERS drifted from its pinned set — every add/remove (including the latent, \
+         manifest-absent converters flux2_dev_quant + sd3_5_*_quant) must be a deliberate, reviewed \
+         update: additions need a resolve_convert_plan arm, removals must be intentional (sc-10573)"
     );
 }
 

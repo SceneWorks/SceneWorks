@@ -1308,6 +1308,24 @@ fn tier_subdir_has_weights(tier_dir: &FsPath) -> bool {
 }
 
 fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
+    // Per-model quality FLOOR (sc-10731, epic 10721): surface the manifest `mlx.minQualityTier` as a
+    // top-level `minQualityTier` so the web `defaultTierSelection` can clamp the DEFAULT generation tier
+    // UP to it (a floored model — Anima base/aesthetic = q8 — never lets a low global "default quality"
+    // setting land the default on the washed q4). An EXPLICIT picker pick below the floor is still
+    // honored, with a non-blocking advisory. Decoupled top-level field, mirroring `mlxTiers` — the web
+    // reads one stable key rather than reaching into the passed-through `mlx` sub-object. Emitted on every
+    // platform where the manifest declares it (the picker only renders where >1 tier installs, but the
+    // field is cheap and lets any surface read the floor). Only bf16/q8/q4 are valid; others are dropped.
+    if let Some(floor) = object
+        .get("mlx")
+        .and_then(|mlx| mlx.get("minQualityTier"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|tier| matches!(*tier, "bf16" | "q8" | "q4"))
+        .map(str::to_owned)
+    {
+        object.insert("minQualityTier".to_owned(), Value::String(floor));
+    }
     let mac_support = {
         let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
         let model_type = object
@@ -1557,6 +1575,27 @@ pub(crate) async fn resolve_model_manifest_entry(
     state: &AppState,
     model_id: &str,
 ) -> Result<Value, ApiError> {
+    // External ComfyUI base models (epic 10451 Phase 2, sc-10667/10668) are synthesized in the
+    // catalog, not declared in a jsonc manifest, so the jsonc lookup below would return `{}` and
+    // the worker would never receive their `components[]` (the DiT/TE/VAE paths). Forward the
+    // assembled row for an `external_base_*` id instead, so the worker can load them in place.
+    // Blocking FS scan → run on the blocking pool, mirroring `model_catalog`.
+    if model_id.starts_with(crate::external_base_models::EXTERNAL_ID_PREFIX) {
+        let roots = state.settings.external_model_roots.clone();
+        let cache = state.external_base_model_cache.clone();
+        let id = model_id.to_owned();
+        let row = tokio::task::spawn_blocking(move || {
+            let mut cache = cache.lock();
+            crate::external_base_models::scan_external_base_models(&roots, &mut cache)
+                .into_iter()
+                .find(|row| row.get("id").and_then(Value::as_str) == Some(id.as_str()))
+        })
+        .await
+        .map_err(|err| ApiError::internal(format!("external base scan task failed: {err}")))?;
+        // Absent (root unconfigured, file vanished) → `{}`, the same fall-back the worker already
+        // handles for an unknown model id.
+        return Ok(row.unwrap_or_else(|| json!({})));
+    }
     let manifest_dir = state.settings.config_dir.join("manifests");
     let builtin =
         load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
@@ -2783,5 +2822,35 @@ mod mlx_tier_probe_tests {
         assert_eq!(tiers, vec!["bf16", "q8", "q4"]);
         // Decoupled from the download matrix — the picker must NOT flip `hasVariantMatrix`.
         assert!(object.get("hasVariantMatrix").is_none());
+    }
+
+    // Per-model quality floor (sc-10731): `apply_mac_and_mlx_fields` surfaces the manifest
+    // `mlx.minQualityTier` as a top-level `minQualityTier` so the web can clamp the DEFAULT tier up to
+    // it. Platform-independent (not gated on the macOS mlx-status probe), and only a valid bf16/q8/q4
+    // value is emitted — a bogus floor is dropped, an absent floor emits nothing.
+    #[test]
+    fn catalog_emits_min_quality_floor_from_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let apply = |mlx: Value| {
+            let mut object = json!({ "id": "anima_base", "type": "image", "mlx": mlx })
+                .as_object()
+                .unwrap()
+                .clone();
+            apply_mac_and_mlx_fields(&mut object, data_dir);
+            object
+                .get("minQualityTier")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        // A declared q8 floor is surfaced verbatim as a top-level field.
+        assert_eq!(
+            apply(json!({ "minQualityTier": "q8" })),
+            Some("q8".to_owned())
+        );
+        // A model with no floor emits nothing (default absent = q4-tolerant, no clamp).
+        assert_eq!(apply(json!({ "requiresConversion": true })), None);
+        // An invalid floor value is dropped rather than surfaced.
+        assert_eq!(apply(json!({ "minQualityTier": "q2" })), None);
     }
 }

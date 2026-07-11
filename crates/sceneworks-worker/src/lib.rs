@@ -13,6 +13,10 @@ use sceneworks_core::contracts::{
     WorkerRegisterRequest, WorkerSnapshot, WorkerStatus, WorkerUtilizationSnapshot,
 };
 use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};
+// The single source of truth for which `mlx.converter` discriminators the native converters handle.
+// `resolve_convert_plan` rejects anything not on it up front so this worker's converter set can never
+// drift from the convert-gap gate that derives its allow-list from the same const (sc-10573).
+use sceneworks_core::jobs_store::NATIVE_CONVERTERS;
 use sceneworks_core::jsonc::strip_jsonc_comments;
 use sceneworks_core::lora_family::{
     apply_model_manifest_defaults, detect_lora_family, detect_model_family, first_safetensors_path,
@@ -91,8 +95,13 @@ use api_client::*;
 mod engines;
 mod gpu;
 use gpu::*;
+// CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired
+// into `generate_candle_stream`; gated to the same candle lane as that consumer so the pub(crate)
+// helpers aren't dead code (→ `-D warnings`) in the non-candle / macOS builds.
 mod job_metrics;
 mod supervisor;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+mod vram_gate;
 use supervisor::*;
 mod model_jobs;
 use model_jobs::*;

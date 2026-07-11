@@ -43,8 +43,9 @@ use serde_json::{json, Value};
 pub(crate) const EXTERNAL_SCOPE: &str = "external";
 
 /// Prefix on every synthesized id, distinct from the external-LoRA `external_`
-/// prefix so a base model and an adapter can never collide.
-const EXTERNAL_ID_PREFIX: &str = "external_base_";
+/// prefix so a base model and an adapter can never collide. Also the marker
+/// `resolve_model_manifest_entry` keys on to forward an assembled row to the worker.
+pub(crate) const EXTERNAL_ID_PREFIX: &str = "external_base_";
 
 /// Reason attached to every assembled external base model until a per-family
 /// load-in-place loader exists (sc-10668+). Even a fully-assembled model is not yet
@@ -455,6 +456,13 @@ fn finish_row(
         BaseWeightDetection::Recognized(v) => Some(v.quant.as_str()),
         BaseWeightDetection::Unrecognized { .. } => None,
     };
+    // A model is **runnable** only when a worker loader exists for its family+quant and
+    // the assembly is complete (all component paths resolved). sc-10668 wires the first:
+    // z-image bf16 (the candle `load_from_comfyui_components` seam). Everything else stays
+    // fail-closed (`usable:false` + reason) until its loader slice lands — the web picker
+    // offers only `usable !== false`.
+    let runnable =
+        assembly == "complete" && family.as_deref() == Some("z-image") && quant == Some("bf16");
     let mut row = json!({
         "id": id,
         "name": format!("{} (ComfyUI)", anchor.name),
@@ -467,10 +475,8 @@ fn finish_row(
         "installedPath": anchor.path.display().to_string(),
         "manifestPath": Value::Null,
         "source": { "path": anchor.path.display().to_string() },
-        // Fail closed: every external base model is surfaced but not yet runnable
-        // (the per-family loaders are sc-10668+). The web picker must not offer it.
-        "usable": false,
-        "unusableReason": reason,
+        "usable": runnable,
+        "unusableReason": if runnable { Value::Null } else { Value::String(reason) },
         "assembly": assembly,
         "components": components,
     });
@@ -576,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn z_image_with_encoder_and_vae_assembles_complete_but_unusable() {
+    fn z_image_bf16_with_encoder_and_vae_assembles_complete_and_runnable() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = models_root(temp.path());
         write_safetensors(
@@ -601,12 +607,11 @@ mod tests {
         assert_eq!(row["catalogScope"], EXTERNAL_SCOPE);
         assert_eq!(row["removable"], false);
         assert_eq!(row["assembly"], "complete");
-        // Fail-closed regardless of completeness: no loader exists yet.
-        assert_eq!(row["usable"], false);
-        assert!(row["unusableReason"]
-            .as_str()
-            .unwrap()
-            .contains("not yet implemented"));
+        // sc-10668: z-image bf16 complete is now runnable (the candle loader exists),
+        // so it is usable and the picker offers it. No unusable reason.
+        assert_eq!(row["usable"], true);
+        assert_eq!(row["unusableReason"], Value::Null);
+        assert_eq!(row["quant"], "bf16");
         assert_eq!(row["components"].as_array().unwrap().len(), 3);
         assert!(row["id"].as_str().unwrap().starts_with(EXTERNAL_ID_PREFIX));
     }

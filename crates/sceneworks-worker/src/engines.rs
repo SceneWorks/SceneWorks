@@ -773,8 +773,9 @@ impl ResolvedModel {
     pub fn supports_negative_prompt(&self) -> bool {
         self.descriptor.capabilities.supports_negative_prompt
     }
-    /// Whether the engine advertises any on-the-fly Q4/Q8 quantization (descriptor-derived). The
-    /// candle SDXL / sc-5096 families advertise none (dense only); Lens advertises Q4/Q8 (sc-5126).
+    /// Whether the engine advertises any Q4/Q8 quantization (descriptor-derived). The candle SDXL
+    /// family advertises Q4/Q8 as of sc-10767 (it packed-detects the pre-quantized MLX tier from disk);
+    /// the remaining sc-5096 candle families advertise none (dense only). Lens advertises Q4/Q8 (sc-5126).
     /// Used on BOTH lanes: the candle lane has always gated quant on this; the MLX lane gates on it
     /// too as of sc-8489 so SANA (the lone generic-MLX family with `supported_quants: &[]`, whose
     /// `load` rejects any quant) loads dense, while every pre-existing family (all Q4/Q8) is
