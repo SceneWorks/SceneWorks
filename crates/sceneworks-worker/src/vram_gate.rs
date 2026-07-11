@@ -287,7 +287,9 @@ mod tests {
             .await
             .expect("GPU 0 should report a live VRAM budget on a CUDA box");
         assert!(
-            real.total_gb > 0.0 && real.free_gb >= 0.0 && real.free_gb <= real.total_gb + f64::EPSILON,
+            real.total_gb > 0.0
+                && real.free_gb >= 0.0
+                && real.free_gb <= real.total_gb + f64::EPSILON,
             "sane live budget: {real:?}"
         );
         eprintln!("live CUDA budget GPU0: {real:?}");
