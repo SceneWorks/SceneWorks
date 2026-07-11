@@ -579,7 +579,12 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // RealVisXL Lightning (MLX sc-6075 / candle sc-7176): standalone few-step distilled SDXL checkpoint
     // on the shared `sdxl` engine, few-step `lightning` accel sampler. **txt2img only** on both backends —
     // edit / reference / mask / pose shapes fall back to torch (accel sampler is conditioning-incompatible).
-    ModelCaps::new("realvisxl_lightning", true, true, false, false, false),
+    // sc-10812 (epic 9083): shares `candle-gen-sdxl`, which advertises `supported_quants: [Q4, Q8]` +
+    // inference LoRA-on-packed after sc-10767 (packed UNet sc-9416 / dual-CLIP sc-9527 / adapter fold
+    // sc-9528). Its `SceneWorks/realvisxl-lightning-mlx` turnkey ships the standard q4/q8/bf16 tiers
+    // (standard_tier_subdir), so a quant tier-select AND a LoRA both stay on the candle lane for the
+    // plain few-step txt2img shape → `candle_quant_lora`. bf16 still resolves to Quant::None (dense).
+    ModelCaps::new("realvisxl_lightning", true, true, false, false, true),
     // InstantID on RealVisXL (sc-3345): MLX-only id — single-identity + the 11-view angle set route to
     // the native `mlx-gen-instantid` provider (candle serves it via the bespoke `instantid_candle_eligible`
     // lane, not the txt2img gate, so it is NOT a candle-routed txt2img id).
@@ -1009,12 +1014,15 @@ mod tests {
     // `supported_quants` to [Q4, Q8]; it already advertised inference LoRA via sc-7836). sc-9994 adds the
     // Raw variant (candle-gen #350) with the same both-set advertisement. sc-10767: the SDXL family
     // (sdxl/realvisxl/illustrious v1+v2) joins the both-set — the candle packed q4/q8 tier (sc-9416/9527)
-    // + adapter-on-packed fold (sc-9528) are wired and now advertised.
+    // + adapter-on-packed fold (sc-9528) are wired and now advertised. sc-10812: realvisxl_lightning (the
+    // few-step distilled sibling on the SAME `sdxl` engine / descriptor) joins the both-set too — quant +
+    // LoRA stay on candle for its plain txt2img shape.
     const EXPECTED_CANDLE_QUANT_LORA_MODELS: &[&str] = &[
         "sdxl",
         "realvisxl",
         "illustrious_xl_v1",
         "illustrious_xl_v2",
+        "realvisxl_lightning",
         "lens",
         "lens_turbo",
         "krea_2_turbo",
