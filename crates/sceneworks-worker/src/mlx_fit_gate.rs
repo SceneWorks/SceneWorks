@@ -40,7 +40,8 @@ use crate::{WorkerError, WorkerResult};
 /// other engine `Sequential` would be a no-op (the advisory contract treats it as `Resident`), so
 /// predicting "it fits staged" and then holding everything resident would SIGKILL — hence the
 /// allowlist. Extended per family as the fan-out (sc-10840) wires each engine.
-const SEQUENTIAL_CAPABLE_ENGINES: &[&str] = &["sdxl", "z_image_turbo", "qwen_image"];
+const SEQUENTIAL_CAPABLE_ENGINES: &[&str] =
+    &["sdxl", "z_image_turbo", "qwen_image", "lens", "lens_turbo"];
 
 /// Whether `engine_id`'s provider drops components in phase order under [`OffloadPolicy::Sequential`].
 pub(crate) fn engine_supports_sequential(engine_id: &str) -> bool {
@@ -510,6 +511,11 @@ mod tests {
         assert!(engine_supports_sequential("sdxl"));
         assert!(engine_supports_sequential("z_image_turbo"));
         assert!(engine_supports_sequential("qwen_image"));
+        // lens + lens_turbo share one crate/arch (sc-11030): both engine ids are wired. The Q8/Q4 win
+        // (Resident 34.5 → Sequential 22.3 GiB at 768², fits a 32 GB Mac) needs the consuming encoder
+        // loader — see mlx-gen-lens `with_selected_layers`.
+        assert!(engine_supports_sequential("lens"));
+        assert!(engine_supports_sequential("lens_turbo"));
         // Not-yet-wired providers must NOT be offered sequential (they'd ignore it and SIGKILL) — this
         // includes the qwen edit/control siblings (separate engine ids, tracked in sc-11006).
         assert!(!engine_supports_sequential("qwen_image_edit"));
