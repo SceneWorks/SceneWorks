@@ -1,9 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { terminalStatuses } from "../constants.js";
-import { loraImportValidation, modelImportValidation } from "../modelManagerValidation.js";
-import { useValidation } from "../validation/useValidation.js";
 import { hasPresentCredential, loadCredentials, serverToken } from "../credentials.js";
 import {
   extractFamilies,
@@ -927,24 +925,18 @@ export function ModelManagerScreen() {
   const localLoraImportJobs = pendingLoraImportJobs.filter((job) => job.status !== "completed" && matchesFamily(job, familyFilter));
   const pendingModelImportJobs = jobs.filter((job) => job.type === "model_import" && job.status !== "completed");
   const isModelFileImport = modelImportForm.mode === "file";
-  // The forms' fill-in requirements in the shared vocabulary (epic 10644); `importing…`
-  // (busy) and `!onImport…` (capability) stay explicit gates. Both rule sets emit only
-  // silent requirements today, so no chip row is rendered — the empty inputs show them.
-  const modelImportDraft = useMemo(
-    () => ({ isFileImport: isModelFileImport, file: modelImportForm.file, sourceUrl: modelImportForm.sourceUrl }),
-    [isModelFileImport, modelImportForm.file, modelImportForm.sourceUrl],
-  );
-  const modelImportValidity = useValidation(modelImportValidation, modelImportDraft, undefined);
-  const modelImportDisabled = !modelImportValidity.ready || importingModel || !onImportModel;
+  const modelImportDisabled =
+    importingModel ||
+    !onImportModel ||
+    (isModelFileImport ? !modelImportForm.file : !modelImportForm.sourceUrl.trim());
   const hiddenImportCount =
     familyFilter === "all" ? 0 : pendingLoraImportJobs.filter((job) => job.status !== "completed" && !matchesFamily(job, familyFilter)).length;
   const isFileImport = importForm.mode === "file";
-  const loraImportDraft = useMemo(
-    () => ({ scope: importForm.scope, activeProject, isFileImport, file: importForm.file, sourceUrl: importForm.sourceUrl }),
-    [importForm.scope, activeProject, isFileImport, importForm.file, importForm.sourceUrl],
-  );
-  const loraImportValidity = useValidation(loraImportValidation, loraImportDraft, undefined);
-  const importDisabled = !loraImportValidity.ready || importingLora || !onImportLora;
+  const importDisabled =
+    importingLora ||
+    !onImportLora ||
+    (importForm.scope === "project" && !activeProject) ||
+    (isFileImport ? !importForm.file : !importForm.sourceUrl.trim());
 
   // LoRAs split into Built-In (catalog `scope: "builtin"`) and User (global/project)
   // containers. Built-in entries are a flat list with a Download affordance; user

@@ -1,17 +1,19 @@
 import { describe, expect, it } from "vitest";
 
 import { batchOperationValidation } from "./components/BatchOperationsPanel.jsx";
-import { batchSaveValidation } from "./components/BatchPromptPanel.jsx";
-import { documentComposeValidation } from "./screens/DocumentStudio.jsx";
-import { credentialValidation, remotePasswordValidation } from "./screens/SettingsScreen.jsx";
-import { downloadSelectionValidation, firstProjectValidation } from "./screens/SetupWizard.jsx";
 import { summarize } from "./validation/issues.js";
 
-// The remaining small screen gates (epic 10652). One surfaces errors — the batch
-// operations Run — and the rest are requirement-only, so their contract is just `ready`
-// with nothing shown.
+// The batch operations Run gate (epic 10652) — the one small screen gate that surfaces
+// messages, so the one worth the validation core. missingModel / missingPrompt used to
+// dim the button with no stated reason (the sc-10492 defect); an empty selection is a
+// silent requirement the header count already shows.
+//
+// The other small gates on these screens (Document compose, batch save, Setup Wizard,
+// Settings) are requirement-only: they surface nothing, so they stay plain boolean
+// `disabled` expressions rather than joining the core (epic 10644 boundary — see the epic
+// description). There is nothing to unit-test about `disabled={!name.trim()}`.
 
-describe("batchOperationValidation (the one that surfaces)", () => {
+describe("batchOperationValidation", () => {
   const whole = { count: 3, op: "edit", missingModel: false, missingPrompt: false };
 
   it("passes a ready operation", () => {
@@ -48,49 +50,5 @@ describe("batchOperationValidation (the one that surfaces)", () => {
     expect(summary.surfaced).toHaveLength(1);
     expect(summary.surfaced[0].message).toContain("No compatible model");
     expect(summary.ready).toBe(false);
-  });
-});
-
-describe("requirement-only screen gates block silently", () => {
-  const blocksSilently = (issues) => {
-    const summary = summarize(issues);
-    expect(summary.ready).toBe(false);
-    expect(summary.surfaced).toEqual([]);
-  };
-  const passes = (issues) => expect(summarize(issues).ready).toBe(true);
-
-  it("documentComposeValidation", () => {
-    passes(documentComposeValidation({ activeProject: { id: "p" }, hasModel: true, prompt: "hi" }));
-    blocksSilently(documentComposeValidation({ activeProject: null, hasModel: true, prompt: "hi" }));
-    blocksSilently(documentComposeValidation({ activeProject: { id: "p" }, hasModel: true, prompt: "  " }));
-    // The no-model case (unreachable past ModelAvailabilityGate) still blocks, silently.
-    blocksSilently(documentComposeValidation({ activeProject: { id: "p" }, hasModel: false, prompt: "hi" }));
-  });
-
-  it("batchSaveValidation", () => {
-    passes(batchSaveValidation({ name: "My batch", promptCount: 3 }));
-    blocksSilently(batchSaveValidation({ name: "", promptCount: 3 }));
-    blocksSilently(batchSaveValidation({ name: "My batch", promptCount: 0 }));
-  });
-
-  it("downloadSelectionValidation", () => {
-    passes(downloadSelectionValidation({ selectionCount: 2 }));
-    blocksSilently(downloadSelectionValidation({ selectionCount: 0 }));
-  });
-
-  it("firstProjectValidation", () => {
-    passes(firstProjectValidation({ projectName: "My project" }));
-    blocksSilently(firstProjectValidation({ projectName: "   " }));
-  });
-
-  it("credentialValidation", () => {
-    passes(credentialValidation({ host: "api.x", token: "abc" }));
-    blocksSilently(credentialValidation({ host: "", token: "abc" }));
-    blocksSilently(credentialValidation({ host: "api.x", token: "" }));
-  });
-
-  it("remotePasswordValidation", () => {
-    passes(remotePasswordValidation({ password: "hunter2" }));
-    blocksSilently(remotePasswordValidation({ password: "" }));
   });
 });
