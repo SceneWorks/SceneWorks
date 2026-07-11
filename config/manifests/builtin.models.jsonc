@@ -2750,6 +2750,22 @@
         "minMemoryGb": 42,
         "quantize": 4
       },
+      // candle/CUDA VRAM gate (epic 10765 sc-10920) — CARRIED (measured:false), arch-scaled, NOT directly
+      // measured: the candle-gen-flux2 offload A/B harness is dev-only (Mistral TE), and klein's Qwen3-TE
+      // txt2img path has no probe harness. Basis: klein keeps the 8B Qwen3 TE DENSE bf16 (~16 GB) in EVERY
+      // tier (only the 9B transformer is packed: q4 ~5 / q8 ~9.5 / bf16 ~18 GB), so the dense TE is the
+      // sequential FLOOR — dropping it before the DiT can't take the peak below its own ~18–20 GB working
+      // set. Estimated resident = TE + DiT + VAE + activations; sequential = max(TE-phase, DiT-phase). These
+      // corroborate the MLX ~36 GB bf16 peak. Behavior they drive: on the epic's 8–16 GB target cards klein
+      // rejects either way (the 16 GB dense TE alone overflows them); on a ~24 GB card the resident overflows
+      // so the gate offloads to the sequential path, which fits. Replace with real numbers if a klein
+      // (Qwen3-TE) offload harness is added to candle-gen-flux2.
+      "candle": {
+        "minMemoryGb": 26,
+        "vramGbByTier": { "q4": 26.0, "q8": 31.0, "bf16": 39.0 },
+        "sequentialPeakGb": { "q4": 20.0, "q8": 20.0, "bf16": 23.0 },
+        "measured": false
+      },
       // SceneWorks public/ungated re-host (LICENSE.md travels with the weights). FLUX
       // Non-Commercial License — generations are non-commercial use only, matching SceneWorks's
       // overall non-commercial posture, so no new app-level guardrail beyond the existing one. No
@@ -3122,16 +3138,30 @@
         "minMemoryGb": 96,
         "quantize": 4
       },
-      // candle/CUDA VRAM gate (sc-9094, epic 9083) — the epic HEADLINE, MEASURED on an RTX PRO 6000
-      // (Blackwell sm_120) at 1024²/8-step via the candle-gen VramProbe. The packed Q4 tier loads its
-      // quantized footprint on-device directly (no dense CPU-staging), so the old ~105 GB dense-staging
-      // load peak is GONE — measured q4 overall-peak 47.2 GB with a negligible load-peak. minMemoryGb 56
-      // covers the measured q4 tier with headroom; q8/bf16 are ESTIMATED (~58 / ~72 GB, scaled from the
-      // 32B DiT weight sizes) pending a q8/bf16 measurement (their TE dirs are not yet cached locally).
+      // candle/CUDA VRAM gate — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at 1024²/8-step via the
+      // candle-gen-flux2 offload A/B harness (flux2_dev_probed_generate_for_offload_ab, device-level
+      // nvidia-smi PeakSampler on an idle GPU 0), the FLUX.1 (sc-10856) / Qwen-Image (sc-10969) methodology.
+      // Two peaks per tier: `vramGbByTier` = RESIDENT (packed TE + DiT + VAE co-resident, the default
+      // cross-request-cached path); `sequentialPeakGb` = SEQUENTIAL residency (sc-10868: the Mistral text
+      // encoder dropped before the DiT loads) — always lower, byte-identical pixels (md5-verified). The
+      // fit-gate compares the resident peak against free VRAM to pick sequential-offload vs reject, then
+      // (sc-10856) REJECTS if even the sequential peak won't fit rather than OOM.
+      // MEASURED (sc-10920): q4 res 44.0 / seq 35.6, q8 res 70.7 / seq 64.9. The reclaim is MODEST because
+      // the packed q4/q8 tiers ALSO pack the Mistral TE (q4 15 GB / q8 25 GB on disk), so dropping it frees
+      // far less than a dense TE would. This CORRECTS the earlier sc-10868 "95 GB resident / ~60 GB reclaim"
+      // figure, which was taken against a DENSE-bf16-TE staging that does NOT match the shipping packed tier
+      // (sc-10868's SEQUENTIAL 35.4 reproduces exactly here at 35.6; only its resident diverged) — and it
+      // agrees with the older sc-9094 VramProbe (q4 47.2). bf16 is CARRIED (measured:false): its 113 GB
+      // dense weights exceed a 96 GB card even sequentially (Mistral TE bf16 ~48 GB + f32 activation), so it
+      // is un-measurable on the dev box — the ~128 GB resident / ~97 GB sequential estimates both exceed
+      // 96 GB, so the gate rejects bf16 off-Mac before OOM (the intended outcome). minMemoryGb 56 stays the
+      // conservative STATIC admit floor (sc-9094 memory-eligibility); the dynamic fit-gate now drives the
+      // true resident/sequential/reject decision per card.
       "candle": {
         "minMemoryGb": 56,
-        "vramGbByTier": { "q4": 47.2, "q8": 58.0, "bf16": 72.0 },
-        "measured": false
+        "vramGbByTier": { "q4": 44.0, "q8": 70.7, "bf16": 128.0 },
+        "sequentialPeakGb": { "q4": 35.6, "q8": 64.9, "bf16": 97.0 },
+        "measured": true
       },
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/flux2-dev-mlx/blob/main/LICENSE.md",

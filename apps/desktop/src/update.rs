@@ -67,11 +67,14 @@ async fn check_and_prompt(app: &AppHandle) -> tauri_plugin_updater::Result<()> {
             // runtime. `update` is moved in (it carries the verified manifest).
             tauri::async_runtime::spawn(async move {
                 if let Err(err) = install_update(&app_for_install, update).await {
-                    tracing::error!(error = %err, "auto-update: install failed");
+                    // Reached only for a download/verify failure — `install_update` stops
+                    // the sidecars only after the bytes are in hand and handles any
+                    // install-time failure itself, so here the app is still fully running.
+                    tracing::error!(error = %err, "auto-update: download failed");
                     app_for_install
                         .dialog()
                         .message(
-                            "The update could not be installed. You can download the \
+                            "The update could not be downloaded. You can download the \
                              latest release manually from the SceneWorks releases page.",
                         )
                         .title("Update failed")
@@ -86,14 +89,49 @@ async fn check_and_prompt(app: &AppHandle) -> tauri_plugin_updater::Result<()> {
 
 /// Download + install the verified update, then restart into it. `restart()`
 /// diverges (`-> !`), so it is the function's tail and nothing runs after it.
+///
+/// Download and install are split deliberately (sc-11015): the signed bundle is
+/// fetched + verified FIRST, while the app and its sidecars keep running, so a
+/// download/verify failure leaves the session fully intact (the caller shows a
+/// recoverable error and the app stays usable). Only with the bytes in hand do we stop
+/// the `sceneworks-api` sidecars — the Windows NSIS installer overwrites
+/// `sceneworks-api.exe` in place, and a still-live sidecar holds a lock on it, which is
+/// what produced the "Error opening file for writing: …\sceneworks-api.exe" abort.
+/// `tauri-plugin-updater`'s NSIS `/UPDATE` only kills the main app binary
+/// (`SceneWorks.exe`), never the sidecars this shell spawned.
 async fn install_update(app: &AppHandle, update: Update) -> tauri_plugin_updater::Result<()> {
     tracing::info!(version = %update.version, "auto-update: downloading");
-    update
-        .download_and_install(
+    let bytes = update
+        .download(
             |_chunk_len: usize, _content_len: Option<u64>| {},
-            || tracing::info!("auto-update: download complete, installing"),
+            || tracing::info!("auto-update: download complete"),
         )
         .await?;
+
+    // Stop the API + GPU-worker sidecars and BLOCK until `sceneworks-api.exe` is no
+    // longer running, so the installer can overwrite it (no-op wait off Windows).
+    tracing::info!("auto-update: stopping sidecars before install");
+    crate::setup::stop_sidecars_for_update(app);
+
+    // Hand off to the installer. On Windows `install` launches the NSIS updater and
+    // terminates this process (the installer relaunches into the new build), so the
+    // `restart()` tail below is reached only on macOS/Linux, where `install` returns.
+    tracing::info!("auto-update: installing");
+    if let Err(err) = update.install(bytes) {
+        // The sidecars are already down, so the running session can't recover in place.
+        // Tell the user, then relaunch to come back cleanly on the current (un-updated)
+        // build rather than sit with a dead API window; they can retry the update.
+        tracing::error!(error = %err, "auto-update: install failed after sidecar teardown; restarting to recover");
+        app.dialog()
+            .message(
+                "The update could not be installed. SceneWorks will restart on the \
+                 current version — you can try updating again from the releases page.",
+            )
+            .title("Update failed")
+            .kind(MessageDialogKind::Error)
+            .blocking_show();
+        app.restart();
+    }
     tracing::info!("auto-update: installed, restarting");
     app.restart()
 }
