@@ -271,6 +271,7 @@ mod driver {
             .map(|image_path| TrainingItem {
                 image_path,
                 caption: caption.clone(),
+                control_image_path: None,
             })
             .collect();
         assert!(
@@ -384,6 +385,7 @@ mod driver {
             .map(|image_path| TrainingItem {
                 image_path,
                 caption: caption.clone(),
+                control_image_path: None,
             })
             .collect();
         assert!(
