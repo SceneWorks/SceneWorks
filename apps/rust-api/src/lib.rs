@@ -107,10 +107,10 @@ use training::{
     create_training_dataset_face_analysis_job, create_training_dataset_upscale_job,
     create_training_job, delete_training_dataset, get_training_dataset,
     get_training_dataset_readiness, list_training_datasets, list_training_presets,
-    list_training_targets, repoint_training_dataset_items, resolve_training_output_location,
-    set_training_dataset_item_quality_ack, smart_crop_training_dataset_items,
-    strip_exif_training_dataset_items, trusted_adapter_files, update_training_dataset,
-    upload_training_dataset_item, validate_lora_id_component,
+    list_training_targets, repoint_training_dataset_items, resolve_control_overlay_output_location,
+    resolve_training_output_location, set_training_dataset_item_quality_ack,
+    smart_crop_training_dataset_items, strip_exif_training_dataset_items, trusted_adapter_files,
+    update_training_dataset, upload_training_dataset_item, validate_lora_id_component,
     write_training_dataset_analysis_embeddings, write_training_dataset_caption_sidecars,
     write_training_dataset_face_embeddings,
 };
@@ -173,8 +173,10 @@ use models::{
     merge_model_manifest_entry, mlx_catalog_status, model_co_requisite_downloads, model_download,
     retain_downloads_for_os,
 };
+mod control_overlays;
 mod external_base_models;
 mod external_loras;
+use control_overlays::list_control_overlays;
 mod loras;
 use loras::{
     create_lora_download_job, create_lora_import_job, delete_lora, list_loras, lora_catalog,
@@ -1214,6 +1216,7 @@ pub(crate) fn create_app_with_state(
             post(create_model_import_job)
                 .layer(DefaultBodyLimit::max(MAX_MODEL_MULTIPART_BODY_BYTES)),
         )
+        .route("/api/v1/control-overlays", get(list_control_overlays))
         .route("/api/v1/loras", get(list_loras))
         .route(
             "/api/v1/loras/:lora_id",
