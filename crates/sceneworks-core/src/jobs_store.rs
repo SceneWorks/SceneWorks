@@ -36,7 +36,9 @@ pub(crate) use routing::mlx::*;
 pub use routing::catalog::{
     mac_capabilities, model_mac_support, MacCapabilities, MAC_NOT_AVAILABLE_LABEL,
 };
-pub use routing::gaps::{candle_supported, mac_rust_supported, UnsupportedReason};
+pub use routing::gaps::{
+    candle_supported, mac_rust_supported, UnsupportedReason, NATIVE_CONVERTERS,
+};
 
 pub const ACTIVE_STATUSES: &[&str] = &[
     "preparing",
