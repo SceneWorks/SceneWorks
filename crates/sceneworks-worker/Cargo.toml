@@ -1566,9 +1566,11 @@ mlx-gen-scail2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "5d88
 # commit, so gen-core stays `5d882290` (the branch is based on `92253d2`, gen-core untouched), keeping the
 # `--features backend-candle` lane on the SINGLE gen-core rev in LOCKSTEP with the worker's mlx-gen pin
 # (skew gate green). `92253d2` is the parent of `8480cfb`, a clean forward move; ALL candle-gen-* move
-# together. NB: `8480cfb` is the PR branch tip on michaeltrefry/candle-gen (gen-core `5d882290`); candle-gen
-# `main` has since advanced gen-core to `8db1ab6`, so pin the branch tip — NOT the eventual squash on main —
-# until a coordinated mlx-gen + candle-gen gen-core bump moves both lanes together.
+# together. NB: candle-gen #392 merged as a MERGE commit (`7552820`), so `8480cfb` is a permanent ancestor
+# of candle-gen `main` (fetchable forever) that still carries gen-core `5d882290`. candle-gen `main` HEAD
+# has since advanced gen-core to `8db1ab6`, so we deliberately pin this ANCESTOR — not `main` HEAD — to keep
+# the candle lane on the single gen-core rev in lockstep with the worker's mlx-gen pin, until a coordinated
+# mlx-gen + candle-gen gen-core bump moves both lanes together.
 candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "8480cfb15e9cde977439b5a8b04065288f916bba", features = ["cuda"], optional = true }
 # Candle image providers (sc-5096) -- Windows/CUDA siblings of the mlx-gen image crates above. Each
 # self-registers its engine id into the shared gen_core inventory registry; force-linked in
