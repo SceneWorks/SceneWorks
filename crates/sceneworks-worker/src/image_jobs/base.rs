@@ -768,16 +768,14 @@ fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
 /// The DENSE (`bf16/`) tier of a SceneWorks quant-matrix turnkey, or `root` unchanged for a flat
 /// diffusers snapshot (sc-10614).
 ///
-/// The candle SDXL edit / IP-Adapter lanes (`sdxl_edit_candle.rs`, `sdxl_ipadapter.rs`) have only a
-/// DENSE implementation — their conditioning paths read dense weights — so they always want `bf16/`,
-/// unlike [`standard_tier_subdir`], which honours `advanced.mlxQuantize`. (The plain txt2img lane DOES
-/// serve the packed q4/q8 tiers as of sc-10767 — the SDXL family is `candle_quant_lora` — but that goes
-/// through `standard_tier_subdir`; these two bespoke sub-mode lanes stay dense-only for now.) They
-/// historically
-/// handed the snapshot ROOT straight to the loader, which works only because `sdxl` and `realvisxl`
-/// fall back to flat upstream diffusers repos (`stabilityai/stable-diffusion-xl-base-1.0`,
-/// `SG161222/RealVisXL_V5.0`). An SDXL model re-hosted as a tiered turnkey has no component tree at
-/// its root, so the loader would find no `unet/` at all.
+/// The FALLBACK tier resolver for the candle SDXL edit / IP-Adapter lanes (`sdxl_edit_candle.rs`,
+/// `sdxl_ipadapter.rs`) on a NON-standard-layout repo. As of sc-10813 those lanes packed-detect and,
+/// for a standard-tier turnkey (`mlx.standardTierLayout`), descend through [`standard_tier_subdir`]
+/// (honouring `advanced.mlxQuantize`, exactly like the txt2img lane, sc-10767) — so the packed q4/q8
+/// tiers now serve edit / inpaint / IP-Adapter, not just txt2img. This helper stays the else-branch:
+/// a flat upstream diffusers repo (`stabilityai/stable-diffusion-xl-base-1.0`, `SG161222/RealVisXL_V5.0`)
+/// roots its `unet/` and is returned untouched, and a non-standard tiered turnkey resolves its dense
+/// `bf16/` (an SDXL turnkey has no component tree at its root, so the loader would find no `unet/`).
 ///
 /// A flat snapshot roots its backbone dir — `unet/` for the SDXL family, `transformer/` for the DiTs
 /// — and is returned untouched, so the existing two models keep resolving exactly as before. Same
