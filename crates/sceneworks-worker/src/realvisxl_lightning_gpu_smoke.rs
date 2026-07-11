@@ -122,7 +122,9 @@ fn realvisxl_lightning_candle_gpu_smoke() {
     // q8 tier (sc-10812): `RVXL_SAMPLER=` (empty) → engine default, `RVXL_GUIDANCE=7.5` for real CFG.
     let sampler_name = env_or("RVXL_SAMPLER", "lightning");
     let sampler = (!sampler_name.trim().is_empty()).then_some(sampler_name.trim());
-    let guidance: f32 = env_or("RVXL_GUIDANCE", "1.0").parse().expect("RVXL_GUIDANCE");
+    let guidance: f32 = env_or("RVXL_GUIDANCE", "1.0")
+        .parse()
+        .expect("RVXL_GUIDANCE");
     println!(
         "[smoke] rendering {} @ {steps} steps ({w}x{h}, guidance {guidance}) ...",
         sampler.unwrap_or("engine-default")
