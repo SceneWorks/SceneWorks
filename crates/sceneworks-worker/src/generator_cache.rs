@@ -175,16 +175,14 @@ impl GeneratorCache {
     ) -> WorkerResult<R> {
         if self.entry.as_ref().map_or(true, |entry| entry.key != key) {
             self.entry = None;
-            // Pre-load unified-memory fit-gate (epic 10834 Phase 0, sc-10835): reject a model that
-            // can't fit this machine's unified memory BEFORE gen_core::load allocates — a wired
-            // overcommit SIGKILLs the worker mid-load rather than returning a catchable error. This
-            // is the cold-load path only (a warm cache hit takes the branch above and skips it), so
-            // an already-resident model is never re-gated.
-            let weight_bytes = match &spec.weights {
-                WeightsSource::Dir(dir) => crate::mlx_fit_gate::sum_safetensors_bytes(dir),
-                WeightsSource::File(file) => std::fs::metadata(file).map_or(0, |meta| meta.len()),
-            };
-            crate::mlx_fit_gate::ensure_fits(weight_bytes, &key.engine_id)?;
+            // Pre-load unified-memory fit-gate + residency selection (epic 10834; sc-10835 Phase 0,
+            // sc-10839 Phase 1): BEFORE gen_core::load allocates, either reject a model that can't fit
+            // this machine's unified memory (a wired overcommit SIGKILLs the worker mid-load rather
+            // than returning a catchable error) OR, for a provider that supports sequential component
+            // residency, select `OffloadPolicy::Sequential` when the resident sum won't fit but the
+            // staged max-single-component will. Cold-load path only (a warm cache hit takes the branch
+            // above and skips it), so an already-resident model is never re-gated.
+            let spec = crate::mlx_fit_gate::apply_residency_policy(spec, &key.engine_id)?;
             let generator = gen_core::load(&key.engine_id, &spec)
                 .map_err(|error| crate::classify_engine_error(&load_error_context, error))?;
             self.entry = Some(GeneratorCacheEntry {
