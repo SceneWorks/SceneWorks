@@ -300,10 +300,20 @@ fn assemble_models(detected: Vec<DetectedFile>) -> Vec<Value> {
 
     let mut rows = Vec::new();
     let mut used_ids = HashSet::new();
-    for anchor in &detected {
+
+    // Wan2.2 is a dual-expert MoE (sc-10671): pair the high/low-noise transformer files into ONE model
+    // (a single expert can't run), handled entirely here — the paired indices are then skipped below.
+    let (wan_rows, wan_consumed) = assemble_wan_experts(&detected, &mut used_ids);
+    rows.extend(wan_rows);
+
+    for (index, anchor) in detected.iter().enumerate() {
         // Only files in an anchor subtree seed a model; a text encoder or VAE is a
         // component, never a standalone model.
         if !ANCHOR_SUBDIRS.contains(&anchor.subdir) {
+            continue;
+        }
+        // Wan MoE experts were already emitted (paired or as an incomplete lone expert).
+        if wan_consumed.contains(&index) {
             continue;
         }
         if let Some(row) = assemble_one(anchor, &text_encoders, &vaes, &mut used_ids) {
@@ -311,6 +321,132 @@ fn assemble_models(detected: Vec<DetectedFile>) -> Vec<Value> {
         }
     }
     rows
+}
+
+/// The high/low-noise level a Wan2.2 MoE expert file names. Filename is the only discriminator (the two
+/// experts are structurally identical), matching the sc-10592 external-LoRA `.high_noise`/`.low_noise`
+/// pairing. Case-insensitive; `None` when neither (or both) token is present.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WanExpertLevel {
+    High,
+    Low,
+}
+
+/// One pairing group of Wan MoE experts (`detected` indices): the high/low-noise expert (if each was
+/// found) plus every index that hashed to this group's base.
+#[derive(Default)]
+struct WanExpertGroup {
+    high: Option<usize>,
+    low: Option<usize>,
+    all: Vec<usize>,
+}
+
+fn wan_expert_level(name: &str) -> Option<WanExpertLevel> {
+    let lower = name.to_ascii_lowercase();
+    match (lower.contains("high"), lower.contains("low")) {
+        (true, false) => Some(WanExpertLevel::High),
+        (false, true) => Some(WanExpertLevel::Low),
+        _ => None,
+    }
+}
+
+/// The pairing key for a Wan expert: its name with the high/low token normalized out, so the two
+/// noise-level siblings share a base (`wan2.2_t2v_high_noise_…` and `…_low_noise_…` → the same base).
+/// t2v vs i2v keep distinct bases (the `t2v`/`i2v` token survives), so they never cross-pair.
+fn wan_pair_base(name: &str) -> String {
+    name.to_ascii_lowercase()
+        .replace("high", "")
+        .replace("low", "")
+}
+
+/// A Wan transformer component JSON with its MoE role (`transformer_high` / `transformer_low`) — the
+/// roles the worker's `resolve_wan_comfyui_paths` reads. Overrides the detector's plain `transformer`.
+fn wan_component_json(file: &DetectedFile, role: &str) -> Value {
+    let mut component = file.component_json();
+    component["role"] = Value::String(role.to_owned());
+    component
+}
+
+/// Pair Wan2.2 MoE transformer experts (sc-10671). Returns one row per pairing group — a **complete**
+/// model with both `transformer_high` + `transformer_low` components when both noise levels are present
+/// (snapshot-backed: UMT5 TE / VAE / tokenizer come from a resident tier, not the tree), or an
+/// **incomplete** unusable row per lone expert when its sibling is missing. Also returns the set of
+/// `detected` indices consumed, so `assemble_models` skips them (a single Wan expert must never fall to
+/// the snapshot-backed single-transformer path, which would wrongly mark it runnable).
+fn assemble_wan_experts(
+    detected: &[DetectedFile],
+    used_ids: &mut HashSet<String>,
+) -> (Vec<Value>, HashSet<usize>) {
+    // Group the wan-video transformers by their pairing base (the name with the high/low token
+    // normalized out), tracking the high/low expert index + every index in the group.
+    let mut groups: std::collections::BTreeMap<String, WanExpertGroup> =
+        std::collections::BTreeMap::new();
+    for (index, file) in detected.iter().enumerate() {
+        if !ANCHOR_SUBDIRS.contains(&file.subdir) {
+            continue;
+        }
+        if !matches!(file.verdict(), Some((Some(fam), ComponentRole::Transformer, _)) if fam == "wan-video")
+        {
+            continue;
+        }
+        let entry = groups.entry(wan_pair_base(&file.name)).or_default();
+        match wan_expert_level(&file.name) {
+            Some(WanExpertLevel::High) if entry.high.is_none() => entry.high = Some(index),
+            Some(WanExpertLevel::Low) if entry.low.is_none() => entry.low = Some(index),
+            _ => {}
+        }
+        entry.all.push(index);
+    }
+
+    let mut rows = Vec::new();
+    let mut consumed = HashSet::new();
+    for (_base, group) in groups {
+        let WanExpertGroup { high, low, all } = group;
+        for index in &all {
+            consumed.insert(*index);
+        }
+        match (high, low) {
+            // Both experts present → one complete MoE model (runnable at scaled_fp8_companion).
+            (Some(high), Some(low)) => {
+                let anchor = &detected[high];
+                let components = vec![
+                    wan_component_json(anchor, "transformer_high"),
+                    wan_component_json(&detected[low], "transformer_low"),
+                ];
+                let id = unique_id(&anchor.name, used_ids);
+                rows.push(finish_row(
+                    id,
+                    anchor,
+                    Some("wan-video".to_owned()),
+                    "complete",
+                    LOADER_PENDING_REASON.to_owned(),
+                    components,
+                ));
+            }
+            // A lone expert (missing its high/low sibling) can't run — surfaced incomplete.
+            _ => {
+                for index in &all {
+                    let file = &detected[*index];
+                    let role = match wan_expert_level(&file.name) {
+                        Some(WanExpertLevel::Low) => "transformer_low",
+                        _ => "transformer_high",
+                    };
+                    let id = unique_id(&file.name, used_ids);
+                    rows.push(finish_row(
+                        id,
+                        file,
+                        Some("wan-video".to_owned()),
+                        "incomplete",
+                        "Incomplete: the other Wan MoE expert (high/low-noise) was not found in the \
+                         tree — both are required."
+                            .to_owned(),
+                        vec![wan_component_json(file, role)],
+                    ));
+                }
+            }
+        }
+    }
+    (rows, consumed)
 }
 
 /// Text-encoder families that satisfy a given DiT family (best-effort labels from
@@ -334,6 +470,8 @@ fn assemble_models(detected: Vec<DetectedFile>) -> Vec<Value> {
 /// (sc-10671) and the tree VAE uses native WAN-VAE keys (a 194-key 3D-VAE remap), so
 /// both are sourced from our snapshot while the plain-fp8 DiT is read in place.
 fn is_snapshot_backed(family: &str) -> bool {
+    // `wan-video` is also snapshot-backed but takes the dedicated MoE-pairing path
+    // ([`assemble_wan_experts`]), never the single-transformer branch this gates.
     matches!(family, "qwen-image")
 }
 
@@ -346,7 +484,9 @@ fn family_quant_runnable(family: Option<&str>, quant: Option<&str>, assembly: &s
     assembly == "complete"
         && matches!(
             (family, quant),
-            (Some("z-image"), Some("bf16")) | (Some("qwen-image"), Some("fp8_e4m3"))
+            (Some("z-image"), Some("bf16"))
+                | (Some("qwen-image"), Some("fp8_e4m3"))
+                | (Some("wan-video"), Some("scaled_fp8_companion"))
         )
 }
 
@@ -726,6 +866,77 @@ mod tests {
         assert_eq!(row["usable"], true);
         assert_eq!(row["unusableReason"], Value::Null);
         assert_eq!(row["components"].as_array().unwrap().len(), 1);
+    }
+
+    /// A ComfyUI Wan2.2 A14B expert (`unet/wan2.2_*_fp8_scaled`): native-Wan dual-stream keys + a
+    /// `.scale_weight` companion + the `scaled_fp8` marker → detector `(wan-video, transformer,
+    /// scaled_fp8_companion)`.
+    fn wan_expert_scaled_fp8_keys() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("patch_embedding.weight", "F16"),
+            ("blocks.0.self_attn.q.weight", "F8_E4M3"),
+            ("blocks.0.self_attn.q.scale_weight", "F32"),
+            ("blocks.0.cross_attn.q.weight", "F8_E4M3"),
+            ("blocks.0.ffn.0.weight", "F8_E4M3"),
+            ("scaled_fp8", "F8_E4M3"),
+        ]
+    }
+
+    #[test]
+    fn wan_moe_high_low_experts_pair_into_one_complete_runnable_model() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = models_root(temp.path());
+        write_safetensors(
+            &root
+                .join("unet")
+                .join("wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"),
+            &wan_expert_scaled_fp8_keys(),
+        );
+        write_safetensors(
+            &root
+                .join("unet")
+                .join("wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors"),
+            &wan_expert_scaled_fp8_keys(),
+        );
+
+        let rows = scan(&[root]);
+        assert_eq!(rows.len(), 1, "two experts pair into one MoE model");
+        let row = &rows[0];
+        assert_eq!(row["family"], "wan-video");
+        assert_eq!(row["type"], "video");
+        assert_eq!(row["quant"], "scaled_fp8_companion");
+        assert_eq!(row["assembly"], "complete");
+        assert_eq!(row["usable"], true);
+        assert_eq!(row["unusableReason"], Value::Null);
+        // Both experts as components, tagged with their MoE roles.
+        let components = row["components"].as_array().unwrap();
+        assert_eq!(components.len(), 2);
+        let roles: Vec<&str> = components
+            .iter()
+            .map(|c| c["role"].as_str().unwrap())
+            .collect();
+        assert!(roles.contains(&"transformer_high"));
+        assert!(roles.contains(&"transformer_low"));
+    }
+
+    #[test]
+    fn wan_lone_expert_without_sibling_is_incomplete() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = models_root(temp.path());
+        // Only the high-noise expert — no low-noise sibling.
+        write_safetensors(
+            &root
+                .join("unet")
+                .join("wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"),
+            &wan_expert_scaled_fp8_keys(),
+        );
+        let rows = scan(&[root]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["family"], "wan-video");
+        assert_eq!(rows[0]["assembly"], "incomplete");
+        assert_eq!(rows[0]["usable"], false);
+        let reason = rows[0]["unusableReason"].as_str().unwrap();
+        assert!(reason.contains("MoE expert"), "reason: {reason}");
     }
 
     #[test]
