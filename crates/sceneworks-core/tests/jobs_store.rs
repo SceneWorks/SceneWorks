@@ -3191,6 +3191,42 @@ fn every_builtin_manifest_converter_is_in_the_convert_gap_allowlist() {
     }
 }
 
+/// sc-10573 arm→const drift guard for the LATENT (manifest-absent) converters. The sibling
+/// `every_builtin_manifest_converter_is_in_the_convert_gap_allowlist` only covers converters a
+/// shipped builtin declares in `mlx.converter`; `flux2_dev_quant` and the `sd3_5_*_quant` set ship
+/// turnkey (no `mlx.converter` in the builtin manifest), so that guard can't see them. Silently
+/// dropping one of those from the const would disable it — the gate and the worker would both reject
+/// the convert consistently (a latent regression, not a runtime lie) — and NO other test would fail.
+/// Pinning the exact set here forces every edit (add OR remove, including the latent ones) to be a
+/// deliberate, reviewed change: additions MUST also gain a `resolve_convert_plan` arm (enforced by
+/// the worker's `native_converters_match_resolve_convert_plan_arms` guard), and removals MUST be
+/// intentional (the converter is truly retired, not merely absent from the manifest).
+#[test]
+fn native_converters_registry_contents_are_pinned() {
+    use std::collections::BTreeSet;
+    let expected: BTreeSet<&str> = [
+        "flux2_klein_diffusers",
+        "ltx_video",
+        "flux2_dev_quant",
+        "sd3_5_large_quant",
+        "sd3_5_large_turbo_quant",
+        "sd3_5_medium_quant",
+        "anima_quant",
+    ]
+    .into_iter()
+    .collect();
+    let actual: BTreeSet<&str> = sceneworks_core::jobs_store::NATIVE_CONVERTERS
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "NATIVE_CONVERTERS drifted from its pinned set — every add/remove (including the latent, \
+         manifest-absent converters flux2_dev_quant + sd3_5_*_quant) must be a deliberate, reviewed \
+         update: additions need a resolve_convert_plan arm, removals must be intentional (sc-10573)"
+    );
+}
+
 #[test]
 fn mac_rust_supported_feature_gaps_point_at_their_spikes() {
     let store = store("oracle-feature-spikes");
