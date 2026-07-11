@@ -133,6 +133,39 @@ export function installedTiers(model, options = {}) {
   return [];
 }
 
+// Quality rank of a generation quant tier: higher = more faithful (bf16 > q8 > q4). Derived from
+// GENERATION_QUALITY_TIERS (highest-fidelity first), so it stays in lockstep with that vocabulary.
+// Unknown / non-quality tiers (e.g. int8-convrot, "training") rank 0 so they never take part in a floor
+// comparison — a below-floor advisory or default clamp only ever fires between two known quality tiers.
+function tierQualityRank(tier) {
+  const i = GENERATION_QUALITY_TIERS.indexOf(tier);
+  return i === -1 ? 0 : GENERATION_QUALITY_TIERS.length - i;
+}
+
+// Whether tier `a` is LOWER fidelity than tier `b`. Both must be known quality tiers (else false).
+function isTierBelow(a, b) {
+  const ra = tierQualityRank(a);
+  const rb = tierQualityRank(b);
+  return ra > 0 && rb > 0 && ra < rb;
+}
+
+// The model's per-model quality FLOOR (sc-10731, epic 10721): the backend surfaces the manifest
+// `mlx.minQualityTier` as a top-level `minQualityTier`. Returns the floor tier (bf16|q8|q4) when declared
+// and valid, else null (default absent = no floor, q4-tolerant). A floored model's DEFAULT tier is
+// clamped UP to this (see `defaultTierSelection`); an EXPLICIT picker pick below it is honored + flagged.
+export function modelQualityFloor(model) {
+  return GENERATION_QUALITY_TIERS.includes(model?.minQualityTier) ? model.minQualityTier : null;
+}
+
+// Whether `tier` is BELOW the model's quality floor (sc-10731): true only when the model declares a floor
+// AND `tier` is a lower-fidelity quality tier than it. Drives the Studio's non-blocking advisory when a
+// user EXPLICITLY picks a below-floor tier — the pick is honored (a quant tier is a deliberate creative
+// choice) but flagged as a quality caution, never silently switched.
+export function isBelowFloor(tier, model) {
+  const floor = modelQualityFloor(model);
+  return !!floor && isTierBelow(tier, floor);
+}
+
 // Whether the studio should render the tier picker: only when MORE THAN ONE quant tier is
 // installed (a single installed tier — the common case — shows no toggle, per acceptance).
 // `options` (sc-9300) forwards the `convRotEligible` gate so an ineligible host doesn't count the
@@ -163,6 +196,11 @@ function defaultInstalledTier(model, tiers) {
 //      uninstalled base resolves to the nearest installed clean tier rather than null. Convert-at-install
 //      models (mlxTiers, sc-10730) fall through bf16 before q4; download-matrix models fall q8 → q4.
 //   4. the first installed tier.
+// Rungs 2–4 (the derived DEFAULT) are then CLAMPED UP to the model's per-model quality floor
+// (`minQualityTier`, sc-10731): a floored model (Anima base/aesthetic = q8) never lets a low global
+// setting / fallback land the default below the floor. The sticky (rung 1) is NOT floored — it was a
+// prior explicit pick, honored as-is. The clamp is capped by clamp-to-installed (a floor tier not on
+// disk resolves to the nearest installed clean tier).
 // Returns null when nothing is installed (no picker will render anyway). `options` also forwards the
 // `convRotEligible` gate (sc-9300) so a hidden INT8-ConvRot tier is never seeded as the selection —
 // and because `defaultQuality` can only ever be bf16|q8|q4, it never re-introduces a filtered tier.
@@ -174,18 +212,32 @@ export function defaultTierSelection(model, lastUsed, options = {}) {
   if (lastUsed && tiers.includes(lastUsed)) {
     return lastUsed;
   }
+  // The per-model quality FLOOR (sc-10731): the DEFAULT derivation below (rungs 2–4) is clamped UP to
+  // this tier. A floored model (Anima base/aesthetic = q8) never lets a declared default, a low global
+  // "default quality" setting, or the fallback land the default below the floor. NOT applied to the
+  // sticky (rung 1) above — that was a prior EXPLICIT pick, honored as-is (the picker re-surfaces the
+  // advisory). Capped by clamp-to-installed (the clean-tier fallback), so a floor tier not on disk
+  // resolves to the nearest installed clean tier, never null.
+  const floor = modelQualityFloor(model);
+  // Rung 2: the model's declared default tier (`variant.default`), when installed. Dead against the real
+  // catalog (no `default` emitted), kept so a manifest that does declare one still wins — subject to the
+  // floor below (a declared q4 on a q8-floored model still starts at q8).
   const declared = defaultInstalledTier(model, tiers);
-  if (declared) {
-    return declared;
-  }
   // Rung 3: the global default-generation-quality setting is the app-wide base default. The caller
   // passes it as `options.defaultQuality`; an absent/invalid value falls back to Q8 (the historical
   // base + worker default) so legacy call sites are unchanged. The base leads a clean-tier fallback so
   // it is always clamped to what's installed — a base tier that isn't on disk resolves to the nearest
   // installed clean tier (never the washed q4 unless that's all that's left), never null.
-  const base = GENERATION_QUALITY_TIERS.includes(options.defaultQuality)
-    ? options.defaultQuality
-    : DEFAULT_GENERATION_QUALITY;
+  let base =
+    declared ??
+    (GENERATION_QUALITY_TIERS.includes(options.defaultQuality)
+      ? options.defaultQuality
+      : DEFAULT_GENERATION_QUALITY);
+  // Clamp the default UP to the model's quality floor (raises only — a base at/above the floor is
+  // untouched; the below fallback still caps it at what's installed).
+  if (floor && isTierBelow(base, floor)) {
+    base = floor;
+  }
   const cleanFallback =
     !model?.hasVariantMatrix && Array.isArray(model?.mlxTiers)
       ? ["q8", "bf16", "q4"]
