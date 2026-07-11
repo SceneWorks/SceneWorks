@@ -1129,6 +1129,9 @@ fn materialize_item(
         id: item_id,
         asset_id: source.asset_id,
         path: relative_path,
+        // Fresh import → no control condition rendered yet (only a ControlNet-training prep pass
+        // writes one). epic 10159.
+        control_image_path: None,
         display_name: input.display_name.unwrap_or(source.display_name),
         caption: Caption {
             text: caption.text,
@@ -1186,6 +1189,9 @@ pub fn repoint_item(item: &TrainingDatasetItem, source: RepointSource) -> Traini
         id: item.id.clone(),
         asset_id: source.asset_id,
         path: source.path,
+        // The condition was rendered from the OLD pixels — the new bytes invalidate it exactly
+        // like tier0_scalars/quality_ack, so clear it (a re-point should re-render). epic 10159.
+        control_image_path: None,
         display_name: item.display_name.clone(),
         caption: item.caption.clone(),
         width: source.width,
@@ -1684,6 +1690,7 @@ mod tests {
             id: id.to_owned(),
             asset_id: None,
             path: format!("images/{id}.png"),
+            control_image_path: None,
             display_name: id.to_owned(),
             caption: Caption {
                 text: String::new(),

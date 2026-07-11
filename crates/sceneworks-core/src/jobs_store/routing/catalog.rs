@@ -865,8 +865,17 @@ pub(crate) const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
 /// NO torch trainer — it is in BOTH this set and [`MLX_ONLY_TRAINING_KERNELS`] (Rust-only: mlx OR
 /// candle, never torch). The dense Wan 5B + the I2V A14B have no candle trainer yet (sc-5167
 /// follow-ups) and Kolors/LTX none at all — those kernels stay on the Python torch worker off-Mac.
-pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] =
-    &["z_image_lora", "sdxl_lora", "lens_lora", "krea_lora"];
+/// `krea_control` (epic 10159, B2 sc-10163 / B1 sc-10162) is the Krea 2 pose-ControlNet branch trainer
+/// (candle-gen-krea `ControlTrainer`, dispatched under `krea_2_control`); it too has NO torch or MLX
+/// trainer, so — like `krea_lora` — it is also in [`MLX_ONLY_TRAINING_KERNELS`] but NOT
+/// [`MLX_ROUTED_TRAINING_KERNELS`] (the MLX control lane is B5/sc-10177).
+pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
+    "z_image_lora",
+    "sdxl_lora",
+    "lens_lora",
+    "krea_lora",
+    "krea_control",
+];
 
 /// Training kernels with NO **torch** fallback — only a Rust worker can run them, so a torch worker
 /// must refuse the job (leaving it queued for a Rust worker) rather than claim it and fail with "no
@@ -880,8 +889,13 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] =
 /// [`CANDLE_ROUTED_TRAINING_KERNELS`]), while torch is still refused. `sd3_lora` (epic 7841 T3
 /// sc-7884) is MLX-native with no torch trainer and no candle trainer yet (the off-Mac/candle SD3.5
 /// trainer is epic 7982), so — like LTX — only an mlx worker runs it today.
-pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] =
-    &["ltx_mlx_lora", "krea_lora", "sd3_lora", "anima_lora"];
+pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
+    "ltx_mlx_lora",
+    "krea_lora",
+    "sd3_lora",
+    "anima_lora",
+    "krea_control",
+];
 
 #[cfg(test)]
 mod tests {
@@ -1093,11 +1107,21 @@ mod tests {
         "anima_lora",
     ];
 
-    const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] =
-        &["z_image_lora", "sdxl_lora", "lens_lora", "krea_lora"];
+    const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
+        "z_image_lora",
+        "sdxl_lora",
+        "lens_lora",
+        "krea_lora",
+        "krea_control",
+    ];
 
-    const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] =
-        &["ltx_mlx_lora", "krea_lora", "sd3_lora", "anima_lora"];
+    const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
+        "ltx_mlx_lora",
+        "krea_lora",
+        "sd3_lora",
+        "anima_lora",
+        "krea_control",
+    ];
 
     #[test]
     fn routed_model_lists_match_snapshot() {

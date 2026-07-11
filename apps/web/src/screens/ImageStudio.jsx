@@ -26,6 +26,7 @@ import {
   MIN_IMAGE_DIMENSION,
   resolveEffectiveDimensions,
 } from "../resolutionOverride.js";
+import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 import { batchItemStatus, summarizeBatchRun } from "../batchOps.js";
 import {
   DEFAULT_SCENE_PROMPT,
@@ -1359,6 +1360,12 @@ export function ImageStudio() {
     widthOverride,
     heightOverride,
   });
+
+  // PiD high-res decode heads-up (sc-10144): PiD super-resolves the base render 4×, so a large base at
+  // the default 4K tier is a multi-minute (auto-tiled above 4096², sc-10087) decode that can look hung.
+  // Surfaced inline under the PiD output tier so the user knows the long decode is progressing, not
+  // stuck. null when PiD is off, on the fast 2K tier, or below the multi-minute threshold.
+  const pidDecodeNotice = pidDecodeHeadsUp({ usePid, pidTarget, width, height });
 
   // Magic-prompt expansion (sc-5997): expand the plain-text idea into an editable caption via the
   // native utility model (same backend as Refine), recording which model drafted it. Returns the
@@ -2922,6 +2929,11 @@ export function ImageStudio() {
                         <option value="4k">4K · max detail</option>
                         <option value="2k">2K · faster</option>
                       </select>
+                      {pidDecodeNotice ? (
+                        <span className="field-hint pid-decode-hint" role="status">
+                          {pidDecodeNotice.message}
+                        </span>
+                      ) : null}
                     </label>
                   ) : null}
                 </>

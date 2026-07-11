@@ -4055,8 +4055,15 @@ async fn generate_candle_stream(
         let tier =
             crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
         let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
-        // Only the candle FLUX lane has wired sequential residency (sc-10769); other families reject.
-        let sequential_capable = matches!(engine_id, "flux1_dev" | "flux1_schnell");
+        // The candle FLUX.1 (sc-10769) and FLUX.2 txt2img (sc-10868) lanes have wired sequential
+        // residency (load→encode→drop the text encoder before the DiT); other families reject. FLUX.2 is
+        // the biggest win off-Mac — the 32B `flux2_dev`'s decoder-LM Mistral TE is multiple GB freed
+        // before the DiT loads. The flux2 edit/control providers are NOT wired (they keep the resident
+        // path), so only the txt2img engine ids appear here.
+        let sequential_capable = matches!(
+            engine_id,
+            "flux1_dev" | "flux1_schnell" | "flux2_dev" | "flux2_klein_9b"
+        );
         match crate::vram_gate::resolve_offload(
             crate::vram_gate::fit_decision(needed, budget),
             sequential_capable,

@@ -118,6 +118,12 @@ fn builtin_targets_gate_network_types() {
         .targets
         .iter()
         .filter(|target| {
+            // Control-branch targets (krea_control, epic 10159) train a conditioning branch, not a
+            // LoRA/LoKr network, so they legitimately advertise no `networkTypes`. The lora/lokr
+            // invariant applies only to LoRA-output targets.
+            if !matches!(target.output_kind, TrainingOutputKind::Lora) {
+                return false;
+            }
             assert!(
                 advertises(target, "lora"),
                 "target {} must advertise lora in limits.networkTypes",

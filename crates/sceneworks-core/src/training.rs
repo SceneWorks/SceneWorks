@@ -55,9 +55,13 @@ string_enum! {
 }
 
 string_enum! {
-    /// What a training run produces. Only LoRA adapters are produced today.
+    /// What a training run produces. `Lora` is a LoRA/LoKr adapter; `ControlBranch` is a
+    /// ControlNet control branch (an "overlay" the engine writes, distinct from a LoRA — it
+    /// injects a conditioning residual rather than reparameterizing weights). ControlNet
+    /// training (epic 10159, the `krea_control` kernel) produces the latter.
     pub enum TrainingOutputKind {
         Lora => "lora",
+        ControlBranch => "control_branch",
     }
 }
 
@@ -117,6 +121,13 @@ pub struct TrainingDatasetItem {
     pub asset_id: Option<String>,
     /// Path relative to the dataset root (Rust owns dataset storage layout).
     pub path: String,
+    /// Path (relative to the dataset root) to the per-item control-conditioning image — the
+    /// rendered pose/canny/depth condition for a ControlNet training run (epic 10159). `None`
+    /// for a plain LoRA item; a control-prep pass (the studio's ControlNet job) writes the
+    /// rendered condition sidecar and stamps this so [`build_training_plan`] can thread it onto
+    /// the plan item. A control-branch kernel (`krea_control`) requires it on every item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_image_path: Option<String>,
     pub display_name: String,
     pub caption: Caption,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -434,6 +445,7 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             kolors_lora_target(),
             lens_turbo_lora_target(),
             krea_raw_lora_target(),
+            krea_control_target(),
             sd3_large_lora_target(),
             sd3_medium_lora_target(),
             anima_base_lora_target(),
@@ -1515,6 +1527,100 @@ fn krea_raw_lora_target() -> TrainingTarget {
     }
 }
 
+/// Krea 2 pose-ControlNet training target (epic 10159 ControlNet Training Studio; B2 trainer sc-10163,
+/// B1 studio wiring sc-10162). Unlike [`krea_raw_lora_target`] this produces a **control branch**
+/// ([`TrainingOutputKind::ControlBranch`]), not a LoRA: the `krea_control` kernel trains a frozen-base
+/// conditioning branch on the Krea 2 Raw DiT that applies at Krea 2 Turbo inference — the off-Mac
+/// candle `krea_2_control` trainer (`engine_trainer_id`; candle-gen-krea `ControlTrainer`). It is
+/// **candle-only** today (no torch/MLX control trainer — the MLX lane is B5/sc-10177), so it is in
+/// [`CANDLE_ROUTED_TRAINING_KERNELS`] + [`MLX_ONLY_TRAINING_KERNELS`] (no-torch-fallback) but NOT
+/// [`MLX_ROUTED_TRAINING_KERNELS`]. `defaults.advanced.controlType` selects the preprocessor/condition
+/// (pose first; canny/depth are Phase C, added by extending `controlTypes` once each trains through the
+/// studio). Gradient checkpointing is forced on (`candle_requires_gradient_checkpointing`) — the dense
+/// control-branch backward doesn't fit otherwise. Submitted through the ControlNet-training studio job
+/// (not the LoRA job): the studio renders the per-item condition via the A1/A2 preprocessor and threads
+/// it onto `control_image_path`; the LoRA submit path rejects a `ControlBranch` target.
+fn krea_control_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "krea_2_control".to_owned(),
+        name: "Krea 2 ControlNet".to_owned(),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::ControlBranch,
+        family: "krea_2".to_owned(),
+        // Trains the branch on the frozen undistilled Krea 2 Raw DiT (arch-identical to Turbo), the same
+        // base the Krea LoRA target trains — so it reuses the installed-base guardrail + resolver with no
+        // new model-catalog entry. The trained branch applies at Krea 2 Turbo inference.
+        base_model: "krea_2_raw".to_owned(),
+        base_model_repo: Some("SceneWorks/krea-2-raw-mlx".to_owned()),
+        kernel: "krea_control".to_owned(),
+        defaults: TrainingConfig {
+            // rank/alpha are LoRA knobs; a control branch is a full (non-low-rank) module, so the
+            // control trainer ignores them. Kept at the family default to satisfy the shared config
+            // contract (both are validated `> 0`).
+            rank: 16,
+            alpha: 16,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 3000,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 1024,
+            save_every: 250,
+            seed: 42,
+            optimizer: "adamw8bit".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                // The control type selects the A1 preprocessor + the overlay `kind` metadata. Pose
+                // first (DWPose + openpose skeleton); canny/depth follow in Phase C.
+                "controlType": "pose",
+                "mixedPrecision": "bf16",
+                // The control trainer VAE-/text-encodes the raw (target, control, caption) triples
+                // itself; there is no pre-encoded latent/embedding cache to toggle here.
+                "gradientCheckpointing": true,
+                // Flow-matching noise sampling mirrors the Krea LoRA target (high-noise bias for the
+                // few-step distilled Turbo the branch applies at).
+                "timestepType": "sigmoid",
+                "timestepBias": "high_noise",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                "lrScheduler": "constant",
+                // In-training previews need a control-conditioned render path (B3/B4 territory); keep
+                // them off for the first studio slice so a half-built preview never runs.
+                "sampleEvery": 0,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 6000],
+            "resolutions": [512, 768, 1024],
+            "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            // Control types the studio can train today. Pose is live; canny/depth are Phase C (each is
+            // just a different A1 preprocessor — no trainer change).
+            "controlTypes": ["pose"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "outputScopes": ["project", "global"]
+            // Candle-only (no `appleSiliconOnly`): the control trainer runs on candle/CUDA off-Mac. The
+            // MLX control lane is B5 (sc-10177); until then a Mac has no control trainer and the job
+            // stays queued for a candle worker.
+        })),
+        ui: object(json!({
+            "label": "Krea 2 ControlNet",
+            "description": "Train a pose-ControlNet branch for Krea 2. Renders a control condition (pose skeleton) per training image, trains a conditioning branch on the frozen Krea 2 Raw base, and applies it at Krea 2 Turbo inference. Windows/Linux NVIDIA (candle/CUDA) only.",
+            "recommendedFor": ["pose"],
+            "datasetModality": "image",
+            // Signals the training studio to surface this in the ControlNet MODE (data-source picker +
+            // control-type selector), not the plain LoRA target dropdown.
+            "trainingMode": "control"
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
 /// Native MLX LoRA/LoKr training for Stable Diffusion 3.5 **Large** (epic 7841, T3 sc-7884).
 ///
 /// LoRAs train on the `stabilityai/stable-diffusion-3.5-large` MMDiT (the `sd3_lora` kernel →
@@ -2372,7 +2478,14 @@ pub fn build_training_plan(
                 width: item.width,
                 height: item.height,
                 extra: ExtraFields::new(),
-                control_image_path: None,
+                // ControlNet training: resolve the per-item control-conditioning sidecar the same
+                // way as the target image (relative → absolute under the dataset root). `None` for
+                // a LoRA item; a control-branch kernel's validate rejects a plan item missing it.
+                control_image_path: item
+                    .control_image_path
+                    .as_deref()
+                    .map(|path| resolve_item_path(input.dataset_root, path))
+                    .transpose()?,
             })
         })
         .collect::<Result<Vec<_>, TrainingPlanError>>()?;
