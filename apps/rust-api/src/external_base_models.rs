@@ -418,12 +418,17 @@ fn assemble_one(
                     components,
                 ));
             };
-            // Snapshot-backed families (sc-10670): the DiT is read in place, but the TE / VAE /
-            // tokenizer come from a resident SceneWorks snapshot, so a bare DiT anchor is complete on
-            // its own — the tree's own components (a different quant / key schema) are not folded in.
-            // Runnability is then decided by family+quant in `finish_row` (only the plain-fp8 qwen DiT
-            // has a loader today; other qwen quants stay fail-closed until their slice).
+            // Snapshot-backed families (sc-10670): the DiT is read in place; the TE + tokenizer come
+            // from a resident SceneWorks snapshot (the tree's Qwen2.5-VL TE is scaled-fp8, sc-10671),
+            // so a bare DiT anchor is complete on its own. The **VAE**, however, now has an in-place
+            // loader (sc-10830: native WAN-VAE keys → diffusers remap), so when the tree carries an
+            // unambiguous VAE it is folded into the row and read in place; ambiguous/absent falls back
+            // to the snapshot VAE (still complete). Runnability stays decided by the DiT's family+quant
+            // in `finish_row`.
             if is_snapshot_backed(&family_name) {
+                if let [only_vae] = vaes {
+                    components.push(only_vae.component_json());
+                }
                 return Some(finish_row(
                     id,
                     anchor,
@@ -716,11 +721,45 @@ mod tests {
         assert_eq!(row["type"], "image");
         assert_eq!(row["quant"], "fp8_e4m3");
         assert_eq!(row["assembly"], "complete");
-        // sc-10670: plain-fp8 qwen DiT has a loader → usable, no reason. The tree's own TE / VAE are
-        // deliberately NOT folded in (different quant / key schema), so components is the DiT alone.
+        // sc-10670: plain-fp8 qwen DiT has a loader → usable, no reason. No tree VAE here, so
+        // components is the DiT alone (the TE is always snapshot-sourced, sc-10671).
         assert_eq!(row["usable"], true);
         assert_eq!(row["unusableReason"], Value::Null);
         assert_eq!(row["components"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn qwen_image_fp8_dit_folds_in_an_unambiguous_tree_vae() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = models_root(temp.path());
+        // sc-10830: a ComfyUI Qwen-Image DiT + exactly one tree VAE → the VAE is folded into the row
+        // (read in place, native WAN-VAE keys → diffusers remap) while the DiT stays snapshot-backed
+        // for the TE + tokenizer. Runnable, and the VAE rides along as a `vae` component.
+        write_safetensors(
+            &root
+                .join("diffusion_models")
+                .join("qwen_image_2512_fp8_e4m3fn.safetensors"),
+            &qwen_image_dit_fp8_keys(),
+        );
+        write_safetensors(
+            &root.join("vae").join("qwen_image_vae.safetensors"),
+            &vae_keys(),
+        );
+
+        let rows = scan(&[root]);
+        assert_eq!(rows.len(), 1, "one anchored DiT model");
+        let row = &rows[0];
+        assert_eq!(row["family"], "qwen-image");
+        assert_eq!(row["assembly"], "complete");
+        assert_eq!(row["usable"], true);
+        let components = row["components"].as_array().unwrap();
+        assert_eq!(components.len(), 2, "DiT + the folded tree VAE");
+        assert!(
+            components
+                .iter()
+                .any(|component| component["role"] == "vae"),
+            "the tree VAE rides along as a `vae` component for the in-place loader"
+        );
     }
 
     #[test]

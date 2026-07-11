@@ -1,15 +1,17 @@
-// Candle (Windows/CUDA) in-place ComfyUI Qwen-Image txt2img route (epic 10451 Phase 2b, sc-10670).
-// Renders a user's existing ComfyUI Qwen-Image DiT — read in place, no copy, no re-download — via
-// `candle_gen_qwen_image::load_from_comfyui_dit`, which strips the `model.diffusion_model.` prefix and
-// upcasts the plain `fp8_e4m3fn` DiT to bf16 in memory (candle-gen sc-10670). Unlike the Z-Image lane
-// (sc-10668), which read all three components in place, only the **DiT** comes from the ComfyUI tree:
-// the tree's Qwen2.5-VL text encoders are themselves scaled-fp8 (sc-10671) and its VAE uses native
-// WAN-VAE keys (a separate 3D-VAE remap), so the text encoder / VAE / tokenizer are sourced from a
-// resident SceneWorks Qwen-Image snapshot (the same tier tree the registry `qwen_image` path loads).
+// Candle (Windows/CUDA) in-place ComfyUI Qwen-Image txt2img route (epic 10451 Phase 2b, sc-10670 +
+// sc-10830). Renders a user's existing ComfyUI Qwen-Image DiT — read in place, no copy, no
+// re-download — via `candle_gen_qwen_image::load_from_comfyui_dit`, which strips the
+// `model.diffusion_model.` prefix and upcasts the plain `fp8_e4m3fn` DiT to bf16 in memory (candle-gen
+// sc-10670). The tree's **VAE** is also read in place when the API folded it into the row (sc-10830:
+// native WAN-VAE keys → diffusers remap); when absent it falls back to the snapshot VAE. The tree's
+// Qwen2.5-VL text encoders are themselves scaled-fp8 (sc-10671), so the **text encoder** + tokenizer
+// are still sourced from a resident SceneWorks Qwen-Image snapshot (the same tier tree the registry
+// `qwen_image` path loads).
 //
 // The model id is an `external_base_*` catalog row (assembled by the API's `external_base_models`);
 // its `modelManifestEntry` carries `family:"qwen-image"`, `usable:true`, `quant:"fp8_e4m3"`, and a
-// `components[]` list whose `transformer` entry is the DiT path.
+// `components[]` list whose `transformer` entry is the DiT path (and, when present, a `vae` entry is
+// the tree VAE path read in place).
 //
 // **Candle-only**, and a **bespoke provider** (like the Z-Image comfyui lane): the loaded generator is
 // not registry-resolvable (its DiT is a single in-place file, not a diffusers snapshot dir), so it is
@@ -37,12 +39,17 @@ const QWEN_COMFYUI_SNAPSHOT_REPO: &str = "SceneWorks/qwen-image-mlx";
 /// partially-downloaded tier does not block the lane.
 const QWEN_COMFYUI_SNAPSHOT_TIERS: &[&str] = &["bf16", "q8", "q4"];
 
-/// The in-place ComfyUI DiT file + the resident snapshot tier dir supplying the other components.
+/// The in-place ComfyUI DiT file + the resident snapshot tier dir supplying the other components,
+/// plus the optional in-place tree VAE (sc-10830).
 struct ComfyuiQwenPaths {
     /// ComfyUI Qwen-Image DiT (`diffusion_models/qwen_image_*_fp8_e4m3fn.safetensors`), read in place.
     transformer: PathBuf,
     /// A resident `SceneWorks/qwen-image-mlx` tier dir (`text_encoder/ vae/ tokenizer/tokenizer.json`).
     snapshot_dir: PathBuf,
+    /// The tree's `vae/qwen_image_vae.safetensors` (native WAN-VAE keys), read in place when the API
+    /// folded it into the row (sc-10830). `None` ⇒ the snapshot tier's VAE. The TE + tokenizer always
+    /// come from the snapshot (the tree TE is scaled-fp8, sc-10671).
+    vae: Option<PathBuf>,
 }
 
 /// Resolve the ComfyUI Qwen-Image DiT path + the resident snapshot tier from the forwarded
@@ -95,6 +102,23 @@ fn resolve_qwen_comfyui_paths(
     else {
         return Ok(None);
     };
+    // sc-10830: the tree's VAE (native WAN-VAE keys), read in place when the API folded it into the
+    // row as a `vae` component. Optional — absent ⇒ the snapshot tier's VAE. Confined by the same
+    // external-root normalization as the DiT (a payload can never point it outside a declared root).
+    let vae = components
+        .iter()
+        .find(|component| component.get("role").and_then(Value::as_str) == Some("vae"))
+        .and_then(|component| component.get("path").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            crate::paths::normalize_app_managed_model_path(
+                settings,
+                value,
+                "ComfyUI Qwen-Image VAE",
+            )
+        })
+        .transpose()?;
     Ok(Some(ComfyuiQwenPaths {
         transformer: crate::paths::normalize_app_managed_model_path(
             settings,
@@ -102,6 +126,7 @@ fn resolve_qwen_comfyui_paths(
             "ComfyUI Qwen-Image transformer",
         )?,
         snapshot_dir,
+        vae,
     }))
 }
 
@@ -198,11 +223,13 @@ async fn generate_candle_qwen_comfyui_stream(
             let ComfyuiQwenPaths {
                 transformer,
                 snapshot_dir,
+                vae,
             } = paths;
             let model =
-                candle_gen_qwen_image::load_from_comfyui_dit(transformer, snapshot_dir).map_err(
-                    |error| WorkerError::Engine(format!("ComfyUI Qwen-Image load failed: {error}")),
-                )?;
+                candle_gen_qwen_image::load_from_comfyui_dit(transformer, snapshot_dir, vae)
+                    .map_err(|error| {
+                        WorkerError::Engine(format!("ComfyUI Qwen-Image load failed: {error}"))
+                    })?;
             Ok(model)
         },
         move |model, tx, cancel| {
