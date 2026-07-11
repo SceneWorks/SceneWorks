@@ -27,6 +27,12 @@ const POSE_LIBRARY_NEGATIVE_PROMPT =
   "cropped, out of frame, multiple people, extra limbs, deformed hands, extra fingers, " +
   "plastic skin, airbrushed, cgi, 3d render, cartoon, anime, waxy, blurry";
 
+// The fixed base render size for a Character angle/pose generation (the worker emits one image per
+// angle/pose from this square base). Single source of truth so the PiD high-res heads-up (sc-10144)
+// warns off the SAME base the job actually renders — at the default 4K PiD tier this super-resolves
+// 4× to 4096², a multi-minute decode.
+const CHARACTER_PANEL_BASE_DIMENSION = 1024;
+
 // Resolve a character generation job's produced images from the full asset
 // catalog. Using the catalog (not just latestAssets, which is the single most
 // recent generation set) is what lets pose / angle previews stream in as each
@@ -618,8 +624,8 @@ export function CharacterGenerationPanel({
         // count; count must satisfy the API's 1-8 guard, so send 1 (worker overrides).
         count: 1,
         seed: advanced.seedValue,
-        width: 1024,
-        height: 1024,
+        width: CHARACTER_PANEL_BASE_DIMENSION,
+        height: CHARACTER_PANEL_BASE_DIMENSION,
         loras: loraSelection.serializedLoras,
         advanced: advanced.buildAdvanced(controller.advancedExtras),
       });
@@ -688,7 +694,11 @@ export function CharacterGenerationPanel({
         Prompt
         <textarea onChange={(event) => setPrompt(event.target.value)} rows={2} value={prompt} />
       </label>
-      <CharacterAdvancedOptions state={advanced} />
+      <CharacterAdvancedOptions
+        state={advanced}
+        baseWidth={CHARACTER_PANEL_BASE_DIMENSION}
+        baseHeight={CHARACTER_PANEL_BASE_DIMENSION}
+      />
       {activeJobs.length ? (
         <div className="worker-progress-card-stack local-job-stack">
           {activeJobs.map((job) => (

@@ -666,6 +666,93 @@
       }
     },
     {
+      "id": "krea_2_control",
+      "name": "Krea 2 ControlNet",
+      "modality": "image",
+      "outputKind": "control_branch",
+      "family": "krea_2",
+      "baseModel": "krea_2_raw",
+      "baseModelRepo": "SceneWorks/krea-2-raw-mlx",
+      "kernel": "krea_control",
+      "defaults": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "controlType": "pose",
+          "gradientCheckpointing": true,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "timestepBias": "high_noise",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "limits": {
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          4
+        ],
+        "controlTypes": [
+          "pose"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "rank": [
+          4,
+          128
+        ],
+        "resolutions": [
+          512,
+          768,
+          1024
+        ],
+        "steps": [
+          200,
+          6000
+        ]
+      },
+      "ui": {
+        "datasetModality": "image",
+        "description": "Train a pose-ControlNet branch for Krea 2. Renders a control condition (pose skeleton) per training image, trains a conditioning branch on the frozen Krea 2 Raw base, and applies it at Krea 2 Turbo inference. Windows/Linux NVIDIA (candle/CUDA) only.",
+        "label": "Krea 2 ControlNet",
+        "recommendedFor": [
+          "pose"
+        ],
+        "trainingMode": "control"
+      }
+    },
+    {
       "id": "sd3_5_large_lora",
       "name": "SD3.5 Large LoRA",
       "modality": "image",

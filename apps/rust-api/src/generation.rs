@@ -42,6 +42,15 @@ pub(crate) async fn create_image_job(
         Some(&catalogs),
     )
     .await?;
+    // Resolve a selected control overlay id → its installed `.safetensors` path (sc-10165, B4), so a
+    // ControlNet the user picked in the Studio's ControlPanel is loadable by the worker strict-control
+    // lane. A no-op unless `advanced.controlWeights.overlayId` is set.
+    crate::control_overlays::resolve_control_overlay_selection(
+        &state,
+        Some(&payload.project_id),
+        &mut job_payload,
+    )
+    .await?;
     if payload.seed.is_none() {
         let count = job_payload
             .get("count")

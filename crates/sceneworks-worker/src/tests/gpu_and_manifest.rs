@@ -459,6 +459,88 @@ fn builtin_model_entry(id: &str) -> Value {
         .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"))
 }
 
+/// epic 10765 sc-10920: the FLUX.2 `candle` blocks drive the dynamic fit-gate end-to-end against the
+/// SHIPPED manifest bytes — resident-fits → sequential-offload → reject-before-OOM. The pure
+/// `vram_gate` unit tests cover the decision logic on synthetic fixtures; THIS guards the data half:
+/// a manifest edit that drops the flux2 `vramGbByTier` / `sequentialPeakGb` makes `predicted_*` return
+/// `None` → the whole gate goes INERT for flux2 (the exact "candle block missing" failure the story
+/// targets). Exercises the same `SCENEWORKS_CUDA_VRAM_CAP_GB` small-card emulation the worker honors via
+/// `apply_vram_cap`. Gated to the candle lane where `vram_gate` compiles (sc-10920 measured q4/q8;
+/// bf16 + klein are carried, and are asserted to reject on real cards, which is the intended outcome).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
+    use crate::vram_gate::{
+        apply_vram_cap, fit_decision, predicted_peak_gb, predicted_sequential_peak_gb,
+        resolve_offload, sequential_overflow_gb, FitDecision,
+    };
+
+    let dev = builtin_model_entry("flux2_dev");
+    // `predicted_*` take the MODEL ENTRY (they read `.candle` internally), not the candle sub-object.
+    let dev_entry = dev.as_object().expect("flux2_dev entry object");
+    assert!(
+        dev_entry.get("candle").and_then(Value::as_object).is_some(),
+        "flux2_dev candle block present (absent ⇒ fit-gate inert for flux2)"
+    );
+
+    // Measured q4 (sc-10920): resident 44.0 / sequential 35.6, each + the gate's 2 GB headroom.
+    let q4_res = predicted_peak_gb(dev_entry, "q4").expect("q4 resident predicted");
+    let q4_seq = predicted_sequential_peak_gb(dev_entry, "q4").expect("q4 sequential predicted");
+    assert!((q4_res - 46.0).abs() < 1e-6, "q4 resident 44.0 + 2 headroom, got {q4_res}");
+    assert!((q4_seq - 37.6).abs() < 1e-6, "q4 sequential 35.6 + 2 headroom, got {q4_seq}");
+    assert!(q4_seq < q4_res, "sequential is the lower peak");
+
+    // A 96 GB card fits q4 resident outright — no offload.
+    let card96 = apply_vram_cap(None, Some(96.0));
+    assert_eq!(fit_decision(Some(q4_res), card96), FitDecision::Fits);
+
+    // Emulate a 40 GB card: resident 46 won't fit, but sequential 37.6 does → OFFLOAD, run sequentially.
+    let card40 = apply_vram_cap(None, Some(40.0));
+    let at40 = resolve_offload(fit_decision(Some(q4_res), card40), /* sequential_capable */ true);
+    assert!(matches!(at40, FitDecision::Offload { .. }), "40 GB → offload, got {at40:?}");
+    assert_eq!(sequential_overflow_gb(Some(q4_seq), card40), None, "sequential fits 40 GB → run");
+
+    // Emulate a 30 GB card: even the sequential 37.6 peak won't fit → REJECT-before-OOM (sc-10856 gate).
+    let card30 = apply_vram_cap(None, Some(30.0));
+    let at30 = resolve_offload(fit_decision(Some(q4_res), card30), true);
+    assert!(matches!(at30, FitDecision::Offload { .. }), "30 GB → offload attempt, got {at30:?}");
+    assert_eq!(
+        sequential_overflow_gb(Some(q4_seq), card30),
+        Some(q4_seq),
+        "sequential 37.6 > 30 GB → reject carrying the number"
+    );
+
+    // Measured q8 is present too (resident 70.7 / sequential 64.9 + headroom).
+    assert!((predicted_peak_gb(dev_entry, "q8").unwrap() - 72.7).abs() < 1e-6);
+    assert!((predicted_sequential_peak_gb(dev_entry, "q8").unwrap() - 66.9).abs() < 1e-6);
+
+    // The carried bf16 tier (128 / 97) rejects on a 96 GB card even sequentially — the intended outcome
+    // (113 GB dense weights can't run off-Mac), reject-before-OOM instead of a silent load-time OOM.
+    let bf16_seq = predicted_sequential_peak_gb(dev_entry, "bf16").expect("bf16 sequential carried");
+    assert_eq!(
+        sequential_overflow_gb(Some(bf16_seq), card96),
+        Some(bf16_seq),
+        "bf16 sequential 99 > 96 GB → reject"
+    );
+
+    // klein carries a candle block so ITS fit-gate is live: on a 16 GB epic-target card klein rejects
+    // even sequentially (the ~16 GB dense Qwen3 TE is the sequential floor).
+    let klein = builtin_model_entry("flux2_klein_9b");
+    let klein_entry = klein.as_object().expect("flux2_klein_9b entry object");
+    assert!(
+        klein_entry.get("candle").and_then(Value::as_object).is_some(),
+        "flux2_klein_9b candle block present"
+    );
+    let klein_seq =
+        predicted_sequential_peak_gb(klein_entry, "q4").expect("klein q4 sequential carried");
+    let card16 = apply_vram_cap(None, Some(16.0));
+    assert_eq!(
+        sequential_overflow_gb(Some(klein_seq), card16),
+        Some(klein_seq),
+        "klein sequential 22 > 16 GB → reject on the epic's small-card target"
+    );
+}
+
 /// sc-7875 (SD3.5 S6, MLX-path validation boundary): the three SD3.5 builtin-manifest entries gate
 /// correctly at the catalog layer — `macOnly: false` (cross-platform now that the candle off-Mac lane
 /// is wired, sc-7880/epic 7982; availability is driven by the routing tables, not this flag),

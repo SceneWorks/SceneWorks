@@ -2198,6 +2198,20 @@ fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<
                 .unwrap_or_else(|| "(unnamed LoRA)".to_owned());
             Some(format!("Training Run — {subject}"))
         }
+        JobType::ControlTraining => {
+            let subject = first_str(payload, &["loraName", "outputName", "targetName"])
+                .map(str::to_owned)
+                .or_else(|| {
+                    payload
+                        .get("plan")
+                        .and_then(|plan| plan.get("output"))
+                        .and_then(|output| output.get("loraId"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| "(unnamed control branch)".to_owned());
+            Some(format!("ControlNet Training — {subject}"))
+        }
         JobType::TrainingCaption => {
             let subject = first_str(payload, &["datasetName", "datasetId"])
                 .unwrap_or("(unnamed dataset)")
@@ -2880,7 +2894,12 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         // (z_image / sdxl / kolors / wan / ltx) via `mlx_gen::load_trainer`. `lens_lora`
         // (sidecar, no mlx-gen crate) and LoKr-on-Wan stay on the Python torch worker.
         // Applies to both dry-run and real runs.
-        if matches!(job.job_type, JobType::LoraTrain) && !training_job_is_mlx_eligible(job) {
+        if matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining)
+            && !training_job_is_mlx_eligible(job)
+        {
+            // ControlNet studio jobs (epic 10159) are candle-only today (no MLX control trainer — that
+            // is B5/sc-10177), so `training_job_is_mlx_eligible` returns false for them and the mlx
+            // worker refuses to claim, leaving the job for a candle worker.
             return false;
         }
         // Dataset captioning (sc-3556): the mlx worker claims only JoyCaption jobs
@@ -2965,7 +2984,12 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
         // training job it can't execute (the `lora_train_execute` advertisement is coarse — it lights
         // up whenever ANY candle trainer is registered) and fail it terminally instead of leaving it
         // for torch. Applies to both dry-run and real runs; mirrors the mlx training gate above.
-        if matches!(job.job_type, JobType::LoraTrain) && !training_job_is_candle_eligible(job) {
+        if matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining)
+            && !training_job_is_candle_eligible(job)
+        {
+            // Same gate for the ControlNet studio job (epic 10159): the candle worker claims it only
+            // when its resolved plan's kernel (`krea_control`) has a candle trainer registered;
+            // otherwise it stays queued (never mis-claimed and failed terminally).
             return false;
         }
         // Dataset captioning (sc-5098): the candle worker serves only JoyCaption (the candle
@@ -3031,11 +3055,17 @@ fn worker_supports_job(worker: &WorkerSnapshot, job: &JobSnapshot) -> bool {
     true
 }
 
-/// True when a job is a real (non-dry-run) LoRA training run. The training
-/// payload defaults to dry-run; only an explicit `dryRun: false` is a real run.
+/// True when a job is a real (non-dry-run) training run — it needs the execute capability
+/// ([`WorkerCapability::LoraTrainExecute`]), not just the base plan-validation capability. A
+/// `lora_train` payload defaults to dry-run so only an explicit `dryRun: false` counts; a
+/// `control_training` studio job (epic 10159) has no dry-run mode — it always renders + trains — so it
+/// is always a real run.
 fn is_real_training_job(job: &JobSnapshot) -> bool {
-    matches!(job.job_type, JobType::LoraTrain)
-        && job.payload.get("dryRun").and_then(Value::as_bool) == Some(false)
+    match job.job_type {
+        JobType::ControlTraining => true,
+        JobType::LoraTrain => job.payload.get("dryRun").and_then(Value::as_bool) == Some(false),
+        _ => false,
+    }
 }
 
 /// The worker capability a job requires. Person detection/tracking default to
@@ -3051,6 +3081,10 @@ fn required_capability(job: &JobSnapshot) -> &str {
         JobType::PersonTrack if person_job_is_preview(job) => {
             WorkerCapability::PersonTrackPreview.as_str()
         }
+        // The ControlNet studio job (epic 10159) trains through the same executor as `lora_train` and
+        // is served by any worker that advertises the training capability — it has no dedicated
+        // capability of its own (the real-run gate below additionally requires `lora_train_execute`).
+        JobType::ControlTraining => WorkerCapability::LoraTrain.as_str(),
         _ => job.job_type.as_str(),
     }
 }
@@ -3232,6 +3266,7 @@ fn job_requires_gpu(job_type: &JobType) -> bool {
             | JobType::VideoUpscale
             | JobType::PersonReplace
             | JobType::LoraTrain
+            | JobType::ControlTraining
             | JobType::TrainingCaption
             | JobType::DatasetAnalysis
             | JobType::DatasetUpscale
@@ -3731,10 +3766,9 @@ mod candle_routing_tests {
             "chroma1_hd",
             &object(json!({ "advanced": { "mlxQuantize": 8 } }))
         ));
-        assert!(!image_request_candle_eligible(
-            "qwen_image",
-            &object(json!({ "advanced": { "mlxQuantize": 4 } }))
-        ));
+        // NOTE: qwen_image USED to be a dense-only counter-example here; sc-11020 moved it to
+        // CANDLE_QUANT_MODELS (its turnkey q4/q8 packed tiers load off-Mac), so its quant tier-select now
+        // STAYS on candle — covered by `qwen_image_quant_tier_select_stays_on_candle`.
         assert!(!video_request_candle_eligible(
             "wan_2_2",
             &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } }))
@@ -3747,6 +3781,34 @@ mod candle_routing_tests {
         assert!(image_request_candle_eligible(
             "chroma1_hd",
             &object(json!({ "advanced": { "steps": 30 } }))
+        ));
+    }
+
+    #[test]
+    fn qwen_image_quant_tier_select_stays_on_candle() {
+        // sc-11020 (epic 9083): base `qwen_image` is a turnkey packed-quant candle family — its q4/q8/bf16
+        // subdirs load off-Mac via `standard_tier_subdir` (sc-8669) and the tiers are GPU-measured
+        // (sc-10969), so a `mlxQuantize` tier-select now STAYS on candle instead of enforce-failing
+        // `candle_unsupported` at routing (the routing half sc-9983 flipped for krea/ideogram/boogu but
+        // missed qwen). A LoRA still defers — base qwen advertises no candle inference LoRA.
+        for bits in [4, 8] {
+            assert!(
+                image_request_candle_eligible(
+                    "qwen_image",
+                    &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": bits } }))
+                ),
+                "qwen_image Q{bits} tier-select should stay on candle"
+            );
+        }
+        // A plain (no tier-select) job is of course still eligible.
+        assert!(image_request_candle_eligible(
+            "qwen_image",
+            &object(json!({ "prompt": "x" }))
+        ));
+        // A LoRA request still defers to torch — no candle inference LoRA on base qwen.
+        assert!(!image_request_candle_eligible(
+            "qwen_image",
+            &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
         ));
     }
 

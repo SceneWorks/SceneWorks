@@ -714,10 +714,13 @@ pub(crate) fn upscale_job_requests_seedvr2(job: &JobSnapshot) -> bool {
             .is_some_and(|engine| engine.trim().eq_ignore_ascii_case("seedvr2"))
 }
 
-/// Whether this `lora_train` job targets a kernel with no non-Rust fallback (see
-/// [`MLX_ONLY_TRAINING_KERNELS`]). Such a job can only run on the mlx worker.
+/// Whether this training job targets a kernel with no torch fallback (see
+/// [`MLX_ONLY_TRAINING_KERNELS`]). Such a job can only run on a Rust worker (mlx, or candle when the
+/// candle exception in [`worker_supports_job`] admits it — e.g. `krea_control`), so a torch worker
+/// must refuse it. Covers both the `lora_train` and the ControlNet studio (`control_training`) jobs —
+/// both stamp a resolved plan whose `krea_control` kernel is no-torch-fallback (epic 10159).
 pub(crate) fn training_kernel_is_mlx_only(job: &JobSnapshot) -> bool {
-    if !matches!(job.job_type, JobType::LoraTrain) {
+    if !matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining) {
         return false;
     }
     job.payload

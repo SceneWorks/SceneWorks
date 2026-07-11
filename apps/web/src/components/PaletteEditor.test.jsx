@@ -71,16 +71,22 @@ describe("PaletteEditor", () => {
     expect(last).toEqual(["#111111", "#222222", "#333333"]);
   });
 
-  it("disables Add for a duplicate color", async () => {
+  it("disables Add for a duplicate color and says why", async () => {
     await mount({ initial: ["#FF0000"] });
     await act(async () => setValue(hexInput(), "#ff0000"));
     expect(addBtn().disabled).toBe(true);
+    // The regression: a duplicate used to disable Add in silence (epic 10644). Asserting
+    // only `disabled` passed against that bug — the reason must show too.
+    expect(container.textContent).toContain("already in the palette");
   });
 
-  it("disables Add for an invalid hex", async () => {
+  it("disables Add for an invalid hex and says why", async () => {
     await mount();
     await act(async () => setValue(hexInput(), "not-a-color"));
     expect(addBtn().disabled).toBe(true);
+    expect(container.textContent).toContain("#RRGGBB");
+    // ...and does not mistake an invalid hex for a duplicate.
+    expect(container.textContent).not.toContain("already in the palette");
   });
 
   it("caps at max and disables further input", async () => {

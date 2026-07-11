@@ -45,7 +45,20 @@ pub(crate) struct VramBudget {
 pub(crate) enum FitDecision {
     Unknown,
     Fits,
-    TooBig { needed_gb: f64, available_gb: f64 },
+    /// The predicted resident peak won't fit, but the model's provider supports sequential component
+    /// residency (the candle FLUX lane, sc-10769) — run with `OffloadPolicy::Sequential` instead of
+    /// rejecting. Sequential peak is always ≤ resident, so this is the best option before a reject.
+    /// When the tier's sequential peak is MEASURED (`candle.sequentialPeakGb`, sc-10856) the caller runs
+    /// a second [`sequential_overflow_gb`] check and rejects if even sequential won't fit; absent that
+    /// number it's best-effort (the reactive Metal/CUDA-OOM containment is the backstop).
+    Offload {
+        needed_gb: f64,
+        available_gb: f64,
+    },
+    TooBig {
+        needed_gb: f64,
+        available_gb: f64,
+    },
 }
 
 /// Read the small-card cap from the environment. `Some(gb)` only for a positive number.
@@ -115,6 +128,23 @@ pub(crate) fn predicted_peak_gb(manifest_entry: &JsonObject, tier_key: &str) -> 
     candle.get("minMemoryGb").and_then(json_f64)
 }
 
+/// Predicted SEQUENTIAL peak VRAM (GB) for `tier_key`: `candle.sequentialPeakGb[tier_key]` (the measured
+/// largest single working set of the sequential-residency path, sc-10856) + [`HEADROOM_GB`], mirroring
+/// [`predicted_peak_gb`]'s headroom. `None` when unmeasured (no `sequentialPeakGb`, or no entry for this
+/// tier) — then the [`FitDecision::Offload`] path keeps today's best-effort behavior: run sequentially
+/// and lean on the reactive Metal/CUDA-OOM containment backstop rather than reject.
+pub(crate) fn predicted_sequential_peak_gb(
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+) -> Option<f64> {
+    manifest_entry
+        .get("candle")?
+        .get("sequentialPeakGb")
+        .and_then(|tiers| tiers.get(tier_key))
+        .and_then(json_f64)
+        .map(|gb| gb + HEADROOM_GB)
+}
+
 /// Decide whether the predicted peak fits the (possibly capped) live budget. Missing either input ⇒
 /// `Unknown` (never block). Compares against `free_gb` — what is actually allocatable now — mirroring
 /// the flux2 edit guard's use of `available_gb`.
@@ -130,6 +160,38 @@ pub(crate) fn fit_decision(needed_gb: Option<f64>, budget: Option<VramBudget>) -
     } else {
         FitDecision::Fits
     }
+}
+
+/// Fold sequential-residency capability into a fit decision (epic 10765 Phase 1b, sc-10821): a
+/// [`FitDecision::TooBig`] on a provider that supports sequential offload (the candle FLUX lane) becomes
+/// [`FitDecision::Offload`] — load→use→drop each component so peak VRAM is the largest single working
+/// set (≤ resident) rather than reject. Every other outcome (Fits / Unknown / TooBig on a non-capable
+/// provider) is unchanged.
+pub(crate) fn resolve_offload(decision: FitDecision, sequential_capable: bool) -> FitDecision {
+    match decision {
+        FitDecision::TooBig {
+            needed_gb,
+            available_gb,
+        } if sequential_capable => FitDecision::Offload {
+            needed_gb,
+            available_gb,
+        },
+        other => other,
+    }
+}
+
+/// Second-stage gate for an [`FitDecision::Offload`] (epic 10765, sc-10856): sequential residency was
+/// selected because the RESIDENT peak won't fit, on the promise that the sequential working set will.
+/// If the tier's MEASURED sequential peak is known (`sequential_needed_gb` = [`predicted_sequential_peak_gb`])
+/// and STILL exceeds the budget, this returns `Some(needed_gb)` so the caller can reject before load with
+/// an actionable message instead of running into a reactive Metal/CUDA OOM. `None` — the sequential peak
+/// fits, is unmeasured for this tier, or there is no live budget — keeps today's best-effort run.
+pub(crate) fn sequential_overflow_gb(
+    sequential_needed_gb: Option<f64>,
+    budget: Option<VramBudget>,
+) -> Option<f64> {
+    let (needed_gb, budget) = (sequential_needed_gb?, budget?);
+    (budget.free_gb + f64::EPSILON < needed_gb).then_some(needed_gb)
 }
 
 /// Parse a JSON uint/int from either a number or a numeric string (mirrors base.rs `quant_int`).
@@ -274,6 +336,78 @@ mod tests {
         // Missing either input ⇒ never block.
         assert_eq!(fit_decision(None, Some(budget)), FitDecision::Unknown);
         assert_eq!(fit_decision(Some(8.0), None), FitDecision::Unknown);
+    }
+
+    #[test]
+    fn resolve_offload_rewrites_toobig_only_when_sequential_capable() {
+        let budget = VramBudget {
+            free_gb: 10.0,
+            total_gb: 10.0,
+        };
+        let too_big = fit_decision(Some(40.0), Some(budget));
+        assert!(matches!(too_big, FitDecision::TooBig { .. }));
+        // Sequential-capable (the candle FLUX lane) ⇒ Offload instead of reject, carrying the numbers.
+        assert_eq!(
+            resolve_offload(too_big.clone(), true),
+            FitDecision::Offload {
+                needed_gb: 40.0,
+                available_gb: 10.0,
+            }
+        );
+        // Not capable ⇒ unchanged TooBig (still rejects).
+        assert!(matches!(
+            resolve_offload(too_big, false),
+            FitDecision::TooBig { .. }
+        ));
+        // Fits / Unknown are never rewritten, regardless of capability.
+        assert_eq!(resolve_offload(FitDecision::Fits, true), FitDecision::Fits);
+        assert_eq!(
+            resolve_offload(FitDecision::Unknown, true),
+            FitDecision::Unknown
+        );
+    }
+
+    #[test]
+    fn predicted_sequential_peak_reads_the_measured_tier_plus_headroom() {
+        let manifest = obj(json!({
+            "candle": {
+                "vramGbByTier": { "q4": 47.2, "q8": 58.0, "bf16": 72.0 },
+                "sequentialPeakGb": { "q4": 30.0, "q8": 40.0, "bf16": 55.0 }
+            }
+        }));
+        assert_eq!(
+            predicted_sequential_peak_gb(&manifest, "q4"),
+            Some(30.0 + HEADROOM_GB)
+        );
+        assert_eq!(
+            predicted_sequential_peak_gb(&manifest, "bf16"),
+            Some(55.0 + HEADROOM_GB)
+        );
+        // Tier absent from sequentialPeakGb ⇒ None (best-effort run, no reject).
+        let sparse = obj(json!({ "candle": { "sequentialPeakGb": { "q4": 30.0 } } }));
+        assert_eq!(predicted_sequential_peak_gb(&sparse, "q8"), None);
+        // No sequentialPeakGb block ⇒ None (today's behavior: resident-only gate).
+        let resident_only = obj(json!({ "candle": { "vramGbByTier": { "q4": 47.2 } } }));
+        assert_eq!(predicted_sequential_peak_gb(&resident_only, "q4"), None);
+        // No candle block ⇒ None.
+        assert_eq!(predicted_sequential_peak_gb(&obj(json!({})), "q4"), None);
+    }
+
+    #[test]
+    fn sequential_overflow_rejects_only_a_measured_genuine_overflow() {
+        let budget = VramBudget {
+            free_gb: 10.0,
+            total_gb: 10.0,
+        };
+        // Measured sequential peak still exceeds the budget ⇒ reject, carrying the number.
+        assert_eq!(sequential_overflow_gb(Some(32.0), Some(budget)), Some(32.0));
+        // Sequential peak fits ⇒ proceed (None). Exactly-fits is not an overflow.
+        assert_eq!(sequential_overflow_gb(Some(8.0), Some(budget)), None);
+        assert_eq!(sequential_overflow_gb(Some(10.0), Some(budget)), None);
+        // Unmeasured tier ⇒ best-effort run (None), even when the card is tiny.
+        assert_eq!(sequential_overflow_gb(None, Some(budget)), None);
+        // No live budget ⇒ never block (None).
+        assert_eq!(sequential_overflow_gb(Some(32.0), None), None);
     }
 
     /// Live real-hardware validation (sc-10766): exercises the REAL `nvidia-smi` VRAM reading on GPU 0

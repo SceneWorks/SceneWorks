@@ -9,8 +9,8 @@ import {
   loraMatchesModel,
   presetLoraId,
   presetLoras,
+  presetSaveValidation,
   presetValidation,
-  presetValidationMessage,
   workflowModes,
 } from "../presetUtils.js";
 import {
@@ -20,6 +20,8 @@ import {
   samplerOptionsFromModel,
   schedulerOptionsFromModel,
 } from "../samplerOptions.js";
+import { useValidation } from "../validation/useValidation.js";
+import { ValidationSummary } from "../validation/Validation.jsx";
 import { useAppStatic } from "../context/AppContext.js";
 import { qualityChoices } from "../jobTypes.js";
 
@@ -327,20 +329,17 @@ export function PresetManagerScreen() {
   const defaultsOptions = { resolutions: resolutionOptions, durations: durationOptions, fps: fpsOptions };
 
   const validation = presetValidation({ loras: form.loras }, loras, selectedModel);
-  const validationMessage = editable ? presetValidationMessage(validation) : "";
   const valueErrors = defaultValueErrors(form, isVideo, defaultsOptions);
   const dirty = editing && !creating && JSON.stringify(form) !== JSON.stringify(baseline);
 
-  // Two kinds of "can't save" (sc-10500 split). A REQUIREMENT is an unfilled field the
-  // form already marks — repeating it as a warning is noise. An ERROR is a value that is
-  // present but broken, or a state the user can't see; it must say why the CTA is dead.
-  const saveRequirement = !form.name.trim() ? "name" : !form.model ? "model" : "";
-  const saveError = !editable
-    ? "Built-in presets are read-only. Duplicate it to make an editable copy."
-    : valueErrors.length
-      ? valueErrors.join(" ")
-      : validationMessage;
-  const canSave = !saveRequirement && !saveError;
+  // One summary gates Save and carries its reasons, so the disabled state and the messages
+  // cannot drift (epic 10644, sc-10651). This generalizes the local sc-10500 split into the
+  // shared core: name/model stay silent requirements; a read-only built-in, broken default
+  // values (valueErrors, sc-10589), and the preset's own LoRA problems surface as chips.
+  const saveDraft = useMemo(() => ({ editable, name: form.name, model: form.model }), [editable, form.name, form.model]);
+  const saveContext = useMemo(() => ({ validation, valueErrors }), [validation, valueErrors]);
+  const saveValidity = useValidation(presetSaveValidation, saveDraft, saveContext);
+  const canSave = saveValidity.ready;
 
   const hasPendingCompatibleLoras = Boolean(selectedModel) && loras.some((lora) => lora.installState === "missing" && loraMatchesModel(lora, selectedModel));
   const loraEmptyMessage = !selectedModel
@@ -515,7 +514,10 @@ export function PresetManagerScreen() {
   async function savePreset(event) {
     event.preventDefault();
     if (!canSave) {
-      setMessage({ tone: "error", text: saveError || "Name this preset before saving." });
+      // Submit via Enter can reach here past the disabled button. Show the first real
+      // error; when it's only an unfilled field (a silent requirement), main's nudge.
+      const [firstError] = saveValidity.surfaced;
+      setMessage({ tone: "error", text: firstError?.message ?? "Name this preset before saving." });
       return;
     }
     setSaving(true);
@@ -1400,7 +1402,10 @@ export function PresetManagerScreen() {
 
     return (
       <>
-        {saveError ? <p className="inline-warning">{saveError}</p> : null}
+        {/* Surfaced reasons only — read-only built-in, broken defaults, preset-LoRA
+            problems. Name/model are silent requirements. The message banner below is a
+            submission result, left as-is (epic 10644, sc-10651). */}
+        <ValidationSummary issues={saveValidity.surfaced} label="Save errors" />
         {message.text ? (
           <p className={message.tone === "success" ? "inline-success" : "inline-warning"}>{message.text}</p>
         ) : null}

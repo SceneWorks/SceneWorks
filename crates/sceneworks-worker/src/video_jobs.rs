@@ -55,7 +55,7 @@ use crate::image_jobs::{classify_adapter, load_reference_image, lora_path};
 ))]
 use gen_core::{
     AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Generator,
-    LoadSpec, OffloadPolicy, Precision, Progress, Quant, WeightsSource,
+    LoadSpec, Precision, Progress, Quant, WeightsSource,
 };
 // MLX-only contract types (LoRA classification, MoE experts) — the candle video lane uses none of these.
 #[cfg(target_os = "macos")]
@@ -256,6 +256,9 @@ enum CandleVideoRoute {
     WanVaceExtendBridge,
     /// A candle txt2video engine id → `generate_candle_video` (sc-5097).
     CandleVideo,
+    /// An in-place ComfyUI Wan2.2 base model (`external_base_*`) → `generate_candle_wan_comfyui`
+    /// (epic 10451 Phase 2c, sc-10671). Not an `is_candle_video_engine` id — routed off the forwarded row.
+    WanComfyui,
     /// Candle disabled, or no candle engine matched → the procedural stub.
     Stub,
 }
@@ -280,6 +283,10 @@ fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> Ca
         CandleVideoRoute::AnimateScail2(engine_id)
     } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge") {
         CandleVideoRoute::WanVaceExtendBridge
+    } else if wan_comfyui_available(request, settings) {
+        // In-place ComfyUI Wan2.2 base (sc-10671): an `external_base_*` id, so it matches no
+        // `is_candle_video_engine` arm below — route it off the forwarded `modelManifestEntry`.
+        CandleVideoRoute::WanComfyui
     } else if is_candle_video_engine(&request.model) {
         CandleVideoRoute::CandleVideo
     } else {
@@ -658,6 +665,18 @@ pub(crate) async fn run_video_generate_job(
                 let (decoded, adapter, raw_settings) =
                     generate_candle_video(api, settings, job, &request, &project_path, backend)
                         .await?;
+                (decoded, adapter, raw_settings, None::<Value>)
+            }
+            CandleVideoRoute::WanComfyui => {
+                let (decoded, adapter, raw_settings) = generate_candle_wan_comfyui(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    backend,
+                )
+                .await?;
                 (decoded, adapter, raw_settings, None::<Value>)
             }
             CandleVideoRoute::Stub => (
@@ -2931,18 +2950,23 @@ fn wan_quant_bits(request: &VideoRequest) -> Option<i64> {
 
 /// The Wan2.2 quant-matrix tier search order for a request — preferred tier first, then the
 /// always-smaller fallback tiers so a repo missing the preferred subdir still loads (mirrors
-/// [`ltx_bundle_tier_order`]): no explicit pick ⇒ **`q8`** (the app-wide default, epic 10721 /
-/// sc-10726), `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, else an explicit `q4`. The Q8 default is
-/// CLAMPED to installed — the macOS base download ships only the lean `q4/` tier, so a default job
-/// resolves q4 unless the user opted into (and fetched) q8. `bf16` stays OUT of the default order
-/// entirely, so a default job never pulls the huge dense tier by accident (preserved from the old q4
-/// default; a heavy Wan model never OOMs on a tier the user didn't request).
+/// [`ltx_bundle_tier_order`]): `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, an explicit `1..=4` ⇒
+/// `q4`, and — with NO explicit `mlxQuantize` — the **`q4`** default (q4-first).
+///
+/// The video lane deliberately does NOT take epic 10721's app-wide **Q8** default (sc-10726); it keeps
+/// the pre-sc-10726 q4-first default (sc-10859). Rationale: the MLX video lane has no user Q8 lever
+/// (Video Studio's quant control is the GGUF/torch path), so a silent Q8 default gives no UI-accessible
+/// quality benefit and only ever surfaces as an *accidental* default when the Q8 tier landed on disk via
+/// a side lane — where it risks a video-runtime OOM at heavy res/frame counts (the install-fit clamp
+/// doesn't help: the sc-8516 budget is 1024²-image-calibrated). Q8/bf16 stay reachable on an explicit
+/// pick; `bf16` stays OUT of the default order so a default job never pulls the huge dense tier. The
+/// precise "highest tier that fits the video-runtime budget" default is the deferred sc-10733 (S8).
 #[cfg(target_os = "macos")]
 fn wan_tier_order(request: &VideoRequest) -> &'static [&'static str] {
     match wan_quant_bits(request) {
-        None => &["q8", "q4"],
         Some(b) if b <= 0 => &["bf16", "q8", "q4"],
         Some(b) if b >= 8 => &["q8", "q4"],
+        // No explicit pick (`None`) OR an explicit `1..=4` ⇒ q4-first (sc-10859 video carve-out).
         _ => &["q4", "q8"],
     }
 }
@@ -3670,6 +3694,36 @@ fn scail2_adapters_have_lightning(adapters: &[AdapterSpec]) -> bool {
         .any(|a| mlx_gen_scail2::has_diff_patch_keys(&a.path).unwrap_or(false))
 }
 
+/// In-place ComfyUI Wan2.2 A14B experts for the sc-10671 base lane (epic 10451 Phase 2c). When set on a
+/// [`VideoGenInput`], [`generate_video`] builds the two experts from these files (key remap +
+/// scaled-fp8 dequant, `candle_gen_wan::load_from_comfyui_experts`) via the uncached bespoke load path
+/// instead of the registry snapshot. The UMT5 TE + VAE are read in place too when `te_file` / `vae_file`
+/// are set (sc-10909), else they come from `model_dir` (a resident Wan snapshot tier); the tiny
+/// tokenizer always comes from `model_dir`. Read in place, never copied.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Clone)]
+#[cfg_attr(
+    not(all(not(target_os = "macos"), feature = "backend-candle")),
+    allow(dead_code)
+)]
+struct ComfyuiWanExperts {
+    /// The high-noise expert file (ComfyUI `*_high_noise_*`), read in place → candle `transformer/`.
+    high_file: PathBuf,
+    /// The low-noise expert file (ComfyUI `*_low_noise_*`), read in place → candle `transformer_2/`.
+    low_file: PathBuf,
+    /// The UMT5-XXL text encoder (`umt5_xxl_fp8_e4m3fn_scaled`, companion scaled-fp8), read in place
+    /// when present (sc-10909); `None` ⇒ the snapshot `text_encoder/`.
+    te_file: Option<PathBuf>,
+    /// The Wan VAE (`wan_2.1_vae.safetensors`, native WAN-VAE keys), read in place when present
+    /// (sc-10909); `None` ⇒ the snapshot `vae/`.
+    vae_file: Option<PathBuf>,
+    /// I2V (channel-concat) vs T2V — selects the Wan config (`patch_embedding` in-channels differ).
+    i2v: bool,
+}
+
 /// The resolved inputs for one video generation (engine load + request build), shared by
 /// Wan (sc-3034) and LTX (sc-3035) — split out so the engine call is unit-testable on real
 /// weights without the API/job plumbing. The LTX-only knobs (`video_mode` no_audio,
@@ -3725,6 +3779,10 @@ struct VideoGenInput {
     // `$LTX_GEMMA_DIR` env var (the old `set_var` seam was unsound on the multithreaded runtime,
     // F-025). `None` on every other model (they bundle their TE) and when no override resolves.
     text_encoder_dir: Option<PathBuf>,
+    /// In-place ComfyUI Wan MoE experts (epic 10451 Phase 2c, sc-10671). `Some` ⇒ [`generate_video`]
+    /// takes the bespoke uncached load path (`load_from_comfyui_experts`) instead of the registry
+    /// snapshot; `None` on every other job.
+    comfyui: Option<ComfyuiWanExperts>,
 }
 
 #[cfg(any(
@@ -3763,6 +3821,7 @@ impl Default for VideoGenInput {
             conditioning_fps: None,
             softness: None,
             text_encoder_dir: None,
+            comfyui: None,
         }
     }
 }
@@ -3789,11 +3848,8 @@ fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
         // LTX's external Gemma-3 text encoder rides the spec (sc-8827); `None` ⇒ the provider's
         // `$LTX_GEMMA_DIR` / `<root>/text_encoder` fallback.
         text_encoder: input.text_encoder_dir.clone().map(WeightsSource::Dir),
-        // `offload_policy` entered `LoadSpec` in mlx-gen #689 (sc-10821); every builder-constructed
-        // spec defaults it to `Resident`. This is the one raw literal, so set it explicitly to the
-        // same value — video providers keep all components co-resident (today's behavior); sequential
-        // residency is an image-lane (sdxl/z-image) feature (epic 10834).
-        offload_policy: OffloadPolicy::Resident,
+        // Video providers have not wired sequential residency (sc-10821) — stays Resident.
+        offload_policy: Default::default(),
     }
 }
 
@@ -4156,24 +4212,70 @@ async fn generate_video(
         let cancel = cancel.clone();
         let spec = video_load_spec(&input);
         let engine_id = input.engine_id;
-        tokio::spawn(async move {
-            crate::generator_cache::with_cached_generator(
-                engine_id,
-                spec,
-                "video load failed",
-                move |generator| {
-                    let mut on_progress = |progress: Progress| {
-                        // A closed channel means the consumer loop returned early (POST failure /
-                        // 409); trip the engine flag so the denoise bails instead of running unheard
-                        // (sc-8804, F-003 — the swallowed-closed-channel leak).
-                        if tx.blocking_send(progress).is_err() {
-                            cancel.cancel();
-                        }
-                    };
-                    run_loaded_video_generation(generator, input, &cancel, &mut on_progress)
-                },
+        // sc-10671: an in-place ComfyUI Wan MoE takes the bespoke **uncached** load path
+        // (`load_from_comfyui_experts` — two experts read in place + remapped + dequant'd), which frees
+        // any resident cached generator first; every other job takes the registry cached path. On the
+        // non-candle/macOS build `comfyui` is always `None`, so only the cached path is compiled.
+        let comfyui_load = input.comfyui.as_ref().map(|e| {
+            (
+                e.high_file.clone(),
+                e.low_file.clone(),
+                e.te_file.clone(),
+                e.vae_file.clone(),
+                input.model_dir.clone(),
+                e.i2v,
             )
-            .await
+        });
+        tokio::spawn(async move {
+            let run = move |generator: &dyn Generator| {
+                let mut on_progress = |progress: Progress| {
+                    // A closed channel means the consumer loop returned early (POST failure /
+                    // 409); trip the engine flag so the denoise bails instead of running unheard
+                    // (sc-8804, F-003 — the swallowed-closed-channel leak).
+                    if tx.blocking_send(progress).is_err() {
+                        cancel.cancel();
+                    }
+                };
+                run_loaded_video_generation(generator, input, &cancel, &mut on_progress)
+            };
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            let result = match comfyui_load {
+                Some((high, low, te, vae, snapshot, i2v)) => {
+                    crate::generator_cache::with_uncached_generator(
+                        move || {
+                            candle_gen_wan::wan14b::load_from_comfyui_experts(
+                                high, low, te, vae, snapshot, i2v,
+                            )
+                            .map_err(|error| {
+                                crate::classify_engine_error("video load failed", error)
+                            })
+                        },
+                        run,
+                    )
+                    .await
+                }
+                None => {
+                    crate::generator_cache::with_cached_generator(
+                        engine_id,
+                        spec,
+                        "video load failed",
+                        run,
+                    )
+                    .await
+                }
+            };
+            #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+            let result = {
+                let _ = comfyui_load;
+                crate::generator_cache::with_cached_generator(
+                    engine_id,
+                    spec,
+                    "video load failed",
+                    run,
+                )
+                .await
+            };
+            result
         })
     };
 
@@ -5108,6 +5210,224 @@ async fn generate_candle_video(
 }
 
 // ---------------------------------------------------------------------------
+// Candle (Windows/CUDA) in-place ComfyUI Wan2.2 base generation (epic 10451 Phase 2c, sc-10671): the
+// video sibling of the z-image/qwen ComfyUI base image lanes. Reads a user's two ComfyUI Wan A14B
+// expert files in place (native-Wan keys + companion scaled-fp8), remapped + dequant'd off-Mac via
+// `candle_gen_wan::load_from_comfyui_experts`. The UMT5 TE + VAE are read in place too when the tree
+// carries them (sc-10909, folded into `components[]` by the API); the tokenizer (and either component
+// when absent) comes from a resident `SceneWorks/wan2.2-*-candle` snapshot tier. T2V only for now
+// (I2V's channel-concat reference conditioning is a follow-up); the model id is an `external_base_*`
+// catalog row.
+// ---------------------------------------------------------------------------
+
+/// The candle Wan2.2 T2V-A14B engine id the ComfyUI base experts load into.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const WAN_COMFYUI_T2V_ENGINE: &str = "wan2_2_t2v_14b";
+
+/// The engine label recorded on candle ComfyUI Wan assets + telemetry.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const WAN_COMFYUI_CANDLE_ADAPTER: &str = "candle_wan_comfyui";
+
+/// The resident Wan2.2 T2V-A14B snapshot repo supplying the dense UMT5 TE / VAE / tokenizer (the
+/// experts are read from the ComfyUI tree). Any complete tier subdir serves — the TE/VAE stay dense
+/// across tiers; only the transformer (which we don't use here) is quantized.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const WAN_COMFYUI_SNAPSHOT_REPO: &str = "SceneWorks/wan2.2-t2v-a14b-candle";
+
+/// Tier subdirs probed for the dense TE/VAE/tokenizer (first fully-present tree wins).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const WAN_COMFYUI_SNAPSHOT_TIERS: &[&str] = &["q8", "q4", "bf16"];
+
+/// Wan T2V DiT `patch_embedding` in-channels (16 latent). I2V is channel-concat (36) and needs the
+/// reference-conditioning lane, so this slice serves only T2V experts.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const WAN_T2V_IN_CHANNELS: u64 = 16;
+
+/// The two in-place ComfyUI expert files + the resident snapshot tier, plus the optional in-place UMT5
+/// TE / VAE files (sc-10909). The snapshot tier always supplies the tokenizer (and the TE/VAE when their
+/// files are absent).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+struct ComfyuiWanPaths {
+    high: PathBuf,
+    low: PathBuf,
+    /// In-place UMT5 TE (`text_encoder` component), confined; `None` ⇒ snapshot `text_encoder/`.
+    te: Option<PathBuf>,
+    /// In-place Wan VAE (`vae` component), confined; `None` ⇒ snapshot `vae/`.
+    vae: Option<PathBuf>,
+    snapshot_dir: PathBuf,
+}
+
+/// Peek a safetensors header (8-byte length + JSON) and return the `patch_embedding.weight`
+/// in-channels (`shape[1]`) — the T2V(16)/I2V(36) discriminator. `None` on any read/parse miss.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn wan_expert_in_channels(path: &Path) -> Option<u64> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut len = [0u8; 8];
+    file.read_exact(&mut len).ok()?;
+    let header_len = u64::from_le_bytes(len) as usize;
+    // Guard against a corrupt/huge length before allocating (headers are KB-scale).
+    if header_len == 0 || header_len > 64 * 1024 * 1024 {
+        return None;
+    }
+    let mut buf = vec![0u8; header_len];
+    file.read_exact(&mut buf).ok()?;
+    let header: Value = serde_json::from_slice(&buf).ok()?;
+    header
+        .get("patch_embedding.weight")?
+        .get("shape")?
+        .as_array()?
+        .get(1)?
+        .as_u64()
+}
+
+/// Resolve the ComfyUI Wan expert paths + a resident snapshot tier from the forwarded `external_base_*`
+/// row. `Ok(None)` (router falls through) when this is not a runnable ComfyUI Wan T2V job: wrong family,
+/// not usable, missing an expert component, no resident Wan snapshot, or an I2V expert (36-channel — the
+/// reference-conditioning lane is deferred). Each expert path is confined by
+/// `normalize_app_managed_model_path` (the sc-10668-widened external-roots allow-list); the snapshot dir
+/// is a fixed-repo/cache path (never payload-derived), so it needs no confinement.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_wan_comfyui_paths(
+    request: &VideoRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<ComfyuiWanPaths>> {
+    let entry = &request.model_manifest_entry;
+    if entry.get("family").and_then(Value::as_str) != Some("wan-video") {
+        return Ok(None);
+    }
+    if entry.get("usable").and_then(Value::as_bool) != Some(true) {
+        return Ok(None);
+    }
+    let Some(components) = entry.get("components").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    let path_for = |role: &str| -> Option<&str> {
+        components
+            .iter()
+            .find(|component| component.get("role").and_then(Value::as_str) == Some(role))
+            .and_then(|component| component.get("path").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let (Some(high), Some(low)) = (path_for("transformer_high"), path_for("transformer_low"))
+    else {
+        return Ok(None);
+    };
+    let Some(snapshot_root) =
+        huggingface_snapshot_dir(&settings.data_dir, WAN_COMFYUI_SNAPSHOT_REPO)
+    else {
+        return Ok(None);
+    };
+    let Some(snapshot_dir) = WAN_COMFYUI_SNAPSHOT_TIERS
+        .iter()
+        .map(|tier| snapshot_root.join(tier))
+        .find(|dir| {
+            dir.join("text_encoder").is_dir()
+                && dir.join("vae").is_dir()
+                && dir.join("tokenizer").join("tokenizer.json").is_file()
+        })
+    else {
+        return Ok(None);
+    };
+    let high = crate::paths::normalize_app_managed_model_path(
+        settings,
+        high,
+        "ComfyUI Wan high-noise expert",
+    )?;
+    let low = crate::paths::normalize_app_managed_model_path(
+        settings,
+        low,
+        "ComfyUI Wan low-noise expert",
+    )?;
+    // T2V only: an I2V expert (36 in-channels) would load into the wrong config; decline it here (the
+    // channel-concat reference lane is a follow-up) rather than surface a shape error at generate.
+    if wan_expert_in_channels(&high) != Some(WAN_T2V_IN_CHANNELS) {
+        return Ok(None);
+    }
+    // Optional in-place UMT5 TE + Wan VAE (sc-10909): the API folds them into `components[]` as
+    // `text_encoder` / `vae` when the tree carries them; each is confined like the experts. Absent ⇒
+    // `None` ⇒ the resident snapshot tier supplies that component (the row is complete either way).
+    let te = path_for("text_encoder")
+        .map(|te| {
+            crate::paths::normalize_app_managed_model_path(settings, te, "ComfyUI Wan UMT5 encoder")
+        })
+        .transpose()?;
+    let vae = path_for("vae")
+        .map(|vae| crate::paths::normalize_app_managed_model_path(settings, vae, "ComfyUI Wan VAE"))
+        .transpose()?;
+    Ok(Some(ComfyuiWanPaths {
+        high,
+        low,
+        te,
+        vae,
+        snapshot_dir,
+    }))
+}
+
+/// True when this is a candle-runnable in-place ComfyUI Wan2.2 T2V job: an `external_base_*` model whose
+/// forwarded row is a usable wan-video with both expert components + a resident snapshot. Mirrors the
+/// image comfyui availability predicates.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn wan_comfyui_available(request: &VideoRequest, settings: &Settings) -> bool {
+    request.model.starts_with("external_base_")
+        && matches!(resolve_wan_comfyui_paths(request, settings), Ok(Some(_)))
+}
+
+/// Real candle in-place ComfyUI Wan2.2 T2V generation: resolve + confine the two expert paths and the
+/// snapshot tier, then drive the shared [`generate_video`] funnel with `input.comfyui` set (the bespoke
+/// uncached `load_from_comfyui_experts` path). Non-distilled base — native multi-step + per-expert CFG
+/// (guidance `None` ⇒ the engine's per-expert defaults); no Lightning distill (the base lane folds no
+/// adapters).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn generate_candle_wan_comfyui(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    backend: &str,
+) -> WorkerResult<(DecodedVideo, &'static str, Value)> {
+    let _ = project_path;
+    let paths = resolve_wan_comfyui_paths(request, settings)?.ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "ComfyUI Wan components could not be resolved (family/usable/experts/snapshot)"
+                .to_owned(),
+        )
+    })?;
+    let input = VideoGenInput {
+        engine_id: WAN_COMFYUI_T2V_ENGINE,
+        // The snapshot tier supplies the tokenizer (and the metrics `model_dir`, and the UMT5 TE / VAE
+        // when their tree files are absent); the experts — and the TE/VAE when present — are read in
+        // place via `comfyui` below (sc-10909).
+        model_dir: paths.snapshot_dir.clone(),
+        prompt: request.prompt.clone(),
+        negative_prompt: non_empty_negative_prompt(request),
+        width: request.width,
+        height: request.height,
+        frames: wan_frame_count(request.raw_frame_count()),
+        fps: request.fps,
+        // Non-Lightning base: honor a requested step count, else the engine default; per-expert CFG
+        // defaults (guidance `None`). No adapters — the ComfyUI base lane does not fold LoRAs.
+        steps: advanced_opt_u32(request, "steps"),
+        guidance: None,
+        seed: resolve_video_seed(request) as u64,
+        conditioning: Vec::new(),
+        comfyui: Some(ComfyuiWanExperts {
+            high_file: paths.high,
+            low_file: paths.low,
+            te_file: paths.te,
+            vae_file: paths.vae,
+            i2v: false,
+        }),
+        ..VideoGenInput::default()
+    };
+    let raw_settings = candle_video_raw_settings(request, WAN_COMFYUI_SNAPSHOT_REPO);
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
+    Ok((decoded, WAN_COMFYUI_CANDLE_ADAPTER, raw_settings))
+}
+
+// ---------------------------------------------------------------------------
 // Candle (Windows/CUDA) SCAIL-2 generation (sc-6837, epic 6563): the off-Mac sibling of the macOS
 // `generate_scail2` / `generate_scail2_replace` (epic 5439). Same end-to-end shape — a reference
 // character image + a driving video → an animated clip (`animate_character`), or cross-identity
@@ -5948,16 +6268,35 @@ const BERNINI_TIER_FILES: &[&str] = &[
     "mllm/tokenizer.json",
 ];
 
+/// Bernini VIDEO-lane default tier order (no explicit `mlxQuantize`): **q4-first** (sc-10859). The MLX
+/// video lane has no Q8 lever, so a silent Q8 default only risks a video-runtime OOM at heavy
+/// res/frame counts — see [`wan_tier_order`]. Passed by the video generation path.
+#[cfg(target_os = "macos")]
+pub(crate) const BERNINI_VIDEO_DEFAULT_TIER_ORDER: &[&str] = &["q4", "q8"];
+
+/// Bernini IMAGE-lane default tier order (no explicit `mlxQuantize`): **q8-first** — epic 10721 /
+/// sc-10726's app-wide Q8 default, kept for the image lane (Image Studio has a Q8 picker and the
+/// sc-8516 budget's 1024²-image transient is exactly what applies). Passed by `image_jobs::bernini`.
+#[cfg(target_os = "macos")]
+pub(crate) const BERNINI_IMAGE_DEFAULT_TIER_ORDER: &[&str] = &["q8", "q4"];
+
 /// The Bernini quant-matrix tier search order for a request — preferred tier first, then the
 /// always-smaller fallback tiers so a repo missing the preferred subdir still loads (mirrors
-/// [`wan_tier_order`]): no explicit pick ⇒ **`q8`** (the app-wide default, epic 10721 / sc-10726,
-/// clamped to installed — the lean `q4/` base download still resolves q4 until q8 is fetched);
-/// `mlxQuantize <= 0` ⇒ `bf16`; `>= 8` ⇒ `q8`; else an explicit `q4`. `bf16` stays OUT of the default
-/// order, so a default job never pulls the huge dense tier by accident.
+/// [`wan_tier_order`]): `mlxQuantize <= 0` ⇒ `bf16`; `>= 8` ⇒ `q8`; an explicit `q4` ⇒ q4-first; and —
+/// with NO explicit pick — `default_order`. `bf16` stays OUT of the default order, so a default job
+/// never pulls the huge dense tier by accident.
+///
+/// Bernini is SHARED by the video (`bernini`) and image (`bernini_image`) lanes, whose *default* tiers
+/// diverge (sc-10859): the caller passes [`BERNINI_VIDEO_DEFAULT_TIER_ORDER`] (q4-first, video OOM
+/// carve-out) or [`BERNINI_IMAGE_DEFAULT_TIER_ORDER`] (q8-first, epic-10721 app-wide default). Only the
+/// no-explicit-pick (`None`) arm consults it; every explicit pick is lane-independent.
 #[cfg(target_os = "macos")]
-fn bernini_tier_order(bits: Option<i64>) -> &'static [&'static str] {
+fn bernini_tier_order(
+    bits: Option<i64>,
+    default_order: &'static [&'static str],
+) -> &'static [&'static str] {
     match bits {
-        None => &["q8", "q4"],
+        None => default_order,
         Some(b) if b <= 0 => &["bf16", "q8", "q4"],
         Some(b) if b >= 8 => &["q8", "q4"],
         _ => &["q4", "q8"],
@@ -5979,8 +6318,12 @@ fn bernini_tier_is_complete(dir: &Path) -> bool {
 /// repo has no complete tier subdir — a legacy flat snapshot, where the caller keeps the root +
 /// load-time quant.
 #[cfg(target_os = "macos")]
-fn bernini_tier_subdir(root: &Path, bits: Option<i64>) -> Option<PathBuf> {
-    bernini_tier_order(bits)
+fn bernini_tier_subdir(
+    root: &Path,
+    bits: Option<i64>,
+    default_order: &'static [&'static str],
+) -> Option<PathBuf> {
+    bernini_tier_order(bits, default_order)
         .iter()
         .map(|tier| root.join(tier))
         .find(|dir| bernini_tier_is_complete(dir))
@@ -5993,15 +6336,17 @@ fn bernini_tier_subdir(root: &Path, bits: Option<i64>) -> Option<PathBuf> {
 /// `quant = None`: `mlxQuantize` selects WHICH tier, never a load-time requant (the `bf16/` tier is
 /// dense, so `None` ⇒ dense too). A legacy flat snapshot (no tier subdirs) keeps today's behavior: load
 /// the root and quantize at load per `legacy_quant`. Shared by the video + image lanes (each passes its
-/// own parsed `bits` + `legacy_quant`).
+/// own parsed `bits` + `legacy_quant` + `default_order`: [`BERNINI_VIDEO_DEFAULT_TIER_ORDER`] for video,
+/// [`BERNINI_IMAGE_DEFAULT_TIER_ORDER`] for image — the no-explicit-pick default diverges per sc-10859).
 #[cfg(target_os = "macos")]
 pub(crate) fn resolve_bernini_tier_dir_and_quant(
     settings: &Settings,
     bits: Option<i64>,
     legacy_quant: Option<Quant>,
+    default_order: &'static [&'static str],
 ) -> WorkerResult<(PathBuf, Option<Quant>)> {
     let root = resolve_bernini_model_dir(settings)?;
-    match bernini_tier_subdir(&root, bits) {
+    match bernini_tier_subdir(&root, bits, default_order) {
         Some(tier) => Ok((tier, None)),
         None => Ok((root, legacy_quant)),
     }
@@ -6227,8 +6572,13 @@ async fn generate_bernini(
     // legacy flat snapshot keeps load-time quant.
     let bits = bernini_quant_bits(request);
     ensure_bernini_tier_present(api, settings, job, bits).await?;
-    let (model_dir, quant) =
-        resolve_bernini_tier_dir_and_quant(settings, bits, resolve_bernini_quant(request))?;
+    // Video lane: no explicit pick defaults q4-first (sc-10859 OOM carve-out), unlike the image lane.
+    let (model_dir, quant) = resolve_bernini_tier_dir_and_quant(
+        settings,
+        bits,
+        resolve_bernini_quant(request),
+        BERNINI_VIDEO_DEFAULT_TIER_ORDER,
+    )?;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -6352,26 +6702,21 @@ fn scail2_tier_repo(model: &str) -> Option<(&'static str, &'static str)> {
 
 /// The SCAIL-2 quant-matrix tier search order for a request — preferred tier first, then the
 /// always-smaller fallback tiers so a repo missing the preferred subdir still loads (mirrors
-/// [`wan_tier_order`]): no explicit `mlxQuantize` ⇒ **`q8`** (the app-wide default, epic 10721 /
-/// sc-10726, clamped to installed — the lean `q4/` base download still resolves q4 until q8 is
-/// fetched); `<= 0` ⇒ `bf16`; `>= 8` ⇒ `q8`; else an explicit `q4`. `bf16` stays OUT of the default
-/// order, so a default job never pulls the huge dense tier by accident. A raw `mlxQuantize`-presence
-/// check distinguishes the default from an explicit Q4 pick — [`resolve_scail2_quant`] maps BOTH to
-/// `Some(Quant::Q4)`, so it can't tell them apart on its own.
+/// [`wan_tier_order`]): `<= 0` ⇒ `bf16`; `>= 8` ⇒ `q8`; and — with NO explicit `mlxQuantize` OR an
+/// explicit `q4` — the **`q4`** default (q4-first). `bf16` stays OUT of the default order, so a default
+/// job never pulls the huge dense tier by accident.
+///
+/// The video lane keeps the pre-sc-10726 q4-first default (sc-10859), NOT epic 10721's app-wide Q8 —
+/// see [`wan_tier_order`] for the rationale (no MLX video Q8 lever ⇒ a silent Q8 only risks a
+/// video-runtime OOM). This also lets the resolver drop its old `mlxQuantize`-presence check: the
+/// no-explicit-pick default and an explicit `q4` now BOTH resolve q4-first, so [`resolve_scail2_quant`]
+/// mapping both to `Some(Quant::Q4)` is exactly what we want.
 #[cfg(target_os = "macos")]
 fn scail2_tier_order(request: &VideoRequest) -> &'static [&'static str] {
-    // No explicit pick → prefer the clean q8 tier when installed (clamped to q4 otherwise).
-    let has_explicit_quant = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-        .is_some();
-    if !has_explicit_quant {
-        return &["q8", "q4"];
-    }
     match resolve_scail2_quant(request) {
         None => &["bf16", "q8", "q4"],
         Some(Quant::Q8) => &["q8", "q4"],
+        // No explicit pick OR an explicit `q4` ⇒ q4-first (sc-10859 video carve-out).
         _ => &["q4", "q8"],
     }
 }
@@ -6970,21 +7315,21 @@ fn ltx_wants_bf16(request: &VideoRequest) -> bool {
 
 /// The SceneWorks LTX bundle tier search order for a request — preferred tier first, then the
 /// always-smaller fallback tiers so a bundle missing the preferred subdir still loads (sc-8513):
-/// `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, an explicit `1..=4` ⇒ `q4`, else — with NO explicit
-/// `mlxQuantize` — the **`q8`** default (epic 10721 / sc-10726), CLAMPED to installed (the lean `q4/`
-/// bundle download still resolves q4 until q8 is fetched). bf16 stays OUT of the default order, so a
-/// default job never loads the huge dense tier by accident.
+/// `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, and — with an explicit `1..=4` OR NO explicit
+/// `mlxQuantize` — the **`q4`** default (q4-first). bf16 stays OUT of the default order, so a default
+/// job never loads the huge dense tier by accident.
+///
+/// The video lane keeps the pre-sc-10726 q4-first default (sc-10859), NOT epic 10721's app-wide Q8 —
+/// see [`wan_tier_order`] for the rationale (no MLX video Q8 lever ⇒ a silent Q8 only risks a
+/// video-runtime OOM). The no-explicit-pick and explicit-`q4` cases now share one q4-first arm.
 #[cfg(target_os = "macos")]
 fn ltx_bundle_tier_order(request: &VideoRequest) -> &'static [&'static str] {
     if ltx_wants_bf16(request) {
         &["bf16", "q8", "q4"]
     } else if ltx_wants_q8(request) {
         &["q8", "q4"]
-    } else if ltx_quant_bits(request).is_none() {
-        // No explicit pick → the q8 default, clamped to installed (q4-only bundles still resolve q4).
-        &["q8", "q4"]
     } else {
-        // An explicit Q4 pick (`1..=4`) stays q4-first.
+        // No explicit pick OR an explicit `1..=4` ⇒ q4-first (sc-10859 video carve-out).
         &["q4", "q8"]
     }
 }
@@ -11003,10 +11348,11 @@ mod tests {
         // An explicit Q4 pick stays q4-first (never overridden by the q8 default).
         let q4 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
         assert_eq!(wan_tier_order(&q4), &["q4", "q8"]);
-        // sc-10726: an absent knob now prefers the clean q8 tier (clamped to installed — q4-only
-        // installs still resolve q4); bf16 is never in a default job's search path (no OOM by accident).
+        // sc-10859: an absent knob defaults q4-first on the video lane (the sc-10726 app-wide q8 default
+        // is NOT applied to video — no MLX video Q8 lever, so a silent q8 only risks an OOM). bf16 is
+        // never in a default job's search path (no OOM by accident).
         let absent = request(json!({ "projectId": "p" }));
-        assert_eq!(wan_tier_order(&absent), &["q8", "q4"]);
+        assert_eq!(wan_tier_order(&absent), &["q4", "q8"]);
     }
 
     /// [`wan_tier_subdir`] resolves the requested tier, falls back to a smaller COMPLETE
@@ -11029,12 +11375,13 @@ mod tests {
         std::fs::write(root.join("q8").join("config.json"), b"x").unwrap();
         assert_eq!(wan_tier_subdir(&root, &q8_req), Some(root.join("q4")));
 
-        // Completed q8 now wins for a q8 request; a default job also prefers the clean q8 default
-        // (sc-10726) now that q8 is installed, while an explicit q4 pick still resolves q4.
+        // Completed q8 now wins for an explicit q8 request; but a DEFAULT job (no mlxQuantize) resolves
+        // q4-first on the video lane even with q8 installed (sc-10859: the sc-10726 app-wide q8 default
+        // is not applied to video — no MLX video Q8 lever). An explicit q4 pick still resolves q4.
         write_complete_wan_tier(&root, "q8");
         assert_eq!(wan_tier_subdir(&root, &q8_req), Some(root.join("q8")));
         let default_req = request(json!({ "projectId": "p" }));
-        assert_eq!(wan_tier_subdir(&root, &default_req), Some(root.join("q8")));
+        assert_eq!(wan_tier_subdir(&root, &default_req), Some(root.join("q4")));
         let q4_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
         assert_eq!(wan_tier_subdir(&root, &q4_req), Some(root.join("q4")));
 
@@ -11132,17 +11479,38 @@ mod tests {
         make_tier("q4");
         make_tier("q8");
 
-        // Default (no bits) → q8 when installed (sc-10726), clamped to what's on disk.
-        assert_eq!(bernini_tier_subdir(&root, None), Some(root.join("q8")));
-        // An explicit Q4 pick stays q4 (never overridden by the q8 default).
-        assert_eq!(bernini_tier_subdir(&root, Some(4)), Some(root.join("q4")));
+        // No explicit pick: the default is LANE-DEPENDENT (sc-10859), clamped to what's on disk. The
+        // VIDEO lane defaults q4-first (OOM carve-out); the IMAGE lane keeps epic-10721's q8 default.
+        assert_eq!(
+            bernini_tier_subdir(&root, None, BERNINI_VIDEO_DEFAULT_TIER_ORDER),
+            Some(root.join("q4"))
+        );
+        assert_eq!(
+            bernini_tier_subdir(&root, None, BERNINI_IMAGE_DEFAULT_TIER_ORDER),
+            Some(root.join("q8"))
+        );
+        // Explicit picks are lane-independent (`default_order` is consulted ONLY for `None`).
+        // An explicit Q4 pick stays q4 (never overridden by a default).
+        assert_eq!(
+            bernini_tier_subdir(&root, Some(4), BERNINI_IMAGE_DEFAULT_TIER_ORDER),
+            Some(root.join("q4"))
+        );
         // Q8 (bits >= 8) → q8.
-        assert_eq!(bernini_tier_subdir(&root, Some(8)), Some(root.join("q8")));
+        assert_eq!(
+            bernini_tier_subdir(&root, Some(8), BERNINI_VIDEO_DEFAULT_TIER_ORDER),
+            Some(root.join("q8"))
+        );
         // bf16 (bits <= 0) with no bf16 tier falls back to q8 (never silently to a default).
-        assert_eq!(bernini_tier_subdir(&root, Some(0)), Some(root.join("q8")));
+        assert_eq!(
+            bernini_tier_subdir(&root, Some(0), BERNINI_VIDEO_DEFAULT_TIER_ORDER),
+            Some(root.join("q8"))
+        );
         // An incomplete tier (missing the nested planner tokenizer) is not resolved.
         std::fs::remove_file(root.join("q8").join("mllm/tokenizer.json")).unwrap();
-        assert_eq!(bernini_tier_subdir(&root, Some(8)), Some(root.join("q4")));
+        assert_eq!(
+            bernini_tier_subdir(&root, Some(8), BERNINI_VIDEO_DEFAULT_TIER_ORDER),
+            Some(root.join("q4"))
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -11190,14 +11558,14 @@ mod tests {
         assert_eq!(scail2_tier_order(&bf16), &["bf16", "q8", "q4"]);
         let q8 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
         assert_eq!(scail2_tier_order(&q8), &["q8", "q4"]);
-        // An explicit Q4 pick stays q4-first (resolve_scail2_quant maps both this and the default to
-        // Some(Q4), so the tier order tells them apart via raw mlxQuantize presence).
+        // An explicit Q4 pick stays q4-first — the SAME arm as the no-pick default now (sc-10859),
+        // which is exactly why the resolver no longer needs its old raw-mlxQuantize-presence check.
         let q4 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
         assert_eq!(scail2_tier_order(&q4), &["q4", "q8"]);
-        // sc-10726: an absent knob now prefers the clean q8 tier (clamped to installed); bf16 is never
-        // in a default job's search path (no OOM by accident).
+        // sc-10859: an absent knob defaults q4-first on the video lane (NOT the sc-10726 app-wide q8 —
+        // no MLX video Q8 lever); bf16 is never in a default job's search path (no OOM by accident).
         let absent = request(json!({ "projectId": "p" }));
-        assert_eq!(scail2_tier_order(&absent), &["q8", "q4"]);
+        assert_eq!(scail2_tier_order(&absent), &["q4", "q8"]);
     }
 
     /// [`scail2_tier_subdir`] resolves the requested tier, falls back to a smaller COMPLETE tier,
@@ -11220,14 +11588,15 @@ mod tests {
         std::fs::write(root.join("q8").join("config.json"), b"x").unwrap();
         assert_eq!(scail2_tier_subdir(&root, &q8_req), Some(root.join("q4")));
 
-        // Completed q8 now wins for a q8 request; a default job also prefers the clean q8 default
-        // (sc-10726) now that q8 is installed, while an explicit q4 pick still resolves q4.
+        // Completed q8 now wins for an explicit q8 request; but a DEFAULT job (no mlxQuantize) resolves
+        // q4-first on the video lane even with q8 installed (sc-10859: the sc-10726 app-wide q8 default
+        // is not applied to video — no MLX video Q8 lever). An explicit q4 pick still resolves q4.
         write_complete_scail2_tier(&root, "q8");
         assert_eq!(scail2_tier_subdir(&root, &q8_req), Some(root.join("q8")));
         let default_req = request(json!({ "projectId": "p" }));
         assert_eq!(
             scail2_tier_subdir(&root, &default_req),
-            Some(root.join("q8"))
+            Some(root.join("q4"))
         );
         let q4_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
         assert_eq!(scail2_tier_subdir(&root, &q4_req), Some(root.join("q4")));
@@ -12921,9 +13290,9 @@ mod tests {
             ltx_bundle_tier_order(&with(json!({ "mlxQuantize": 8 }))),
             &["q8", "q4"]
         );
-        // sc-10726: a plain request (no mlxQuantize) prefers the clean q8 tier, clamped to installed
-        // (q4-only bundles still resolve q4); bf16 stays out of the default search path.
-        assert_eq!(ltx_bundle_tier_order(&plain), &["q8", "q4"]);
+        // sc-10859: a plain request (no mlxQuantize) defaults q4-first on the video lane (NOT the
+        // sc-10726 app-wide q8 — no MLX video Q8 lever); bf16 stays out of the default search path.
+        assert_eq!(ltx_bundle_tier_order(&plain), &["q4", "q8"]);
         // An explicit Q4 pick stays q4-first.
         assert_eq!(
             ltx_bundle_tier_order(&with(json!({ "mlxQuantize": 4 }))),

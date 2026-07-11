@@ -95,6 +95,8 @@ use api_client::*;
 mod engines;
 mod gpu;
 use gpu::*;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod mlx_fit_gate;
 // CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired
 // into `generate_candle_stream`; gated to the same candle lane as that consumer so the pub(crate)
 // helpers aren't dead code (→ `-D warnings`) in the non-candle / macOS builds.
@@ -392,10 +394,46 @@ mod pose_jobs;
 // A1 lands this registry ahead of its first non-test consumer: the folder-ingest data-prep
 // pipeline (A2, sc-10161) is what resolves + drives a preprocessor over a dataset, and the
 // bring-your-own-dataset adapter (A3, sc-10171) reuses it for annotated-render/convention checks.
-// Until then only `control_kind_label` has a caller (the strict-control driver delegates to it), so
-// allow dead_code module-wide — remove when A2 wires `preprocessor_for` into ingest.
-#[allow(dead_code)]
+// The studio job (B1, sc-10162) is the first real consumer — it renders conditions via this registry
+// (through A2). That caller exists only on the neural-inference builds (macOS / off-Mac candle), so
+// the module is fully wired there; on a candle-disabled off-Mac ("neither") build there is still no
+// consumer of the neural path, so keep the dead_code allowance only for that build.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
 mod control_preprocess;
+// Folder-ingest control-dataset prep (Training Studio A2, sc-10161, epic 10159): the "create your
+// own" GENERATE core — raw target images → render each condition via the A1 `control_preprocess`
+// registry → square-canonical letterbox for alignment → write `(target, control, caption)` triples
+// + `manifest.jsonl` in the layout the Krea control trainer (B2) and the bring-your-own adapter (A3)
+// consume. Cross-platform for the canny path; pose/depth/person-filter resolve through the
+// backend-gated registry/detector. The studio job (B1, sc-10162, `control_training_jobs`) is the
+// first real caller — it renders conditions from an existing dataset then trains. That caller exists
+// only on the neural-inference builds; on a candle-disabled off-Mac ("neither") build nothing drives
+// the pipeline, so keep the dead_code allowance only for that build.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+mod control_dataset_prep;
+// Bring-your-own-dataset ingest adapter (Training Studio A3, sc-10171, epic 10159): the second
+// dataset-input path — map a PROVIDED dataset into the same on-disk layout A2 emits, skipping what
+// the source supplies. Prepared pairs (target + rendered condition) are convention-validated then
+// ingested as-is / normalized / regenerated via the A1 preprocessor; annotated COCO
+// (person_keypoints + captions) renders the OpenPose-18 skeleton from ground-truth keypoints (no
+// detection) — cross-platform. Reuses A2's square letterbox + write/manifest tail. B1 (sc-10162)
+// ships only the render-from-an-existing-dataset source; wiring this bring-your-own path into the
+// studio job (source provisioning + convention-warning surfacing) is a scoped follow-up, so this
+// module keeps its dead_code allowance until that lands.
+#[allow(dead_code)]
+mod control_dataset_byo;
+// ControlNet Training Studio orchestration job (B1, sc-10162, epic 10159): renders the per-image
+// control condition from an existing captioned dataset via `control_preprocess`/`control_dataset_prep`
+// (A1/A2), then trains the control branch through the shared `training_jobs` executor
+// (`krea_control` → `krea_2_control`). Cross-platform module shell with a neural-build-gated real impl
+// + a loud stub, mirroring `training_jobs`.
+mod control_training_jobs;
 // CUDA execution-provider dependency preloading for the off-Mac candle `ort` paths
 // (sc-6209, epic 5482): `ort::ep::cuda::preload_dylibs` dlopens the CUDA-12 runtime +
 // cuDNN-9 DLLs the onnxruntime CUDA EP needs, so it engages the GPU regardless of PATH
@@ -949,7 +987,7 @@ async fn register_worker(
 /// declaring a worker gone. A non-transport error (the API answered and rejected
 /// the heartbeat, e.g. the worker is no longer registered) is a real signal and is
 /// still propagated. (sc-6320)
-async fn heartbeat(
+pub(crate) async fn heartbeat(
     api: &ApiClient,
     settings: &Settings,
     status: WorkerStatus,
@@ -1091,6 +1129,16 @@ async fn run_utility_job(
             JobType::LoraTrain => run_lora_train_job(api, settings, &job)
                 .await
                 .map_err(|error| ("LoRA training failed.", error)),
+            // ControlNet Training Studio (epic 10159, sc-10162): render the per-image control
+            // condition from the plan's dataset (A1/A2), then train the control branch through the
+            // same native executor as LoRA (`krea_control` → `krea_2_control`). Candle-only today; the
+            // routing gate keeps it on a candle worker (or the linked mlx build), the stub fails loudly
+            // elsewhere.
+            JobType::ControlTraining => {
+                control_training_jobs::run_control_training_job(api, settings, http_client, &job)
+                    .await
+                    .map_err(|error| ("ControlNet training failed.", error))
+            }
             // Native MLX JoyCaption dataset captioning (epic 3550, sc-3556). The API
             // routes only `captioner=joy_caption` jobs here; Windows/Linux and
             // explicit non-MLX GPU choices keep the Python torch captioner fallback.

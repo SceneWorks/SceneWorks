@@ -218,6 +218,8 @@ enum CandleImageRoute {
     Flux2Control,
     /// FLUX.1-dev strict-control Shakker Union-Pro-2.0 (sc-8412).
     Flux1Control,
+    /// Krea 2 pose-ControlNet — a trained control-branch overlay on the frozen Turbo base (sc-8464).
+    KreaControl,
     /// A strict-pose job on a candle model with NO pose lane → reject loudly, never silent T2I (sc-5968).
     PoseReject,
     /// An in-place ComfyUI Z-Image base model (`external_base_*`) → `generate_candle_zimage_comfyui_stream`
@@ -226,6 +228,10 @@ enum CandleImageRoute {
     /// An in-place ComfyUI Qwen-Image base model (`external_base_*`) → `generate_candle_qwen_comfyui_stream`
     /// (epic 10451 Phase 2b, sc-10670). Not an `is_candle_engine` id — routed off the forwarded row.
     QwenImageComfyui,
+    /// An in-place ComfyUI FLUX.2-dev fp8-mixed base model (`external_base_*`) →
+    /// `generate_candle_flux2_comfyui_stream` (epic 10451 Phase 2e, sc-10680). Not an `is_candle_engine`
+    /// id — routed off the forwarded row.
+    Flux2Comfyui,
     /// A plain candle txt2img engine id → `generate_candle_stream`.
     CandleTxt2Img,
 }
@@ -276,6 +282,11 @@ fn resolve_candle_image_route(
         Some(CandleImageRoute::Flux2Control)
     } else if flux1_control_candle_available(request, settings) {
         Some(CandleImageRoute::Flux1Control)
+    } else if krea_control_candle_available(request, settings) {
+        // Krea 2 pose-ControlNet (sc-8464): `krea_2_turbo` + `advanced.poses` is the bespoke candle
+        // `Krea2Control` lane, diverted before the registry txt2img arm (which would render it as plain
+        // txt2img and drop the poses). Mirrors `jobs_store::krea_control_candle_eligible`.
+        Some(CandleImageRoute::KreaControl)
     } else if zimage_comfyui_available(request, settings) {
         // In-place ComfyUI Z-Image base (sc-10668): an `external_base_*` id, so it matches no
         // `is_candle_engine` arm below — route it here off the forwarded `modelManifestEntry`.
@@ -284,10 +295,20 @@ fn resolve_candle_image_route(
         // In-place ComfyUI Qwen-Image base (sc-10670): sibling of the Z-Image comfyui lane — an
         // `external_base_*` id routed off the forwarded row (family=="qwen-image", usable).
         Some(CandleImageRoute::QwenImageComfyui)
+    } else if flux2_comfyui_available(request, settings) {
+        // In-place ComfyUI FLUX.2-dev base (sc-10680): sibling of the Qwen-Image comfyui lane — an
+        // `external_base_*` id routed off the forwarded row (family=="flux2", usable).
+        Some(CandleImageRoute::Flux2Comfyui)
     } else if is_candle_engine(&request.model)
         && !matches!(
             request.model.as_str(),
-            "qwen_image" | "kolors" | "z_image_turbo" | "z_image" | "flux2_dev" | "flux_dev"
+            "qwen_image"
+                | "kolors"
+                | "z_image_turbo"
+                | "z_image"
+                | "flux2_dev"
+                | "flux_dev"
+                | "krea_2_turbo"
         )
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
@@ -4047,36 +4068,95 @@ async fn generate_candle_stream(
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
-    // VRAM fit-gate (epic 10765 Phase 0, sc-10766): reject-before-OOM when the selected tier can't fit
-    // the card, and honor `SCENEWORKS_CUDA_VRAM_CAP_GB` to emulate a small card on big hardware. Models
-    // with no measured `candle` VRAM block, and non-NVIDIA hosts, yield `FitDecision::Unknown` → never
-    // block (mirrors the flux2 edit guard's `None` short-circuit). Auto-downtier / CPU-offload is Phase
-    // 1 (sc-10769); today a too-big model is rejected with an actionable message instead of a mid-render
-    // Metal/CUDA OOM.
-    {
+    // VRAM fit-gate (epic 10765, sc-10766 Phase 0 + sc-10821 Phase 1b + sc-10856): when the selected
+    // tier's predicted resident peak won't fit the card, either RUN SEQUENTIALLY (a provider that
+    // supports sequential component residency — the candle FLUX lane, sc-10769 — drops the text encoders
+    // before the DiT so peak = DiT+VAE, not TE+DiT+VAE) or, for a family that has not wired it, reject-
+    // before-OOM with an actionable message. sc-10856 adds a second stage on the sequential path: when
+    // the tier's MEASURED sequential peak (`candle.sequentialPeakGb`) is known and STILL won't fit, reject
+    // instead of running into a reactive OOM. Honors `SCENEWORKS_CUDA_VRAM_CAP_GB` to emulate a small
+    // card. Unmeasured models (no `candle` block) and non-NVIDIA hosts yield `Unknown` → never block.
+    let use_sequential = {
         let budget = crate::vram_gate::apply_vram_cap(
             crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
             crate::vram_gate::cuda_vram_cap_gb(),
         );
-        let tier = crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
+        let tier =
+            crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
         let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
-        if let crate::vram_gate::FitDecision::TooBig {
-            needed_gb,
-            available_gb,
-        } = crate::vram_gate::fit_decision(needed, budget)
-        {
-            return Err(WorkerError::InvalidPayload(format!(
-                "{model} at the {tier} tier needs ~{needed} GB of VRAM (with headroom) but GPU {gpu} \
-                 has ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output resolution, \
-                 or run on a card with more VRAM.",
-                model = request.model,
-                needed = needed_gb.round() as i64,
-                available = available_gb.round() as i64,
-                gpu = settings.gpu_id,
-            )));
+        // The candle FLUX.1 (sc-10769), FLUX.2 txt2img (sc-10868), and Qwen-Image txt2img (sc-10867)
+        // lanes have wired sequential residency (load→encode→drop the text encoder before the DiT);
+        // other families reject-before-OOM. FLUX.2 is the biggest win off-Mac — the 32B `flux2_dev`'s
+        // decoder-LM Mistral TE is multiple GB freed before the DiT loads; Qwen-Image drops the ~8 GB
+        // Qwen2.5-VL encoder before the 20B DiT. The flux2 edit/control and the Qwen edit/pose-control/
+        // ComfyUI lanes are NOT wired (they keep the resident path) and are diverted before this gate by
+        // `resolve_candle_image_route`, so only the plain-txt2img engine ids appear here (and the qwen
+        // provider additionally guards the in-place ComfyUI DiT → falls back to resident).
+        let sequential_capable = matches!(
+            engine_id,
+            "flux1_dev" | "flux1_schnell" | "flux2_dev" | "flux2_klein_9b" | "qwen_image"
+        );
+        match crate::vram_gate::resolve_offload(
+            crate::vram_gate::fit_decision(needed, budget),
+            sequential_capable,
+        ) {
+            crate::vram_gate::FitDecision::Offload {
+                needed_gb,
+                available_gb,
+            } => {
+                // Second-stage gate (sc-10856): sequential residency was selected because the resident
+                // peak won't fit. If this tier's MEASURED sequential peak is known and STILL exceeds the
+                // budget, reject before load instead of running into a reactive OOM. Absent the number
+                // (unmeasured tier) keep the best-effort run — the reactive OOM containment backstops it.
+                let sequential_needed = crate::vram_gate::predicted_sequential_peak_gb(
+                    &request.model_manifest_entry,
+                    tier,
+                );
+                if let Some(seq_gb) =
+                    crate::vram_gate::sequential_overflow_gb(sequential_needed, budget)
+                {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "{model} at the {tier} tier needs ~{seq} GB of VRAM even with sequential \
+                         component residency (loading one component at a time), but GPU {gpu} has \
+                         ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output \
+                         resolution, or run on a card with more VRAM.",
+                        model = request.model,
+                        seq = seq_gb.round() as i64,
+                        available = available_gb.round() as i64,
+                        gpu = settings.gpu_id,
+                    )));
+                }
+                tracing::info!(
+                    model = %request.model,
+                    needed_gb = needed_gb.round() as i64,
+                    available_gb = available_gb.round() as i64,
+                    "candle VRAM fit-gate: resident peak exceeds free VRAM — loading with sequential \
+                     component residency (text encoders dropped before the DiT)"
+                );
+                true
+            }
+            crate::vram_gate::FitDecision::TooBig {
+                needed_gb,
+                available_gb,
+            } => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{model} at the {tier} tier needs ~{needed} GB of VRAM (with headroom) but GPU \
+                     {gpu} has ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output \
+                     resolution, or run on a card with more VRAM.",
+                    model = request.model,
+                    needed = needed_gb.round() as i64,
+                    available = available_gb.round() as i64,
+                    gpu = settings.gpu_id,
+                )));
+            }
+            _ => false,
         }
-    }
+    };
     let mut spec = load_spec(weights_dir, quant, adapters, None);
+    if use_sequential {
+        // Ask the provider (candle FLUX) to load→use→drop each component in phase order (sc-10821).
+        spec = spec.with_offload_policy(gen_core::OffloadPolicy::Sequential);
+    }
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }

@@ -542,7 +542,12 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("z_image_edit", true, false, false, false, false),
     ModelCaps::new("flux_schnell", true, true, false, false, false),
     ModelCaps::new("flux_dev", true, true, false, false, false),
-    ModelCaps::new("qwen_image", true, true, false, false, false),
+    // Base `qwen_image` candle txt2img is a turnkey packed-quant family (sc-8669 wired the q4/q8/bf16
+    // subdirs into `STANDARD_TIER_MODELS`; sc-10969 measured the tiers), so a tier-select `mlxQuantize`
+    // stays on candle — `candle_quant` is set (sc-11020, the routing half previously missed by sc-9983,
+    // which flipped krea/ideogram/boogu but not qwen). No inference LoRA on base qwen off-Mac, so NOT
+    // quant/lora-exempt.
+    ModelCaps::new("qwen_image", true, true, true, false, false),
     // Qwen-Image-Edit ids (sc-3397/3398): MLX edit siblings; candle serves them via the bespoke
     // `qwen_edit_candle_eligible` lane (NOT the txt2img gate), so they are NOT candle-routed txt2img ids.
     ModelCaps::new("qwen_image_edit", true, false, false, false, false),
@@ -619,8 +624,13 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
         false,
     ),
     // Kolors (epic 3090): full surface on the Rust `kolors` engine (SDXL-family U-Net + ChatGLM3);
-    // candle serves txt2img + bespoke IP/pose lanes (sc-5488/sc-5489).
-    ModelCaps::new("kolors", true, true, false, false, false),
+    // candle serves txt2img + bespoke IP/pose lanes (sc-5488/sc-5489). sc-10819 (epic 9083): the candle
+    // `candle-gen-kolors` lane now serves the packed q4/q8 `SceneWorks/kolors-mlx` tiers end-to-end —
+    // packed ChatGLM3 (the four GLM projections) + the vendored packed-detecting SDXL UNet, VAE dense —
+    // and advertises `supported_quants: [Q4, Q8]`. So a quant tier-select stays on candle → `candle_quant`.
+    // NOT `candle_quant_lora`: kolors advertises NO candle inference LoRA (`supports_lora: false`), so a
+    // LoRA still defers to torch. bf16 still resolves to Quant::None (dense), verbatim.
+    ModelCaps::new("kolors", true, true, true, false, false),
     // Microsoft Lens / Lens-Turbo (epic 3164 / sc-5105 MLX; sc-5126 candle): pure T2I family. UNLIKE the
     // other candle families it DOES advertise on-the-fly quant AND LoRA/LoKr, so `candle_quant_lora` is
     // set — the first (and, with SD3.5/Krea, one of the) candle families exempt from the quant/LoRA → torch
@@ -860,8 +870,17 @@ pub(crate) const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
 /// NO torch trainer — it is in BOTH this set and [`MLX_ONLY_TRAINING_KERNELS`] (Rust-only: mlx OR
 /// candle, never torch). The dense Wan 5B + the I2V A14B have no candle trainer yet (sc-5167
 /// follow-ups) and Kolors/LTX none at all — those kernels stay on the Python torch worker off-Mac.
-pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] =
-    &["z_image_lora", "sdxl_lora", "lens_lora", "krea_lora"];
+/// `krea_control` (epic 10159, B2 sc-10163 / B1 sc-10162) is the Krea 2 pose-ControlNet branch trainer
+/// (candle-gen-krea `ControlTrainer`, dispatched under `krea_2_control`); it too has NO torch or MLX
+/// trainer, so — like `krea_lora` — it is also in [`MLX_ONLY_TRAINING_KERNELS`] but NOT
+/// [`MLX_ROUTED_TRAINING_KERNELS`] (the MLX control lane is B5/sc-10177).
+pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
+    "z_image_lora",
+    "sdxl_lora",
+    "lens_lora",
+    "krea_lora",
+    "krea_control",
+];
 
 /// Training kernels with NO **torch** fallback — only a Rust worker can run them, so a torch worker
 /// must refuse the job (leaving it queued for a Rust worker) rather than claim it and fail with "no
@@ -875,8 +894,13 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] =
 /// [`CANDLE_ROUTED_TRAINING_KERNELS`]), while torch is still refused. `sd3_lora` (epic 7841 T3
 /// sc-7884) is MLX-native with no torch trainer and no candle trainer yet (the off-Mac/candle SD3.5
 /// trainer is epic 7982), so — like LTX — only an mlx worker runs it today.
-pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] =
-    &["ltx_mlx_lora", "krea_lora", "sd3_lora", "anima_lora"];
+pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
+    "ltx_mlx_lora",
+    "krea_lora",
+    "sd3_lora",
+    "anima_lora",
+    "krea_control",
+];
 
 #[cfg(test)]
 mod tests {
@@ -1030,7 +1054,9 @@ mod tests {
     ];
 
     // sc-9983: ideogram/boogu join SD3.5 as quant-only candle families (sc-9607 flipped their
-    // `supported_quants` to [Q4, Q8]; no inference LoRA on candle).
+    // `supported_quants` to [Q4, Q8]; no inference LoRA on candle). sc-10819: kolors joins the quant-only
+    // set — the candle `candle-gen-kolors` lane now serves the packed q4/q8 `SceneWorks/kolors-mlx` tiers
+    // (packed ChatGLM3 + vendored SDXL UNet) and advertises [Q4, Q8], but NO candle inference LoRA.
     const EXPECTED_CANDLE_QUANT_MODELS: &[&str] = &[
         "sd3_5_large",
         "sd3_5_large_turbo",
@@ -1040,6 +1066,11 @@ mod tests {
         "boogu_image",
         "boogu_image_turbo",
         "boogu_image_edit",
+        "kolors",
+        // sc-11020: qwen_image's turnkey q4/q8/bf16 packed tiers (sc-8669, measured sc-10969) load on
+        // the candle txt2img lane, so a tier-select stays on candle; no candle inference LoRA on base
+        // qwen. (sc-9983 flipped this for krea/ideogram/boogu but missed qwen.)
+        "qwen_image",
     ];
 
     // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH). sc-10676: Anima is the LoRA-only candle
@@ -1085,11 +1116,21 @@ mod tests {
         "anima_lora",
     ];
 
-    const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] =
-        &["z_image_lora", "sdxl_lora", "lens_lora", "krea_lora"];
+    const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
+        "z_image_lora",
+        "sdxl_lora",
+        "lens_lora",
+        "krea_lora",
+        "krea_control",
+    ];
 
-    const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] =
-        &["ltx_mlx_lora", "krea_lora", "sd3_lora", "anima_lora"];
+    const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
+        "ltx_mlx_lora",
+        "krea_lora",
+        "sd3_lora",
+        "anima_lora",
+        "krea_control",
+    ];
 
     #[test]
     fn routed_model_lists_match_snapshot() {

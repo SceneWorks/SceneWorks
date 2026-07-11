@@ -175,6 +175,14 @@ impl GeneratorCache {
     ) -> WorkerResult<R> {
         if self.entry.as_ref().map_or(true, |entry| entry.key != key) {
             self.entry = None;
+            // Pre-load unified-memory fit-gate + residency selection (epic 10834; sc-10835 Phase 0,
+            // sc-10839 Phase 1): BEFORE gen_core::load allocates, either reject a model that can't fit
+            // this machine's unified memory (a wired overcommit SIGKILLs the worker mid-load rather
+            // than returning a catchable error) OR, for a provider that supports sequential component
+            // residency, select `OffloadPolicy::Sequential` when the resident sum won't fit but the
+            // staged max-single-component will. Cold-load path only (a warm cache hit takes the branch
+            // above and skips it), so an already-resident model is never re-gated.
+            let spec = crate::mlx_fit_gate::apply_residency_policy(spec, &key.engine_id)?;
             let generator = gen_core::load(&key.engine_id, &spec)
                 .map_err(|error| crate::classify_engine_error(&load_error_context, error))?;
             self.entry = Some(GeneratorCacheEntry {
@@ -451,6 +459,57 @@ where
                 Err(WorkerError::Engine(format!(
                     "MLX generation panicked and was contained (the engine likely ran out of \
                      memory; the cached generator was reset): {}",
+                    panic_message(panic.as_ref())
+                )))
+            }
+        };
+        let _ = reply_tx.send(result);
+    });
+    generator_worker()
+        .send(job)
+        .map_err(|_| WorkerError::Engine("MLX generator cache worker stopped".to_owned()))?;
+    reply_rx.await.map_err(|_| {
+        WorkerError::Engine("MLX generator cache worker dropped the job result".to_owned())
+    })?
+}
+
+/// Run `run` against a freshly-loaded, **uncached** generator on the shared cache thread (epic 10451
+/// Phase 2c, sc-10671). Unlike [`with_cached_generator`], the generator is built by the caller-supplied
+/// `load` closure (not `gen_core::load` from a `LoadSpec`) — the path an in-place ComfyUI base takes,
+/// whose weights are per-file and don't fit a registry `(engine_id, spec)` key. Any resident cached
+/// generator is **evicted first** (freeing its VRAM back to the backend pool) so a large fresh load —
+/// e.g. a ~28 GB in-place Wan MoE (two 14B experts) — has room; the fresh generator is dropped when
+/// `run` returns (never cached). Runs on the cache thread, so it keeps that thread's serialization and
+/// panic containment (an engine OOM fails only this job, and evicts).
+///
+/// Candle-only: the sole caller is the in-place ComfyUI Wan base lane (`video_jobs`, candle-gated), so
+/// this is dead code on the MLX / non-candle builds — gated to match the caller.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) async fn with_uncached_generator<R>(
+    load: impl FnOnce() -> WorkerResult<Box<dyn Generator>> + Send + 'static,
+    run: impl FnOnce(&dyn Generator) -> WorkerResult<R> + Send + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
+    let (reply_tx, reply_rx) = oneshot::channel::<WorkerResult<R>>();
+    let job = Box::new(move |cache: &mut GeneratorCache| {
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Free the resident cached generator (if any) before loading the fresh one, so the pool has
+            // room for the large in-place weights. On CUDA `release_backend_cache_after_evict` is a
+            // no-op (cudarc has no empty_cache); the drop returns the tensors' allocation to the pool.
+            if cache.evict().is_some() {
+                release_backend_cache_after_evict();
+            }
+            let generator = load()?;
+            run(generator.as_ref())
+        })) {
+            Ok(result) => result,
+            Err(panic) => {
+                // Post-panic backend state is suspect; the resident (already-evicted) cache stays empty.
+                release_backend_cache_after_evict();
+                Err(WorkerError::Engine(format!(
+                    "generation panicked and was contained (the engine likely ran out of memory): {}",
                     panic_message(panic.as_ref())
                 )))
             }

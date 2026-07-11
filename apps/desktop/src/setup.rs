@@ -1480,6 +1480,102 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
     true
 }
 
+/// True while any `sceneworks-api` sidecar image is still running. The auto-update
+/// install gate polls this so the NSIS installer only overwrites `sceneworks-api.exe`
+/// once every sidecar has released its lock on the binary — the API, the candle `auto`
+/// worker supervisor, and its per-GPU + CPU children are all this same image.
+#[cfg(windows)]
+fn api_sidecar_running() -> bool {
+    use std::os::windows::process::CommandExt;
+    // CREATE_NO_WINDOW: this is polled in a tight loop during the update, so keep a
+    // console window from flashing on every probe.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let Ok(output) = std::process::Command::new("tasklist")
+        .args([
+            "/FI",
+            "IMAGENAME eq sceneworks-api.exe",
+            "/FO",
+            "CSV",
+            "/NH",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    else {
+        // If the probe itself fails, don't spin — treat the binary as clear and let the
+        // installer's own retry/abort dialog handle any lingering lock.
+        return false;
+    };
+    String::from_utf8_lossy(&output.stdout).contains("sceneworks-api")
+}
+
+/// Non-Windows replaces a running executable in place (the swap unlinks the old inode,
+/// which the live process keeps using), so an update never waits on the binary being
+/// unlocked — the wait loop that calls this exits immediately.
+#[cfg(not(windows))]
+fn api_sidecar_running() -> bool {
+    false
+}
+
+/// Stop the API + GPU-worker sidecars for an in-place auto-update and BLOCK until the
+/// `sceneworks-api` binary is no longer running, so the installer can overwrite it
+/// (sc-11015).
+///
+/// The Windows update path is why this exists: `tauri-plugin-updater`'s NSIS `/UPDATE`
+/// terminates only the main app binary (`SceneWorks.exe`), not the `sceneworks-api.exe`
+/// sidecars this shell spawned — the API, the candle `auto` worker supervisor, and its
+/// per-GPU + CPU children. Any of them still holding the binary open makes NSIS abort
+/// with "Error opening file for writing: …\sceneworks-api.exe". We tear them down and
+/// wait for the lock to release before handing off to the installer.
+///
+/// Unlike [`begin_shutdown`] this does NOT exit the app — the shell must stay alive to
+/// launch the installer (which relaunches into the new build on Windows, or which the
+/// caller follows with `restart()` off Windows). Latches `shutting_down` so the worker
+/// supervisors stop respawning and a sidecar exit doesn't surface the "API stopped
+/// unexpectedly" error dialog mid-update.
+pub fn stop_sidecars_for_update(app: &AppHandle) {
+    let managed = app.state::<Managed>();
+    managed.shutting_down.store(true, Ordering::SeqCst);
+
+    let mlx_worker = managed.mlx_worker.lock().expect("mlx worker lock").take();
+    let candle_worker = managed
+        .candle_worker
+        .lock()
+        .expect("candle worker lock")
+        .take();
+    let api_child = managed.api.lock().expect("api lock").take();
+
+    // Tree-kill the candle `auto` supervisor so its per-GPU + CPU grandchildren die
+    // with it (each is a `sceneworks-api.exe` holding the binary open);
+    // CommandChild::kill() reaps only the supervisor and orphans them — the same reason
+    // `begin_shutdown` tree-kills it.
+    if let Some(child) = candle_worker {
+        #[cfg(windows)]
+        kill_pid(child.pid());
+        #[cfg(not(windows))]
+        let _ = child.kill();
+    }
+    if let Some(child) = mlx_worker {
+        let _ = child.kill();
+    }
+    if let Some(child) = api_child {
+        let _ = child.kill();
+    }
+
+    // These PIDs are being terminated on purpose; drop the pidfile so the next launch
+    // doesn't try to reap them (or a since-recycled PID).
+    let _ = std::fs::remove_file(sidecar_pidfile());
+
+    // Wait for the OS to report no `sceneworks-api.exe` still running, so its file
+    // handle is released before the installer overwrites it. Bounded, so a wedged
+    // process can't hang the update forever — past the deadline the installer's own
+    // retry/abort dialog takes over. Returns immediately off Windows (no lock to wait
+    // on).
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while api_sidecar_running() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// Minimum NVIDIA display driver for the bundled CUDA 12.9 runtime (sc-3676 /
 /// sc-5560): the floor that supports it and forward-JITs the compute_80 PTX.
 #[cfg(target_os = "windows")]

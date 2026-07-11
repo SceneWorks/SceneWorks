@@ -35,7 +35,7 @@ services:
       - "${SCENEWORKS_API_PUBLISH_HOST:-127.0.0.1}:${SCENEWORKS_API_PORT:-8010}:${SCENEWORKS_API_PORT:-8010}"
     volumes:
       - ${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data
-      - ${SCENEWORKS_HF_CACHE_BIND:-${USERPROFILE:-$HOME}/.cache/huggingface}:/sceneworks/data/cache/huggingface
+      - ${SCENEWORKS_HF_CACHE_BIND:-${HF_HOME:-${USERPROFILE:-$HOME}/.cache/huggingface}}:/sceneworks/data/cache/huggingface
       - ${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS \"http://127.0.0.1:$${SCENEWORKS_API_PORT:-8010}/api/v1/health\" >/dev/null"]
@@ -82,7 +82,7 @@ services:
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
     volumes:
       - ${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data
-      - ${SCENEWORKS_HF_CACHE_BIND:-${USERPROFILE:-$HOME}/.cache/huggingface}:/sceneworks/data/cache/huggingface
+      - ${SCENEWORKS_HF_CACHE_BIND:-${HF_HOME:-${USERPROFILE:-$HOME}/.cache/huggingface}}:/sceneworks/data/cache/huggingface
       - ${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config
     depends_on:
       api:
@@ -128,7 +128,7 @@ services:
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
     volumes:
       - ${SCENEWORKS_DATA_BIND:-./data}:/sceneworks/data
-      - ${SCENEWORKS_HF_CACHE_BIND:-${USERPROFILE:-$HOME}/.cache/huggingface}:/sceneworks/data/cache/huggingface
+      - ${SCENEWORKS_HF_CACHE_BIND:-${HF_HOME:-${USERPROFILE:-$HOME}/.cache/huggingface}}:/sceneworks/data/cache/huggingface
       - ${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config
     depends_on:
       api:

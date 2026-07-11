@@ -1098,6 +1098,21 @@ pub(crate) async fn create_training_job(
         .ok_or_else(|| {
             ApiError::bad_request(format!("Unknown training target: {}", payload.target_id))
         })?;
+    // ControlNet training (epic 10159) reuses this submit path — same target registry, dataset
+    // resolution, plan build, and output/guardrail plumbing — but produces a control branch, not a
+    // LoRA. A `ControlBranch` target enqueues the orchestrated `control_training` job (render the
+    // per-image condition, then train) instead of `lora_train`. It has no dry-run mode (the worker
+    // always renders + trains), so a dry-run request is rejected rather than silently producing
+    // nothing.
+    let is_control = matches!(
+        target.output_kind,
+        sceneworks_core::training::TrainingOutputKind::ControlBranch
+    );
+    if is_control && payload.dry_run {
+        return Err(ApiError::bad_request(
+            "ControlNet training runs the full render + train pipeline and does not support a dry run; submit with dryRun=false.",
+        ));
+    }
     let preset_metadata = match payload.preset_id.as_deref() {
         Some(preset_id) => {
             let preset_registry = builtin_training_presets();
@@ -1216,10 +1231,31 @@ pub(crate) async fn create_training_job(
     // recomputed from the same trusted inputs at registration time
     // (`register_trained_lora`), never read back from the job payload.
     let output_scope = training_output_scope(&payload.config.advanced)?;
-    let (output_dir, _manifest_path) =
-        resolve_training_output_location(&state, &output_scope, Some(&project_id), &lora_id)
-            .await?;
-    let source_relpath = format!("loras/{lora_id}");
+    // A control overlay is a distinct artifact class (registered into its own store + manifest, applied at
+    // inference on a frozen base via a strict-control lane, not a mergeable adapter), so its output +
+    // source path go to `control-overlays/`, never the LoRA tree (sc-10165, epic 10159 B4).
+    let (output_dir, _manifest_path) = if is_control {
+        resolve_control_overlay_output_location(&state, &output_scope, Some(&project_id), &lora_id)
+            .await?
+    } else {
+        resolve_training_output_location(&state, &output_scope, Some(&project_id), &lora_id).await?
+    };
+    let source_relpath = if is_control {
+        format!("control-overlays/{lora_id}")
+    } else {
+        format!("loras/{lora_id}")
+    };
+    // Capture the control kind before `payload.config` is moved into `build_training_plan` below; used
+    // only when shaping the control-overlay manifest entry (sc-10165, B4).
+    let control_type = payload
+        .config
+        .advanced
+        .get("controlType")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("pose")
+        .to_ascii_lowercase();
 
     // Operational guardrails (story 1419): fail fast with actionable errors for
     // the common setup problems, before a job is queued.
@@ -1319,6 +1355,45 @@ pub(crate) async fn create_training_job(
         provenance.retain(|_, value| !value.is_null());
     }
 
+    // A control overlay registers as a ControlNet, not a LoRA (sc-10165, B4): swap the LoRA-shaped
+    // descriptive fields (networkType/triggerWords/family) for its inference-side control identity — the
+    // control kind, the STRICT_CONTROL_ENGINES engine id, and the frozen base the overlay applies on at
+    // generation (krea_2 trains against krea_2_raw but applies on krea_2_turbo). `register_completed_\
+    // control_overlay` writes this into the control-overlay manifest; the security-sensitive id/scope/
+    // source are recomputed from trusted inputs there, so this stays purely descriptive.
+    if is_control {
+        let (control_engine, inference_base) = control_overlay_inference_identity(&target.family)
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "Control training target '{}' (family '{}') has no control-inference lane to apply the overlay on",
+                    target.id, target.family
+                ))
+            })?;
+        if let Some(entry) = manifest_entry.as_object_mut() {
+            entry.remove("networkType");
+            entry.remove("triggerWords");
+            entry.remove("family");
+            entry.insert("backbone".to_owned(), Value::String(target.family.clone()));
+            entry.insert(
+                "controlType".to_owned(),
+                Value::String(control_type.clone()),
+            );
+            entry.insert(
+                "controlEngine".to_owned(),
+                Value::String(control_engine.to_owned()),
+            );
+            entry.insert(
+                "kind".to_owned(),
+                Value::String(format!("{control_type}_control_branch")),
+            );
+            // Override the training base (krea_2_raw) with the inference base the overlay is used on.
+            entry.insert(
+                "baseModel".to_owned(),
+                Value::String(inference_base.to_owned()),
+            );
+        }
+    }
+
     let plan_value =
         serde_json::to_value(&plan).map_err(|error| ApiError::internal(error.to_string()))?;
 
@@ -1343,7 +1418,11 @@ pub(crate) async fn create_training_job(
         store.create_job_with_id(
             job_id,
             CreateJob {
-                job_type: JobType::LoraTrain,
+                job_type: if is_control {
+                    JobType::ControlTraining
+                } else {
+                    JobType::LoraTrain
+                },
                 project_id: Some(project_id),
                 project_name: Some(project_name),
                 payload: job_payload,
@@ -1550,6 +1629,63 @@ pub(crate) async fn resolve_training_output_location(
         other => Err(ApiError::bad_request(format!(
             "Unsupported training outputScope: {other}. Use project or global."
         ))),
+    }
+}
+
+/// The control-overlay analog of [`resolve_training_output_location`] (sc-10165, epic 10159 B4). A
+/// registered ControlNet overlay is a distinct artifact class from a LoRA — it applies at inference on a
+/// frozen base via a strict-control lane, not as a mergeable adapter — so it gets its own store + manifest
+/// (`control-overlays/` + `control_overlays.jsonc`), never the LoRA tree. Same trusted-input recomputation
+/// discipline: the id is validated to a safe path component before it can name a dir/manifest. Returns
+/// `(output_dir, manifest_path)`.
+pub(crate) async fn resolve_control_overlay_output_location(
+    state: &AppState,
+    scope: &str,
+    project_id: Option<&str>,
+    overlay_id: &str,
+) -> Result<(PathBuf, PathBuf), ApiError> {
+    match scope {
+        "project" => {
+            let project_id = project_id.ok_or_else(|| {
+                ApiError::bad_request("Project-scoped training requires a project id")
+            })?;
+            let overlays_dir = project_path_for_id(state.clone(), project_id)
+                .await?
+                .join("control-overlays");
+            Ok((
+                overlays_dir.join(overlay_id),
+                overlays_dir.join("manifest.jsonc"),
+            ))
+        }
+        "global" => {
+            let overlays_dir = state.settings.data_dir.join("control-overlays");
+            Ok((
+                overlays_dir.join(overlay_id),
+                state
+                    .settings
+                    .config_dir
+                    .join("manifests")
+                    .join("user.control_overlays.jsonc"),
+            ))
+        }
+        other => Err(ApiError::bad_request(format!(
+            "Unsupported training outputScope: {other}. Use project or global."
+        ))),
+    }
+}
+
+/// Maps a control training target's family to its inference-side control identity (sc-10165, B4): the
+/// [`STRICT_CONTROL_ENGINES`](../../../crates/sceneworks-worker) engine id + the frozen base model the
+/// trained overlay applies on at generation time. The inference base is DISTINCT from the training base —
+/// e.g. `krea_2` trains against `krea_2_raw` but the overlay applies on `krea_2_turbo` (the deployed base
+/// the control branch was frozen against; the trainer records the same in its overlay meta). Returns
+/// `None` for a family with no candle control-inference lane (a control overlay nothing can run).
+pub(crate) fn control_overlay_inference_identity(
+    family: &str,
+) -> Option<(&'static str, &'static str)> {
+    match family {
+        "krea_2" => Some(("krea_2_turbo_control", "krea_2_turbo")),
+        _ => None,
     }
 }
 

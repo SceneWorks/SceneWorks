@@ -220,6 +220,14 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if model == "flux2_dev" && flux2_dev_control_candle_eligible(&job.payload) {
         return true;
     }
+    // Krea 2 pose-ControlNet (sc-8464, epic 8459): `krea_2_turbo` + `advanced.poses` is the bespoke candle
+    // `Krea2Control` lane (`generate_candle_krea_control_stream`), NOT txt2img — `krea_2_turbo` is a
+    // registered candle txt2img id, so without diverting first a pose job would render as plain txt2img and
+    // drop the poses. Branch it out before the registry txt2img gate (mirrors the qwen/flux2-control
+    // reasoning, for the first Krea backbone). Mirrors the worker's `krea_control_candle_available`.
+    if model == "krea_2_turbo" && krea_control_candle_eligible(&job.payload) {
+        return true;
+    }
     // PuLID-FLUX face identity (sc-5492, epic 5480): `pulid_flux_dev` is a distinct model id (not a
     // candle txt2img id), so the `image_request_candle_eligible` gate below would reject it; the candle
     // `candle-gen-pulid` provider serves it via a bespoke `generate_candle_pulid_stream` lane (the
@@ -266,8 +274,9 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
     }
     // Lens / Lens-Turbo and Krea 2 Turbo advertise Q4/Q8 + LoRA/LoKr, so a quant request OR a LoRA stays
     // on the candle lane for them (Krea gained Q4/Q8 in sc-9607, joining Lens in the both-set — sc-9983).
-    // SD3.5 (sc-7880) and the Ideogram/Boogu packed families (sc-9607) advertise Q4/Q8 but NOT inference
-    // LoRA (quant stays, LoRA defers). Every other candle family advertises neither and defers both. The
+    // SD3.5 (sc-7880), the Ideogram/Boogu packed families (sc-9607), and Qwen-Image (sc-11020, its
+    // turnkey q4/q8/bf16 tiers) advertise Q4/Q8 but NOT inference LoRA (quant stays, LoRA defers). Every
+    // other candle family advertises neither and defers both. The
     // two capabilities are decoupled: `supports_lora` and `supports_quant` each consult the both-set plus
     // their own list.
     let supports_lora =
@@ -296,8 +305,9 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
     // On-the-fly quantization (`advanced.mlxQuantize` > 0) → torch UNLESS the family advertises quant.
     // The sc-3675/sc-5096 candle providers advertise `supported_quants: &[]` (dense bf16/fp16 only), so
     // an explicit quant request can't be honored — route to Python rather than silently running dense
-    // (sc-5099). Lens (sc-5126), SD3.5 (sc-7880), Krea (sc-9607/sc-9983), and the Ideogram/Boogu packed
-    // families (sc-9607) advertise Q4/Q8, so their quant requests stay on candle. For the packed families
+    // (sc-5099). Lens (sc-5126), SD3.5 (sc-7880), Krea (sc-9607/sc-9983), the Ideogram/Boogu packed
+    // families (sc-9607), and Qwen-Image (sc-11020) advertise Q4/Q8, so their quant requests stay on
+    // candle. For the packed families
     // the `mlxQuantize` value is a turnkey tier-SELECT (which pre-quantized q4/q8 subdir to load), a no-op
     // on the loader rather than a runtime quantize — but the gate is the same: quant-capable → stay.
     if !supports_quant && candle_request_wants_quant(payload) {
@@ -912,6 +922,24 @@ pub(crate) fn flux2_dev_control_candle_eligible(payload: &Map<String, Value>) ->
         .is_some_and(|poses| !poses.is_empty())
 }
 
+/// Krea 2 pose-ControlNet candle-routing conditions (sc-8464, epic 8459). The candle `Krea2Control`
+/// provider serves `krea_2_turbo` + a non-empty `advanced.poses` (one image per pose, each conditioned on
+/// a DWPose skeleton via a trained control-branch overlay on the frozen Turbo base), NOT an `edit_image`.
+/// Same shape as the qwen/kolors/zimage/flux control gates — the model gate (`krea_2_turbo`) is applied at
+/// the call site. Mirrors the worker's `krea_control_candle_available`. Candle-only (there is no MLX Krea
+/// control twin yet — 8459 S5 / sc-8465).
+pub(crate) fn krea_control_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty())
+}
+
 /// Candle-routed image models that HAVE a candle strict-control lane (sc-5489; flux2_dev sc-7736; base
 /// z_image + flux_dev sc-8379 / sc-8412). A `advanced.poses` job on any OTHER candle-routed model has no
 /// pose path on candle (plain-SDXL pose ships via InstantID, `instantid_realvisxl`, not `sdxl`).
@@ -982,7 +1010,10 @@ pub(crate) fn worker_is_candle(worker: &WorkerSnapshot) -> bool {
 /// LoKr-on-Wan exclusion here. The resolved plan is stamped into the payload at submit (apps/rust-api
 /// training.rs), so the kernel + base model are readable without touching the dataset or weights.
 pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
-    if !matches!(job.job_type, JobType::LoraTrain) {
+    // The ControlNet studio job (epic 10159) trains through the SAME native executor keyed on the
+    // resolved plan's kernel (`krea_control` ∈ [`CANDLE_ROUTED_TRAINING_KERNELS`]), so it is
+    // candle-eligible on the same terms as a `lora_train` run.
+    if !matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining) {
         return false;
     }
     let Some(plan) = job.payload.get("plan").and_then(Value::as_object) else {

@@ -778,6 +778,22 @@ pub(crate) async fn run_image_generate_job(
                     )
                     .await?;
                 }
+                // In-place ComfyUI FLUX.2-dev fp8-mixed base (sc-10680, epic 10451): an `external_base_*`
+                // id whose forwarded row carries the DiT component path — render the user's ComfyUI
+                // weights in place via `candle_gen_flux2::load_from_comfyui_dit` (inline-scale fp8 dequant
+                // + BFL→diffusers remap; TE/VAE/tokenizer from a resident FLUX.2-dev snapshot).
+                CandleImageRoute::Flux2Comfyui => {
+                    generate_candle_flux2_comfyui_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
                 // Z-Image identity-init for Image Studio "With Character" (sc-8409, epic 4406) — the
                 // off-Mac sibling of the macOS generic lane's Z-Image identity img2img; reuses the candle
                 // ZImageEdit engine with the identity `referenceAssetId` as the source-latent init + wires
@@ -917,6 +933,21 @@ pub(crate) async fn run_image_generate_job(
                     )
                     .await?;
                 }
+                // Krea 2 pose-ControlNet (sc-8464, epic 8459) — `krea_2_turbo` + `advanced.poses` is the
+                // bespoke candle Krea2Control lane (a trained control-branch overlay on the frozen Turbo
+                // base), diverted before the registry txt2img arm.
+                CandleImageRoute::KreaControl => {
+                    generate_candle_krea_control_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
                 // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane (e.g.
                 // sdxl) must be REJECTED with a clear error, not silently rendered as plain txt2img (poses
                 // dropped) and not bounced to torch. The candle worker CLAIMS these (jobs_store
@@ -927,8 +958,8 @@ pub(crate) async fn run_image_generate_job(
                     return Err(WorkerError::InvalidPayload(format!(
                         "strict pose (advanced.poses) is not supported for model '{}' on the candle backend — \
                          refusing rather than silently generating an unconditioned image (wired candle pose \
-                         families: qwen_image, kolors, z_image_turbo, z_image, flux2_dev, flux_dev; SDXL \
-                         identity-pose runs via InstantID)",
+                         families: qwen_image, kolors, z_image_turbo, z_image, flux2_dev, flux_dev, \
+                         krea_2_turbo; SDXL identity-pose runs via InstantID)",
                         request.model
                     )));
                 }
@@ -1768,6 +1799,11 @@ include!("image_jobs/flux2_control_candle.rs");
 // bf16 dev DiT).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 include!("image_jobs/flux1_control_candle.rs");
+// Krea 2 pose-ControlNet (strict pose) — the Windows/CUDA candle lane ONLY (sc-8464, epic 8459). There is
+// no MLX Krea control twin yet (8459 S5 / sc-8465); the candle `Krea2Control` loads a trained
+// control-branch overlay on the frozen dense bf16 Turbo base.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+include!("image_jobs/krea_control_candle.rs");
 // Z-Image img2img / edit — the Windows/CUDA candle lane ONLY (sc-6595). macOS keeps the MLX
 // `z_image_turbo` registry generator's `Conditioning::Reference` img2img path; the candle `ZImageEdit`
 // is a bespoke provider.
@@ -1782,6 +1818,12 @@ include!("image_jobs/zimage_comfyui_candle.rs");
 // from a resident `SceneWorks/qwen-image-mlx` snapshot tier.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 include!("image_jobs/qwen_comfyui_candle.rs");
+// FLUX.2-dev txt2img from an in-place ComfyUI fp8-mixed DiT (inline-scale fp8 dequant → f32, then
+// quantized onto the GPU) — the Windows/CUDA candle lane ONLY (sc-10680, epic 10451 Phase 2e). Sibling
+// of the Qwen-Image comfyui lane; the Mistral-3 TE / VAE / tokenizer come from a resident FLUX.2-dev
+// snapshot tier.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+include!("image_jobs/flux2_comfyui_candle.rs");
 // Z-Image identity-init for Image Studio "With Character" — the Windows/CUDA candle lane ONLY (sc-8409,
 // epic 4406). macOS keeps the MLX `z_image_turbo` generic-lane identity img2img (`generate_stream` ⇒
 // `resolve_zimage_identity_init`); off-Mac this bespoke lane reuses the candle `ZImageEdit` engine with

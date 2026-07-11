@@ -347,6 +347,79 @@ async fn generate_candle_qwen_edit_stream(
     let total = work.len();
     let negative = request.negative_prompt.clone();
 
+    // VRAM fit-gate for the Qwen-Image-Edit lane (epic 10765 Phase 1c follow-up, sc-10968) — the edit
+    // sibling of the txt2img gate (base.rs `generate_candle_stream`). The edit lane routes through THIS
+    // function, not `generate_candle_stream`, so it needs its own gate: when the selected tier's predicted
+    // resident peak won't fit the card, load with sequential component residency (`QwenEdit` loads the
+    // VL encoder + VAE encoder → encodes + VAE-encodes the references → DROPS them before the DiT loads)
+    // instead of OOMing; and if even the MEASURED sequential peak won't fit, reject-before-OOM. The edit
+    // lane IS sequential-capable (sc-10968 wired `QwenEdit::generate_sequential`). Inert (Unknown →
+    // resident) until the edit manifest tiers carry a `candle` block with measured peaks (the sc-10969 /
+    // sc-10920 measure sibling for edit) — mirroring flux2 / qwen txt2img before their measure stories.
+    let use_sequential = {
+        let budget = crate::vram_gate::apply_vram_cap(
+            crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+            crate::vram_gate::cuda_vram_cap_gb(),
+        );
+        let tier =
+            crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
+        let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
+        match crate::vram_gate::resolve_offload(
+            crate::vram_gate::fit_decision(needed, budget),
+            /* sequential_capable */ true,
+        ) {
+            crate::vram_gate::FitDecision::Offload {
+                needed_gb,
+                available_gb,
+            } => {
+                // Second-stage gate (sc-10856): if this tier's MEASURED sequential peak is known and STILL
+                // exceeds the budget, reject before load instead of a reactive OOM. Absent the number
+                // (unmeasured edit tier) keep the best-effort sequential run.
+                let sequential_needed = crate::vram_gate::predicted_sequential_peak_gb(
+                    &request.model_manifest_entry,
+                    tier,
+                );
+                if let Some(seq_gb) =
+                    crate::vram_gate::sequential_overflow_gb(sequential_needed, budget)
+                {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "{model} at the {tier} tier needs ~{seq} GB of VRAM even with sequential \
+                         component residency (loading one component at a time), but GPU {gpu} has \
+                         ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output \
+                         resolution, or run on a card with more VRAM.",
+                        model = request.model,
+                        seq = seq_gb.round() as i64,
+                        available = available_gb.round() as i64,
+                        gpu = settings.gpu_id,
+                    )));
+                }
+                tracing::info!(
+                    model = %request.model,
+                    needed_gb = needed_gb.round() as i64,
+                    available_gb = available_gb.round() as i64,
+                    "candle Qwen-Edit VRAM fit-gate: resident peak exceeds free VRAM — loading with \
+                     sequential component residency (VL encoder dropped before the DiT)"
+                );
+                true
+            }
+            crate::vram_gate::FitDecision::TooBig {
+                needed_gb,
+                available_gb,
+            } => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{model} at the {tier} tier needs ~{needed} GB of VRAM (with headroom) but GPU \
+                     {gpu} has ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output \
+                     resolution, or run on a card with more VRAM.",
+                    model = request.model,
+                    needed = needed_gb.round() as i64,
+                    available = available_gb.round() as i64,
+                    gpu = settings.gpu_id,
+                )));
+            }
+            _ => false,
+        }
+    };
+
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "qwen_edit",
@@ -355,6 +428,13 @@ async fn generate_candle_qwen_edit_stream(
             let model = QwenEdit::load(&QwenEditPaths {
                 root: qwen_base,
                 adapters,
+                // sc-10968: the fit-gate above picks sequential residency when the resident peak won't
+                // fit; the provider then loads→encodes→drops the VL encoder before the DiT.
+                offload_policy: if use_sequential {
+                    gen_core::OffloadPolicy::Sequential
+                } else {
+                    gen_core::OffloadPolicy::Resident
+                },
             })
             .map_err(|error| WorkerError::Engine(format!("Qwen edit load failed: {error}")))?;
             Ok((model, reference))

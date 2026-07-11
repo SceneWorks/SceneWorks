@@ -4,6 +4,7 @@ import { AdvancedSection } from "../../components/AdvancedSection.jsx";
 import { Icon } from "../../components/Icons.jsx";
 import { WorkPanel } from "../../components/WorkPanel.jsx";
 import { DatasetDoctorReadout } from "./DatasetDoctor.jsx";
+import { invalidProps, ReadyPill, ValidationSummary } from "../../validation/Validation.jsx";
 import {
   lossTypeOptions,
   networkTypeLabel,
@@ -32,12 +33,13 @@ import {
 // noise around the one button that matters. Readiness shows in the head's Ready /
 // Needs input pill and in the disabled Start button.
 //
-// The one exception is `configValueErrors` (sc-10501): chips for values the user
-// actively broke. Missing-field hints stay suppressed — you can see an empty field —
-// but a cleared number leaves nothing on screen to explain the dead button.
+// `configValidity` is the whole validation summary (epic 10644): the same object gates
+// Start, tones the pill, fills the chip row, and outlines the inputs the chips name.
+// Missing-field hints stay suppressed — you can see an empty field — but a cleared
+// number leaves nothing on screen to explain the dead button (sc-10501).
 export function ConfigureJobPanel({
   setActiveView,
-  configReady,
+  configValidity,
   trainingTargetsError,
   trainingPresetsError,
   configError,
@@ -69,18 +71,22 @@ export function ConfigureJobPanel({
   showTrainingAdapter,
   visibleTrainingAdapterVersions,
   visibleResolutionOptions,
-  configValueErrors,
   submittingJob,
   resetConfigDefaults,
   submitTrainingJob,
   configSnapshot,
   // sc-8942 (F-140): grouped Dataset Doctor readout props (report/loading + the six
   // fix-action callbacks), shared verbatim with DatasetEditorPanel. Spread straight onto
-  // DatasetDoctorReadout below. `readinessBlocksTraining` stays a separate prop — it gates
-  // the Train button, not the readout.
+  // DatasetDoctorReadout below. Whether readiness blocks the run is now one of
+  // `configValidity`'s issues (sc-10648), so there is no separate readiness prop.
   datasetDoctor,
-  readinessBlocksTraining = false,
 }) {
+  // ControlNet training (epic 10159) reuses this panel: a `control_branch` target renders the
+  // per-image control condition from the selected dataset (the data source) and trains a control
+  // branch instead of a LoRA. Surface that so the run reads as ControlNet, not a mislabeled LoRA.
+  const isControlTarget = selectedTarget?.outputKind === "control_branch";
+  const controlType =
+    selectedTarget?.defaults?.advanced?.controlType ?? selectedTarget?.limits?.controlTypes?.[0] ?? "pose";
   return (
     <WorkPanel
       className="training-config-panel"
@@ -92,7 +98,7 @@ export function ConfigureJobPanel({
             <Icon.Library size={14} />
             Data Sets
           </button>
-          <span className="training-status-pill">{configReady ? "Ready" : "Needs input"}</span>
+          <ReadyPill ready={configValidity.ready} />
         </>
       }
     >
@@ -166,7 +172,7 @@ export function ConfigureJobPanel({
             </label>
 
             <label>
-              LoRA name
+              {isControlTarget ? "Control branch name" : "LoRA name"}
               <input onChange={(event) => updateConfigDraft("outputName", event.target.value)} value={configDraft.outputName ?? ""} />
             </label>
             <label>
@@ -175,7 +181,12 @@ export function ConfigureJobPanel({
             </label>
             <label>
               Steps
-              <input onChange={(event) => updateConfigDraft("steps", event.target.value)} type="number" value={configDraft.steps ?? ""} />
+              <input
+                onChange={(event) => updateConfigDraft("steps", event.target.value)}
+                type="number"
+                value={configDraft.steps ?? ""}
+                {...invalidProps(configValidity, "steps")}
+              />
             </label>
             <label>
               Checkpoint cadence
@@ -183,6 +194,7 @@ export function ConfigureJobPanel({
                 onChange={(event) => updateConfigDraft("saveEvery", event.target.value)}
                 type="number"
                 value={configDraft.saveEvery ?? ""}
+                {...invalidProps(configValidity, "saveEvery")}
               />
             </label>
 
@@ -224,6 +236,15 @@ export function ConfigureJobPanel({
             </label>
           </div>
 
+          {isControlTarget ? (
+            <p className="training-control-note inline-success">
+              <strong>ControlNet training.</strong> A {controlType} condition is rendered from each image
+              in the selected dataset — your data source — then a control branch is trained for{" "}
+              {selectedTarget.ui?.label ?? selectedTarget.name} (applied at generation time). Use a
+              captioned dataset; bring-your-own prepared/annotated datasets are coming next.
+            </p>
+          ) : null}
+
           <AdvancedSection
             hint="cleared values → preset default"
             onToggle={() => setShowAdvancedConfig(!showAdvancedConfig)}
@@ -242,11 +263,45 @@ export function ConfigureJobPanel({
               </label>
               <label>
                 Rank
-                <input onChange={(event) => updateConfigDraft("rank", event.target.value)} type="number" value={configDraft.rank ?? ""} />
+                <input
+                  onChange={(event) => updateConfigDraft("rank", event.target.value)}
+                  type="number"
+                  value={configDraft.rank ?? ""}
+                  {...invalidProps(configValidity, "rank")}
+                />
               </label>
               <label>
                 Alpha
-                <input onChange={(event) => updateConfigDraft("alpha", event.target.value)} type="number" value={configDraft.alpha ?? ""} />
+                <input
+                  onChange={(event) => updateConfigDraft("alpha", event.target.value)}
+                  type="number"
+                  value={configDraft.alpha ?? ""}
+                  {...invalidProps(configValidity, "alpha")}
+                />
+              </label>
+              {/* Real hyperparameters the config validates (sc-10689). They live here
+                  beside the other numeric knobs so every `> 0` error the rule set can
+                  raise names an input the user can reach. The draft always seeds a
+                  working value (configDraftFromTarget), so these are never empty. */}
+              <label title="Images per optimizer step. Higher batches smooth gradients but cost more VRAM.">
+                Batch size
+                <input
+                  min="1"
+                  onChange={(event) => updateConfigDraft("batchSize", event.target.value)}
+                  type="number"
+                  value={configDraft.batchSize ?? ""}
+                  {...invalidProps(configValidity, "batchSize")}
+                />
+              </label>
+              <label title="Optimizer steps accumulated before an update — multiplies the effective batch size without extra VRAM.">
+                Gradient accumulation
+                <input
+                  min="1"
+                  onChange={(event) => updateConfigDraft("gradientAccumulation", event.target.value)}
+                  type="number"
+                  value={configDraft.gradientAccumulation ?? ""}
+                  {...invalidProps(configValidity, "gradientAccumulation")}
+                />
               </label>
               {showNetworkType ? (
                 <label title="Adapter parameterization. LoRA is the standard low-rank adapter; LoKr (LyCORIS Kronecker) trains a much smaller, often more expressive adapter (torch backends only).">
@@ -296,6 +351,7 @@ export function ConfigureJobPanel({
                   step="0.00001"
                   type="number"
                   value={configDraft.learningRate ?? ""}
+                  {...invalidProps(configValidity, "learningRate")}
                 />
               </label>
               <label>
@@ -373,7 +429,11 @@ export function ConfigureJobPanel({
               ) : null}
               <label>
                 Resolution
-                <select onChange={(event) => updateConfigDraft("resolution", event.target.value)} value={configDraft.resolution ?? ""}>
+                <select
+                  onChange={(event) => updateConfigDraft("resolution", event.target.value)}
+                  value={configDraft.resolution ?? ""}
+                  {...invalidProps(configValidity, "resolution")}
+                >
                   {visibleResolutionOptions.length ? null : <option value={configDraft.resolution ?? ""}>{configDraft.resolution ?? ""}</option>}
                   {visibleResolutionOptions.map((resolution) => (
                     <option key={resolution} value={resolution}>
@@ -424,24 +484,15 @@ export function ConfigureJobPanel({
 
           {/* Dataset Doctor readout before the Train button (sc-6534). Advisory: it
               only hard-blocks training when the gate is Blocked (too few images / a
-              fatal flag); warnings stay informational. */}
+              fatal flag); warnings stay informational. A Blocked gate now rides in the
+              chip row below as one of configValidity's errors (sc-10648), so the
+              hand-rolled "isn't ready to train" paragraph is gone. */}
           <DatasetDoctorReadout {...datasetDoctor} compact />
-          {readinessBlocksTraining ? (
-            <p className="inline-warning">
-              This dataset isn’t ready to train yet — open Data Sets to add or fix images.
-            </p>
-          ) : null}
 
           {/* Only broken values, never the "you haven't picked a dataset yet" hints —
               those are obvious from the form. Sits against the actions row so it reads
               as the reason Start training is dead (sc-10501). */}
-          {configValueErrors.length ? (
-            <div className="training-config-warnings" aria-label="Configuration errors">
-              {configValueErrors.map((warning) => (
-                <span key={warning}>{warning}</span>
-              ))}
-            </div>
-          ) : null}
+          <ValidationSummary issues={configValidity.surfaced} label="Configuration errors" />
 
           <div className="training-config-actions">
             <button className="secondary-action" onClick={resetConfigDefaults} type="button">
@@ -449,7 +500,7 @@ export function ConfigureJobPanel({
             </button>
             <button
               className="primary-action"
-              disabled={!configReady || submittingJob || readinessBlocksTraining}
+              disabled={!configValidity.ready || submittingJob}
               onClick={submitTrainingJob}
               type="button"
             >

@@ -386,6 +386,12 @@ pub(crate) async fn update_job_progress(
         if let Some(status) = register_completed_training_lora(&state, &job_id).await {
             result.get_or_insert_with(JsonObject::new).extend(status);
         }
+        // A completing ControlTraining run registers its trained overlay into the control-overlay
+        // manifest so it is selectable + runnable in generation (sc-10165, B4). Gates on
+        // `JobType::ControlTraining`, so exactly one of these two fires per job.
+        if let Some(status) = register_completed_control_overlay(&state, &job_id).await {
+            result.get_or_insert_with(JsonObject::new).extend(status);
+        }
     }
     // Persist any generated assets the worker reported as `assetWrites` facts and
     // re-inject the built sidecars into the result so the UI keeps streaming them
@@ -647,4 +653,150 @@ pub(crate) async fn register_trained_lora(
     })
     .await?;
     Ok(Some((lora_id, manifest_path)))
+}
+
+/// The control-overlay analog of [`register_completed_training_lora`] (sc-10165, epic 10159 B4). A
+/// completing `ControlTraining` run leaves a trained overlay in its output dir that nothing yet
+/// registers (`register_completed_training_lora` is `LoraTrain`-only), so a Krea ControlNet was produced
+/// but not usable in generation. This registers it into the control-overlay manifest. Never errors the
+/// progress update: a failure is logged and surfaced via `controlOverlayRegistered: false` +
+/// `controlOverlayRegistrationError` so the trained output is not silently lost.
+pub(crate) async fn register_completed_control_overlay(
+    state: &AppState,
+    job_id: &str,
+) -> Option<JsonObject> {
+    let job = store_call(state.clone(), {
+        let job_id = job_id.to_owned();
+        move |store, _timeout| store.get_job(&job_id)
+    })
+    .await
+    .ok()?;
+    if !matches!(job.job_type, JobType::ControlTraining) {
+        return None;
+    }
+    match register_trained_control_overlay(state, &job).await {
+        Ok(None) => None,
+        Ok(Some((overlay_id, manifest_path))) => {
+            let mut status = JsonObject::new();
+            status.insert("controlOverlayRegistered".to_owned(), Value::Bool(true));
+            status.insert("controlOverlayId".to_owned(), Value::String(overlay_id));
+            status.insert(
+                "controlOverlayManifestPath".to_owned(),
+                Value::String(manifest_path.display().to_string()),
+            );
+            Some(status)
+        }
+        Err(error) => {
+            tracing::error!(
+                event = "control_overlay_registration_failed",
+                jobId = %job.id,
+                detail = %error.detail,
+                "failed to register trained control overlay"
+            );
+            let mut status = JsonObject::new();
+            status.insert("controlOverlayRegistered".to_owned(), Value::Bool(false));
+            status.insert(
+                "controlOverlayRegistrationError".to_owned(),
+                Value::String(error.detail),
+            );
+            Some(status)
+        }
+    }
+}
+
+/// Registers a completed control-training run's overlay as a SceneWorks control overlay, returning the
+/// registered `(overlay_id, manifest_path)` or `None` when there is nothing to register (a dry run, or a
+/// job without a staged entry).
+///
+/// Security: mirrors [`register_trained_lora`] exactly — the manifest path and output dir are recomputed
+/// from the run's scope, owning project, and a validated overlay id (never the mutable job payload), so a
+/// crafted or duplicated job cannot redirect the write outside the two canonical control-overlay
+/// manifests (`config_dir/manifests/user.control_overlays.jsonc` or
+/// `<project>/control-overlays/manifest.jsonc`). A run whose overlay is missing under the recomputed dir
+/// registers nothing. The entry lands in the `controlOverlays` field and is selectable as a ControlNet
+/// for its backbone in the Studio.
+pub(crate) async fn register_trained_control_overlay(
+    state: &AppState,
+    job: &JobSnapshot,
+) -> Result<Option<(String, PathBuf)>, ApiError> {
+    if job
+        .payload
+        .get("dryRun")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+    {
+        return Ok(None);
+    }
+    let Some(manifest_entry) = job
+        .payload
+        .get("manifestEntry")
+        .and_then(Value::as_object)
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let scope = manifest_entry
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("project")
+        .to_owned();
+    let overlay_id = manifest_entry
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::internal("Control training manifest entry requires an id"))?
+        .to_owned();
+    validate_lora_id_component(&overlay_id)?;
+
+    // Recompute the output dir + manifest path from trusted inputs; the payload's own paths are ignored.
+    let (output_dir, manifest_path) = resolve_control_overlay_output_location(
+        state,
+        &scope,
+        job.project_id.as_deref(),
+        &overlay_id,
+    )
+    .await?;
+    let Some(files) = trusted_adapter_files(manifest_entry.get("files"), &output_dir) else {
+        return Err(ApiError::internal(format!(
+            "No declared trained overlay found under {}; skipping control-overlay registration",
+            output_dir.display()
+        )));
+    };
+
+    // Overwrite the security-sensitive fields with trusted values, keeping the descriptive control
+    // metadata (name, controlType, controlEngine, backbone, baseModel, kind, provenance) the submit step
+    // captured. `source.path` stays relative so the catalog resolves it under the scope root.
+    let mut entry = manifest_entry;
+    entry.insert("id".to_owned(), Value::String(overlay_id.clone()));
+    entry.insert("scope".to_owned(), Value::String(scope));
+    entry.insert(
+        "source".to_owned(),
+        json!({ "provider": "training", "path": format!("control-overlays/{overlay_id}") }),
+    );
+    entry.insert(
+        "files".to_owned(),
+        Value::Array(files.into_iter().map(Value::String).collect()),
+    );
+    entry.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
+
+    let upsert_id = overlay_id.clone();
+    mutate_manifest_entries(state, &manifest_path, "controlOverlays", move |entries| {
+        // Replace any prior entry with this id (re-run) so provenance refreshes without duplicating,
+        // preserving the original createdAt.
+        let created_at = entries
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str) == Some(upsert_id.as_str()))
+            .and_then(|item| item.get("createdAt").cloned());
+        let mut entries = entries
+            .into_iter()
+            .filter(|item| item.get("id").and_then(Value::as_str) != Some(upsert_id.as_str()))
+            .collect::<Vec<_>>();
+        let mut entry = entry;
+        if let Some(created_at) = created_at {
+            entry.insert("createdAt".to_owned(), created_at);
+        }
+        entries.push(Value::Object(entry));
+        Ok((entries, ()))
+    })
+    .await?;
+    Ok(Some((overlay_id, manifest_path)))
 }

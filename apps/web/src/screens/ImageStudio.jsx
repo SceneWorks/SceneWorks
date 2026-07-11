@@ -26,6 +26,7 @@ import {
   MIN_IMAGE_DIMENSION,
   resolveEffectiveDimensions,
 } from "../resolutionOverride.js";
+import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 import { batchItemStatus, summarizeBatchRun } from "../batchOps.js";
 import {
   DEFAULT_SCENE_PROMPT,
@@ -108,13 +109,15 @@ import {
   LoraPickerSection,
   onPromptKeyDown,
   PresetGuidanceStrip,
-  PresetValidationWarnings,
   SavePresetPanel,
   useGenerationStudio,
   useSavePreset,
 } from "./generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
+import { imageBatchValidation, imageGenerateValidation } from "../imageStudioValidation.js";
+import { useValidation } from "../validation/useValidation.js";
+import { ValidationSummary } from "../validation/Validation.jsx";
 import {
   downloadOffersFor,
   imageModelUsable,
@@ -1358,6 +1361,12 @@ export function ImageStudio() {
     heightOverride,
   });
 
+  // PiD high-res decode heads-up (sc-10144): PiD super-resolves the base render 4×, so a large base at
+  // the default 4K tier is a multi-minute (auto-tiled above 4096², sc-10087) decode that can look hung.
+  // Surfaced inline under the PiD output tier so the user knows the long decode is progressing, not
+  // stuck. null when PiD is off, on the fast 2K tier, or below the multi-minute threshold.
+  const pidDecodeNotice = pidDecodeHeadsUp({ usePid, pidTarget, width, height });
+
   // Magic-prompt expansion (sc-5997): expand the plain-text idea into an editable caption via the
   // native utility model (same backend as Refine), recording which model drafted it. Returns the
   // cleaned caption (aspect_ratio + bboxes stripped); the builder applies it and switches to the
@@ -1953,25 +1962,60 @@ export function ImageStudio() {
   // auto-write a caption per resolved prompt (sc-9980).
   const batchStructuredExpandBlocked =
     structuredPromptModel && (magicModelMissing || typeof magicPrompt !== "function");
-  const batchRunDisabled =
-    !activeProject ||
-    batchStructuredExpandBlocked ||
-    batchTotal === 0 ||
-    batchMissingKeys.length > 0 ||
-    batchGroupIssues.length > 0 ||
-    batchResolutionIssues.length > 0 ||
-    Boolean(batchRun?.submitting);
-
+  // One summary per CTA (epic 10644): the button's `disabled` and the message it owes the
+  // user come from the same issue list and cannot drift. Two independent rule sets — the
+  // batch's problems must never disable single-image Generate. The drafts gather the
+  // already-computed sub-results the rules turn into issues.
+  const batchDraft = useMemo(
+    () => ({
+      activeProject,
+      batchStructuredExpandBlocked,
+      batchTotal,
+      missingKeys: batchMissingKeys,
+      groupIssues: batchGroupIssues,
+      resolutionIssues: batchResolutionIssues,
+      minDimension: MIN_IMAGE_DIMENSION,
+      maxDimension: MAX_IMAGE_DIMENSION,
+    }),
+    [activeProject, batchStructuredExpandBlocked, batchTotal, batchMissingKeys, batchGroupIssues, batchResolutionIssues],
+  );
+  const generateDraft = useMemo(
+    () => ({
+      activeProject,
+      structuredActive,
+      captionHasContent,
+      prompt,
+      mode,
+      characterId,
+      presetMissing: presetValidationResult.missing,
+      presetIncompatible: presetValidationResult.incompatible,
+      loraIncompatible: selectedLoraValidationResult.incompatible,
+      modelName: selectedModel?.name,
+    }),
+    [
+      activeProject,
+      structuredActive,
+      captionHasContent,
+      prompt,
+      mode,
+      characterId,
+      presetValidationResult,
+      selectedLoraValidationResult,
+      selectedModel,
+    ],
+  );
+  const batchValidity = useValidation(imageBatchValidation, batchDraft, undefined);
+  const generateValidity = useValidation(imageGenerateValidation, generateDraft, undefined);
+  // `submitting` is a busy gate, not a rule. `batchTotal === 0` is a requirement (silent),
+  // already folded into batchValidity — no need to repeat it here.
+  const batchRunDisabled = !batchValidity.ready || Boolean(batchRun?.submitting);
+  // The two conditions whose message has its own home stay explicit gates: a structured
+  // caption's field errors live in the builder, and a Mac block prints its own note.
   const generateDisabled =
     submitting ||
-    !activeProject ||
-    // Structured models gate on a valid, non-empty caption; everyone else on a
-    // non-empty prompt. (Plain-text fallback falls through to the prompt check.)
-    (structuredActive ? !captionValidation?.ok || !captionHasContent : !prompt.trim()) ||
-    (mode === "character_image" && !characterId) ||
-    Boolean(macActiveModeBlock) ||
-    !presetValidationResult.ok ||
-    !selectedLoraValidationResult.ok;
+    !generateValidity.ready ||
+    (structuredActive && !captionValidation?.ok) ||
+    Boolean(macActiveModeBlock);
 
   return (
     <ModelAvailabilityGate
@@ -2058,25 +2102,12 @@ export function ImageStudio() {
                 error={batchError}
               />
               <div className="batch-run">
-                {batchStructuredExpandBlocked ? (
-                  <p className="batch-warning">
-                    Batch on a structured-caption model needs the prompt-refiner model installed — it
-                    auto-writes a caption for each prompt.
-                  </p>
-                ) : batchMissingKeys.length > 0 ? (
-                  <p className="batch-warning">
-                    Fill in a value for {batchMissingKeys.map((key) => `{{${key}}}`).join(", ")} to run.
-                  </p>
-                ) : batchGroupIssues.length > 0 ? (
-                  <p className="batch-warning">
-                    Give each {batchGroupIssues.map((issue) => `{{${issue.label}:…}}`).join(", ")} the same number of
-                    options to run.
-                  </p>
-                ) : batchResolutionIssues.length > 0 ? (
-                  <p className="batch-warning">
-                    A prompt&rsquo;s [{batchResolutionIssues[0].width}×{batchResolutionIssues[0].height}] size is out of
-                    range — each side must be {MIN_IMAGE_DIMENSION}–{MAX_IMAGE_DIMENSION}.
-                  </p>
+                {/* The batch's blocking problems, still one at a time in priority order —
+                    but now the winning message and the disabled button read from the same
+                    summary, so they cannot disagree (sc-10649). The empty-batch hint is a
+                    silent requirement, rendered here as its own empty-state affordance. */}
+                {batchValidity.surfaced.length ? (
+                  <p className="batch-warning">{batchValidity.surfaced[0].message}</p>
                 ) : batchTotal === 0 ? (
                   <p className="batch-hint">Add at least one prompt to run a batch.</p>
                 ) : null}
@@ -2898,6 +2929,11 @@ export function ImageStudio() {
                         <option value="4k">4K · max detail</option>
                         <option value="2k">2K · faster</option>
                       </select>
+                      {pidDecodeNotice ? (
+                        <span className="field-hint pid-decode-hint" role="status">
+                          {pidDecodeNotice.message}
+                        </span>
+                      ) : null}
                     </label>
                   ) : null}
                 </>
@@ -2983,12 +3019,9 @@ export function ImageStudio() {
             </div>
           </AdvancedSection>
 
-          <PresetValidationWarnings presetValidationResult={presetValidationResult} selectedModel={selectedModel} />
-          {selectedLoraValidationResult.incompatible.length ? (
-            <p className="inline-warning">
-              Generate is blocked because these selected LoRAs are incompatible with {selectedModel?.name ?? "the selected model"}: {selectedLoraValidationResult.incompatible.join(", ")}.
-            </p>
-          ) : null}
+          {/* The preset/LoRA problems that used to be three separate .inline-warning
+              paragraphs (sc-10649). Requirements — no project, empty prompt — stay silent. */}
+          <ValidationSummary issues={generateValidity.surfaced} label="Generate errors" />
 
         </WorkPanel>
 

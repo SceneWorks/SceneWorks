@@ -263,6 +263,14 @@ string_enum! {
         // entry's installState to "installed" once the HF files land.
         LoraDownload => "lora_download",
         LoraTrain => "lora_train",
+        // ControlNet Training Studio (epic 10159, B1 sc-10162): one orchestrated job that renders the
+        // per-image control condition (pose/canny/depth via the A1/A2 preprocessor, or ingests a
+        // bring-your-own dataset), builds a `krea_control` plan, then trains the control branch through
+        // the SAME native-training executor as `lora_train` (candle-gen-krea `krea_2_control`). Routed +
+        // capability-gated exactly like a real `lora_train` run keyed on the `krea_control` kernel
+        // (candle-only; no torch/MLX control trainer). GPU-required; not in NON_GPU_JOB_TYPES; reuses the
+        // `lora_train`/`lora_train_execute` capabilities (no new WorkerCapability).
+        ControlTraining => "control_training",
         TrainingCaption => "training_caption",
         // CLIP image-embedding pass over a training dataset for Dataset Doctor analysis
         // (epic 6529 P2, sc-6535): set-level near-duplicate / diversity / aesthetic findings.

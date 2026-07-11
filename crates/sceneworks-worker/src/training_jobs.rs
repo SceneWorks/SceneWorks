@@ -106,7 +106,7 @@ pub(crate) async fn run_lora_train_job(
 /// Deserialize the Rust-resolved plan stamped into the job payload at submit time
 /// (apps/rust-api training.rs). The plan round-trips through `TrainingPlan`, so a
 /// payload missing/garbling it is a hard error (never a silent no-op).
-fn parse_plan(payload: &JsonObject) -> WorkerResult<TrainingPlan> {
+pub(crate) fn parse_plan(payload: &JsonObject) -> WorkerResult<TrainingPlan> {
     let plan = payload.get("plan").ok_or_else(|| {
         WorkerError::InvalidPayload("Training job payload is missing a resolved plan.".to_owned())
     })?;
@@ -270,7 +270,7 @@ fn dry_run_summary(settings: &Settings, plan: &TrainingPlan) -> JsonObject {
 /// A `lora_train` progress update with the worker's backend label (mirrors
 /// `image_jobs::image_progress`). LoRA training keeps `status: running` across the
 /// caching/training/checkpointing/saving stages; only the final update is `completed`.
-fn training_progress(
+pub(crate) fn training_progress(
     status: JobStatus,
     stage: ProgressStage,
     progress: f64,
@@ -671,7 +671,7 @@ fn training_text_encoder(engine_id: &str, weights_dir: &std::path::Path) -> Opti
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-async fn run_training_execution(
+pub(crate) async fn run_training_execution(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -3243,7 +3243,9 @@ mod tests {
             .and_then(|v| v.parse().ok())
             .unwrap_or(32usize);
 
-        // Read the COCO-pose manifest → (target, pose skeleton, caption) triples.
+        // Read the control manifest → (target, control image, caption) triples. The A2 folder-ingest
+        // pipeline (sc-10161) emits the canonical `control` key + `kind`; the older COCO-pose spike
+        // datasets keyed the condition as `pose`, so accept `control` first and fall back to `pose`.
         let manifest =
             std::fs::read_to_string(data.join("manifest.jsonl")).expect("read manifest.jsonl");
         let items: Vec<TrainingItem> = manifest
@@ -3258,10 +3260,16 @@ mod tests {
                         .unwrap_or_else(|| panic!("manifest row missing {k}"))
                         .to_string()
                 };
+                let control = v
+                    .get("control")
+                    .or_else(|| v.get("pose"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_else(|| panic!("manifest row missing control/pose"))
+                    .to_string();
                 TrainingItem::with_control(
                     data.join(field("target")),
                     field("caption"),
-                    data.join(field("pose")),
+                    data.join(control),
                 )
             })
             .collect();
