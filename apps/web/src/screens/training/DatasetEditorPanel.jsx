@@ -6,6 +6,7 @@ import { DatasetAddDialog } from "../../components/DatasetAddDialog.jsx";
 import { DatasetCaptionDialog } from "../../components/DatasetCaptionDialog.jsx";
 import { Icon } from "../../components/Icons.jsx";
 import { WorkPanel } from "../../components/WorkPanel.jsx";
+import { ValidationSummary } from "../../validation/Validation.jsx";
 import {
   DatasetDoctorDistributions,
   DatasetDoctorReadout,
@@ -110,6 +111,7 @@ export function DatasetEditorPanel({
   readinessByKey,
   onToggleItemAck,
   canSave,
+  saveValidity,
   saveDataset,
   savingDataset,
   unavailableAssetIds,
@@ -282,6 +284,11 @@ export function DatasetEditorPanel({
               {savingDataset ? "Saving" : activeDataset ? "Save dataset" : "Create dataset"}
             </button>
             {statusPill}
+            {/* The one broken-value case: assets that went rejected/trashed/deleted after
+                selection. Missing name / empty selection are requirements — silent, the
+                empty field speaks for itself — and the caption/duplicate counts have their
+                own home in the health grid, so this row is usually absent (sc-10648). */}
+            <ValidationSummary issues={saveValidity?.surfaced} label="Dataset errors" />
           </div>
         </div>
 

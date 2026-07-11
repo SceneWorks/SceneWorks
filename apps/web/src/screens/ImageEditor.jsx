@@ -94,6 +94,7 @@ import {
   MASK_PREVIEW_RGBA,
   maskHasContent,
 } from "./imageEditor/maskShared.js";
+import { loraAddHint } from "./imageEditor/loraSection.js";
 
 export {
   buildDetailJobBody,
@@ -2825,6 +2826,11 @@ export function ImageEditor() {
     const { compatibleLoras, selectedLoraIds, toggleLora, weightFor, setWeight } = editLoraSelection;
     const nextLora = compatibleLoras.find((lora) => !selectedLoraIds.includes(lora.id));
     const addDisabled = !nextLora || selectedLoraIds.length >= MAX_JOB_LORAS_TOTAL;
+    const addHint = loraAddHint({
+      selectedCount: selectedLoraIds.length,
+      hasNext: Boolean(nextLora),
+      max: MAX_JOB_LORAS_TOTAL,
+    });
     return (
       <div className="ie-section">
         <div className="ie-sec-title">
@@ -2839,6 +2845,8 @@ export function ImageEditor() {
             + Add
           </button>
         </div>
+        {/* Why + Add is dead once you've added some (epic 10644 / sc-10653). See loraAddHint. */}
+        {addHint ? <p className="ie-note">{addHint}</p> : null}
         {selectedLoraIds.length ? (
           selectedLoraIds
             .map((id) => compatibleLoras.find((lora) => lora.id === id))

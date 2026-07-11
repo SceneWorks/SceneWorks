@@ -1,3 +1,5 @@
+import { issue } from "./validation/issues.js";
+
 export const noPresetId = "__no_preset__";
 
 // LoRA-per-job / per-preset caps (sc-8936, F-134). Single source of truth for the web:
@@ -342,18 +344,49 @@ export function presetValidation(preset, loras, model) {
   };
 }
 
-export function presetValidationMessage(validation) {
-  if (validation.ok) {
-    return "";
+// What gates Save in the Preset Manager, in the app-wide vocabulary (epic 10644,
+// sc-10651). Replaces the local saveRequirement/saveError split and the flatten-only
+// presetValidationMessage — name and model are silent requirements (the empty fields show
+// them); a read-only built-in, broken default values, and the preset's own LoRA problems
+// are surfaced errors. The read-only case short-circuits: a locked form's other checks are
+// moot.
+//
+// `valueErrors` are the out-of-range / out-of-menu default values from defaultValueErrors
+// (sc-10589) — pre-formatted message strings, one error each.
+export function presetSaveValidation({ editable, name, model }, { validation, valueErrors = [] } = {}) {
+  const issues = [];
+  if (!editable) {
+    issues.push(issue.error(null, "Built-in presets are read-only. Duplicate it to make an editable copy."));
+    return issues;
   }
-  const parts = [];
-  if (validation.missing.length) {
-    parts.push(`${validation.missing.join(", ")} has not finished importing`);
+  if (!name?.trim()) {
+    issues.push(issue.requirement("name", "Name is required."));
   }
-  if (validation.incompatible.length) {
-    parts.push(`${validation.incompatible.join(", ")} is not compatible with the selected model`);
+  if (!model) {
+    issues.push(issue.requirement("model", "Choose a model before saving."));
   }
-  return `Save blocked: ${parts.join("; ")}. Wait for imports to finish, remove incompatible LoRAs, or choose a matching model.`;
+  for (const message of valueErrors) {
+    issues.push(issue.error(null, message));
+  }
+  const missing = validation?.missing ?? [];
+  const incompatible = validation?.incompatible ?? [];
+  if (missing.length) {
+    issues.push(
+      issue.error(
+        null,
+        `Save blocked: ${missing.join(", ")} ${missing.length === 1 ? "has" : "have"} not finished importing. Wait for imports to finish.`,
+      ),
+    );
+  }
+  if (incompatible.length) {
+    issues.push(
+      issue.error(
+        null,
+        `Save blocked: ${incompatible.join(", ")} ${incompatible.length === 1 ? "is" : "are"} not compatible with the selected model. Remove incompatible LoRAs or choose a matching model.`,
+      ),
+    );
+  }
+  return issues;
 }
 
 // ── Studio "Save as Preset" round-trip helpers ───────────────────────────────

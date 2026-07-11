@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { configDraftFromTarget, trainingConfigSnapshot } from "./trainingConfig.js";
+import { summarize } from "../validation/issues.js";
+import { configDraftFromTarget, configValidation, trainingConfigSnapshot } from "./trainingConfig.js";
 
 // sc-4199: configDraftFromTarget (target/preset → form draft) and
 // trainingConfigSnapshot (form draft → worker payload) were pure builders buried
@@ -158,5 +159,96 @@ describe("trainingConfigSnapshot", () => {
     });
     expect(snap.presetId).toBe("preset-1");
     expect(snap.presetVersion).toBe(5);
+  });
+});
+
+// The training config's rule set, now expressed in the app-wide vocabulary (epic 10644, sc-10647).
+// The kinds are the contract: a `requirement` blocks in silence, an `error` blocks and speaks. Get
+// one wrong and either the form nags about an empty box or Start dies with no stated reason.
+describe("configValidation", () => {
+  const wholeDraft = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+  };
+  const ctx = { activeDataset: dataset, selectedTarget: target };
+  const kindsOf = (issues, field) => issues.filter((entry) => entry.field === field).map((entry) => entry.kind);
+
+  it("finds nothing wrong with a whole draft", () => {
+    expect(configValidation(wholeDraft, ctx)).toEqual([]);
+  });
+
+  it("marks the unfilled fields as requirements, which block without speaking", () => {
+    const issues = configValidation({ ...wholeDraft, outputName: "", triggerWord: "  " }, { activeDataset: null, selectedTarget: null });
+    expect(kindsOf(issues, "target")).toEqual(["requirement"]);
+    expect(kindsOf(issues, "dataset")).toEqual(["requirement"]);
+    expect(kindsOf(issues, "outputName")).toEqual(["requirement"]);
+    expect(kindsOf(issues, "triggerWord")).toEqual(["requirement"]);
+    expect(summarize(issues).surfaced).toEqual([]);
+    expect(summarize(issues).ready).toBe(false);
+  });
+
+  // Every numeric rule, not a sample: one mis-kinded field is exactly what a sampled table misses.
+  for (const field of ["rank", "alpha", "learningRate", "steps", "resolution", "batchSize", "gradientAccumulation", "saveEvery"]) {
+    it(`raises an error when ${field} is cleared, and names ${field} as its field`, () => {
+      const issues = configValidation({ ...wholeDraft, [field]: "" }, ctx);
+      expect(kindsOf(issues, field)).toEqual(["error"]);
+      expect(summarize(issues).surfaced).toHaveLength(1);
+      expect(summarize(issues).invalidFields.has(field)).toBe(true);
+    });
+
+    it(`raises an error when ${field} is zero or negative`, () => {
+      expect(kindsOf(configValidation({ ...wholeDraft, [field]: 0 }, ctx), field)).toEqual(["error"]);
+      expect(kindsOf(configValidation({ ...wholeDraft, [field]: -1 }, ctx), field)).toEqual(["error"]);
+    });
+  }
+
+  it("names the output after the target's output kind", () => {
+    const issues = configValidation({ ...wholeDraft, outputName: "" }, ctx);
+    expect(issues.find((entry) => entry.field === "outputName").message).toBe("Name the LoRA output");
+  });
+
+  // A broken value and an unfilled field at once: the chip row shows one and stays silent on the
+  // other. This is the pairing sc-10492 collapsed and sc-10501 restored.
+  it("surfaces the broken value alone when both kinds are live", () => {
+    const summary = summarize(configValidation({ ...wholeDraft, outputName: "", rank: "" }, ctx));
+    expect(summary.surfaced.map((entry) => entry.message)).toEqual(["Rank must be greater than zero"]);
+    expect(summary.invalidFields.has("outputName")).toBe(false);
+    expect(summary.ready).toBe(false);
+  });
+
+  it("tolerates a missing context", () => {
+    expect(() => configValidation(wholeDraft)).not.toThrow();
+  });
+
+  // Readiness rides in the same summary as the draft rules (sc-10648), so the Train button
+  // has one reason-set instead of a separate `disabled` term. A Blocked dataset is a
+  // form-scoped error — the fix is in Data Sets, not an input here.
+  describe("dataset readiness gate", () => {
+    it("adds a form-scoped error when the dataset is not ready to train", () => {
+      const issues = configValidation(wholeDraft, { ...ctx, datasetNotReady: true });
+      const readiness = issues.find((entry) => entry.message.includes("isn’t ready to train"));
+      expect(readiness).toBeTruthy();
+      expect(readiness.kind).toBe("error");
+      expect(readiness.field).toBeNull();
+      expect(summarize(issues).ready).toBe(false);
+    });
+
+    it("says nothing when the dataset is trainable", () => {
+      const issues = configValidation(wholeDraft, { ...ctx, datasetNotReady: false });
+      expect(issues.some((entry) => entry.message.includes("ready to train"))).toBe(false);
+      expect(summarize(issues).ready).toBe(true);
+    });
+
+    it("defaults to trainable when readiness is unknown", () => {
+      expect(summarize(configValidation(wholeDraft, ctx)).ready).toBe(true);
+    });
   });
 });
