@@ -36,8 +36,9 @@ fn is_sdxl_edit_candle_model(model: &str) -> bool {
 ///
 /// `sdxl` and `realvisxl` name FLAT upstream diffusers snapshots. Illustrious has no such upstream —
 /// OnomaAI ship a single-file LDM checkpoint — so it names its tiered turnkey, and
-/// `dense_tier_subdir` descends into the dense `bf16/` tier (sc-10614). This lane is dense-only:
-/// `IMAGE_MODEL_CAPS` marks the whole SDXL family `candle_quant: false`.
+/// `dense_tier_subdir` descends into the dense `bf16/` tier (sc-10614). This edit lane is dense-only —
+/// its candle implementation reads dense weights — even though the plain txt2img lane now serves the
+/// packed q4/q8 tiers (sc-10767, the SDXL family is `candle_quant_lora`); the packed path is txt2img-only.
 fn sdxl_edit_candle_default_repo(model: &str) -> &'static str {
     match model {
         "realvisxl" => "SG161222/RealVisXL_V5.0",
