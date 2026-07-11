@@ -542,7 +542,12 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("z_image_edit", true, false, false, false, false),
     ModelCaps::new("flux_schnell", true, true, false, false, false),
     ModelCaps::new("flux_dev", true, true, false, false, false),
-    ModelCaps::new("qwen_image", true, true, false, false, false),
+    // Base `qwen_image` candle txt2img is a turnkey packed-quant family (sc-8669 wired the q4/q8/bf16
+    // subdirs into `STANDARD_TIER_MODELS`; sc-10969 measured the tiers), so a tier-select `mlxQuantize`
+    // stays on candle — `candle_quant` is set (sc-11020, the routing half previously missed by sc-9983,
+    // which flipped krea/ideogram/boogu but not qwen). No inference LoRA on base qwen off-Mac, so NOT
+    // quant/lora-exempt.
+    ModelCaps::new("qwen_image", true, true, true, false, false),
     // Qwen-Image-Edit ids (sc-3397/3398): MLX edit siblings; candle serves them via the bespoke
     // `qwen_edit_candle_eligible` lane (NOT the txt2img gate), so they are NOT candle-routed txt2img ids.
     ModelCaps::new("qwen_image_edit", true, false, false, false, false),
@@ -1062,6 +1067,10 @@ mod tests {
         "boogu_image_turbo",
         "boogu_image_edit",
         "kolors",
+        // sc-11020: qwen_image's turnkey q4/q8/bf16 packed tiers (sc-8669, measured sc-10969) load on
+        // the candle txt2img lane, so a tier-select stays on candle; no candle inference LoRA on base
+        // qwen. (sc-9983 flipped this for krea/ideogram/boogu but missed qwen.)
+        "qwen_image",
     ];
 
     // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH). sc-10676: Anima is the LoRA-only candle
