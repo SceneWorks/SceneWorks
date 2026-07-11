@@ -489,16 +489,21 @@ fn assemble_wan_experts(
 /// `qwen-image`: the ComfyUI Qwen2.5-VL text encoders are themselves *scaled*-fp8
 /// (sc-10671) and the tree VAE uses native WAN-VAE keys (a 194-key 3D-VAE remap), so
 /// both are sourced from our snapshot while the plain-fp8 DiT is read in place.
+///
+/// `flux2` (sc-10680): the `flux2_dev_fp8mixed` file is a bare **inline-scale fp8** DiT
+/// with no text encoder / VAE — the Mistral-3 TE + AutoencoderKL-Flux2 + tokenizer are
+/// sourced from our snapshot while the fp8 DiT is dequanted + read in place.
 fn is_snapshot_backed(family: &str) -> bool {
     // `wan-video` is also snapshot-backed but takes the dedicated MoE-pairing path
     // ([`assemble_wan_experts`]), never the single-transformer branch this gates.
-    matches!(family, "qwen-image")
+    matches!(family, "qwen-image" | "flux2")
 }
 
 /// Whether a fully-assembled external model has a worker loader for its family+quant,
 /// i.e. is offerable as a generation target (the picker offers only `usable !== false`).
 /// Each `(family, quant)` here corresponds to a landed load-in-place slice:
-/// z-image bf16 (sc-10668) · qwen-image plain fp8_e4m3 (sc-10670). Everything else
+/// z-image bf16 (sc-10668) · qwen-image plain fp8_e4m3 (sc-10670) · wan-video
+/// scaled_fp8_companion (sc-10671) · flux2 inline-scale fp8 (sc-10680). Everything else
 /// stays fail-closed until its slice lands. Only ever true for a `complete` assembly.
 fn family_quant_runnable(family: Option<&str>, quant: Option<&str>, assembly: &str) -> bool {
     assembly == "complete"
@@ -507,6 +512,7 @@ fn family_quant_runnable(family: Option<&str>, quant: Option<&str>, assembly: &s
             (Some("z-image"), Some("bf16"))
                 | (Some("qwen-image"), Some("fp8_e4m3"))
                 | (Some("wan-video"), Some("scaled_fp8_companion"))
+                | (Some("flux2"), Some("fp8_inline_scale"))
         )
 }
 
@@ -900,6 +906,51 @@ mod tests {
         assert_eq!(row["assembly"], "complete");
         // sc-10670: plain-fp8 qwen DiT has a loader → usable, no reason. No tree VAE here, so
         // components is the DiT alone (the TE is always snapshot-sourced, sc-10671).
+        assert_eq!(row["usable"], true);
+        assert_eq!(row["unusableReason"], Value::Null);
+        assert_eq!(row["components"].as_array().unwrap().len(), 1);
+    }
+
+    /// A ComfyUI FLUX.2-dev fp8-mixed DiT (`diffusion_models/flux2_dev_fp8mixed`): BFL-native MMDiT keys
+    /// with **inline-scale fp8** MLPs (`.weight` F8_E4M3 + `.weight_scale`/`.input_scale` F32 siblings)
+    /// and BF16 attention/modulation → detector `(flux2, transformer, fp8_inline_scale)` (sc-10662).
+    fn flux2_dev_dit_inline_scale_keys() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("double_stream_modulation_img.lin.weight", "BF16"),
+            ("single_stream_modulation.lin.weight", "BF16"),
+            ("double_blocks.0.img_attn.qkv.weight", "BF16"),
+            ("double_blocks.0.img_mlp.0.weight", "F8_E4M3"),
+            ("double_blocks.0.img_mlp.0.weight_scale", "F32"),
+            ("double_blocks.0.img_mlp.0.input_scale", "F32"),
+            ("single_blocks.0.linear1.weight", "F8_E4M3"),
+            ("single_blocks.0.linear1.weight_scale", "F32"),
+            ("single_blocks.0.linear1.input_scale", "F32"),
+        ]
+    }
+
+    #[test]
+    fn flux2_inline_scale_dit_is_snapshot_backed_complete_and_runnable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = models_root(temp.path());
+        // Only the DiT is on disk — no tree text encoder / VAE. flux2 is snapshot-backed (sc-10680): the
+        // Mistral-3 TE / AutoencoderKL-Flux2 / tokenizer come from a resident SceneWorks snapshot, so a
+        // bare inline-scale-fp8 DiT anchor is still complete and runnable.
+        write_safetensors(
+            &root
+                .join("diffusion_models")
+                .join("flux2_dev_fp8mixed.safetensors"),
+            &flux2_dev_dit_inline_scale_keys(),
+        );
+
+        let rows = scan(&[root]);
+        assert_eq!(rows.len(), 1, "one anchored DiT model");
+        let row = &rows[0];
+        assert_eq!(row["family"], "flux2");
+        assert_eq!(row["type"], "image");
+        assert_eq!(row["quant"], "fp8_inline_scale");
+        assert_eq!(row["assembly"], "complete");
+        // sc-10680: inline-scale-fp8 flux2 DiT has a loader → usable, no reason. No tree VAE here, so
+        // components is the DiT alone (the TE / VAE are snapshot-sourced).
         assert_eq!(row["usable"], true);
         assert_eq!(row["unusableReason"], Value::Null);
         assert_eq!(row["components"].as_array().unwrap().len(), 1);
