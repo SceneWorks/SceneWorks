@@ -3697,8 +3697,9 @@ fn scail2_adapters_have_lightning(adapters: &[AdapterSpec]) -> bool {
 /// In-place ComfyUI Wan2.2 A14B experts for the sc-10671 base lane (epic 10451 Phase 2c). When set on a
 /// [`VideoGenInput`], [`generate_video`] builds the two experts from these files (key remap +
 /// scaled-fp8 dequant, `candle_gen_wan::load_from_comfyui_experts`) via the uncached bespoke load path
-/// instead of the registry snapshot; the UMT5 TE / VAE / tokenizer still come from `model_dir` (a
-/// resident Wan snapshot tier). Read in place, never copied.
+/// instead of the registry snapshot. The UMT5 TE + VAE are read in place too when `te_file` / `vae_file`
+/// are set (sc-10909), else they come from `model_dir` (a resident Wan snapshot tier); the tiny
+/// tokenizer always comes from `model_dir`. Read in place, never copied.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -3713,6 +3714,12 @@ struct ComfyuiWanExperts {
     high_file: PathBuf,
     /// The low-noise expert file (ComfyUI `*_low_noise_*`), read in place → candle `transformer_2/`.
     low_file: PathBuf,
+    /// The UMT5-XXL text encoder (`umt5_xxl_fp8_e4m3fn_scaled`, companion scaled-fp8), read in place
+    /// when present (sc-10909); `None` ⇒ the snapshot `text_encoder/`.
+    te_file: Option<PathBuf>,
+    /// The Wan VAE (`wan_2.1_vae.safetensors`, native WAN-VAE keys), read in place when present
+    /// (sc-10909); `None` ⇒ the snapshot `vae/`.
+    vae_file: Option<PathBuf>,
     /// I2V (channel-concat) vs T2V — selects the Wan config (`patch_embedding` in-channels differ).
     i2v: bool,
 }
@@ -4213,6 +4220,8 @@ async fn generate_video(
             (
                 e.high_file.clone(),
                 e.low_file.clone(),
+                e.te_file.clone(),
+                e.vae_file.clone(),
                 input.model_dir.clone(),
                 e.i2v,
             )
@@ -4231,11 +4240,11 @@ async fn generate_video(
             };
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let result = match comfyui_load {
-                Some((high, low, snapshot, i2v)) => {
+                Some((high, low, te, vae, snapshot, i2v)) => {
                     crate::generator_cache::with_uncached_generator(
                         move || {
                             candle_gen_wan::wan14b::load_from_comfyui_experts(
-                                high, low, snapshot, i2v,
+                                high, low, te, vae, snapshot, i2v,
                             )
                             .map_err(|error| {
                                 crate::classify_engine_error("video load failed", error)
@@ -5204,9 +5213,11 @@ async fn generate_candle_video(
 // Candle (Windows/CUDA) in-place ComfyUI Wan2.2 base generation (epic 10451 Phase 2c, sc-10671): the
 // video sibling of the z-image/qwen ComfyUI base image lanes. Reads a user's two ComfyUI Wan A14B
 // expert files in place (native-Wan keys + companion scaled-fp8), remapped + dequant'd off-Mac via
-// `candle_gen_wan::load_from_comfyui_experts`, and sources the UMT5 TE / VAE / tokenizer from a resident
-// `SceneWorks/wan2.2-*-candle` snapshot tier. T2V only for now (I2V's channel-concat reference
-// conditioning is a follow-up); the model id is an `external_base_*` catalog row.
+// `candle_gen_wan::load_from_comfyui_experts`. The UMT5 TE + VAE are read in place too when the tree
+// carries them (sc-10909, folded into `components[]` by the API); the tokenizer (and either component
+// when absent) comes from a resident `SceneWorks/wan2.2-*-candle` snapshot tier. T2V only for now
+// (I2V's channel-concat reference conditioning is a follow-up); the model id is an `external_base_*`
+// catalog row.
 // ---------------------------------------------------------------------------
 
 /// The candle Wan2.2 T2V-A14B engine id the ComfyUI base experts load into.
@@ -5232,11 +5243,17 @@ const WAN_COMFYUI_SNAPSHOT_TIERS: &[&str] = &["q8", "q4", "bf16"];
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const WAN_T2V_IN_CHANNELS: u64 = 16;
 
-/// The two in-place ComfyUI expert files + the resident snapshot tier supplying TE/VAE/tokenizer.
+/// The two in-place ComfyUI expert files + the resident snapshot tier, plus the optional in-place UMT5
+/// TE / VAE files (sc-10909). The snapshot tier always supplies the tokenizer (and the TE/VAE when their
+/// files are absent).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 struct ComfyuiWanPaths {
     high: PathBuf,
     low: PathBuf,
+    /// In-place UMT5 TE (`text_encoder` component), confined; `None` ⇒ snapshot `text_encoder/`.
+    te: Option<PathBuf>,
+    /// In-place Wan VAE (`vae` component), confined; `None` ⇒ snapshot `vae/`.
+    vae: Option<PathBuf>,
     snapshot_dir: PathBuf,
 }
 
@@ -5328,9 +5345,22 @@ fn resolve_wan_comfyui_paths(
     if wan_expert_in_channels(&high) != Some(WAN_T2V_IN_CHANNELS) {
         return Ok(None);
     }
+    // Optional in-place UMT5 TE + Wan VAE (sc-10909): the API folds them into `components[]` as
+    // `text_encoder` / `vae` when the tree carries them; each is confined like the experts. Absent ⇒
+    // `None` ⇒ the resident snapshot tier supplies that component (the row is complete either way).
+    let te = path_for("text_encoder")
+        .map(|te| {
+            crate::paths::normalize_app_managed_model_path(settings, te, "ComfyUI Wan UMT5 encoder")
+        })
+        .transpose()?;
+    let vae = path_for("vae")
+        .map(|vae| crate::paths::normalize_app_managed_model_path(settings, vae, "ComfyUI Wan VAE"))
+        .transpose()?;
     Ok(Some(ComfyuiWanPaths {
         high,
         low,
+        te,
+        vae,
         snapshot_dir,
     }))
 }
@@ -5367,8 +5397,9 @@ async fn generate_candle_wan_comfyui(
     })?;
     let input = VideoGenInput {
         engine_id: WAN_COMFYUI_T2V_ENGINE,
-        // The snapshot tier supplies the UMT5 TE / VAE / tokenizer (and the metrics `model_dir`); the
-        // experts are read in place via `comfyui` below.
+        // The snapshot tier supplies the tokenizer (and the metrics `model_dir`, and the UMT5 TE / VAE
+        // when their tree files are absent); the experts — and the TE/VAE when present — are read in
+        // place via `comfyui` below (sc-10909).
         model_dir: paths.snapshot_dir.clone(),
         prompt: request.prompt.clone(),
         negative_prompt: non_empty_negative_prompt(request),
@@ -5385,6 +5416,8 @@ async fn generate_candle_wan_comfyui(
         comfyui: Some(ComfyuiWanExperts {
             high_file: paths.high,
             low_file: paths.low,
+            te_file: paths.te,
+            vae_file: paths.vae,
             i2v: false,
         }),
         ..VideoGenInput::default()
