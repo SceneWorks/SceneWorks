@@ -256,6 +256,9 @@ enum CandleVideoRoute {
     WanVaceExtendBridge,
     /// A candle txt2video engine id → `generate_candle_video` (sc-5097).
     CandleVideo,
+    /// An in-place ComfyUI Wan2.2 base model (`external_base_*`) → `generate_candle_wan_comfyui`
+    /// (epic 10451 Phase 2c, sc-10671). Not an `is_candle_video_engine` id — routed off the forwarded row.
+    WanComfyui,
     /// Candle disabled, or no candle engine matched → the procedural stub.
     Stub,
 }
@@ -280,6 +283,10 @@ fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> Ca
         CandleVideoRoute::AnimateScail2(engine_id)
     } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge") {
         CandleVideoRoute::WanVaceExtendBridge
+    } else if wan_comfyui_available(request, settings) {
+        // In-place ComfyUI Wan2.2 base (sc-10671): an `external_base_*` id, so it matches no
+        // `is_candle_video_engine` arm below — route it off the forwarded `modelManifestEntry`.
+        CandleVideoRoute::WanComfyui
     } else if is_candle_video_engine(&request.model) {
         CandleVideoRoute::CandleVideo
     } else {
@@ -658,6 +665,18 @@ pub(crate) async fn run_video_generate_job(
                 let (decoded, adapter, raw_settings) =
                     generate_candle_video(api, settings, job, &request, &project_path, backend)
                         .await?;
+                (decoded, adapter, raw_settings, None::<Value>)
+            }
+            CandleVideoRoute::WanComfyui => {
+                let (decoded, adapter, raw_settings) = generate_candle_wan_comfyui(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    backend,
+                )
+                .await?;
                 (decoded, adapter, raw_settings, None::<Value>)
             }
             CandleVideoRoute::Stub => (
@@ -3675,6 +3694,29 @@ fn scail2_adapters_have_lightning(adapters: &[AdapterSpec]) -> bool {
         .any(|a| mlx_gen_scail2::has_diff_patch_keys(&a.path).unwrap_or(false))
 }
 
+/// In-place ComfyUI Wan2.2 A14B experts for the sc-10671 base lane (epic 10451 Phase 2c). When set on a
+/// [`VideoGenInput`], [`generate_video`] builds the two experts from these files (key remap +
+/// scaled-fp8 dequant, `candle_gen_wan::load_from_comfyui_experts`) via the uncached bespoke load path
+/// instead of the registry snapshot; the UMT5 TE / VAE / tokenizer still come from `model_dir` (a
+/// resident Wan snapshot tier). Read in place, never copied.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Clone)]
+#[cfg_attr(
+    not(all(not(target_os = "macos"), feature = "backend-candle")),
+    allow(dead_code)
+)]
+struct ComfyuiWanExperts {
+    /// The high-noise expert file (ComfyUI `*_high_noise_*`), read in place → candle `transformer/`.
+    high_file: PathBuf,
+    /// The low-noise expert file (ComfyUI `*_low_noise_*`), read in place → candle `transformer_2/`.
+    low_file: PathBuf,
+    /// I2V (channel-concat) vs T2V — selects the Wan config (`patch_embedding` in-channels differ).
+    i2v: bool,
+}
+
 /// The resolved inputs for one video generation (engine load + request build), shared by
 /// Wan (sc-3034) and LTX (sc-3035) — split out so the engine call is unit-testable on real
 /// weights without the API/job plumbing. The LTX-only knobs (`video_mode` no_audio,
@@ -3730,6 +3772,10 @@ struct VideoGenInput {
     // `$LTX_GEMMA_DIR` env var (the old `set_var` seam was unsound on the multithreaded runtime,
     // F-025). `None` on every other model (they bundle their TE) and when no override resolves.
     text_encoder_dir: Option<PathBuf>,
+    /// In-place ComfyUI Wan MoE experts (epic 10451 Phase 2c, sc-10671). `Some` ⇒ [`generate_video`]
+    /// takes the bespoke uncached load path (`load_from_comfyui_experts`) instead of the registry
+    /// snapshot; `None` on every other job.
+    comfyui: Option<ComfyuiWanExperts>,
 }
 
 #[cfg(any(
@@ -3768,6 +3814,7 @@ impl Default for VideoGenInput {
             conditioning_fps: None,
             softness: None,
             text_encoder_dir: None,
+            comfyui: None,
         }
     }
 }
@@ -4158,24 +4205,68 @@ async fn generate_video(
         let cancel = cancel.clone();
         let spec = video_load_spec(&input);
         let engine_id = input.engine_id;
-        tokio::spawn(async move {
-            crate::generator_cache::with_cached_generator(
-                engine_id,
-                spec,
-                "video load failed",
-                move |generator| {
-                    let mut on_progress = |progress: Progress| {
-                        // A closed channel means the consumer loop returned early (POST failure /
-                        // 409); trip the engine flag so the denoise bails instead of running unheard
-                        // (sc-8804, F-003 — the swallowed-closed-channel leak).
-                        if tx.blocking_send(progress).is_err() {
-                            cancel.cancel();
-                        }
-                    };
-                    run_loaded_video_generation(generator, input, &cancel, &mut on_progress)
-                },
+        // sc-10671: an in-place ComfyUI Wan MoE takes the bespoke **uncached** load path
+        // (`load_from_comfyui_experts` — two experts read in place + remapped + dequant'd), which frees
+        // any resident cached generator first; every other job takes the registry cached path. On the
+        // non-candle/macOS build `comfyui` is always `None`, so only the cached path is compiled.
+        let comfyui_load = input.comfyui.as_ref().map(|e| {
+            (
+                e.high_file.clone(),
+                e.low_file.clone(),
+                input.model_dir.clone(),
+                e.i2v,
             )
-            .await
+        });
+        tokio::spawn(async move {
+            let run = move |generator: &dyn Generator| {
+                let mut on_progress = |progress: Progress| {
+                    // A closed channel means the consumer loop returned early (POST failure /
+                    // 409); trip the engine flag so the denoise bails instead of running unheard
+                    // (sc-8804, F-003 — the swallowed-closed-channel leak).
+                    if tx.blocking_send(progress).is_err() {
+                        cancel.cancel();
+                    }
+                };
+                run_loaded_video_generation(generator, input, &cancel, &mut on_progress)
+            };
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            let result = match comfyui_load {
+                Some((high, low, snapshot, i2v)) => {
+                    crate::generator_cache::with_uncached_generator(
+                        move || {
+                            candle_gen_wan::wan14b::load_from_comfyui_experts(
+                                high, low, snapshot, i2v,
+                            )
+                            .map_err(|error| {
+                                crate::classify_engine_error("video load failed", error)
+                            })
+                        },
+                        run,
+                    )
+                    .await
+                }
+                None => {
+                    crate::generator_cache::with_cached_generator(
+                        engine_id,
+                        spec,
+                        "video load failed",
+                        run,
+                    )
+                    .await
+                }
+            };
+            #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+            let result = {
+                let _ = comfyui_load;
+                crate::generator_cache::with_cached_generator(
+                    engine_id,
+                    spec,
+                    "video load failed",
+                    run,
+                )
+                .await
+            };
+            result
         })
     };
 
@@ -5107,6 +5198,200 @@ async fn generate_candle_video(
     let raw_settings = candle_video_raw_settings(request, &repo);
     let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
     Ok((decoded, adapter, raw_settings))
+}
+
+// ---------------------------------------------------------------------------
+// Candle (Windows/CUDA) in-place ComfyUI Wan2.2 base generation (epic 10451 Phase 2c, sc-10671): the
+// video sibling of the z-image/qwen ComfyUI base image lanes. Reads a user's two ComfyUI Wan A14B
+// expert files in place (native-Wan keys + companion scaled-fp8), remapped + dequant'd off-Mac via
+// `candle_gen_wan::load_from_comfyui_experts`, and sources the UMT5 TE / VAE / tokenizer from a resident
+// `SceneWorks/wan2.2-*-candle` snapshot tier. T2V only for now (I2V's channel-concat reference
+// conditioning is a follow-up); the model id is an `external_base_*` catalog row.
+// ---------------------------------------------------------------------------
+
+/// The candle Wan2.2 T2V-A14B engine id the ComfyUI base experts load into.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const WAN_COMFYUI_T2V_ENGINE: &str = "wan2_2_t2v_14b";
+
+/// The engine label recorded on candle ComfyUI Wan assets + telemetry.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const WAN_COMFYUI_CANDLE_ADAPTER: &str = "candle_wan_comfyui";
+
+/// The resident Wan2.2 T2V-A14B snapshot repo supplying the dense UMT5 TE / VAE / tokenizer (the
+/// experts are read from the ComfyUI tree). Any complete tier subdir serves — the TE/VAE stay dense
+/// across tiers; only the transformer (which we don't use here) is quantized.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const WAN_COMFYUI_SNAPSHOT_REPO: &str = "SceneWorks/wan2.2-t2v-a14b-candle";
+
+/// Tier subdirs probed for the dense TE/VAE/tokenizer (first fully-present tree wins).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const WAN_COMFYUI_SNAPSHOT_TIERS: &[&str] = &["q8", "q4", "bf16"];
+
+/// Wan T2V DiT `patch_embedding` in-channels (16 latent). I2V is channel-concat (36) and needs the
+/// reference-conditioning lane, so this slice serves only T2V experts.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const WAN_T2V_IN_CHANNELS: u64 = 16;
+
+/// The two in-place ComfyUI expert files + the resident snapshot tier supplying TE/VAE/tokenizer.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+struct ComfyuiWanPaths {
+    high: PathBuf,
+    low: PathBuf,
+    snapshot_dir: PathBuf,
+}
+
+/// Peek a safetensors header (8-byte length + JSON) and return the `patch_embedding.weight`
+/// in-channels (`shape[1]`) — the T2V(16)/I2V(36) discriminator. `None` on any read/parse miss.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn wan_expert_in_channels(path: &Path) -> Option<u64> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut len = [0u8; 8];
+    file.read_exact(&mut len).ok()?;
+    let header_len = u64::from_le_bytes(len) as usize;
+    // Guard against a corrupt/huge length before allocating (headers are KB-scale).
+    if header_len == 0 || header_len > 64 * 1024 * 1024 {
+        return None;
+    }
+    let mut buf = vec![0u8; header_len];
+    file.read_exact(&mut buf).ok()?;
+    let header: Value = serde_json::from_slice(&buf).ok()?;
+    header
+        .get("patch_embedding.weight")?
+        .get("shape")?
+        .as_array()?
+        .get(1)?
+        .as_u64()
+}
+
+/// Resolve the ComfyUI Wan expert paths + a resident snapshot tier from the forwarded `external_base_*`
+/// row. `Ok(None)` (router falls through) when this is not a runnable ComfyUI Wan T2V job: wrong family,
+/// not usable, missing an expert component, no resident Wan snapshot, or an I2V expert (36-channel — the
+/// reference-conditioning lane is deferred). Each expert path is confined by
+/// `normalize_app_managed_model_path` (the sc-10668-widened external-roots allow-list); the snapshot dir
+/// is a fixed-repo/cache path (never payload-derived), so it needs no confinement.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_wan_comfyui_paths(
+    request: &VideoRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<ComfyuiWanPaths>> {
+    let entry = &request.model_manifest_entry;
+    if entry.get("family").and_then(Value::as_str) != Some("wan-video") {
+        return Ok(None);
+    }
+    if entry.get("usable").and_then(Value::as_bool) != Some(true) {
+        return Ok(None);
+    }
+    let Some(components) = entry.get("components").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    let path_for = |role: &str| -> Option<&str> {
+        components
+            .iter()
+            .find(|component| component.get("role").and_then(Value::as_str) == Some(role))
+            .and_then(|component| component.get("path").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let (Some(high), Some(low)) = (path_for("transformer_high"), path_for("transformer_low"))
+    else {
+        return Ok(None);
+    };
+    let Some(snapshot_root) =
+        huggingface_snapshot_dir(&settings.data_dir, WAN_COMFYUI_SNAPSHOT_REPO)
+    else {
+        return Ok(None);
+    };
+    let Some(snapshot_dir) = WAN_COMFYUI_SNAPSHOT_TIERS
+        .iter()
+        .map(|tier| snapshot_root.join(tier))
+        .find(|dir| {
+            dir.join("text_encoder").is_dir()
+                && dir.join("vae").is_dir()
+                && dir.join("tokenizer").join("tokenizer.json").is_file()
+        })
+    else {
+        return Ok(None);
+    };
+    let high = crate::paths::normalize_app_managed_model_path(
+        settings,
+        high,
+        "ComfyUI Wan high-noise expert",
+    )?;
+    let low = crate::paths::normalize_app_managed_model_path(
+        settings,
+        low,
+        "ComfyUI Wan low-noise expert",
+    )?;
+    // T2V only: an I2V expert (36 in-channels) would load into the wrong config; decline it here (the
+    // channel-concat reference lane is a follow-up) rather than surface a shape error at generate.
+    if wan_expert_in_channels(&high) != Some(WAN_T2V_IN_CHANNELS) {
+        return Ok(None);
+    }
+    Ok(Some(ComfyuiWanPaths {
+        high,
+        low,
+        snapshot_dir,
+    }))
+}
+
+/// True when this is a candle-runnable in-place ComfyUI Wan2.2 T2V job: an `external_base_*` model whose
+/// forwarded row is a usable wan-video with both expert components + a resident snapshot. Mirrors the
+/// image comfyui availability predicates.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn wan_comfyui_available(request: &VideoRequest, settings: &Settings) -> bool {
+    request.model.starts_with("external_base_")
+        && matches!(resolve_wan_comfyui_paths(request, settings), Ok(Some(_)))
+}
+
+/// Real candle in-place ComfyUI Wan2.2 T2V generation: resolve + confine the two expert paths and the
+/// snapshot tier, then drive the shared [`generate_video`] funnel with `input.comfyui` set (the bespoke
+/// uncached `load_from_comfyui_experts` path). Non-distilled base — native multi-step + per-expert CFG
+/// (guidance `None` ⇒ the engine's per-expert defaults); no Lightning distill (the base lane folds no
+/// adapters).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn generate_candle_wan_comfyui(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    backend: &str,
+) -> WorkerResult<(DecodedVideo, &'static str, Value)> {
+    let _ = project_path;
+    let paths = resolve_wan_comfyui_paths(request, settings)?.ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "ComfyUI Wan components could not be resolved (family/usable/experts/snapshot)"
+                .to_owned(),
+        )
+    })?;
+    let input = VideoGenInput {
+        engine_id: WAN_COMFYUI_T2V_ENGINE,
+        // The snapshot tier supplies the UMT5 TE / VAE / tokenizer (and the metrics `model_dir`); the
+        // experts are read in place via `comfyui` below.
+        model_dir: paths.snapshot_dir.clone(),
+        prompt: request.prompt.clone(),
+        negative_prompt: non_empty_negative_prompt(request),
+        width: request.width,
+        height: request.height,
+        frames: wan_frame_count(request.raw_frame_count()),
+        fps: request.fps,
+        // Non-Lightning base: honor a requested step count, else the engine default; per-expert CFG
+        // defaults (guidance `None`). No adapters — the ComfyUI base lane does not fold LoRAs.
+        steps: advanced_opt_u32(request, "steps"),
+        guidance: None,
+        seed: resolve_video_seed(request) as u64,
+        conditioning: Vec::new(),
+        comfyui: Some(ComfyuiWanExperts {
+            high_file: paths.high,
+            low_file: paths.low,
+            i2v: false,
+        }),
+        ..VideoGenInput::default()
+    };
+    let raw_settings = candle_video_raw_settings(request, WAN_COMFYUI_SNAPSHOT_REPO);
+    let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
+    Ok((decoded, WAN_COMFYUI_CANDLE_ADAPTER, raw_settings))
 }
 
 // ---------------------------------------------------------------------------
