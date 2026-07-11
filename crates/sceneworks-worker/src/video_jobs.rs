@@ -3789,6 +3789,8 @@ fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
         // LTX's external Gemma-3 text encoder rides the spec (sc-8827); `None` ⇒ the provider's
         // `$LTX_GEMMA_DIR` / `<root>/text_encoder` fallback.
         text_encoder: input.text_encoder_dir.clone().map(WeightsSource::Dir),
+        // Video providers have not wired sequential residency (sc-10821) — stays Resident.
+        offload_policy: Default::default(),
     }
 }
 
