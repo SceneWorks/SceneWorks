@@ -4055,14 +4055,17 @@ async fn generate_candle_stream(
         let tier =
             crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
         let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
-        // The candle FLUX.1 (sc-10769) and FLUX.2 txt2img (sc-10868) lanes have wired sequential
-        // residency (load→encode→drop the text encoder before the DiT); other families reject. FLUX.2 is
-        // the biggest win off-Mac — the 32B `flux2_dev`'s decoder-LM Mistral TE is multiple GB freed
-        // before the DiT loads. The flux2 edit/control providers are NOT wired (they keep the resident
-        // path), so only the txt2img engine ids appear here.
+        // The candle FLUX.1 (sc-10769), FLUX.2 txt2img (sc-10868), and Qwen-Image txt2img (sc-10867)
+        // lanes have wired sequential residency (load→encode→drop the text encoder before the DiT);
+        // other families reject-before-OOM. FLUX.2 is the biggest win off-Mac — the 32B `flux2_dev`'s
+        // decoder-LM Mistral TE is multiple GB freed before the DiT loads; Qwen-Image drops the ~8 GB
+        // Qwen2.5-VL encoder before the 20B DiT. The flux2 edit/control and the Qwen edit/pose-control/
+        // ComfyUI lanes are NOT wired (they keep the resident path) and are diverted before this gate by
+        // `resolve_candle_image_route`, so only the plain-txt2img engine ids appear here (and the qwen
+        // provider additionally guards the in-place ComfyUI DiT → falls back to resident).
         let sequential_capable = matches!(
             engine_id,
-            "flux1_dev" | "flux1_schnell" | "flux2_dev" | "flux2_klein_9b"
+            "flux1_dev" | "flux1_schnell" | "flux2_dev" | "flux2_klein_9b" | "qwen_image"
         );
         match crate::vram_gate::resolve_offload(
             crate::vram_gate::fit_decision(needed, budget),
