@@ -96,6 +96,18 @@ const STRICT_CONTROL_ENGINES: &[StrictControlEngine] = &[
         repo: "Kwai-Kolors/Kolors-ControlNet-Pose",
         supported_kinds: &[ControlKind::Pose],
     },
+    StrictControlEngine {
+        // Pose-ONLY (sc-8464, epic 8459). The Krea 2 candle strict-control lane rides a trained
+        // control-branch overlay on the frozen Turbo base — a from-scratch pose ControlNet, not a
+        // Fun-Union VACE engine, so it has no canny/depth conditioning (those are Phase-C follow-ups).
+        // Listed here so the candle lane routes through `run_candle_strict_control` and a
+        // `controlMode = canny | depth` request is REJECTED (not silently rendered as pose). Off-Mac
+        // candle-only; the candle lane resolves its overlay from env / `advanced.controlWeights` (no
+        // hosted default repo yet — B4/sc-10165 + sc-8466), so `repo` here is informational.
+        engine_id: "krea_2_turbo_control",
+        repo: "krea/Krea-2-Turbo",
+        supported_kinds: &[ControlKind::Pose],
+    },
 ];
 
 /// The catalog row for a registry strict-control engine id, or `None` if it is not a Fun-Union
