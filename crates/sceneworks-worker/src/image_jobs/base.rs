@@ -4039,12 +4039,14 @@ async fn generate_candle_stream(
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
-    // VRAM fit-gate (epic 10765, sc-10766 Phase 0 + sc-10821 Phase 1b): when the selected tier's
-    // predicted resident peak won't fit the card, either RUN SEQUENTIALLY (a provider that supports
-    // sequential component residency — the candle FLUX lane, sc-10769 — drops the text encoders before
-    // the DiT so peak = DiT+VAE, not TE+DiT+VAE) or, for a family that has not wired it, reject-before-
-    // OOM with an actionable message. Honors `SCENEWORKS_CUDA_VRAM_CAP_GB` to emulate a small card.
-    // Unmeasured models (no `candle` block) and non-NVIDIA hosts yield `Unknown` → never block.
+    // VRAM fit-gate (epic 10765, sc-10766 Phase 0 + sc-10821 Phase 1b + sc-10856): when the selected
+    // tier's predicted resident peak won't fit the card, either RUN SEQUENTIALLY (a provider that
+    // supports sequential component residency — the candle FLUX lane, sc-10769 — drops the text encoders
+    // before the DiT so peak = DiT+VAE, not TE+DiT+VAE) or, for a family that has not wired it, reject-
+    // before-OOM with an actionable message. sc-10856 adds a second stage on the sequential path: when
+    // the tier's MEASURED sequential peak (`candle.sequentialPeakGb`) is known and STILL won't fit, reject
+    // instead of running into a reactive OOM. Honors `SCENEWORKS_CUDA_VRAM_CAP_GB` to emulate a small
+    // card. Unmeasured models (no `candle` block) and non-NVIDIA hosts yield `Unknown` → never block.
     let use_sequential = {
         let budget = crate::vram_gate::apply_vram_cap(
             crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
@@ -4063,6 +4065,28 @@ async fn generate_candle_stream(
                 needed_gb,
                 available_gb,
             } => {
+                // Second-stage gate (sc-10856): sequential residency was selected because the resident
+                // peak won't fit. If this tier's MEASURED sequential peak is known and STILL exceeds the
+                // budget, reject before load instead of running into a reactive OOM. Absent the number
+                // (unmeasured tier) keep the best-effort run — the reactive OOM containment backstops it.
+                let sequential_needed = crate::vram_gate::predicted_sequential_peak_gb(
+                    &request.model_manifest_entry,
+                    tier,
+                );
+                if let Some(seq_gb) =
+                    crate::vram_gate::sequential_overflow_gb(sequential_needed, budget)
+                {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "{model} at the {tier} tier needs ~{seq} GB of VRAM even with sequential \
+                         component residency (loading one component at a time), but GPU {gpu} has \
+                         ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output \
+                         resolution, or run on a card with more VRAM.",
+                        model = request.model,
+                        seq = seq_gb.round() as i64,
+                        available = available_gb.round() as i64,
+                        gpu = settings.gpu_id,
+                    )));
+                }
                 tracing::info!(
                     model = %request.model,
                     needed_gb = needed_gb.round() as i64,
