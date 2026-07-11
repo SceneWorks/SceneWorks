@@ -511,6 +511,21 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::KreaControl => {
+                // Krea 2 Turbo strict-pose (advanced.poses on `krea_2_turbo`) → the trained control-branch
+                // overlay on the frozen dense base (sc-8465, epic 8459 S5), one image per pose. The MLX
+                // twin of the candle `CandleImageRoute::KreaControl` lane.
+                generate_krea_control_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::Flux1DevControl => {
                 // FLUX.1-dev strict control (advanced.poses) → Shakker Union-Pro-2.0, one image per pose
                 // (pose / canny / depth via advanced.controlMode).
@@ -1719,6 +1734,9 @@ include!("image_jobs/qwen.rs");
 #[cfg(target_os = "macos")]
 // Krea 2 Kontext-style image-edit routing (epic 10871).
 include!("image_jobs/krea_edit.rs");
+#[cfg(target_os = "macos")]
+// Krea 2 pose-ControlNet (MLX) strict-pose routing (sc-8465, epic 8459 S5).
+include!("image_jobs/krea_control.rs");
 #[cfg(target_os = "macos")]
 // SenseNova edit routing.
 include!("image_jobs/sensenova.rs");

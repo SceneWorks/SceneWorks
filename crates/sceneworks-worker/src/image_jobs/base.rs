@@ -83,6 +83,7 @@ enum ImageRoute {
     ZImageBaseControl,
     QwenControl,
     KolorsControl,
+    KreaControl,
     Flux1DevControl,
     Flux2DevControl,
     Flux2Edit,
@@ -109,6 +110,12 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         Some(ImageRoute::QwenControl)
     } else if kolors_control_available(request, settings) {
         Some(ImageRoute::KolorsControl)
+    } else if krea_control_available(request, settings) {
+        // Krea 2 Turbo strict pose (advanced.poses on `krea_2_turbo`) → the trained control-branch
+        // overlay (sc-8465, epic 8459 S5). Wins over the generic `mlx_available` arm below — `krea_2_turbo`
+        // is in MODEL_TABLE, so `mlx_available` would otherwise render it as plain t2i and silently drop
+        // the poses. The MLX twin of the candle `CandleImageRoute::KreaControl` resolver arm.
+        Some(ImageRoute::KreaControl)
     } else if flux1_dev_control_available(request, settings) {
         // FLUX.1-dev strict control (advanced.poses on flux_dev) → Shakker Union-Pro-2.0. Wins over the
         // PuLID-FLUX / generic MLX arms below: a flux_dev pose job is the real ControlNet path (sc-8244).
@@ -156,6 +163,7 @@ impl ImageRoute {
             | ImageRoute::ZImageBaseControl
             | ImageRoute::QwenControl
             | ImageRoute::KolorsControl
+            | ImageRoute::KreaControl
             | ImageRoute::Flux1DevControl
             | ImageRoute::Flux2DevControl => pose_entries(request).len() as u32,
             ImageRoute::Flux2Edit | ImageRoute::QwenEdit => grouped_edit_image_count(request),
