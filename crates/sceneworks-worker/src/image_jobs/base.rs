@@ -782,16 +782,14 @@ fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
 /// The DENSE (`bf16/`) tier of a SceneWorks quant-matrix turnkey, or `root` unchanged for a flat
 /// diffusers snapshot (sc-10614).
 ///
-/// The candle SDXL edit / IP-Adapter lanes (`sdxl_edit_candle.rs`, `sdxl_ipadapter.rs`) have only a
-/// DENSE implementation — their conditioning paths read dense weights — so they always want `bf16/`,
-/// unlike [`standard_tier_subdir`], which honours `advanced.mlxQuantize`. (The plain txt2img lane DOES
-/// serve the packed q4/q8 tiers as of sc-10767 — the SDXL family is `candle_quant_lora` — but that goes
-/// through `standard_tier_subdir`; these two bespoke sub-mode lanes stay dense-only for now.) They
-/// historically
-/// handed the snapshot ROOT straight to the loader, which works only because `sdxl` and `realvisxl`
-/// fall back to flat upstream diffusers repos (`stabilityai/stable-diffusion-xl-base-1.0`,
-/// `SG161222/RealVisXL_V5.0`). An SDXL model re-hosted as a tiered turnkey has no component tree at
-/// its root, so the loader would find no `unet/` at all.
+/// The FALLBACK tier resolver for the candle SDXL edit / IP-Adapter lanes (`sdxl_edit_candle.rs`,
+/// `sdxl_ipadapter.rs`) on a NON-standard-layout repo. As of sc-10813 those lanes packed-detect and,
+/// for a standard-tier turnkey (`mlx.standardTierLayout`), descend through [`standard_tier_subdir`]
+/// (honouring `advanced.mlxQuantize`, exactly like the txt2img lane, sc-10767) — so the packed q4/q8
+/// tiers now serve edit / inpaint / IP-Adapter, not just txt2img. This helper stays the else-branch:
+/// a flat upstream diffusers repo (`stabilityai/stable-diffusion-xl-base-1.0`, `SG161222/RealVisXL_V5.0`)
+/// roots its `unet/` and is returned untouched, and a non-standard tiered turnkey resolves its dense
+/// `bf16/` (an SDXL turnkey has no component tree at its root, so the loader would find no `unet/`).
 ///
 /// A flat snapshot roots its backbone dir — `unet/` for the SDXL family, `transformer/` for the DiTs
 /// — and is returned untouched, so the existing two models keep resolving exactly as before. Same
@@ -4886,6 +4884,69 @@ mod standard_tier_tests {
             standard_tier_subdir(root, &request(json!({ "mlxQuantize": "8" }))),
             root.join("q8")
         );
+    }
+
+    /// **sc-10732 — acceptance #1: the app-wide default-tier revert guard.**
+    ///
+    /// Epic 10721 moved the gen-time default tier off the old blind `q4` to `q8` (sc-10726): the shared
+    /// [`preferred_tier`] returns `"q8"` with no explicit `mlxQuantize` pick and no per-model floor, and
+    /// BOTH tier resolvers ([`standard_tier_subdir`] and [`anima_tier_subdir`]) inherit it. If a future
+    /// change reverts that default back to `q4` — in `preferred_tier`'s `None => …` arm, or a resolver
+    /// special-case — this test FAILS LOUDLY. That is the whole point of the sc-10732 lock: the finer
+    /// resolver/floor tests each imply it, but this one names it at the revert site so the intent is
+    /// unmissable. Deliberately redundant.
+    #[test]
+    fn default_tier_is_q8_not_q4_regression() {
+        // The shared default-tier primitive: no explicit `mlxQuantize`, no per-model floor → q8, never q4.
+        assert_eq!(
+            preferred_tier(None, None),
+            "q8",
+            "app-wide gen default MUST be q8 (epic 10721 / sc-10726) — a revert to q4 is the regression \
+             this guards"
+        );
+        assert_ne!(
+            preferred_tier(None, None),
+            "q4",
+            "the pre-epic-10721 blind-q4 default has been reverted — do NOT reinstate it (sc-10726/sc-10732)"
+        );
+
+        // Disk-backed through the standard resolver: a default job (no mlxQuantize) with ALL tiers
+        // installed resolves the q8 subdir, not the washed q4 — the revert is caught end-to-end too.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for tier in ["bf16", "q8", "q4"] {
+            seed_tier(root, tier, "diffusion_pytorch_model.safetensors");
+        }
+        let default_job = request(json!({}));
+        assert_eq!(
+            standard_tier_subdir(root, &default_job),
+            root.join("q8"),
+            "standard_tier_subdir default MUST land on q8 (not q4) when all tiers are installed"
+        );
+        assert_ne!(standard_tier_subdir(root, &default_job), root.join("q4"));
+
+        // The Anima resolver shares the same default (sc-10714 → sc-10731): its no-pick default is q8 too,
+        // so a revert to q4 also washes Anima — the exact quality bug epic 10721 fixed.
+        #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+        {
+            let anima_root = tempfile::tempdir().unwrap();
+            for tier in ["bf16", "q8", "q4"] {
+                let dir = anima_root.path().join(tier).join("diffusion_models");
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("anima-base-v1.0.safetensors"), b"x").unwrap();
+            }
+            let anima_default =
+                ImageRequest::from_payload(json!({ "model": "anima_base" }).as_object().unwrap());
+            assert_eq!(
+                anima_tier_subdir(anima_root.path(), &anima_default),
+                anima_root.path().join("q8"),
+                "anima_tier_subdir default MUST be q8 (sc-10714), never the washed q4"
+            );
+            assert_ne!(
+                anima_tier_subdir(anima_root.path(), &anima_default),
+                anima_root.path().join("q4")
+            );
+        }
     }
 
     #[test]

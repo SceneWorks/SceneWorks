@@ -73,6 +73,7 @@ fn write_synthetic_dataset(dir: &Path, n: u32, res: u32, trigger: &str) -> Vec<T
             TrainingItem {
                 image_path: path,
                 caption: caption.clone(),
+                control_image_path: None,
             }
         })
         .collect()
