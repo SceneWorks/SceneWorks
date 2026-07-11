@@ -58,6 +58,8 @@ Run it directly:
 ```sh
 npm run check:nc-weights              # scan the default payload trees
 node scripts/check-no-nc-weights.mjs --dir <path>   # scan a built artifact tree
+node scripts/check-no-nc-weights.mjs --dir <path> --scan-archives --skip-uninspectable
+                                                     # + decompress-and-scan archives
 node scripts/check-no-nc-weights.mjs --self-test     # prove the gate fires
 ```
 
@@ -78,6 +80,46 @@ node scripts/check-no-nc-weights.mjs --self-test     # prove the gate fires
   file-tree scans cannot see into: a weight sealed inside an archive staged as a
   resource. The current resources (`onnxruntime/**/*`, `ffmpeg/**/*`, `mlx/**/*`) are
   clean.
+- **`--scan-archives` (opt-in, sc-10551):** decompress-and-scan the CONTENTS of every
+  archive under the scan roots, running the exact same weight/NC-token checks over the
+  entry paths inside — **recursively** (an archive-in-archive is caught too). This is
+  defense-in-depth for a weight that reached a built artifact sealed inside an archive
+  some other way than a declared Tauri resource. Pure Node (no new dependency); it
+  reads `.zip` / `.nsis.zip` (central-directory listing, stored + deflate), `.tar`,
+  `.tar.gz` / `.tgz`, and bare `.gz`. The real release payloads it opens are the macOS
+  `bundle/macos/*.app.tar.gz` updater tarball and the Windows `*.nsis.zip` updater. It
+  is **off by default** so it never slows an ordinary build; the release lanes turn it
+  on.
+
+### Archive-bomb guards (`--scan-archives`)
+
+A malicious or accidental archive bomb (a tiny file that declares or inflates to an
+enormous payload, a "many tiny files" bomb, or a deeply-nested quine) must never
+exhaust memory or disk. The scan **fails closed** — it refuses the archive and fails
+the build rather than OOM — if any of these caps is exceeded:
+
+| Limit                    | Default  | CLI override           |
+| ------------------------ | -------- | ---------------------- |
+| On-disk archive size     | 2 GiB    | `--max-archive-bytes`  |
+| Total uncompressed bytes | 3 GiB    | `--max-uncompressed`   |
+| Per-entry uncompressed   | 1 GiB    | `--max-entry-bytes`    |
+| Entry count              | 200 000  | `--max-entries`        |
+| Nesting depth            | 8        | `--max-depth`          |
+
+For a `.zip` the size caps are checked against the **declared** central-directory
+sizes **before any entry is inflated**, so a zip bomb is refused up front. For gzip the
+total cap is enforced as the gunzip output limit (Node throws before inflating past
+it). All limits are per top-level archive tree (they accumulate across nesting levels).
+
+### Opaque installers (`--skip-uninspectable`)
+
+The final installers — `.dmg` (macOS), `.msi` and the NSIS `-setup.exe` (Windows) —
+have **no pure-JS reader**. By default `--scan-archives` **fails closed** on a
+container it cannot read (it never silently passes an un-verified archive). The release
+lanes pass **`--skip-uninspectable`** to downgrade those to a *warning*, because the
+opaque installer's CONTENTS duplicate the `.app` / resource tree the loose-tree walk in
+the same step already scanned. A bomb refusal is **never** downgraded by this flag —
+only the "no reader for this format" case is.
 
 ### The `.bin` question (not a blind spot)
 
@@ -140,39 +182,34 @@ path is still flagged.
 
 ## Where it runs in CI
 
-- **`.github/workflows/check.yml`** (every PR): runs `--self-test` then the default
-  scan over the Docker build context / Tauri resource trees.
+- **`.github/workflows/check.yml`** (every PR): runs `--self-test` (which now also
+  exercises the archive-scan positive/negative/bomb cases) then the default scan over
+  the Docker build context / Tauri resource trees.
 - **`.github/workflows/release.yml`** (desktop release, macOS + Windows): scans the
-  freshly-built `target/release/bundle` tree before signing/publishing — the
-  real-artifact form of the check.
+  freshly-built `target/release/bundle` tree before signing/publishing with
+  `--scan-archives --skip-uninspectable` — the real-artifact form of the check, which
+  additionally decompresses the `*.app.tar.gz` / `*.nsis.zip` updater payloads.
 
 ## Known limitation
 
-The `.dmg` / `.msi` / `-setup.exe` installers are opaque compressed archives; the
-`--dir` release scan walks the loose `.app` / bundle tree (which carries the same
-`Contents/Resources` payload the DMG wraps) but does not decompress the final
-installer. The exhaustive resource-source scan in `check.yml` covers the resource
-trees that feed those installers, so a weight cannot reach an installer without first
-tripping the source scan.
+**Opaque installers still are not decompressed.** The `.dmg` / `.msi` / `-setup.exe`
+installers have no pure-JS reader, so `--scan-archives` cannot open them (it warns
+under `--skip-uninspectable`, or fails closed without it). This is not a real gap: the
+`--dir` release scan walks the loose `.app` / bundle tree — which carries the same
+`Contents/Resources` payload the DMG/MSI wraps — and the exhaustive resource-source
+scan in `check.yml` covers the trees that feed those installers, so a weight cannot
+reach an installer without first tripping one of those scans. The archives that are NOT
+otherwise covered — the `*.app.tar.gz` / `*.nsis.zip` updater payloads — ARE now
+decompressed and scanned by `--scan-archives` (sc-10551).
 
-**Archive-*content* scanning is not implemented (tracked follow-up).** The guard
-inspects file *names* on disk and Tauri resource *config*, but it does not open
-archives (`.zip` / `.tar.gz` / `.dmg` / …) to scan the files *inside* them. The
-config-level resource check above already fails the build if an archive or a weights
-directory is *declared* as a bundle resource — which is the realistic vector and is
-cheap to enforce — so a weight cannot be staged into the bundle inside an archive
-without the config check catching the declaration. A full recursive decompress-and-
-scan of every archive in a built artifact is comparatively expensive (needs a
-decompressor per format, temp extraction, and archive-bomb guards) and buys little
-over the declaration check, so it is deliberately deferred to a tracked Shortcut
-story rather than implemented here. `include_bytes!`-compiled weights (a weight
-embedded in a Rust binary at compile time) are likewise not detectable by a file
-scan; the source-tree scan catches the weight *file* that such a macro would embed,
-before it is compiled in.
+`include_bytes!`-compiled weights (a weight embedded in a Rust binary at compile time)
+are not detectable by any file or archive scan post-compile; the source-tree scan
+catches the weight *file* that such a macro would embed, before it is compiled in.
 
 The **RunPod image (epic 10362) does not exist yet** — there is no RunPod-specific
 Dockerfile in the repo. The existing `docker/rust.Dockerfile` (the base the RunPod
 lane will build on) is verified to pull-at-runtime: its COPYs are limited to
 `config/`, `crates/`, `apps/`, and the built binaries, and `.dockerignore` excludes
 `data/models|loras|cache`. When the RunPod image lands, run the guard over its build
-context / extracted rootfs (`--dir`) as part of that lane.
+context / extracted rootfs with `--dir <rootfs> --scan-archives` as part of that lane
+(the tar-based image layers are exactly the format `--scan-archives` reads).
