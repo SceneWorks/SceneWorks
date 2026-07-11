@@ -332,6 +332,15 @@ enum WanExpertLevel {
     Low,
 }
 
+/// One pairing group of Wan MoE experts (`detected` indices): the high/low-noise expert (if each was
+/// found) plus every index that hashed to this group's base.
+#[derive(Default)]
+struct WanExpertGroup {
+    high: Option<usize>,
+    low: Option<usize>,
+    all: Vec<usize>,
+}
+
 fn wan_expert_level(name: &str) -> Option<WanExpertLevel> {
     let lower = name.to_ascii_lowercase();
     match (lower.contains("high"), lower.contains("low")) {
@@ -368,8 +377,9 @@ fn assemble_wan_experts(
     detected: &[DetectedFile],
     used_ids: &mut HashSet<String>,
 ) -> (Vec<Value>, HashSet<usize>) {
-    // base → (high index, low index, all indices in the group).
-    let mut groups: std::collections::BTreeMap<String, (Option<usize>, Option<usize>, Vec<usize>)> =
+    // Group the wan-video transformers by their pairing base (the name with the high/low token
+    // normalized out), tracking the high/low expert index + every index in the group.
+    let mut groups: std::collections::BTreeMap<String, WanExpertGroup> =
         std::collections::BTreeMap::new();
     for (index, file) in detected.iter().enumerate() {
         if !ANCHOR_SUBDIRS.contains(&file.subdir) {
@@ -381,16 +391,17 @@ fn assemble_wan_experts(
         }
         let entry = groups.entry(wan_pair_base(&file.name)).or_default();
         match wan_expert_level(&file.name) {
-            Some(WanExpertLevel::High) if entry.0.is_none() => entry.0 = Some(index),
-            Some(WanExpertLevel::Low) if entry.1.is_none() => entry.1 = Some(index),
+            Some(WanExpertLevel::High) if entry.high.is_none() => entry.high = Some(index),
+            Some(WanExpertLevel::Low) if entry.low.is_none() => entry.low = Some(index),
             _ => {}
         }
-        entry.2.push(index);
+        entry.all.push(index);
     }
 
     let mut rows = Vec::new();
     let mut consumed = HashSet::new();
-    for (_base, (high, low, all)) in groups {
+    for (_base, group) in groups {
+        let WanExpertGroup { high, low, all } = group;
         for index in &all {
             consumed.insert(*index);
         }
