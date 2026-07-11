@@ -279,6 +279,30 @@ export function ConfigureJobPanel({
                   {...invalidProps(configValidity, "alpha")}
                 />
               </label>
+              {/* Real hyperparameters the config validates (sc-10689). They live here
+                  beside the other numeric knobs so every `> 0` error the rule set can
+                  raise names an input the user can reach. The draft always seeds a
+                  working value (configDraftFromTarget), so these are never empty. */}
+              <label title="Images per optimizer step. Higher batches smooth gradients but cost more VRAM.">
+                Batch size
+                <input
+                  min="1"
+                  onChange={(event) => updateConfigDraft("batchSize", event.target.value)}
+                  type="number"
+                  value={configDraft.batchSize ?? ""}
+                  {...invalidProps(configValidity, "batchSize")}
+                />
+              </label>
+              <label title="Optimizer steps accumulated before an update — multiplies the effective batch size without extra VRAM.">
+                Gradient accumulation
+                <input
+                  min="1"
+                  onChange={(event) => updateConfigDraft("gradientAccumulation", event.target.value)}
+                  type="number"
+                  value={configDraft.gradientAccumulation ?? ""}
+                  {...invalidProps(configValidity, "gradientAccumulation")}
+                />
+              </label>
               {showNetworkType ? (
                 <label title="Adapter parameterization. LoRA is the standard low-rank adapter; LoKr (LyCORIS Kronecker) trains a much smaller, often more expressive adapter (torch backends only).">
                   Network type

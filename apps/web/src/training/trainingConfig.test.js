@@ -60,6 +60,27 @@ describe("configDraftFromTarget", () => {
     expect(draft.outputName).toBe("Custom name");
   });
 
+  // sc-10689: batchSize and gradientAccumulation are validated with a `> 0` rule and now
+  // have inputs. A target/preset whose defaults omit either would seed "" and fail that
+  // rule with no fixable box. The draft floors both so the box is never empty.
+  it("floors batch size and gradient accumulation so an omitting target can't seed a dead CTA", () => {
+    const { batchSize: _b, gradientAccumulation: _g, ...leanDefaults } = target.defaults;
+    const leanTarget = { ...target, defaults: leanDefaults };
+    const draft = configDraftFromTarget(leanTarget, dataset, ["auto"]);
+    expect(draft.batchSize).toBe("1");
+    expect(draft.gradientAccumulation).toBe("1");
+    const summary = summarize(configValidation(draft, { activeDataset: dataset, selectedTarget: leanTarget }));
+    expect(summary.invalidFields.has("batchSize")).toBe(false);
+    expect(summary.invalidFields.has("gradientAccumulation")).toBe(false);
+  });
+
+  it("carries an explicit batch size / gradient accumulation from the target defaults", () => {
+    const richTarget = { ...target, defaults: { ...target.defaults, batchSize: 4, gradientAccumulation: 2 } };
+    const draft = configDraftFromTarget(richTarget, dataset, ["auto"]);
+    expect(draft.batchSize).toBe("4");
+    expect(draft.gradientAccumulation).toBe("2");
+  });
+
   it("defaults the LoKr factor to an auto -1 string and normalizes the adapter version", () => {
     const draft = configDraftFromTarget(target, dataset, ["auto"]);
     expect(draft.decomposeFactor).toBe("-1");
