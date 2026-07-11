@@ -5354,9 +5354,7 @@ fn resolve_wan_comfyui_paths(
         })
         .transpose()?;
     let vae = path_for("vae")
-        .map(|vae| {
-            crate::paths::normalize_app_managed_model_path(settings, vae, "ComfyUI Wan VAE")
-        })
+        .map(|vae| crate::paths::normalize_app_managed_model_path(settings, vae, "ComfyUI Wan VAE"))
         .transpose()?;
     Ok(Some(ComfyuiWanPaths {
         high,

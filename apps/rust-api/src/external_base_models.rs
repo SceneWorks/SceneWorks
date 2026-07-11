@@ -425,9 +425,9 @@ fn assemble_wan_experts(
                 // sc-10909: fold the tree's UMT5 TE (a `t5` encoder — `required_text_encoders`) and an
                 // unambiguous VAE in as in-place components. Additive only; whichever is absent falls
                 // back to the snapshot tier at load, so completeness/runnability is unaffected.
-                if let Some(encoder) = text_encoders.iter().find(|encoder| {
-                    matches!(encoder.verdict(), Some((Some(fam), _, _)) if fam == "t5")
-                }) {
+                if let Some(encoder) = text_encoders.iter().find(
+                    |encoder| matches!(encoder.verdict(), Some((Some(fam), _, _)) if fam == "t5"),
+                ) {
                     components.push(encoder.component_json());
                 }
                 if let [only_vae] = vaes {
@@ -981,7 +981,10 @@ mod tests {
                 .join("umt5_xxl_fp8_e4m3fn_scaled.safetensors"),
             &umt5_scaled_te_keys(),
         );
-        write_safetensors(&root.join("vae").join("wan_2.1_vae.safetensors"), &vae_keys());
+        write_safetensors(
+            &root.join("vae").join("wan_2.1_vae.safetensors"),
+            &vae_keys(),
+        );
 
         let rows = scan(&[root]);
         assert_eq!(rows.len(), 1, "experts + TE + VAE → one MoE model");
