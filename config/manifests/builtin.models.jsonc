@@ -2802,20 +2802,27 @@
         "minMemoryGb": 42,
         "quantize": 4
       },
-      // candle/CUDA VRAM gate (epic 10765 sc-10920) — CARRIED (measured:false), arch-scaled, NOT directly
-      // measured: the candle-gen-flux2 offload A/B harness is dev-only (Mistral TE), and klein's Qwen3-TE
-      // txt2img path has no probe harness. Basis: klein keeps the 8B Qwen3 TE DENSE bf16 (~16 GB) in EVERY
-      // tier (only the 9B transformer is packed: q4 ~5 / q8 ~9.5 / bf16 ~18 GB), so the dense TE is the
-      // sequential FLOOR — dropping it before the DiT can't take the peak below its own ~18–20 GB working
-      // set. Estimated resident = TE + DiT + VAE + activations; sequential = max(TE-phase, DiT-phase). These
-      // corroborate the MLX ~36 GB bf16 peak. Behavior they drive: on the epic's 8–16 GB target cards klein
-      // rejects either way (the 16 GB dense TE alone overflows them); on a ~24 GB card the resident overflows
-      // so the gate offloads to the sequential path, which fits. Replace with real numbers if a klein
-      // (Qwen3-TE) offload harness is added to candle-gen-flux2.
+      // candle/CUDA VRAM gate (epic 10765). bf16 DIRECTLY MEASURED (sc-11008) on an RTX PRO 6000 (Blackwell
+      // sm_120) at 1024²/4-step CFG-free via the candle-gen-flux2 klein offload A/B harness
+      // (flux2_klein_probed_generate_for_offload_ab, device-level nvidia-smi PeakSampler on an idle GPU 0),
+      // the FLUX.2-dev (sc-10920) methodology: resident 77284 MiB = 75.5 GB (dense Qwen3 TE + 9B DiT + VAE
+      // co-resident); sequential 54564 MiB = 53.3 GB (sc-10868 — the 8B Qwen3 TE dropped before the DiT
+      // loads); pixels byte-identical (md5 4e36816e). The 22.7 GB reclaim is large because, like flux2-dev,
+      // klein runs reference/attention math in f32, so the dense TE + f32 activations are huge — this CORRECTS
+      // the old sc-10920 arch-scale (bf16 39/23), which was ~2× low. q4/q8 are DERIVED (still measured:false)
+      // from the measured bf16 by subtracting the on-disk transformer quant delta (only the 9B DiT packs; the
+      // 8B Qwen3 TE stays dense bf16 in EVERY tier — DENSE_TE_TIER): bf16->q4 -12.0 GB, bf16->q8 -7.9 GB. They
+      // CANNOT be run or directly measured on candle today — the SceneWorks/flux2-klein-9b-mlx q4/q8 tiers are
+      // MLX-format (not candle-loadable) and load_klein rejects on-the-fly quant; a candle klein packed-quant
+      // loader (sc-11031) is the prerequisite to run/measure them and flip measured:true. Behavior: on the
+      // epic's 8–16 GB target cards klein rejects every tier (the 16 GB dense TE alone overflows them); even
+      // q4 needs ~41 GB sequential, so off-Mac klein is a big-card/offload family. minMemoryGb 42 is the
+      // conservative static admit floor (≈ q4 sequential); the dynamic fit-gate drives the true per-card
+      // resident/sequential/reject decision.
       "candle": {
-        "minMemoryGb": 26,
-        "vramGbByTier": { "q4": 26.0, "q8": 31.0, "bf16": 39.0 },
-        "sequentialPeakGb": { "q4": 20.0, "q8": 20.0, "bf16": 23.0 },
+        "minMemoryGb": 42,
+        "vramGbByTier": { "q4": 63.5, "q8": 67.6, "bf16": 75.5 },
+        "sequentialPeakGb": { "q4": 41.3, "q8": 45.4, "bf16": 53.3 },
         "measured": false
       },
       // SceneWorks public/ungated re-host (LICENSE.md travels with the weights). FLUX
