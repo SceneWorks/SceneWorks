@@ -945,6 +945,64 @@ describe("ImageStudio model picker capability gating", () => {
     expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(8);
   });
 
+  // Per-model quality floor (sc-10731). A floored convert-at-install model (Anima base = q8 floor) is a
+  // decoupled `mlxTiers` model: the DEFAULT clamps UP to the floor, and an EXPLICIT below-floor pick is
+  // honored (never silently switched) but flagged with a non-blocking advisory.
+  // `floor` is passed explicitly (no default) so `undefined` yields a genuinely non-floored model.
+  const flooredModel = (mlxTiers, floor) => ({
+    ...Z_IMAGE,
+    id: "anima_base",
+    name: "Anima 2B",
+    hasVariantMatrix: false,
+    variants: undefined,
+    mlxTiers,
+    minQualityTier: floor,
+  });
+  const floorNote = () => container.querySelector(".quant-tier-floor-note");
+
+  it("floors the default tier to q8 and flags an explicit below-floor pick (sc-10731)", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    // Even with the global default set to q4, the q8-floored model clamps the DEFAULT up to q8.
+    window.localStorage.setItem("sceneworks-default-generation-quality", "q4");
+    await render(
+      baseContext({
+        createImageJob,
+        imageModels: [flooredModel(["q4", "q8"], "q8")],
+        macCapabilities: MAC_CAPS,
+      }),
+    );
+    await openAdvanced(container);
+    await act(async () => {});
+    const picker = tierPicker(container);
+    expect(picker).toBeTruthy();
+    // Acceptance #1: global q4 + floored model → q8 (floored), and no advisory at the floor.
+    expect(picker.value).toBe("q8");
+    expect(floorNote()).toBeFalsy();
+    // Acceptance #2: explicitly pick the below-floor q4 → honored (value stays q4) + advisory appears.
+    setSelect(picker, "q4");
+    await act(async () => {});
+    expect(tierPicker(container).value).toBe("q4");
+    expect(floorNote()).toBeTruthy();
+    // The explicit q4 is honored on Generate (not switched back to the floor).
+    await click(generateButton());
+    expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
+  });
+
+  it("does not flag or clamp a NON-floored model's q4 default (sc-10731, acceptance #3)", async () => {
+    // Same convert-at-install shape but no floor → the global q4 default is honored, no advisory.
+    window.localStorage.setItem("sceneworks-default-generation-quality", "q4");
+    await render(
+      baseContext({
+        imageModels: [flooredModel(["q4", "q8"], undefined)],
+        macCapabilities: MAC_CAPS,
+      }),
+    );
+    await openAdvanced(container);
+    await act(async () => {});
+    expect(tierPicker(container).value).toBe("q4");
+    expect(floorNote()).toBeFalsy();
+  });
+
   // Disjointness guard (sc-8515): the tier picker and Boogu's ui.precisionToggle both write
   // advanced.mlxQuantize and MUST never co-render/co-emit. In the catalog they are disjoint —
   // Boogu downloads via `base/`-style subfolder globs (no downloads[].variant keys), so it is

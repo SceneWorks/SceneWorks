@@ -4,8 +4,10 @@ import {
   GENERATION_QUALITY_TIERS,
   defaultTierSelection,
   installedTiers,
+  isBelowFloor,
   isConvRotTier,
   isSelectableTier,
+  modelQualityFloor,
   shouldShowTierPicker,
   tierLabel,
   tierQuantize,
@@ -288,5 +290,80 @@ describe("quantTier — convert-at-install mlxTiers (sc-10730)", () => {
         null,
       ),
     ).toBe("q8");
+  });
+});
+
+// Per-model quality floor (sc-10731, epic 10721): the backend surfaces the manifest `mlx.minQualityTier`
+// as a top-level `minQualityTier`. `defaultTierSelection` clamps the DEFAULT (rungs 2–4) UP to it — a
+// floored model (Anima base/aesthetic = q8) never lets a low global setting / fallback land the default
+// on the washed q4 — while an EXPLICIT below-floor picker pick is honored + flagged (`isBelowFloor`).
+function flooredConvertModel({ mlxTiers = ["q4", "q8", "bf16"], floor = "q8" } = {}) {
+  return { id: "anima_base", hasVariantMatrix: false, mlxTiers, minQualityTier: floor };
+}
+
+describe("modelQualityFloor / isBelowFloor (sc-10731)", () => {
+  it("reads a valid declared floor and ignores absent/invalid ones", () => {
+    expect(modelQualityFloor({ minQualityTier: "q8" })).toBe("q8");
+    expect(modelQualityFloor({ minQualityTier: "bf16" })).toBe("bf16");
+    expect(modelQualityFloor({ minQualityTier: "q2" })).toBe(null);
+    expect(modelQualityFloor({})).toBe(null);
+    expect(modelQualityFloor(undefined)).toBe(null);
+  });
+
+  it("flags a tier below the floor, not one at/above it", () => {
+    const model = { minQualityTier: "q8" };
+    expect(isBelowFloor("q4", model)).toBe(true);
+    expect(isBelowFloor("q8", model)).toBe(false);
+    expect(isBelowFloor("bf16", model)).toBe(false);
+    // No floor → nothing is ever below it.
+    expect(isBelowFloor("q4", { minQualityTier: undefined })).toBe(false);
+    // A non-quality tier (int8-convrot) never participates in a floor compare.
+    expect(isBelowFloor(INT8_CONVROT_TIER, model)).toBe(false);
+  });
+});
+
+describe("defaultTierSelection — per-model quality floor (sc-10731)", () => {
+  it("clamps a low global setting UP to the floor (acceptance #1: global q4 + Anima base → q8)", () => {
+    const model = flooredConvertModel({ mlxTiers: ["q4", "q8", "bf16"], floor: "q8" });
+    // Global "default quality" is q4, but the model floors at q8 → the DEFAULT resolves q8, never q4.
+    expect(defaultTierSelection(model, null, { defaultQuality: "q4" })).toBe("q8");
+    // The plain q8 base default is already at the floor → still q8.
+    expect(defaultTierSelection(model, null)).toBe("q8");
+  });
+
+  it("raises a declared default below the floor up to the floor", () => {
+    // A download-matrix model that (hypothetically) declares a q4 default but floors at q8 → q8.
+    const model = {
+      ...matrixModel({ installed: ["q4", "q8", "bf16"], defaultTier: "q4" }),
+      minQualityTier: "q8",
+    };
+    expect(defaultTierSelection(model, null)).toBe("q8");
+  });
+
+  it("caps the floor at what's installed (floor q8, only q4 on disk → q4)", () => {
+    const model = flooredConvertModel({ mlxTiers: ["q4"], floor: "q8" });
+    expect(defaultTierSelection(model, null, { defaultQuality: "q4" })).toBe("q4");
+  });
+
+  it("prefers the clean bf16 over the washed q4 when the floor tier is absent", () => {
+    // Floor q8 not installed; bf16 (above the floor) + q4 present → the clean-tier fallback picks bf16.
+    const model = flooredConvertModel({ mlxTiers: ["q4", "bf16"], floor: "q8" });
+    expect(defaultTierSelection(model, null, { defaultQuality: "q4" })).toBe("bf16");
+  });
+
+  it("still honors a below-floor STICKY (rung 1) — a prior explicit pick is not re-floored", () => {
+    const model = flooredConvertModel({ mlxTiers: ["q4", "q8", "bf16"], floor: "q8" });
+    // The user explicitly stickied q4 for this model before → honored as-is (the picker re-flags it).
+    expect(defaultTierSelection(model, "q4")).toBe("q4");
+  });
+
+  it("leaves non-floored models unaffected (acceptance #3)", () => {
+    // No floor (no `minQualityTier`) → the app-wide q8 base default and a q4 global setting both
+    // resolve exactly as before.
+    const model = { id: "anima_base", hasVariantMatrix: false, mlxTiers: ["q4", "q8", "bf16"] };
+    expect(defaultTierSelection(model, null)).toBe("q8");
+    expect(defaultTierSelection(model, null, { defaultQuality: "q4" })).toBe("q4");
+    // And a bf16 global setting is not lowered by any floor.
+    expect(defaultTierSelection(model, null, { defaultQuality: "bf16" })).toBe("bf16");
   });
 });

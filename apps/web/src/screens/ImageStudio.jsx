@@ -126,6 +126,8 @@ import { pidToggleVisible } from "../pidEligibility.js";
 import {
   defaultTierSelection,
   installedTiers,
+  isBelowFloor,
+  modelQualityFloor,
   shouldShowTierPicker,
   tierLabel,
 } from "../quantTier.js";
@@ -872,6 +874,15 @@ export function ImageStudio() {
   const showTierPicker = useMemo(
     () => shouldShowTierPicker(selectedModel, tierOptions),
     [selectedModel, tierOptions],
+  );
+  // Per-model quality floor (sc-10731): the model's minimum-fidelity tier (`minQualityTier`) and whether
+  // the CURRENT pick sits below it. The DEFAULT is already clamped up to the floor (defaultTierSelection),
+  // so this only fires when the user EXPLICITLY picks a below-floor tier — a deliberate quality/creative
+  // choice we HONOR, but flag with a non-blocking advisory (never silently switch their tier).
+  const qualityFloor = useMemo(() => modelQualityFloor(selectedModel), [selectedModel]);
+  const tierBelowFloor = useMemo(
+    () => showTierPicker && isBelowFloor(quantTier, selectedModel),
+    [showTierPicker, quantTier, selectedModel],
   );
   // PiD decoder toggle visibility (epic 7840, sc-7851): the model's latent space has a PiD
   // backbone (ui.pid) AND that backbone's PiD checkpoint is installed. Hidden otherwise — for
@@ -2836,6 +2847,13 @@ export function ImageStudio() {
                   {tierSwitching ? (
                     <span className="field-hint" role="status">
                       Loading {tierLabel(tierSwitching)}…
+                    </span>
+                  ) : null}
+                  {tierBelowFloor ? (
+                    <span className="field-hint quant-tier-floor-note">
+                      {tierLabel(quantTier)} is below the {tierLabel(qualityFloor)} recommended for{" "}
+                      {selectedModel?.name ?? "this model"} — it can look washed or lose fine detail
+                      here (quantization error is amplified under CFG). Your pick is honored.
                     </span>
                   ) : null}
                 </label>
