@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { PoseLibraryPicker } from "./PoseLibraryPicker.jsx";
 import { ImageEditSourcePickerField } from "./AssetPicker.jsx";
+import { ControlOverlayPicker } from "./ControlOverlayPicker.jsx";
 
 // Strict-control panel for the text-to-image studios (epic 8236, sc-8245). One picker gated by the
 // selected backbone's supported control modes (`ui.controlModes`, mirrored from the manifest /
@@ -34,6 +35,12 @@ export function ControlPanel({
   onClearPoses,
   loadUserPoses,
   poseBlockText,
+  // Trained ControlNet overlay selection (sc-10165 B4). `controlOverlayBaseModel` is the backbone id
+  // whose pose control rides a REGISTERED overlay (e.g. `krea_2_turbo`); `null` for the Fun-Union
+  // backbones that carry built-in control weights (no overlay picker). The picker self-fetches its list.
+  controlOverlayBaseModel,
+  selectedOverlayId,
+  onOverlayChange,
   // Canny / depth control image
   controlImageAssetId,
   onControlImageChange,
@@ -107,6 +114,13 @@ export function ControlPanel({
               <p className="mac-gating-note">{poseBlockText}</p>
             ) : (
               <div className="control-pose-section">
+                {controlOverlayBaseModel ? (
+                  <ControlOverlayPicker
+                    baseModel={controlOverlayBaseModel}
+                    onOverlayChange={onOverlayChange}
+                    selectedOverlayId={selectedOverlayId}
+                  />
+                ) : null}
                 <PoseLibraryPicker
                   loadUserPoses={loadUserPoses}
                   onClear={onClearPoses}
