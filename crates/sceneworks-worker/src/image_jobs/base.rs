@@ -1005,12 +1005,15 @@ fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
 
 /// Pick the engine-complete packed subdir of a Krea 2 Turbo turnkey `root`: `q4/` when the request opts
 /// into Q4 (`advanced.mlxQuantize <= 4`) AND it is downloaded, else the default `q8/` (the shipped
-/// default — the P1-validated near-lossless quant). Falls back to whichever subdir is present, then
-/// `root`, so a partially-downloaded bundle surfaces as a load error rather than a silent half-load. The
-/// turnkey (`SceneWorks/krea-2-turbo-mlx`, sc-7573) carries one `from_snapshot`-loadable subdir per quant
-/// (each with a packed `transformer/diffusion_pytorch_model.safetensors`); the loader auto-detects the
-/// packed quant, so the resolved `spec.quantize` is a no-op on it. Mirrors [`ideogram_model_subdir`]
-/// (q4/q8 subdirs) with Boogu's packed-transformer filename and a Q8-default selection.
+/// default — the P1-validated near-lossless quant), CLAMPED UP to the model's per-model quality floor
+/// (`mlx.minQualityTier`, sc-10731 via the shared [`preferred_tier`], sc-10845 — a bf16 floor raises the
+/// picker-less default to the dense `bf16/`). Falls back to whichever subdir is present, then `root`, so
+/// a partially-downloaded bundle surfaces as a load error rather than a silent half-load (a floor tier not
+/// on disk falls to the best installed). The turnkey (`SceneWorks/krea-2-turbo-mlx`, sc-7573) carries one
+/// `from_snapshot`-loadable subdir per quant (each with a packed
+/// `transformer/diffusion_pytorch_model.safetensors`); the loader auto-detects the packed quant, so the
+/// resolved `spec.quantize` is a no-op on it. Mirrors [`ideogram_model_subdir`] (q4/q8 subdirs) with
+/// Boogu's packed-transformer filename and a Q8-default selection.
 fn krea_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
     let bits = request
         .advanced
@@ -1028,13 +1031,18 @@ fn krea_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
             .is_file();
         (packed || sharded).then_some(dir)
     };
-    // bits<=0 → bf16 (the dense base; krea's loader takes it with no quantize); bits<=4 → q4; else the
-    // default q8 (the P1-validated near-lossless quant).
-    let preferred = match bits {
-        Some(b) if b <= 0 => "bf16",
-        Some(b) if b <= 4 => "q4",
-        _ => "q8",
-    };
+    // The tier the request prefers: an explicit `mlxQuantize` pick maps directly (`<=0` → bf16 the dense
+    // base which krea's loader takes with no quantize, `>4` → q8, `1..=4` → q4 — the SAME mapping krea's
+    // own match used), else the app-wide q8 default (epic 10721 / sc-10726, the P1-validated near-lossless
+    // quant) CLAMPED UP to the model's per-model quality floor (`mlx.minQualityTier`, sc-10731) — the SAME
+    // shared, floor-aware logic as `standard_tier_subdir` / `anima_tier_subdir` / `ideogram_model_subdir` /
+    // `boogu_model_subdir` (sc-10845, routing this last bespoke resolver through [`preferred_tier`] instead
+    // of its own non-floor-aware q8 default). No shipping Krea model declares a floor, so this is
+    // byte-identical to the prior q8 default; the routing keeps the resolver from silently landing below a
+    // floor should one ever be declared (a bf16 floor would raise the picker-less default from q8 to the
+    // dense bf16, capped by what's installed). Fallback stays krea's q8 → q4 → bf16 (bf16 last — it is the
+    // heaviest dense tree), so a partial bundle still surfaces as a load error.
+    let preferred = preferred_tier(bits, min_quality_floor(request));
     present(preferred)
         .or_else(|| present("q8"))
         .or_else(|| present("q4"))
@@ -5597,6 +5605,71 @@ mod standard_tier_tests {
             krea_model_subdir(bf16_only.path(), &krea_request(json!(null))),
             bf16_only.path().join("bf16"),
             "q8-default must fall back to the only downloaded tier (bf16), not the repo root"
+        );
+    }
+
+    /// sc-10845 (epic 10721): [`krea_model_subdir`] — the last bespoke tier resolver — routes its DEFAULT
+    /// through the shared, floor-aware [`preferred_tier`]`(bits, `[`min_quality_floor`]`(request))`, exactly
+    /// like [`standard_tier_subdir`] / [`anima_tier_subdir`] / [`ideogram_model_subdir`] /
+    /// [`boogu_model_subdir`], so a floored model's picker-less default clamps UP to `mlx.minQualityTier`
+    /// (capped by installed) instead of blindly landing on the q8 default. No shipping Krea model declares
+    /// a floor today, so every current model is byte-identical to the prior q8 default; this pins the
+    /// generality. Mirrors [`standard_tier_subdir_clamps_default_to_the_floor`].
+    #[test]
+    fn krea_default_tier_clamps_to_the_floor() {
+        // A krea request with the given `bits` (null = no explicit pick) and an optional per-model quality
+        // floor forwarded via `modelManifestEntry.mlx.minQualityTier`.
+        let floored = |bits: serde_json::Value, floor: Option<&str>| {
+            let payload = match floor {
+                Some(f) => json!({
+                    "model": "krea_2_raw",
+                    "advanced": { "mlxQuantize": bits },
+                    "modelManifestEntry": { "mlx": { "minQualityTier": f } },
+                }),
+                None => json!({
+                    "model": "krea_2_raw",
+                    "advanced": { "mlxQuantize": bits },
+                }),
+            };
+            ImageRequest::from_payload(payload.as_object().unwrap())
+        };
+        // Krea turnkey carries packed q4/q8 + dense sharded bf16.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
+        seed_tier(root, "bf16", "diffusion_pytorch_model.safetensors.index.json");
+
+        // Floor bf16, no explicit pick → the dense bf16 (raised above the q8 default).
+        assert_eq!(
+            krea_model_subdir(root, &floored(json!(null), Some("bf16"))),
+            root.join("bf16"),
+            "floored Krea default → the bf16 floor tier (raised above the q8 default)"
+        );
+        // Floor q8 (at the default) → q8, unchanged (the floor only ever RAISES).
+        assert_eq!(
+            krea_model_subdir(root, &floored(json!(null), Some("q8"))),
+            root.join("q8")
+        );
+        // An explicit below-floor q4 pick is HONORED even against a bf16 floor (the worker never overrides
+        // a deliberate quant choice — the web surfaces the advisory instead).
+        assert_eq!(
+            krea_model_subdir(root, &floored(json!(4), Some("bf16"))),
+            root.join("q4")
+        );
+        // Non-floored default is unchanged — the q8 default still stands.
+        assert_eq!(
+            krea_model_subdir(root, &floored(json!(null), None)),
+            root.join("q8")
+        );
+
+        // Floor capped by installed: bf16 floor but only q8 on disk → q8.
+        let only_q8 = tempfile::tempdir().unwrap();
+        seed_tier(only_q8.path(), "q8", "diffusion_pytorch_model.safetensors");
+        assert_eq!(
+            krea_model_subdir(only_q8.path(), &floored(json!(null), Some("bf16"))),
+            only_q8.path().join("q8"),
+            "bf16 floor with only q8 installed → q8 (a floor tier not on disk falls to the best installed)"
         );
     }
 
