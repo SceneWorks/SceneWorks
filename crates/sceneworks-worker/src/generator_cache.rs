@@ -473,6 +473,10 @@ where
 /// e.g. a ~28 GB in-place Wan MoE (two 14B experts) — has room; the fresh generator is dropped when
 /// `run` returns (never cached). Runs on the cache thread, so it keeps that thread's serialization and
 /// panic containment (an engine OOM fails only this job, and evicts).
+///
+/// Candle-only: the sole caller is the in-place ComfyUI Wan base lane (`video_jobs`, candle-gated), so
+/// this is dead code on the MLX / non-candle builds — gated to match the caller.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) async fn with_uncached_generator<R>(
     load: impl FnOnce() -> WorkerResult<Box<dyn Generator>> + Send + 'static,
     run: impl FnOnce(&dyn Generator) -> WorkerResult<R> + Send + 'static,
