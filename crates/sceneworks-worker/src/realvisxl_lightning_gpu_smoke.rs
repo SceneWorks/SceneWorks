@@ -5,11 +5,23 @@
 //! the worker pins for `realvisxl_lightning`, against the distilled RealVisXL_V5.0_Lightning weights.
 //! This is the end-to-end worker-lane validation that backs the macOnly drop.
 //!
-//! Setup (PowerShell; the diffusers fp16 components must be in the HF cache — download via the Model
-//! Manager / the manifest `realvisxl_lightning` entry):
+//! `REALVISXL_LIGHTNING_DIR` may point at EITHER a dense diffusers snapshot (the fp16 components under a
+//! `model_index.json` root) OR a packed **q4/q8 standard tier** dir (the `q4/`/`q8/` subdir of the
+//! `SceneWorks/realvisxl-lightning-mlx` turnkey, which carries engine-complete `unet/`+`text_encoder/`+
+//! `vae/`). `candle-gen-sdxl::load` packed-detects the tier from disk (sc-9416/9527), so the SAME seam
+//! serves both — this is the sc-10812 packed-tier eyeball: the routing flip to `candle_quant_lora` keeps
+//! a quant tier-select on candle, and a packed lightning render must stay coherent at 5-step. Point it
+//! at the cached `SceneWorks/sdxl-base-mlx` `q8/` tier (with `RVXL_SAMPLER=` unset → engine default,
+//! since the non-distilled base isn't a lightning checkpoint) to exercise the shared candle-gen-sdxl
+//! packed loader on this box when the lightning turnkey isn't pulled.
+//!
+//! Setup (PowerShell; the components must be in the HF cache — download via the Model Manager / the
+//! manifest `realvisxl_lightning` entry):
 //! ```text
-//! # the snapshot dir holding model_index.json + unet/ text_encoder/ ... *.fp16.safetensors
+//! # dense: the snapshot dir holding model_index.json + unet/ text_encoder/ ... *.fp16.safetensors
 //! $env:REALVISXL_LIGHTNING_DIR="C:\Users\Michael\.cache\huggingface\hub\models--SG161222--RealVisXL_V5.0_Lightning\snapshots\<hash>"
+//! # OR packed (sc-10812): a q4/q8 tier dir carrying unet/ text_encoder/ vae/
+//! # $env:REALVISXL_LIGHTNING_DIR="D:\.cache\huggingface\hub\models--SceneWorks--realvisxl-lightning-mlx\snapshots\<hash>\q8"
 //! $env:RVXL_OUT_DIR="D:\sceneworks-sampler-validate\rvxl-lightning"
 //! # optional: RVXL_STEPS=5 RVXL_W=1024 RVXL_H=1024 RVXL_PROMPT="..." RVXL_CONTRAST=1 (also render ddim@steps)
 //! cargo test -p sceneworks-worker --features backend-candle --release realvisxl_lightning_candle_gpu_smoke -- --ignored --nocapture
@@ -73,9 +85,17 @@ fn render(
 #[ignore = "real-weight GPU smoke; needs the candle RealVisXL_V5.0_Lightning diffusers snapshot"]
 fn realvisxl_lightning_candle_gpu_smoke() {
     let weights_dir = env_path("REALVISXL_LIGHTNING_DIR");
+    // Accept EITHER a dense diffusers snapshot (model_index.json root) OR a packed q4/q8 standard-tier
+    // dir (sc-10812: engine-complete unet/+text_encoder/+vae/, no model_index.json). candle-gen-sdxl
+    // packed-detects the tier from disk, so both load through the same `gen_core::load("sdxl")` seam.
+    let is_diffusers_snapshot = weights_dir.join("model_index.json").is_file();
+    let is_packed_tier = weights_dir.join("unet").is_dir()
+        && weights_dir.join("text_encoder").is_dir()
+        && weights_dir.join("vae").is_dir();
     assert!(
-        weights_dir.join("model_index.json").is_file(),
-        "REALVISXL_LIGHTNING_DIR must point at the diffusers snapshot (model_index.json missing): {}",
+        is_diffusers_snapshot || is_packed_tier,
+        "REALVISXL_LIGHTNING_DIR must be a diffusers snapshot (model_index.json) or a packed q4/q8 tier \
+         (unet/+text_encoder/+vae/): {}",
         weights_dir.display()
     );
     let out_dir = PathBuf::from(env_or("RVXL_OUT_DIR", "/tmp/rvxl_lightning_smoke"));
@@ -97,9 +117,17 @@ fn realvisxl_lightning_candle_gpu_smoke() {
     let generator = gen_core::load("sdxl", &spec).expect("load candle sdxl provider");
 
     // The shipped behavior: realvisxl_lightning forces the few-step `lightning` sampler, CFG-off
-    // (guidance 1.0 — the distilled checkpoint is trained CFG-free).
-    println!("[smoke] rendering lightning @ {steps} steps ({w}x{h}) ...");
-    let lightning = render(&*generator, &prompt, w, h, steps, 1.0, Some("lightning"));
+    // (guidance 1.0 — the distilled checkpoint is trained CFG-free). Overridable so this harness can also
+    // exercise the shared candle-gen-sdxl packed loader against the cached non-distilled `sdxl-base-mlx`
+    // q8 tier (sc-10812): `RVXL_SAMPLER=` (empty) → engine default, `RVXL_GUIDANCE=7.5` for real CFG.
+    let sampler_name = env_or("RVXL_SAMPLER", "lightning");
+    let sampler = (!sampler_name.trim().is_empty()).then_some(sampler_name.trim());
+    let guidance: f32 = env_or("RVXL_GUIDANCE", "1.0").parse().expect("RVXL_GUIDANCE");
+    println!(
+        "[smoke] rendering {} @ {steps} steps ({w}x{h}, guidance {guidance}) ...",
+        sampler.unwrap_or("engine-default")
+    );
+    let lightning = render(&*generator, &prompt, w, h, steps, guidance, sampler);
     let lightning_std = image_std(&lightning);
     save_png(
         &lightning,

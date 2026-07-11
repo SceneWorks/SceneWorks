@@ -3756,11 +3756,15 @@ mod candle_routing_tests {
         // AND inference LoRA/LoKr on a packed tier (sc-9528), so a quant tier-select AND a LoRA both
         // stay on the candle lane rather than deferring to the retired torch fallback. Mirrors the
         // boogu/lens quant-stays coverage; the inverse of the old dense-only behavior.
+        //
+        // sc-10812: realvisxl_lightning (the few-step distilled sibling on the SAME `sdxl` engine /
+        // descriptor) joins the family — same quant + LoRA stay-on-candle for its plain txt2img shape.
         for model in [
             "sdxl",
             "realvisxl",
             "illustrious_xl_v1",
             "illustrious_xl_v2",
+            "realvisxl_lightning",
         ] {
             for bits in [8, 4] {
                 assert!(
