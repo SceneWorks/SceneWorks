@@ -4524,6 +4524,62 @@ fn krea_training_has_no_torch_fallback_but_runs_on_either_rust_backend() {
     assert_eq!(claimed.id, job.id);
 }
 
+/// A ControlNet Training Studio job (epic 10159, sc-10162): the `control_training` job type carrying a
+/// resolved `krea_control` plan. Mirrors `mlx_training_job` but with no dry-run mode (the studio job
+/// always renders + trains).
+fn control_training_job(requested_gpu: &str) -> CreateJob {
+    CreateJob {
+        job_type: JobType::ControlTraining,
+        project_id: Some("project-1".to_owned()),
+        project_name: Some("Project 1".to_owned()),
+        payload: object(json!({
+            "outputName": "my pose control",
+            "plan": {
+                "planVersion": 1,
+                "target": { "kernel": "krea_control", "baseModel": "krea_2_raw" },
+                "config": { "advanced": { "controlType": "pose" } }
+            }
+        })),
+        requested_gpu: requested_gpu.to_owned(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+        initial_status: None,
+    }
+}
+
+#[test]
+fn control_training_routes_to_candle_only() {
+    // The Krea pose-ControlNet trainer is candle-only (epic 10159): `krea_control` has no torch and no
+    // MLX trainer (the MLX control lane is B5/sc-10177), so neither a torch nor an mlx worker may claim
+    // a `control_training` job — only the candle worker does.
+    let store = store("control-training-candle-only");
+    register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
+    let job = store
+        .create_job(control_training_job("auto"))
+        .expect("job creates");
+
+    // Torch refuses (no torch control trainer — krea_control is no-torch-fallback).
+    assert!(store
+        .claim_next_job("worker-torch")
+        .expect("torch claim ok")
+        .is_none());
+    // MLX refuses (no MLX control trainer yet).
+    assert!(store
+        .claim_next_job("worker-mlx")
+        .expect("mlx claim ok")
+        .is_none());
+
+    // The candle worker is the only home for it.
+    register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
+    let claimed = store
+        .claim_next_job("worker-candle")
+        .expect("candle claim ok")
+        .expect("candle claims the control training job");
+    assert_eq!(claimed.id, job.id);
+}
+
 #[test]
 fn krea_training_runs_on_the_mlx_worker() {
     let store = store("mlx-training-krea");

@@ -81,6 +81,12 @@ export function ConfigureJobPanel({
   // `configValidity`'s issues (sc-10648), so there is no separate readiness prop.
   datasetDoctor,
 }) {
+  // ControlNet training (epic 10159) reuses this panel: a `control_branch` target renders the
+  // per-image control condition from the selected dataset (the data source) and trains a control
+  // branch instead of a LoRA. Surface that so the run reads as ControlNet, not a mislabeled LoRA.
+  const isControlTarget = selectedTarget?.outputKind === "control_branch";
+  const controlType =
+    selectedTarget?.defaults?.advanced?.controlType ?? selectedTarget?.limits?.controlTypes?.[0] ?? "pose";
   return (
     <WorkPanel
       className="training-config-panel"
@@ -166,7 +172,7 @@ export function ConfigureJobPanel({
             </label>
 
             <label>
-              LoRA name
+              {isControlTarget ? "Control branch name" : "LoRA name"}
               <input onChange={(event) => updateConfigDraft("outputName", event.target.value)} value={configDraft.outputName ?? ""} />
             </label>
             <label>
@@ -229,6 +235,15 @@ export function ConfigureJobPanel({
               />
             </label>
           </div>
+
+          {isControlTarget ? (
+            <p className="training-control-note inline-success">
+              <strong>ControlNet training.</strong> A {controlType} condition is rendered from each image
+              in the selected dataset — your data source — then a control branch is trained for{" "}
+              {selectedTarget.ui?.label ?? selectedTarget.name} (applied at generation time). Use a
+              captioned dataset; bring-your-own prepared/annotated datasets are coming next.
+            </p>
+          ) : null}
 
           <AdvancedSection
             hint="cleared values → preset default"

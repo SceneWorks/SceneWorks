@@ -768,6 +768,20 @@ pub(crate) fn detect_and_render_skeleton(
 // weights provisioning (download-on-first-use parity with rtmlib)
 // ---------------------------------------------------------------------------
 
+/// Resolve the two DWPose onnx weight paths `(detector, pose)`, downloading them on first use — the
+/// public seam the ControlNet Training Studio job (epic 10159, sc-10162) uses to build a
+/// [`crate::control_preprocess::PreprocessResources`] before rendering pose conditions. Thin wrapper
+/// over the module-private [`ensure_weights`] (the same resolver `run_pose_detect_job` uses), so the
+/// studio and the pose-detect job provision the identical weights.
+pub(crate) async fn ensure_dwpose_weights(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: &JobSnapshot,
+) -> WorkerResult<(PathBuf, PathBuf)> {
+    ensure_weights(api, settings, http_client, job).await
+}
+
 /// Resolve the two onnx weights, downloading them on first use. Order: explicit env
 /// pin (`SCENEWORKS_DWPOSE_DET`/`POSE`), then the app cache
 /// `<data_dir>/cache/dwpose/`, then rtmlib's own cache (dev machines), else download
