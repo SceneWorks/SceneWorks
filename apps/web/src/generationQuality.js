@@ -4,10 +4,14 @@
 // (lastTierStore) and above clamp-to-installed. It replaces the old hardcoded q8 base fallback in
 // `defaultTierSelection`, which now reads it via `options.defaultQuality`.
 //
-// Persistence reuses the app's per-UI-pref pattern — a single value in localStorage behind a
-// try/catch guard, mirroring the theme/accent helpers in appHelpers.js — rather than the
-// (screen,model)-keyed lastTierStore (that store answers "which tier did you last pick FOR THIS
-// MODEL"; this answers the app-wide baseline, one dimension, no keying).
+// Persistence mirrors theme/accent (sc-10728): the durable copy lives server-side in
+// `ui-preferences.json`, written through `PUT /api/v1/ui-preferences` by the Settings change handler
+// and re-seeded from `GET /api/v1/ui-preferences` on launch (App.jsx). localStorage is only an
+// instant-paint cache — the read/write helpers below touch it — because on the desktop shell the UI
+// runs at the API's per-launch `http://127.0.0.1:<port>` origin, where origin-keyed localStorage does
+// NOT survive a relaunch (the port, and so the origin, changes every launch). This is one app-wide
+// dimension, not the (screen,model)-keyed lastTierStore ("which tier did you last pick FOR THIS
+// MODEL").
 //
 // Vocabulary is bf16|q8|q4 (the three user-facing quality tiers); default q8, matching the worker's
 // generation default (sc-10726). int8-convrot is deliberately NOT a global-default option — it is a
@@ -37,10 +41,11 @@ export function normalizeGenerationQuality(value) {
   return GENERATION_QUALITY_TIERS.includes(value) ? value : DEFAULT_GENERATION_QUALITY;
 }
 
-// The persisted global default generation quality, or q8 when unset / invalid / localStorage is
-// unavailable (private mode, quota, non-DOM env). Reads fresh on every call (no in-memory cache) so a
-// value written in a previous session survives a restart and a change made in Settings is picked up the
-// next time a studio derives a default tier.
+// The global default generation quality from the instant-paint cache, or q8 when unset / invalid /
+// localStorage is unavailable (private mode, quota, non-DOM env). Reads fresh on every call (no
+// in-memory cache) so a value seeded from the server on launch — or changed in Settings — is picked up
+// the next time a studio derives a default tier. On desktop the cache is re-seeded from the durable
+// server copy at launch (App.jsx), so it reflects the previous session even after the origin changed.
 export function readDefaultGenerationQuality() {
   try {
     return normalizeGenerationQuality(window.localStorage.getItem(STORAGE_KEY));
@@ -49,14 +54,16 @@ export function readDefaultGenerationQuality() {
   }
 }
 
-// Persist `value` (normalized to a valid tier) as the global default and return what was stored, so the
-// caller can reflect the canonical value in its UI state.
+// Write `value` (normalized to a valid tier) into the instant-paint localStorage cache and return what
+// was stored. This is ONLY the cache write; the durable copy is persisted separately through
+// `PUT /api/v1/ui-preferences` (see SettingsScreen.changeDefaultQuality). The launch-time seed also
+// calls this to prime the cache from the server without echoing a redundant PUT back.
 export function writeDefaultGenerationQuality(value) {
   const next = normalizeGenerationQuality(value);
   try {
     window.localStorage.setItem(STORAGE_KEY, next);
   } catch {
-    // localStorage unavailable — the setting just won't persist this session.
+    // localStorage unavailable — the cache just won't persist this session (the server copy still does).
   }
   return next;
 }

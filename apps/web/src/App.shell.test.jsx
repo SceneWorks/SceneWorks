@@ -250,6 +250,42 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Queue");
   });
 
+  // sc-10728: the global default generation quality is durable across desktop relaunches only
+  // because App re-seeds the localStorage instant-paint cache from the server copy on mount — the
+  // shell's per-launch 127.0.0.1:<port> origin wipes origin-keyed localStorage every launch. This
+  // asserts the launch-time GET /ui-preferences primes readDefaultGenerationQuality()'s cache.
+  it("re-seeds the default generation quality cache from the server on mount (sc-10728)", async () => {
+    window.localStorage.clear(); // simulate the wiped cache after a relaunch under a new origin
+    global.fetch = vi.fn((url) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) {
+        return Promise.resolve(response({ status: "ok", authRequired: false }));
+      }
+      if (path.endsWith("/access")) {
+        return Promise.resolve(response({ authRequired: false }));
+      }
+      if (path.endsWith("/jobs/events/ticket")) {
+        return Promise.resolve(response({ ticket: "stream-ticket" }));
+      }
+      if (path.endsWith("/projects")) {
+        return Promise.resolve(response([{ id: "project-default", name: "Default Project" }]));
+      }
+      if (path.endsWith("/ui-preferences")) {
+        // The durable server copy the desktop shell persisted in a previous session.
+        return Promise.resolve(response({ defaultGenerationQuality: "q4" }));
+      }
+      return Promise.resolve(response([]));
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    expect(window.localStorage.getItem("sceneworks-default-generation-quality")).toBe("q4");
+  });
+
   // sc-4193 regression (F-WEB-3): the queueCounts memo reads queueSummary, so a
   // queue.updated SSE event (which changes queueSummary but NOT jobs) must refresh
   // the topbar "Queue N" chip. Before the fix the memo's deps were [jobs] only, so
