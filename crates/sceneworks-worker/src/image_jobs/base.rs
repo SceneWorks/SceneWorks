@@ -640,6 +640,70 @@ fn is_dense_te_tier(request: &ImageRequest) -> bool {
             .unwrap_or(false)
 }
 
+/// Quality rank of a generation quant tier: higher = more faithful (`bf16` = 3, `q8` = 2, `q4` = 1,
+/// anything else = 0). Used to CLAMP a resolver's DEFAULT tier UP to a model's per-model quality floor
+/// (`mlx.minQualityTier`, sc-10731) — the clamp only ever RAISES, never lowers.
+fn tier_quality_rank(tier: &str) -> u8 {
+    match tier {
+        "bf16" => 3,
+        "q8" => 2,
+        "q4" => 1,
+        _ => 0,
+    }
+}
+
+/// Normalize a floor tier string to its canonical `&'static str` name (`bf16`/`q8`/`q4`), so a floor
+/// borrowed from the request manifest can be returned as a static tier subdir name. An unknown value
+/// falls to `q4` (harmless — it never outranks the `q8` default, so it is never actually selected).
+fn tier_static_name(tier: &str) -> &'static str {
+    match tier {
+        "bf16" => "bf16",
+        "q8" => "q8",
+        _ => "q4",
+    }
+}
+
+/// The tier subdir name a request prefers, given its explicit `advanced.mlxQuantize` `bits` and the
+/// model's per-model quality `floor` (`mlx.minQualityTier`, sc-10731 — `None` = no floor).
+///
+/// An EXPLICIT pick maps directly (`<= 0` → bf16, `> 4` → q8, `1..=4` → q4) and is HONORED even below
+/// the floor — a quant tier is a deliberate quality/creative choice, so the worker never silently
+/// overrides it (the web surfaces a non-blocking advisory on a below-floor pick instead). With NO
+/// explicit pick, the app-wide default (Q8, epic 10721 / sc-10726) is CLAMPED UP to the floor: a floored
+/// model (Anima base/aesthetic = q8) never lets the plain default land below the floor. The floor only
+/// ever RAISES the default — a floor at or below Q8 leaves the Q8 default unchanged — and the caller's
+/// clean-tier fallback chain still caps the result at what's installed (a floor tier not on disk falls
+/// to the best installed tier). This is the SHARED default-tier logic behind both [`standard_tier_subdir`]
+/// and [`anima_tier_subdir`]; it REPLACES the sc-10714 anima-specific `None => "q8"` hardcode so Anima's
+/// q8 default is now floor-driven from the manifest, not a resolver special-case.
+fn preferred_tier(bits: Option<i64>, floor: Option<&str>) -> &'static str {
+    match bits {
+        Some(b) if b <= 0 => "bf16",
+        Some(b) if b > 4 => "q8",
+        Some(_) => "q4",
+        None => match floor {
+            Some(f) if tier_quality_rank(f) > tier_quality_rank("q8") => tier_static_name(f),
+            _ => "q8",
+        },
+    }
+}
+
+/// The model's per-model quality FLOOR (`mlx.minQualityTier`, sc-10731): the MINIMUM-fidelity tier a
+/// DEFAULT resolution may land on, read from the request's forwarded manifest entry. `None` (field
+/// absent) means no floor — the app-wide default stands (e.g. Anima turbo is q4-tolerant and declares
+/// none). Only `bf16`/`q8`/`q4` are honored; any other value is ignored. Ungated (like
+/// [`standard_tier_subdir`], its ungated caller) so every build config that compiles the resolver also
+/// compiles this.
+fn min_quality_floor(request: &ImageRequest) -> Option<&str> {
+    request
+        .model_manifest_entry
+        .get("mlx")
+        .and_then(|mlx| mlx.get("minQualityTier"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|tier| tier_quality_rank(tier) > 0)
+}
+
 /// Pick the engine-complete tier subdir of a standard SceneWorks quant-matrix turnkey `root`:
 /// `bf16/` when the request opts out of quantization (`advanced.mlxQuantize <= 0` / "none"), `q8/`
 /// when it opts into Q8 (`> 4`), `q4/` for an explicit Q4 pick (`1..=4`), else — with NO explicit
@@ -694,16 +758,13 @@ fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
             || component_has_weights(&dir);
         has_backbone.then_some(dir)
     };
-    // No explicit selection → q8 (the app-wide default, epic 10721 / sc-10726); bits<=0
+    // No explicit selection → the app-wide q8 default (epic 10721 / sc-10726), CLAMPED UP to the model's
+    // per-model quality floor (`mlx.minQualityTier`, sc-10731 — raises only, never lowers); bits<=0
     // (advanced.mlxQuantize: 0 / "none") → bf16; bits>4 → q8; else (an explicit 1..=4) the q4 the user
-    // asked for. Fallback prefers the clean tiers (q8 → bf16 → q4) so a partial install never silently
-    // lands on the washed q4, and the q8 default is clamped to what's on disk.
-    let preferred = match bits {
-        None => "q8",
-        Some(b) if b <= 0 => "bf16",
-        Some(b) if b > 4 => "q8",
-        _ => "q4",
-    };
+    // asked for (an explicit below-floor pick is honored — the web flags it, the worker never overrides).
+    // Fallback prefers the clean tiers (q8 → bf16 → q4) so a partial install never silently lands on the
+    // washed q4, and the (possibly floored) default is clamped to what's on disk.
+    let preferred = preferred_tier(bits, min_quality_floor(request));
     present(preferred)
         .or_else(|| present("q8"))
         .or_else(|| present("bf16"))
@@ -714,9 +775,12 @@ fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
 /// The DENSE (`bf16/`) tier of a SceneWorks quant-matrix turnkey, or `root` unchanged for a flat
 /// diffusers snapshot (sc-10614).
 ///
-/// The candle SDXL lanes (`sdxl_edit_candle.rs`, `sdxl_ipadapter.rs`) read dense weights —
-/// `IMAGE_MODEL_CAPS` marks the whole SDXL family `candle_quant: false` — so they always want
-/// `bf16/`, unlike [`standard_tier_subdir`], which honours `advanced.mlxQuantize`. They historically
+/// The candle SDXL edit / IP-Adapter lanes (`sdxl_edit_candle.rs`, `sdxl_ipadapter.rs`) have only a
+/// DENSE implementation — their conditioning paths read dense weights — so they always want `bf16/`,
+/// unlike [`standard_tier_subdir`], which honours `advanced.mlxQuantize`. (The plain txt2img lane DOES
+/// serve the packed q4/q8 tiers as of sc-10767 — the SDXL family is `candle_quant_lora` — but that goes
+/// through `standard_tier_subdir`; these two bespoke sub-mode lanes stay dense-only for now.) They
+/// historically
 /// handed the snapshot ROOT straight to the loader, which works only because `sdxl` and `realvisxl`
 /// fall back to flat upstream diffusers repos (`stabilityai/stable-diffusion-xl-base-1.0`,
 /// `SG161222/RealVisXL_V5.0`). An SDXL model re-hosted as a tiered turnkey has no component tree at
@@ -768,18 +832,17 @@ fn anima_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
             .unwrap_or(false);
         has_dit.then_some(dir)
     };
-    // Default (no explicit `mlxQuantize`) → Q8 (sc-10714 fix; aligns with epic 10721's "Q8 everywhere"
-    // default). q4 was the old blind default and it renders base/aesthetic WASHED — q4 weight-quant error
-    // is amplified by CFG 4.5 over 30 steps (turbo is CFG-free, so q4 is acceptable there). Q8 is
-    // near-lossless (≈bf16) and fixes the smudge at ~2.2 GB; bf16 (explicit `<= 0`) is there for max
-    // fidelity/speed on this small 2B DiT, and an explicit q4 pick is still honored. Fallback prefers the
-    // clean tiers (q8 → bf16 → q4) so a partial install never silently lands on the washed q4.
-    let preferred = match bits {
-        None => "q8",
-        Some(b) if b <= 0 => "bf16",
-        Some(b) if b > 4 => "q8",
-        _ => "q4",
-    };
+    // Default (no explicit `mlxQuantize`) → the app-wide Q8 default (epic 10721 / sc-10726), CLAMPED UP
+    // to the model's per-model quality floor (`mlx.minQualityTier`, sc-10731). This REPLACES the sc-10714
+    // anima-specific `None => "q8"` hardcode with the SHARED, floor-driven [`preferred_tier`]: Anima
+    // base/aesthetic declare `minQualityTier: q8` in the manifest, so their default is now floor-derived
+    // — the fix for base/aesthetic rendering WASHED at q4 (q4 weight-quant error amplified by CFG 4.5 over
+    // 30 steps) is a general mechanism, not a resolver special-case. Turbo declares NO floor (it is
+    // CFG-free, so q4 is acceptable there) and rides the plain q8 default. bf16 (explicit `<= 0`) is there
+    // for max fidelity/speed on this small 2B DiT, and an explicit q4 pick is still honored (the web
+    // flags a below-floor pick with an advisory). Fallback prefers the clean tiers (q8 → bf16 → q4) so a
+    // partial install never silently lands on the washed q4.
+    let preferred = preferred_tier(bits, min_quality_floor(request));
     present(preferred)
         .or_else(|| present("q8"))
         .or_else(|| present("bf16"))
@@ -3936,6 +3999,35 @@ async fn generate_candle_stream(
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
+    // VRAM fit-gate (epic 10765 Phase 0, sc-10766): reject-before-OOM when the selected tier can't fit
+    // the card, and honor `SCENEWORKS_CUDA_VRAM_CAP_GB` to emulate a small card on big hardware. Models
+    // with no measured `candle` VRAM block, and non-NVIDIA hosts, yield `FitDecision::Unknown` → never
+    // block (mirrors the flux2 edit guard's `None` short-circuit). Auto-downtier / CPU-offload is Phase
+    // 1 (sc-10769); today a too-big model is rejected with an actionable message instead of a mid-render
+    // Metal/CUDA OOM.
+    {
+        let budget = crate::vram_gate::apply_vram_cap(
+            crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+            crate::vram_gate::cuda_vram_cap_gb(),
+        );
+        let tier = crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
+        let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
+        if let crate::vram_gate::FitDecision::TooBig {
+            needed_gb,
+            available_gb,
+        } = crate::vram_gate::fit_decision(needed, budget)
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{model} at the {tier} tier needs ~{needed} GB of VRAM (with headroom) but GPU {gpu} \
+                 has ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output resolution, \
+                 or run on a card with more VRAM.",
+                model = request.model,
+                needed = needed_gb.round() as i64,
+                available = available_gb.round() as i64,
+                gpu = settings.gpu_id,
+            )));
+        }
+    }
     let mut spec = load_spec(weights_dir, quant, adapters, None);
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
@@ -4873,13 +4965,18 @@ mod standard_tier_tests {
         );
     }
 
-    /// sc-10517 / sc-10714: Anima is convert-at-install with a q4/q8/bf16 MATRIX under the injected
-    /// `modelPath` root (`bf16/ q8/ q4/`, each a `diffusion_models/<variant>.safetensors` tree — NOT a
-    /// `transformer/` component). [`anima_tier_subdir`] picks the tier by `mlxQuantize`
+    /// sc-10517 / sc-10714 / sc-10731: Anima is convert-at-install with a q4/q8/bf16 MATRIX under the
+    /// injected `modelPath` root (`bf16/ q8/ q4/`, each a `diffusion_models/<variant>.safetensors` tree —
+    /// NOT a `transformer/` component). [`anima_tier_subdir`] picks the tier by `mlxQuantize`
     /// (**default Q8**; `<= 0` → bf16; `1..=4` → q4; `> 4` → q8) and falls back clean-tiers-first through
     /// q8 → bf16 → q4 → root, so a partial install surfaces as a load error, never a silent half-load onto
     /// the washed q4. The Q8 default (sc-10714) is the fix for base/aesthetic rendering smudgy at q4 —
     /// q4 × CFG amplifies quant error; Q8 is near-lossless. [`is_anima_model`] gates only the three ids.
+    ///
+    /// sc-10731 reconciled the old anima-specific `None => "q8"` hardcode into the shared, floor-driven
+    /// [`preferred_tier`]: with no manifest floor the app-wide q8 default still stands (the assertions
+    /// above), and the added assertions below prove the floor now DRIVES the default — a manifest
+    /// `mlx.minQualityTier` clamps the default UP (capped by installed), while an explicit pick is honored.
     #[test]
     fn anima_tier_subdir_selects_and_falls_back() {
         let anima_request = |bits: serde_json::Value| {
@@ -4945,6 +5042,150 @@ mod standard_tier_tests {
         assert_eq!(
             anima_tier_subdir(tmp3.path(), &anima_request(json!(null))),
             tmp3.path().to_path_buf()
+        );
+
+        // sc-10731 — the per-model quality FLOOR now DRIVES the anima default (was a hardcode).
+        // A floored request carries `advanced.mlxQuantize` AND the forwarded manifest floor.
+        let floored_request = |bits: serde_json::Value, floor: &str| {
+            ImageRequest::from_payload(
+                json!({
+                    "model": "anima_base",
+                    "advanced": { "mlxQuantize": bits },
+                    "modelManifestEntry": { "mlx": { "minQualityTier": floor } }
+                })
+                .as_object()
+                .unwrap(),
+            )
+        };
+        // Anima base's PRODUCTION shape: floor q8, all tiers present, no explicit pick → the default is
+        // q8 — now floor-DERIVED (the hardcode is gone), not a resolver special-case.
+        assert_eq!(
+            anima_tier_subdir(root, &floored_request(json!(null), "q8")),
+            root.join("q8"),
+            "floor q8 drives the default to q8 (reconciled from the sc-10714 hardcode)"
+        );
+        // Floor CAPPED by installed: floor q8 but only q4 on disk → q4 (the floor never selects an
+        // uninstalled tier — a heavy model never resolves a tier the user didn't download).
+        assert_eq!(
+            anima_tier_subdir(tmp2.path(), &floored_request(json!(null), "q8")),
+            tmp2.path().join("q4"),
+            "floor q8 but only q4 installed → q4 (floor capped by installed)"
+        );
+        // Floor RAISES above the q8 default: a synthetic bf16 floor + no explicit pick → bf16 (proves the
+        // clamp genuinely lifts the default, not just coincides with the app-wide q8).
+        assert_eq!(
+            anima_tier_subdir(root, &floored_request(json!(null), "bf16")),
+            root.join("bf16"),
+            "floored default → the floor tier (bf16 floor raises above the q8 default)"
+        );
+        // An EXPLICIT below-floor pick is HONORED even against a q8 floor — the worker never overrides a
+        // deliberate quant choice (the web surfaces the advisory instead).
+        assert_eq!(
+            anima_tier_subdir(root, &floored_request(json!(4), "q8")),
+            root.join("q4"),
+            "explicit q4 honored despite the q8 floor (below-floor pick is the user's choice)"
+        );
+    }
+
+    /// sc-10731: the shared, floor-aware default-tier logic behind both [`standard_tier_subdir`] and
+    /// [`anima_tier_subdir`]. An explicit `mlxQuantize` pick maps directly and is honored regardless of
+    /// the floor; with NO pick, the app-wide q8 default is clamped UP to the floor (never DOWN).
+    #[test]
+    fn preferred_tier_clamps_default_up_to_the_floor_only() {
+        // No explicit pick, no floor → the app-wide q8 default (unchanged, non-floored models).
+        assert_eq!(preferred_tier(None, None), "q8");
+        // Floor at/below q8 leaves the q8 default untouched (the floor only ever RAISES).
+        assert_eq!(preferred_tier(None, Some("q8")), "q8");
+        assert_eq!(preferred_tier(None, Some("q4")), "q8");
+        // A floor ABOVE q8 raises the default to the floor tier.
+        assert_eq!(preferred_tier(None, Some("bf16")), "bf16");
+        // Explicit picks map directly and are HONORED even below the floor (no clamp on an explicit pick).
+        assert_eq!(preferred_tier(Some(4), Some("q8")), "q4");
+        assert_eq!(preferred_tier(Some(0), Some("q8")), "bf16");
+        assert_eq!(preferred_tier(Some(8), None), "q8");
+        assert_eq!(preferred_tier(Some(2), None), "q4");
+        // Rank order + normalization helpers.
+        assert!(tier_quality_rank("bf16") > tier_quality_rank("q8"));
+        assert!(tier_quality_rank("q8") > tier_quality_rank("q4"));
+        assert_eq!(tier_quality_rank("mystery"), 0);
+    }
+
+    /// sc-10731: [`min_quality_floor`] reads the forwarded manifest `mlx.minQualityTier`, honoring only a
+    /// valid bf16/q8/q4 value and treating an absent/bogus one as no floor.
+    #[test]
+    fn min_quality_floor_reads_valid_manifest_values_only() {
+        let with_floor = |mlx: serde_json::Value| {
+            ImageRequest::from_payload(
+                json!({ "model": "anima_base", "modelManifestEntry": { "mlx": mlx } })
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        assert_eq!(
+            min_quality_floor(&with_floor(json!({ "minQualityTier": "q8" }))),
+            Some("q8")
+        );
+        assert_eq!(min_quality_floor(&with_floor(json!({ "quantize": 4 }))), None);
+        assert_eq!(
+            min_quality_floor(&with_floor(json!({ "minQualityTier": "q2" }))),
+            None
+        );
+        // No manifest entry at all → no floor.
+        assert_eq!(min_quality_floor(&request(json!({}))), None);
+    }
+
+    /// sc-10731: [`standard_tier_subdir`] applies the same floor clamp — a floored standard-tier model's
+    /// DEFAULT lands at the floor (capped by installed), while a non-floored one is unchanged and an
+    /// explicit below-floor pick is honored.
+    #[test]
+    fn standard_tier_subdir_clamps_default_to_the_floor() {
+        let floored = |bits: Option<i64>, floor: &str| {
+            let advanced = match bits {
+                Some(b) => json!({ "mlxQuantize": b }),
+                None => json!({}),
+            };
+            ImageRequest::from_payload(
+                json!({
+                    "model": "some_matrix_model",
+                    "advanced": advanced,
+                    "modelManifestEntry": { "mlx": { "minQualityTier": floor } }
+                })
+                .as_object()
+                .unwrap(),
+            )
+        };
+        // All three tiers present.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for tier in ["bf16", "q8", "q4"] {
+            seed_tier(root, tier, "diffusion_pytorch_model.safetensors");
+        }
+        // Floor bf16, no explicit pick → bf16 (floored default → floor tier).
+        assert_eq!(
+            standard_tier_subdir(root, &floored(None, "bf16")),
+            root.join("bf16")
+        );
+        // Floor q8, no explicit pick → q8; a non-floored default is q8 too, but here it is floor-driven.
+        assert_eq!(
+            standard_tier_subdir(root, &floored(None, "q8")),
+            root.join("q8")
+        );
+        // Explicit q4 honored despite a bf16 floor (below-floor pick is the user's choice).
+        assert_eq!(
+            standard_tier_subdir(root, &floored(Some(4), "bf16")),
+            root.join("q4")
+        );
+        // Floor capped by installed: floor bf16 but only q4 on disk → q4.
+        let only_q4 = tempfile::tempdir().unwrap();
+        seed_tier(only_q4.path(), "q4", "diffusion_pytorch_model.safetensors");
+        assert_eq!(
+            standard_tier_subdir(only_q4.path(), &floored(None, "bf16")),
+            only_q4.path().join("q4")
+        );
+        // Non-floored model unaffected — the plain q8 default still stands (acceptance #3).
+        assert_eq!(
+            standard_tier_subdir(root, &request(json!({}))),
+            root.join("q8")
         );
     }
 

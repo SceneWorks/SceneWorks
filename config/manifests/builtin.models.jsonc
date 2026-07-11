@@ -4247,6 +4247,15 @@
         // covers both the convert peak and a 1536² generate.
         "minMemoryGb": 16,
         "quantize": 4,
+        // Per-model quality FLOOR (sc-10731, epic 10721): the minimum-fidelity tier the DEFAULT resolution
+        // may land on. Anima base renders WASHED/smudged at q4 under CFG 4.5 × 30 steps (sc-10714 — q4
+        // weight-quant error is amplified), so the app-wide default (and a low global "default quality"
+        // setting) clamps UP to q8 here rather than silently landing on q4. This REPLACES the sc-10714
+        // `anima_tier_subdir` q8 hardcode: the q8 default is now floor-driven, not a resolver special-case.
+        // An EXPLICIT q4 pick in the Studio picker is still honored (a quant tier is a creative choice) —
+        // the web surfaces a non-blocking advisory instead. Turbo omits this floor (it is CFG-free, so q4
+        // is acceptable there).
+        "minQualityTier": "q8",
         "requiresConversion": true,
         "converter": "anima_quant",
         "convertSourceRepo": "circlestone-labs/Anima",
@@ -4339,6 +4348,10 @@
       "mlx": {
         "minMemoryGb": 16,
         "quantize": 4,
+        // Per-model quality FLOOR (sc-10731, epic 10721): same q8 floor as `anima_base` — the aesthetic
+        // fine-tune shares the base's washed-at-q4-under-CFG behavior (sc-10714), so the DEFAULT clamps UP
+        // to q8. Floor-driven, not the old resolver hardcode; an explicit q4 pick is honored + flagged.
+        "minQualityTier": "q8",
         "requiresConversion": true,
         "converter": "anima_quant",
         "convertSourceRepo": "circlestone-labs/Anima",
