@@ -109,7 +109,8 @@ pub(crate) struct PrepReport {
 
 /// Letterbox `img` into a centered `max(w,h)` black square (pad the short axis, never crop). Mirrors
 /// `pose_jobs::squareify`'s centering so a square target aligns with the square-rendered skeleton.
-fn letterbox_to_square(img: &RgbImage) -> RgbImage {
+/// Shared with the bring-your-own adapter (A3) so both ingest paths are square-canonical.
+pub(crate) fn letterbox_to_square(img: &RgbImage) -> RgbImage {
     let (w, h) = (img.width(), img.height());
     if w == h {
         return img.clone();
@@ -152,6 +153,55 @@ fn target_has_person(_path: &Path, _filter: &PersonFilter) -> WorkerResult<bool>
 fn save_png(img: &RgbImage, path: &Path) -> WorkerResult<()> {
     img.save(path)
         .map_err(|e| WorkerError::Engine(format!("control-prep write {}: {e}", path.display())))
+}
+
+/// Write one control item to `<out_dir>/train/` — `{id}.target.png`, `{id}.{label}.png`,
+/// `{id}.txt` — and return its manifest row. Both images must already be square-canonical and
+/// pixel-aligned. Shared by the generate core (A2) and the bring-your-own adapter (A3) so every
+/// ingest path emits an identical on-disk layout. `<out_dir>/train/` must already exist.
+pub(crate) fn write_control_item(
+    out_dir: &Path,
+    id: &str,
+    target: &RgbImage,
+    control: &RgbImage,
+    caption: &str,
+    label: &str,
+) -> WorkerResult<PreppedItem> {
+    let target_rel = format!("train/{id}.target.png");
+    let control_rel = format!("train/{id}.{label}.png");
+    save_png(target, &out_dir.join(&target_rel))?;
+    save_png(control, &out_dir.join(&control_rel))?;
+    std::fs::write(out_dir.join("train").join(format!("{id}.txt")), caption)?;
+    Ok(PreppedItem {
+        id: id.to_owned(),
+        target_rel,
+        control_rel,
+        caption: caption.to_owned(),
+    })
+}
+
+/// Write `<out_dir>/manifest.jsonl` from prepared `items` (`{"id","caption","target","control",
+/// "kind"}` per line) and return its path. Shared by A2 and A3.
+pub(crate) fn write_manifest(
+    out_dir: &Path,
+    items: &[PreppedItem],
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    let manifest_path = out_dir.join("manifest.jsonl");
+    let mut manifest = String::new();
+    for item in items {
+        let row = json!({
+            "id": item.id,
+            "caption": item.caption,
+            "target": item.target_rel,
+            "control": item.control_rel,
+            "kind": label,
+        });
+        manifest.push_str(&row.to_string());
+        manifest.push('\n');
+    }
+    std::fs::write(&manifest_path, manifest)?;
+    Ok(manifest_path)
 }
 
 /// Generate a control training dataset from `inputs`.
@@ -230,35 +280,18 @@ pub(crate) fn prepare_control_dataset(
             }
         };
 
-        let target_rel = format!("train/{id}.target.png");
-        let control_rel = format!("train/{id}.{label}.png");
-        save_png(&target_square, &out_dir.join(&target_rel))?;
-        save_png(&control, &out_dir.join(&control_rel))?;
-        std::fs::write(train_dir.join(format!("{id}.txt")), &input.caption)?;
-
-        items.push(PreppedItem {
-            id,
-            target_rel,
-            control_rel,
-            caption: input.caption.clone(),
-        });
+        items.push(write_control_item(
+            out_dir,
+            &id,
+            &target_square,
+            &control,
+            &input.caption,
+            &label,
+        )?);
     }
     on_progress(total, total);
 
-    let manifest_path = out_dir.join("manifest.jsonl");
-    let mut manifest = String::new();
-    for item in &items {
-        let row = json!({
-            "id": item.id,
-            "caption": item.caption,
-            "target": item.target_rel,
-            "control": item.control_rel,
-            "kind": label,
-        });
-        manifest.push_str(&row.to_string());
-        manifest.push('\n');
-    }
-    std::fs::write(&manifest_path, manifest)?;
+    let manifest_path = write_manifest(out_dir, &items, &label)?;
 
     Ok(PrepReport {
         items,
