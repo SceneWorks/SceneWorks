@@ -13,6 +13,10 @@ use sceneworks_core::contracts::{
     WorkerRegisterRequest, WorkerSnapshot, WorkerStatus, WorkerUtilizationSnapshot,
 };
 use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};
+// The single source of truth for which `mlx.converter` discriminators the native converters handle.
+// `resolve_convert_plan` rejects anything not on it up front so this worker's converter set can never
+// drift from the convert-gap gate that derives its allow-list from the same const (sc-10573).
+use sceneworks_core::jobs_store::NATIVE_CONVERTERS;
 use sceneworks_core::jsonc::strip_jsonc_comments;
 use sceneworks_core::lora_family::{
     apply_model_manifest_defaults, detect_lora_family, detect_model_family, first_safetensors_path,

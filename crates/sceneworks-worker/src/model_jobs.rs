@@ -951,6 +951,17 @@ async fn resolve_convert_plan(
     let model_id = required_payload_string(&job.payload, "modelId")?;
     let source_repo = required_payload_string(&job.payload, "sourceRepo")?;
     let converter = optional_payload_string(&job.payload, "converter").unwrap_or_default();
+    // Reject any non-empty converter that is not in the shared registry up front, so this resolver's
+    // recognized set is derived from `NATIVE_CONVERTERS` — the same const the convert-gap gate derives
+    // its allow-list from. This guarantees the gate can never be stricter than the set of arms below,
+    // the exact drift that shipped as sc-10573 (`ltx_video` handled here but missing from the gate).
+    // The empty ("" = no converter configured) case still falls through to its own arm below.
+    if !converter.is_empty() && !NATIVE_CONVERTERS.contains(&converter) {
+        return Ok(Err(ConvertPlanError {
+            message: "Unknown MLX converter.",
+            detail: format!("Unrecognized mlx.converter '{converter}' for {model_id}."),
+        }));
+    }
     let plan = match converter {
         "flux2_klein_diffusers" => {
             let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
@@ -2871,6 +2882,125 @@ mod anima_convert_tests {
                 *expected,
                 "partition drift for `{key}` — must match mlx_gen_anima::convert::is_dit_quant_target"
             );
+        }
+    }
+}
+
+/// sc-10573 drift guard (the worker half of the convert-gap allow-list check). Pins the shared
+/// `NATIVE_CONVERTERS` registry to the actual `resolve_convert_plan` arms so the two can never drift:
+/// the convert-gap gate in `sceneworks-core` derives its allow-list from that same const, so keeping
+/// it in lockstep with the arms here keeps the gate no stricter (and no looser) than what the worker
+/// can really convert.
+#[cfg(test)]
+mod convert_registry_tests {
+    use super::*;
+
+    /// A `Settings` with just enough to construct an `ApiClient`; every download/limit field is inert
+    /// for `resolve_convert_plan`'s converter-recognition path (no network is reached — each arm
+    /// returns its own missing-source error before any fetch).
+    fn minimal_settings(data_dir: PathBuf) -> Settings {
+        Settings {
+            api_url: "http://127.0.0.1:0".to_owned(),
+            access_token: None,
+            data_dir,
+            config_dir: PathBuf::from("config"),
+            worker_id: "test-worker".to_owned(),
+            gpu_id: "cpu".to_owned(),
+            is_child_worker: true,
+            poll_seconds: 1,
+            heartbeat_seconds: 5,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            // Values irrelevant to this test (no URL work happens); the byte-limit defaults.
+            max_lora_url_bytes: 8u64 * 1024 * 1024 * 1024,
+            max_model_url_bytes: 256u64 * 1024 * 1024 * 1024,
+            allow_private_lora_urls: true,
+            utility_workers: 1,
+            backend_mlx_enabled: true,
+            backend_candle_enabled: false,
+            gpu_memory_limit_bytes: 0,
+            external_model_roots: Vec::new(),
+        }
+    }
+
+    /// A `model_convert` `JobSnapshot` carrying `converter`. It also carries `sourceFile`/`baseRepo`
+    /// so the arms that `required_payload_string(..)` those before their existence checks reach their
+    /// own (converter-specific) failure — never an infra `?` error out of `resolve_convert_plan`.
+    fn convert_job(converter: &str) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job-convert-registry-test",
+            "type": "model_convert",
+            "status": "running",
+            "projectId": null,
+            "projectName": null,
+            "payload": {
+                "modelId": "test_model",
+                "sourceRepo": "org/test-repo",
+                "converter": converter,
+                "sourceFile": "model.safetensors",
+                "baseRepo": "org/base-repo"
+            },
+            "result": {},
+            "requestedGpu": "auto",
+            "assignedGpu": null,
+            "workerId": null,
+            "progress": 0.0,
+            "stage": "queued",
+            "message": "",
+            "error": null,
+            "etaSeconds": null,
+            "elapsedSeconds": null,
+            "attempts": 0,
+            "sourceJobId": null,
+            "duplicateOfJobId": null,
+            "cancelRequested": false,
+            "createdAt": "2026-07-10T00:00:00Z",
+            "updatedAt": "2026-07-10T00:00:00Z",
+            "startedAt": null,
+            "completedAt": null,
+            "canceledAt": null,
+            "lastHeartbeatAt": null
+        }))
+        .expect("valid model_convert JobSnapshot")
+    }
+
+    /// Every id in `NATIVE_CONVERTERS` is a REAL `resolve_convert_plan` arm — it resolves to a plan or
+    /// an arm-specific error, never the "Unknown MLX converter." fallback — and a bogus id IS rejected
+    /// as unknown. Failure-capable: adding a nonexistent id to the const (no arm) makes it fall to the
+    /// "Unknown MLX converter." path and this test goes RED; the bogus-id case proves the check isn't
+    /// vacuously accepting every string.
+    #[tokio::test]
+    async fn native_converters_match_resolve_convert_plan_arms() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let settings = minimal_settings(tmp.path().to_path_buf());
+        let api = ApiClient::new(&settings);
+        let checkpoint_dir = tmp.path();
+
+        for &converter in NATIVE_CONVERTERS {
+            let job = convert_job(converter);
+            let resolved = resolve_convert_plan(&api, &settings, &job, checkpoint_dir, None)
+                .await
+                .expect("resolver runs without an infra error");
+            if let Err(err) = &resolved {
+                assert_ne!(
+                    err.message, "Unknown MLX converter.",
+                    "'{converter}' is in NATIVE_CONVERTERS but resolve_convert_plan has no arm for it \
+                     — the gate would allow a convert the worker rejects (sc-10573)"
+                );
+            }
+        }
+
+        // A converter NOT in the registry is rejected as unknown — proving the check above is
+        // meaningful and that the fallback still fires.
+        let bogus = convert_job("definitely_not_a_real_converter");
+        let resolved = resolve_convert_plan(&api, &settings, &bogus, checkpoint_dir, None)
+            .await
+            .expect("resolver runs without an infra error");
+        match resolved {
+            Err(err) => assert_eq!(err.message, "Unknown MLX converter."),
+            Ok(_) => panic!("a bogus converter must not resolve to a plan"),
         }
     }
 }
