@@ -40,7 +40,7 @@ use crate::{WorkerError, WorkerResult};
 /// other engine `Sequential` would be a no-op (the advisory contract treats it as `Resident`), so
 /// predicting "it fits staged" and then holding everything resident would SIGKILL — hence the
 /// allowlist. Extended per family as the fan-out (sc-10840) wires each engine.
-const SEQUENTIAL_CAPABLE_ENGINES: &[&str] = &["sdxl", "z_image_turbo"];
+const SEQUENTIAL_CAPABLE_ENGINES: &[&str] = &["sdxl", "z_image_turbo", "qwen_image"];
 
 /// Whether `engine_id`'s provider drops components in phase order under [`OffloadPolicy::Sequential`].
 pub(crate) fn engine_supports_sequential(engine_id: &str) -> bool {
@@ -509,8 +509,10 @@ mod tests {
     fn engine_supports_sequential_is_the_wired_provider_allowlist() {
         assert!(engine_supports_sequential("sdxl"));
         assert!(engine_supports_sequential("z_image_turbo"));
-        // Not-yet-wired providers must NOT be offered sequential (they'd ignore it and SIGKILL).
-        assert!(!engine_supports_sequential("qwen-image"));
+        assert!(engine_supports_sequential("qwen_image"));
+        // Not-yet-wired providers must NOT be offered sequential (they'd ignore it and SIGKILL) — this
+        // includes the qwen edit/control siblings (separate engine ids, tracked in sc-11006).
+        assert!(!engine_supports_sequential("qwen_image_edit"));
         assert!(!engine_supports_sequential("z_image_turbo_control"));
         assert!(!engine_supports_sequential("flux"));
     }
