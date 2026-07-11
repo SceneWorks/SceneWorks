@@ -95,6 +95,8 @@ use api_client::*;
 mod engines;
 mod gpu;
 use gpu::*;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod mlx_fit_gate;
 // CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired
 // into `generate_candle_stream`; gated to the same candle lane as that consumer so the pub(crate)
 // helpers aren't dead code (→ `-D warnings`) in the non-candle / macOS builds.
