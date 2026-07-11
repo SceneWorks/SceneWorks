@@ -45,7 +45,19 @@ pub(crate) struct VramBudget {
 pub(crate) enum FitDecision {
     Unknown,
     Fits,
-    TooBig { needed_gb: f64, available_gb: f64 },
+    /// The predicted resident peak won't fit, but the model's provider supports sequential component
+    /// residency (the candle FLUX lane, sc-10769) — run with `OffloadPolicy::Sequential` instead of
+    /// rejecting. Sequential peak is always ≤ resident, so this is the best option before a reject;
+    /// it's best-effort (the reactive Metal/CUDA-OOM containment is the backstop if even sequential
+    /// overflows), which is why it needs no separately-measured sequential-peak number to be correct.
+    Offload {
+        needed_gb: f64,
+        available_gb: f64,
+    },
+    TooBig {
+        needed_gb: f64,
+        available_gb: f64,
+    },
 }
 
 /// Read the small-card cap from the environment. `Some(gb)` only for a positive number.
@@ -129,6 +141,24 @@ pub(crate) fn fit_decision(needed_gb: Option<f64>, budget: Option<VramBudget>) -
         }
     } else {
         FitDecision::Fits
+    }
+}
+
+/// Fold sequential-residency capability into a fit decision (epic 10765 Phase 1b, sc-10821): a
+/// [`FitDecision::TooBig`] on a provider that supports sequential offload (the candle FLUX lane) becomes
+/// [`FitDecision::Offload`] — load→use→drop each component so peak VRAM is the largest single working
+/// set (≤ resident) rather than reject. Every other outcome (Fits / Unknown / TooBig on a non-capable
+/// provider) is unchanged.
+pub(crate) fn resolve_offload(decision: FitDecision, sequential_capable: bool) -> FitDecision {
+    match decision {
+        FitDecision::TooBig {
+            needed_gb,
+            available_gb,
+        } if sequential_capable => FitDecision::Offload {
+            needed_gb,
+            available_gb,
+        },
+        other => other,
     }
 }
 
@@ -274,6 +304,35 @@ mod tests {
         // Missing either input ⇒ never block.
         assert_eq!(fit_decision(None, Some(budget)), FitDecision::Unknown);
         assert_eq!(fit_decision(Some(8.0), None), FitDecision::Unknown);
+    }
+
+    #[test]
+    fn resolve_offload_rewrites_toobig_only_when_sequential_capable() {
+        let budget = VramBudget {
+            free_gb: 10.0,
+            total_gb: 10.0,
+        };
+        let too_big = fit_decision(Some(40.0), Some(budget));
+        assert!(matches!(too_big, FitDecision::TooBig { .. }));
+        // Sequential-capable (the candle FLUX lane) ⇒ Offload instead of reject, carrying the numbers.
+        assert_eq!(
+            resolve_offload(too_big.clone(), true),
+            FitDecision::Offload {
+                needed_gb: 40.0,
+                available_gb: 10.0,
+            }
+        );
+        // Not capable ⇒ unchanged TooBig (still rejects).
+        assert!(matches!(
+            resolve_offload(too_big, false),
+            FitDecision::TooBig { .. }
+        ));
+        // Fits / Unknown are never rewritten, regardless of capability.
+        assert_eq!(resolve_offload(FitDecision::Fits, true), FitDecision::Fits);
+        assert_eq!(
+            resolve_offload(FitDecision::Unknown, true),
+            FitDecision::Unknown
+        );
     }
 
     /// Live real-hardware validation (sc-10766): exercises the REAL `nvidia-smi` VRAM reading on GPU 0

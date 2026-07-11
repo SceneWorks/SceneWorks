@@ -4031,36 +4031,61 @@ async fn generate_candle_stream(
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
-    // VRAM fit-gate (epic 10765 Phase 0, sc-10766): reject-before-OOM when the selected tier can't fit
-    // the card, and honor `SCENEWORKS_CUDA_VRAM_CAP_GB` to emulate a small card on big hardware. Models
-    // with no measured `candle` VRAM block, and non-NVIDIA hosts, yield `FitDecision::Unknown` → never
-    // block (mirrors the flux2 edit guard's `None` short-circuit). Auto-downtier / CPU-offload is Phase
-    // 1 (sc-10769); today a too-big model is rejected with an actionable message instead of a mid-render
-    // Metal/CUDA OOM.
-    {
+    // VRAM fit-gate (epic 10765, sc-10766 Phase 0 + sc-10821 Phase 1b): when the selected tier's
+    // predicted resident peak won't fit the card, either RUN SEQUENTIALLY (a provider that supports
+    // sequential component residency — the candle FLUX lane, sc-10769 — drops the text encoders before
+    // the DiT so peak = DiT+VAE, not TE+DiT+VAE) or, for a family that has not wired it, reject-before-
+    // OOM with an actionable message. Honors `SCENEWORKS_CUDA_VRAM_CAP_GB` to emulate a small card.
+    // Unmeasured models (no `candle` block) and non-NVIDIA hosts yield `Unknown` → never block.
+    let use_sequential = {
         let budget = crate::vram_gate::apply_vram_cap(
             crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
             crate::vram_gate::cuda_vram_cap_gb(),
         );
-        let tier = crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
+        let tier =
+            crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
         let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
-        if let crate::vram_gate::FitDecision::TooBig {
-            needed_gb,
-            available_gb,
-        } = crate::vram_gate::fit_decision(needed, budget)
-        {
-            return Err(WorkerError::InvalidPayload(format!(
-                "{model} at the {tier} tier needs ~{needed} GB of VRAM (with headroom) but GPU {gpu} \
-                 has ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output resolution, \
-                 or run on a card with more VRAM.",
-                model = request.model,
-                needed = needed_gb.round() as i64,
-                available = available_gb.round() as i64,
-                gpu = settings.gpu_id,
-            )));
+        // Only the candle FLUX lane has wired sequential residency (sc-10769); other families reject.
+        let sequential_capable = matches!(engine_id, "flux1_dev" | "flux1_schnell");
+        match crate::vram_gate::resolve_offload(
+            crate::vram_gate::fit_decision(needed, budget),
+            sequential_capable,
+        ) {
+            crate::vram_gate::FitDecision::Offload {
+                needed_gb,
+                available_gb,
+            } => {
+                tracing::info!(
+                    model = %request.model,
+                    needed_gb = needed_gb.round() as i64,
+                    available_gb = available_gb.round() as i64,
+                    "candle VRAM fit-gate: resident peak exceeds free VRAM — loading with sequential \
+                     component residency (text encoders dropped before the DiT)"
+                );
+                true
+            }
+            crate::vram_gate::FitDecision::TooBig {
+                needed_gb,
+                available_gb,
+            } => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{model} at the {tier} tier needs ~{needed} GB of VRAM (with headroom) but GPU \
+                     {gpu} has ~{available} GB available. Pick a lower tier (Q4/Q8), lower the output \
+                     resolution, or run on a card with more VRAM.",
+                    model = request.model,
+                    needed = needed_gb.round() as i64,
+                    available = available_gb.round() as i64,
+                    gpu = settings.gpu_id,
+                )));
+            }
+            _ => false,
         }
-    }
+    };
     let mut spec = load_spec(weights_dir, quant, adapters, None);
+    if use_sequential {
+        // Ask the provider (candle FLUX) to load→use→drop each component in phase order (sc-10821).
+        spec = spec.with_offload_policy(gen_core::OffloadPolicy::Sequential);
+    }
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
