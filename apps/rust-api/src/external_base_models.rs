@@ -323,6 +323,33 @@ fn assemble_models(detected: Vec<DetectedFile>) -> Vec<Value> {
 /// present". VAE families are intentionally not pinned — the Wan and Qwen 3D VAEs
 /// are byte-identical by key, so the detector returns no VAE family, and requiring
 /// one would false-negative every assembly.
+/// Families the worker loads **DiT-in-place, snapshot-backed** (epic 10451 Phase 2b,
+/// sc-10670): the diffusion transformer is read from the ComfyUI tree, but the text
+/// encoder / VAE / tokenizer come from a resident SceneWorks diffusers snapshot —
+/// not the tree. So a bare DiT anchor is a **complete** assembly on its own; the
+/// tree's own components are a different quant/key-schema (separate slices) and are
+/// deliberately not folded in.
+///
+/// `qwen-image`: the ComfyUI Qwen2.5-VL text encoders are themselves *scaled*-fp8
+/// (sc-10671) and the tree VAE uses native WAN-VAE keys (a 194-key 3D-VAE remap), so
+/// both are sourced from our snapshot while the plain-fp8 DiT is read in place.
+fn is_snapshot_backed(family: &str) -> bool {
+    matches!(family, "qwen-image")
+}
+
+/// Whether a fully-assembled external model has a worker loader for its family+quant,
+/// i.e. is offerable as a generation target (the picker offers only `usable !== false`).
+/// Each `(family, quant)` here corresponds to a landed load-in-place slice:
+/// z-image bf16 (sc-10668) · qwen-image plain fp8_e4m3 (sc-10670). Everything else
+/// stays fail-closed until its slice lands. Only ever true for a `complete` assembly.
+fn family_quant_runnable(family: Option<&str>, quant: Option<&str>, assembly: &str) -> bool {
+    assembly == "complete"
+        && matches!(
+            (family, quant),
+            (Some("z-image"), Some("bf16")) | (Some("qwen-image"), Some("fp8_e4m3"))
+        )
+}
+
 fn required_text_encoders(family: &str) -> Option<&'static [&'static str]> {
     match family {
         // Z-Image pairs with Qwen3-4B; Wan with UMT5 (a T5 encoder); FLUX.2 with
@@ -391,6 +418,21 @@ fn assemble_one(
                     components,
                 ));
             };
+            // Snapshot-backed families (sc-10670): the DiT is read in place, but the TE / VAE /
+            // tokenizer come from a resident SceneWorks snapshot, so a bare DiT anchor is complete on
+            // its own — the tree's own components (a different quant / key schema) are not folded in.
+            // Runnability is then decided by family+quant in `finish_row` (only the plain-fp8 qwen DiT
+            // has a loader today; other qwen quants stay fail-closed until their slice).
+            if is_snapshot_backed(&family_name) {
+                return Some(finish_row(
+                    id,
+                    anchor,
+                    Some(family_name),
+                    "complete",
+                    LOADER_PENDING_REASON.to_owned(),
+                    components,
+                ));
+            }
             match required_text_encoders(&family_name) {
                 None => (
                     Some(family_name),
@@ -457,12 +499,11 @@ fn finish_row(
         BaseWeightDetection::Unrecognized { .. } => None,
     };
     // A model is **runnable** only when a worker loader exists for its family+quant and
-    // the assembly is complete (all component paths resolved). sc-10668 wires the first:
-    // z-image bf16 (the candle `load_from_comfyui_components` seam). Everything else stays
-    // fail-closed (`usable:false` + reason) until its loader slice lands — the web picker
-    // offers only `usable !== false`.
-    let runnable =
-        assembly == "complete" && family.as_deref() == Some("z-image") && quant == Some("bf16");
+    // the assembly is complete (all component paths resolved). sc-10668 wired z-image bf16;
+    // sc-10670 wires qwen-image plain fp8_e4m3. Everything else stays fail-closed
+    // (`usable:false` + reason) until its loader slice lands — the web picker offers only
+    // `usable !== false`.
+    let runnable = family_quant_runnable(family.as_deref(), quant, assembly);
     let mut row = json!({
         "id": id,
         "name": format!("{} (ComfyUI)", anchor.name),
@@ -635,6 +676,51 @@ mod tests {
         assert!(reason.contains("text encoder"), "reason: {reason}");
         // The VAE it did find is still listed as a component.
         assert_eq!(row["components"].as_array().unwrap().len(), 2);
+    }
+
+    /// A ComfyUI Qwen-Image DiT (`diffusion_models/*_fp8_e4m3fn`): dual-stream MMDiT keys under the
+    /// BFL `model.diffusion_model.` prefix, all `F8_E4M3` → detector `(qwen-image, transformer,
+    /// fp8_e4m3)`.
+    fn qwen_image_dit_fp8_keys() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("model.diffusion_model.img_in.weight", "F8_E4M3"),
+            (
+                "model.diffusion_model.transformer_blocks.0.attn.add_q_proj.weight",
+                "F8_E4M3",
+            ),
+            (
+                "model.diffusion_model.transformer_blocks.0.img_mlp.net.0.proj.weight",
+                "F8_E4M3",
+            ),
+        ]
+    }
+
+    #[test]
+    fn qwen_image_fp8_dit_is_snapshot_backed_complete_and_runnable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = models_root(temp.path());
+        // Only the DiT is on disk — no tree text encoder / VAE. Snapshot-backed families (sc-10670)
+        // source the TE / VAE / tokenizer from a resident SceneWorks snapshot, so a bare DiT anchor is
+        // still complete and runnable.
+        write_safetensors(
+            &root
+                .join("diffusion_models")
+                .join("qwen_image_2512_fp8_e4m3fn.safetensors"),
+            &qwen_image_dit_fp8_keys(),
+        );
+
+        let rows = scan(&[root]);
+        assert_eq!(rows.len(), 1, "one anchored DiT model");
+        let row = &rows[0];
+        assert_eq!(row["family"], "qwen-image");
+        assert_eq!(row["type"], "image");
+        assert_eq!(row["quant"], "fp8_e4m3");
+        assert_eq!(row["assembly"], "complete");
+        // sc-10670: plain-fp8 qwen DiT has a loader → usable, no reason. The tree's own TE / VAE are
+        // deliberately NOT folded in (different quant / key schema), so components is the DiT alone.
+        assert_eq!(row["usable"], true);
+        assert_eq!(row["unusableReason"], Value::Null);
+        assert_eq!(row["components"].as_array().unwrap().len(), 1);
     }
 
     #[test]
