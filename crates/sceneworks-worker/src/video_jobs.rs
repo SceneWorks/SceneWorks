@@ -2931,18 +2931,23 @@ fn wan_quant_bits(request: &VideoRequest) -> Option<i64> {
 
 /// The Wan2.2 quant-matrix tier search order for a request — preferred tier first, then the
 /// always-smaller fallback tiers so a repo missing the preferred subdir still loads (mirrors
-/// [`ltx_bundle_tier_order`]): no explicit pick ⇒ **`q8`** (the app-wide default, epic 10721 /
-/// sc-10726), `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, else an explicit `q4`. The Q8 default is
-/// CLAMPED to installed — the macOS base download ships only the lean `q4/` tier, so a default job
-/// resolves q4 unless the user opted into (and fetched) q8. `bf16` stays OUT of the default order
-/// entirely, so a default job never pulls the huge dense tier by accident (preserved from the old q4
-/// default; a heavy Wan model never OOMs on a tier the user didn't request).
+/// [`ltx_bundle_tier_order`]): `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, an explicit `1..=4` ⇒
+/// `q4`, and — with NO explicit `mlxQuantize` — the **`q4`** default (q4-first).
+///
+/// The video lane deliberately does NOT take epic 10721's app-wide **Q8** default (sc-10726); it keeps
+/// the pre-sc-10726 q4-first default (sc-10859). Rationale: the MLX video lane has no user Q8 lever
+/// (Video Studio's quant control is the GGUF/torch path), so a silent Q8 default gives no UI-accessible
+/// quality benefit and only ever surfaces as an *accidental* default when the Q8 tier landed on disk via
+/// a side lane — where it risks a video-runtime OOM at heavy res/frame counts (the install-fit clamp
+/// doesn't help: the sc-8516 budget is 1024²-image-calibrated). Q8/bf16 stay reachable on an explicit
+/// pick; `bf16` stays OUT of the default order so a default job never pulls the huge dense tier. The
+/// precise "highest tier that fits the video-runtime budget" default is the deferred sc-10733 (S8).
 #[cfg(target_os = "macos")]
 fn wan_tier_order(request: &VideoRequest) -> &'static [&'static str] {
     match wan_quant_bits(request) {
-        None => &["q8", "q4"],
         Some(b) if b <= 0 => &["bf16", "q8", "q4"],
         Some(b) if b >= 8 => &["q8", "q4"],
+        // No explicit pick (`None`) OR an explicit `1..=4` ⇒ q4-first (sc-10859 video carve-out).
         _ => &["q4", "q8"],
     }
 }
@@ -5945,16 +5950,35 @@ const BERNINI_TIER_FILES: &[&str] = &[
     "mllm/tokenizer.json",
 ];
 
+/// Bernini VIDEO-lane default tier order (no explicit `mlxQuantize`): **q4-first** (sc-10859). The MLX
+/// video lane has no Q8 lever, so a silent Q8 default only risks a video-runtime OOM at heavy
+/// res/frame counts — see [`wan_tier_order`]. Passed by the video generation path.
+#[cfg(target_os = "macos")]
+pub(crate) const BERNINI_VIDEO_DEFAULT_TIER_ORDER: &[&str] = &["q4", "q8"];
+
+/// Bernini IMAGE-lane default tier order (no explicit `mlxQuantize`): **q8-first** — epic 10721 /
+/// sc-10726's app-wide Q8 default, kept for the image lane (Image Studio has a Q8 picker and the
+/// sc-8516 budget's 1024²-image transient is exactly what applies). Passed by `image_jobs::bernini`.
+#[cfg(target_os = "macos")]
+pub(crate) const BERNINI_IMAGE_DEFAULT_TIER_ORDER: &[&str] = &["q8", "q4"];
+
 /// The Bernini quant-matrix tier search order for a request — preferred tier first, then the
 /// always-smaller fallback tiers so a repo missing the preferred subdir still loads (mirrors
-/// [`wan_tier_order`]): no explicit pick ⇒ **`q8`** (the app-wide default, epic 10721 / sc-10726,
-/// clamped to installed — the lean `q4/` base download still resolves q4 until q8 is fetched);
-/// `mlxQuantize <= 0` ⇒ `bf16`; `>= 8` ⇒ `q8`; else an explicit `q4`. `bf16` stays OUT of the default
-/// order, so a default job never pulls the huge dense tier by accident.
+/// [`wan_tier_order`]): `mlxQuantize <= 0` ⇒ `bf16`; `>= 8` ⇒ `q8`; an explicit `q4` ⇒ q4-first; and —
+/// with NO explicit pick — `default_order`. `bf16` stays OUT of the default order, so a default job
+/// never pulls the huge dense tier by accident.
+///
+/// Bernini is SHARED by the video (`bernini`) and image (`bernini_image`) lanes, whose *default* tiers
+/// diverge (sc-10859): the caller passes [`BERNINI_VIDEO_DEFAULT_TIER_ORDER`] (q4-first, video OOM
+/// carve-out) or [`BERNINI_IMAGE_DEFAULT_TIER_ORDER`] (q8-first, epic-10721 app-wide default). Only the
+/// no-explicit-pick (`None`) arm consults it; every explicit pick is lane-independent.
 #[cfg(target_os = "macos")]
-fn bernini_tier_order(bits: Option<i64>) -> &'static [&'static str] {
+fn bernini_tier_order(
+    bits: Option<i64>,
+    default_order: &'static [&'static str],
+) -> &'static [&'static str] {
     match bits {
-        None => &["q8", "q4"],
+        None => default_order,
         Some(b) if b <= 0 => &["bf16", "q8", "q4"],
         Some(b) if b >= 8 => &["q8", "q4"],
         _ => &["q4", "q8"],
@@ -5976,8 +6000,12 @@ fn bernini_tier_is_complete(dir: &Path) -> bool {
 /// repo has no complete tier subdir — a legacy flat snapshot, where the caller keeps the root +
 /// load-time quant.
 #[cfg(target_os = "macos")]
-fn bernini_tier_subdir(root: &Path, bits: Option<i64>) -> Option<PathBuf> {
-    bernini_tier_order(bits)
+fn bernini_tier_subdir(
+    root: &Path,
+    bits: Option<i64>,
+    default_order: &'static [&'static str],
+) -> Option<PathBuf> {
+    bernini_tier_order(bits, default_order)
         .iter()
         .map(|tier| root.join(tier))
         .find(|dir| bernini_tier_is_complete(dir))
@@ -5990,15 +6018,17 @@ fn bernini_tier_subdir(root: &Path, bits: Option<i64>) -> Option<PathBuf> {
 /// `quant = None`: `mlxQuantize` selects WHICH tier, never a load-time requant (the `bf16/` tier is
 /// dense, so `None` ⇒ dense too). A legacy flat snapshot (no tier subdirs) keeps today's behavior: load
 /// the root and quantize at load per `legacy_quant`. Shared by the video + image lanes (each passes its
-/// own parsed `bits` + `legacy_quant`).
+/// own parsed `bits` + `legacy_quant` + `default_order`: [`BERNINI_VIDEO_DEFAULT_TIER_ORDER`] for video,
+/// [`BERNINI_IMAGE_DEFAULT_TIER_ORDER`] for image — the no-explicit-pick default diverges per sc-10859).
 #[cfg(target_os = "macos")]
 pub(crate) fn resolve_bernini_tier_dir_and_quant(
     settings: &Settings,
     bits: Option<i64>,
     legacy_quant: Option<Quant>,
+    default_order: &'static [&'static str],
 ) -> WorkerResult<(PathBuf, Option<Quant>)> {
     let root = resolve_bernini_model_dir(settings)?;
-    match bernini_tier_subdir(&root, bits) {
+    match bernini_tier_subdir(&root, bits, default_order) {
         Some(tier) => Ok((tier, None)),
         None => Ok((root, legacy_quant)),
     }
@@ -6224,8 +6254,13 @@ async fn generate_bernini(
     // legacy flat snapshot keeps load-time quant.
     let bits = bernini_quant_bits(request);
     ensure_bernini_tier_present(api, settings, job, bits).await?;
-    let (model_dir, quant) =
-        resolve_bernini_tier_dir_and_quant(settings, bits, resolve_bernini_quant(request))?;
+    // Video lane: no explicit pick defaults q4-first (sc-10859 OOM carve-out), unlike the image lane.
+    let (model_dir, quant) = resolve_bernini_tier_dir_and_quant(
+        settings,
+        bits,
+        resolve_bernini_quant(request),
+        BERNINI_VIDEO_DEFAULT_TIER_ORDER,
+    )?;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -6349,26 +6384,21 @@ fn scail2_tier_repo(model: &str) -> Option<(&'static str, &'static str)> {
 
 /// The SCAIL-2 quant-matrix tier search order for a request — preferred tier first, then the
 /// always-smaller fallback tiers so a repo missing the preferred subdir still loads (mirrors
-/// [`wan_tier_order`]): no explicit `mlxQuantize` ⇒ **`q8`** (the app-wide default, epic 10721 /
-/// sc-10726, clamped to installed — the lean `q4/` base download still resolves q4 until q8 is
-/// fetched); `<= 0` ⇒ `bf16`; `>= 8` ⇒ `q8`; else an explicit `q4`. `bf16` stays OUT of the default
-/// order, so a default job never pulls the huge dense tier by accident. A raw `mlxQuantize`-presence
-/// check distinguishes the default from an explicit Q4 pick — [`resolve_scail2_quant`] maps BOTH to
-/// `Some(Quant::Q4)`, so it can't tell them apart on its own.
+/// [`wan_tier_order`]): `<= 0` ⇒ `bf16`; `>= 8` ⇒ `q8`; and — with NO explicit `mlxQuantize` OR an
+/// explicit `q4` — the **`q4`** default (q4-first). `bf16` stays OUT of the default order, so a default
+/// job never pulls the huge dense tier by accident.
+///
+/// The video lane keeps the pre-sc-10726 q4-first default (sc-10859), NOT epic 10721's app-wide Q8 —
+/// see [`wan_tier_order`] for the rationale (no MLX video Q8 lever ⇒ a silent Q8 only risks a
+/// video-runtime OOM). This also lets the resolver drop its old `mlxQuantize`-presence check: the
+/// no-explicit-pick default and an explicit `q4` now BOTH resolve q4-first, so [`resolve_scail2_quant`]
+/// mapping both to `Some(Quant::Q4)` is exactly what we want.
 #[cfg(target_os = "macos")]
 fn scail2_tier_order(request: &VideoRequest) -> &'static [&'static str] {
-    // No explicit pick → prefer the clean q8 tier when installed (clamped to q4 otherwise).
-    let has_explicit_quant = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-        .is_some();
-    if !has_explicit_quant {
-        return &["q8", "q4"];
-    }
     match resolve_scail2_quant(request) {
         None => &["bf16", "q8", "q4"],
         Some(Quant::Q8) => &["q8", "q4"],
+        // No explicit pick OR an explicit `q4` ⇒ q4-first (sc-10859 video carve-out).
         _ => &["q4", "q8"],
     }
 }
@@ -6967,21 +6997,21 @@ fn ltx_wants_bf16(request: &VideoRequest) -> bool {
 
 /// The SceneWorks LTX bundle tier search order for a request — preferred tier first, then the
 /// always-smaller fallback tiers so a bundle missing the preferred subdir still loads (sc-8513):
-/// `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, an explicit `1..=4` ⇒ `q4`, else — with NO explicit
-/// `mlxQuantize` — the **`q8`** default (epic 10721 / sc-10726), CLAMPED to installed (the lean `q4/`
-/// bundle download still resolves q4 until q8 is fetched). bf16 stays OUT of the default order, so a
-/// default job never loads the huge dense tier by accident.
+/// `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, and — with an explicit `1..=4` OR NO explicit
+/// `mlxQuantize` — the **`q4`** default (q4-first). bf16 stays OUT of the default order, so a default
+/// job never loads the huge dense tier by accident.
+///
+/// The video lane keeps the pre-sc-10726 q4-first default (sc-10859), NOT epic 10721's app-wide Q8 —
+/// see [`wan_tier_order`] for the rationale (no MLX video Q8 lever ⇒ a silent Q8 only risks a
+/// video-runtime OOM). The no-explicit-pick and explicit-`q4` cases now share one q4-first arm.
 #[cfg(target_os = "macos")]
 fn ltx_bundle_tier_order(request: &VideoRequest) -> &'static [&'static str] {
     if ltx_wants_bf16(request) {
         &["bf16", "q8", "q4"]
     } else if ltx_wants_q8(request) {
         &["q8", "q4"]
-    } else if ltx_quant_bits(request).is_none() {
-        // No explicit pick → the q8 default, clamped to installed (q4-only bundles still resolve q4).
-        &["q8", "q4"]
     } else {
-        // An explicit Q4 pick (`1..=4`) stays q4-first.
+        // No explicit pick OR an explicit `1..=4` ⇒ q4-first (sc-10859 video carve-out).
         &["q4", "q8"]
     }
 }
@@ -11000,10 +11030,11 @@ mod tests {
         // An explicit Q4 pick stays q4-first (never overridden by the q8 default).
         let q4 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
         assert_eq!(wan_tier_order(&q4), &["q4", "q8"]);
-        // sc-10726: an absent knob now prefers the clean q8 tier (clamped to installed — q4-only
-        // installs still resolve q4); bf16 is never in a default job's search path (no OOM by accident).
+        // sc-10859: an absent knob defaults q4-first on the video lane (the sc-10726 app-wide q8 default
+        // is NOT applied to video — no MLX video Q8 lever, so a silent q8 only risks an OOM). bf16 is
+        // never in a default job's search path (no OOM by accident).
         let absent = request(json!({ "projectId": "p" }));
-        assert_eq!(wan_tier_order(&absent), &["q8", "q4"]);
+        assert_eq!(wan_tier_order(&absent), &["q4", "q8"]);
     }
 
     /// [`wan_tier_subdir`] resolves the requested tier, falls back to a smaller COMPLETE
@@ -11026,12 +11057,13 @@ mod tests {
         std::fs::write(root.join("q8").join("config.json"), b"x").unwrap();
         assert_eq!(wan_tier_subdir(&root, &q8_req), Some(root.join("q4")));
 
-        // Completed q8 now wins for a q8 request; a default job also prefers the clean q8 default
-        // (sc-10726) now that q8 is installed, while an explicit q4 pick still resolves q4.
+        // Completed q8 now wins for an explicit q8 request; but a DEFAULT job (no mlxQuantize) resolves
+        // q4-first on the video lane even with q8 installed (sc-10859: the sc-10726 app-wide q8 default
+        // is not applied to video — no MLX video Q8 lever). An explicit q4 pick still resolves q4.
         write_complete_wan_tier(&root, "q8");
         assert_eq!(wan_tier_subdir(&root, &q8_req), Some(root.join("q8")));
         let default_req = request(json!({ "projectId": "p" }));
-        assert_eq!(wan_tier_subdir(&root, &default_req), Some(root.join("q8")));
+        assert_eq!(wan_tier_subdir(&root, &default_req), Some(root.join("q4")));
         let q4_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
         assert_eq!(wan_tier_subdir(&root, &q4_req), Some(root.join("q4")));
 
@@ -11129,17 +11161,38 @@ mod tests {
         make_tier("q4");
         make_tier("q8");
 
-        // Default (no bits) → q8 when installed (sc-10726), clamped to what's on disk.
-        assert_eq!(bernini_tier_subdir(&root, None), Some(root.join("q8")));
-        // An explicit Q4 pick stays q4 (never overridden by the q8 default).
-        assert_eq!(bernini_tier_subdir(&root, Some(4)), Some(root.join("q4")));
+        // No explicit pick: the default is LANE-DEPENDENT (sc-10859), clamped to what's on disk. The
+        // VIDEO lane defaults q4-first (OOM carve-out); the IMAGE lane keeps epic-10721's q8 default.
+        assert_eq!(
+            bernini_tier_subdir(&root, None, BERNINI_VIDEO_DEFAULT_TIER_ORDER),
+            Some(root.join("q4"))
+        );
+        assert_eq!(
+            bernini_tier_subdir(&root, None, BERNINI_IMAGE_DEFAULT_TIER_ORDER),
+            Some(root.join("q8"))
+        );
+        // Explicit picks are lane-independent (`default_order` is consulted ONLY for `None`).
+        // An explicit Q4 pick stays q4 (never overridden by a default).
+        assert_eq!(
+            bernini_tier_subdir(&root, Some(4), BERNINI_IMAGE_DEFAULT_TIER_ORDER),
+            Some(root.join("q4"))
+        );
         // Q8 (bits >= 8) → q8.
-        assert_eq!(bernini_tier_subdir(&root, Some(8)), Some(root.join("q8")));
+        assert_eq!(
+            bernini_tier_subdir(&root, Some(8), BERNINI_VIDEO_DEFAULT_TIER_ORDER),
+            Some(root.join("q8"))
+        );
         // bf16 (bits <= 0) with no bf16 tier falls back to q8 (never silently to a default).
-        assert_eq!(bernini_tier_subdir(&root, Some(0)), Some(root.join("q8")));
+        assert_eq!(
+            bernini_tier_subdir(&root, Some(0), BERNINI_VIDEO_DEFAULT_TIER_ORDER),
+            Some(root.join("q8"))
+        );
         // An incomplete tier (missing the nested planner tokenizer) is not resolved.
         std::fs::remove_file(root.join("q8").join("mllm/tokenizer.json")).unwrap();
-        assert_eq!(bernini_tier_subdir(&root, Some(8)), Some(root.join("q4")));
+        assert_eq!(
+            bernini_tier_subdir(&root, Some(8), BERNINI_VIDEO_DEFAULT_TIER_ORDER),
+            Some(root.join("q4"))
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -11187,14 +11240,14 @@ mod tests {
         assert_eq!(scail2_tier_order(&bf16), &["bf16", "q8", "q4"]);
         let q8 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
         assert_eq!(scail2_tier_order(&q8), &["q8", "q4"]);
-        // An explicit Q4 pick stays q4-first (resolve_scail2_quant maps both this and the default to
-        // Some(Q4), so the tier order tells them apart via raw mlxQuantize presence).
+        // An explicit Q4 pick stays q4-first — the SAME arm as the no-pick default now (sc-10859),
+        // which is exactly why the resolver no longer needs its old raw-mlxQuantize-presence check.
         let q4 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
         assert_eq!(scail2_tier_order(&q4), &["q4", "q8"]);
-        // sc-10726: an absent knob now prefers the clean q8 tier (clamped to installed); bf16 is never
-        // in a default job's search path (no OOM by accident).
+        // sc-10859: an absent knob defaults q4-first on the video lane (NOT the sc-10726 app-wide q8 —
+        // no MLX video Q8 lever); bf16 is never in a default job's search path (no OOM by accident).
         let absent = request(json!({ "projectId": "p" }));
-        assert_eq!(scail2_tier_order(&absent), &["q8", "q4"]);
+        assert_eq!(scail2_tier_order(&absent), &["q4", "q8"]);
     }
 
     /// [`scail2_tier_subdir`] resolves the requested tier, falls back to a smaller COMPLETE tier,
@@ -11217,14 +11270,15 @@ mod tests {
         std::fs::write(root.join("q8").join("config.json"), b"x").unwrap();
         assert_eq!(scail2_tier_subdir(&root, &q8_req), Some(root.join("q4")));
 
-        // Completed q8 now wins for a q8 request; a default job also prefers the clean q8 default
-        // (sc-10726) now that q8 is installed, while an explicit q4 pick still resolves q4.
+        // Completed q8 now wins for an explicit q8 request; but a DEFAULT job (no mlxQuantize) resolves
+        // q4-first on the video lane even with q8 installed (sc-10859: the sc-10726 app-wide q8 default
+        // is not applied to video — no MLX video Q8 lever). An explicit q4 pick still resolves q4.
         write_complete_scail2_tier(&root, "q8");
         assert_eq!(scail2_tier_subdir(&root, &q8_req), Some(root.join("q8")));
         let default_req = request(json!({ "projectId": "p" }));
         assert_eq!(
             scail2_tier_subdir(&root, &default_req),
-            Some(root.join("q8"))
+            Some(root.join("q4"))
         );
         let q4_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
         assert_eq!(scail2_tier_subdir(&root, &q4_req), Some(root.join("q4")));
@@ -12918,9 +12972,9 @@ mod tests {
             ltx_bundle_tier_order(&with(json!({ "mlxQuantize": 8 }))),
             &["q8", "q4"]
         );
-        // sc-10726: a plain request (no mlxQuantize) prefers the clean q8 tier, clamped to installed
-        // (q4-only bundles still resolve q4); bf16 stays out of the default search path.
-        assert_eq!(ltx_bundle_tier_order(&plain), &["q8", "q4"]);
+        // sc-10859: a plain request (no mlxQuantize) defaults q4-first on the video lane (NOT the
+        // sc-10726 app-wide q8 — no MLX video Q8 lever); bf16 stays out of the default search path.
+        assert_eq!(ltx_bundle_tier_order(&plain), &["q4", "q8"]);
         // An explicit Q4 pick stays q4-first.
         assert_eq!(
             ltx_bundle_tier_order(&with(json!({ "mlxQuantize": 4 }))),
