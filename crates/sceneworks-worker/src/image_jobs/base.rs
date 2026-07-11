@@ -198,6 +198,9 @@ enum CandleImageRoute {
     QwenEdit,
     /// Z-Image img2img / edit (sc-6595).
     ZimageEdit,
+    /// Krea 2 Kontext-style dual-conditioned image-edit — `krea_2_raw` + `edit_image` + a source, with
+    /// the required `krea2_identity_edit` LoRA (epic 10871).
+    KreaEdit,
     /// Z-Image identity-init for Image Studio "With Character" (sc-8409).
     ZimageIdentity,
     /// SDXL IP-Adapter-Plus reference conditioning (sc-5488).
@@ -287,6 +290,12 @@ fn resolve_candle_image_route(
         // `Krea2Control` lane, diverted before the registry txt2img arm (which would render it as plain
         // txt2img and drop the poses). Mirrors `jobs_store::krea_control_candle_eligible`.
         Some(CandleImageRoute::KreaControl)
+    } else if krea_edit_candle_available(request, settings) {
+        // Krea 2 Kontext-style edit (epic 10871): `krea_2_raw` + `edit_image` + a source is the bespoke
+        // candle `KreaEdit` lane (`generate_candle_krea_edit_stream`), NOT txt2img — `krea_2_raw` is
+        // MLX-only for t2i (absent from `is_candle_engine`), so without this arm an off-Mac Krea edit had
+        // no candle lane. Mirrors `jobs_store::krea_edit_candle_eligible`.
+        Some(CandleImageRoute::KreaEdit)
     } else if zimage_comfyui_available(request, settings) {
         // In-place ComfyUI Z-Image base (sc-10668): an `external_base_*` id, so it matches no
         // `is_candle_engine` arm below — route it here off the forwarded `modelManifestEntry`.
