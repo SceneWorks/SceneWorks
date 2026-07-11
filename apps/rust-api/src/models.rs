@@ -1575,6 +1575,27 @@ pub(crate) async fn resolve_model_manifest_entry(
     state: &AppState,
     model_id: &str,
 ) -> Result<Value, ApiError> {
+    // External ComfyUI base models (epic 10451 Phase 2, sc-10667/10668) are synthesized in the
+    // catalog, not declared in a jsonc manifest, so the jsonc lookup below would return `{}` and
+    // the worker would never receive their `components[]` (the DiT/TE/VAE paths). Forward the
+    // assembled row for an `external_base_*` id instead, so the worker can load them in place.
+    // Blocking FS scan → run on the blocking pool, mirroring `model_catalog`.
+    if model_id.starts_with(crate::external_base_models::EXTERNAL_ID_PREFIX) {
+        let roots = state.settings.external_model_roots.clone();
+        let cache = state.external_base_model_cache.clone();
+        let id = model_id.to_owned();
+        let row = tokio::task::spawn_blocking(move || {
+            let mut cache = cache.lock();
+            crate::external_base_models::scan_external_base_models(&roots, &mut cache)
+                .into_iter()
+                .find(|row| row.get("id").and_then(Value::as_str) == Some(id.as_str()))
+        })
+        .await
+        .map_err(|err| ApiError::internal(format!("external base scan task failed: {err}")))?;
+        // Absent (root unconfigured, file vanished) → `{}`, the same fall-back the worker already
+        // handles for an unknown model id.
+        return Ok(row.unwrap_or_else(|| json!({})));
+    }
     let manifest_dir = state.settings.config_dir.join("manifests");
     let builtin =
         load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
