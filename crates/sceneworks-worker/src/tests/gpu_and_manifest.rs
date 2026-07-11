@@ -541,6 +541,104 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
     );
 }
 
+/// epic 10765 sc-11019: the Qwen-Image-Edit `candle` blocks drive the EDIT fit-gate (qwen_edit_candle.rs,
+/// sc-10968) end-to-end against the SHIPPED manifest bytes — resident-fits → sequential-offload →
+/// reject-before-OOM. The edit sibling of `flux2_candle_blocks_drive_the_fit_gate_and_reject`: guards the
+/// DATA half — a manifest edit dropping the qwen-edit `vramGbByTier` / `sequentialPeakGb` makes
+/// `predicted_*` return `None` → the edit gate goes INERT (the exact "candle block missing" failure the
+/// story targets). The edit lane is unconditionally sequential-capable (sc-10968 wired
+/// `QwenEdit::generate_sequential`), so this exercises `resolve_offload` with `sequential_capable=true`.
+/// Both the base entry (measured q4/q8/bf16) and the Lightning entry (the same conservative base numbers,
+/// `measured:false`) are asserted to carry a candle block so BOTH edit gates are live.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn qwen_edit_candle_blocks_drive_the_fit_gate_and_reject() {
+    use crate::vram_gate::{
+        apply_vram_cap, fit_decision, predicted_peak_gb, predicted_sequential_peak_gb,
+        resolve_offload, sequential_overflow_gb, FitDecision,
+    };
+
+    let edit = builtin_model_entry("qwen_image_edit_2511");
+    // `predicted_*` take the MODEL ENTRY (they read `.candle` internally), not the candle sub-object.
+    let edit_entry = edit.as_object().expect("qwen_image_edit_2511 entry object");
+    assert!(
+        edit_entry.get("candle").and_then(Value::as_object).is_some(),
+        "qwen_image_edit_2511 candle block present (absent ⇒ edit fit-gate inert)"
+    );
+
+    // Measured q4 (sc-10968): resident 56.7 / sequential 36.9, each + the gate's 2 GB headroom.
+    let q4_res = predicted_peak_gb(edit_entry, "q4").expect("q4 resident predicted");
+    let q4_seq = predicted_sequential_peak_gb(edit_entry, "q4").expect("q4 sequential predicted");
+    assert!(
+        (q4_res - 58.7).abs() < 1e-6,
+        "q4 resident 56.7 + 2 headroom, got {q4_res}"
+    );
+    assert!(
+        (q4_seq - 38.9).abs() < 1e-6,
+        "q4 sequential 36.9 + 2 headroom, got {q4_seq}"
+    );
+    assert!(q4_seq < q4_res, "sequential is the lower peak");
+
+    // A 96 GB card fits q4 resident outright — no offload.
+    let card96 = apply_vram_cap(None, Some(96.0));
+    assert_eq!(fit_decision(Some(q4_res), card96), FitDecision::Fits);
+
+    // A 48 GB card: resident 58.7 won't fit, but sequential 38.9 does → OFFLOAD, run sequentially.
+    let card48 = apply_vram_cap(None, Some(48.0));
+    let at48 = resolve_offload(fit_decision(Some(q4_res), card48), true);
+    assert!(matches!(at48, FitDecision::Offload { .. }), "48 GB → offload");
+    assert_eq!(
+        sequential_overflow_gb(Some(q4_seq), card48),
+        None,
+        "sequential 38.9 fits 48 GB → run"
+    );
+
+    // A 30 GB card: even the sequential 38.9 peak won't fit → REJECT-before-OOM (sc-10856 gate).
+    let card30 = apply_vram_cap(None, Some(30.0));
+    let at30 = resolve_offload(fit_decision(Some(q4_res), card30), true);
+    assert!(matches!(at30, FitDecision::Offload { .. }), "30 GB → offload attempt");
+    assert_eq!(
+        sequential_overflow_gb(Some(q4_seq), card30),
+        Some(q4_seq),
+        "sequential 38.9 > 30 GB → reject carrying the number"
+    );
+
+    // Measured q8 (69.0 / 39.3) + bf16 (81.7 / 52.2) present too, each + headroom.
+    assert!((predicted_peak_gb(edit_entry, "q8").unwrap() - 71.0).abs() < 1e-6);
+    assert!((predicted_sequential_peak_gb(edit_entry, "q8").unwrap() - 41.3).abs() < 1e-6);
+    let bf16_res = predicted_peak_gb(edit_entry, "bf16").expect("bf16 resident");
+    let bf16_seq = predicted_sequential_peak_gb(edit_entry, "bf16").expect("bf16 seq");
+    assert!(
+        (bf16_res - 83.7).abs() < 1e-6,
+        "bf16 resident 81.7 + 2 headroom, got {bf16_res}"
+    );
+    assert!(
+        (bf16_seq - 54.2).abs() < 1e-6,
+        "bf16 sequential 52.2 + 2 headroom, got {bf16_seq}"
+    );
+    // Dense bf16 fits a 96 GB card resident, but on a 48 GB card even sequential overflows → reject.
+    assert_eq!(fit_decision(Some(bf16_res), card96), FitDecision::Fits);
+    assert_eq!(
+        sequential_overflow_gb(Some(bf16_seq), card48),
+        Some(bf16_seq),
+        "bf16 sequential 54.2 > 48 GB → reject on the smaller card"
+    );
+
+    // The Lightning entry carries the same conservative base block so ITS edit gate is live too.
+    let lightning = builtin_model_entry("qwen_image_edit_2511_lightning");
+    let lightning_entry = lightning.as_object().expect("lightning entry object");
+    assert!(
+        lightning_entry.get("candle").and_then(Value::as_object).is_some(),
+        "qwen_image_edit_2511_lightning candle block present"
+    );
+    let l_seq = predicted_sequential_peak_gb(lightning_entry, "q4").expect("lightning q4 seq");
+    assert_eq!(
+        sequential_overflow_gb(Some(l_seq), card30),
+        Some(l_seq),
+        "lightning sequential 38.9 > 30 GB → reject (gate live for the distill entry too)"
+    );
+}
+
 /// sc-7875 (SD3.5 S6, MLX-path validation boundary): the three SD3.5 builtin-manifest entries gate
 /// correctly at the catalog layer — `macOnly: false` (cross-platform now that the candle off-Mac lane
 /// is wired, sc-7880/epic 7982; availability is driven by the routing tables, not this flag),
