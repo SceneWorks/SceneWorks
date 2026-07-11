@@ -3766,10 +3766,9 @@ mod candle_routing_tests {
             "chroma1_hd",
             &object(json!({ "advanced": { "mlxQuantize": 8 } }))
         ));
-        assert!(!image_request_candle_eligible(
-            "qwen_image",
-            &object(json!({ "advanced": { "mlxQuantize": 4 } }))
-        ));
+        // NOTE: qwen_image USED to be a dense-only counter-example here; sc-11020 moved it to
+        // CANDLE_QUANT_MODELS (its turnkey q4/q8 packed tiers load off-Mac), so its quant tier-select now
+        // STAYS on candle — covered by `qwen_image_quant_tier_select_stays_on_candle`.
         assert!(!video_request_candle_eligible(
             "wan_2_2",
             &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } }))
@@ -3782,6 +3781,34 @@ mod candle_routing_tests {
         assert!(image_request_candle_eligible(
             "chroma1_hd",
             &object(json!({ "advanced": { "steps": 30 } }))
+        ));
+    }
+
+    #[test]
+    fn qwen_image_quant_tier_select_stays_on_candle() {
+        // sc-11020 (epic 9083): base `qwen_image` is a turnkey packed-quant candle family — its q4/q8/bf16
+        // subdirs load off-Mac via `standard_tier_subdir` (sc-8669) and the tiers are GPU-measured
+        // (sc-10969), so a `mlxQuantize` tier-select now STAYS on candle instead of enforce-failing
+        // `candle_unsupported` at routing (the routing half sc-9983 flipped for krea/ideogram/boogu but
+        // missed qwen). A LoRA still defers — base qwen advertises no candle inference LoRA.
+        for bits in [4, 8] {
+            assert!(
+                image_request_candle_eligible(
+                    "qwen_image",
+                    &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": bits } }))
+                ),
+                "qwen_image Q{bits} tier-select should stay on candle"
+            );
+        }
+        // A plain (no tier-select) job is of course still eligible.
+        assert!(image_request_candle_eligible(
+            "qwen_image",
+            &object(json!({ "prompt": "x" }))
+        ));
+        // A LoRA request still defers to torch — no candle inference LoRA on base qwen.
+        assert!(!image_request_candle_eligible(
+            "qwen_image",
+            &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
         ));
     }
 
