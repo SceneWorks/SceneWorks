@@ -3274,17 +3274,8 @@ label {
   gap: 10px;
 }
 
-.training-status-pill {
-  display: inline-flex;
-  align-items: center;
-  min-height: 28px;
-  padding: 0 10px;
-  border-radius: var(--r-pill);
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  font-size: 12px;
-  font-weight: 700;
-}
+/* .training-status-pill retired in sc-10654 — generalized to .ready-pill (<ReadyPill>),
+   which fixes its two-states-look-identical bug. */
 
 .training-config-form,
 .training-config-grid,
@@ -3641,24 +3632,8 @@ input.dataset-name-input.boxed:focus {
   grid-template-columns: repeat(4, minmax(120px, 1fr));
 }
 
-/* Chips for values the user actively broke, sitting against the actions row so they
-   read as the reason Start training is disabled (sc-10501). Missing-field hints are
-   deliberately NOT rendered here — an empty field speaks for itself. */
-.training-config-warnings {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-}
-
-.training-config-warnings span {
-  padding: 5px 8px;
-  border: 1px solid color-mix(in oklch, var(--danger) 40%, var(--border));
-  border-radius: var(--r-pill);
-  background: color-mix(in oklch, var(--danger) 8%, var(--surface));
-  color: color-mix(in oklch, var(--danger) 75%, var(--text));
-  font-size: 12px;
-  font-weight: 700;
-}
+/* .training-config-warnings (+ span) retired in sc-10654 — the training config chips are
+   now the generic .validation-chip row (<ValidationSummary>), shared app-wide. */
 
 .training-advanced-grid .training-checkbox-field,
 .training-advanced-toggles .training-checkbox-field {
@@ -12063,4 +12038,96 @@ details[open] > summary.lora-scope-group-heading::before,
 .stats-chart-title {
   font-size: 13px;
   color: var(--text-muted);
+}
+
+/* ---------- App-wide form validation (epic 10644, sc-10646) ----------
+   One message channel: the chip row. A field carries the mark, never the text —
+   see apps/web/src/validation/issues.js. Retired the two predecessors this fully
+   replaced — .training-config-warnings and .training-status-pill (sc-10654). The
+   others (.inline-warning, .structured-error, .refine-error, .batch-warning) stay:
+   they still carry submission results and bespoke non-core surfaces (epic non-goals). */
+
+.validation-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+/* Every mix below interpolates `in srgb`, not `in oklch`. Both `--border` and `--text`
+   carry hue 240 at low chroma, and oklch takes the shorter arc around the hue wheel to
+   reach it — so `--warn` (hue 70, amber) lands on hue 172, a teal, and `--danger`
+   (hue 25) lands on 298, a lavender. An advisory chip with a green border reads as
+   success. Measured in the browser; oklch is right for perceptual lightness ramps and
+   wrong for pulling a hue toward a near-neutral. */
+.validation-chip {
+  padding: 5px 8px;
+  border-radius: var(--r-pill);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* A value the user broke. Blocks the CTA, so it reads at full danger weight. */
+.validation-chip.tone-error {
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  color: color-mix(in srgb, var(--danger) 75%, var(--text));
+}
+
+/* Worth saying, doesn't block. Amber keeps it distinguishable from an error at a
+   glance — the two kinds sit side by side in the same row. */
+.validation-chip.tone-advisory {
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
+  background: color-mix(in srgb, var(--warn) 10%, var(--surface));
+  color: color-mix(in srgb, var(--warn) 70%, var(--text));
+}
+
+/* The readiness pill. Its predecessor .training-status-pill was accent-toned in both
+   states, so "Needs input" was styled as success and only the text disagreed. These
+   two rules must never converge; validation/styles.test.js pins them apart. */
+.ready-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: var(--r-pill);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ready-pill.is-ready {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+/* Neutral, not danger: an unfilled form is not an error, it is unfinished. */
+.ready-pill.is-pending {
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+
+/* The mark on a broken input. An attribute selector rather than a class, because
+   `invalidProps` returns props for an existing input and never wraps it in a node —
+   a node added inside .training-config-grid would become a grid item (sc-10481).
+   Specificity (0,1,1) clears the base `input` chrome at (0,0,1), and ties with
+   `.training-config-grid select` — which this rule follows, so it wins the tie.
+
+   `background-color`, never the `background` shorthand: that sibling rule paints the
+   select's chevron with `background-image`, and the shorthand would erase it, leaving
+   an invalid Resolution select with no arrow. */
+input[aria-invalid="true"],
+select[aria-invalid="true"],
+textarea[aria-invalid="true"] {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  background-color: color-mix(in srgb, var(--danger) 4%, var(--surface));
+}
+
+/* Focus must stay red. The base `:focus` rule sets `outline: none` and repaints
+   `border-color` with the accent, so an `outline-color` override would do nothing and
+   the field would turn teal the instant the user clicks in to fix it. Mirror the glow
+   in the danger hue instead. */
+input[aria-invalid="true"]:focus,
+select[aria-invalid="true"]:focus,
+textarea[aria-invalid="true"]:focus {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--danger) 18%, transparent);
 }

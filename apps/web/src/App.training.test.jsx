@@ -170,10 +170,10 @@ describe("SceneWorks app shell", () => {
 
     // Nothing is filled in, so every issue is a `requirement` — those stay silent
     // (sc-10501). No dataset chip, no trigger-phrase chip.
-    expect(container.querySelector(".training-config-warnings")).toBeNull();
+    expect(container.querySelector(".validation-chips")).toBeNull();
     expect(container.textContent).not.toContain("Add a trigger phrase");
     // Readiness still has a home: the panel head's pill.
-    expect(container.querySelector(".training-status-pill").textContent).toBe("Needs input");
+    expect(container.querySelector(".ready-pill").textContent).toBe("Needs input");
   });
 
   it("creates a training dataset from selected image assets", async () => {
@@ -1339,9 +1339,9 @@ describe("SceneWorks app shell", () => {
     // Unfilled fields are `requirement`s: silent, just the pill + a disabled button.
     // ("Select a saved dataset" is still on the page — it's the Dataset select's
     // placeholder option — so assert on the chip-only copy instead.)
-    expect(container.querySelector(".training-status-pill").textContent).toBe("Needs input");
+    expect(container.querySelector(".ready-pill").textContent).toBe("Needs input");
     expect(container.textContent).not.toContain("Add a trigger phrase");
-    expect(container.querySelector(".training-config-warnings")).toBeNull();
+    expect(container.querySelector(".validation-chips")).toBeNull();
     expect([...document.body.querySelectorAll("button")].find((button) => button.textContent === "Start training").disabled).toBe(true);
 
     await changeField(field(container, "Dataset"), "dataset-a");
@@ -1351,10 +1351,13 @@ describe("SceneWorks app shell", () => {
 
     // Clearing a valid number is an `error` — the form shows nothing, so say why (sc-10501).
     const submitButton = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Start training");
-    expect(container.querySelector(".training-status-pill").textContent).toBe("Needs input");
-    expect(container.querySelector(".training-config-warnings")).toBeTruthy();
+    expect(container.querySelector(".ready-pill").textContent).toBe("Needs input");
+    expect(container.querySelector(".validation-chips")).toBeTruthy();
     expect(container.textContent).toContain("Checkpoint cadence must be greater than zero");
     expect(submitButton.disabled).toBe(true);
+    // ...and the chip names a field, so that field is outlined (epic 10644, R5). This is the
+    // only assertion that exercises the whole chain: rule → summarize → invalidProps → DOM.
+    expect(field(container, "Checkpoint cadence").getAttribute("aria-invalid")).toBe("true");
 
     await act(async () => {
       submitButton.click();

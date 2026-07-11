@@ -396,6 +396,25 @@ mod pose_jobs;
 // allow dead_code module-wide — remove when A2 wires `preprocessor_for` into ingest.
 #[allow(dead_code)]
 mod control_preprocess;
+// Folder-ingest control-dataset prep (Training Studio A2, sc-10161, epic 10159): the "create your
+// own" GENERATE core — raw target images → render each condition via the A1 `control_preprocess`
+// registry → square-canonical letterbox for alignment → write `(target, control, caption)` triples
+// + `manifest.jsonl` in the layout the Krea control trainer (B2) and the bring-your-own adapter (A3)
+// consume. Cross-platform for the canny path; pose/depth/person-filter resolve through the
+// backend-gated registry/detector. Lands ahead of its first non-test caller: the studio job type
+// (B1, sc-10162) dispatches it and feeds captions from the JoyCaption job; allow dead_code until
+// then.
+#[allow(dead_code)]
+mod control_dataset_prep;
+// Bring-your-own-dataset ingest adapter (Training Studio A3, sc-10171, epic 10159): the second
+// dataset-input path — map a PROVIDED dataset into the same on-disk layout A2 emits, skipping what
+// the source supplies. Prepared pairs (target + rendered condition) are convention-validated then
+// ingested as-is / normalized / regenerated via the A1 preprocessor; annotated COCO
+// (person_keypoints + captions) renders the OpenPose-18 skeleton from ground-truth keypoints (no
+// detection) — cross-platform. Reuses A2's square letterbox + write/manifest tail. Lands ahead of
+// its first non-test caller (the studio job type B1, sc-10162); allow dead_code until then.
+#[allow(dead_code)]
+mod control_dataset_byo;
 // CUDA execution-provider dependency preloading for the off-Mac candle `ort` paths
 // (sc-6209, epic 5482): `ort::ep::cuda::preload_dylibs` dlopens the CUDA-12 runtime +
 // cuDNN-9 DLLs the onnxruntime CUDA EP needs, so it engages the GPU regardless of PATH

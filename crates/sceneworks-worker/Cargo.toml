@@ -1566,18 +1566,32 @@ mlx-gen-scail2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4df9
 # candle-gen-qwen-image `comfyui.rs`/`lib.rs` + the qwen example — provider-only, every other candle-gen-*
 # crate byte-identical to `7552820`), so candle-gen's gen-core stays mlx-gen `8db1ab6` (skew gate green).
 # `7552820` is an ancestor of `dc2c750`, a clean forward move; ALL candle-gen-* move together.
-# Bumped `77c06ad` -> `e437967` (sc-10830, epic 10451 Phase 2b): candle-gen #397 extends
+#
+# Bumped `77c06ad` -> `5c27bf1` (sc-10819, epic 9083): candle-gen main HEAD carrying #396 — the
+# candle-gen-kolors packed q4/q8 load path (packed ChatGLM3 via `QLinear::linear_detect_gs` + the
+# vendored packed-detecting SDXL UNet; VAE dense), which drops the loader's `spec.quantize` reject and
+# advertises `supported_quants: [Q4, Q8]`. This is the candle-gen half the `kolors` -> `candle_quant`
+# routing flip below needs (the SDXL family only needed the routing flip because `candle-gen-sdxl` already
+# advertised [Q4, Q8]; kolors needed the loader built first). `77c06ad` (main's actual prior pin — the
+# sc-10826 #395 ghost-fix merge; the `dc2c750` note above is a stale doc lag, the pin VALUE was 77c06ad)
+# is an ancestor of `5c27bf1`, a clean forward move; the delta is SOURCE-ONLY in candle-gen-kolors (plus
+# provider-only qwen-image/flux crates in the range). candle-gen's OWN gen-core stays mlx-gen `4df97dce`
+# across `77c06ad..5c27bf1` (EXACTLY this worker's mlx-gen pin, unchanged by this rebase), so
+# `--features backend-candle` still resolves the SINGLE gen-core rev `4df97dce` (skew gate green, no
+# testkit reconcile). ALL candle-gen-* move together. GPU-validated on RTX PRO 6000 (sm_120): kolors
+# q4/q8 render coherently at 640² with a −67%/−58% peak-VRAM drop vs bf16.
+# Bumped `5c27bf1` -> `3c7d981` (sc-10830, epic 10451 Phase 2b): candle-gen #397 (MERGED on candle-gen
+# main as `3c7d981`, the merge of `e437967` onto main's `5c27bf1`) extends
 # `candle_gen_qwen_image::load_from_comfyui_dit(dit, snapshot, vae_file)` with an optional in-place VAE —
 # the tree's `vae/qwen_image_vae.safetensors` (native WAN-VAE keys) key-remapped to the diffusers schema
 # (`remap_vae_wan_to_diffusers`) so the ComfyUI Qwen VAE is read in place (falls back to the snapshot VAE
-# when absent); the qwen_comfyui worker route now passes the folded `vae` component path. The range
-# `77c06ad..e437967` carries only #396 (candle-gen-kolors packed load, sc-10819 — provider-only, adds a
-# `serde_json` dep to candle-gen-kolors) + #397 (candle-gen-qwen-image `comfyui.rs`/`lib.rs` — provider-
-# only); every other candle-gen-* crate is a clean forward move. candle-gen's OWN gen-core stays mlx-gen
-# `4df97dce` (EXACTLY this worker's mlx-gen pin), so `--features backend-candle` resolves the SINGLE
-# gen-core rev `4df97dce` (skew gate green, lock diff is candle-gen-only). ALL candle-gen-* move together.
-# (candle-gen #397 MERGED on candle-gen main as `3c7d981` — the merge of `e437967` onto `5c27bf1`, tree-
-# identical to the branch commit — the canonical SHA all candle-gen-* pins point at.)
+# when absent); the qwen_comfyui worker route now passes the folded `vae` component path. The delta
+# `5c27bf1..3c7d981` is SOURCE-ONLY in candle-gen-qwen-image (`comfyui.rs`/`lib.rs` — provider-only);
+# every other candle-gen-* crate is byte-identical, a clean forward move. candle-gen's OWN gen-core stays
+# mlx-gen `4df97dce` (EXACTLY this worker's mlx-gen pin), so `--features backend-candle` resolves the
+# SINGLE gen-core rev `4df97dce` (skew gate green, lock diff is candle-gen-only). ALL candle-gen-* move
+# together. GPU-validated (sm_120): in-place VAE decode is byte-identical to the snapshot VAE (max abs
+# decode diff 0.000e0).
 candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "3c7d98146463498203fbde0319cf91a2c7b7149a", features = ["cuda"], optional = true }
 # Candle image providers (sc-5096) -- Windows/CUDA siblings of the mlx-gen image crates above. Each
 # self-registers its engine id into the shared gen_core inventory registry; force-linked in

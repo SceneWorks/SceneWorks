@@ -1,6 +1,9 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { Modal } from "./Modal.jsx";
 import { BATCH_OPS } from "../batchOps.js";
+import { issue } from "../validation/issues.js";
+import { useValidation } from "../validation/useValidation.js";
+import { ValidationSummary } from "../validation/Validation.jsx";
 
 // Batch operations panel (sc-6112): pick ONE op (upscale / detail / edit) + shared
 // params and apply it across the selected image assets. Presentational — it owns the
@@ -9,6 +12,26 @@ import { BATCH_OPS } from "../batchOps.js";
 // the aggregate `progress` so this panel renders the live progress view.
 
 const STATUS_LABEL = { queued: "Queued", running: "Running…", completed: "Done", failed: "Failed" };
+
+// What gates Run, in the app-wide vocabulary (epic 10644, sc-10652). An empty selection
+// is a silent requirement — the panel's header count shows it. A missing model/engine or
+// a missing edit prompt used to only dim the button with no stated reason (the sc-10492
+// defect); now they say why.
+export function batchOperationValidation({ count, op, missingModel, missingPrompt } = {}) {
+  const issues = [];
+  if (!(count > 0)) {
+    issues.push(issue.requirement("selection", "Select at least one image"));
+  }
+  if (missingModel) {
+    issues.push(
+      issue.error(null, op === "upscale" ? "No upscale engine is available — install one in Models." : "No compatible model is available for this operation."),
+    );
+  }
+  if (missingPrompt) {
+    issues.push(issue.error("prompt", "Enter a prompt for the edit."));
+  }
+  return issues;
+}
 
 export function BatchOperationsPanel({
   assets,
@@ -49,7 +72,10 @@ export function BatchOperationsPanel({
   const missingModel =
     (op === "detail" && !activeDetailModel) || (op === "edit" && !activeEditModel) || (op === "upscale" && !activeEngine);
   const missingPrompt = op === "edit" && !prompt.trim();
-  const canRun = count > 0 && !busy && !missingModel && !missingPrompt;
+  // One summary gates Run and carries its reasons (epic 10644); `busy` stays a plain gate.
+  const runDraft = useMemo(() => ({ count, op, missingModel, missingPrompt }), [count, op, missingModel, missingPrompt]);
+  const runValidity = useValidation(batchOperationValidation, runDraft, undefined);
+  const canRun = runValidity.ready && !busy;
 
   function run() {
     if (!canRun) return;
@@ -210,6 +236,9 @@ export function BatchOperationsPanel({
             </div>
           ) : null}
 
+          {/* The reasons Run is dead — a missing model/engine or edit prompt. An empty
+              selection is a silent requirement (the header count shows it). sc-10652. */}
+          <ValidationSummary issues={runValidity.surfaced} label="Batch operation errors" />
           <div className="batch-ops-actions">
             <button onClick={onClose} type="button">
               Cancel

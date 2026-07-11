@@ -3243,7 +3243,9 @@ mod tests {
             .and_then(|v| v.parse().ok())
             .unwrap_or(32usize);
 
-        // Read the COCO-pose manifest → (target, pose skeleton, caption) triples.
+        // Read the control manifest → (target, control image, caption) triples. The A2 folder-ingest
+        // pipeline (sc-10161) emits the canonical `control` key + `kind`; the older COCO-pose spike
+        // datasets keyed the condition as `pose`, so accept `control` first and fall back to `pose`.
         let manifest =
             std::fs::read_to_string(data.join("manifest.jsonl")).expect("read manifest.jsonl");
         let items: Vec<TrainingItem> = manifest
@@ -3258,10 +3260,16 @@ mod tests {
                         .unwrap_or_else(|| panic!("manifest row missing {k}"))
                         .to_string()
                 };
+                let control = v
+                    .get("control")
+                    .or_else(|| v.get("pose"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_else(|| panic!("manifest row missing control/pose"))
+                    .to_string();
                 TrainingItem::with_control(
                     data.join(field("target")),
                     field("caption"),
-                    data.join(field("pose")),
+                    data.join(control),
                 )
             })
             .collect();
