@@ -220,3 +220,42 @@ describe("ConfigureJobPanel surfaces broken values and stays quiet about unfille
     expect(pill.className).toContain("is-ready");
   });
 });
+
+// sc-10689: configValidation raises a `> 0` error for eight numeric fields; every one must
+// name an input the user can reach, or the chip points at a control that isn't on the screen
+// and Start dies unfixably (the epic's own defect class, one step worse). This drove the bug:
+// batchSize and gradientAccumulation were validated with no input, so clearing either chipped
+// with nothing to outline. The map is the field label configValidation uses, which is also the
+// panel's label text — so it double-checks the two agree.
+describe("every validated numeric field maps to a reachable, outline-able input", () => {
+  const FIELD_LABELS = {
+    rank: "Rank",
+    alpha: "Alpha",
+    learningRate: "Learning rate",
+    steps: "Steps",
+    resolution: "Resolution",
+    batchSize: "Batch size",
+    gradientAccumulation: "Gradient accumulation",
+    saveEvery: "Checkpoint cadence",
+  };
+
+  for (const [field, label] of Object.entries(FIELD_LABELS)) {
+    it(`chips ${field} and outlines the ${label} control the chip names`, () => {
+      const draft = { ...VALID_DRAFT, [field]: "" };
+      const configValidity = validityFor(draft);
+      mount(
+        <ConfigureJobPanel
+          {...baseProps({ configValidity, configDraft: draft, showAdvancedConfig: true, visibleResolutionOptions: [512, 768, 1024] })}
+        />,
+      );
+
+      expect(chips()).toContain(`${label} must be greater than zero`);
+
+      const control = [...container.querySelectorAll("label")]
+        .find((node) => node.textContent.trim().startsWith(label))
+        ?.querySelector("input, select");
+      expect(control).toBeTruthy();
+      expect(control.getAttribute("aria-invalid")).toBe("true");
+    });
+  }
+});

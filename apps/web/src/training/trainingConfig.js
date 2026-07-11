@@ -174,8 +174,12 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
         ? advanced.samplePrompts
         : samplePromptsFromTrigger(triggerPhrase || asText(defaults.triggerWord)),
     ),
-    batchSize: numericDraft(defaults.batchSize),
-    gradientAccumulation: numericDraft(defaults.gradientAccumulation),
+    // Batch size and gradient accumulation have inputs in the Advanced grid
+    // (sc-10689), so a bad value there is now fixable. The `?? default` floor
+    // guarantees the box is never empty: a target/preset whose defaults omit either
+    // field would otherwise seed "" and fail the `> 0` rule with no way to clear it.
+    batchSize: numericDraft(defaults.batchSize ?? defaultBatchSize),
+    gradientAccumulation: numericDraft(defaults.gradientAccumulation ?? defaultGradientAccumulation),
     seed: numericDraft(defaults.seed),
   };
 }
@@ -206,9 +210,10 @@ export function configValidation(configDraft, { activeDataset, selectedTarget, d
     issues.push(issue.requirement("triggerWord", "Add a trigger phrase"));
   }
   // The field name is the draft key, so `invalidProps` can outline the very input the
-  // chip is talking about. `batchSize` and `gradientAccumulation` have no input in the
-  // panel — they arrive from the preset — so a bad value there chips without outlining
-  // anything, and the user cannot clear it. Tracked in sc-10689.
+  // chip is talking about. Every field below has an input in ConfigureJobPanel — the
+  // basic grid (steps, saveEvery) or the Advanced disclosure (the rest, including
+  // batchSize and gradientAccumulation as of sc-10689) — so every error names a field
+  // the user can reach and clear, which is the epic's premise (10644 R5).
   for (const [field, label] of [
     ["rank", "Rank"],
     ["alpha", "Alpha"],
@@ -251,6 +256,16 @@ export function samplePromptsFromTrigger(triggerWord) {
 // unchanged when neither knob is touched. The backends cap the prompt pool at
 // this count (one preview per prompt, truncated — never padded).
 export const defaultSampleCount = 4;
+
+// Safety-net defaults for the two hyperparameters the panel now exposes (sc-10689).
+// Every built-in target/preset already ships explicit values (the Rust `TrainingConfig`
+// contract types both as required, so the API can't omit them), and that per-model
+// value is what `configDraftFromTarget` uses when present. These only fill the box for
+// a source that omits the field — a loosened contract or a user-authored preset — where
+// `1` (batch of one, no accumulation) is the universally safe floor: minimum VRAM,
+// always fits, and never larger than any advertised `limits.batchSize` range.
+export const defaultBatchSize = 1;
+export const defaultGradientAccumulation = 1;
 
 // The sample-prompts textarea holds one prompt per line; the worker payload wants
 // a string array. These two convert between the draft string and the array.
