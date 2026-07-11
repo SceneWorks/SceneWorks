@@ -3302,10 +3302,10 @@ mod tests {
         let mut last_loss = f32::NAN;
         let out = trainer
             .train(&request, &mut |progress| match progress {
-                TrainingProgress::Caching { current, total } => {
-                    if current == 1 || current == total {
-                        eprintln!("caching {current}/{total}");
-                    }
+                TrainingProgress::Caching { current, total }
+                    if current == 1 || current == total =>
+                {
+                    eprintln!("caching {current}/{total}");
                 }
                 TrainingProgress::Training { step, total, loss } => {
                     last_loss = loss;
