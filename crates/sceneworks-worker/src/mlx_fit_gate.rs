@@ -1,12 +1,18 @@
-//! MLX unified-memory pre-load fit-gate (epic 10834 Phase 0, sc-10835).
+//! MLX unified-memory pre-load fit-gate (epic 10834 Phase 0 sc-10835; Phase 1 residency selection
+//! sc-10839).
 //!
-//! The unified-memory sibling of the candle `vram_gate.rs` (epic 10765, sc-10766). Before an MLX
-//! generation loads, predict the model's whole-model peak footprint and compare it against the
-//! machine's unified-memory budget, so a Mac that cannot fit the model is rejected with an
-//! actionable message instead of being SIGKILL'd / Metal-OOM'd mid-render. Also honors
-//! [`MLX_MEMORY_CAP_ENV`], which emulates a smaller Mac on big hardware so the Phase 1 sequential
-//! residency work (sc-10839) can be validated on the dev box's 128 GB machine without 16/32 GB
-//! hardware.
+//! The unified-memory sibling of the candle `vram_gate.rs` (epic 10765, sc-10766/sc-10821). Before an
+//! MLX generation loads, predict the model's whole-model peak footprint and compare it against the
+//! machine's unified-memory budget. Three outcomes, mirroring the candle gate:
+//!  - **Fits** (or no signal) → load resident (the warm, cross-job path).
+//!  - **Won't fit resident, but the provider supports sequential component residency (sc-10839) and
+//!    the staged max-single-component peak WILL fit** → select [`OffloadPolicy::Sequential`] so the
+//!    engine drops the text encoder(s) before the DiT loads, bounding peak to the largest component.
+//!  - **Won't fit even staged** → reject with an actionable message instead of a SIGKILL / Metal-OOM
+//!    mid-render.
+//!
+//! Also honors [`MLX_MEMORY_CAP_ENV`], which emulates a smaller Mac on big hardware so the sequential
+//! residency selection can be validated on the dev box's 128 GB machine without 16/32 GB hardware.
 //!
 //! ## Why this budgets on PREDICTED (on-disk) bytes, not live allocator deltas
 //! MLX materializes weights lazily on first forward, so `get_active_memory()` reads ~0 right after
@@ -25,7 +31,21 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+use gen_core::{LoadSpec, OffloadPolicy, WeightsSource};
+
 use crate::{WorkerError, WorkerResult};
+
+/// The MLX engine ids whose provider honors [`OffloadPolicy::Sequential`] — the sc-10839 Phase 1
+/// providers (SDXL + Z-Image-turbo). The gate only SELECTS sequential residency for these; for any
+/// other engine `Sequential` would be a no-op (the advisory contract treats it as `Resident`), so
+/// predicting "it fits staged" and then holding everything resident would SIGKILL — hence the
+/// allowlist. Extended per family as the fan-out (sc-10840) wires each engine.
+const SEQUENTIAL_CAPABLE_ENGINES: &[&str] = &["sdxl", "z_image_turbo"];
+
+/// Whether `engine_id`'s provider drops components in phase order under [`OffloadPolicy::Sequential`].
+pub(crate) fn engine_supports_sequential(engine_id: &str) -> bool {
+    SEQUENTIAL_CAPABLE_ENGINES.contains(&engine_id)
+}
 
 /// Emulate a smaller Mac: force the total-unified-memory budget (GB). Set e.g.
 /// `SCENEWORKS_MLX_MEMORY_CAP_GB=16` to make the gate treat this machine as a 16 GB Mac, so a model
@@ -63,7 +83,18 @@ pub(crate) struct MemoryBudget {
 pub(crate) enum FitDecision {
     Unknown,
     Fits,
-    TooBig { needed_gb: f64, available_gb: f64 },
+    /// The predicted RESIDENT peak won't fit, but the provider supports sequential component residency
+    /// (sc-10839) — run with [`OffloadPolicy::Sequential`] instead of rejecting. Sequential peak is
+    /// always ≤ resident. The caller then runs the second-stage [`sequential_overflow_gb`] check and
+    /// rejects only if even the staged max-single-component peak won't fit.
+    Offload {
+        needed_gb: f64,
+        available_gb: f64,
+    },
+    TooBig {
+        needed_gb: f64,
+        available_gb: f64,
+    },
 }
 
 /// Read the small-Mac cap from the environment. `Some(gb)` only for a positive number.
@@ -106,6 +137,55 @@ pub(crate) fn fit_decision(needed_gb: Option<f64>, budget: Option<MemoryBudget>)
     }
 }
 
+/// Predicted SEQUENTIAL peak (GiB) = the largest single working set + [`HEADROOM_GB`] (sc-10839). The
+/// `Sequential` schedule drops the text encoder(s) before the DiT loads and keeps the tiny VAE
+/// co-resident with the DiT, so the peak is `max(text-encoders, everything-else) + headroom` rather
+/// than the resident sum. `everything-else = total − text_encoders` (the DiT + VAE + any control/IP).
+/// `None` when nothing was measured (`total == 0`). When the text encoders are unmeasured
+/// (`te_bytes == 0`) this equals the resident peak — no claimed saving, so the second-stage overflow
+/// check then rejects exactly as the resident gate would (the safe fallback).
+pub(crate) fn predicted_sequential_peak_gb(total_bytes: u64, te_bytes: u64) -> Option<f64> {
+    if total_bytes == 0 {
+        return None;
+    }
+    let rest_bytes = total_bytes.saturating_sub(te_bytes);
+    let staged_max = te_bytes.max(rest_bytes);
+    Some(staged_max as f64 / BYTES_PER_GIB + HEADROOM_GB)
+}
+
+/// Fold sequential-residency capability into a fit decision (sc-10839, mirroring the candle
+/// `vram_gate::resolve_offload`): a [`FitDecision::TooBig`] on a provider that drops components in
+/// phase order becomes [`FitDecision::Offload`] — load→use→drop so peak is the largest single
+/// component (≤ resident) rather than a reject. Every other outcome (Fits / Unknown / TooBig on a
+/// non-capable provider) is unchanged.
+pub(crate) fn resolve_offload(decision: FitDecision, sequential_capable: bool) -> FitDecision {
+    match decision {
+        FitDecision::TooBig {
+            needed_gb,
+            available_gb,
+        } if sequential_capable => FitDecision::Offload {
+            needed_gb,
+            available_gb,
+        },
+        other => other,
+    }
+}
+
+/// Second-stage gate for a [`FitDecision::Offload`] (sc-10839): sequential residency was selected
+/// because the RESIDENT peak won't fit, on the promise that the staged working set will. If the
+/// predicted staged peak ([`predicted_sequential_peak_gb`]) STILL exceeds the budget, return
+/// `Some(needed_gb)` so the caller rejects before load with an actionable message instead of a
+/// reactive Metal-OOM / SIGKILL. `None` (staged fits, or no budget) keeps the sequential run. Unlike
+/// the candle gate — where the sequential peak is only sometimes measured — the MLX staged peak is
+/// always derivable from the on-disk component split, so this check always applies.
+pub(crate) fn sequential_overflow_gb(
+    sequential_needed_gb: Option<f64>,
+    budget: Option<MemoryBudget>,
+) -> Option<f64> {
+    let (needed_gb, budget) = (sequential_needed_gb?, budget?);
+    (budget.total_gb + f64::EPSILON < needed_gb).then_some(needed_gb)
+}
+
 /// Sum the on-disk bytes of every `.safetensors` weight file under `dir` (recursively), following
 /// symlinks (the HF cache stores each shard as a symlink into `blobs/`). AppleDouble `._*` sidecars
 /// are skipped — they masquerade as `.safetensors` and would double-count (and corrupt globs, per
@@ -136,6 +216,32 @@ pub(crate) fn sum_safetensors_bytes(dir: &Path) -> u64 {
     }
     let mut total = 0;
     walk(dir, &mut total);
+    total
+}
+
+/// Sum the on-disk `.safetensors` bytes of the model's TEXT-ENCODER component(s) — the phase-A
+/// component the `Sequential` residency drops before the DiT loads (sc-10839). Matches the diffusers
+/// snapshot's top-level `text_encoder` / `text_encoder_2` / `text_encoder_*` subdirs (SDXL has both
+/// CLIP encoders; Z-Image the single Qwen encoder), reusing [`sum_safetensors_bytes`] per subdir so
+/// the HF-cache symlink + AppleDouble handling is shared. `0` if the dir is missing or has no
+/// recognizable text-encoder subdir — which makes the staged estimate fall back to the resident sum
+/// (no claimed saving), the safe direction.
+pub(crate) fn sum_text_encoder_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !std::fs::metadata(&path).is_ok_and(|meta| meta.is_dir()) {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == "text_encoder" || name.starts_with("text_encoder_") {
+            total += sum_safetensors_bytes(&path);
+        }
+    }
     total
 }
 
@@ -170,39 +276,136 @@ fn sysctl_total_unified_memory_gib() -> Option<f64> {
     None
 }
 
-/// Pre-load admission gate: reject if the model's predicted peak won't fit the machine's
-/// unified-memory budget (or the [`MLX_MEMORY_CAP_ENV`] emulated budget). Called on the generator
-/// cache's cold-load path, before `gen_core::load` allocates — never on a warm cache hit, so an
-/// already-resident model is never re-gated. Any missing signal (probe failed, no cap, unmeasurable
-/// weights) ⇒ `Ok`, so the gate never blocks a machine that can actually fit the model.
-///
-/// `model_label` is a human-facing model name for the rejection message (the engine id).
-pub(crate) fn ensure_fits(weight_bytes: u64, model_label: &str) -> WorkerResult<()> {
-    let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
-    fit_result(weight_bytes, budget, model_label)
+/// The residency-selection outcome (sc-10839) — the pure decision, split from the [`LoadSpec`]/IO so
+/// the whole three-way selection is deterministically unit-testable without the live probe or the
+/// `MLX_MEMORY_CAP_ENV` global. See [`decide_residency`].
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ResidencyOutcome {
+    /// Fits resident (or no signal) — load with everything co-resident (the warm cross-job path).
+    Resident,
+    /// Won't fit resident but the provider stages components and the staged peak fits — load with
+    /// [`OffloadPolicy::Sequential`].
+    Sequential,
+    /// Won't fit even staged (or the provider can't stage) — reject. `staged_gb` is `Some` when the
+    /// staged path was attempted and still overflows (so the message can name it).
+    Reject {
+        needed_gb: f64,
+        available_gb: f64,
+        staged_gb: Option<f64>,
+    },
 }
 
-/// Map a fit decision to a worker result: `TooBig` → an actionable [`WorkerError::InvalidPayload`],
-/// else `Ok`. Split from [`ensure_fits`] so the rejection message is testable without the live probe
-/// or the `MLX_MEMORY_CAP_ENV` global.
-fn fit_result(
-    weight_bytes: u64,
+/// The pure residency decision: given the model's whole-model + text-encoder on-disk bytes, the
+/// (possibly emulated) budget, and whether the provider stages components, choose Resident /
+/// Sequential / Reject (sc-10839). No IO, no globals — the live [`apply_residency_policy`] resolves
+/// those and delegates here.
+pub(crate) fn decide_residency(
+    total_bytes: u64,
+    te_bytes: u64,
     budget: Option<MemoryBudget>,
-    model_label: &str,
-) -> WorkerResult<()> {
-    match fit_decision(predicted_peak_gb(weight_bytes), budget) {
+    sequential_capable: bool,
+) -> ResidencyOutcome {
+    let resident = fit_decision(predicted_peak_gb(total_bytes), budget);
+    match resolve_offload(resident, sequential_capable) {
+        FitDecision::Fits | FitDecision::Unknown => ResidencyOutcome::Resident,
+        FitDecision::Offload {
+            needed_gb,
+            available_gb,
+        } => {
+            // Second stage: reject if even the staged max-single-component peak won't fit.
+            let staged = predicted_sequential_peak_gb(total_bytes, te_bytes);
+            match sequential_overflow_gb(staged, budget) {
+                Some(_) => ResidencyOutcome::Reject {
+                    needed_gb,
+                    available_gb,
+                    staged_gb: staged,
+                },
+                None => ResidencyOutcome::Sequential,
+            }
+        }
         FitDecision::TooBig {
             needed_gb,
             available_gb,
-        } => Err(WorkerError::InvalidPayload(format!(
-            "{model_label} needs ~{needed} GB of unified memory (model weights plus headroom for \
-             activations and the OS) but this machine has ~{available} GB. Choose a smaller quant \
-             tier, lower the output resolution, or run on a Mac with more memory.",
-            needed = needed_gb.round() as i64,
-            available = available_gb.round() as i64,
-        ))),
-        FitDecision::Fits | FitDecision::Unknown => Ok(()),
+        } => ResidencyOutcome::Reject {
+            needed_gb,
+            available_gb,
+            staged_gb: None,
+        },
     }
+}
+
+/// Pre-load admission + residency-selection gate (sc-10835 Phase 0, sc-10839 Phase 1). Called on the
+/// generator cache's cold-load path, before `gen_core::load` allocates — never on a warm cache hit,
+/// so an already-resident model is never re-gated. Resolves the budget + on-disk component bytes,
+/// delegates the choice to [`decide_residency`], and returns the [`LoadSpec`] to load with:
+///  - fits resident (or no signal / unmeasurable weights) ⇒ the spec unchanged (warm resident path);
+///  - won't fit resident but the provider stages components and the staged peak fits ⇒ the spec with
+///    [`OffloadPolicy::Sequential`] set (drop the text encoder(s) before the DiT loads);
+///  - won't fit even staged ⇒ [`WorkerError::InvalidPayload`] with an actionable message.
+///
+/// `engine_id` is both the [`engine_supports_sequential`] key and the human-facing model name in the
+/// rejection message.
+pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerResult<LoadSpec> {
+    // Respect an offload policy already chosen upstream (defensive: the MLX cache seam normally sees
+    // the default `Resident`, but never downgrade a `Sequential` set by another gate).
+    if spec.offload_policy == OffloadPolicy::Sequential {
+        return Ok(spec);
+    }
+    let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
+    let (total_bytes, te_bytes) = match &spec.weights {
+        WeightsSource::Dir(dir) => (sum_safetensors_bytes(dir), sum_text_encoder_bytes(dir)),
+        // A single-file source has no component split to stage — resident-or-reject only.
+        WeightsSource::File(file) => (std::fs::metadata(file).map_or(0, |meta| meta.len()), 0),
+    };
+    match decide_residency(
+        total_bytes,
+        te_bytes,
+        budget,
+        engine_supports_sequential(engine_id),
+    ) {
+        ResidencyOutcome::Resident => Ok(spec),
+        ResidencyOutcome::Sequential => {
+            tracing::info!(
+                event = "mlx_sequential_residency_selected",
+                engine = %engine_id,
+                total_gb = (total_bytes as f64 / BYTES_PER_GIB).round() as i64,
+                text_encoder_gb = (te_bytes as f64 / BYTES_PER_GIB).round() as i64,
+                budget_gb = budget.map(|b| b.total_gb.round() as i64),
+            );
+            Ok(spec.with_offload_policy(OffloadPolicy::Sequential))
+        }
+        ResidencyOutcome::Reject {
+            needed_gb,
+            available_gb,
+            staged_gb,
+        } => Err(too_big_error(engine_id, needed_gb, available_gb, staged_gb)),
+    }
+}
+
+/// Build the actionable over-budget rejection. `staged_gb` is `Some` when sequential residency was
+/// tried and its staged peak still overflows (so the message names both the resident and the staged
+/// requirement — telling the user even one-component-at-a-time won't fit); `None` for a plain resident
+/// reject on a non-staging provider. Split out so the message is testable without the live probe.
+fn too_big_error(
+    model_label: &str,
+    needed_gb: f64,
+    available_gb: f64,
+    staged_gb: Option<f64>,
+) -> WorkerError {
+    let staged_note = match staged_gb {
+        Some(staged) => format!(
+            " (~{} GB even loading one component at a time)",
+            staged.round() as i64
+        ),
+        None => String::new(),
+    };
+    WorkerError::InvalidPayload(format!(
+        "{model_label} needs ~{needed} GB of unified memory{staged_note} (model weights plus \
+         headroom for activations and the OS) but this machine has ~{available} GB. Choose a \
+         smaller quant tier, lower the output resolution, or run on a Mac with more memory.",
+        needed = needed_gb.round() as i64,
+        available = available_gb.round() as i64,
+    ))
 }
 
 #[cfg(test)]
@@ -303,30 +506,186 @@ mod tests {
     }
 
     #[test]
-    fn fit_result_rejects_over_budget_with_an_actionable_message() {
-        // qwen-image q8 ≈ 36 GiB of weights ⇒ predicted ~46 GB; a 16 GB Mac can't fit it.
-        let bytes = 36 * 1024 * 1024 * 1024_u64;
-        let error = fit_result(bytes, Some(MemoryBudget { total_gb: 16.0 }), "qwen-image")
-            .expect_err("an over-budget model must be rejected");
-        let WorkerError::InvalidPayload(message) = error else {
-            panic!("expected InvalidPayload, got {error:?}");
-        };
-        assert!(message.contains("qwen-image"), "names the model: {message}");
-        assert!(
-            message.contains("unified memory"),
-            "explains the limit: {message}"
-        );
-        assert!(message.contains("46"), "states what it needs: {message}");
-        assert!(message.contains("16"), "states the budget: {message}");
+    fn engine_supports_sequential_is_the_wired_provider_allowlist() {
+        assert!(engine_supports_sequential("sdxl"));
+        assert!(engine_supports_sequential("z_image_turbo"));
+        // Not-yet-wired providers must NOT be offered sequential (they'd ignore it and SIGKILL).
+        assert!(!engine_supports_sequential("qwen-image"));
+        assert!(!engine_supports_sequential("z_image_turbo_control"));
+        assert!(!engine_supports_sequential("flux"));
     }
 
     #[test]
-    fn fit_result_allows_a_fit_and_never_blocks_without_signal() {
-        let bytes = 36 * 1024 * 1024 * 1024_u64;
-        // Fits a 128 GB Mac.
-        assert!(fit_result(bytes, Some(MemoryBudget { total_gb: 128.0 }), "qwen-image").is_ok());
-        // No budget signal ⇒ never block, even a huge model.
-        assert!(fit_result(999 * 1024 * 1024 * 1024_u64, None, "qwen-image").is_ok());
+    fn predicted_sequential_peak_is_largest_component_plus_headroom() {
+        let gib = 1024 * 1024 * 1024_u64;
+        // illustrious q8-class: total ~5 GiB, text encoders ~1 GiB ⇒ staged = max(1, 4) + headroom.
+        let total = 5 * gib;
+        let te = gib;
+        assert_eq!(
+            predicted_sequential_peak_gb(total, te),
+            Some(4.0 + HEADROOM_GB)
+        );
+        // TE-dominant (lens-class): total 17, TE 13 ⇒ staged = max(13, 4) + headroom = 13 + headroom.
+        assert_eq!(
+            predicted_sequential_peak_gb(17 * gib, 13 * gib),
+            Some(13.0 + HEADROOM_GB)
+        );
+        // Unmeasured text encoders ⇒ staged == resident sum (no claimed saving), the safe fallback.
+        assert_eq!(
+            predicted_sequential_peak_gb(20 * gib, 0),
+            Some(20.0 + HEADROOM_GB)
+        );
+        // Nothing measured ⇒ no signal.
+        assert_eq!(predicted_sequential_peak_gb(0, 0), None);
+    }
+
+    #[test]
+    fn resolve_offload_rewrites_toobig_only_when_capable() {
+        let too_big = FitDecision::TooBig {
+            needed_gb: 46.0,
+            available_gb: 16.0,
+        };
+        // Sequential-capable provider ⇒ Offload (carrying the resident numbers).
+        assert_eq!(
+            resolve_offload(too_big.clone(), true),
+            FitDecision::Offload {
+                needed_gb: 46.0,
+                available_gb: 16.0,
+            }
+        );
+        // Non-capable ⇒ still a reject.
+        assert!(matches!(
+            resolve_offload(too_big, false),
+            FitDecision::TooBig { .. }
+        ));
+        // Fits / Unknown are never rewritten.
+        assert_eq!(resolve_offload(FitDecision::Fits, true), FitDecision::Fits);
+        assert_eq!(
+            resolve_offload(FitDecision::Unknown, true),
+            FitDecision::Unknown
+        );
+    }
+
+    #[test]
+    fn sequential_overflow_rejects_only_a_genuine_staged_overflow() {
+        let budget = Some(MemoryBudget { total_gb: 16.0 });
+        // Staged still needs 20 > 16 ⇒ reject even sequentially.
+        assert_eq!(sequential_overflow_gb(Some(20.0), budget), Some(20.0));
+        // Staged fits (14 <= 16) ⇒ run sequentially, no reject.
+        assert_eq!(sequential_overflow_gb(Some(14.0), budget), None);
+        // Exactly-fits is not an overflow.
+        assert_eq!(sequential_overflow_gb(Some(16.0), budget), None);
+        // No staged estimate or no budget ⇒ best-effort run (no reject).
+        assert_eq!(sequential_overflow_gb(None, budget), None);
+        assert_eq!(sequential_overflow_gb(Some(20.0), None), None);
+    }
+
+    #[test]
+    fn too_big_error_names_model_budget_and_optional_staged() {
+        // Plain resident reject (non-staging provider): no staged note.
+        let WorkerError::InvalidPayload(resident) = too_big_error("qwen-image", 46.0, 16.0, None)
+        else {
+            panic!("expected InvalidPayload");
+        };
+        assert!(
+            resident.contains("qwen-image"),
+            "names the model: {resident}"
+        );
+        assert!(resident.contains("unified memory"), "explains: {resident}");
+        assert!(resident.contains("46"), "states what it needs: {resident}");
+        assert!(resident.contains("16"), "states the budget: {resident}");
+        assert!(
+            !resident.contains("one component at a time"),
+            "no staged note when not attempted: {resident}"
+        );
+        // Staged reject: the message also names the one-at-a-time requirement.
+        let WorkerError::InvalidPayload(staged) = too_big_error("sdxl", 46.0, 16.0, Some(24.0))
+        else {
+            panic!("expected InvalidPayload");
+        };
+        assert!(
+            staged.contains("one component at a time"),
+            "names the staged path: {staged}"
+        );
+        assert!(
+            staged.contains("24"),
+            "states the staged requirement: {staged}"
+        );
+    }
+
+    #[test]
+    fn decide_residency_picks_resident_sequential_or_reject_by_budget() {
+        let gib = 1024 * 1024 * 1024_u64;
+        // illustrious q8-class: total ~5 GiB (TE ~1, DiT+VAE ~4). Resident peak = 5+10 = 15;
+        // staged peak = max(1, 4)+10 = 14.
+        let total = 5 * gib;
+        let te = gib;
+
+        // Roomy budget (128 GB Mac) ⇒ Resident (keep the warm path).
+        assert_eq!(
+            decide_residency(total, te, Some(MemoryBudget { total_gb: 128.0 }), true),
+            ResidencyOutcome::Resident
+        );
+        // Budget between staged (14) and resident (15): resident won't fit, staged will, provider
+        // stages ⇒ Sequential. This is the fit-gate SELECTING sequential residency.
+        assert_eq!(
+            decide_residency(total, te, Some(MemoryBudget { total_gb: 14.5 }), true),
+            ResidencyOutcome::Sequential
+        );
+        // Same budget but a provider that can't stage ⇒ reject (never a silent Resident that OOMs).
+        assert!(matches!(
+            decide_residency(total, te, Some(MemoryBudget { total_gb: 14.5 }), false),
+            ResidencyOutcome::Reject {
+                staged_gb: None,
+                ..
+            }
+        ));
+        // Budget below even the staged peak ⇒ reject, naming the staged requirement.
+        assert!(matches!(
+            decide_residency(total, te, Some(MemoryBudget { total_gb: 12.0 }), true),
+            ResidencyOutcome::Reject {
+                staged_gb: Some(_),
+                ..
+            }
+        ));
+        // No budget signal ⇒ Resident (never block).
+        assert_eq!(
+            decide_residency(total, te, None, true),
+            ResidencyOutcome::Resident
+        );
+        // Unmeasured weights ⇒ Resident (no signal).
+        assert_eq!(
+            decide_residency(0, 0, Some(MemoryBudget { total_gb: 8.0 }), true),
+            ResidencyOutcome::Resident
+        );
+    }
+
+    #[test]
+    fn sum_text_encoder_bytes_sums_only_text_encoder_subdirs() {
+        let root = std::env::temp_dir().join(format!(
+            "mlx_fit_gate_te_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        // SDXL-shaped tree: two CLIP encoders + the U-Net + VAE.
+        for (sub, bytes) in [
+            ("text_encoder", 1000usize),
+            ("text_encoder_2", 3000),
+            ("unet", 9000),
+            ("vae", 400),
+        ] {
+            let dir = root.join(sub);
+            std::fs::create_dir_all(&dir).expect("mk subdir");
+            std::fs::write(dir.join("model.safetensors"), vec![0u8; bytes]).expect("weights");
+        }
+        // Only the two text-encoder subdirs count (1000 + 3000); unet/vae are excluded.
+        assert_eq!(sum_text_encoder_bytes(&root), 4000);
+        // The whole-model sum includes everything.
+        assert_eq!(sum_safetensors_bytes(&root), 13400);
+        // Missing dir ⇒ 0.
+        assert_eq!(sum_text_encoder_bytes(&root.join("nope")), 0);
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     // HF cache stores each shard as a symlink into `blobs/`; the gate must follow those to the real

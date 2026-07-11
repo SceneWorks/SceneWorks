@@ -210,6 +210,8 @@ enum CandleImageRoute {
     Flux2Control,
     /// FLUX.1-dev strict-control Shakker Union-Pro-2.0 (sc-8412).
     Flux1Control,
+    /// Krea 2 pose-ControlNet — a trained control-branch overlay on the frozen Turbo base (sc-8464).
+    KreaControl,
     /// A strict-pose job on a candle model with NO pose lane → reject loudly, never silent T2I (sc-5968).
     PoseReject,
     /// An in-place ComfyUI Z-Image base model (`external_base_*`) → `generate_candle_zimage_comfyui_stream`
@@ -272,6 +274,11 @@ fn resolve_candle_image_route(
         Some(CandleImageRoute::Flux2Control)
     } else if flux1_control_candle_available(request, settings) {
         Some(CandleImageRoute::Flux1Control)
+    } else if krea_control_candle_available(request, settings) {
+        // Krea 2 pose-ControlNet (sc-8464): `krea_2_turbo` + `advanced.poses` is the bespoke candle
+        // `Krea2Control` lane, diverted before the registry txt2img arm (which would render it as plain
+        // txt2img and drop the poses). Mirrors `jobs_store::krea_control_candle_eligible`.
+        Some(CandleImageRoute::KreaControl)
     } else if zimage_comfyui_available(request, settings) {
         // In-place ComfyUI Z-Image base (sc-10668): an `external_base_*` id, so it matches no
         // `is_candle_engine` arm below — route it here off the forwarded `modelManifestEntry`.
@@ -287,7 +294,13 @@ fn resolve_candle_image_route(
     } else if is_candle_engine(&request.model)
         && !matches!(
             request.model.as_str(),
-            "qwen_image" | "kolors" | "z_image_turbo" | "z_image" | "flux2_dev" | "flux_dev"
+            "qwen_image"
+                | "kolors"
+                | "z_image_turbo"
+                | "z_image"
+                | "flux2_dev"
+                | "flux_dev"
+                | "krea_2_turbo"
         )
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()

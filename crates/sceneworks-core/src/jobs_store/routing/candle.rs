@@ -220,6 +220,14 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if model == "flux2_dev" && flux2_dev_control_candle_eligible(&job.payload) {
         return true;
     }
+    // Krea 2 pose-ControlNet (sc-8464, epic 8459): `krea_2_turbo` + `advanced.poses` is the bespoke candle
+    // `Krea2Control` lane (`generate_candle_krea_control_stream`), NOT txt2img — `krea_2_turbo` is a
+    // registered candle txt2img id, so without diverting first a pose job would render as plain txt2img and
+    // drop the poses. Branch it out before the registry txt2img gate (mirrors the qwen/flux2-control
+    // reasoning, for the first Krea backbone). Mirrors the worker's `krea_control_candle_available`.
+    if model == "krea_2_turbo" && krea_control_candle_eligible(&job.payload) {
+        return true;
+    }
     // PuLID-FLUX face identity (sc-5492, epic 5480): `pulid_flux_dev` is a distinct model id (not a
     // candle txt2img id), so the `image_request_candle_eligible` gate below would reject it; the candle
     // `candle-gen-pulid` provider serves it via a bespoke `generate_candle_pulid_stream` lane (the
@@ -901,6 +909,24 @@ pub(crate) fn flux1_control_candle_eligible(payload: &Map<String, Value>) -> boo
 /// gate (`flux2_dev`) is applied at the call site. Mirrors the worker's `flux2_control_candle_available`.
 /// Candle-only — the macOS path is the MLX `flux2_dev_control` registry generator (sc-6055).
 pub(crate) fn flux2_dev_control_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty())
+}
+
+/// Krea 2 pose-ControlNet candle-routing conditions (sc-8464, epic 8459). The candle `Krea2Control`
+/// provider serves `krea_2_turbo` + a non-empty `advanced.poses` (one image per pose, each conditioned on
+/// a DWPose skeleton via a trained control-branch overlay on the frozen Turbo base), NOT an `edit_image`.
+/// Same shape as the qwen/kolors/zimage/flux control gates — the model gate (`krea_2_turbo`) is applied at
+/// the call site. Mirrors the worker's `krea_control_candle_available`. Candle-only (there is no MLX Krea
+/// control twin yet — 8459 S5 / sc-8465).
+pub(crate) fn krea_control_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
