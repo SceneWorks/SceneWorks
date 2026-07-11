@@ -303,7 +303,9 @@ fn assemble_models(detected: Vec<DetectedFile>) -> Vec<Value> {
 
     // Wan2.2 is a dual-expert MoE (sc-10671): pair the high/low-noise transformer files into ONE model
     // (a single expert can't run), handled entirely here — the paired indices are then skipped below.
-    let (wan_rows, wan_consumed) = assemble_wan_experts(&detected, &mut used_ids);
+    // The tree's UMT5 TE + VAE are folded in when present (sc-10909), read in place like the experts.
+    let (wan_rows, wan_consumed) =
+        assemble_wan_experts(&detected, &text_encoders, &vaes, &mut used_ids);
     rows.extend(wan_rows);
 
     for (index, anchor) in detected.iter().enumerate() {
@@ -368,13 +370,20 @@ fn wan_component_json(file: &DetectedFile, role: &str) -> Value {
 }
 
 /// Pair Wan2.2 MoE transformer experts (sc-10671). Returns one row per pairing group — a **complete**
-/// model with both `transformer_high` + `transformer_low` components when both noise levels are present
-/// (snapshot-backed: UMT5 TE / VAE / tokenizer come from a resident tier, not the tree), or an
-/// **incomplete** unusable row per lone expert when its sibling is missing. Also returns the set of
-/// `detected` indices consumed, so `assemble_models` skips them (a single Wan expert must never fall to
-/// the snapshot-backed single-transformer path, which would wrongly mark it runnable).
+/// model with both `transformer_high` + `transformer_low` components when both noise levels are present,
+/// or an **incomplete** unusable row per lone expert when its sibling is missing. Also returns the set
+/// of `detected` indices consumed, so `assemble_models` skips them (a single Wan expert must never fall
+/// to the snapshot-backed single-transformer path, which would wrongly mark it runnable).
+///
+/// The tree's **UMT5 text encoder** (a `t5` encoder, itself scaled-fp8) and **VAE** are folded into the
+/// complete row as `text_encoder` / `vae` components when present (sc-10909) — the worker then reads
+/// them in place (scaled-fp8 dequant / native-key remap) instead of the snapshot tier. This is purely
+/// additive: the tiny tokenizer (and either component when absent) still comes from the resident
+/// snapshot, so the row is `complete` and runnable regardless of whether the TE/VAE were folded.
 fn assemble_wan_experts(
     detected: &[DetectedFile],
+    text_encoders: &[&DetectedFile],
+    vaes: &[&DetectedFile],
     used_ids: &mut HashSet<String>,
 ) -> (Vec<Value>, HashSet<usize>) {
     // Group the wan-video transformers by their pairing base (the name with the high/low token
@@ -409,10 +418,21 @@ fn assemble_wan_experts(
             // Both experts present → one complete MoE model (runnable at scaled_fp8_companion).
             (Some(high), Some(low)) => {
                 let anchor = &detected[high];
-                let components = vec![
+                let mut components = vec![
                     wan_component_json(anchor, "transformer_high"),
                     wan_component_json(&detected[low], "transformer_low"),
                 ];
+                // sc-10909: fold the tree's UMT5 TE (a `t5` encoder — `required_text_encoders`) and an
+                // unambiguous VAE in as in-place components. Additive only; whichever is absent falls
+                // back to the snapshot tier at load, so completeness/runnability is unaffected.
+                if let Some(encoder) = text_encoders.iter().find(|encoder| {
+                    matches!(encoder.verdict(), Some((Some(fam), _, _)) if fam == "t5")
+                }) {
+                    components.push(encoder.component_json());
+                }
+                if let [only_vae] = vaes {
+                    components.push(only_vae.component_json());
+                }
                 let id = unique_id(&anchor.name, used_ids);
                 rows.push(finish_row(
                     id,
@@ -745,6 +765,23 @@ mod tests {
             ("decoder.up.0.block.0.conv1.weight", "F32"),
         ]
     }
+    /// A ComfyUI UMT5-XXL text encoder (`text_encoders/umt5_xxl_fp8_e4m3fn_scaled`): T5 encoder keys +
+    /// a `.scale_weight` companion → detector `(t5, text_encoder, scaled_fp8_companion)`.
+    fn umt5_scaled_te_keys() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("shared.weight", "F32"),
+            ("encoder.block.0.layer.0.SelfAttention.q.weight", "F8_E4M3"),
+            (
+                "encoder.block.0.layer.0.SelfAttention.q.scale_weight",
+                "F32",
+            ),
+            (
+                "encoder.block.0.layer.1.DenseReluDense.wi_0.weight",
+                "F8_E4M3",
+            ),
+            ("encoder.final_layer_norm.weight", "F32"),
+        ]
+    }
 
     fn models_root(temp: &Path) -> PathBuf {
         temp.join("ComfyUI").join("models")
@@ -917,6 +954,51 @@ mod tests {
             .collect();
         assert!(roles.contains(&"transformer_high"));
         assert!(roles.contains(&"transformer_low"));
+    }
+
+    #[test]
+    fn wan_moe_folds_in_tree_umt5_te_and_vae() {
+        // sc-10909: a complete MoE pair + the tree's UMT5 TE (t5, scaled-fp8) + one VAE → both are
+        // folded in as in-place `text_encoder` / `vae` components (worker reads them in place). Still
+        // complete + runnable (the tokenizer stays snapshot-sourced).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = models_root(temp.path());
+        write_safetensors(
+            &root
+                .join("unet")
+                .join("wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"),
+            &wan_expert_scaled_fp8_keys(),
+        );
+        write_safetensors(
+            &root
+                .join("unet")
+                .join("wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors"),
+            &wan_expert_scaled_fp8_keys(),
+        );
+        write_safetensors(
+            &root
+                .join("text_encoders")
+                .join("umt5_xxl_fp8_e4m3fn_scaled.safetensors"),
+            &umt5_scaled_te_keys(),
+        );
+        write_safetensors(&root.join("vae").join("wan_2.1_vae.safetensors"), &vae_keys());
+
+        let rows = scan(&[root]);
+        assert_eq!(rows.len(), 1, "experts + TE + VAE → one MoE model");
+        let row = &rows[0];
+        assert_eq!(row["family"], "wan-video");
+        assert_eq!(row["assembly"], "complete");
+        assert_eq!(row["usable"], true);
+        let components = row["components"].as_array().unwrap();
+        let roles: Vec<&str> = components
+            .iter()
+            .map(|c| c["role"].as_str().unwrap())
+            .collect();
+        assert!(roles.contains(&"transformer_high"));
+        assert!(roles.contains(&"transformer_low"));
+        // The TE + VAE ride along as in-place components (worker reads them in place, sc-10909).
+        assert!(roles.contains(&"text_encoder"), "roles: {roles:?}");
+        assert!(roles.contains(&"vae"), "roles: {roles:?}");
     }
 
     #[test]
