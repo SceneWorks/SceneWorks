@@ -707,9 +707,12 @@ fn standard_tier_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
 /// The DENSE (`bf16/`) tier of a SceneWorks quant-matrix turnkey, or `root` unchanged for a flat
 /// diffusers snapshot (sc-10614).
 ///
-/// The candle SDXL lanes (`sdxl_edit_candle.rs`, `sdxl_ipadapter.rs`) read dense weights —
-/// `IMAGE_MODEL_CAPS` marks the whole SDXL family `candle_quant: false` — so they always want
-/// `bf16/`, unlike [`standard_tier_subdir`], which honours `advanced.mlxQuantize`. They historically
+/// The candle SDXL edit / IP-Adapter lanes (`sdxl_edit_candle.rs`, `sdxl_ipadapter.rs`) have only a
+/// DENSE implementation — their conditioning paths read dense weights — so they always want `bf16/`,
+/// unlike [`standard_tier_subdir`], which honours `advanced.mlxQuantize`. (The plain txt2img lane DOES
+/// serve the packed q4/q8 tiers as of sc-10767 — the SDXL family is `candle_quant_lora` — but that goes
+/// through `standard_tier_subdir`; these two bespoke sub-mode lanes stay dense-only for now.) They
+/// historically
 /// handed the snapshot ROOT straight to the loader, which works only because `sdxl` and `realvisxl`
 /// fall back to flat upstream diffusers repos (`stabilityai/stable-diffusion-xl-base-1.0`,
 /// `SG161222/RealVisXL_V5.0`). An SDXL model re-hosted as a tiered turnkey has no component tree at

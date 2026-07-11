@@ -3721,10 +3721,12 @@ mod candle_routing_tests {
 
     #[test]
     fn explicit_quantization_falls_back_to_torch_image_and_video() {
-        // sc-5099: the candle providers are dense (supported_quants: &[]); an explicit
-        // `advanced.mlxQuantize > 0` must route to Python rather than silently running dense.
+        // sc-5099: a candle provider that advertises NO quant (supported_quants: &[]) must route an
+        // explicit `advanced.mlxQuantize > 0` to Python rather than silently running dense. chroma1_hd
+        // is such a dense-only candle family (contrast the SDXL family, sc-10767, which now advertises
+        // Q4/Q8 packed tiers and stays on candle — covered by `sdxl_family_quant_and_lora_stay_on_candle`).
         assert!(!image_request_candle_eligible(
-            "sdxl",
+            "chroma1_hd",
             &object(json!({ "advanced": { "mlxQuantize": 8 } }))
         ));
         assert!(!image_request_candle_eligible(
@@ -3735,15 +3737,46 @@ mod candle_routing_tests {
             "wan_2_2",
             &object(json!({ "mode": "text_to_video", "advanced": { "mlxQuantize": 8 } }))
         ));
-        // Dense (<= 0) or absent quant leaves candle on its native dense path → still eligible.
+        // Dense (<= 0) or absent quant leaves a dense candle family on its native path → still eligible.
         assert!(image_request_candle_eligible(
-            "sdxl",
+            "chroma1_hd",
             &object(json!({ "advanced": { "mlxQuantize": 0 } }))
         ));
         assert!(image_request_candle_eligible(
-            "sdxl",
+            "chroma1_hd",
             &object(json!({ "advanced": { "steps": 30 } }))
         ));
+    }
+
+    #[test]
+    fn sdxl_family_quant_and_lora_stay_on_candle() {
+        // sc-10767 (epic 9083): the SDXL family advertises Q4/Q8 packed tiers (candle-gen sc-9416/9527)
+        // AND inference LoRA/LoKr on a packed tier (sc-9528), so a quant tier-select AND a LoRA both
+        // stay on the candle lane rather than deferring to the retired torch fallback. Mirrors the
+        // boogu/lens quant-stays coverage; the inverse of the old dense-only behavior.
+        for model in [
+            "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ] {
+            for bits in [8, 4] {
+                assert!(
+                    image_request_candle_eligible(
+                        model,
+                        &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": bits } }))
+                    ),
+                    "{model} Q{bits} tier-select should stay on candle (sc-10767)"
+                );
+            }
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
+                ),
+                "{model} with a LoRA should stay on candle (sc-10767)"
+            );
+        }
     }
 
     #[test]
@@ -3889,12 +3922,14 @@ mod candle_routing_tests {
 
     #[test]
     fn sdxl_advanced_shapes_fall_back_to_torch() {
-        // Every conditioning shape the txt2img candle lane can't honor must be ineligible.
+        // Every conditioning shape the txt2img candle lane can't honor must be ineligible. A LoRA is NOT
+        // in this set anymore (sc-10767): the SDXL family advertises inference LoRA on candle, so a plain
+        // LoRA txt2img stays on the candle lane (see `sdxl_family_quant_and_lora_stay_on_candle`). Only
+        // the genuine conditioning shapes (img2img / reference / mask / strict-pose) fall back.
         let cases = [
             json!({ "mode": "edit_image", "sourceAssetId": "asset_1" }), // img2img / inpaint / outpaint
             json!({ "referenceAssetId": "asset_1" }),                    // IP-Adapter reference
             json!({ "mode": "edit_image", "sourceAssetId": "a", "maskAssetId": "m" }), // inpaint
-            json!({ "loras": [{ "name": "x" }] }),                       // LoRA
             json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),    // strict-pose ControlNet
         ];
         for case in cases {
