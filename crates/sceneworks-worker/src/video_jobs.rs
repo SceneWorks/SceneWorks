@@ -2521,9 +2521,28 @@ fn resolve_dense_adapters(
     Ok(specs)
 }
 
-/// MLX quantization for a dense video load (Bernini / SCAIL-2): Q4 default (the validated tier),
-/// Q8 opt-in via the advanced `mlxQuantize: 8` control, explicit `<= 0` ⇒ bf16 (power users with
-/// ample RAM). Never defaults to bf16 — the bf16 snapshots are far too large for the default box.
+/// MLX quantization for a dense video load (Bernini / SCAIL-2). Explicit `mlxQuantize`: `<= 0` ⇒ bf16
+/// (power users with ample RAM), `<= 4` ⇒ Q4, `>= 5` ⇒ Q8. **No explicit pick ⇒ Q4** — a deliberate,
+/// owned exception to epic 10721's app-wide **Q8** generation default (sc-10750, owner-confirmed
+/// 2026-07-11). It is NOT an oversight, and it does NOT hold dense video back from "Q8 app-wide":
+///
+/// - The primary default path is the turnkey tier machinery [`bernini_tier_order`] /
+///   [`scail2_tier_order`], which ALREADY defaults to Q8 clamped-to-installed (sc-10726). So a modern
+///   tier-subdir install resolves Q8 whenever the `q8/` tier is on disk. This resolver only feeds two
+///   narrow spots, and Q4 is the safe answer for BOTH:
+///     1. `legacy_quant` for a LEGACY flat snapshot (no tier subdirs, pre-sc-9944/9945): the flat bf16
+///        layout (~93 GB Bernini) is quantized AT LOAD, so Q4 (~37 GB resident) is the OOM-safe floor;
+///        Q8 (~55 GB) would risk an OOM on the default box for zero gain on a deprecated path.
+///     2. the on-demand tier-fetch gate [`ensure_scail2_tier_present`]: a Q8 default here would
+///        auto-pull the ~55 GB `q8/` tier on EVERY default job — Q4 keeps a default job from
+///        triggering a huge unrequested download (Q8 is fetched only on an explicit pick).
+///
+/// Never defaults to bf16 — the bf16 snapshots are far too large for the default box. The
+/// epic-consistent upgrade (default to the highest tier that FITS the machine's *video-runtime* memory
+/// budget, falling back to Q4 on tight boxes) is the deferred capability / `Auto` work — sc-10733 (S8),
+/// which owns the Apple-Silicon, video-workload-aware transient calibration; it must NOT be duplicated
+/// with a divergent probe here (epic 10721 R4: one capability calc, no drift).
+///
 /// Shared by both MLX dense families (sc-8830; formerly the byte-identical `resolve_bernini_quant`
 /// / `resolve_scail2_quant`).
 #[cfg(target_os = "macos")]
@@ -11608,6 +11627,12 @@ mod tests {
 
     /// sc-8830: the shared [`resolve_mlx_dense_quant`] (Bernini / SCAIL-2) defaults to Q4, honors
     /// `mlxQuantize: 8` → Q8, and treats `<= 0` as bf16 (`None`) — never defaulting to bf16.
+    ///
+    /// The Q4 default is the OWNED exception to epic 10721's app-wide Q8 default (sc-10750): this
+    /// resolver is the legacy flat-snapshot load-time quant + the on-demand tier-fetch gate, where Q4 is
+    /// the OOM-safe / no-surprise-download floor. The modern turnkey default (Q8-clamped-to-installed)
+    /// lives in [`bernini_tier_order`] / [`scail2_tier_order`], not here. This assertion guards that
+    /// decision — do not flip it to Q8 without the sc-10733 (S8) capability clamp.
     #[cfg(target_os = "macos")]
     #[test]
     fn resolve_mlx_dense_quant_defaults_q4_and_honors_override() {
