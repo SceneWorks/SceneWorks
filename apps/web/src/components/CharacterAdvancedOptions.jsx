@@ -13,6 +13,7 @@ import {
   stepsDefaultFromModel,
 } from "../samplerOptions.js";
 import { pidToggleVisible } from "../pidEligibility.js";
+import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 
 // Shared advanced-generation controls for Character Studio's Angle Set and Pose
 // Library panels (sc-3857). Mirrors the Image Studio advanced panel
@@ -174,7 +175,7 @@ export function useCharacterAdvancedOptions(
   };
 }
 
-export function CharacterAdvancedOptions({ state }) {
+export function CharacterAdvancedOptions({ state, baseWidth, baseHeight }) {
   const {
     open,
     setOpen,
@@ -209,6 +210,12 @@ export function CharacterAdvancedOptions({ state }) {
     showSamplerPicker,
     showSchedulerPicker,
   } = state;
+
+  // PiD high-res decode heads-up (sc-10144): Character angle/pose generations render at a fixed base
+  // (baseWidth/baseHeight, passed by the panel — 1024² today), which the default 4K PiD tier
+  // super-resolves 4× to 4096² — a multi-minute decode. Surface the same "it's working, not stuck"
+  // heads-up as Image Studio so a long Character decode never reads as hung. null on the fast 2K tier.
+  const pidDecodeNotice = pidDecodeHeadsUp({ usePid, pidTarget, width: baseWidth, height: baseHeight });
 
   const guidancePlaceholder = (() => {
     const value = guidanceDefaultFromModel(model);
@@ -349,6 +356,11 @@ export function CharacterAdvancedOptions({ state }) {
                     <option value="4k">4K · max detail</option>
                     <option value="2k">2K · faster</option>
                   </select>
+                  {pidDecodeNotice ? (
+                    <span className="field-hint pid-decode-hint" role="status">
+                      {pidDecodeNotice.message}
+                    </span>
+                  ) : null}
                 </label>
               ) : null}
             </>
