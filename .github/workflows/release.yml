@@ -237,11 +237,15 @@ jobs:
       # model weights before publishing. Any loose resource weight Tauri stages under
       # bundle/ is caught by the loose-tree walk; the exhaustive resource-source scan
       # runs in check.yml over apps/. --scan-archives (sc-10551) DECOMPRESSES the
-      # archives Tauri emits — here the `*.nsis.zip` updater payload — and scans the
-      # files inside, with archive-bomb guards. --skip-uninspectable downgrades the
-      # opaque `.msi` / NSIS `-setup.exe` (no pure-JS reader) to a warning: their
-      # contents duplicate the resource tree the loose-tree walk already covered. NC
-      # weights must never ship.
+      # archive containers Tauri emits — here the `*.nsis.zip` updater payload — and
+      # scans the entry paths inside, with archive-bomb guards. It does NOT crack open
+      # the Windows installer internals: a `-setup.exe` is not an archive candidate at
+      # all (`.exe` is not a scanned archive extension), and `--skip-uninspectable` only
+      # downgrades the `.msi` "no pure-JS reader" refusal to a warning. Those opaque
+      # installer internals are covered instead by the always-on Tauri resource-config
+      # check and the source-tree scan in check.yml (a weight cannot reach an installer
+      # without first tripping one of those), NOT by decompression. NC weights must
+      # never ship.
       - name: Guard against NC model weights in the desktop bundle (sc-10526, sc-10551)
         shell: bash
         run: node scripts/check-no-nc-weights.mjs --dir target/release/bundle --scan-archives --skip-uninspectable

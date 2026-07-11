@@ -63,10 +63,16 @@
 //   (no external deps): `.zip`/`.nsis.zip` (central-directory listing, deflate/store),
 //   `.tar`, `.tar.gz`/`.tgz`, and bare `.gz`. Real release payloads it decompresses:
 //   the macOS `bundle/macos/*.app.tar.gz` updater tarball and the Windows
-//   `*.nsis.zip` updater. Opaque installers (`.dmg`/`.msi`/`-setup.exe`) have no
-//   pure-JS reader; their CONTENTS duplicate the already-walked `.app`/resource tree,
-//   so `--skip-uninspectable` downgrades them from a hard failure to a warning on the
-//   release lanes. ARCHIVE-BOMB GUARDS (required): the scan fails CLOSED — never
+//   `*.nsis.zip` updater container (its entry paths ARE scanned). What it does NOT
+//   crack open: the Windows installer INTERNALS. A `-setup.exe` is not even an archive
+//   candidate (`.exe` is not in ARCHIVE_EXTENSIONS), so it is never inspected — and a
+//   `-setup.exe` nested inside the `.nsis.zip` is opaque too (not recursed). A `.dmg`/
+//   `.msi` IS a candidate but has no pure-JS reader, so on the release lanes
+//   `--skip-uninspectable` downgrades that "no reader" refusal to a warning. Those
+//   opaque installer internals are covered NOT by decompression but by the always-on
+//   Tauri resource-config check here plus the source-tree scan in check.yml (a weight
+//   cannot reach an installer without first tripping one of those). ARCHIVE-BOMB
+//   GUARDS (required): the scan fails CLOSED — never
 //   OOMs — if an archive exceeds the on-disk size cap, the cumulative/per-entry
 //   uncompressed-size caps (zip is refused on its DECLARED sizes before any inflate),
 //   the entry-count cap, or the nesting-depth cap. See DEFAULT_ARCHIVE_LIMITS and
@@ -236,9 +242,11 @@ const DEFAULT_ARCHIVE_LIMITS = {
   // itself the first bomb signal, and bounds the Buffer we load).
   maxArchiveFileBytes: 2 * 1024 * 1024 * 1024, // 2 GiB
   // Cumulative UNCOMPRESSED bytes across an entire archive tree (all nesting levels of
-  // one top-level archive). For gzip this is the gunzip `maxOutputLength` (Node throws
-  // before inflating past it); for zip it is checked against the DECLARED sizes in the
-  // central directory BEFORE any entry is inflated. Kept < Node's Buffer max (~4 GiB).
+  // one top-level archive). For gzip each member's gunzip `maxOutputLength` is set to
+  // the REMAINING budget (this total minus what siblings already consumed), so Node
+  // throws before inflating past what is left; for zip it is checked against the
+  // DECLARED sizes in the central directory BEFORE any entry is inflated. Kept < Node's
+  // Buffer max (~4 GiB).
   maxTotalUncompressedBytes: 3 * 1024 * 1024 * 1024, // 3 GiB
   // Per-entry uncompressed cap (zip: declared size; deflate inflate `maxOutputLength`).
   maxEntryUncompressedBytes: 1 * 1024 * 1024 * 1024, // 1 GiB
@@ -718,10 +726,13 @@ class ArchiveBombError extends Error {
   }
 }
 
-// No pure-JS reader for this container (e.g. `.dmg`, `.msi`, an unsupported zip
-// compression method). By default this fails the build too (fail closed); the release
-// lanes pass --skip-uninspectable to downgrade it to a warning, because the opaque
-// installer's CONTENTS duplicate the already-walked `.app`/resource tree.
+// A container that IS an archive candidate but has no pure-JS reader (e.g. `.dmg`,
+// `.msi`, an unsupported zip compression method). By default this fails the build too
+// (fail closed); the release lanes pass --skip-uninspectable to downgrade it to a
+// warning, because the opaque installer's internals are covered by the loose-tree walk
+// over the same `.app`/resource tree plus the source-tree scan in check.yml. NOTE this
+// does NOT cover a `-setup.exe`: `.exe` is not in ARCHIVE_EXTENSIONS, so an NSIS
+// installer is never an archive candidate and never reaches this error at all.
 class UninspectableArchiveError extends Error {
   constructor(reason) {
     super(reason);
@@ -1041,12 +1052,23 @@ function scanArchiveBuffer(buf, displayPath, ctx, depth, budget) {
   }
 
   if (format === "gzip") {
+    // Cap this inflate at the REMAINING cumulative budget, not the full total, so the
+    // cap stays actually cumulative: sibling gzip members (e.g. several `.gz` in one
+    // tar) share one budget, and once earlier siblings have consumed it a later one
+    // cannot transiently allocate up to the full cap before the running-total check
+    // trips. Clamp to >= 1 (Node rejects/ambiguously treats a 0 maxOutputLength); an
+    // already-exhausted budget then refuses any non-empty inflate.
+    const remainingUncompressedBytes = Math.max(
+      1,
+      ctx.limits.maxTotalUncompressedBytes - budget.totalBytes,
+    );
     let inflated;
     try {
-      inflated = zlib.gunzipSync(buf, { maxOutputLength: ctx.limits.maxTotalUncompressedBytes });
+      inflated = zlib.gunzipSync(buf, { maxOutputLength: remainingUncompressedBytes });
     } catch (error) {
       throw new ArchiveBombError(
-        `gunzip of "${displayPath}" exceeded the total cap ${ctx.limits.maxTotalUncompressedBytes} B or is corrupt: ${error.code || error.message}`,
+        `gunzip of "${displayPath}" exceeded the remaining cumulative cap ${remainingUncompressedBytes} B ` +
+          `(of ${ctx.limits.maxTotalUncompressedBytes} B total) or is corrupt: ${error.code || error.message}`,
       );
     }
     if (inflated.length >= 262 && inflated.toString("ascii", 257, 262) === "ustar") {
@@ -1657,7 +1679,7 @@ async function selfTest() {
   );
 
   // ========================================================================
-  // (m)-(x) --scan-archives (sc-10551): decompress-and-scan archive CONTENTS
+  // (m)-(y) --scan-archives (sc-10551): decompress-and-scan archive CONTENTS
   // ========================================================================
   // A weight sealed inside an archive must be caught (planted-positive), a clean
   // archive must pass (negative), and an archive-bomb-shaped input must be REFUSED —
@@ -1899,6 +1921,48 @@ async function selfTest() {
     );
   } finally {
     await rm(archTmp, { recursive: true, force: true });
+  }
+
+  // (y) ARCHIVE-BOMB (the cumulative cap is actually cumulative): two sibling `.gz`
+  //     members in one tar, each individually under the total cap but summing OVER it,
+  //     are REFUSED — and the refusal fires DURING the crossing sibling's inflate, so
+  //     its transient allocation is bounded by the REMAINING budget, not the full cap.
+  //     Before the remaining-budget fix this still refused, but only AFTER inflating the
+  //     crossing member up to the full cap (via the post-inflate running-total check,
+  //     message "cumulative … exceeds cap"); after the fix the gunzip maxOutputLength
+  //     (= remaining budget) trips first (message "remaining cumulative cap"). Asserting
+  //     that mechanism makes this fail-before / pass-after and keeps it failure-capable
+  //     against any regression that stopped sharing one budget across siblings.
+  {
+    const cap = 2000;
+    // gzip of 1200 identical bytes is tiny on disk, so the tar's own per-entry
+    // accounting barely moves the budget; each member inflates to 1200 B, and
+    // 1200 + 1200 > 2000, so the SECOND member's inflate crosses the cap.
+    const sibling = () => zlib.gzipSync(Buffer.alloc(1200, 65));
+    const tar = makeTar([
+      { name: "a.gz", content: sibling() },
+      { name: "b.gz", content: sibling() },
+    ]);
+    let caught = null;
+    try {
+      scanArchiveBuffer(
+        tar,
+        "bundle/siblings.tar",
+        freshCtx({ ...DEFAULT_ARCHIVE_LIMITS, maxTotalUncompressedBytes: cap }),
+        1,
+        newBudget(),
+      );
+    } catch (error) {
+      caught = error;
+    }
+    assert(
+      "archive-bomb: sibling gzip members summing over the total cap are refused",
+      caught instanceof ArchiveBombError,
+    );
+    assert(
+      "archive-bomb: the crossing sibling is capped at the REMAINING budget (refused during inflate)",
+      caught instanceof ArchiveBombError && /remaining cumulative cap/.test(caught.reason ?? caught.message ?? ""),
+    );
   }
 
   if (failures === 0) {

@@ -113,13 +113,21 @@ it). All limits are per top-level archive tree (they accumulate across nesting l
 
 ### Opaque installers (`--skip-uninspectable`)
 
-The final installers — `.dmg` (macOS), `.msi` and the NSIS `-setup.exe` (Windows) —
-have **no pure-JS reader**. By default `--scan-archives` **fails closed** on a
-container it cannot read (it never silently passes an un-verified archive). The release
-lanes pass **`--skip-uninspectable`** to downgrade those to a *warning*, because the
-opaque installer's CONTENTS duplicate the `.app` / resource tree the loose-tree walk in
-the same step already scanned. A bomb refusal is **never** downgraded by this flag —
-only the "no reader for this format" case is.
+The `.dmg` (macOS) and `.msi` (Windows) installers ARE archive candidates but have
+**no pure-JS reader**. By default `--scan-archives` **fails closed** on a container it
+cannot read (it never silently passes an un-verified archive). The release lanes pass
+**`--skip-uninspectable`** to downgrade that "no reader" refusal to a *warning*, because
+the opaque installer's internals are covered by the `.app` / resource tree the loose-tree
+walk in the same step already scanned (plus the source-tree scan in `check.yml`). A bomb
+refusal is **never** downgraded by this flag — only the "no reader for this format" case
+is.
+
+The NSIS **`-setup.exe`** is a different case: `.exe` is **not** a scanned archive
+extension, so a `-setup.exe` is never even an archive candidate — `--scan-archives`
+does not look at it at all, and `--skip-uninspectable` has nothing to downgrade for it.
+A `-setup.exe` nested inside a `.nsis.zip` is opaque the same way (its bytes are not
+recursed into). Its internals are covered by the resource-config check + source-tree
+scan, exactly as for `.msi`, not by decompression.
 
 ### The `.bin` question (not a blind spot)
 
@@ -192,15 +200,18 @@ path is still flagged.
 
 ## Known limitation
 
-**Opaque installers still are not decompressed.** The `.dmg` / `.msi` / `-setup.exe`
-installers have no pure-JS reader, so `--scan-archives` cannot open them (it warns
-under `--skip-uninspectable`, or fails closed without it). This is not a real gap: the
-`--dir` release scan walks the loose `.app` / bundle tree — which carries the same
-`Contents/Resources` payload the DMG/MSI wraps — and the exhaustive resource-source
-scan in `check.yml` covers the trees that feed those installers, so a weight cannot
-reach an installer without first tripping one of those scans. The archives that are NOT
-otherwise covered — the `*.app.tar.gz` / `*.nsis.zip` updater payloads — ARE now
-decompressed and scanned by `--scan-archives` (sc-10551).
+**Opaque installer internals still are not decompressed.** The `.dmg` and `.msi`
+installers are archive candidates with no pure-JS reader, so `--scan-archives` cannot
+open them (it warns under `--skip-uninspectable`, or fails closed without it); the NSIS
+`-setup.exe` is not an archive candidate at all (`.exe` is not a scanned extension), so
+it is simply never inspected — nor is a `-setup.exe` sealed inside the `.nsis.zip`. This
+is not a real gap: the `--dir` release scan walks the loose `.app` / bundle tree — which
+carries the same `Contents/Resources` payload the DMG/MSI/EXE wraps — and the exhaustive
+resource-source scan in `check.yml` covers the trees that feed those installers, so a
+weight cannot reach an installer without first tripping one of those scans. The archive
+containers that are NOT otherwise covered — the `*.app.tar.gz` / `*.nsis.zip` updater
+payloads — ARE now decompressed and their entry paths scanned by `--scan-archives`
+(sc-10551).
 
 `include_bytes!`-compiled weights (a weight embedded in a Rust binary at compile time)
 are not detectable by any file or archive scan post-compile; the source-tree scan
