@@ -55,7 +55,7 @@ use crate::image_jobs::{classify_adapter, load_reference_image, lora_path};
 ))]
 use gen_core::{
     AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Generator,
-    LoadSpec, Precision, Progress, Quant, WeightsSource,
+    LoadSpec, OffloadPolicy, Precision, Progress, Quant, WeightsSource,
 };
 // MLX-only contract types (LoRA classification, MoE experts) — the candle video lane uses none of these.
 #[cfg(target_os = "macos")]
@@ -3789,6 +3789,11 @@ fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
         // LTX's external Gemma-3 text encoder rides the spec (sc-8827); `None` ⇒ the provider's
         // `$LTX_GEMMA_DIR` / `<root>/text_encoder` fallback.
         text_encoder: input.text_encoder_dir.clone().map(WeightsSource::Dir),
+        // `offload_policy` entered `LoadSpec` in mlx-gen #689 (sc-10821); every builder-constructed
+        // spec defaults it to `Resident`. This is the one raw literal, so set it explicitly to the
+        // same value — video providers keep all components co-resident (today's behavior); sequential
+        // residency is an image-lane (sdxl/z-image) feature (epic 10834).
+        offload_policy: OffloadPolicy::Resident,
     }
 }
 
