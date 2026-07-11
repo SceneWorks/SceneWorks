@@ -10620,6 +10620,65 @@ async fn ui_preferences_put_open_when_no_token_configured() {
     assert_eq!(saved["theme"], "dark");
 }
 
+#[tokio::test]
+async fn ui_preferences_default_generation_quality_round_trips_and_merges() {
+    // sc-10728: the app-wide default generation quality persists like theme/accent so it
+    // survives a desktop relaunch — the shell's per-launch 127.0.0.1:<port> origin wipes
+    // origin-keyed localStorage, so the durable copy must live server-side. GET resolves an
+    // unset value to the q8 default; PUT accepts bf16|q8|q4 and MERGES, so a theme-only
+    // write can't reset a previously-chosen quality, and an invalid value coerces to q8.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir); // no token configured ⇒ PUT is open
+    assert!(settings.access_token.is_empty());
+    let app = create_app(settings).expect("app creates");
+
+    // Fresh install: GET resolves the absent value to the q8 default so the web can seed it.
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["defaultGenerationQuality"], "q8");
+
+    // PUT a valid tier: persisted and echoed back.
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "defaultGenerationQuality": "q4" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["defaultGenerationQuality"], "q4");
+
+    // Survives a "relaunch": a fresh GET reads it back from disk.
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["defaultGenerationQuality"], "q4");
+
+    // A partial PUT (theme only) MERGES — it must not clobber the stored quality.
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "dark" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["defaultGenerationQuality"], "q4");
+    assert_eq!(prefs["theme"], "dark");
+
+    // A present-but-invalid tier coerces to the q8 default (defensive; the UI never sends one).
+    let (status, saved) = request(
+        app,
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "defaultGenerationQuality": "int8-convrot" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["defaultGenerationQuality"], "q8");
+}
+
 #[test]
 fn requires_token_only_gates_api_paths() {
     use axum::http::Method;

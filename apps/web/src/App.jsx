@@ -39,6 +39,7 @@ import { useJobEvents } from "./hooks/useJobEvents.js";
 import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import { isAccentId } from "./accents.js";
+import { writeDefaultGenerationQuality } from "./generationQuality.js";
 import {
   dropUpscaledVariants,
   findFoldedAssetById,
@@ -898,6 +899,14 @@ export function App() {
         }
         if (isAccentId(prefs?.accent)) {
           setAccent(prefs.accent);
+        }
+        // Re-prime the default-generation-quality cache from the durable server copy (sc-10728).
+        // It isn't React state here — the studio reads it fresh from localStorage via
+        // readDefaultGenerationQuality() — so seeding the cache is all that's needed for it to
+        // survive a desktop relaunch (the GET always resolves a concrete tier). writeDefault…
+        // normalizes, so an absent/legacy value lands on q8. No PUT: this is a read-only seed.
+        if (prefs?.defaultGenerationQuality) {
+          writeDefaultGenerationQuality(prefs.defaultGenerationQuality);
         }
       })
       .catch(() => {});
