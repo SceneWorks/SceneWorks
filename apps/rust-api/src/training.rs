@@ -1098,6 +1098,21 @@ pub(crate) async fn create_training_job(
         .ok_or_else(|| {
             ApiError::bad_request(format!("Unknown training target: {}", payload.target_id))
         })?;
+    // ControlNet training (epic 10159) reuses this submit path — same target registry, dataset
+    // resolution, plan build, and output/guardrail plumbing — but produces a control branch, not a
+    // LoRA. A `ControlBranch` target enqueues the orchestrated `control_training` job (render the
+    // per-image condition, then train) instead of `lora_train`. It has no dry-run mode (the worker
+    // always renders + trains), so a dry-run request is rejected rather than silently producing
+    // nothing.
+    let is_control = matches!(
+        target.output_kind,
+        sceneworks_core::training::TrainingOutputKind::ControlBranch
+    );
+    if is_control && payload.dry_run {
+        return Err(ApiError::bad_request(
+            "ControlNet training runs the full render + train pipeline and does not support a dry run; submit with dryRun=false.",
+        ));
+    }
     let preset_metadata = match payload.preset_id.as_deref() {
         Some(preset_id) => {
             let preset_registry = builtin_training_presets();
@@ -1343,7 +1358,11 @@ pub(crate) async fn create_training_job(
         store.create_job_with_id(
             job_id,
             CreateJob {
-                job_type: JobType::LoraTrain,
+                job_type: if is_control {
+                    JobType::ControlTraining
+                } else {
+                    JobType::LoraTrain
+                },
                 project_id: Some(project_id),
                 project_name: Some(project_name),
                 payload: job_payload,

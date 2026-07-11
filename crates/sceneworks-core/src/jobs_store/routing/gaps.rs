@@ -141,9 +141,9 @@ pub(crate) fn termination_failure_error(
 /// of non-generation job types (and is required anyway — `JobType` is `#[non_exhaustive]`).
 pub(crate) fn oom_remediation_hint(job_type: Option<&JobType>) -> &'static str {
     match job_type {
-        // LoRA training: the sc-4874 first-training-step OOM — gradient checkpointing is
-        // the real lever; resolution is secondary.
-        Some(JobType::LoraTrain) => {
+        // LoRA / ControlNet-branch training: the sc-4874 first-training-step OOM — gradient
+        // checkpointing is the real lever; resolution is secondary.
+        Some(JobType::LoraTrain | JobType::ControlTraining) => {
             ", likely out-of-memory during the first training step \
              — enable Gradient Checkpointing or reduce resolution"
         }
@@ -417,6 +417,16 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
 
         JobType::LoraTrain => Err(classify_training_gap(&job.payload)),
 
+        // ControlNet Training Studio (epic 10159): the control-branch trainer is candle-only — there is
+        // no MLX control trainer yet (that is B5/sc-10177) — so a `control_training` job stranded on Mac
+        // with no candle worker is a real gap, not a torch fallback.
+        JobType::ControlTraining => Err(UnsupportedReason::new(
+            None,
+            "ControlNet branch training",
+            "ControlNet training runs on the candle/CUDA control trainer (krea_control); there is no native MLX control trainer yet, so it is not available in the flow on Mac.",
+            Some("epic 10159"),
+        )),
+
         JobType::TrainingCaption => Err(UnsupportedReason::new(
             None,
             "dataset captioning",
@@ -532,6 +542,11 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::KpsExtract
         | JobType::ImageSegment
         | JobType::LoraTrain
+        // epic 10159: control_training routes by capability (only a candle worker with the
+        // krea_control trainer advertises it); candle-eligible ones already early-returned Ok via
+        // `job_is_any_candle_eligible`, so reaching here means "no candle worker yet" — leave Ok
+        // rather than enforce-fail, the same "parity landing later" treatment as lora_train.
+        | JobType::ControlTraining
         // sc-6535: a candle CLIP embedder (`candle-gen-clip`) is future work; until then
         // dataset_analysis routes by capability (no candle worker advertises it) rather than
         // enforce-failing — the same "parity landing later" treatment as the surfaces above.

@@ -97,6 +97,20 @@ pub(crate) enum SkipReason {
     PreprocessFailed(String),
 }
 
+impl SkipReason {
+    /// A short human-readable reason, for the studio job's skip tally / logs. Reads every variant's
+    /// detail (the decode/preprocess error string, the too-small dimensions) so the report a caller
+    /// surfaces carries the actual cause, not just a count.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            SkipReason::Undecodable(error) => format!("undecodable ({error})"),
+            SkipReason::TooSmall { width, height } => format!("too small ({width}x{height})"),
+            SkipReason::NoPersonDetected => "no person detected".to_owned(),
+            SkipReason::PreprocessFailed(error) => format!("preprocess failed ({error})"),
+        }
+    }
+}
+
 /// Outcome of a prep run.
 pub(crate) struct PrepReport {
     /// Successfully written `(target, control, caption)` rows.
