@@ -545,8 +545,10 @@ sceneworks-core = { path = "../sceneworks-core" }
 # folds in main #692 (sequential-residency, sdxl/z-image only):
 # gen-core is NOT byte-identical this time but the delta is ADDITIVE (`gen-core/src/runtime.rs` +32
 # OffloadPolicy runtime, `lib.rs` re-export) — worker import surface unchanged, compiles clean. Bumps
-# EVERY mlx-gen crate + gen-core 8db1ab6 -> 212cba5. BRANCH-HEAD pin (PR #693 not yet merged) — flip to the
-# merged/squashed SHA once #693 lands. candle-gen is NOT re-pinned in lockstep (the candle Krea-edit engine
+# EVERY mlx-gen crate + gen-core 8db1ab6 -> 212cba5. PR #693 is MERGED (regular merge 19573a9 on main), so
+# 212cba5 is a durable ancestor of main HEAD — this pins the exact validated engine tree WITHOUT pulling
+# in the unrelated #694 (qwen-image residency) that also rode main HEAD. candle-gen is NOT re-pinned in
+# lockstep (the candle Krea-edit engine
 # is unwritten, P1.2/P2.2): `--features backend-candle --target all` is TEMPORARILY gen-core-skewed until
 # candle catches up; the DEFAULT PR gate (check.yml, blind to candle-gen) stays single-rev/green at 212cba5.
 sceneworks-gen-core = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "212cba567102ffbf6866b3006ece2db384698f04" }
