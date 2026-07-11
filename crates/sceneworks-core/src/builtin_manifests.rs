@@ -32,6 +32,10 @@ pub const BUILTIN_MANIFESTS: &[(&str, &str)] = &[
         "builtin.recipe-presets.jsonc",
         include_str!("../../../config/manifests/builtin.recipe-presets.jsonc"),
     ),
+    (
+        "builtin.control_overlays.jsonc",
+        include_str!("../../../config/manifests/builtin.control_overlays.jsonc"),
+    ),
 ];
 
 /// How an existing manifest file is treated when seeding.

@@ -1,0 +1,51 @@
+{
+  // Built-in (hosted) control-overlay catalog — the third source of the shared control-overlay registry
+  // (sc-8466, epic 8459 S6), alongside the user-global `user.control_overlays.jsonc` and per-project
+  // `<project>/control-overlays/manifest.jsonc` that studio-trained overlays register into (B4/sc-10165).
+  // The API `control_overlay_catalog` merges builtin → user → project by id (later scopes override), the
+  // exact `builtin.loras.jsonc` pattern — do NOT build a parallel registry.
+  //
+  // Each entry reuses the LoRA entry shape so it normalizes through `normalize_lora_entry`: a
+  // `source.provider="huggingface"` + `source.repo` hosted overlay resolves its `installState` from the HF
+  // cache, and the ControlPanel picker (`GET /api/v1/control-overlays?baseModel=…`) lists it. The candle
+  // worker lane (`ensure_krea_control_weights`) already defaults to the same repo and lazy-downloads it, so
+  // pose control works out-of-box even before the overlay is explicitly picked; a studio-trained overlay
+  // always overrides the built-in.
+  "schemaVersion": 1,
+  "controlOverlays": [
+    {
+      "id": "krea_2_pose_beta",
+      "name": "Krea 2 Pose ControlNet (beta)",
+      // The frozen INFERENCE base the overlay applies on (Krea 2 Turbo), NOT the training base
+      // (krea_2_raw). `list_control_overlays` filters the picker by this; the ControlPanel offers it only
+      // for `krea_2_turbo`.
+      "baseModel": "krea_2_turbo",
+      "controlType": "pose",
+      // Mirrors the worker STRICT_CONTROL_ENGINES `krea_2_turbo_control` (supported_kinds = {Pose}).
+      "controlEngine": "krea_2_turbo_control",
+      "backbone": "krea_2",
+      "kind": "pose_control_branch",
+      // EXPERIMENTAL: the S0 feasibility spike (5,000-step, ~30k COCO GT skeletons, body-18 + head
+      // direction, no hands/dense-face). Usable pose-lock ~0.5–0.85 (S0 GO verdict); not-for-production.
+      // The production overlay from the full-corpus run (S3/sc-8463) will supersede this entry.
+      "experimental": true,
+      "source": {
+        "provider": "huggingface",
+        "repo": "SceneWorks/krea2-pose-controlnet-beta",
+        // Pinned for defense-in-depth (parity with the worker's KREA_CONTROL_OVERLAY_REVISION) so a repo
+        // re-push can't swap the checkpoint under the cache install-state probe.
+        "revision": "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac",
+        "file": "control_step5000.safetensors"
+      },
+      "files": ["control_step5000.safetensors"],
+      "provenance": {
+        "epic": "8459",
+        "story": "8466",
+        "spike": "sc-8460 S0",
+        "notForProduction": true
+      },
+      "createdAt": "2026-07-09T00:00:00Z",
+      "updatedAt": "2026-07-09T00:00:00Z"
+    }
+  ]
+}
