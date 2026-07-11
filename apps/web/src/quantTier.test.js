@@ -367,3 +367,60 @@ describe("defaultTierSelection — per-model quality floor (sc-10731)", () => {
     expect(defaultTierSelection(model, null, { defaultQuality: "bf16" })).toBe("bf16");
   });
 });
+
+// sc-10732 — acceptance #1 (WEB ANALOG of the worker `default_tier_is_q8_not_q4_regression` guard).
+// Epic 10721 moved the app-wide gen-time default OFF the old blind q4 to q8 (sc-10726), matching the
+// worker's `preferred_tier(None, None) == "q8"`. If a future change reverts `DEFAULT_GENERATION_QUALITY`
+// (or the no-options fallback base) back to q4, these fail loudly on the CI-runnable web side too.
+describe("defaultTierSelection — q8-not-q4 base-default revert guard (sc-10732)", () => {
+  it("keeps the app-wide base default constant at q8, never q4", () => {
+    expect(DEFAULT_GENERATION_QUALITY).toBe("q8");
+    expect(DEFAULT_GENERATION_QUALITY).not.toBe("q4");
+  });
+
+  it("resolves the no-sticky/no-setting default to q8 (not q4) for matrix AND convert models", () => {
+    // Download-matrix model: no sticky, no declared default, no global setting → the q8 base default.
+    const matrix = matrixModel({ installed: ["q4", "q8", "bf16"], defaultTier: "none" });
+    expect(defaultTierSelection(matrix, null)).toBe("q8");
+    expect(defaultTierSelection(matrix, null)).not.toBe("q4");
+    // Convert-at-install (mlxTiers) model — the same base default, so the picker never silently
+    // re-sends the washed q4 (the sc-10714 Anima quality bug epic 10721 fixed).
+    const convert = convertModel({ mlxTiers: ["q4", "q8", "bf16"] });
+    expect(defaultTierSelection(convert, null)).toBe("q8");
+    expect(defaultTierSelection(convert, null)).not.toBe("q4");
+  });
+});
+
+// sc-10732 — the FULL precedence LADDER in one place, so the rung ORDER (not just each rung in
+// isolation, as the sc-10727/28/31 suites above cover) is locked coherently: peel rungs from the top on
+// one floored convert model —
+//   sticky (rung 1, un-floored) > global setting (rung 3) > floor clamp > installed clamp > first installed.
+describe("defaultTierSelection — full precedence ladder (sc-10732)", () => {
+  const floored = () => flooredConvertModel({ mlxTiers: ["q4", "q8", "bf16"], floor: "q8" });
+
+  it("rung 1: a below-floor sticky beats BOTH the global setting and the floor", () => {
+    // Sticky q4 (a prior EXPLICIT pick) wins over a bf16 global setting and is NOT re-floored up to q8.
+    // Combines two rungs the isolated suites test separately — sticky-beats-global and sticky-below-floor.
+    expect(defaultTierSelection(floored(), "q4", { defaultQuality: "bf16" })).toBe("q4");
+  });
+
+  it("rung 3: with no sticky, the global setting (above the floor) drives the default", () => {
+    expect(defaultTierSelection(floored(), null, { defaultQuality: "bf16" })).toBe("bf16");
+  });
+
+  it("floor clamp: a global setting BELOW the floor is raised to the floor, never landing on q4", () => {
+    expect(defaultTierSelection(floored(), null, { defaultQuality: "q4" })).toBe("q8");
+  });
+
+  it("installed clamp: the floor is capped by what's on disk (floor q8, only q4 installed → q4)", () => {
+    const model = flooredConvertModel({ mlxTiers: ["q4"], floor: "q8" });
+    expect(defaultTierSelection(model, null, { defaultQuality: "q4" })).toBe("q4");
+  });
+
+  it("first-installed fallback: a lone tier outside the clean-fallback chain is the last resort", () => {
+    // bf16 alone: no sticky/global/declared/floor; base q8 + fallback [q8,q4] are all absent → the sole
+    // installed tier (rung 4 / `tiers[0]`), proving the bottom of the ladder.
+    const model = matrixModel({ tiers: ["bf16"], installed: ["bf16"], defaultTier: "none" });
+    expect(defaultTierSelection(model, null)).toBe("bf16");
+  });
+});
