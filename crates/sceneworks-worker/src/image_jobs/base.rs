@@ -4076,14 +4076,26 @@ async fn generate_candle_stream(
     // the tier's MEASURED sequential peak (`candle.sequentialPeakGb`) is known and STILL won't fit, reject
     // instead of running into a reactive OOM. Honors `SCENEWORKS_CUDA_VRAM_CAP_GB` to emulate a small
     // card. Unmeasured models (no `candle` block) and non-NVIDIA hosts yield `Unknown` → never block.
+    let budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    // sc-11023: the single-slot generator cache evicts its current occupant BEFORE the incoming load,
+    // and cudarc's caching allocator reuses those freed pages in-process — nvidia-smi `free` never rises
+    // after an in-process evict (the epic 10765 caching-allocator note). So the VRAM this process already
+    // holds is RECLAIMABLE by the incoming load; budget against `free + reclaimable` (capped to total),
+    // else a warm/swap re-gate falsely rejects a load that will actually fit (the "even with sequential
+    // residency" 2nd-run reject a resident bf16 tier hits on the next generation).
+    let budget = budget.map(|budget| {
+        crate::vram_gate::with_reclaimable(
+            budget,
+            crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id),
+        )
+    });
+    let tier =
+        crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
+    let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
     let use_sequential = {
-        let budget = crate::vram_gate::apply_vram_cap(
-            crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-            crate::vram_gate::cuda_vram_cap_gb(),
-        );
-        let tier =
-            crate::vram_gate::requested_tier_key(&request.advanced, &request.model_manifest_entry);
-        let needed = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
         // The candle FLUX.1 (sc-10769), FLUX.2 txt2img (sc-10868), and Qwen-Image txt2img (sc-10867)
         // lanes have wired sequential residency (load→encode→drop the text encoder before the DiT);
         // other families reject-before-OOM. FLUX.2 is the biggest win off-Mac — the 32B `flux2_dev`'s
@@ -4152,6 +4164,20 @@ async fn generate_candle_stream(
             _ => false,
         }
     };
+    // sc-11023: record this admitted load's incurred peak as the reclaimable high-water for the NEXT
+    // gate. Sequential residency peaks at the largest single component; a resident load at the whole-
+    // model peak. cudarc's pool never returns pages to the driver, so the max we have ever loaded is
+    // exactly what a later swap-in reclaims after the single-slot cache evicts this model. Reached only
+    // when the gate ADMITTED the load (the reject arms `return` above), so we never record a peak we
+    // didn't actually attempt to allocate.
+    let incurred_peak = if use_sequential {
+        crate::vram_gate::predicted_sequential_peak_gb(&request.model_manifest_entry, tier)
+    } else {
+        needed
+    };
+    if let Some(peak_gb) = incurred_peak {
+        crate::vram_gate::note_loaded_peak(&settings.gpu_id, peak_gb);
+    }
     let mut spec = load_spec(weights_dir, quant, adapters, None);
     if use_sequential {
         // Ask the provider (candle FLUX) to load→use→drop each component in phase order (sc-10821).

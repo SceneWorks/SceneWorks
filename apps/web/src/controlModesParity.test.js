@@ -35,9 +35,19 @@ describe("controlModes ↔ manifest parity (sc-8245)", () => {
     (model) => Array.isArray(model?.ui?.controlModes) && model.ui.controlModes.length > 0,
   );
 
-  it("the manifest advertises strict control on the five Fun-Union backbones", () => {
+  it("the manifest advertises strict control on the expected backbones", () => {
     const ids = manifestControlModels.map((model) => model.id).sort();
-    expect(ids).toEqual(["flux2_dev", "flux_dev", "qwen_image", "z_image", "z_image_turbo"]);
+    // The Fun-Union strict-control backbones (flux2_dev/flux_dev/qwen_image/z_image/z_image_turbo) plus
+    // krea_2_turbo — Krea's from-scratch pose-ControlNet (pose-only), driven by a registered trained
+    // overlay (sc-8464 inference lane / sc-10165 B4).
+    expect(ids).toEqual([
+      "flux2_dev",
+      "flux_dev",
+      "krea_2_turbo",
+      "qwen_image",
+      "z_image",
+      "z_image_turbo",
+    ]);
   });
 
   it.each(
