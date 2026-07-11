@@ -38,9 +38,22 @@ const KREA_CONTROL_ENGINE_ID: &str = "krea_2_turbo_control";
 /// own base) — bypasses the HF-cache resolve.
 const KREA_CONTROL_BASE_ENV: &str = "SCENEWORKS_KREA_CONTROL_BASE";
 /// Env override pointing directly at a trained control-branch overlay `.safetensors` (validation against
-/// the spike checkpoint; no published overlay repo exists yet — the studio-trained overlay + a hosted
-/// catalog are B4/sc-10165 + sc-8466).
+/// the spike checkpoint / bring-your-own) — bypasses the hosted-overlay resolve + download.
 const KREA_CONTROL_WEIGHTS_ENV: &str = "SCENEWORKS_CONTROLNET_KREA";
+/// Default published Krea pose control-branch overlay repo (sc-8466) — the S0 spike (5,000-step)
+/// checkpoint, hosted so the overlay downloads/provisions like the other control repos (the FLUX.2
+/// `FLUX2_CONTROL_CANDLE_REPO` precedent) when the user hasn't selected a studio-trained overlay
+/// (B4/sc-10165). EXPERIMENTAL / not-for-production: an 8-step CFG-free feasibility overlay, usable
+/// pose-lock ~0.5–0.85 (S0). A studio-trained overlay (resolved to `controlWeights.path`) always overrides.
+const KREA_CONTROL_OVERLAY_REPO: &str = "SceneWorks/krea2-pose-controlnet-beta";
+/// The overlay weight file within [`KREA_CONTROL_OVERLAY_REPO`] (the final 5k-step checkpoint; the repo
+/// also carries the 4.5k for comparison).
+const KREA_CONTROL_OVERLAY_FILE: &str = "control_step5000.safetensors";
+/// Pinned revision for the default overlay repo (defense-in-depth: `main` moving under us can't swap the
+/// checkpoint we load — mirrors `FLUX2_CONTROL_CANDLE_REVISION` / sc-9879). Applied ONLY to the default
+/// repo; a `controlWeights.repo` override keeps `main`. `ensure_hf_cached_file` still verifies the file's
+/// `lfs.oid` from HF's tree API.
+const KREA_CONTROL_OVERLAY_REVISION: &str = "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac";
 
 /// Model ids the candle Krea strict-pose control route accepts (the deployed base the overlay applies on).
 fn is_krea_control_model(model: &str) -> bool {
@@ -98,18 +111,54 @@ fn krea_control_candle_steps(request: &ImageRequest) -> u32 {
     resolve_advanced_or_manifest_u32(request, "steps", KREA_CONTROL_DEFAULT_STEPS, 1..=50)
 }
 
-/// Resolve the control-branch overlay checkpoint the `Krea2Control` provider loads. Order: the
-/// `SCENEWORKS_CONTROLNET_KREA` env → an `advanced.controlWeights.path` override → error. There is no
-/// published default Krea overlay repo yet (a studio-trained overlay registered via B4/sc-10165 or a
-/// hosted catalog via sc-8466 will supply it), so a job that reaches here without one fails loudly rather
-/// than silently rendering an un-conditioned base image.
-fn ensure_krea_control_weights(request: &ImageRequest) -> WorkerResult<PathBuf> {
+/// The (repo, filename) of the hosted control overlay — `advanced.controlWeights.{repo,filename}`
+/// overrides (a not-yet-cached registered/hosted overlay the API passed through), else the default
+/// published beta overlay. Mirrors `flux2_control_candle_repo_file`; the filename must be a plain
+/// component (sc-8821 / F-019).
+fn krea_control_overlay_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
+    let cw = request
+        .advanced
+        .get("controlWeights")
+        .and_then(Value::as_object);
+    let pick = |key: &str, default: &str| {
+        cw.and_then(|m| m.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(default)
+            .to_owned()
+    };
+    Ok((
+        pick("repo", KREA_CONTROL_OVERLAY_REPO),
+        safe_weight_filename(
+            &pick("filename", KREA_CONTROL_OVERLAY_FILE),
+            "advanced.controlWeights.filename",
+        )?,
+    ))
+}
+
+/// Resolve the control-branch overlay checkpoint the `Krea2Control` provider loads, downloading on first
+/// use. Order (most specific wins): the `SCENEWORKS_CONTROLNET_KREA` env (validation / bring-your-own) → an
+/// `advanced.controlWeights.path` (a studio-trained or registered LOCAL overlay the API resolved,
+/// B4/sc-10165) → an `advanced.controlWeights.{repo,filename}` hosted override / the default published
+/// overlay repo (`SceneWorks/krea2-pose-controlnet-beta`, sc-8466), fetched into the app cache. The
+/// ~6.6 GB overlay is lazy-fetched only on the first Krea pose job (vs bloating the base download),
+/// mirroring `ensure_flux2_control_candle_weights`.
+async fn ensure_krea_control_weights(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &ImageRequest,
+) -> WorkerResult<PathBuf> {
+    // 1. Env override — a local overlay `.safetensors` (validation against the spike, bring-your-own).
     if let Ok(p) = std::env::var(KREA_CONTROL_WEIGHTS_ENV) {
         let p = PathBuf::from(p.trim());
         if p.is_file() {
             return Ok(p);
         }
     }
+    // 2. A LOCAL overlay path the API resolved from a studio-trained / registered overlay selection
+    //    (B4/sc-10165 `resolve_control_overlay_selection` writes `advanced.controlWeights.path`).
     if let Some(path) = request
         .advanced
         .get("controlWeights")
@@ -124,11 +173,39 @@ fn ensure_krea_control_weights(request: &ImageRequest) -> WorkerResult<PathBuf> 
             return Ok(p);
         }
     }
-    Err(WorkerError::InvalidPayload(
-        "Krea 2 pose control requires a trained control-branch overlay; set SCENEWORKS_CONTROLNET_KREA \
-         or advanced.controlWeights.path (no hosted Krea overlay is published yet)"
-            .to_owned(),
-    ))
+    // 3. A hosted overlay: a `controlWeights.{repo,filename}` override (a not-yet-cached registered/hosted
+    //    overlay the API passed through) or the default published beta overlay — HF cache, else download.
+    let (repo, file) = krea_control_overlay_repo_file(request)?;
+    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, &repo) {
+        let f = snapshot.join(&file);
+        if f.is_file() {
+            return Ok(f);
+        }
+    }
+    let client = reqwest::Client::new();
+    let context = DownloadContext {
+        api,
+        client: &client,
+        settings,
+        job_id: &job.id,
+        cancel_message: "Krea 2 strict-pose generation canceled while fetching control overlay.",
+        fresh_download: false,
+    };
+    let dst = settings
+        .data_dir
+        .join("cache")
+        .join("controlnet-krea")
+        .join(&file);
+    // Pin the exact commit for the default overlay repo so `main` moving under us can't swap the
+    // checkpoint (sc-8466 / sc-9879). A `controlWeights.repo` override may carry its own layout, so only
+    // pin when we're on the default repo.
+    let revision = if repo == KREA_CONTROL_OVERLAY_REPO {
+        KREA_CONTROL_OVERLAY_REVISION
+    } else {
+        "main"
+    };
+    ensure_hf_cached_file(&context, &repo, revision, &file, &dst).await?;
+    Ok(dst)
 }
 
 /// Flat telemetry recorded on candle Krea control assets.
@@ -240,7 +317,7 @@ async fn generate_candle_krea_control_stream(
     let base = resolve_krea_control_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("Krea 2 Turbo base (krea/Krea-2-Turbo) weights not found".to_owned())
     })?;
-    let control = ensure_krea_control_weights(request)?;
+    let control = ensure_krea_control_weights(api, settings, job, request).await?;
 
     let steps = krea_control_candle_steps(request);
     let control_scale = advanced::f32_clamped(
