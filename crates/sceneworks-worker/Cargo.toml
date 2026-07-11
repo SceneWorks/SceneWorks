@@ -1558,7 +1558,7 @@ mlx-gen-scail2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "5d88
 # so the `--features backend-candle` lane resolves the SINGLE gen-core rev `5d882290` in LOCKSTEP with the
 # worker's mlx-gen pin (skew gate green). `40583ff` is an ancestor of `92253d2`, a clean forward move;
 # ALL candle-gen-* move together.
-# Bumped `92253d2` -> `a388290` (sc-10670, epic 10451 Phase 2b): candle-gen #386 adds
+# Bumped `92253d2` -> `a388290` (sc-10670, epic 10451 Phase 2b): candle-gen #393 adds
 # `candle_gen_qwen_image::load_from_comfyui_dit` — load a ComfyUI Qwen-Image DiT in place (plain
 # `fp8_e4m3fn` → bf16, `model.diffusion_model.` prefix strip), sourcing the TE/VAE/tokenizer from a
 # resident snapshot. Provider-only, touches ONLY candle-gen-qwen-image, so every other candle-gen-* crate
