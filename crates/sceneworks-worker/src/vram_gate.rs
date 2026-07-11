@@ -89,6 +89,59 @@ pub(crate) fn apply_vram_cap(real: Option<VramBudget>, cap: Option<f64>) -> Opti
     }
 }
 
+/// Fold this process's RECLAIMABLE in-process VRAM pool into the live budget (sc-11023): add
+/// `reclaimable_gb` to `free_gb`, clamped to the physical `total_gb`. The candle generator cache is a
+/// single exclusive slot that evicts its current occupant BEFORE loading the incoming model, and
+/// cudarc's caching allocator reuses the freed pages in-process (nvidia-smi `free` never rises after an
+/// evict — see the module caveat). So the VRAM this process already holds will be available to the next
+/// load; without this, a warm same-model re-gate or a swap-in is measured against `free` that still
+/// counts the model it is about to replace, falsely rejecting a load that fits. A no-op when
+/// `reclaimable_gb == 0` (nothing loaded yet), so a genuine cold first-load is gated exactly as before.
+pub(crate) fn with_reclaimable(budget: VramBudget, reclaimable_gb: f64) -> VramBudget {
+    VramBudget {
+        free_gb: (budget.free_gb + reclaimable_gb.max(0.0)).min(budget.total_gb),
+        total_gb: budget.total_gb,
+    }
+}
+
+/// Per-GPU high-water of the peak VRAM (GB) this process has admitted a load at — the size of the
+/// reclaimable cudarc pool (sc-11023). Keyed by `gpu_id` (a worker process is pinned to one card, but
+/// keying is defensive + explicit). The pool only ever grows (no `empty_cache`/trim), so the running
+/// MAX is exactly what a later swap-in can reuse.
+fn reclaimable_pool_store() -> &'static std::sync::Mutex<std::collections::HashMap<String, f64>> {
+    static STORE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, f64>>> =
+        std::sync::OnceLock::new();
+    STORE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Record the peak VRAM (GB) an admitted load will occupy on `gpu_id`, as a monotonic high-water
+/// (sc-11023). Called only after the fit-gate ADMITS a load, so it reflects a real allocation attempt.
+/// A non-positive peak is ignored.
+pub(crate) fn note_loaded_peak(gpu_id: &str, peak_gb: f64) {
+    // Ignore a non-positive, NaN, or infinite peak (defensive — a real measured peak is finite > 0).
+    if !peak_gb.is_finite() || peak_gb <= 0.0 {
+        return;
+    }
+    let mut store = reclaimable_pool_store()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let entry = store.entry(gpu_id.to_owned()).or_insert(0.0);
+    if peak_gb > *entry {
+        *entry = peak_gb;
+    }
+}
+
+/// The reclaimable in-process VRAM pool (GB) for `gpu_id` — the [`note_loaded_peak`] high-water, or
+/// `0.0` when nothing has loaded on this card yet (so [`with_reclaimable`] is a no-op on a cold start).
+pub(crate) fn reclaimable_pool_gb(gpu_id: &str) -> f64 {
+    reclaimable_pool_store()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(gpu_id)
+        .copied()
+        .unwrap_or(0.0)
+}
+
 /// The tier key (`bf16`/`q8`/`q4`) the request selected — derived the SAME way the tier-subdir
 /// resolvers pick their folder (`advanced.mlxQuantize` → manifest `mlx.quantize` → `q8` default;
 /// `<= 0` ⇒ `bf16`; `<= 4` ⇒ `q4`; else `q8`). Deliberately NOT derived from the resolved `Quant`,
@@ -408,6 +461,66 @@ mod tests {
         assert_eq!(sequential_overflow_gb(None, Some(budget)), None);
         // No live budget ⇒ never block (None).
         assert_eq!(sequential_overflow_gb(Some(32.0), None), None);
+    }
+
+    #[test]
+    fn with_reclaimable_adds_the_pool_and_clamps_to_total() {
+        let budget = VramBudget {
+            free_gb: 14.0,
+            total_gb: 96.0,
+        };
+        // A resident ~82 GB model is reclaimable → the incoming load sees free + 82, capped to total.
+        // This is the sc-11023 fix: raw free (14) would reject a bf16 re-load that actually fits.
+        assert_eq!(
+            with_reclaimable(budget, 82.0),
+            VramBudget {
+                free_gb: 96.0,
+                total_gb: 96.0,
+            }
+        );
+        // Partial reclaim stays below total.
+        assert_eq!(
+            with_reclaimable(budget, 20.0),
+            VramBudget {
+                free_gb: 34.0,
+                total_gb: 96.0,
+            }
+        );
+        // Nothing reclaimable (cold start) ⇒ budget unchanged.
+        assert_eq!(with_reclaimable(budget, 0.0), budget);
+        // Negative is treated as zero (defensive).
+        assert_eq!(with_reclaimable(budget, -5.0), budget);
+        // Never exceeds the physical total, even with a huge/stale high-water.
+        assert_eq!(
+            with_reclaimable(budget, 1000.0),
+            VramBudget {
+                free_gb: 96.0,
+                total_gb: 96.0,
+            }
+        );
+    }
+
+    #[test]
+    fn reclaimable_pool_is_a_per_gpu_monotonic_high_water() {
+        // Distinct gpu_ids so this test can't race the process-global against other tests.
+        let gpu = "test-reclaimable-gpu-a";
+        let other = "test-reclaimable-gpu-b";
+        // Nothing loaded yet ⇒ 0 (so `with_reclaimable` no-ops on a cold card).
+        assert_eq!(reclaimable_pool_gb(gpu), 0.0);
+        note_loaded_peak(gpu, 30.0);
+        assert_eq!(reclaimable_pool_gb(gpu), 30.0);
+        // A bigger load raises the high-water…
+        note_loaded_peak(gpu, 82.0);
+        assert_eq!(reclaimable_pool_gb(gpu), 82.0);
+        // …a smaller later load does NOT lower it — the cudarc pool never returns pages to the driver.
+        note_loaded_peak(gpu, 54.0);
+        assert_eq!(reclaimable_pool_gb(gpu), 82.0);
+        // Non-positive peaks are ignored.
+        note_loaded_peak(gpu, 0.0);
+        note_loaded_peak(gpu, -1.0);
+        assert_eq!(reclaimable_pool_gb(gpu), 82.0);
+        // Keyed per GPU — a different card is independent.
+        assert_eq!(reclaimable_pool_gb(other), 0.0);
     }
 
     /// Live real-hardware validation (sc-10766): exercises the REAL `nvidia-smi` VRAM reading on GPU 0
