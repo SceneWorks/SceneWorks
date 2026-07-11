@@ -91,8 +91,17 @@ jobs:
           bash scripts/check-gen-core-skew.sh
       - name: Run Rust workspace checks
         run: npm run rust:check
-      - name: Build Rust API before contract tests
-        run: cargo build -q -p sceneworks-rust-api
+      - name: Export prebuilt Rust binaries for the e2e/parity harnesses
+        # `npm run rust:check` ends in `cargo build`, which builds both default-member
+        # binaries into target/debug. Point the pytest harnesses at them so the ~30
+        # API + worker spawns across the e2e/parity steps launch the binary directly
+        # and skip `cargo run`'s per-launch freshness check over the whole workspace
+        # graph. This also replaces the old redundant `cargo build -p sceneworks-rust-api`
+        # step (the binary is already built above). See tests/test_rust_api_worker_smoke.py
+        # `_launch_command` and tests/test_rust_api_contract_snapshots.py (sc-10823).
+        run: |
+          echo "SCENEWORKS_RUST_API_BINARY=${{ github.workspace }}/target/debug/sceneworks-rust-api" >> "$GITHUB_ENV"
+          echo "SCENEWORKS_RUST_WORKER_BINARY=${{ github.workspace }}/target/debug/sceneworks-rust-worker" >> "$GITHUB_ENV"
       - name: Run end-to-end job pipeline test
         # tests/conftest.py fails this gate (via `require_tool` + an all-skipped
         # session guard) if `CI` is set and every collected test skips -- e.g. a
@@ -104,5 +113,33 @@ jobs:
         # Same all-skipped guard as the e2e step: a parity run that exercised
         # nothing fails instead of reporting success (sc-8935 / F-133).
         run: python -m pytest -q -m parity --strict-markers
+      - name: Decide whether to run the Docker runtime smoke
+        id: docker_smoke_gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        # The Docker smoke recompiles the whole ~275-crate workspace from scratch in
+        # the release profile inside BuildKit — its `--mount=type=cache` target dir is
+        # empty on ephemeral runners and isn't exportable to the gha cache, so it shares
+        # nothing with the host's rust-cache-warmed target/ and costs ~5 min every run.
+        # The host contract + e2e steps already exercise the API binary's startup and
+        # /health, so the container smoke only adds packaging coverage. Re-run it only
+        # when an input that can actually regress the image changed; always run off a
+        # pull request (push to main / codex/**) for full coverage (sc-10823).
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Not a pull request; running the Docker runtime smoke."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed="$(gh pr view "${{ github.event.pull_request.number }}" --json files --jq '.files[].path')"
+          if printf '%s\n' "$changed" | grep -qE '^(docker/|config/|docker-compose\.yml|Cargo\.lock|\.github/workflows/check\.yml|scripts/check-(docker-api-runtime|compose-config)\.mjs)'; then
+            echo "Docker-relevant files changed; running the Docker runtime smoke."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No Docker-relevant changes; skipping the Docker runtime smoke (sc-10823)."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Smoke default Rust API Docker runtime
+        if: steps.docker_smoke_gate.outputs.run == 'true'
         run: npm run check:docker:rust-api

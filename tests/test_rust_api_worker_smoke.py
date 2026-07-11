@@ -193,6 +193,25 @@ def complete_image_job(
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _launch_command(binary_env: str, package: str, purpose: str) -> list[str]:
+    """Command to spawn a workspace binary for the e2e smoke.
+
+    Prefer a prebuilt binary exported by CI (SCENEWORKS_RUST_API_BINARY /
+    SCENEWORKS_RUST_WORKER_BINARY) so the ~30 API+worker spawns across the e2e
+    and parity steps skip `cargo run`'s per-launch freshness check over the whole
+    workspace graph (sc-10823). Local ad-hoc runs with no export fall back to
+    `cargo run`. A binary path that is set but missing means the earlier build
+    step regressed, so fail loudly rather than silently reverting to cargo —
+    mirroring the require_tool honesty guard (sc-8935 / F-133)."""
+    binary = os.getenv(binary_env)
+    if binary:
+        if not Path(binary).is_file():
+            raise AssertionError(f"{binary_env}={binary} does not exist")
+        return [binary]
+    require_tool("cargo", purpose)
+    return ["cargo", "run", "-q", "-p", package]
+
+
 def wait_for_job_status(base_url: str, job_id: str, status: str, process: subprocess.Popen) -> dict:
     deadline = time.monotonic() + 30
     last_job: dict | None = None
@@ -213,7 +232,9 @@ def wait_for_job_status(base_url: str, job_id: str, status: str, process: subpro
 
 @pytest.fixture()
 def rust_api(tmp_path):
-    require_tool("cargo", "the Rust API smoke test")
+    command = _launch_command(
+        "SCENEWORKS_RUST_API_BINARY", "sceneworks-rust-api", "the Rust API smoke test"
+    )
 
     port = free_port()
     base_url = f"http://127.0.0.1:{port}"
@@ -229,7 +250,7 @@ def rust_api(tmp_path):
         }
     )
     process = subprocess.Popen(
-        ["cargo", "run", "-q", "-p", "sceneworks-rust-api"],
+        command,
         cwd=ROOT,
         env=env,
         stdout=subprocess.PIPE,
@@ -476,7 +497,9 @@ def test_character_image_angle_and_pose_sets_carry_loras_through_worker(rust_api
 
 
 def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(rust_api, tmp_path):
-    require_tool("cargo", "the Rust worker smoke test")
+    worker_command = _launch_command(
+        "SCENEWORKS_RUST_WORKER_BINARY", "sceneworks-rust-worker", "the Rust worker smoke test"
+    )
 
     # The Rust API only imports a sourcePath from app-managed roots (data/loras,
     # project loras, or staged uploads) for path safety; stage the source inside
@@ -497,7 +520,7 @@ def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(ru
         }
     )
     worker = subprocess.Popen(
-        ["cargo", "run", "-q", "-p", "sceneworks-rust-worker"],
+        worker_command,
         cwd=ROOT,
         env=env,
         stdout=subprocess.PIPE,
@@ -533,13 +556,16 @@ def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(ru
 
 
 def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_binary(rust_api, tmp_path):
-    require_tool("cargo", "the Rust worker smoke test")
     # ffmpeg is intentionally NOT provisioned in the `check.yml` CI (only in the
     # desktop/release packaging workflows), so this stays a plain skip: it must not
     # red the e2e gate. The all-skipped guard in conftest still fires if cargo (and
     # thus every other e2e test) also went missing (sc-8935 / F-133).
     if shutil.which("ffmpeg") is None:
         pytest.skip("ffmpeg is required for the FFmpeg worker smoke test")
+
+    worker_command = _launch_command(
+        "SCENEWORKS_RUST_WORKER_BINARY", "sceneworks-rust-worker", "the Rust worker smoke test"
+    )
 
     env = os.environ.copy()
     env.update(
@@ -554,7 +580,7 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
         }
     )
     worker = subprocess.Popen(
-        ["cargo", "run", "-q", "-p", "sceneworks-rust-worker"],
+        worker_command,
         cwd=ROOT,
         env=env,
         stdout=subprocess.PIPE,

@@ -360,6 +360,11 @@ pub struct TrainingPlanItem {
     /// Absolute image path resolved by Rust.
     pub image_path: String,
     pub caption: String,
+    /// Absolute path to the per-item control-conditioning image (rendered pose/canny/depth) for a
+    /// ControlNet training run — `None` for LoRA training. Threaded into the engine `TrainingItem`'s
+    /// `control_image_path`; a control-branch kernel requires it on every item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_image_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2367,6 +2372,7 @@ pub fn build_training_plan(
                 width: item.width,
                 height: item.height,
                 extra: ExtraFields::new(),
+                control_image_path: None,
             })
         })
         .collect::<Result<Vec<_>, TrainingPlanError>>()?;

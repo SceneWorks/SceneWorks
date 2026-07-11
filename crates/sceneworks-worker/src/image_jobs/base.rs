@@ -212,6 +212,9 @@ enum CandleImageRoute {
     Flux1Control,
     /// A strict-pose job on a candle model with NO pose lane → reject loudly, never silent T2I (sc-5968).
     PoseReject,
+    /// An in-place ComfyUI Z-Image base model (`external_base_*`) → `generate_candle_zimage_comfyui_stream`
+    /// (epic 10451 Phase 2, sc-10668). Not an `is_candle_engine` id — routed off the forwarded row.
+    ZimageComfyui,
     /// A plain candle txt2img engine id → `generate_candle_stream`.
     CandleTxt2Img,
 }
@@ -262,6 +265,10 @@ fn resolve_candle_image_route(
         Some(CandleImageRoute::Flux2Control)
     } else if flux1_control_candle_available(request, settings) {
         Some(CandleImageRoute::Flux1Control)
+    } else if zimage_comfyui_available(request, settings) {
+        // In-place ComfyUI Z-Image base (sc-10668): an `external_base_*` id, so it matches no
+        // `is_candle_engine` arm below — route it here off the forwarded `modelManifestEntry`.
+        Some(CandleImageRoute::ZimageComfyui)
     } else if is_candle_engine(&request.model)
         && !matches!(
             request.model.as_str(),
@@ -4870,6 +4877,69 @@ mod standard_tier_tests {
             standard_tier_subdir(root, &request(json!({ "mlxQuantize": "8" }))),
             root.join("q8")
         );
+    }
+
+    /// **sc-10732 — acceptance #1: the app-wide default-tier revert guard.**
+    ///
+    /// Epic 10721 moved the gen-time default tier off the old blind `q4` to `q8` (sc-10726): the shared
+    /// [`preferred_tier`] returns `"q8"` with no explicit `mlxQuantize` pick and no per-model floor, and
+    /// BOTH tier resolvers ([`standard_tier_subdir`] and [`anima_tier_subdir`]) inherit it. If a future
+    /// change reverts that default back to `q4` — in `preferred_tier`'s `None => …` arm, or a resolver
+    /// special-case — this test FAILS LOUDLY. That is the whole point of the sc-10732 lock: the finer
+    /// resolver/floor tests each imply it, but this one names it at the revert site so the intent is
+    /// unmissable. Deliberately redundant.
+    #[test]
+    fn default_tier_is_q8_not_q4_regression() {
+        // The shared default-tier primitive: no explicit `mlxQuantize`, no per-model floor → q8, never q4.
+        assert_eq!(
+            preferred_tier(None, None),
+            "q8",
+            "app-wide gen default MUST be q8 (epic 10721 / sc-10726) — a revert to q4 is the regression \
+             this guards"
+        );
+        assert_ne!(
+            preferred_tier(None, None),
+            "q4",
+            "the pre-epic-10721 blind-q4 default has been reverted — do NOT reinstate it (sc-10726/sc-10732)"
+        );
+
+        // Disk-backed through the standard resolver: a default job (no mlxQuantize) with ALL tiers
+        // installed resolves the q8 subdir, not the washed q4 — the revert is caught end-to-end too.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for tier in ["bf16", "q8", "q4"] {
+            seed_tier(root, tier, "diffusion_pytorch_model.safetensors");
+        }
+        let default_job = request(json!({}));
+        assert_eq!(
+            standard_tier_subdir(root, &default_job),
+            root.join("q8"),
+            "standard_tier_subdir default MUST land on q8 (not q4) when all tiers are installed"
+        );
+        assert_ne!(standard_tier_subdir(root, &default_job), root.join("q4"));
+
+        // The Anima resolver shares the same default (sc-10714 → sc-10731): its no-pick default is q8 too,
+        // so a revert to q4 also washes Anima — the exact quality bug epic 10721 fixed.
+        #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+        {
+            let anima_root = tempfile::tempdir().unwrap();
+            for tier in ["bf16", "q8", "q4"] {
+                let dir = anima_root.path().join(tier).join("diffusion_models");
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("anima-base-v1.0.safetensors"), b"x").unwrap();
+            }
+            let anima_default =
+                ImageRequest::from_payload(json!({ "model": "anima_base" }).as_object().unwrap());
+            assert_eq!(
+                anima_tier_subdir(anima_root.path(), &anima_default),
+                anima_root.path().join("q8"),
+                "anima_tier_subdir default MUST be q8 (sc-10714), never the washed q4"
+            );
+            assert_ne!(
+                anima_tier_subdir(anima_root.path(), &anima_default),
+                anima_root.path().join("q4")
+            );
+        }
     }
 
     #[test]
