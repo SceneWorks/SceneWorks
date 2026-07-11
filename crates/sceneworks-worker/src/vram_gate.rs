@@ -554,4 +554,84 @@ mod tests {
             FitDecision::Fits
         );
     }
+
+    /// GPU repro of the sc-11023 warm-swap false reject: occupy REAL VRAM on GPU 0 to mimic a
+    /// resident model (nvidia-smi `free` drops the way a cached model makes it), then show that the
+    /// SAME live budget REJECTS the incoming bf16 tier on raw `free` (the bug) but FITS once the
+    /// reclaimable high-water is folded in (the fix). Run on an idle GPU 0:
+    /// `cargo test -p sceneworks-worker --lib --features backend-candle -- --ignored --nocapture \
+    ///  reclaimable_high_water_flips_a_real_warm_reject`
+    #[tokio::test]
+    #[ignore]
+    async fn reclaimable_high_water_flips_a_real_warm_reject() {
+        use candle_gen::candle_core::{DType, Device, Tensor};
+
+        let gpu = "0";
+        // Qwen-Image bf16 published tier peaks (builtin.models.jsonc `candle` block, sc-10969).
+        let manifest = obj(json!({
+            "candle": { "vramGbByTier": { "bf16": 82.5 }, "sequentialPeakGb": { "bf16": 71.7 } }
+        }));
+        let needed = predicted_peak_gb(&manifest, "bf16").expect("bf16 resident peak");
+        let seq_needed = predicted_sequential_peak_gb(&manifest, "bf16").expect("bf16 seq peak");
+
+        let cold = crate::gpu::nvidia_vram_budget_gb(gpu)
+            .await
+            .expect("GPU 0 live budget — run on a CUDA box");
+        eprintln!("cold budget: {cold:?} (needed resident={needed}, sequential={seq_needed})");
+        assert!(
+            cold.free_gb > seq_needed,
+            "GPU 0 must start with enough free VRAM to host bf16 for the repro: {cold:?}"
+        );
+
+        // Mimic run 1 admitting a bf16 load: the live gate records the model's predicted peak as the
+        // reclaimable high-water (note_loaded_peak) AND the model actually occupies VRAM. Occupy enough
+        // (8 GB f32 chunks) to push `free` below the sequential threshold, so raw-free rejects even
+        // sequentially — capped defensively so we never exhaust the card.
+        note_loaded_peak(gpu, needed);
+        let device = Device::new_cuda(0).expect("cuda:0");
+        let chunk_elems = 8usize * 1024 * 1024 * 1024 / 4; // 8 GB of f32
+        let mut hogs: Vec<Tensor> = Vec::new();
+        loop {
+            let now = crate::gpu::nvidia_vram_budget_gb(gpu)
+                .await
+                .expect("live budget");
+            if now.free_gb < seq_needed - 4.0 || hogs.len() >= 8 {
+                break;
+            }
+            hogs.push(Tensor::zeros(chunk_elems, DType::F32, &device).expect("VRAM hog chunk"));
+        }
+        let warm = crate::gpu::nvidia_vram_budget_gb(gpu)
+            .await
+            .expect("GPU 0 live budget (warm)");
+        eprintln!("warm budget after {} GB hog: {warm:?}", hogs.len() * 8);
+        assert!(
+            warm.free_gb < seq_needed,
+            "the hog must push free below the sequential need to arm the reject: {warm:?}"
+        );
+
+        // BEFORE the fix (raw free): sequential residency is selected, then the second-stage overflow
+        // check rejects — the exact "even with sequential residency" 2nd-run failure.
+        let raw_decision = resolve_offload(fit_decision(Some(needed), Some(warm)), true);
+        assert!(
+            matches!(raw_decision, FitDecision::Offload { .. }),
+            "raw free must not fit resident: {raw_decision:?}"
+        );
+        assert!(
+            sequential_overflow_gb(Some(seq_needed), Some(warm)).is_some(),
+            "raw-free gate must reject even sequentially — this is the sc-11023 bug"
+        );
+
+        // AFTER the fix: fold the reclaimable high-water (the resident model we are about to evict)
+        // back into the budget → the incoming bf16 fits resident, no false reject.
+        let reclaimable = reclaimable_pool_gb(gpu);
+        let fixed = with_reclaimable(warm, reclaimable);
+        eprintln!("reclaimable={reclaimable} → augmented budget: {fixed:?}");
+        assert_eq!(
+            fit_decision(Some(needed), Some(fixed)),
+            FitDecision::Fits,
+            "with the resident model counted reclaimable, the warm re-gate must FIT"
+        );
+        // Keep the hog alive to the end so the warm reading isn't reclaimed early.
+        drop(hogs);
+    }
 }
