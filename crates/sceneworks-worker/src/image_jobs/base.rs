@@ -220,6 +220,10 @@ enum CandleImageRoute {
     /// An in-place ComfyUI Qwen-Image base model (`external_base_*`) → `generate_candle_qwen_comfyui_stream`
     /// (epic 10451 Phase 2b, sc-10670). Not an `is_candle_engine` id — routed off the forwarded row.
     QwenImageComfyui,
+    /// An in-place ComfyUI FLUX.2-dev fp8-mixed base model (`external_base_*`) →
+    /// `generate_candle_flux2_comfyui_stream` (epic 10451 Phase 2e, sc-10680). Not an `is_candle_engine`
+    /// id — routed off the forwarded row.
+    Flux2Comfyui,
     /// A plain candle txt2img engine id → `generate_candle_stream`.
     CandleTxt2Img,
 }
@@ -283,6 +287,10 @@ fn resolve_candle_image_route(
         // In-place ComfyUI Qwen-Image base (sc-10670): sibling of the Z-Image comfyui lane — an
         // `external_base_*` id routed off the forwarded row (family=="qwen-image", usable).
         Some(CandleImageRoute::QwenImageComfyui)
+    } else if flux2_comfyui_available(request, settings) {
+        // In-place ComfyUI FLUX.2-dev base (sc-10680): sibling of the Qwen-Image comfyui lane — an
+        // `external_base_*` id routed off the forwarded row (family=="flux2", usable).
+        Some(CandleImageRoute::Flux2Comfyui)
     } else if is_candle_engine(&request.model)
         && !matches!(
             request.model.as_str(),
