@@ -6030,6 +6030,42 @@ mod mlx_routing_tests {
     }
 
     #[test]
+    fn krea_2_raw_edit_image_routes_to_mlx() {
+        // epic 10871 (sc-10882): Krea 2 Raw serves BOTH text-to-image and the Kontext-style edit
+        // surface. A t2i job routes to MLX; an `edit_image` job WITH a source routes to the edit lane;
+        // an `edit_image` job WITHOUT a source is rejected (the defensive shape). Edit is Raw-only, so
+        // the `features.edit` oracle flips true for Raw while Turbo (validated above) stays false.
+        assert!(image_request_mlx_eligible(
+            "krea_2_raw",
+            &object(json!({ "model": "krea_2_raw", "prompt": "full-CFG editorial portrait" }))
+        ));
+        assert!(image_request_mlx_eligible("krea_2_raw", &Map::new()));
+        assert!(
+            image_request_mlx_eligible(
+                "krea_2_raw",
+                &object(
+                    json!({ "model": "krea_2_raw", "mode": "edit_image", "sourceAssetId": "asset_1" })
+                )
+            ),
+            "krea_2_raw edit_image with a source must route to the edit lane"
+        );
+        assert!(
+            !image_request_mlx_eligible(
+                "krea_2_raw",
+                &object(json!({ "model": "krea_2_raw", "mode": "edit_image" }))
+            ),
+            "krea_2_raw edit_image without a source is rejected"
+        );
+
+        let support = model_mac_support("krea_2_raw", "image");
+        assert!(support.supported, "krea_2_raw must be Mac-supported");
+        assert!(
+            support.features.edit,
+            "krea_2_raw advertises the edit tab (epic 10871)"
+        );
+    }
+
+    #[test]
     fn sd3_5_text_to_image_routes_to_mlx() {
         // sc-7873 (epic 7841): the three SD3.5 variants have native `mlx-gen-sd3` text-to-image engines
         // (S2 MODEL_TABLE), so they must reach the Text → Image picker (macSupport.supported) rather than

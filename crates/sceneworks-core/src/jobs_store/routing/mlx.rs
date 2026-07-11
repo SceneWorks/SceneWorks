@@ -431,12 +431,25 @@ pub(crate) fn boogu_mlx_eligible(payload: &Map<String, Value>) -> bool {
     true
 }
 
-/// Krea 2 Turbo (epic 7565 / sc-7572) + Krea 2 Raw (epic 9992) MLX-eligibility. The native
-/// `mlx-gen-krea` engine serves the text-to-image surface only for both variants (distilled Turbo +
-/// full-CFG Raw); `edit_image` has no source/reference path, so reject that defensive shape the same way
-/// Lens does.
+/// Krea 2 Turbo (epic 7565 / sc-7572) + Krea 2 Raw (epic 9992) MLX-eligibility. Both variants serve
+/// text-to-image on the native `mlx-gen-krea` engine. Krea 2 **Raw** additionally serves the
+/// Kontext-style image-edit surface (epic 10871): an `edit_image` job with a `sourceAssetId` routes to
+/// the dual-conditioned edit lane (source image as in-context VAE tokens + Qwen3-VL vision-tower
+/// grounding), which the community `krea2_identity_edit` LoRA needs. Edit is Raw-only — it denoises from
+/// pure noise under full CFG (the tier the LoRA targets and the one validated on Metal, sc-10881); the
+/// distilled few-step **Turbo** sampler has no validated edit recipe, so Turbo stays t2i-only and its
+/// `features.edit` (the `model_mac_support` probe) stays false. An `edit_image` shape without a source is
+/// rejected (the same defensive shape the t2i-only engines reject).
 pub(crate) fn krea_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        let is_raw = payload.get("model").and_then(Value::as_str) == Some("krea_2_raw");
+        let has_source = payload
+            .get("sourceAssetId")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+        return is_raw && has_source;
+    }
+    true
 }
 
 /// Stable Diffusion 3.5 Large / Large Turbo / Medium (epic 7841, surfaced S4 sc-7873) MLX-eligibility.
