@@ -982,7 +982,10 @@ pub(crate) fn worker_is_candle(worker: &WorkerSnapshot) -> bool {
 /// LoKr-on-Wan exclusion here. The resolved plan is stamped into the payload at submit (apps/rust-api
 /// training.rs), so the kernel + base model are readable without touching the dataset or weights.
 pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
-    if !matches!(job.job_type, JobType::LoraTrain) {
+    // The ControlNet studio job (epic 10159) trains through the SAME native executor keyed on the
+    // resolved plan's kernel (`krea_control` ∈ [`CANDLE_ROUTED_TRAINING_KERNELS`]), so it is
+    // candle-eligible on the same terms as a `lora_train` run.
+    if !matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining) {
         return false;
     }
     let Some(plan) = job.payload.get("plan").and_then(Value::as_object) else {

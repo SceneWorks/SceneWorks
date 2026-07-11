@@ -4,6 +4,7 @@
 // bury — configDraftFromTarget (target/preset → form draft) and
 // trainingConfigSnapshot (form draft → worker payload). No React, no app state.
 
+import { issue } from "../validation/issues.js";
 import {
   asText,
   compactObject,
@@ -179,31 +180,35 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
   };
 }
 
-// Every issue blocks Start training, but they don't deserve the same screen space.
+// The training config's rule set, in the shape `useValidation` wants: a pure
+// `(draft, ctx) => Issue[]` living beside the draft it validates (epic 10644).
 //
-//   `requirement` — a field the user simply hasn't filled in yet. Which ones are empty
-//                   is obvious from the form, so the screen stays quiet and lets the
-//                   "Needs input" pill carry it.
-//   `error`       — a value the user actively broke (cleared or non-positive number).
-//                   Nothing on the form explains why Start is disabled, so these show.
+// Every issue blocks Start training, but they don't deserve the same screen space. An
+// unfilled field is a `requirement` — you can see the empty box, so the screen stays
+// quiet and the "Needs input" pill carries it. A number the user cleared or drove
+// non-positive is an `error`: nothing on the form explains the dead button, so it earns
+// a chip and outlines its input.
 //
-// sc-10492 dropped both as noise; sc-10501 brought the errors back. A real app-wide
-// validation system is tracked separately — this split is the local stand-in.
-export function configValidation({ activeDataset, configDraft, selectedTarget }) {
+// sc-10492 dropped both as noise; sc-10501 brought the errors back and this is where
+// that distinction became the app's vocabulary rather than one screen's helper.
+export function configValidation(configDraft, { activeDataset, selectedTarget, datasetNotReady = false } = {}) {
   const issues = [];
-  const requirement = (message) => issues.push({ kind: "requirement", message });
   if (!selectedTarget) {
-    requirement("Select a training target");
+    issues.push(issue.requirement("target", "Select a training target"));
   }
   if (!activeDataset?.id) {
-    requirement("Select a saved dataset");
+    issues.push(issue.requirement("dataset", "Select a saved dataset"));
   }
   if (!configDraft.outputName?.trim()) {
-    requirement(`Name the ${outputKindLabel(selectedTarget)} output`);
+    issues.push(issue.requirement("outputName", `Name the ${outputKindLabel(selectedTarget)} output`));
   }
   if (!configDraft.triggerWord?.trim()) {
-    requirement("Add a trigger phrase");
+    issues.push(issue.requirement("triggerWord", "Add a trigger phrase"));
   }
+  // The field name is the draft key, so `invalidProps` can outline the very input the
+  // chip is talking about. `batchSize` and `gradientAccumulation` have no input in the
+  // panel — they arrive from the preset — so a bad value there chips without outlining
+  // anything, and the user cannot clear it. Tracked in sc-10689.
   for (const [field, label] of [
     ["rank", "Rank"],
     ["alpha", "Alpha"],
@@ -216,15 +221,19 @@ export function configValidation({ activeDataset, configDraft, selectedTarget })
   ]) {
     const value = numberFromDraft(configDraft[field]);
     if (!value || value <= 0) {
-      issues.push({ kind: "error", message: `${label} must be greater than zero` });
+      issues.push(issue.error(field, `${label} must be greater than zero`));
     }
   }
+  // Whether the chosen dataset is trainable is part of "can this job run", so it belongs
+  // in the Train button's one validity summary rather than a separate `disabled` term.
+  // The screen passes the already-computed gate (trainBlockedByReadiness keeps its
+  // bias-to-warn rule in datasetReadiness.js); a `needs_attention` gate is deliberately
+  // NOT surfaced here — DatasetDoctorReadout's headline already carries it, and a chip
+  // would only repeat it. field is null: the fix is in Data Sets, not an input on this form.
+  if (datasetNotReady) {
+    issues.push(issue.error(null, "This dataset isn’t ready to train yet — open Data Sets to add or fix images."));
+  }
   return issues;
-}
-
-// The subset worth showing: values the user broke, not fields they haven't reached yet.
-export function configValueErrors(issues) {
-  return (issues ?? []).filter((issue) => issue.kind === "error").map((issue) => issue.message);
 }
 
 export function samplePromptsFromTrigger(triggerWord) {

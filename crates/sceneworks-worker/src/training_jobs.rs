@@ -106,7 +106,7 @@ pub(crate) async fn run_lora_train_job(
 /// Deserialize the Rust-resolved plan stamped into the job payload at submit time
 /// (apps/rust-api training.rs). The plan round-trips through `TrainingPlan`, so a
 /// payload missing/garbling it is a hard error (never a silent no-op).
-fn parse_plan(payload: &JsonObject) -> WorkerResult<TrainingPlan> {
+pub(crate) fn parse_plan(payload: &JsonObject) -> WorkerResult<TrainingPlan> {
     let plan = payload.get("plan").ok_or_else(|| {
         WorkerError::InvalidPayload("Training job payload is missing a resolved plan.".to_owned())
     })?;
@@ -270,7 +270,7 @@ fn dry_run_summary(settings: &Settings, plan: &TrainingPlan) -> JsonObject {
 /// A `lora_train` progress update with the worker's backend label (mirrors
 /// `image_jobs::image_progress`). LoRA training keeps `status: running` across the
 /// caching/training/checkpointing/saving stages; only the final update is `completed`.
-fn training_progress(
+pub(crate) fn training_progress(
     status: JobStatus,
     stage: ProgressStage,
     progress: f64,
@@ -671,7 +671,7 @@ fn training_text_encoder(engine_id: &str, weights_dir: &std::path::Path) -> Opti
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-async fn run_training_execution(
+pub(crate) async fn run_training_execution(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,

@@ -76,6 +76,13 @@ export default function PaletteEditor({ value, onChange, max, label }) {
       {!atMax && normalizedDraft == null && draft.trim() ? (
         <p className="structured-hint">Enter an uppercase #RRGGBB hex color.</p>
       ) : null}
+      {/* The third reason Add is disabled. Its two siblings above each explain
+          themselves; this one used to render nothing, so a duplicate color killed Add
+          in silence (epic 10644 / sc-10653). Neutral hint to match them — a duplicate
+          is a soft no-op, not a broken value. */}
+      {!atMax && duplicate ? (
+        <p className="structured-hint">That color is already in the palette.</p>
+      ) : null}
     </div>
   );
 }

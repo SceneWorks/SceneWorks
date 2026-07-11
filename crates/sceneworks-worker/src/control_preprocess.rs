@@ -62,8 +62,13 @@ pub(crate) enum PoseComponents {
     /// Body-18 + head-direction only (8459 Config-1). No hands, no dense face. The studio default.
     #[default]
     Body,
+    // The richer sets exist so the same registry serves a hands/face inference lane later (epic
+    // 10159); the training studio renders `Body` (Config-1) only today, so they are not yet
+    // constructed. Kept as intentional forward API rather than deleted.
+    #[allow(dead_code)]
     /// Body-18 + 21×2 hands. No dense face.
     BodyHands,
+    #[allow(dead_code)]
     /// Full whole-body: body-18 + hands + 68-pt face (matches the `pose_detect` job's render).
     WholeBody,
 }
@@ -87,10 +92,15 @@ impl PoseComponents {
 /// (folder-ingest, byte-your-own-dataset ingest, an inference lane) builds it once from resolved
 /// resources and reuses it across a whole dataset / batch.
 pub(crate) trait ControlPreprocessor: Send + Sync {
+    // `kind`/`label` are the inference-facing accessors of the shared preprocessor contract; the
+    // training-studio caller drives only `preprocess` (it labels the dataset via `control_kind_label`
+    // directly), so they are not yet called off-Mac. Kept as intentional contract surface.
     /// The control kind this preprocessor produces.
+    #[allow(dead_code)]
     fn kind(&self) -> ControlKind;
 
     /// The stable lowercase label ([`control_kind_label`]) for this preprocessor's kind.
+    #[allow(dead_code)]
     fn label(&self) -> String {
         control_kind_label(&self.kind())
     }
