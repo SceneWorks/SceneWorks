@@ -66,6 +66,7 @@ export function buildImageJobAdvanced(state) {
     activeControlMode,
     controlPassthroughId,
     effectiveControlScale,
+    controlOverlayId,
   } = state;
 
   return {
@@ -197,5 +198,11 @@ export function buildImageJobAdvanced(state) {
     // (strict_control.rs `resolve_user_control_map`). Derive mode uses request.sourceAssetId.
     ...(controlPassthroughId ? { controlImage: controlPassthroughId } : {}),
     ...(controlActive ? { controlScale: effectiveControlScale } : {}),
+    // Trained ControlNet overlay selection (sc-10165 B4): the picked overlay id (pose backbones that
+    // apply a registered overlay, e.g. Krea 2 Turbo). The API resolves it to the overlay's weights path
+    // (`resolve_control_overlay_selection`); the worker strict-control lane loads that.
+    ...(controlActive && controlOverlayId
+      ? { controlWeights: { overlayId: controlOverlayId } }
+      : {}),
   };
 }

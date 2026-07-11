@@ -546,6 +546,9 @@ export function ImageStudio() {
   // true = use-as-is (the user-supplied map passes through verbatim → advanced.controlImage).
   const [controlImagePassthrough, setControlImagePassthrough] = useState(false);
   const [controlScale, setControlScale] = useState(saved.controlScale ?? null);
+  // Selected trained ControlNet overlay id (sc-10165 B4) — for backbones whose pose control rides a
+  // registered overlay (Krea 2 Turbo). Flows to advanced.controlWeights.overlayId; the API resolves it.
+  const [controlOverlayId, setControlOverlayId] = useState(null);
   // Configurable sampler / scheduler (epic 1753). Restored from per-workspace
   // settings; reset to the selected model's manifest defaults whenever the
   // model changes.
@@ -821,6 +824,9 @@ export function ImageStudio() {
   // is its own input image / pose, distinct from the edit / character source).
   const controlModes = useMemo(() => supportedControlModes(selectedModel), [selectedModel]);
   const controlScaleConfig = selectedModel?.ui?.controlScale ?? null;
+  // Backbones whose pose control rides a registered trained overlay (sc-10165 B4) advertise
+  // `ui.controlOverlay` (Krea 2 Turbo); the ControlPanel then shows a self-fetching overlay picker.
+  const controlOverlayBaseModel = selectedModel?.ui?.controlOverlay ? selectedModel.id : null;
   // The control type actually in effect: the user's pick when the backbone still supports it, else the
   // first supported mode. Decouples the gating (derived) from the raw state so a backbone switch that
   // strands an unsupported pick degrades gracefully even before the reset effect runs.
@@ -964,6 +970,9 @@ export function ImageStudio() {
     setControlScale(typeof ui.controlScale?.default === "number" ? ui.controlScale.default : null);
     setControlImageAssetId("");
     setControlImagePassthrough(false);
+    // Clear a stale overlay pick so an id trained for a different backbone can't leak into a submit
+    // (sc-10165 B4); the picker re-fetches for the new backbone.
+    setControlOverlayId(null);
   }, [model]);
   // Approved reference images for the selected character (the IP-Adapter identity
   // source). Resolve the full asset from the catalog so thumbnails render even when
@@ -1771,6 +1780,7 @@ export function ImageStudio() {
           activeControlMode,
           controlPassthroughId,
           effectiveControlScale,
+          controlOverlayId,
         }),
       });
       onLocalJobCreated?.(job);
@@ -1852,6 +1862,7 @@ export function ImageStudio() {
       activeControlMode,
       controlPassthroughId,
       effectiveControlScale,
+      controlOverlayId,
     }),
   });
 
@@ -2647,6 +2658,9 @@ export function ImageStudio() {
               controlScaleConfig={controlScaleConfig}
               controlScale={effectiveControlScale}
               onControlScaleChange={setControlScale}
+              controlOverlayBaseModel={controlOverlayBaseModel}
+              selectedOverlayId={controlOverlayId}
+              onOverlayChange={setControlOverlayId}
             />
           </div>
         ) : null}
