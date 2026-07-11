@@ -101,6 +101,30 @@
         "repo": "lightx2v/Wan2.1-I2V-14B-480P-StepDistill-CfgDistill-Lightx2v",
         "file": "loras/Wan21_I2V_14B_lightx2v_cfg_step_distill_lora_rank64.safetensors"
       }
+    },
+    {
+      // Krea 2 Identity Edit (epic 10871). The community instruction-based, identity-preserving
+      // image-edit LoRA for Krea 2 (conradlocke/krea2-identity-edit). Krea has no product-layer edit
+      // surface — its "reference image" is SDEdit img2img — so this LoRA is INERT without the
+      // Kontext-style edit path (epic 10871): the source image enters as in-context VAE tokens at a
+      // distinct RoPE frame AND grounds the Qwen3-VL vision tower. `conditioningRole: image_edit` makes
+      // selecting it auto-activate that dual-conditioning edit recipe (the base can't edit without it);
+      // on a plain t2i job the weights do nothing. Referenced directly from the author's HF repo (NO
+      // re-host / NO bundle); downloaded on demand when selected. Default variant is rank-128 (v1.1);
+      // the repo also ships an r64 (smaller) file. Krea 2 Community License (commercial < $1M/yr) — the
+      // same license we already ship Krea 2 Raw/Turbo under, so no new gating beyond the base.
+      "id": "krea2_identity_edit",
+      "name": "Krea 2 Identity Edit",
+      "family": "krea_2",
+      "triggerWords": [],
+      "compatibility": { "families": ["krea_2"] },
+      "conditioningRole": "image_edit",
+      "defaultWeight": 1.0,
+      "source": {
+        "provider": "huggingface",
+        "repo": "conradlocke/krea2-identity-edit",
+        "file": "krea2_identity_edit_v1_1_r128.safetensors"
+      }
     }
   ]
 }

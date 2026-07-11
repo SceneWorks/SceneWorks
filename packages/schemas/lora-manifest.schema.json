@@ -23,7 +23,8 @@
           "icLora": { "type": "boolean" },
           "conditioningRole": {
             "type": "string",
-            "enum": ["ic_lora"]
+            "description": "How the worker must condition a job for this LoRA to function. 'ic_lora' = LTX in-context video conditioning (source clip). 'image_edit' = Kontext-style image edit (source image as in-context VAE tokens + vision-tower grounding); selecting such a LoRA auto-activates the model's edit recipe. A base without the matching conditioning leaves these weights inert.",
+            "enum": ["ic_lora", "image_edit"]
           }
         },
         "additionalProperties": true

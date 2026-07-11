@@ -565,6 +565,20 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::KreaEdit => {
+                // Krea 2 Raw Kontext-style edit (mode edit_image + a source) → the `krea_2_edit`
+                // engine: source as in-context VAE tokens + Qwen3-VL grounding (epic 10871, sc-10882).
+                generate_krea_edit_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::InstantId => {
                 // InstantID identity-preserving character image (sc-3345): single identity or
                 // grouped angle/pose sets, on RealVisXL + IdentityNet + the native face stack.
@@ -1702,6 +1716,9 @@ include!("image_jobs/flux1_control.rs");
 #[cfg(target_os = "macos")]
 // Qwen control/edit routing.
 include!("image_jobs/qwen.rs");
+#[cfg(target_os = "macos")]
+// Krea 2 Kontext-style image-edit routing (epic 10871).
+include!("image_jobs/krea_edit.rs");
 #[cfg(target_os = "macos")]
 // SenseNova edit routing.
 include!("image_jobs/sensenova.rs");
