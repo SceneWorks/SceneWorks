@@ -84,8 +84,9 @@ const ACCEL_DEVICE: &str = "cuda";
 /// Default per-keypoint confidence floor for rendering/thresholding. rtmlib's RTMW
 /// SimCC scores are NOT in `[0,1]` (good keypoints observed ~4–8 in the spike), so
 /// this is a render/threshold knob, not a probability; raw scores are preserved in
-/// the result. Mirrors Python `DEFAULT_POSE_MIN_CONF`.
-const DEFAULT_POSE_MIN_CONF: f64 = 0.3;
+/// the result. Mirrors Python `DEFAULT_POSE_MIN_CONF`. Owned by [`crate::control_preprocess`] so
+/// the pose preprocessor registry and this job share one floor.
+pub(crate) const DEFAULT_POSE_MIN_CONF: f64 = crate::control_preprocess::DEFAULT_POSE_MIN_CONF;
 
 /// Terminal cancel message for the pose-detect job. Shared between the
 /// `run_blocking_with_heartbeat` keepalive (which posts it when the blocking task finishes AFTER
@@ -675,6 +676,92 @@ fn detect_batch(
         }));
     }
     Ok((out, device))
+}
+
+/// Detect the dominant person in `image` and render an OpenPose skeleton control image,
+/// reusing the SAME cached DWPose detector + `wholebody_to_openpose` conversion + squareify +
+/// `draw_wholebody` renderer the `pose_detect` job uses. This is the pose entry the
+/// ControlNet-Training-Studio preprocessor registry calls (sc-10160): sharing the render path
+/// makes the train-prep skeleton convention identical to the inference lanes' by construction
+/// (the pose lesson — train/infer skeletons must be the same render convention).
+///
+/// `components` selects which keypoint groups are drawn (8459 Config-1 = body-18 + head only:
+/// [`crate::control_preprocess::PoseComponents::Body`]). The skeleton is drawn on a `max(w,h)`
+/// SQUARE canvas (aspect-canonical, matching `squareify`'s stored-pose convention). The
+/// largest-person-area figure wins when several are detected; a source with no detected person
+/// yields an all-black canvas (a valid empty condition, not an error).
+///
+/// Blocking (onnx forward + raster); callers on an async runtime should wrap it in
+/// `spawn_blocking`, exactly as the batch job does for its detect + render loops.
+///
+/// Lands with its registry wrapper ahead of the first non-test caller — the folder-ingest
+/// data-prep pipeline (A2, sc-10161) drives it through [`crate::control_preprocess::PosePreprocessor`];
+/// allow dead_code until then.
+#[allow(dead_code)]
+pub(crate) fn detect_and_render_skeleton(
+    det_path: &Path,
+    pose_path: &Path,
+    image: &RgbImage,
+    components: crate::control_preprocess::PoseComponents,
+    min_conf: f64,
+) -> WorkerResult<RgbImage> {
+    let (w, h) = (image.width() as f32, image.height() as f32);
+    let side = image.width().max(image.height());
+    let stick = body_stickwidth(side, side);
+
+    // Process-wide cached detector — the same `DETECTOR` static + EP-with-CPU-fallback load the
+    // batch path uses, so the studio and the pose_detect job share one loaded model.
+    let cell = DETECTOR.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        *guard = None;
+        guard
+    });
+    if guard.is_none() {
+        *guard = Some(Detector::load(det_path, pose_path)?);
+    }
+    let detector = guard.as_mut().expect("detector loaded");
+    let people = detector.detect(image)?;
+
+    // Convert + squareify each person, keep the largest-area one (same ordering rule as the
+    // batch render's `sort_by area desc`, reduced to an arg-max since we render a single figure).
+    let mut best: Option<(f32, PoseRecord)> = None;
+    for kps in &people {
+        let rec = squareify(&wholebody_to_openpose(kps, w, h)?, w, h);
+        let area = bbox(
+            &[&rec.keypoints, &rec.hands[0], &rec.hands[1], &rec.face],
+            min_conf,
+        )
+        .map_or(0.0, |b| (b[2] - b[0]) * (b[3] - b[1]));
+        // MSRV 1.80: `Option::is_none_or` is 1.82, so use `map_or(true, …)` (matches the
+        // repo-wide convention, e.g. `sceneworks-core::session_log`).
+        if best.as_ref().map_or(true, |(a, _)| area > *a) {
+            best = Some((area, rec));
+        }
+    }
+
+    let Some((_, rec)) = best else {
+        return Ok(RgbImage::new(side, side));
+    };
+
+    let body = thresholded(&rec.keypoints, min_conf);
+    let hands = components.wants_hands().then(|| {
+        [
+            thresholded(&rec.hands[0], min_conf),
+            thresholded(&rec.hands[1], min_conf),
+        ]
+    });
+    let face = components
+        .wants_face()
+        .then(|| thresholded(&rec.face, min_conf));
+    Ok(draw_wholebody(
+        side,
+        side,
+        &body,
+        hands.as_ref().map(|h| &h[..]),
+        face.as_deref(),
+        stick,
+    ))
 }
 
 // ---------------------------------------------------------------------------

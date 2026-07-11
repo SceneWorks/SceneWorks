@@ -382,6 +382,20 @@ mod depth;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 mod pose_jobs;
+// Control-type preprocessor registry (ControlNet Training Studio A1, sc-10160, epic 10159): the
+// single `ControlKind`-keyed mapping from a target image to its condition image, wrapping the
+// existing pose (pose_jobs + openpose_skeleton) / canny / depth preprocessors so train-prep
+// (folder-ingest A2, bring-your-own-dataset A3) and the strict-control inference lanes render the
+// condition with identical code (automatic convention-match). Cross-platform like `canny` (the
+// pose/depth arms are internally backend-gated).
+//
+// A1 lands this registry ahead of its first non-test consumer: the folder-ingest data-prep
+// pipeline (A2, sc-10161) is what resolves + drives a preprocessor over a dataset, and the
+// bring-your-own-dataset adapter (A3, sc-10171) reuses it for annotated-render/convention checks.
+// Until then only `control_kind_label` has a caller (the strict-control driver delegates to it), so
+// allow dead_code module-wide — remove when A2 wires `preprocessor_for` into ingest.
+#[allow(dead_code)]
+mod control_preprocess;
 // CUDA execution-provider dependency preloading for the off-Mac candle `ort` paths
 // (sc-6209, epic 5482): `ort::ep::cuda::preload_dylibs` dlopens the CUDA-12 runtime +
 // cuDNN-9 DLLs the onnxruntime CUDA EP needs, so it engages the GPU regardless of PATH
