@@ -248,6 +248,18 @@ fn krea_control_candle_raw_settings(
         "controlEngine".to_owned(),
         Value::String(KREA_CONTROL_ENGINE.to_owned()),
     );
+    // User LoRA labels applied on top of the pose control branch (sc-11721) — mirrors the
+    // `image_settings_metrics` `loras` field so the control-lane asset records what rode alongside the
+    // pose lock. Omitted when no LoRA was requested (the sc-4408 omit-when-absent contract).
+    let loras: Vec<Value> = request
+        .loras
+        .iter()
+        .filter_map(lora_label)
+        .map(Value::String)
+        .collect();
+    if !loras.is_empty() {
+        raw.insert("loras".to_owned(), Value::Array(loras));
+    }
     raw
 }
 
@@ -257,6 +269,9 @@ fn krea_control_candle_raw_settings(
 struct KreaStrictControl {
     base: PathBuf,
     control: PathBuf,
+    /// User LoRA/LoKr adapters applied additively to the frozen base DiT (sc-11721) — a character/style
+    /// adapter reshapes the subject while the control branch keeps the pose lock. Empty ⇒ stock control.
+    adapters: Vec<AdapterSpec>,
     prompt: String,
     width: u32,
     height: u32,
@@ -291,6 +306,7 @@ impl CandleStrictControl for KreaStrictControl {
         let paths = candle_gen_krea::Krea2ControlPaths {
             root: self.base.clone(),
             control: self.control.clone(),
+            adapters: self.adapters.clone(),
         };
         candle_gen_krea::Krea2Control::load(&paths).map_err(|error| {
             WorkerError::Engine(format!("Krea 2 strict-pose control load failed: {error}"))
@@ -340,6 +356,10 @@ async fn generate_candle_krea_control_stream(
         WorkerError::InvalidPayload("Krea 2 Turbo base (krea/Krea-2-Turbo) weights not found".to_owned())
     })?;
     let control = ensure_krea_control_weights(api, settings, job, request).await?;
+    // User LoRA/LoKr adapters ride additively on the frozen base DiT (sc-11721 / candle-gen sc-11720):
+    // resolved + path-confined by the shared helper (enforces MAX_JOB_LORAS + `normalize_app_managed_
+    // lora_path`), then installed on the base at load — the pose control branch is never adapted.
+    let adapters = resolve_adapters(request, settings)?;
 
     let steps = krea_control_candle_steps(request);
     let control_scale = advanced::f32_clamped(
@@ -364,6 +384,7 @@ async fn generate_candle_krea_control_stream(
     let provider = KreaStrictControl {
         base,
         control,
+        adapters,
         prompt: request.prompt.clone(),
         width: request.width,
         height: request.height,
