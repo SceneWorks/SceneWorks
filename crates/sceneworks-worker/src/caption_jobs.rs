@@ -21,6 +21,18 @@ const JOY_CAPTION_MODEL: &str = "fancyfeast/llama-joycaption-beta-one-hf-llava";
 ))]
 const CANCEL_MESSAGE: &str = "Training captioning canceled by user.";
 
+// Coalesced per-step progress-post cadence (sc-11189, F-016 — the sc-8840 F-038 pattern the refine
+// path already uses). The token callback publishes every decoded token into a latest-wins watch
+// channel (never blocking decode); the job loop drains only the newest value on this tick, so a
+// multi-image dataset emits a handful of `update_job` POSTs per second instead of hundreds of
+// sequential per-token POSTs (which also throttled decode to API latency). 250 ms keeps the progress
+// bar visibly smooth while bounding API load and decoupling decode speed from API latency.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const PROGRESS_POST_INTERVAL: Duration = Duration::from_millis(250);
+
 // epic 3720 (sc-3724): the backend-neutral captioner contract types come from `gen_core`; the
 // `as _;` provider link below stays mlx-gen-specific (it registers the JoyCaption captioner into
 // the registry).
@@ -65,19 +77,16 @@ struct CaptionJobOptions {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
+// The meaningful per-image result streamed on the bounded mpsc channel (sc-11189, F-016). Per-STEP
+// token progress no longer rides this channel — it is coalesced through a latest-wins watch channel
+// (see `run_training_caption_job`) — so only the finished caption for each image is sent here, one
+// send per image, back-pressured by design.
 #[derive(Debug)]
-enum CaptionEvent {
-    Step {
-        index: usize,
-        current: u32,
-        total: u32,
-    },
-    Captioned {
-        index: usize,
-        item_id: String,
-        text: String,
-        trigger_words: Vec<String>,
-    },
+struct CaptionedItem {
+    index: usize,
+    item_id: String,
+    text: String,
+    trigger_words: Vec<String>,
 }
 
 #[cfg(any(
@@ -150,7 +159,15 @@ pub(crate) async fn run_training_caption_job(
     .await?;
 
     let cancel = CancelFlag::new();
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<CaptionEvent>(64);
+    // Per-item captions ride a bounded mpsc (the meaningful per-image results — kept, one send per
+    // image, back-pressured by design). Per-STEP token progress is coalesced through a latest-wins
+    // **watch** channel instead of a POST per token (sc-11189, F-016 — the sc-8840 F-038 pattern the
+    // refine path already uses): the callback publishes `(index, current, total)` non-blocking and
+    // latest-wins (`send` never blocks decode and never drops the LATEST value), and the loop below
+    // posts only the newest snapshot on a fixed tick. Decode is fully decoupled from API latency and
+    // intermediate ticks are coalesced away.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<CaptionedItem>(64);
+    let (progress_tx, progress_rx) = tokio::sync::watch::channel::<(usize, u32, u32)>((0, 0, 0));
     let blocking_cancel = cancel.clone();
     let blocking_items = items.clone();
     let blocking_options = options.clone();
@@ -200,17 +217,14 @@ pub(crate) async fn run_training_caption_job(
             request.prompt = request.options.custom_prompt.clone();
             let mut on_progress = |progress: Progress| {
                 if let Progress::Step { current, total } = progress {
-                    // A closed channel means the consumer loop returned early (POST failure / 409);
-                    // trip the engine flag so the captioner bails instead of running unheard
-                    // (sc-8804, F-003 — the swallowed-closed-channel leak).
-                    if tx
-                        .blocking_send(CaptionEvent::Step {
-                            index,
-                            current,
-                            total,
-                        })
-                        .is_err()
-                    {
+                    // Publish the latest `(index, current, total)` token count into the coalescing
+                    // watch channel the loop below reads. `send` is non-blocking and latest-wins —
+                    // token decode is NEVER back-pressured by API latency (the F-016 fix). A send
+                    // error means every receiver was dropped (the consumer loop returned early on a
+                    // POST failure / 409): trip the engine flag so the captioner bails instead of
+                    // running unheard (sc-8804, F-003 — the swallowed-closed-channel leak, preserved
+                    // verbatim from the old bounded-channel behavior).
+                    if progress_tx.send((index, current, total)).is_err() {
                         blocking_cancel.cancel();
                     }
                 }
@@ -227,7 +241,7 @@ pub(crate) async fn run_training_caption_job(
             // (sc-5098) — the same logic mlx-gen + candle-gen each ship locally — so the shared path
             // names no backend-specific symbol.
             let text = apply_trigger_words(&output.text, &item.trigger_words);
-            tx.blocking_send(CaptionEvent::Captioned {
+            tx.blocking_send(CaptionedItem {
                 index,
                 item_id: item.item_id,
                 text,
@@ -244,8 +258,26 @@ pub(crate) async fn run_training_caption_job(
     // instead of leaving it running on a job nobody is consuming. `cancel` is kept alongside (it's
     // `Clone`) for the in-loop cancel poll; the guard drives only the drop-time teardown.
     let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
-    let mut interval = tokio::time::interval(progress_report_interval(settings));
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Heartbeat + poll-cancel cadence (the shared 5–15 s worker interval).
+    let mut heartbeat_interval = tokio::time::interval(progress_report_interval(settings));
+    heartbeat_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Coalesced per-step progress cadence (sc-11189, F-016): a fixed short tick that drains ONLY the
+    // newest token count from the watch channel — hundreds of per-token POSTs collapse to a few, and
+    // decode is never back-pressured by API latency. Decoupled from the (coarser) heartbeat interval
+    // so per-step progress stays smooth without the token stream driving the API.
+    let mut progress_interval = tokio::time::interval(PROGRESS_POST_INTERVAL);
+    progress_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Skip a redundant post when the token count has not advanced since the last one (the watch holds
+    // the same value between ticks), so a stalled decode does not re-POST identical progress.
+    let mut last_posted: Option<(usize, u32, u32)> = None;
+    // Defer the terminal `Canceled` until the blocking captioner has actually stopped (sc-11189,
+    // F-017): a cancel poll here only TRIPS the engine flag (`cancel_requested_peek`, no terminal
+    // write) and latches `canceled`; the terminal `Canceled` — which frees the worker row — is posted
+    // below only AFTER `into_handle().await` returns, so the scheduler never sees a free worker while
+    // the captioner is still on the GPU (mirrors `run_batched_analysis_job` sc-8917/F-115 + the
+    // training path). The old path called `check_cancel` on the tick, which posted the terminal
+    // `Canceled` at acknowledgement time.
+    let mut canceled = false;
     let mut captions = Vec::with_capacity(items.len());
     // Run the stream loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
@@ -254,23 +286,7 @@ pub(crate) async fn run_training_caption_job(
         tokio::select! {
             event = rx.recv() => {
                 match event {
-                    Some(CaptionEvent::Step { index, current, total }) => {
-                        let progress = caption_step_progress(index, current, total, items.len());
-                        update_job(
-                            api,
-                            &job.id,
-                            caption_progress(
-                                JobStatus::Running,
-                                ProgressStage::Running,
-                                progress,
-                                &format!("Captioning image {} of {}.", index + 1, items.len()),
-                                None,
-                                backend,
-                            ),
-                        )
-                        .await?;
-                    }
-                    Some(CaptionEvent::Captioned { index, item_id, text, trigger_words }) => {
+                    Some(CaptionedItem { index, item_id, text, trigger_words }) => {
                         captions.push(json!({
                             "itemId": item_id,
                             "caption": {
@@ -297,22 +313,40 @@ pub(crate) async fn run_training_caption_job(
                     None => break,
                 }
             }
-            _ = interval.tick() => {
+            _ = progress_interval.tick() => {
+                // Coalesced per-step progress: post ONLY the latest `(index, current, total)`, and
+                // only if it moved since the last post (a stalled decode holds the same value between
+                // ticks → no redundant re-POST). Copy the `(usize, u32, u32)` out of the borrow first
+                // so the non-`Send` `watch::Ref` is not held across the `.await` (keeps the enclosing
+                // job future `Send` for rust-api's `tokio::spawn`).
+                let latest = *progress_rx.borrow();
+                if let Some((index, current, total)) = next_caption_step_post(latest, last_posted) {
+                    update_job(
+                        api,
+                        &job.id,
+                        caption_progress(
+                            JobStatus::Running,
+                            ProgressStage::Running,
+                            caption_step_progress(index, current, total, items.len()),
+                            &format!("Captioning image {} of {}.", index + 1, items.len()),
+                            None,
+                            backend,
+                        ),
+                    )
+                    .await?;
+                    last_posted = Some((index, current, total));
+                }
+            }
+            _ = heartbeat_interval.tick() => {
                 heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-                // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
-                // `check_cancel` poll (a local flag read) so a quit trips the captioner flag at its
-                // next per-item check instead of waiting out the grace window, exactly like a user
-                // cancel does. `check_cancel` posts the terminal `Canceled` itself; on shutdown the
-                // bounded-wait teardown in `run_job_with_shutdown` owns the terminal, so here we just
-                // trip the engine flag to stop the captioner mid-dataset.
-                if shutdown_requested() {
+                // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API poll
+                // (a local flag read) so a quit trips the captioner flag at its next per-item check
+                // instead of waiting out the grace window, exactly like a user cancel does. Here we
+                // only TRIP the engine flag and latch `canceled`; the terminal `Canceled` is posted
+                // below once the task has actually stopped (sc-11189, F-017).
+                if !canceled && (shutdown_requested() || cancel_requested_peek(api, &job.id).await) {
                     cancel.cancel();
-                } else {
-                    match check_cancel(api, &job.id, CANCEL_MESSAGE).await {
-                        Ok(()) => {}
-                        Err(WorkerError::Canceled(_)) => cancel.cancel(),
-                        Err(error) => return Err(error),
-                    }
+                    canceled = true;
                 }
             }
         }
@@ -328,10 +362,19 @@ pub(crate) async fn run_training_caption_job(
     }
 
     // Loop exited cleanly (channel closed) — reclaim the handle (disarming the drop-guard) and join.
-    guard
+    let join_result = guard
         .into_handle()
         .await
-        .map_err(|error| task_join_error("caption task join", error))??;
+        .map_err(|error| task_join_error("caption task join", error))?;
+    if canceled {
+        // The captioner has actually stopped now, so post the TERMINAL `Canceled` here (not at the
+        // earlier cancel poll, which only tripped the flag) — this terminal write frees the worker row
+        // as the worker returns to its claim loop, so the next queued job waits only until the GPU is
+        // genuinely free (sc-11189, F-017; mirrors `run_batched_analysis_job` + the training path).
+        mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
+        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+    }
+    join_result?;
 
     update_job(
         api,
@@ -622,6 +665,24 @@ fn load_caption_image(path: &Path) -> WorkerResult<Image> {
     })
 }
 
+/// The coalescing decision (sc-11189, F-016; mirrors `prompt_refine_jobs::next_progress_post`):
+/// given the LATEST `(index, current, total)` token count from the watch channel and the value
+/// already posted, return `Some(latest)` when it should be posted (it moved) or `None` when it is a
+/// redundant repeat (a stalled decode holds the same value between ticks, so we don't re-POST
+/// identical progress). Pure so the coalescing invariant — intermediate repeats dropped, every
+/// distinct value posted exactly once — is unit-testable without an API or real weights (the caption
+/// test module, like the whole caption path, is gated on the macOS/candle backends).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn next_caption_step_post(
+    latest: (usize, u32, u32),
+    last_posted: Option<(usize, u32, u32)>,
+) -> Option<(usize, u32, u32)> {
+    (last_posted != Some(latest)).then_some(latest)
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -723,6 +784,77 @@ mod tests {
         assert_eq!(options.sampling.temperature, 0.5);
         assert_eq!(options.sampling.top_p, 0.8);
         assert_eq!(options.sampling.max_new_tokens, 128);
+    }
+
+    // ── sc-11189 (F-016): per-step token-progress coalescing (ported from the refine path) ────────
+
+    // The coalescing decision: a value that MOVED is posted; a repeat of the last-posted value is
+    // dropped (a stalled decode between ticks does not re-POST identical progress). Mirrors
+    // `prompt_refine_jobs::next_progress_post_drops_repeats_and_emits_movement`, extended to the
+    // `(index, current, total)` triple the caption path tracks (progress advances across images too).
+    #[test]
+    fn next_caption_step_post_drops_repeats_and_emits_movement() {
+        // First observation (nothing posted yet) is always emitted.
+        assert_eq!(next_caption_step_post((0, 5, 256), None), Some((0, 5, 256)));
+        // An unchanged value after it was posted is a redundant repeat → dropped.
+        assert_eq!(next_caption_step_post((0, 5, 256), Some((0, 5, 256))), None);
+        // Token movement within the same image is emitted.
+        assert_eq!(
+            next_caption_step_post((0, 6, 256), Some((0, 5, 256))),
+            Some((0, 6, 256))
+        );
+        // Advancing to the next image (index moved, token count reset) is emitted.
+        assert_eq!(
+            next_caption_step_post((1, 1, 256), Some((0, 6, 256))),
+            Some((1, 1, 256))
+        );
+    }
+
+    // The watch channel is latest-wins and non-blocking (the F-016 core): a fast token callback that
+    // writes thousands of counts NEVER blocks decode, the consumer reading on a tick sees only the
+    // newest value (intermediate ticks coalesced away), and the FINAL value is always readable after
+    // the producer finishes — so the terminal per-image step progress can never be lost. Mirrors the
+    // refine `watch_channel_coalesces_and_preserves_final_value` test.
+    #[test]
+    fn caption_step_watch_channel_coalesces_and_preserves_final_value() {
+        let (tx, rx) = tokio::sync::watch::channel::<(usize, u32, u32)>((0, 0, 0));
+        // Simulate the token callback for image 0: publish every token. `send` is non-blocking and
+        // never drops the LATEST value, so a burst faster than any consumer cannot back-pressure it.
+        for current in 1..=256u32 {
+            tx.send((0, current, 256))
+                .expect("receiver alive → send never errors");
+        }
+        // A consumer reading between bursts sees only the newest value, not each intermediate one.
+        assert_eq!(*rx.borrow(), (0, 256, 256));
+
+        // The final value survives the producer dropping (this image finished decoding).
+        drop(tx);
+        assert_eq!(*rx.borrow(), (0, 256, 256));
+
+        // Feeding the resident value through the coalescing gate emits it once, then drops the repeat.
+        let final_value = *rx.borrow();
+        assert_eq!(
+            next_caption_step_post(final_value, None),
+            Some((0, 256, 256))
+        );
+        assert_eq!(next_caption_step_post(final_value, Some(final_value)), None);
+    }
+
+    // `send` signals a closed consumer (all receivers dropped): the token callback maps this to
+    // tripping the engine cancel flag (sc-8804, F-003 — the captioner must not run unheard). Prove the
+    // error surfaces when the receiver is gone, which is exactly the condition the callback keys on.
+    #[test]
+    fn caption_step_watch_send_errors_when_all_receivers_dropped() {
+        let (tx, rx) = tokio::sync::watch::channel::<(usize, u32, u32)>((0, 0, 0));
+        assert!(
+            tx.send((0, 1, 256)).is_ok(),
+            "send succeeds while a receiver lives"
+        );
+        drop(rx);
+        assert!(
+            tx.send((0, 2, 256)).is_err(),
+            "send must error once every receiver is dropped (the consumer-gone signal)"
+        );
     }
 
     #[test]
