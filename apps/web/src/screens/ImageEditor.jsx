@@ -10,7 +10,7 @@ import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { useLoraSelection } from "../components/LoraPickerField.jsx";
-import { MAX_JOB_LORAS_TOTAL } from "../presetUtils.js";
+import { MAX_JOB_LORAS_TOTAL, findModelEditLora, loraIsInstalled } from "../presetUtils.js";
 import { guidanceDefaultFromModel } from "../samplerOptions.js";
 import {
   BLEND_MODES,
@@ -615,6 +615,9 @@ export function ImageEditor() {
     // Project LoRA catalog (sc-10254): fed to the AI Edit LoRA picker, gated to the
     // edit model's compatible families.
     loras = [],
+    // Managed image-edit LoRA download (epic 10871, sc-11069): a missing Krea edit LoRA
+    // offers a one-click fetch, mirroring the Image Studio Edit tab.
+    createLoraDownloadJob,
     // Global theme (sc-10244): the redesign top-bar ☾/☀ toggle drives the app-wide
     // data-theme, not a screen-local override — consistent with the rest of the app.
     theme = "light",
@@ -767,6 +770,35 @@ export function ImageEditor() {
   // serialization the studios use (useLoraSelection → serializeLora), threaded top-level
   // into buildEditJobBody; the worker's edit streams apply them via resolve_adapters.
   const editLoraSelection = useLoraSelection(loras, selectedEditModel);
+  // ---- Krea-style managed image-edit LoRA (epic 10871, sc-11069) — parity with the Studio ----
+  // The Krea 2 edit surface REQUIRES a dual-conditioning `image_edit` LoRA (worker R5) the base can't
+  // edit without. Manage it for the user — auto-applied to the payload when installed (via
+  // buildEditJobBody's `editLora`), surfaced as a one-click download when not — instead of leaving it
+  // in the manual picker. `findModelEditLora` returns null for edit models that need none
+  // (Qwen-Image-Edit, FLUX.2), so this whole block stays inert for them.
+  const editLora = useMemo(() => findModelEditLora(loras, selectedEditModel), [loras, selectedEditModel]);
+  const editLoraInstalled = loraIsInstalled(editLora);
+  // The managed LoRA is applied automatically; hide it from the manual picker so it can't be
+  // double-shown or accidentally toggled. Deduped again at payload time in case a stale selection
+  // carries it (buildEditJobBody dedups by id).
+  const managedEditLoraId = editLora && editLoraInstalled ? editLora.id : null;
+  const editLoraRequiredMissing = Boolean(editLora) && !editLoraInstalled;
+  const [editLoraDownloadRequested, setEditLoraDownloadRequested] = useState(false);
+  // Clear the transient "requested" state once the download lands (installState flips) or the edit
+  // LoRA leaves the picture (model change).
+  useEffect(() => {
+    if (!editLoraRequiredMissing) setEditLoraDownloadRequested(false);
+  }, [editLoraRequiredMissing]);
+  const requestEditLoraDownload = useCallback(() => {
+    if (!editLora) return;
+    setEditLoraDownloadRequested(true);
+    createLoraDownloadJob?.(editLora);
+  }, [editLora, createLoraDownloadJob]);
+  // The manual LoRA picker hides the managed edit LoRA (it's applied automatically), so it can't be
+  // double-shown or accidentally toggled — mirrors the Studio's pickerCompatibleLoras.
+  const pickerCompatibleLoras = managedEditLoraId
+    ? editLoraSelection.compatibleLoras.filter((lora) => lora.id !== managedEditLoraId)
+    : editLoraSelection.compatibleLoras;
   // Whether the edit model conditions on extra reference images (FLUX.2 multi-reference edit, sc-6107):
   // the manifest tags it `ui.multiReference`. Gates the reference picker; off-models hide it entirely.
   const multiRefCapable = Boolean(selectedEditModel?.ui?.multiReference);
@@ -1870,6 +1902,9 @@ export function ImageEditor() {
           width: working.width,
           height: working.height,
           fitMode: "crop",
+          // The boxes-layout edit runs the same edit model, so it also needs the managed
+          // image-edit LoRA when the model requires one (Krea R5) — sc-11069.
+          editLora: managedEditLoraId ? editLora : null,
         }),
     });
   }
@@ -2054,6 +2089,10 @@ export function ImageEditor() {
   async function runEdit() {
     const prompt = editPrompt.trim();
     if (!prompt || !editModel || !working) return;
+    // A required image-edit LoRA that isn't downloaded yet blocks the run (worker R5): the source
+    // band renders the actionable Download note (epic 10871, sc-11069). Defensive — the Generate
+    // button is already disabled on this condition.
+    if (editLoraRequiredMissing) return;
     // Canvas-extend / outpaint (sc-2556): resolve the output W×H from the chosen aspect
     // and fit mode (outpaint coerced away when the model can't inpaint). "match" keeps
     // the working size, so the existing same-size edit behavior is unchanged.
@@ -2098,6 +2137,9 @@ export function ImageEditor() {
           height: outHeight,
           fitMode,
           loras: editLoraSelection.serializedLoras,
+          // Auto-apply the model's managed image-edit LoRA (R5) when installed — deduped inside
+          // buildEditJobBody, so a run needs no manual picking (epic 10871, sc-11069).
+          editLora: managedEditLoraId ? editLora : null,
           guidanceScale: editGuidance,
         }),
     });
@@ -2823,7 +2865,9 @@ export function ImageEditor() {
   };
 
   const renderLoraSection = () => {
-    const { compatibleLoras, selectedLoraIds, toggleLora, weightFor, setWeight } = editLoraSelection;
+    const { selectedLoraIds, toggleLora, weightFor, setWeight } = editLoraSelection;
+    // The managed image-edit LoRA is applied automatically (sc-11069) — hidden from the manual list.
+    const compatibleLoras = pickerCompatibleLoras;
     const nextLora = compatibleLoras.find((lora) => !selectedLoraIds.includes(lora.id));
     const addDisabled = !nextLora || selectedLoraIds.length >= MAX_JOB_LORAS_TOTAL;
     const addHint = loraAddHint({
@@ -2919,7 +2963,30 @@ export function ImageEditor() {
           </div>
         </div>
 
-        {editLoraSelection.compatibleLoras.length ? renderLoraSection() : null}
+        {/* Managed image-edit LoRA (epic 10871, sc-11069): auto-applied for the user — a status note
+            when installed, a one-click download that gates the run when not. Inert for edit models
+            that need none. Placed right under the model so it reads as part of the edit surface. */}
+        {editLora ? (
+          editLoraInstalled ? (
+            <div className="ie-section">
+              <p className="ie-note">✨ {editLora.name} is applied automatically for editing.</p>
+            </div>
+          ) : (
+            <div className="ie-section">
+              <p className="ie-note">{editLora.name} is required to edit — the base can’t edit without it.</p>
+              <button
+                className="ie-btn block"
+                disabled={editLoraDownloadRequested}
+                onClick={requestEditLoraDownload}
+                type="button"
+              >
+                {editLoraDownloadRequested ? "Downloading…" : `Download ${editLora.name}`}
+              </button>
+            </div>
+          )
+        ) : null}
+
+        {pickerCompatibleLoras.length ? renderLoraSection() : null}
 
         <div className="ie-section">
           <div className="ie-sec-title">Output</div>
@@ -3146,7 +3213,12 @@ export function ImageEditor() {
               />
             </div>
           </div>
-          <button className="ie-btn block primary" disabled={!editPrompt.trim() || !!aiOp} onClick={runEdit} type="button">
+          <button
+            className="ie-btn block primary"
+            disabled={!editPrompt.trim() || !!aiOp || editLoraRequiredMissing}
+            onClick={runEdit}
+            type="button"
+          >
             {maskActive ? "Inpaint region" : "Generate edit"}
           </button>
         </div>

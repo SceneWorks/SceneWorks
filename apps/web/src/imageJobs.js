@@ -4,6 +4,8 @@
 // editor is deliberately lazy-loaded to keep konva off the main/test path). ImageEditor.jsx
 // re-exports these so its public surface (and its tests) are unchanged.
 
+import { serializeLora } from "./presetUtils.js";
+
 // Models that can edit an existing image with a prompt — the manifest tags them
 // with an `edit_image`/`image_edit` capability (same filter the Image Studio uses).
 export function editCapableModels(imageModels) {
@@ -36,6 +38,7 @@ export function buildEditJobBody({
   height,
   fitMode = "crop",
   loras = null,
+  editLora = null,
   guidanceScale = null,
 }) {
   // Guidance override (sc-10275): only sent when the user set a finite value —
@@ -66,7 +69,17 @@ export function buildEditJobBody({
   };
   // Style/subject LoRAs (sc-10254): serialized top-level, same shape + resolver the
   // generation path uses (serializeLora → worker resolve_adapters). Omitted when empty.
-  if (loras && loras.length) body.loras = loras;
+  //
+  // Krea-style managed image-edit LoRA (epic 10871, sc-11069): the edit surface auto-applies the
+  // model's required `image_edit`-role LoRA (worker R5) the base can't edit without — appended here
+  // and deduped by id so a manual selection that already carries it isn't doubled. `editLora` is the
+  // raw catalog entry (its `conditioningRole` must round-trip via serializeLora, or the worker's edit
+  // lane rejects the run); it's null for edit models that need no such LoRA (Qwen-Image-Edit, FLUX.2).
+  const loraList = Array.isArray(loras) ? [...loras] : [];
+  if (editLora && !loraList.some((lora) => lora.id === editLora.id)) {
+    loraList.push(serializeLora(editLora));
+  }
+  if (loraList.length) body.loras = loraList;
   // Inpaint mask (sc-2436): only sent for inpaint-capable models with a painted
   // region; the worker confines the edit to it. Omitted entirely otherwise.
   if (maskAssetId) body.maskAssetId = maskAssetId;

@@ -1030,6 +1030,50 @@ describe("AI prompt edit", () => {
     expect(body.advanced).toEqual({});
   });
 
+  it("auto-applies the managed image-edit LoRA, deduped, with its role round-tripped (epic 10871, sc-11069)", () => {
+    const base = {
+      project: { id: "p", name: "P" },
+      requestedGpu: "auto",
+      sourceAssetId: "a",
+      model: "krea_2_raw",
+      prompt: "x",
+      width: 10,
+      height: 10,
+    };
+    const editLora = {
+      id: "krea2_identity_edit",
+      name: "Krea 2 Identity Edit",
+      family: "krea_2",
+      conditioningRole: "image_edit",
+      defaultWeight: 1,
+    };
+    // Null editLora → nothing appended (edit models that need no such LoRA).
+    expect("loras" in buildEditJobBody(base)).toBe(false);
+
+    // With no manual picks, the managed LoRA is auto-applied — its `conditioningRole` MUST survive
+    // (serializeLora) or the worker's edit lane rejects the run (R5).
+    const auto = buildEditJobBody({ ...base, editLora });
+    expect(auto.loras).toHaveLength(1);
+    expect(auto.loras[0].id).toBe("krea2_identity_edit");
+    expect(auto.loras[0].conditioningRole).toBe("image_edit");
+
+    // Appended alongside manual picks, not replacing them.
+    const withManual = buildEditJobBody({
+      ...base,
+      loras: [{ id: "l1", name: "Film Grain", weight: 0.8 }],
+      editLora,
+    });
+    expect(withManual.loras.map((l) => l.id)).toEqual(["l1", "krea2_identity_edit"]);
+
+    // Deduped by id: a selection that already carries the managed LoRA isn't doubled.
+    const alreadyPresent = buildEditJobBody({
+      ...base,
+      loras: [{ id: "krea2_identity_edit", name: "Krea 2 Identity Edit", weight: 1, conditioningRole: "image_edit" }],
+      editLora,
+    });
+    expect(alreadyPresent.loras.filter((l) => l.id === "krea2_identity_edit")).toHaveLength(1);
+  });
+
   it("sends advanced.guidanceScale only for a finite override (sc-10275)", () => {
     const base = {
       project: { id: "p", name: "P" },
