@@ -288,7 +288,19 @@ impl ProjectStore {
             };
             let project_path = PathBuf::from(path);
             if project_path.exists() {
-                projects.push(read_project_summary(&project_path)?);
+                // Fail open per entry: one project whose `project.json` is missing,
+                // unreadable, or short a required field must not take down the whole
+                // listing and leave every healthy project unreachable. Skip the bad
+                // entry with a structured warning and keep the rest.
+                match read_project_summary(&project_path) {
+                    Ok(summary) => projects.push(summary),
+                    Err(error) => tracing::warn!(
+                        event = "list_projects_summary_failed",
+                        project = %project_path.display(),
+                        error = %error,
+                        "skipping project with unreadable project.json"
+                    ),
+                }
             }
         }
         Ok(projects)
@@ -5932,6 +5944,39 @@ mod tests {
                 .id,
             GLOBAL_POSES_PROJECT_ID
         );
+    }
+
+    #[test]
+    fn list_projects_skips_a_corrupt_entry_and_returns_the_healthy_ones() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+
+        let good = store.create_project("Healthy One").expect("first project");
+        let broken = store.create_project("Corrupt One").expect("second project");
+        let also_good = store.create_project("Healthy Two").expect("third project");
+
+        // Corrupt one project's `project.json` after the fact: truncate it to an
+        // object missing every required field (id/name/createdAt) so
+        // `read_project_summary` fails for that entry only.
+        let broken_file = std::path::Path::new(&broken.path).join("project.json");
+        std::fs::write(&broken_file, b"{}").expect("clobber project.json");
+
+        let listed = store.list_projects().expect("list survives a bad entry");
+
+        let ids: Vec<&str> = listed.iter().map(|p| p.id.as_str()).collect();
+        assert!(
+            ids.contains(&good.id.as_str()),
+            "healthy project before the bad entry is still listed"
+        );
+        assert!(
+            ids.contains(&also_good.id.as_str()),
+            "healthy project after the bad entry is still listed"
+        );
+        assert!(
+            !ids.contains(&broken.id.as_str()),
+            "the corrupt entry is skipped, not surfaced"
+        );
+        assert_eq!(listed.len(), 2, "exactly the two healthy projects remain");
     }
 
     #[test]
