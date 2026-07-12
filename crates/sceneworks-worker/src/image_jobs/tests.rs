@@ -881,6 +881,55 @@ fn bernini_image_task_and_quant_mapping() {
     ));
 }
 
+/// Candle Bernini tier-subdir selection (sc-11003): the published `SceneWorks/bernini` layout nests
+/// `bf16/`|`q8/`|`q4/` component trees, so the candle lane descends into the requested quant tier and
+/// pairs it with the matching load quant. Asserts the pure selection helpers: bf16-dense DEFAULT
+/// (unlike the MLX q4-first video default), explicit Q4/Q8 opt-in, the smaller-tier fallback when the
+/// preferred subfolder is absent, and the legacy flat-tree (`transformer/` at root) path. Runs in CI
+/// on the candle build (no weights — just directory sentinels).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_bernini_tier_subdir_selection() {
+    // Tier order: no pick / <=0 ⇒ bf16-first; explicit 4 ⇒ q4-first; >=8 ⇒ q8-first (all with the
+    // always-present smaller fallbacks).
+    assert_eq!(candle_bernini_tier_order(None), &["bf16", "q8", "q4"]);
+    assert_eq!(candle_bernini_tier_order(Some(0)), &["bf16", "q8", "q4"]);
+    assert_eq!(candle_bernini_tier_order(Some(4)), &["q4", "q8", "bf16"]);
+    assert_eq!(candle_bernini_tier_order(Some(8)), &["q8", "q4", "bf16"]);
+    // Tier → load quant: q4/q8 packed, bf16 dense (None).
+    assert!(matches!(
+        candle_bernini_tier_quant("q4"),
+        Some(gen_core::Quant::Q4)
+    ));
+    assert!(matches!(
+        candle_bernini_tier_quant("q8"),
+        Some(gen_core::Quant::Q8)
+    ));
+    assert!(candle_bernini_tier_quant("bf16").is_none());
+
+    // Sentinels on a temp root: a tier subfolder with a `transformer/` tree, plus a bare root.
+    let root = std::env::temp_dir().join(format!("candle-bernini-tier-{}", std::process::id()));
+    std::fs::remove_dir_all(&root).ok();
+    let make_tier = |tier: &str| {
+        std::fs::create_dir_all(root.join(tier).join("transformer")).unwrap();
+    };
+    make_tier("q8");
+    make_tier("q4");
+    // A tier root (has subfolders) is a usable snapshot; a bare/empty dir is not.
+    assert!(candle_bernini_snapshot_ok(&root));
+    let empty = root.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    assert!(!candle_bernini_snapshot_ok(&empty));
+    // `transformer/` sentinel resolves the tier tree, not a bare dir.
+    assert!(candle_bernini_tree_present(&root.join("q4")));
+    assert!(!candle_bernini_tree_present(&root));
+    // A legacy flat tree (`transformer/` AT root) is accepted as a snapshot too.
+    let flat = root.join("flat");
+    std::fs::create_dir_all(flat.join("transformer")).unwrap();
+    assert!(candle_bernini_snapshot_ok(&flat));
+    std::fs::remove_dir_all(&root).ok();
+}
+
 /// Resolve the Bernini MLX snapshot dir for the real-weight smokes: env override → the local
 /// mlx-gen-models conversion caches / app-managed dir → the turnkey `SceneWorks/bernini-mlx` HF-cache
 /// snapshot. Mirrors the video test's `bernini_dir()` candidate list. `None` ⇒ skip (weights live
