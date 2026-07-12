@@ -8,6 +8,17 @@ const assets = [
   { id: "b", type: "image", displayName: "two.png", file: { path: "assets/two.png", mimeType: "image/png" }, projectId: "p1" },
 ];
 
+// A video asset with a server-advertised poster — the grid must paint the poster
+// <img>, never a full <video controls preload="metadata"> (sc-11224 / F-032).
+const videoAsset = {
+  id: "v",
+  type: "video",
+  displayName: "clip.mp4",
+  file: { path: "assets/clip.mp4", mimeType: "video/mp4" },
+  projectId: "p1",
+  posterUrl: "/api/v1/projects/p1/files/assets/clip.poster.jpg",
+};
+
 describe("AssetGrid multi-select (sc-6112)", () => {
   let container;
   let root;
@@ -67,6 +78,54 @@ describe("AssetGrid multi-select (sc-6112)", () => {
     // The tile body still drives single-select (the detail flow is unchanged).
     await act(async () => tiles()[0].click());
     expect(setSelectedAssetId).toHaveBeenCalledWith("a");
+  });
+
+  it("renders poster thumbnails, not full <video>/full-res media, in grid tiles (sc-11224 F-032)", async () => {
+    const setSelectedAssetId = vi.fn();
+    await act(() => {
+      root.render(
+        <AssetGrid assets={[videoAsset, ...assets]} onPreview={vi.fn()} selectedAsset={null} setSelectedAssetId={setSelectedAssetId} />,
+      );
+    });
+    // No full <video> element is mounted for the video tile — the poster <img> is used
+    // instead (pre-fix the grid rendered a <video controls preload="metadata">).
+    expect(container.querySelectorAll("video")).toHaveLength(0);
+    // Every tile (1 video poster + 2 image thumbs) paints an <img> thumbnail.
+    expect(container.querySelectorAll(".asset-tile img")).toHaveLength(3);
+    // Clicking the video tile still drives single-select — interactions are preserved.
+    await act(async () => tiles()[0].click());
+    expect(setSelectedAssetId).toHaveBeenCalledWith("v");
+  });
+
+  it("applies the content-visibility windowing class to single-select grid cells (sc-11224 F-032)", async () => {
+    await act(() => {
+      root.render(<AssetGrid assets={assets} onPreview={vi.fn()} selectedAsset={null} setSelectedAssetId={vi.fn()} />);
+    });
+    // In single-select the tile button IS the grid cell, so it carries the class.
+    expect(container.querySelectorAll(".asset-tile.asset-tile-windowed")).toHaveLength(assets.length);
+  });
+
+  it("windows multi-select cells at the wrap (not the inner button) and still toggles (sc-11224 F-032)", async () => {
+    const onToggleSelect = vi.fn();
+    await act(() => {
+      root.render(
+        <AssetGrid
+          assets={assets}
+          onPreview={vi.fn()}
+          selectedAsset={null}
+          setSelectedAssetId={vi.fn()}
+          selectedIds={new Set()}
+          onToggleSelect={onToggleSelect}
+        />,
+      );
+    });
+    // The grid cell is the wrap in multi-select, so IT carries the windowing class;
+    // the inner button must NOT (avoids nesting two content-visibility containers).
+    expect(container.querySelectorAll(".asset-tile-wrap.asset-tile-windowed")).toHaveLength(assets.length);
+    expect(container.querySelectorAll(".asset-tile.asset-tile-windowed")).toHaveLength(0);
+    // Checkbox toggling is unaffected.
+    await act(async () => checks()[0].click());
+    expect(onToggleSelect).toHaveBeenCalledWith("a");
   });
 
   it("suppresses the native context menu on a Library grid thumbnail cell (sc-8731) without breaking selection", async () => {

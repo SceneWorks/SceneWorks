@@ -3,7 +3,7 @@ import { isAbortError } from "../api.js";
 import { assetMatchesCharacter } from "../characterMembership.js";
 import { saveAssetAs, revealAsset } from "../assetActions.js";
 import { isDesktop, isPageFullscreen, setViewerFullscreen } from "../runtime.js";
-import { AssetMedia, assetCanRenderAsVideo, assetUrl, suppressThumbnailContextMenu } from "./assetMedia.jsx";
+import { AssetMedia, AssetThumbnail, assetCanRenderAsVideo, assetUrl, suppressThumbnailContextMenu } from "./assetMedia.jsx";
 import { DocumentView } from "./DocumentView.jsx";
 import { Icon } from "./Icons.jsx";
 import { LikenessBadge } from "./LikenessBadge.jsx";
@@ -290,6 +290,16 @@ function CharacterAssetLinker({ asset, characters = [], onMoveToCharacter }) {
 // checkbox (a sibling of the tile button, so no interactive element nests inside the
 // button) toggling membership in `selectedIds`. The tile-body click still drives the
 // single-select detail flow unchanged, so the default Library behavior is preserved.
+//
+// Perf (sc-11224 / F-032): grid tiles render `AssetThumbnail` (the poster/JPEG path),
+// NOT the full-resolution `AssetMedia`, so a few-hundred-asset project no longer decodes
+// hundreds of originals or mounts a `<video preload="metadata">` per clip on every visit.
+// Each grid cell also carries the `asset-tile-windowed` class, which applies
+// `content-visibility: auto` (styles.css) so off-screen tiles skip layout/paint/decode
+// until scrolled near — a dependency-free windowing (react-window is not a dep). Clicking
+// a tile still opens the full asset via the detail/preview flow; the thumbnail only
+// changes what the grid paints, not what selection/open resolve to. Applies to every grid
+// that shares this component (Library, Pose Library, character-asset views).
 export function AssetGrid({ assets, onPreview, selectedAsset, setSelectedAssetId, selectedIds = null, onToggleSelect = null }) {
   if (!assets.length) {
     return <div className="empty-panel">No assets in this view</div>;
@@ -299,15 +309,20 @@ export function AssetGrid({ assets, onPreview, selectedAsset, setSelectedAssetId
   return (
     <div className="asset-grid">
       {assets.map((asset) => {
+        // In single-select mode the button IS the grid cell, so it carries the
+        // windowing class; in multi-select the wrap is the cell (below).
+        const tileClasses = ["asset-tile"];
+        if (selectedAsset?.id === asset.id) tileClasses.push("active");
+        if (!multi) tileClasses.push("asset-tile-windowed");
         const tile = (
           <button
-            className={selectedAsset?.id === asset.id ? "asset-tile active" : "asset-tile"}
+            className={tileClasses.join(" ")}
             onClick={() => setSelectedAssetId(asset.id)}
             onContextMenu={suppressThumbnailContextMenu}
             onDoubleClick={() => onPreview(asset)}
             type="button"
           >
-            <AssetMedia asset={asset} />
+            <AssetThumbnail asset={asset} />
             <strong>{asset.displayName}</strong>
             {Array.isArray(asset.tags) && asset.tags.length ? (
               <div className="asset-tile-tags">
@@ -323,8 +338,10 @@ export function AssetGrid({ assets, onPreview, selectedAsset, setSelectedAssetId
         if (!multi) {
           return React.cloneElement(tile, { key: asset.id });
         }
+        const wrapClasses = ["asset-tile-wrap", "asset-tile-windowed"];
+        if (selectedIds?.has(asset.id)) wrapClasses.push("selected");
         return (
-          <div className={selectedIds?.has(asset.id) ? "asset-tile-wrap selected" : "asset-tile-wrap"} key={asset.id}>
+          <div className={wrapClasses.join(" ")} key={asset.id}>
             <label className="asset-tile-check">
               <input
                 aria-label={`Select ${asset.displayName}`}

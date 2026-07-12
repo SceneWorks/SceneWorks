@@ -4334,6 +4334,18 @@ input.dataset-name-input.boxed:focus {
   border-color: var(--border-strong);
 }
 
+/* Grid windowing (sc-11224 / F-032): skip layout/paint/thumbnail-decode for grid
+   cells scrolled off-screen. `content-visibility: auto` lets the browser leave an
+   off-screen tile un-rendered until it nears the viewport; `contain-intrinsic-size`
+   reserves its box (≈ the .asset-tile min-height plus its label) so the scrollbar and
+   scroll offset stay stable while tiles are skipped. Dependency-free (no react-window).
+   Applied to the grid cell — the .asset-tile button in single-select, the
+   .asset-tile-wrap in multi-select. */
+.asset-tile-windowed {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 240px;
+}
+
 .asset-tile.active {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 22%, transparent);

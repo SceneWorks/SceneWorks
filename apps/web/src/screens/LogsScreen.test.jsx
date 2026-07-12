@@ -167,12 +167,17 @@ describe("LogsScreen", () => {
     }
   });
 
-  it("does not re-arm the 2s poll on every keystroke (sc-8849)", async () => {
+  it("does not re-arm the 2s poll on every keystroke (sc-8849, sc-11224)", async () => {
     vi.useFakeTimers();
-    const setInterval = vi.spyOn(globalThis, "setInterval");
+    // The poll is now a self-scheduling setTimeout(run, POLL_MS) loop with backoff
+    // (sc-11224), so a poll re-arm is a setTimeout call at the 2000ms cadence. The
+    // 250ms search debounce also uses setTimeout, so we count only the POLL_MS timers
+    // to isolate poll re-arms from debounce timers.
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const pollArms = () => setTimeoutSpy.mock.calls.filter((call) => call[1] === 2000).length;
     try {
       await render();
-      const intervalsAfterLoad = setInterval.mock.calls.length;
+      const armsAfterLoad = pollArms();
       const input = container.querySelector("input.logs-search");
 
       for (const value of ["c", "ca", "can", "cand"]) {
@@ -182,10 +187,11 @@ describe("LogsScreen", () => {
         vi.advanceTimersByTime(300);
       });
 
-      // The poll interval must not be recreated as the search term changes.
-      expect(setInterval.mock.calls.length).toBe(intervalsAfterLoad);
+      // The poll loop must not be re-scheduled as the search term changes — only
+      // source/level filter changes (which refetch) may reset the poll.
+      expect(pollArms()).toBe(armsAfterLoad);
     } finally {
-      setInterval.mockRestore();
+      setTimeoutSpy.mockRestore();
       vi.useRealTimers();
     }
   });
@@ -227,8 +233,13 @@ describe("LogsScreen", () => {
           logRows.push(row(seq, "api", "info", message, { event: "tick" }));
         }
         await render();
-        // Snapshot fetched all rows, so the deep row is actually held in memory.
-        expect(container.querySelectorAll(".logs-row").length).toBe(ROW_COUNT);
+        // The snapshot fetched ALL rows (held in memory for search), but the render
+        // is now windowed to the newest LOG_RENDER_WINDOW (400) rows (sc-11224), so
+        // the DOM shows fewer than the full buffer — yet the deep needle is still
+        // searchable because the filter runs over the whole in-memory snapshot.
+        const beforeSearchRows = container.querySelectorAll(".logs-row").length;
+        expect(beforeSearchRows).toBe(400);
+        expect(beforeSearchRows).toBeLessThan(ROW_COUNT);
 
         const input = container.querySelector("input.logs-search");
         await typeSearch(input, "needle_deep_in_buffer");
@@ -264,6 +275,104 @@ describe("LogsScreen", () => {
       });
       expect(container.querySelectorAll(".logs-row").length).toBe(3);
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("windows the rendered tail to the newest rows while search still spans the whole buffer (sc-11224)", async () => {
+    vi.useFakeTimers();
+    try {
+      // A buffer larger than the render window, with a UNIQUE marker on an OLD row
+      // (seq 10) that lives far outside the newest-400 render window.
+      const ROW_COUNT = 900;
+      const OLD_MARKER_SEQ = 10;
+      logRows = [];
+      for (let seq = 0; seq < ROW_COUNT; seq += 1) {
+        const message = seq === OLD_MARKER_SEQ ? "old_unique_marker alpha" : "routine tick";
+        logRows.push(row(seq, "api", "info", message, { event: "tick" }));
+      }
+      await render();
+
+      // Only the newest LOG_RENDER_WINDOW (400) rows are painted, though all 900 are held.
+      const painted = container.querySelectorAll(".logs-row").length;
+      expect(painted).toBe(400);
+      expect(painted).toBeLessThan(ROW_COUNT);
+      // A windowed-count notice tells the user older rows are scrolled out.
+      expect(container.textContent).toContain("Showing the latest");
+
+      // Search runs over the ENTIRE in-memory snapshot: the old, un-painted row is found.
+      const input = container.querySelector("input.logs-search");
+      await typeSearch(input, "old_unique_marker");
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      const rows = container.querySelectorAll(".logs-row");
+      expect(rows.length).toBe(1);
+      expect(rows[0].textContent).toContain("old_unique_marker");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("backs off the poll after consecutive failures and resets to 2s cadence on success (sc-11224)", async () => {
+    vi.useFakeTimers();
+    try {
+      // Snapshot loads fine; every incremental (afterSeq) poll fails.
+      apiFetch.mockImplementation(async (path) => {
+        if (path.includes("afterSeq=")) throw new Error("network down");
+        return logRows;
+      });
+      await render();
+      const pollCalls = () => apiFetch.mock.calls.filter((call) => call[0].includes("afterSeq=")).length;
+      expect(pollCalls()).toBe(0);
+
+      // First poll fires at the 2s cadence and fails; the error is surfaced.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(pollCalls()).toBe(1);
+      expect(container.textContent).toContain("network down");
+
+      // Second failure re-arms at 2s (2000 * 2^0).
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(pollCalls()).toBe(2);
+
+      // Now backed off to 4s: a fixed 2s interval would fire again at +2s, but the
+      // backoff holds it — no new poll until +4s.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(pollCalls()).toBe(2); // still 2 — proof the poll backed off past 2s
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(pollCalls()).toBe(3); // fired at +4s
+
+      // Recover: polls succeed again. The pending arm after 3 failures is 8s.
+      apiFetch.mockImplementation(async (path) => (path.includes("afterSeq=") ? [] : logRows));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(8000);
+      });
+      const afterRecover = pollCalls();
+      expect(afterRecover).toBeGreaterThanOrEqual(4);
+      // Cadence reset to 2s: the next poll fires within 2s, not the backed-off 16s.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(pollCalls()).toBe(afterRecover + 1);
+      // A successful poll clears the error banner.
+      expect(container.textContent).not.toContain("network down");
+    } finally {
+      // Restore the factory-equivalent implementation so later tests are unaffected.
+      apiFetch.mockImplementation(async (path) => {
+        if (path.includes("afterSeq=")) return [];
+        if (path.includes("source=mlx-worker")) {
+          return logRows.filter((r) => r.source === "mlx-worker");
+        }
+        return logRows;
+      });
       vi.useRealTimers();
     }
   });
