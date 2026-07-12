@@ -132,6 +132,15 @@ pub(crate) async fn with_hf_auth(
 /// upscaler (`SCENEWORKS_REALESRGAN_*_ONNX`, sc-8911), the person detector
 /// (`SCENEWORKS_PERSON_DETECTOR_WEIGHTS`), and SAM2/SAM3
 /// (`SCENEWORKS_SAM2_WEIGHTS`/`SCENEWORKS_SAM3_WEIGHTS`, sc-11175/F-011).
+///
+/// Gated to the union of its callers' cfgs (upscaler / person detector / SAM2 / SAM3),
+/// all of which compile only on macOS OR the off-Mac candle lane. On the Linux `parity`
+/// lane (non-macOS, default features) none of those callers compile, so leaving this
+/// helper ungated makes it dead code under `-D warnings` (sc-11175, Linux parity fix).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) fn resolve_env_file_pin(
     key: &str,
     value: Option<std::ffi::OsString>,
