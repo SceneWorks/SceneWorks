@@ -128,6 +128,36 @@ fn krea_control_overlay_repo_file(request: &ImageRequest) -> WorkerResult<(Strin
     ))
 }
 
+/// Confine a payload-supplied `advanced.controlWeights.path` to an app-managed root (sc-11168 / F-006).
+/// The API writes this key for a studio-trained / registered LOCAL overlay (B4/sc-10165), but the value
+/// arrives untrusted across the LAN boundary (epic 4484), so — like every other on-disk model input — it
+/// must resolve under the app data dir / HF hub cache (or a declared external root) via the house
+/// `normalize_app_managed_model_path`; without this a crafted job could point the loader at any file on
+/// disk (an arbitrary-file-read primitive). Returns `Ok(None)` when the payload carries no path, `Ok(Some)`
+/// for a confined path (whether or not it exists — the caller checks `is_file`), and the same
+/// `InvalidPayload` rejection as the sibling lanes for an out-of-root path. Mirrors the candle twin.
+fn krea_control_payload_overlay_path(
+    settings: &Settings,
+    request: &ImageRequest,
+) -> WorkerResult<Option<PathBuf>> {
+    let Some(path) = request
+        .advanced
+        .get("controlWeights")
+        .and_then(Value::as_object)
+        .and_then(|cw| cw.get("path"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(crate::paths::normalize_app_managed_model_path(
+        settings,
+        path,
+        "Krea control overlay",
+    )?))
+}
+
 /// Resolve the MLX control-branch overlay the `KreaTurboControl` provider loads, downloading on first use.
 /// Order (most specific wins): the `SCENEWORKS_CONTROLNET_KREA` env → an `advanced.controlWeights.path`
 /// (a studio-trained / registered LOCAL overlay the API resolved, B4/sc-10165) → an
@@ -145,16 +175,7 @@ async fn ensure_krea_control_weights(
             return Ok(p);
         }
     }
-    if let Some(path) = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object)
-        .and_then(|cw| cw.get("path"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        let p = PathBuf::from(path);
+    if let Some(p) = krea_control_payload_overlay_path(settings, request)? {
         if p.is_file() {
             return Ok(p);
         }
