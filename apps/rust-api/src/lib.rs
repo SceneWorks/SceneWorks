@@ -940,7 +940,20 @@ pub(crate) fn create_app_with_state(
     // port) carrying the access token, so there is no second engine/DB path.
     // Blocking-job wait policy comes from Settings (sc-10277: SCENEWORKS_MCP_JOB_*
     // env knobs), clamped to the invariants the poll loop needs.
-    let mcp_service = sceneworks_mcp::streamable_http_service_with(
+    // F-040 (sc-11236): restore the transport's Host-header (DNS-rebinding)
+    // defense. `/mcp` rides `access_control`, but that gate performs NO
+    // Host/Origin validation, so in the loopback/loopback-trust/no-token desktop
+    // posture a malicious page could DNS-rebind a browser onto `/mcp`. Derive the
+    // allowed Host set from the SAME bind config that decides where the API
+    // listens: loopback is always allowed; a concrete interface host adds itself;
+    // a wildcard LAN bind honors `SCENEWORKS_MCP_ALLOWED_HOSTS` (and otherwise
+    // disables the check, relying on the mandatory LAN access token).
+    let mcp_allowed_hosts = sceneworks_mcp::mcp_allowed_hosts(
+        &state.settings.host,
+        state.settings.port,
+        &state.settings.mcp_allowed_hosts_extra,
+    );
+    let mcp_service = sceneworks_mcp::streamable_http_service_with_hosts(
         sceneworks_mcp::ApiClientConfig {
             base_url: state.settings.mcp_api_url.clone(),
             access_token: Some(state.settings.access_token.clone()),
@@ -949,6 +962,7 @@ pub(crate) fn create_app_with_state(
             state.settings.mcp_job_poll_interval,
             state.settings.mcp_job_timeout,
         ),
+        mcp_allowed_hosts,
     );
 
     let router = Router::new()

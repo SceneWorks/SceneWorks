@@ -48,6 +48,21 @@ use crate::api_client::{ApiClient, ApiClientError};
 /// server-side; only a sustained failure streak surfaces as an error.
 const MAX_CONSECUTIVE_POLL_ERRORS: u32 = 5;
 
+/// F-041 (sc-11236) — inline-payload caps for `generate_image`. The tool
+/// base64-inlines every produced image into the JSON-RPC tool result. base64
+/// inflates the bytes by ~33% and the encoded response is held twice in memory,
+/// so a large batch (`count` up to 8, caller-chosen dimensions up to 2048²) can
+/// balloon to tens of MB — enough to exceed an MCP client's message-size limit or
+/// blow the model's context window. When a single image exceeds
+/// [`MAX_INLINE_IMAGE_BYTES`] OR the running total exceeds
+/// [`MAX_INLINE_TOTAL_BYTES`], `generate_image` returns the exact same
+/// ticketed-download-link shape as `get_job_result` (resource links + a JSON
+/// summary, no inline bytes) instead of inlining. Thresholds are on the RAW
+/// (pre-base64) byte count and picked conservatively: a typical 1–2 image job of a
+/// few-MP PNG still inlines; only genuinely heavy batches spill to links.
+const MAX_INLINE_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_INLINE_TOTAL_BYTES: usize = 10 * 1024 * 1024;
+
 /// How the blocking job tools (generate_image) wait for a terminal JobSnapshot:
 /// poll `GET /api/v1/jobs/:id` every `poll_interval` until terminal, and give up
 /// with a clear tool error after `timeout` so a stuck job can never hang the MCP
@@ -303,6 +318,7 @@ impl SceneWorksMcp {
         &self,
         Parameters(args): Parameters<GenerateImageArgs>,
         ctx: RequestContext<RoleServer>,
+        extensions: Extensions,
     ) -> Result<CallToolResult, ErrorData> {
         let body =
             image_job_body(&args).map_err(|message| ErrorData::invalid_params(message, None))?;
@@ -431,6 +447,7 @@ impl SceneWorksMcp {
 
         let mut blocks = Vec::with_capacity(assets.len() + 1);
         let mut summary_assets = Vec::with_capacity(assets.len());
+        let mut total_bytes = 0usize;
         for asset in assets {
             let Some(media_path) = asset_media_path(asset) else {
                 continue;
@@ -448,6 +465,18 @@ impl SceneWorksMcp {
                 asset.pointer("/file/mimeType").and_then(Value::as_str),
                 header_mime.as_deref(),
             );
+            // F-041 (sc-11236): an over-cap result must not be inlined — the
+            // base64 JSON-RPC payload (held twice in memory) would exceed MCP
+            // client message limits / the model context. Above EITHER the
+            // per-image or running-total cap, switch the WHOLE response to the
+            // get_job_result ticketed-link shape (bytes downloaded so far are
+            // simply dropped). The ticket links reach the same media without
+            // inlining, so no result is lost.
+            total_bytes = total_bytes.saturating_add(bytes.len());
+            if bytes.len() > MAX_INLINE_IMAGE_BYTES || total_bytes > MAX_INLINE_TOTAL_BYTES {
+                let link_base = self.request_link_base(&extensions);
+                return self.job_result_links(&job_id, &job, link_base).await;
+            }
             summary_assets.push(json!({
                 "id": asset.get("id").cloned().unwrap_or(Value::Null),
                 "path": &media_path,
@@ -565,6 +594,38 @@ impl SceneWorksMcp {
             }
         }
 
+        let link_base = self.request_link_base(&extensions);
+        self.job_result_links(job_id, &job, link_base).await
+    }
+
+    /// Absolute URL base for ticketed media links (sc-10290). `/mcp` and
+    /// `/api/v1` are the SAME axum app, so the host the client used to reach
+    /// `/mcp` is exactly the host that serves the media — derive it from the
+    /// incoming request so the URL is reachable by THIS client regardless of how
+    /// `SCENEWORKS_API_URL` is configured (e.g. a loopback-default desktop
+    /// answering a LAN client). Falls back to the configured API base when the
+    /// request parts / Host aren't available. The Host is only reflected back to
+    /// the caller that supplied it (never stored / shown to other users), and
+    /// `/mcp` is already gated by access_control, so reflecting it is safe.
+    fn request_link_base(&self, extensions: &Extensions) -> String {
+        extensions
+            .get::<http::request::Parts>()
+            .and_then(|parts| request_base_url(&parts.headers, &parts.uri))
+            .unwrap_or_else(|| self.api.base_url().to_owned())
+    }
+
+    /// Build the ticketed-download-link result for a COMPLETED `job`: mint one
+    /// sliding multi-use media ticket and emit one `resource_link` block per
+    /// result asset plus a JSON summary, with `link_base` as the absolute URL
+    /// base. This is the response shape `get_job_result` returns, and the
+    /// oversize-payload fallback `generate_image` uses (F-041, sc-11236) instead
+    /// of inlining tens of MB of base64.
+    async fn job_result_links(
+        &self,
+        job_id: &str,
+        job: &Value,
+        link_base: String,
+    ) -> Result<CallToolResult, ErrorData> {
         let Some(project_id) = job
             .get("projectId")
             .and_then(Value::as_str)
@@ -611,20 +672,6 @@ impl SceneWorksMcp {
             ));
         };
         let expires_in_seconds = ticket_response.get("expiresInSeconds").cloned();
-
-        // Absolute URL base for the ticket links (sc-10290). `/mcp` and `/api/v1`
-        // are the SAME axum app, so the host the client used to reach `/mcp` is
-        // exactly the host that serves the media — derive it from the incoming
-        // request so the URL is reachable by THIS client regardless of how
-        // `SCENEWORKS_API_URL` is configured (e.g. a loopback-default desktop
-        // answering a LAN client). Falls back to the configured API base when the
-        // request parts / Host aren't available. The Host is only reflected back to
-        // the caller that supplied it (never stored / shown to other users), and
-        // `/mcp` is already gated by access_control, so reflecting it is safe.
-        let link_base = extensions
-            .get::<http::request::Parts>()
-            .and_then(|parts| request_base_url(&parts.headers, &parts.uri))
-            .unwrap_or_else(|| self.api.base_url().to_owned());
 
         let mut blocks = Vec::with_capacity(assets.len() + 1);
         let mut summary_assets = Vec::with_capacity(assets.len());
