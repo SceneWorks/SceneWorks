@@ -4688,7 +4688,7 @@ mod candle_routing_tests {
         // sc-10997 (epic 6562): the candle Bernini VIDEO lane serves t2v + the editing/reference/
         // multi-source modes on the distinct `bernini` engine — the off-Mac parity of the MLX
         // `video_mode_is_mlx_eligible(bernini, mode)` gate. Each mode claims the candle lane (routed on
-        // id + mode; the worker validates the per-mode media + `SceneWorks/bernini-candle` weights loudly,
+        // id + mode; the worker validates the per-mode media + `SceneWorks/bernini` weights loudly,
         // sc-11003). The story's "i2v"/"edit" map onto Bernini's `video_to_video` — its Wan2.2-T2V
         // renderer has no classic still-image-to-video (mirrors the MLX lane's mode set exactly).
         for (mode, payload) in [

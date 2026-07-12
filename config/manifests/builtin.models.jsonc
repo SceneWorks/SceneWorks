@@ -6504,6 +6504,24 @@
           // under bf16/ for the uniform tier layout (~81.6 GiB measured).
           "estimatedSizeBytes": 87591990679,
           "footprint": { "diskSizeBytes": 87591990679, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // Windows/Linux candle (sc-10997 video / sc-10996 image, epic 6562): the candle `bernini`
+          // engine (candle-gen-bernini) reads a DISTINCT turnkey — the converted full-Bernini candle tree
+          // (transformer/ + transformer_2/ + text_encoder/ + vae/ + tokenizer/ + mllm/ + connector/ +
+          // vit_decoder/), a different tensor layout than the MLX `-mlx` repo — published PUBLIC at
+          // `SceneWorks/bernini` with bf16/Q8/Q4 tiers (sc-11003). Whole-repo download (empty files list);
+          // the candle worker resolves it by string from the HF cache (`CANDLE_BERNINI_REPO`,
+          // image_jobs/bernini.rs; overridable via SCENEWORKS_CANDLE_BERNINI_DIR), independent of
+          // `paths.model`, and the video lane reuses the same resolver. Without this entry the off-Mac
+          // candle Bernini lane dead-ended with no way to install the snapshot. Shared by bernini +
+          // bernini_image (one repo, HF cache dedupes). Loads dense today (the off-Mac packed-tier select
+          // is a follow-up). Size is the bf16 tier estimate (candle loads the converted tree dense).
+          "provider": "huggingface",
+          "repo": "SceneWorks/bernini",
+          "files": [],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 87591990679
         }
       ],
       "paths": {
@@ -6624,6 +6642,20 @@
           "platforms": ["macos"],
           "estimatedSizeBytes": 87591990679,
           "footprint": { "diskSizeBytes": 87591990679, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // Windows/Linux candle (sc-10996, epic 6562): the SAME distinct candle turnkey the video `bernini`
+          // id installs — the converted full-Bernini candle tree published PUBLIC at `SceneWorks/bernini`
+          // with bf16/Q8/Q4 tiers (sc-11003), a different tensor layout than the MLX `-mlx` repo. Whole-repo
+          // download (empty files list); the candle worker's `resolve_candle_bernini_model_dir` resolves it
+          // by string from the HF cache (`CANDLE_BERNINI_REPO`, image_jobs/bernini.rs; overridable via
+          // SCENEWORKS_CANDLE_BERNINI_DIR), independent of `paths.model`. One repo shared with the video id
+          // (HF cache dedupes). Loads dense today (off-Mac packed-tier select is a follow-up).
+          "provider": "huggingface",
+          "repo": "SceneWorks/bernini",
+          "files": [],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 87591990679
         }
       ],
       "paths": {

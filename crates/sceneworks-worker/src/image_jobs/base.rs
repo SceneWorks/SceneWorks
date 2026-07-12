@@ -328,7 +328,7 @@ fn resolve_candle_image_route(
         // generic `is_candle_engine` txt2img arm below — `bernini_image` is NOT an `is_candle_engine` id
         // (its engine is `Modality::Video`, reached with `frames:1`), so it would otherwise fall through
         // to `None` and stub. Routed on the model id alone (like the sdxl txt2img arm) — a missing
-        // `SceneWorks/bernini-candle` snapshot fails loud at load, never silently stubs (the MLX
+        // `SceneWorks/bernini` snapshot fails loud at load, never silently stubs (the MLX
         // `ImageRoute::Bernini` weight-gates instead only because it must fall through to `mlx_available`).
         Some(CandleImageRoute::Bernini)
     } else if is_candle_engine(&request.model)

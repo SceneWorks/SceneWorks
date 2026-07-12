@@ -646,7 +646,7 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // `bernini_image` `edit_image` branch in `image_job_is_candle_eligible` (a `sourceAssetId` edit, the
     // bespoke `generate_candle_bernini_image_stream` lane — like the MLX `bernini_image_mlx_eligible`).
     // NOT `candle_quant`: the descriptor advertises Q4/Q8, but the off-Mac packed-tier select is deferred
-    // until the `SceneWorks/bernini-candle` tier layout lands (sc-11003) — the candle lane loads the
+    // until the `SceneWorks/bernini` tier layout lands (sc-11003) — the candle lane loads the
     // converted snapshot dense today. The video `bernini` id lives in the video table below (still
     // MLX-only — no candle video route wired yet).
     ModelCaps::new("bernini_image", true, true, false, false, false),
@@ -731,7 +731,7 @@ pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
     // rv2v / mv2v / ads2v) on both lanes; the candle worker routes those via the dedicated
     // `bernini_video_candle_eligible` gate + the `CandleVideoRoute::Bernini` dispatch (NOT the generic
     // wan/ltx txt2video arm — Bernini is a distinct engine). Not an i2v/VACE model, so those columns
-    // stay false. Off-Mac packed-tier select is deferred until the `SceneWorks/bernini-candle` tier
+    // stay false. Off-Mac packed-tier select is deferred until the `SceneWorks/bernini` tier
     // layout lands (sc-11003) — the candle lane loads the converted snapshot dense today.
     VideoModelCaps::new("bernini", true, true, false, false),
     // SCAIL-2 (epic 5439 / sc-5448): MLX end-to-end character animation; the candle SCAIL-2 engine

@@ -304,7 +304,7 @@ async fn generate_bernini_image_stream(
 // `generate_candle_stream` txt2img lane. Shares the neutral harness (`load_spec` /
 // `start_cached_gen_stream` / `drive_gen_items` / `bernini_image_generate_one` / `consume_gen_events`)
 // and the backend-neutral resolvers (`resolve_steps` / `resolve_guidance` / `resolve_negative_prompt`)
-// with the MLX path. GPU-val is BLOCKED on the converted `SceneWorks/bernini-candle` weights (sc-11003,
+// with the MLX path. GPU-val is BLOCKED on the converted `SceneWorks/bernini` weights (sc-11003,
 // the 168 GB conversion, not yet published), so this delivers routing + lane wiring; a missing snapshot
 // fails loud at load (never a silent stub).
 // ---------------------------------------------------------------------------
@@ -318,9 +318,9 @@ const CANDLE_BERNINI_IMAGE_ADAPTER: &str = "candle_bernini";
 /// The turnkey candle Bernini snapshot repo (sc-11003): the converted full-Bernini tree (`transformer/`
 /// `transformer_2/` `text_encoder/` `vae/` `tokenizer/` `mllm/` `connector/` `vit_decoder/`) the
 /// `candle-gen-bernini` `load` reads. Distinct from the MLX `SceneWorks/bernini-mlx` turnkey (different
-/// tensor layout). NOT yet published — GPU-val is blocked on it (sc-11003).
+/// tensor layout). Published PUBLIC at `SceneWorks/bernini` with bf16/Q8/Q4 tiers (sc-11003).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const CANDLE_BERNINI_REPO: &str = "SceneWorks/bernini-candle";
+const CANDLE_BERNINI_REPO: &str = "SceneWorks/bernini";
 
 /// True when this is a candle Bernini still-image job: the `bernini_image` id. Routed on the model id
 /// alone (like the sdxl candle txt2img arm) — NOT weight-gated — so a missing snapshot fails loud at
@@ -332,7 +332,7 @@ fn bernini_image_candle_available(request: &ImageRequest) -> bool {
 }
 
 /// Resolve the candle Bernini snapshot dir: `SCENEWORKS_CANDLE_BERNINI_DIR` override → app-managed
-/// `<data>/models/candle/bernini` → the turnkey `SceneWorks/bernini-candle` HF snapshot. Sentinel = the
+/// `<data>/models/candle/bernini` → the turnkey `SceneWorks/bernini` HF snapshot. Sentinel = the
 /// `transformer/` subdir (the converted renderer's first DiT expert; the `candle-gen-bernini` `load`
 /// validates the full component set and reports the precise gap). Errors loudly when absent — like the
 /// candle SCAIL-2 / Wan-VACE resolvers, a missing checkpoint surfaces a clear re-download error instead
@@ -367,7 +367,7 @@ pub(crate) fn resolve_candle_bernini_model_dir(settings: &Settings) -> WorkerRes
 
 /// Real candle Bernini still-image generation (sc-10996, epic 6562): the off-Mac sibling of
 /// [`generate_bernini_image_stream`]. Loads the full candle planner+renderer once from the converted
-/// `SceneWorks/bernini-candle` snapshot (dense — the candle loader reads the converted tree as-is), then
+/// `SceneWorks/bernini` snapshot (dense — the candle loader reads the converted tree as-is), then
 /// one image per seed: t2i from the prompt alone, or i2i conditioned on the `sourceAssetId` source (the
 /// engine ViT/VAE-encodes it at native resolution, no worker-side fit). Forces `frames:1` + the engine
 /// task string so the video-modality engine returns a single still. Standard guidance family (no LoRA;
@@ -410,7 +410,7 @@ async fn generate_candle_bernini_image_stream(
     let task = bernini_image_engine_task(&request.mode);
     // Requested tier bits (advanced `mlxQuantize`) recorded for lineage only — the candle lane loads the
     // converted snapshot DENSE (the loader reads the tree as-is; the descriptor advertises Q4/Q8 but the
-    // off-Mac packed-tier select is a follow-up once the `bernini-candle` tier layout lands, sc-11003).
+    // off-Mac packed-tier select is a follow-up once the `SceneWorks/bernini` tier layout lands, sc-11003).
     let tier_bits = request
         .advanced
         .get("mlxQuantize")
