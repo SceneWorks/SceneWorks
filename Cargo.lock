@@ -463,7 +463,7 @@ dependencies = [
 [[package]]
 name = "candle-gen"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-nn 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
@@ -481,7 +481,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-anima"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
  "candle-gen-qwen-image",
@@ -493,7 +493,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-boogu"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
  "candle-gen-pid",
@@ -507,7 +507,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-chroma"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
  "candle-gen-pid",
@@ -522,7 +522,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-clip"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
@@ -536,7 +536,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-depth"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
@@ -546,7 +546,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-face"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
@@ -556,7 +556,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-flux"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
@@ -574,7 +574,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-flux2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
  "candle-gen-pid",
@@ -589,7 +589,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-ideogram"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
  "candle-gen-flux2",
@@ -604,7 +604,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-instantid"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
  "candle-gen-face",
@@ -617,7 +617,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-joycaption"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
  "candle-llm 0.0.0 (git+https://github.com/SceneWorks/candle-llm?rev=3d9fdf04047bf3b1fbf323ab56c919f3a03f0794)",
@@ -627,7 +627,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-kolors"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
  "candle-gen-pid",
@@ -643,9 +643,10 @@ dependencies = [
 [[package]]
 name = "candle-gen-krea"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
+ "candle-gen-boogu",
  "candle-gen-pid",
  "candle-gen-qwen-image",
  "inventory",
@@ -658,7 +659,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-lens"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
  "candle-gen-flux2",
@@ -673,7 +674,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-ltx"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
  "inventory",
@@ -686,7 +687,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-pid"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
  "image",
@@ -696,7 +697,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-pulid"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
@@ -713,7 +714,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-qwen-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
  "candle-gen-pid",
@@ -727,7 +728,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-sam3"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
@@ -738,7 +739,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-scail2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
  "candle-gen-wan",
@@ -753,7 +754,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-sd3"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
@@ -770,7 +771,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-sdxl"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
@@ -790,7 +791,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-seedvr2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
  "inventory",
@@ -801,7 +802,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-sensenova"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
  "inventory",
@@ -814,7 +815,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-svd"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
  "inventory",
@@ -825,7 +826,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-wan"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-gen",
  "inventory",
@@ -838,7 +839,7 @@ dependencies = [
 [[package]]
 name = "candle-gen-z-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/candle-gen?rev=95a2ebcca5930323acd8de440f83602ebd681ca0#95a2ebcca5930323acd8de440f83602ebd681ca0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439#8cc3ea4c9ffb0a07cd79ddfa2c9d211a99b3f439"
 dependencies = [
  "candle-core 0.10.2 (git+https://github.com/huggingface/candle?rev=c1e6756a89faefa888ea57b056394a0619925b87)",
  "candle-gen",
@@ -3674,7 +3675,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "inventory",
  "pmetal-mlx-rs",
@@ -3688,7 +3689,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-anima"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "image",
  "inventory",
@@ -3701,7 +3702,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-bernini"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "image",
  "inventory",
@@ -3715,7 +3716,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-boogu"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "image",
  "inventory",
@@ -3729,7 +3730,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-chroma"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3743,7 +3744,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-clip"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3754,7 +3755,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-depth"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "mlx-gen",
  "pmetal-mlx-rs",
@@ -3763,7 +3764,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-face"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "mlx-gen",
  "pmetal-mlx-rs",
@@ -3772,7 +3773,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-flux"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3786,7 +3787,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-flux2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3799,7 +3800,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-ideogram"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3812,7 +3813,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-instantid"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "mlx-gen",
  "mlx-gen-face",
@@ -3824,7 +3825,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-joycaption"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3834,7 +3835,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-kolors"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "image",
  "inventory",
@@ -3847,7 +3848,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-krea"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "image",
  "inventory",
@@ -3862,7 +3863,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-lens"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "image",
  "inventory",
@@ -3876,7 +3877,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-ltx"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "image",
  "inventory",
@@ -3888,7 +3889,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-pid"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "image",
  "mlx-gen",
@@ -3899,7 +3900,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-pulid"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3911,7 +3912,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-qwen-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3923,7 +3924,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-sam2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "mlx-gen",
  "pmetal-mlx-rs",
@@ -3932,7 +3933,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-sam3"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "mlx-gen",
  "pmetal-mlx-rs",
@@ -3941,7 +3942,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-sana"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "mlx-gen",
  "mlx-gen-pid",
@@ -3951,7 +3952,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-scail2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -3963,7 +3964,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-sd3"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "image",
  "inventory",
@@ -3978,7 +3979,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-sdxl"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "image",
  "inventory",
@@ -3992,7 +3993,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-seedvr2"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -4003,7 +4004,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-sensenova"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -4015,7 +4016,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-svd"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "inventory",
  "mlx-gen",
@@ -4026,7 +4027,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-wan"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "image",
  "inventory",
@@ -4040,7 +4041,7 @@ dependencies = [
 [[package]]
 name = "mlx-gen-z-image"
 version = "0.0.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "image",
  "inventory",
@@ -5874,7 +5875,7 @@ dependencies = [
 [[package]]
 name = "sceneworks-gen-core"
 version = "0.1.0"
-source = "git+https://github.com/michaeltrefry/mlx-gen?rev=19573a9ab01fe7efaf6830c6f1693e687fcb1b6f#19573a9ab01fe7efaf6830c6f1693e687fcb1b6f"
+source = "git+https://github.com/michaeltrefry/mlx-gen?rev=ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a#ab46fcbfd7ccdade605d65dfe8e6cb97dd51d21a"
 dependencies = [
  "core-llm",
  "inventory",
