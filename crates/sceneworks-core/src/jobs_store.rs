@@ -228,7 +228,20 @@ impl From<serde_json::Error> for JobsStoreError {
 #[derive(Debug)]
 pub struct JobsStore {
     db_path: PathBuf,
-    lock: Mutex<()>,
+    /// Serializes writers AND owns the process's single long-lived write
+    /// connection (sc-11202 / F-025). Every mutating method takes this mutex and
+    /// reuses the connection inside it, so the hot claim/heartbeat/progress path
+    /// no longer pays a fresh `Connection::open` + `create_dir_all` + WAL/
+    /// busy_timeout/foreign_keys pragma round-trip per call. The connection is
+    /// created lazily on first write (so `new` stays infallible) and its
+    /// WAL/busy_timeout/foreign_keys pragmas are established exactly once when it
+    /// opens. The mutex still serializes writers exactly as before, and because
+    /// the connection lives entirely behind it, it is never touched by two
+    /// threads at once. Read-only methods still open their own short-lived
+    /// connection off the mutex and rely on WAL reader isolation (see
+    /// `list_jobs`); the separate worker PROCESS keeps its own connection, so
+    /// cross-process access and WAL semantics are unchanged.
+    lock: Mutex<Option<Connection>>,
 }
 
 #[derive(Debug, Clone)]
@@ -346,7 +359,7 @@ impl JobsStore {
     pub fn new(db_path: impl Into<PathBuf>) -> Self {
         Self {
             db_path: db_path.into(),
-            lock: Mutex::new(()),
+            lock: Mutex::new(None),
         }
     }
 
@@ -355,8 +368,8 @@ impl JobsStore {
     }
 
     pub fn initialize(&self) -> JobsStoreResult<()> {
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(
             "
@@ -469,8 +482,8 @@ impl JobsStore {
     }
 
     pub fn mark_interrupted_on_startup(&self) -> JobsStoreResult<Vec<JobSnapshot>> {
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let interrupted = self.list_jobs_by_status_on_connection(&transaction, ACTIVE_STATUSES)?;
         // A `pending_caption` job (sc-9120) is owned by an API-side background task, not a worker,
@@ -533,8 +546,8 @@ impl JobsStore {
     }
 
     pub fn create_job(&self, request: CreateJob) -> JobsStoreResult<JobSnapshot> {
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.create_job_on_connection(&transaction, request, None)?;
         transaction.commit()?;
@@ -550,8 +563,8 @@ impl JobsStore {
         id: String,
         request: CreateJob,
     ) -> JobsStoreResult<JobSnapshot> {
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.create_job_on_connection(&transaction, request, Some(id))?;
         transaction.commit()?;
@@ -580,8 +593,8 @@ impl JobsStore {
         job_id: &str,
         new_payload: Option<Map<String, Value>>,
     ) -> JobsStoreResult<PendingCaptionPromotion> {
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = utc_now();
         let affected = match new_payload {
@@ -632,7 +645,7 @@ impl JobsStore {
         prompt: &str,
         aspect_ratio: &str,
     ) -> JobsStoreResult<Option<JobSnapshot>> {
-        let connection = self.connect()?;
+        let connection = self.open_connection()?;
         let mut statement = connection.prepare(&format!(
             "
             select * from jobs
@@ -665,7 +678,7 @@ impl JobsStore {
         // pure read never mutates and never needs it, so keeping it here would
         // pointlessly stall list/get/summary traffic behind every claim or
         // progress update. All mutating methods still hold the mutex.
-        let connection = self.connect()?;
+        let connection = self.open_connection()?;
         let limit = limit.clamp(1, 500);
         let mut conditions: Vec<&str> = Vec::new();
         let mut bindings: Vec<Box<dyn ToSql>> = Vec::new();
@@ -693,7 +706,7 @@ impl JobsStore {
     pub fn get_job(&self, job_id: &str) -> JobsStoreResult<JobSnapshot> {
         // Read-only single-SELECT: no write mutex, relies on WAL reader isolation
         // (sc-8950 / F-148 — see list_jobs for the full rationale).
-        let connection = self.connect()?;
+        let connection = self.open_connection()?;
         self.get_job_on_connection(&connection, job_id)
     }
 
@@ -707,8 +720,8 @@ impl JobsStore {
         job_id: &str,
         metrics: &GenerationMetrics,
     ) -> JobsStoreResult<()> {
-        let _guard = self.lock.lock();
-        let connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let now = utc_now();
         let loras_json = optional_dumps(metrics.loras.as_ref())?;
         connection.execute(
@@ -792,7 +805,7 @@ impl JobsStore {
         &self,
         job_id: &str,
     ) -> JobsStoreResult<Option<GenerationMetrics>> {
-        let connection = self.connect()?;
+        let connection = self.open_connection()?;
         let metrics = connection
             .query_row(
                 "select * from generation_metrics where job_id = ?1",
@@ -813,7 +826,7 @@ impl JobsStore {
         quant_label: Option<&str>,
         limit: u32,
     ) -> JobsStoreResult<Vec<GenerationMetricsRow>> {
-        let connection = self.connect()?;
+        let connection = self.open_connection()?;
         let limit = limit.clamp(1, 5000);
         let mut conditions: Vec<&str> = Vec::new();
         let mut bindings: Vec<Box<dyn ToSql>> = Vec::new();
@@ -853,8 +866,8 @@ impl JobsStore {
     }
 
     pub fn cancel_job(&self, job_id: &str) -> JobsStoreResult<JobSnapshot> {
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.get_job_on_connection(&transaction, job_id)?;
         if is_terminal_status(job.status.as_str()) {
@@ -902,8 +915,8 @@ impl JobsStore {
     }
 
     pub fn retry_job(&self, job_id: &str, request: RetryJob) -> JobsStoreResult<JobSnapshot> {
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.get_job_on_connection(&transaction, job_id)?;
         if job.attempts >= MAX_JOB_ATTEMPTS {
@@ -940,8 +953,8 @@ impl JobsStore {
         job_id: &str,
         request: DuplicateJob,
     ) -> JobsStoreResult<JobSnapshot> {
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.get_job_on_connection(&transaction, job_id)?;
         let mut payload = job.payload;
@@ -968,8 +981,8 @@ impl JobsStore {
     }
 
     pub fn register_worker(&self, request: RegisterWorker) -> JobsStoreResult<WorkerSnapshot> {
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = utc_now();
         transaction.execute(
@@ -1003,8 +1016,8 @@ impl JobsStore {
     }
 
     pub fn heartbeat_worker(&self, request: WorkerHeartbeat) -> JobsStoreResult<WorkerSnapshot> {
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let worker = self.get_worker_on_connection(&transaction, &request.worker_id)?;
         let now = utc_now();
@@ -1081,8 +1094,8 @@ impl JobsStore {
         &self,
         timeout_seconds: u64,
     ) -> JobsStoreResult<StaleSweep> {
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = now_unix_seconds();
         let timeout = i64::try_from(timeout_seconds.max(1)).unwrap_or(i64::MAX);
@@ -1177,8 +1190,8 @@ impl JobsStore {
         signal: Option<i32>,
         exit_code: Option<i32>,
     ) -> JobsStoreResult<Option<JobSnapshot>> {
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = utc_now();
         let worker_ids = [worker_id.to_owned()];
@@ -1253,8 +1266,8 @@ impl JobsStore {
         if !mlx_required {
             return Ok(Vec::new());
         }
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = now_unix_seconds();
         let grace = i64::try_from(grace_seconds.max(1)).unwrap_or(i64::MAX);
@@ -1348,8 +1361,8 @@ impl JobsStore {
         if !mlx_required || !enforce {
             return Ok(Vec::new());
         }
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut statement = transaction
             .prepare("select * from jobs where status = 'queued' order by created_at asc")?;
@@ -1405,8 +1418,8 @@ impl JobsStore {
         if !candle_required {
             return Ok(Vec::new());
         }
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now = now_unix_seconds();
         let grace = i64::try_from(grace_seconds.max(1)).unwrap_or(i64::MAX);
@@ -1501,8 +1514,8 @@ impl JobsStore {
         if !candle_required || !enforce {
             return Ok(Vec::new());
         }
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut statement = transaction
             .prepare("select * from jobs where status = 'queued' order by created_at asc")?;
@@ -1551,8 +1564,8 @@ impl JobsStore {
         worker_id: &str,
         mlx_required: bool,
     ) -> JobsStoreResult<(Option<JobSnapshot>, Option<RouteDecision>)> {
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         // BEGIN IMMEDIATE: take the write lock up front. The claim reads the worker, the
         // active-gpu-job guard and the full queued set before deciding, then writes. A
         // DEFERRED transaction holds only a read lock through those reads and tries to
@@ -1675,8 +1688,8 @@ impl JobsStore {
             return Err(JobsStoreError::InvalidNumber("peakGpuLoadPct".to_owned()));
         }
 
-        let _guard = self.lock.lock();
-        let mut connection = self.connect()?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         // Guard against zombie-worker writes (sc-4172): a worker that went
         // silent long enough for the stale sweep to mark its job `interrupted`
@@ -1779,7 +1792,7 @@ impl JobsStore {
     pub fn list_workers(&self) -> JobsStoreResult<Vec<WorkerSnapshot>> {
         // Read-only single-SELECT: no write mutex, relies on WAL reader isolation
         // (sc-8950 / F-148 — see list_jobs for the full rationale).
-        let connection = self.connect()?;
+        let connection = self.open_connection()?;
         let mut statement = connection.prepare("select * from workers order by gpu_id, id")?;
         let workers = collect_workers(statement.query_map([], row_to_worker)?)?;
         Ok(workers)
@@ -1788,7 +1801,7 @@ impl JobsStore {
     pub fn get_worker(&self, worker_id: &str) -> JobsStoreResult<WorkerSnapshot> {
         // Read-only single-SELECT: no write mutex, relies on WAL reader isolation
         // (sc-8950 / F-148 — see list_jobs for the full rationale).
-        let connection = self.connect()?;
+        let connection = self.open_connection()?;
         self.get_worker_on_connection(&connection, worker_id)
     }
 
@@ -1803,7 +1816,7 @@ impl JobsStore {
         // first to dodge a self-deadlock on the non-reentrant mutex; dropping the
         // mutex removes that hazard entirely.)
         let workers = self.list_workers()?;
-        let connection = self.connect()?;
+        let connection = self.open_connection()?;
 
         // Per-status counts over the WHOLE table — never a capped/newest-N sample.
         // Filtering an already-capped list silently undercounts once a project
@@ -1845,7 +1858,25 @@ impl JobsStore {
         })
     }
 
-    fn connect(&self) -> JobsStoreResult<Connection> {
+    /// Borrow the store's single long-lived write connection, lazily opening it
+    /// on first use (sc-11202 / F-025). The caller must already hold the write
+    /// mutex (`guard` is its contents), so the returned `&mut Connection` is only
+    /// ever reachable by one thread at a time. The WAL/busy_timeout/foreign_keys
+    /// pragmas are established once, when the connection first opens; subsequent
+    /// writes skip the per-op `Connection::open` + pragma round-trip entirely.
+    fn write_connection<'a>(
+        &self,
+        guard: &'a mut Option<Connection>,
+    ) -> JobsStoreResult<&'a mut Connection> {
+        if guard.is_none() {
+            *guard = Some(self.open_connection()?);
+        }
+        Ok(guard
+            .as_mut()
+            .expect("write connection was just initialized"))
+    }
+
+    fn open_connection(&self) -> JobsStoreResult<Connection> {
         if let Some(parent) = self.db_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -6565,5 +6596,81 @@ mod mlx_routing_tests {
         assert!(video_mode_is_mlx_eligible("wan_2_2", "replace_person"));
         // Unknown modes are never eligible.
         assert!(!video_mode_is_mlx_eligible("ltx_2_3", "nonsense"));
+    }
+}
+
+#[cfg(test)]
+mod connection_pool_tests {
+    //! sc-11202 / F-025: the store keeps ONE long-lived write connection behind
+    //! its write mutex instead of opening a fresh one per op. These pin that the
+    //! long-lived connection still establishes WAL + busy_timeout + foreign_keys
+    //! exactly once, so the concurrency contract the per-op opener guaranteed is
+    //! unchanged.
+    use super::*;
+
+    /// The long-lived write connection carries the same three pragmas every
+    /// opener set before the refactor: a 5s `busy_timeout` (so a concurrent
+    /// worker+API writer waits on the lock instead of failing instantly),
+    /// `foreign_keys=on`, and WAL journal mode.
+    #[test]
+    fn long_lived_write_connection_has_wal_busy_timeout_and_foreign_keys() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = JobsStore::new(dir.path().join("jobs.db"));
+        store.initialize().expect("store initializes");
+
+        let mut guard = store.lock.lock();
+        let connection = store
+            .write_connection(&mut guard)
+            .expect("long-lived write connection");
+
+        let busy_timeout: i64 = connection
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .expect("busy_timeout pragma reads");
+        assert_eq!(busy_timeout, 5000, "5s busy_timeout established");
+
+        let foreign_keys: i64 = connection
+            .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+            .expect("foreign_keys pragma reads");
+        assert_eq!(foreign_keys, 1, "foreign_keys enforcement on");
+
+        let journal_mode: String = connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .expect("journal_mode pragma reads");
+        assert_eq!(journal_mode, "wal", "WAL journal mode established");
+    }
+
+    /// The write connection is opened once and REUSED across ops: a connection-
+    /// scoped `TEMP` table created on it survives into a later `write_connection`
+    /// call. A fresh `Connection::open` per op (the pre-refactor churn) would not
+    /// carry the temp table, so this fails if the long-lived connection is ever
+    /// re-created behind the mutex.
+    #[test]
+    fn write_connection_is_reused_across_calls() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = JobsStore::new(dir.path().join("jobs.db"));
+        store.initialize().expect("store initializes");
+
+        {
+            let mut guard = store.lock.lock();
+            let connection = store.write_connection(&mut guard).expect("write conn");
+            connection
+                .execute_batch("create temp table reuse_probe(x integer)")
+                .expect("temp table created on the long-lived connection");
+        }
+
+        let mut guard = store.lock.lock();
+        let connection = store.write_connection(&mut guard).expect("write conn");
+        let exists: i64 = connection
+            .query_row(
+                "select count(*) from sqlite_temp_master \
+                 where type = 'table' and name = 'reuse_probe'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("temp probe query");
+        assert_eq!(
+            exists, 1,
+            "the connection-scoped temp table persists → same long-lived connection reused"
+        );
     }
 }

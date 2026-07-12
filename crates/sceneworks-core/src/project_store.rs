@@ -3535,6 +3535,21 @@ fn connect_project_db(project_path: &Path) -> ProjectStoreResult<Connection> {
     Ok(connection)
 }
 
+/// Open `project.db` with the shared `busy_timeout` AND run the version-gated
+/// migrations, then hand back the ready connection. This is the house helper
+/// external store modules (e.g. `training_store`) should use instead of a raw
+/// `Connection::open(project_path.join("project.db"))`, which sets no
+/// `busy_timeout` (so concurrent worker+API access hits an immediate
+/// `SQLITE_BUSY` instead of waiting) and can miss migrations (sc-11202 / F-026).
+/// `apply_project_migrations` is `PRAGMA user_version`-gated, so the DDL only
+/// runs when the schema is actually behind — cheap on the common already-migrated
+/// path.
+pub(crate) fn connect_project_db_migrated(project_path: &Path) -> ProjectStoreResult<Connection> {
+    let connection = connect_project_db(project_path)?;
+    apply_project_migrations(&connection)?;
+    Ok(connection)
+}
+
 /// Assemble the on-disk asset sidecar from the worker-reported flat facts. Rust
 /// is the single owner of this envelope schema now (story 1656): the worker
 /// ships values (paths, dimensions, seed, recipe inputs) and Rust builds the
