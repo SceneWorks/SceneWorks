@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import socket
 import subprocess
+import threading
 import time
 
 import httpx
@@ -50,9 +51,93 @@ def safetensors_bytes() -> bytes:
 minimal_safetensors = safetensors_bytes
 
 
+class SpawnedProcess:
+    """A spawned API/worker binary whose pipes can't deadlock the test (F-042).
+
+    The children emit `tracing` output the whole time a test drives them. When a
+    spawn keeps ``stdout``/``stderr`` as ``PIPE`` and nobody reads them until the
+    child exits, the child blocks on ``write`` the moment either OS pipe buffer
+    fills (~64 KB) -- the test then hangs until its deadline and is mis-reported
+    as "job did not reach status" rather than the real cause.
+
+    This wrapper sends ``stdout`` to ``DEVNULL`` (the previous code captured it
+    but never read it) and drains ``stderr`` on a background daemon thread into an
+    in-memory buffer, so the child can always make progress. ``stderr_text()``
+    returns everything captured so far for failure messages, preserving the
+    stderr-on-early-exit debuggability the callers relied on.
+
+    It delegates the small slice of the ``Popen`` surface the tests use
+    (``poll``/``returncode``/``terminate``/``wait``/``kill``) so it drops in for
+    the old ``subprocess.Popen`` handles.
+    """
+
+    def __init__(self, popen: subprocess.Popen) -> None:
+        self._popen = popen
+        self._chunks: list[str] = []
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(
+            target=self._drain, name="spawned-stderr-drain", daemon=True
+        )
+        self._thread.start()
+
+    def _drain(self) -> None:
+        stream = self._popen.stderr
+        if stream is None:
+            return
+        # Iterating a text-mode pipe yields lines until EOF (child exit/close),
+        # so this loop drains continuously and ends on its own.
+        for line in stream:
+            with self._lock:
+                self._chunks.append(line)
+
+    def stderr_text(self) -> str:
+        """Return the child's captured stderr. If the child has already exited,
+        wait briefly for the drain thread to consume the final buffered bytes so
+        the failure message is complete."""
+        if self._popen.poll() is not None:
+            self._thread.join(timeout=5)
+        with self._lock:
+            return "".join(self._chunks)
+
+    # -- Popen delegation (only what the tests touch) ------------------------
+    def poll(self) -> int | None:
+        return self._popen.poll()
+
+    @property
+    def returncode(self) -> int | None:
+        return self._popen.returncode
+
+    def terminate(self) -> None:
+        self._popen.terminate()
+
+    def kill(self) -> None:
+        self._popen.kill()
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self._popen.wait(timeout=timeout)
+
+
+def spawn_process(command, *, cwd, env) -> SpawnedProcess:
+    """Spawn an API/worker binary with non-blocking pipe handling (F-042).
+
+    ``stdout`` is discarded to ``DEVNULL`` (it was captured but never read) and
+    ``stderr`` is drained by a background thread -- neither can fill and block the
+    child, so a chatty binary can no longer hang the test. Returns a
+    :class:`SpawnedProcess` that stands in for the old raw ``Popen`` handle."""
+    popen = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return SpawnedProcess(popen)
+
+
 def wait_for_health(
     base_url: str,
-    process: subprocess.Popen,
+    process: SpawnedProcess,
     runtime: str = "rust",
     timeout_seconds: float = 30.0,
 ) -> None:
@@ -62,7 +147,7 @@ def wait_for_health(
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            stderr = process.stderr.read() if process.stderr else ""
+            stderr = process.stderr_text()
             raise AssertionError(
                 f"{runtime} API exited early with code {process.returncode}: {stderr}"
             )

@@ -1,5 +1,7 @@
 # Image Model Research
 
+> **Historical — partially superseded.** The model recommendations here (Z-Image-Turbo, Qwen-Image-Edit) still informed the current app, but the Python/Diffusers worker path this doc describes as the default has been deleted and replaced by native Rust inference engines (MLX on macOS, candle/CUDA on Windows) — there is no Diffusers/Python worker. Kept for historical context — see the [README](../README.md) for the current architecture.
+
 ## Recommendation
 
 Use `z_image_turbo` as the first SceneWorks image-generation target, expose `z_image_edit` as the matching Diffusers image-to-image target, and keep `qwen_image_edit` available behind the same adapter boundary for higher-control edit workflows.

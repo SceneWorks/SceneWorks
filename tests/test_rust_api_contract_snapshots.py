@@ -17,7 +17,13 @@ import pytest
 # Shared, corruption-free fixtures (sc-8934 / F-132): the PNG + safetensors
 # builder and the API-spawn helpers used to be copy-pasted (and had drifted)
 # between this file and test_rust_api_worker_smoke.py.
-from rust_api_harness import PNG_1X1, free_port, safetensors_bytes, wait_for_health
+from rust_api_harness import (
+    PNG_1X1,
+    free_port,
+    safetensors_bytes,
+    spawn_process,
+    wait_for_health,
+)
 
 
 pytestmark = pytest.mark.parity
@@ -199,14 +205,7 @@ class ServerApiHarness:
             if rust_binary
             else ["cargo", "run", "-q", "-p", "sceneworks-rust-api"]
         )
-        self.process = subprocess.Popen(
-            command,
-            cwd=ROOT,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        self.process = spawn_process(command, cwd=ROOT, env=env)
         wait_for_health(self.base_url, self.process, "rust")
         self.client = httpx.Client(base_url=self.base_url, timeout=10)
 
