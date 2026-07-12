@@ -625,7 +625,8 @@ fn qwen_edit_candle_blocks_drive_the_fit_gate_and_reject() {
         "bf16 sequential 54.2 > 48 GB → reject on the smaller card"
     );
 
-    // The Lightning entry carries the same conservative base block so ITS edit gate is live too.
+    // The Lightning entry carries its own MEASURED additive-path block (sc-11666) so ITS edit gate is
+    // live too — q4 additive sequential 33.1 + 2 headroom = 35.1 > 30 → reject on the small card.
     let lightning = builtin_model_entry("qwen_image_edit_2511_lightning");
     let lightning_entry = lightning.as_object().expect("lightning entry object");
     assert!(
@@ -636,7 +637,7 @@ fn qwen_edit_candle_blocks_drive_the_fit_gate_and_reject() {
     assert_eq!(
         sequential_overflow_gb(Some(l_seq), card30),
         Some(l_seq),
-        "lightning sequential 38.9 > 30 GB → reject (gate live for the distill entry too)"
+        "lightning sequential 35.1 > 30 GB → reject (gate live for the distill entry too)"
     );
 }
 

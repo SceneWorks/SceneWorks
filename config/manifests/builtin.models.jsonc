@@ -729,20 +729,25 @@
         "families": ["qwen-image"],
         "types": ["style", "enhance", "character"]
       },
-      // candle/CUDA VRAM gate (epic 10765 sc-11019) — the Lightning distill shares the IDENTICAL
-      // Qwen-Image-Edit-2511 base weights (the same SceneWorks/qwen-image-edit-2511-mlx q4/q8/bf16 tiers)
-      // and the identical dense Qwen2.5-VL sequential floor, so it carries the base (true-CFG, 8-step)
-      // measurements from `qwen_image_edit_2511`. Lightning runs 4-step CFG-OFF (a single MMDiT forward,
-      // no cond/uncond batch doubling), so its real peaks are ≤ these — a conservative upper bound that
-      // never under-admits. measured:false — the CFG-off distill path (with the lightx2v LoRA fused) was
-      // not itself A/B-measured (needs the harness lightning flag + the distill LoRA staged); tracked as a
-      // follow-up. The numbers still drive the edit fit-gate identically: it reads vramGbByTier /
-      // sequentialPeakGb regardless of the `measured` provenance flag.
+      // candle/CUDA VRAM gate (epic 10765) — MEASURED through the shared additive-LoRA path (sc-11666;
+      // candle-gen #425 / sc-11091), replacing the sc-11019 base-copied estimate. q4/q8 apply the lightx2v
+      // 4-step distill ADDITIVELY on the packed base (candle_gen::quant::AdaptLinear keeps the base packed +
+      // small low-rank branches — no dense fold), so their footprint ≈ the base tier: resident within ~0.3 GB
+      // (q4 57.0 vs base 56.7; q8 65.8 vs 69.0) and sequential LOWER than the base's true-CFG number (q4 33.1
+      // vs 36.9) because Lightning runs 4-step CFG-OFF (one MMDiT forward, no cond/uncond batch doubling).
+      // bf16 is a DENSE base so the distill folds bit-exact via merge_adapters (the eager load-merge path),
+      // which peaks HEAVIER than base bf16: resident 87.4 (vs 81.7), sequential 53.2 (vs 52.2). Measured on an
+      // RTX PRO 6000 (Blackwell sm_120) at 1024²/4-step CFG-off via the candle-gen-qwen-image edit offload A/B
+      // harness (qwen_edit_probed_generate_for_offload_ab + QWEN_EDIT_LIGHTNING=1, device-level idle-gated
+      // GPU 0 peak), pointed at each staged SceneWorks/qwen-image-edit-2511-mlx tier + the staged lightx2v
+      // distill LoRA. Resident/sequential pixels byte-identical per tier (q4 md5 08385ae1, q8 e78141a8, bf16
+      // ea51b237). The edit fit-gate (qwen_edit_candle.rs, sc-10968) reads vramGbByTier vs free VRAM to choose
+      // sequential-offload vs reject; minMemoryGb 59 gates the DEFAULT (q4) tier (resident 57.0).
       "candle": {
         "minMemoryGb": 59,
-        "vramGbByTier": { "q4": 56.7, "q8": 69.0, "bf16": 81.7 },
-        "sequentialPeakGb": { "q4": 36.9, "q8": 39.3, "bf16": 52.2 },
-        "measured": false
+        "vramGbByTier": { "q4": 57.0, "q8": 65.8, "bf16": 87.4 },
+        "sequentialPeakGb": { "q4": 33.1, "q8": 39.3, "bf16": 53.2 },
+        "measured": true
       },
       "ui": {
         "label": "Qwen Image Edit (2511) Lightning",
