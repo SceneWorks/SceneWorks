@@ -690,20 +690,20 @@ describe("ImageStudio Krea image edit LoRA (epic 10871)", () => {
   });
 
   // Two-reference edit (epic 10871 P1.3): a model whose `ui.editReferences` adds an optional second
-  // (person) source — scene = image 1, person = image 2, fixed order.
+  // source — any two images, image 1 (required) + image 2 (optional), fixed order.
   const KREA_RAW_TWOREF = {
     ...KREA_RAW,
     ui: {
       editReferences: {
-        secondaryLabel: "Person image",
-        secondaryHint: "Optional — a person to place into the scene.",
+        secondaryLabel: "Image 2 (optional)",
+        secondaryHint: "Optional — a second image to combine with Image 1.",
       },
     },
   };
   const SCENE = { id: "scene-plate", projectId: "project_1", type: "image", displayName: "Scene Plate", status: {} };
   const PERSON = { id: "person-plate", projectId: "project_1", type: "image", displayName: "Person Plate", status: {} };
 
-  // Select an asset into the next empty source picker (the scene picker's button flips to "Change"
+  // Select an asset into the next empty source picker (the first picker's button flips to "Change"
   // once set, so the remaining "Select image" button is always the next empty slot).
   async function pickNextSource(assetName) {
     const btn = [...document.body.querySelectorAll(".asset-picker-head button")].find(
@@ -716,9 +716,9 @@ describe("ImageStudio Krea image edit LoRA (epic 10871)", () => {
     await click([...dialog.querySelectorAll("button")].find((b) => b.textContent === "Use Selection"));
   }
 
-  it("renders the optional person picker only when the model declares ui.editReferences", async () => {
+  it("renders the optional second-image picker only when the model declares ui.editReferences", async () => {
     const { root: root2, container: c2 } = mountRoot();
-    // Plain Krea (no editReferences) → no person slot.
+    // Plain Krea (no editReferences) → no second-image slot.
     await act(async () => {
       root2.render(
         <AppContext.Provider value={baseContext({ imageModels: [KREA_RAW], loras: [EDIT_LORA], assets: [SCENE] })}>
@@ -728,29 +728,29 @@ describe("ImageStudio Krea image edit LoRA (epic 10871)", () => {
     });
     await act(async () => {});
     await click([...document.body.querySelectorAll(".mode-tabs button")].find((b) => b.textContent === "Edit"));
-    expect(document.body.textContent).not.toContain("Person image");
+    expect(document.body.textContent).not.toContain("Image 2 (optional)");
     await unmountRoot(root2, c2);
 
-    // Krea with editReferences → the labeled optional person slot appears.
+    // Krea with editReferences → the labeled optional second-image slot appears.
     await render(baseContext({ imageModels: [KREA_RAW_TWOREF], loras: [EDIT_LORA], assets: [SCENE, PERSON] }));
     await enterEdit();
-    expect(container.textContent).toContain("Person image");
-    expect(container.textContent).toContain("No person image selected (optional)");
+    expect(container.textContent).toContain("Image 2 (optional)");
+    expect(container.textContent).toContain("No second image selected (optional)");
   });
 
-  it("sends the ordered [scene, person] pair as referenceAssetIds when a person is chosen", async () => {
+  it("sends the ordered [image1, image2] pair as referenceAssetIds when a second image is chosen", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     await render(
       baseContext({ createImageJob, imageModels: [KREA_RAW_TWOREF], loras: [EDIT_LORA], assets: [SCENE, PERSON], selectedAsset: null }),
     );
     await enterEdit();
-    await pickNextSource("Scene Plate"); // → sourceAssetId (scene, image 1)
-    await pickNextSource("Person Plate"); // → editPersonAssetId (person, image 2)
+    await pickNextSource("Scene Plate"); // → sourceAssetId (image 1)
+    await pickNextSource("Person Plate"); // → editSecondAssetId (image 2)
     await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
 
     const payload = createImageJob.mock.calls[0][0];
     expect(payload.mode).toBe("edit_image");
-    // Fixed order preserved: scene first, person second.
+    // Fixed order preserved: image 1 first, image 2 second.
     expect(payload.referenceAssetIds).toEqual(["scene-plate", "person-plate"]);
     // The single sourceAssetId is dropped in favor of the ordered pair.
     expect(payload.sourceAssetId).toBeNull();
@@ -758,7 +758,7 @@ describe("ImageStudio Krea image edit LoRA (epic 10871)", () => {
     expect(payload.loras.some((l) => l.id === "krea2_identity_edit")).toBe(true);
   });
 
-  it("falls back to the single sourceAssetId when no person is chosen (person is optional)", async () => {
+  it("falls back to the single sourceAssetId when no second image is chosen (image 2 is optional)", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     await render(
       baseContext({ createImageJob, imageModels: [KREA_RAW_TWOREF], loras: [EDIT_LORA], assets: [SCENE, PERSON], selectedAsset: null }),
