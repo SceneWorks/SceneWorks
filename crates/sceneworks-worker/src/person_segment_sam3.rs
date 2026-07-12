@@ -27,7 +27,6 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use crate::person_segment::{check_segment_canceled, SegmentProgress, CANCEL_MESSAGE};
 use gen_core::CancelFlag;
 use mlx_gen::weights::Weights;
 use mlx_gen_sam3::{
@@ -37,8 +36,9 @@ use mlx_gen_sam3::{
 use mlx_rs::Array;
 
 use crate::person_segment_sam3_common::{
-    mask_centroid_x, mask_to_frame, normalize_chw, select_object, BoxNorm, Sam3FrameOutput,
-    CONCEPT_PROMPT, INPUT_SIZE, MASK_GRID,
+    check_segment_canceled, frame_mask_for_object, mask_to_frame, normalize_chw, paint_order,
+    per_frame_masks, select_object, BoxNorm, Sam3FrameOutput, SegmentProgress, CANCEL_MESSAGE,
+    CONCEPT_PROMPT, INPUT_SIZE,
 };
 use crate::{WorkerError, WorkerResult};
 
@@ -414,29 +414,6 @@ pub(crate) fn segment_track_blocking(
     Ok(masks)
 }
 
-/// Emit the selected object's binary mask on one SAM3 frame, or an empty vec when the object
-/// isn't present (legitimate per-frame absence → orchestrator box-fallback). Guards the
-/// `obj_ids`/`masks` parallel-vec assumption: an id present in `obj_ids` but with no matching
-/// entry in `masks` is a malformed engine output, surfaced as an `Engine` error rather than
-/// indexing OOB (sc-8905, F-103).
-fn frame_mask_for_object(
-    frame: &VideoFrameOutput,
-    selected: i32,
-    width: u32,
-    height: u32,
-) -> WorkerResult<Vec<u8>> {
-    let Some(i) = frame.obj_ids.iter().position(|&o| o == selected) else {
-        return Ok(Vec::new());
-    };
-    let logits = frame.masks.get(i).ok_or_else(|| {
-        WorkerError::Engine(format!(
-            "sam3 frame has obj id {selected} at index {i} but only {} masks",
-            frame.masks.len()
-        ))
-    })?;
-    mask_to_frame(logits, MASK_GRID, width, height)
-}
-
 /// Normalize an `[x1, y1, x2, y2]` pixel box (clamped to the image) to SAM3's `[cx, cy, w, h]`
 /// ∈ [0, 1]. SAM3 squashes the image to a fixed 1008² square (NOT aspect-preserving), so a box's
 /// normalized source coordinates equal its normalized model-input coordinates — no letterbox math.
@@ -763,45 +740,11 @@ pub(crate) fn segment_all_persons_in_memory(
             e => WorkerError::Engine(format!("sam3 propagate: {e}")),
         })?;
 
-    // Paint order: each object's centroid-x in the FIRST frame it appears, ascending (tie-break on
-    // first-seen frame, then object id, so repeated runs agree).
-    use std::collections::BTreeMap;
-    let mut first_seen: BTreeMap<i32, (usize, f64)> = BTreeMap::new();
-    for (f, frame) in outputs.iter().enumerate() {
-        for (oid, logits) in frame.obj_ids.iter().zip(&frame.masks) {
-            if first_seen.contains_key(oid) {
-                continue;
-            }
-            if let Some(cx) = mask_centroid_x(logits, MASK_GRID) {
-                first_seen.insert(*oid, (f, cx));
-            }
-        }
-    }
-    let mut order: Vec<i32> = first_seen.keys().copied().collect();
-    order.sort_by(|a, b| {
-        let (fa, xa) = first_seen[a];
-        let (fb, xb) = first_seen[b];
-        xa.partial_cmp(&xb)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(fa.cmp(&fb))
-            .then(a.cmp(b))
-    });
-
-    // `zip` already bounds to the shorter of obj_ids/masks, so the parallel-vec assumption is
-    // safe here; `mask_to_frame` now returns an `Engine` error on a malformed (grid-mismatched)
-    // mask instead of the empty-vec sentinel, so propagate rather than silently dropping it
-    // (sc-8905, F-103).
-    let per_frame = outputs
-        .iter()
-        .map(|frame| {
-            frame
-                .obj_ids
-                .iter()
-                .zip(&frame.masks)
-                .map(|(oid, logits)| Ok((*oid, mask_to_frame(logits, MASK_GRID, width, height)?)))
-                .collect::<WorkerResult<Vec<_>>>()
-        })
-        .collect::<WorkerResult<Vec<_>>>()?;
+    // Paint order + per-frame masks are backend-neutral pure logic shared with the candle twin via
+    // `person_segment_sam3_common` (sc-11191, F-018), so the tie-break and mask selection stay
+    // byte-identical on both platforms.
+    let order = paint_order(&outputs);
+    let per_frame = per_frame_masks(&outputs, width, height)?;
 
     Ok(AllPersonMasks {
         order,
@@ -815,8 +758,9 @@ pub(crate) fn segment_all_persons_in_memory(
 mod tests {
     use super::*;
     // The checkpoint filenames now live in the shared module; the real-weights smokes below join them
-    // onto a snapshot dir to build the model/tokenizer paths.
-    use crate::person_segment_sam3_common::{MODEL_FILE, TOKENIZER_FILE};
+    // onto a snapshot dir to build the model/tokenizer paths. `MASK_GRID` sizes the synthetic mask
+    // fixtures (the production paths call it inside the shared `person_segment_sam3_common` helpers).
+    use crate::person_segment_sam3_common::{MASK_GRID, MODEL_FILE, TOKENIZER_FILE};
 
     /// sc-8846 / F-044: the smart-select model cache is keyed by `(model_path, quant_bits)`, so a
     /// re-pinned weight snapshot **or** a `SCENEWORKS_SAM3_QUANT` flip is a cache miss (rebuild),

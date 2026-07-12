@@ -17,35 +17,40 @@
 //! (`SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS`, default 300 s), so the two caches age out together and
 //! a single setting bounds resident model memory across both lanes.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{mpsc, OnceLock};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use gen_core::core_llm::{
     load_for_model_with, Constraint, LoadSpec, ModelRequirements, Quantize, TextLlm,
 };
-use tokio::sync::oneshot;
 
+use crate::cache_thread::{self, CacheJob, CacheThread, Fingerprint, SeamMessages};
 use crate::{WorkerError, WorkerResult};
 
-type RefineJob = Box<dyn FnOnce(&mut RefineModelCache) + Send + 'static>;
+/// The refine cache is a single-resident [`CacheThread`] keyed by [`RefineModelCacheKey`], holding a
+/// loaded `Box<dyn TextLlm>`. The generic scaffolding (dedicated worker thread, idle-timeout
+/// eviction, panic containment, `Fingerprint`, oneshot-reply seam) lives in [`crate::cache_thread`];
+/// this module supplies only the key derivation, the loader, and the message strings (sc-11191, F-019).
+// Referenced only from the tests' worker closures (the production seam infers the `CacheThread` type
+// from the job channel), so it reads as dead on the non-test lib build.
+#[allow(dead_code)]
+type RefineModelCache = CacheThread<RefineModelCacheKey, Box<dyn TextLlm>>;
+type RefineJob = CacheJob<RefineModelCacheKey, Box<dyn TextLlm>>;
 
 /// Reuse the generator cache's idle-eviction knob so both resident-model caches age out on the same
 /// window and one setting bounds memory across the image/video AND text lanes.
 const REFINE_CACHE_IDLE_SECONDS_ENV: &str = "SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS";
 const DEFAULT_REFINE_CACHE_IDLE_SECONDS: u64 = 300;
 
+/// The refine cache DOES free the backend cache before a cold load (unlike the generator cache): the
+/// prior resident ~16 GB model's backend allocation is released BEFORE the new load allocates, so
+/// peak memory is one model, not two. This is the deliberate divergence from the generator cache —
+/// see the [`crate::cache_thread`] module docs; do not silently unify it away.
+const REFINE_EVICT_BEFORE_LOAD: bool = true;
+
 static REFINE_WORKER: OnceLock<mpsc::Sender<RefineJob>> = OnceLock::new();
-
-struct RefineModelCache {
-    entry: Option<RefineModelCacheEntry>,
-}
-
-struct RefineModelCacheEntry {
-    key: RefineModelCacheKey,
-    model: Box<dyn TextLlm>,
-}
 
 /// Identity of a loaded refine model. Two loads collide (a cache hit) iff they would produce the
 /// same resident model: the same weights source + quantization, resolved against the same selection
@@ -60,40 +65,6 @@ pub(crate) struct RefineModelCacheKey {
     vision: bool,
     video: bool,
     constraints: Vec<Constraint>,
-}
-
-/// Content-change proxy for the weights snapshot dir referenced in the cache key. We stat `(size,
-/// mtime)` rather than hashing multi-GB weights: mtime+size is a cheap, good content-change proxy,
-/// and a re-convert lands via a finalize/rename that bumps the dir's mtime, so a re-converted
-/// snapshot at the same path is a distinct key (same rationale as `generator_cache::Fingerprint`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Fingerprint {
-    /// `metadata()` succeeded: `(len, modified)`. `modified` is `None` on the rare platform/FS that
-    /// reports no mtime, in which case `len` alone carries the weaker signal.
-    Present {
-        size: u64,
-        mtime: Option<SystemTime>,
-    },
-    /// `metadata()` errored (path missing / transient stat failure / permissions). Kept DISTINCT
-    /// from any `Present` value so a stat error forces a MISS (rebuild) rather than serving a stale
-    /// entry — the load that follows surfaces the real error. Two `Unavailable`s compare equal
-    /// (`Eq` stays reflexive), but that only arises when the file is genuinely gone on both keys, in
-    /// which case the reload fails loudly anyway.
-    Unavailable,
-}
-
-impl Fingerprint {
-    /// Snapshot `(size, mtime)` for `path` once at key-construction time so the fingerprint is
-    /// stable across the lookup within a single request (no mtime drift mid-request).
-    fn of(path: &Path) -> Self {
-        match std::fs::metadata(path) {
-            Ok(meta) => Self::Present {
-                size: meta.len(),
-                mtime: meta.modified().ok(),
-            },
-            Err(_) => Self::Unavailable,
-        }
-    }
 }
 
 impl RefineModelCacheKey {
@@ -111,50 +82,6 @@ impl RefineModelCacheKey {
     }
 }
 
-impl RefineModelCache {
-    fn new() -> Self {
-        Self { entry: None }
-    }
-
-    /// Drop the resident model so the next job reloads from scratch. Returns the evicted key for the
-    /// idle-eviction log.
-    fn evict(&mut self) -> Option<RefineModelCacheKey> {
-        self.entry.take().map(|entry| entry.key)
-    }
-
-    /// Load (on a miss) or reuse (on a hit) the model for `key`/`spec`/`reqs`, then run `run` against
-    /// it. A miss first drops the resident model (single-resident: only one refine model in memory at
-    /// a time) so the old ~16 GB weights are freed before the new load allocates.
-    fn with_model<R>(
-        &mut self,
-        key: RefineModelCacheKey,
-        spec: LoadSpec,
-        reqs: ModelRequirements,
-        load_error_context: String,
-        run: impl FnOnce(&dyn TextLlm) -> WorkerResult<R>,
-    ) -> WorkerResult<R> {
-        if self.entry.as_ref().map_or(true, |entry| entry.key != key) {
-            // Free the prior resident model BEFORE loading the new one so peak memory is one model,
-            // not two.
-            self.entry = None;
-            release_backend_cache_after_evict();
-            let model = load_for_model_with(&spec, &reqs)
-                .map_err(|error| WorkerError::Engine(format!("{load_error_context}: {error}")))?;
-            self.entry = Some(RefineModelCacheEntry {
-                key: key.clone(),
-                model,
-            });
-        }
-
-        let Some(entry) = self.entry.as_ref() else {
-            return Err(WorkerError::Engine(
-                "Refine model cache entry missing after load.".to_owned(),
-            ));
-        };
-        run(entry.model.as_ref())
-    }
-}
-
 fn refine_worker() -> &'static mpsc::Sender<RefineJob> {
     REFINE_WORKER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<RefineJob>();
@@ -169,56 +96,22 @@ fn refine_worker() -> &'static mpsc::Sender<RefineJob> {
     })
 }
 
+/// Thin wrapper over the generic [`cache_thread::run_cache_worker`]: evict-before-load
+/// ([`REFINE_EVICT_BEFORE_LOAD`]) to bound peak memory to one ~16 GB model, plus the refine-specific
+/// idle-eviction log.
 fn run_refine_cache_worker(rx: mpsc::Receiver<RefineJob>, idle_timeout: Option<Duration>) {
-    let mut cache = RefineModelCache::new();
-    loop {
-        let job = match recv_refine_job(&rx, idle_timeout) {
-            RefineWorkerEvent::Job(job) => job,
-            RefineWorkerEvent::IdleTimeout => {
-                if let Some(key) = cache.evict() {
-                    release_backend_cache_after_evict();
-                    tracing::info!(
-                        event = "refine_model_cache_idle_evicted",
-                        source = %key.source.display(),
-                        idleSeconds = idle_timeout.map_or(0, |timeout| timeout.as_secs()),
-                    );
-                }
-                continue;
-            }
-            RefineWorkerEvent::Disconnected => break,
-        };
-        // Backstop: contain any panic that escapes a job's own guard so this single shared cache
-        // thread can never die and poison every later refine (mirrors sc-6067 in generator_cache).
-        // The cache is reset on a contained panic because post-abort MLX/Metal state is suspect.
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&mut cache))).is_err()
-            && cache.evict().is_some()
-        {
-            release_backend_cache_after_evict();
-        }
-    }
-}
-
-enum RefineWorkerEvent {
-    Job(RefineJob),
-    IdleTimeout,
-    Disconnected,
-}
-
-fn recv_refine_job(
-    rx: &mpsc::Receiver<RefineJob>,
-    idle_timeout: Option<Duration>,
-) -> RefineWorkerEvent {
-    match idle_timeout {
-        Some(timeout) => match rx.recv_timeout(timeout) {
-            Ok(job) => RefineWorkerEvent::Job(job),
-            Err(mpsc::RecvTimeoutError::Timeout) => RefineWorkerEvent::IdleTimeout,
-            Err(mpsc::RecvTimeoutError::Disconnected) => RefineWorkerEvent::Disconnected,
+    cache_thread::run_cache_worker(
+        rx,
+        idle_timeout,
+        REFINE_EVICT_BEFORE_LOAD,
+        |key: &RefineModelCacheKey, idle_seconds| {
+            tracing::info!(
+                event = "refine_model_cache_idle_evicted",
+                source = %key.source.display(),
+                idleSeconds = idle_seconds,
+            );
         },
-        None => match rx.recv() {
-            Ok(job) => RefineWorkerEvent::Job(job),
-            Err(_) => RefineWorkerEvent::Disconnected,
-        },
-    }
+    );
 }
 
 fn refine_cache_idle_timeout_from_env() -> Option<Duration> {
@@ -226,39 +119,28 @@ fn refine_cache_idle_timeout_from_env() -> Option<Duration> {
 }
 
 fn refine_cache_idle_timeout(raw: Option<&str>) -> Option<Duration> {
-    let seconds = raw
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_REFINE_CACHE_IDLE_SECONDS);
-    (seconds > 0).then(|| Duration::from_secs(seconds))
+    cache_thread::idle_timeout_from_secs(raw, DEFAULT_REFINE_CACHE_IDLE_SECONDS)
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
-fn release_backend_cache_after_evict() {
-    mlx_rs::memory::clear_cache();
-}
-
-#[cfg(any(not(target_os = "macos"), test))]
-fn release_backend_cache_after_evict() {}
-
-/// Best-effort human-readable text from a caught panic payload (the `&str`/`String` a `panic!`
-/// produces), so a contained mlx-rs `.unwrap()`/`.expect()` panic surfaces its real cause.
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_owned()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "unknown panic payload".to_owned()
-    }
-}
+/// User-facing message strings for the refine cache seam, preserving the exact wording the worker
+/// emitted before the `cache_thread` extraction (sc-11191, F-019).
+const REFINE_SEAM_MESSAGES: SeamMessages = SeamMessages {
+    entry_missing: "Refine model cache entry missing after load.",
+    panic_reset: "Refine generation panicked and was contained (the engine likely ran out of \
+                  memory; the cached model was reset)",
+    worker_stopped: "Refine model cache worker stopped",
+    worker_dropped: "Refine model cache worker dropped the job result",
+};
 
 /// Run `run` against the cached (or freshly loaded) refine model for `spec`/`reqs`. Mirrors
 /// [`crate::generator_cache::with_cached_generator`]: the model lives on the dedicated cache thread,
 /// `run` executes there (so it may hold a `!Send` reference to the model), and only the `R` result
 /// crosses back. `run` is where the caller drives `model.generate(...)` — streaming tokens through
 /// its own callback and honoring the request's cancel flag.
+///
+/// A cache miss frees the prior resident model's backend allocation BEFORE loading the new one
+/// (evict-before-load, [`REFINE_EVICT_BEFORE_LOAD`]) so peak memory is one ~16 GB model, not two —
+/// the deliberate divergence from the generator cache.
 pub(crate) async fn with_cached_refiner<R>(
     spec: LoadSpec,
     reqs: ModelRequirements,
@@ -270,35 +152,18 @@ where
 {
     let key = RefineModelCacheKey::new(&spec, &reqs);
     let load_error_context = load_error_context.into();
-    let (reply_tx, reply_rx) = oneshot::channel::<WorkerResult<R>>();
-    let job = Box::new(move |cache: &mut RefineModelCache| {
-        // Contain a panic from inside the provider (e.g. mlx-rs `.unwrap()`-ing a Metal allocation
-        // failure) so it fails THIS job with a clean error instead of unwinding out of the shared
-        // cache thread and stopping every subsequent refine. The cached model is evicted on panic —
-        // post-abort MLX/Metal state is suspect, so the next job reloads fresh.
-        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            cache.with_model(key, spec, reqs, load_error_context, run)
-        })) {
-            Ok(result) => result,
-            Err(panic) => {
-                if cache.evict().is_some() {
-                    release_backend_cache_after_evict();
-                }
-                Err(WorkerError::Engine(format!(
-                    "Refine generation panicked and was contained (the engine likely ran out of \
-                     memory; the cached model was reset): {}",
-                    panic_message(panic.as_ref())
-                )))
-            }
-        };
-        let _ = reply_tx.send(result);
-    });
-    refine_worker()
-        .send(job)
-        .map_err(|_| WorkerError::Engine("Refine model cache worker stopped".to_owned()))?;
-    reply_rx.await.map_err(|_| {
-        WorkerError::Engine("Refine model cache worker dropped the job result".to_owned())
-    })?
+    // The loader owns the refine-specific error-context wrapping; evict-before-load happens in the
+    // generic `CacheThread::with_model` before this runs (see `REFINE_EVICT_BEFORE_LOAD`).
+    let load = move || {
+        load_for_model_with(&spec, &reqs)
+            .map_err(|error| WorkerError::Engine(format!("{load_error_context}: {error}")))
+    };
+    // Adapt the user's `&dyn TextLlm` run closure to the generic cache's resident `Box<dyn TextLlm>`.
+    // The `&Box<_>` param is inherent to the seam (the cache stores the boxed trait object), so
+    // silence the borrowed-box lint here rather than boxing/unboxing again.
+    #[allow(clippy::borrowed_box)]
+    let run = move |model: &Box<dyn TextLlm>| run(&**model);
+    cache_thread::run_cached(refine_worker(), key, load, run, REFINE_SEAM_MESSAGES).await
 }
 
 #[cfg(test)]
@@ -382,6 +247,7 @@ mod tests {
     #[test]
     fn cache_key_changes_when_weights_dir_is_replaced_at_same_path() {
         use std::io::Write;
+        use std::time::SystemTime;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let source = dir.path().join("snapshot");
@@ -473,11 +339,14 @@ mod tests {
         }
     }
 
-    fn stub_entry() -> RefineModelCacheEntry {
-        RefineModelCacheEntry {
-            key: RefineModelCacheKey::new(&spec("/models/stub"), &ModelRequirements::default()),
-            model: Box::new(StubLlm),
-        }
+    fn stub_key() -> RefineModelCacheKey {
+        RefineModelCacheKey::new(&spec("/models/stub"), &ModelRequirements::default())
+    }
+
+    /// Seed the generic cache with a resident stub model (the test replacement for directly assigning
+    /// the old `RefineModelCache.entry`, now that the entry lives in `cache_thread`).
+    fn seed_stub_entry(cache: &mut RefineModelCache) {
+        cache.install(stub_key(), Box::new(StubLlm));
     }
 
     #[test]
@@ -488,7 +357,7 @@ mod tests {
         });
         let (seed_tx, seed_rx) = mpsc::channel();
         tx.send(Box::new(move |cache: &mut RefineModelCache| {
-            cache.entry = Some(stub_entry());
+            seed_stub_entry(cache);
             seed_tx.send(()).expect("ack cache seed");
         }))
         .expect("seed cache entry");
@@ -504,9 +373,7 @@ mod tests {
             thread::sleep(Duration::from_millis(50));
             let (reply_tx, reply_rx) = mpsc::channel();
             tx.send(Box::new(move |cache: &mut RefineModelCache| {
-                reply_tx
-                    .send(cache.entry.is_none())
-                    .expect("send cache state");
+                reply_tx.send(cache.is_empty()).expect("send cache state");
             }))
             .expect("check cache state");
             if reply_rx
@@ -533,7 +400,7 @@ mod tests {
         });
         let (seed_tx, seed_rx) = mpsc::channel();
         tx.send(Box::new(move |cache: &mut RefineModelCache| {
-            cache.entry = Some(stub_entry());
+            seed_stub_entry(cache);
             seed_tx.send(()).expect("ack cache seed");
         }))
         .expect("seed cache entry");
@@ -545,9 +412,7 @@ mod tests {
 
         let (reply_tx, reply_rx) = mpsc::channel();
         tx.send(Box::new(move |cache: &mut RefineModelCache| {
-            reply_tx
-                .send(cache.entry.is_some())
-                .expect("send cache state");
+            reply_tx.send(!cache.is_empty()).expect("send cache state");
         }))
         .expect("check cache state");
         assert!(
@@ -566,20 +431,20 @@ mod tests {
     // changes across a miss by tracking a load counter.
     #[test]
     fn with_model_reuses_on_hit_and_reloads_on_miss() {
-        // Drive the cache directly (not through the async worker) so we can count loads. `with_model`
-        // itself calls the real `load_for_model_with`, so instead we assert the reuse policy on the
-        // entry lifecycle: seed an entry, then a matching key must keep it and a differing key must
-        // replace it. We stub the load by pre-seeding and checking `entry` identity via the key.
-        let mut cache = RefineModelCache::new();
-        cache.entry = Some(stub_entry());
-        let seeded_key = cache.entry.as_ref().map(|e| e.key.clone()).unwrap();
+        // Drive the cache directly (not through the async worker) so we can assert the reuse policy on
+        // the entry lifecycle: seed an entry, then a matching key must keep it resident and a differing
+        // key must be a miss. (`with_model` calls the real `load_for_model_with`, so we exercise the
+        // key identity rather than a real load.)
+        let mut cache = RefineModelCache::new(REFINE_EVICT_BEFORE_LOAD);
+        seed_stub_entry(&mut cache);
+        let seeded_key = cache.resident_key().cloned().unwrap();
 
         // Same key → hit: the entry is untouched (same key still resident).
         let hit_key =
             RefineModelCacheKey::new(&spec("/models/stub"), &ModelRequirements::default());
         assert_eq!(seeded_key, hit_key);
         assert!(
-            cache.entry.as_ref().is_some_and(|e| e.key == hit_key),
+            cache.resident_key() == Some(&hit_key),
             "a matching key must keep the resident model"
         );
 

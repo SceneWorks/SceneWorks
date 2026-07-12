@@ -14,8 +14,35 @@
 
 use std::path::{Path, PathBuf};
 
+use gen_core::CancelFlag;
+
 use crate::downloads::{ensure_hf_cached_file, DownloadContext};
-use crate::{Settings, WorkerResult};
+use crate::{Settings, WorkerError, WorkerResult};
+
+/// Cancel copy surfaced when a SAM2/SAM3 person segmentation is interrupted by a user cancel — either
+/// by an engine's per-frame propagate cancel contract (gen-core d8038beb / sc-8972) or by the coarse
+/// checks around the cold weight load (sc-8807). Shared by the SAM2 module ([`crate::person_segment`])
+/// and both SAM3 twins (sc-11191, F-018): the candle twin is off-Mac, so it cannot reach the Mac-only
+/// `person_segment`; hoisting the trio here gives both cfg-exclusive twins ONE definition and stops a
+/// tweak in one silently diverging from the other.
+pub(crate) const CANCEL_MESSAGE: &str = "Person segmentation canceled by user.";
+
+/// Per-propagated-frame progress callback `(frame_index, total_frames)`, invoked from the blocking
+/// thread after each propagated frame (the gen-core d8038beb video per-step progress contract).
+/// Boxed + `Send` so call sites can move it into `spawn_blocking`. Shared by the SAM2/SAM3 modules
+/// (sc-11191, F-018).
+pub(crate) type SegmentProgress = Box<dyn FnMut(usize, usize) + Send>;
+
+/// Bail out with [`WorkerError::Canceled`] when the threaded flag has been tripped — the coarse
+/// cancel seam guarding the phases the engine cannot observe (frame decode, the cold multi-GB weight
+/// load/parse, quantize). The engine itself checks the same flag between frames (sc-8807). Shared by
+/// the SAM2/SAM3 modules (sc-11191, F-018).
+pub(crate) fn check_segment_canceled(cancel: Option<&CancelFlag>) -> WorkerResult<()> {
+    if cancel.is_some_and(CancelFlag::is_cancelled) {
+        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+    }
+    Ok(())
+}
 
 /// SAM3 checkpoint files (loaded stock from `facebook/sam3`, no conversion).
 pub(crate) const MODEL_FILE: &str = "model.safetensors";
@@ -271,6 +298,88 @@ pub(crate) fn mask_centroid_x(mask_logits: &[f32], grid: usize) -> Option<f64> {
     (n > 0).then(|| sum_x / n as f64)
 }
 
+/// Emit the selected object's binary mask on one SAM3 frame, or an empty vec when the object isn't
+/// present (legitimate per-frame absence → orchestrator box-fallback). Guards the `obj_ids`/`masks`
+/// parallel-vec assumption: an id present in `obj_ids` but with no matching entry in `masks` is a
+/// malformed engine output, surfaced as an `Engine` error rather than indexing OOB (sc-8905, F-103).
+///
+/// Generic over [`Sam3FrameOutput`] so the identical selection/emit runs on either backend's frame
+/// type — the last verbatim duplicate between the two SAM3 twins (sc-11191, F-018).
+pub(crate) fn frame_mask_for_object<F: Sam3FrameOutput>(
+    frame: &F,
+    selected: i32,
+    width: u32,
+    height: u32,
+) -> WorkerResult<Vec<u8>> {
+    let Some(i) = frame.obj_ids().iter().position(|&o| o == selected) else {
+        return Ok(Vec::new());
+    };
+    let logits = frame.masks().get(i).ok_or_else(|| {
+        WorkerError::Engine(format!(
+            "sam3 frame has obj id {selected} at index {i} but only {} masks",
+            frame.masks().len()
+        ))
+    })?;
+    mask_to_frame(logits, MASK_GRID, width, height)
+}
+
+/// Stable left-to-right paint order for the SCAIL-2 painter: each object's centroid-x in the FIRST
+/// frame it appears, ascending (tie-break on first-seen frame, then object id, so repeated runs
+/// agree). Generic over [`Sam3FrameOutput`] so both SAM3 twins share ONE definition — a tie-break
+/// tweak can no longer silently change SCAIL-2 palette assignment on one platform only (sc-11191,
+/// F-018).
+pub(crate) fn paint_order<F: Sam3FrameOutput>(outputs: &[F]) -> Vec<i32> {
+    use std::collections::BTreeMap;
+    let mut first_seen: BTreeMap<i32, (usize, f64)> = BTreeMap::new();
+    for (f, frame) in outputs.iter().enumerate() {
+        for (oid, logits) in frame.obj_ids().iter().zip(frame.masks()) {
+            if first_seen.contains_key(oid) {
+                continue;
+            }
+            if let Some(cx) = mask_centroid_x(logits, MASK_GRID) {
+                first_seen.insert(*oid, (f, cx));
+            }
+        }
+    }
+    let mut order: Vec<i32> = first_seen.keys().copied().collect();
+    order.sort_by(|a, b| {
+        let (fa, xa) = first_seen[a];
+        let (fb, xb) = first_seen[b];
+        xa.partial_cmp(&xb)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(fa.cmp(&fb))
+            .then(a.cmp(b))
+    });
+    order
+}
+
+/// Per-frame `(obj_id, binary row-major `width*height` 0/255 mask)` lists — the body of
+/// [`AllPersonMasks::per_frame`], one inner `Vec` per clip frame.
+pub(crate) type PerFrameMasks = Vec<Vec<(i32, Vec<u8>)>>;
+
+/// Map every SAM3 object present on each frame to its `(obj_id, binary mask)` at `width×height` — the
+/// per-frame body of [`AllPersonMasks::per_frame`]. `zip` bounds to the shorter of obj_ids/masks (so
+/// the parallel-vec assumption is safe here); a malformed (grid-mismatched) mask propagates as an
+/// `Engine` error from [`mask_to_frame`] rather than the empty-vec sentinel (sc-8905, F-103). Generic
+/// over [`Sam3FrameOutput`] so both SAM3 twins share ONE definition (sc-11191, F-018).
+pub(crate) fn per_frame_masks<F: Sam3FrameOutput>(
+    outputs: &[F],
+    width: u32,
+    height: u32,
+) -> WorkerResult<PerFrameMasks> {
+    outputs
+        .iter()
+        .map(|frame| {
+            frame
+                .obj_ids()
+                .iter()
+                .zip(frame.masks())
+                .map(|(oid, logits)| Ok((*oid, mask_to_frame(logits, MASK_GRID, width, height)?)))
+                .collect::<WorkerResult<Vec<_>>>()
+        })
+        .collect::<WorkerResult<Vec<_>>>()
+}
+
 /// Every tracked person's per-frame mask + a stable left-to-right paint order — the input to the
 /// SCAIL-2 color-mask painter (sc-5448). Backend-neutral (pure mask bytes): both SAM3 modules build
 /// this and [`crate::scail2_masks`]'s painters consume it. Unlike the per-backend `segment_track`
@@ -282,7 +391,7 @@ pub(crate) struct AllPersonMasks {
     pub order: Vec<i32>,
     /// `per_frame[f]` = `(obj_id, binary mask row-major width*height, 0/255)` for every object
     /// present on frame `f` (empty masks dropped). Object ids index into [`AllPersonMasks::order`].
-    pub per_frame: Vec<Vec<(i32, Vec<u8>)>>,
+    pub per_frame: PerFrameMasks,
     pub width: u32,
     pub height: u32,
 }
@@ -433,6 +542,114 @@ mod tests {
             matches!(result, Err(crate::WorkerError::Engine(ref m)) if m.contains("logits")),
             "mismatched grid length must be rejected, got {result:?}"
         );
+    }
+
+    /// A `MASK_GRID²` mask with the top-left quadrant foreground, for the shared-helper tests below.
+    fn quadrant_mask(top_left: bool) -> Vec<f32> {
+        let g = MASK_GRID;
+        let mut m = vec![-1.0f32; g * g];
+        let (rows, cols) = if top_left {
+            (0..g / 2, 0..g / 2)
+        } else {
+            (g / 2..g, g / 2..g)
+        };
+        for y in rows {
+            for x in cols.clone() {
+                m[y * g + x] = 1.0;
+            }
+        }
+        m
+    }
+
+    /// sc-11191 / F-018 (was sc-8905 / F-103, per twin): the shared `frame_mask_for_object` guards
+    /// the obj_ids/masks parallel-vec assumption — absent id → empty vec (legitimate box-fallback), a
+    /// present-but-unmatched id → `Engine` error (not an OOB index), a well-formed pair → a binary
+    /// mask at the requested dims. Exercised on the backend-neutral `TestFrame` so it covers the
+    /// single copy both twins now delegate to.
+    #[test]
+    fn frame_mask_for_object_selects_guards_and_binarizes() {
+        // obj id 5 present but `masks` empty → parallel-vec violation → Engine error.
+        let malformed = TestFrame {
+            obj_ids: vec![5],
+            masks: vec![],
+        };
+        assert!(
+            matches!(frame_mask_for_object(&malformed, 5, 8, 8), Err(crate::WorkerError::Engine(ref m)) if m.contains("masks")),
+            "obj id without a mask must error"
+        );
+
+        // Selected object absent → empty vec (box fallback), not an error.
+        let absent = TestFrame {
+            obj_ids: vec![9],
+            masks: vec![quadrant_mask(true)],
+        };
+        assert!(
+            frame_mask_for_object(&absent, 5, 8, 8)
+                .expect("absent is not an error")
+                .is_empty(),
+            "absent object → empty mask"
+        );
+
+        // Well-formed pair → binary mask at width*height.
+        let present = TestFrame {
+            obj_ids: vec![5],
+            masks: vec![quadrant_mask(true)],
+        };
+        let mask = frame_mask_for_object(&present, 5, 8, 8).expect("well-formed");
+        assert_eq!(mask.len(), 64);
+        assert!(mask.iter().all(|&v| v == 0 || v == 255), "binary");
+    }
+
+    /// sc-11191 / F-018: the shared `paint_order` sorts objects by first-seen centroid-x ascending
+    /// (leftmost first), tie-breaking on first-seen frame then object id — the SCAIL-2 palette order.
+    /// A left object must precede a right one regardless of obj-id numbering.
+    #[test]
+    fn paint_order_sorts_left_to_right_by_first_seen_centroid() {
+        // obj 8 sits left, obj 3 sits right — order must be by centroid (8 then 3), NOT by id.
+        let outputs = vec![TestFrame {
+            obj_ids: vec![8, 3],
+            masks: vec![quadrant_mask(true), quadrant_mask(false)],
+        }];
+        assert_eq!(paint_order(&outputs), vec![8, 3]);
+
+        // Empty-mask objects (no centroid) are dropped from the order.
+        let empty = vec![TestFrame {
+            obj_ids: vec![1],
+            masks: vec![vec![-1.0f32; MASK_GRID * MASK_GRID]],
+        }];
+        assert!(paint_order(&empty).is_empty());
+    }
+
+    /// sc-11191 / F-018: the shared `per_frame_masks` maps every present object to `(obj_id, binary
+    /// mask)` per frame, and propagates a malformed-mask `Engine` error rather than dropping it.
+    #[test]
+    fn per_frame_masks_maps_all_objects_and_propagates_errors() {
+        let outputs = vec![
+            TestFrame {
+                obj_ids: vec![2, 4],
+                masks: vec![quadrant_mask(true), quadrant_mask(false)],
+            },
+            TestFrame {
+                obj_ids: vec![2],
+                masks: vec![quadrant_mask(true)],
+            },
+        ];
+        let per_frame = per_frame_masks(&outputs, 8, 8).expect("well-formed");
+        assert_eq!(per_frame.len(), 2);
+        assert_eq!(per_frame[0].len(), 2);
+        assert_eq!(per_frame[0][0].0, 2);
+        assert_eq!(per_frame[0][0].1.len(), 64);
+        assert_eq!(per_frame[1].len(), 1);
+
+        // A grid-mismatched mask surfaces as an Engine error (not a silently dropped frame).
+        let bad = vec![TestFrame {
+            obj_ids: vec![7],
+            masks: vec![vec![1.0f32; 10]],
+        }];
+        assert!(matches!(
+            per_frame_masks(&bad, 8, 8),
+            Err(crate::WorkerError::Engine(_))
+        ));
     }
 
     fn f011_test_settings(data_dir: PathBuf) -> Settings {

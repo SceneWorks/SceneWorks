@@ -1,30 +1,37 @@
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, OnceLock};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use gen_core::{
     AdapterKind, AdapterSpec, Generator, LoadSpec, MoeExpert, Precision, Quant, WeightsSource,
 };
-use tokio::sync::oneshot;
 
-use crate::{WorkerError, WorkerResult};
+use crate::cache_thread::{self, CacheJob, CacheThread, Fingerprint, SeamMessages};
+use crate::WorkerResult;
 
-type GeneratorJob = Box<dyn FnOnce(&mut GeneratorCache) + Send + 'static>;
+/// The generator cache is a single-resident [`CacheThread`] keyed by [`GeneratorCacheKey`], holding a
+/// loaded `Box<dyn Generator>`. The generic scaffolding (dedicated worker thread, idle-timeout
+/// eviction, panic containment, `Fingerprint`, oneshot-reply seam) lives in [`crate::cache_thread`];
+/// this module supplies only the key derivation, the loader, and the message strings (sc-11191, F-019).
+// Referenced only from the candle `with_uncached_generator` and the tests' worker closures (the
+// production seam infers the `CacheThread` type from the job channel), so it reads as dead on the
+// base macOS lib build.
+#[allow(dead_code)]
+type GeneratorCache = CacheThread<GeneratorCacheKey, Box<dyn Generator>>;
+type GeneratorJob = CacheJob<GeneratorCacheKey, Box<dyn Generator>>;
 
 const GENERATOR_CACHE_IDLE_SECONDS_ENV: &str = "SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS";
 const DEFAULT_GENERATOR_CACHE_IDLE_SECONDS: u64 = 300;
 
+/// The generator cache does NOT free the backend cache before a cold load (unlike the refine cache,
+/// which sets this `true` to bound peak memory to one ~16 GB model). A cold miss here clears the
+/// resident generator and loads, sizing the load via the fit-gate/residency policy in the loader
+/// closure rather than a pre-load backend trim. This divergence is deliberate and documented — see
+/// the [`crate::cache_thread`] module docs; do not silently unify it away.
+const GENERATOR_EVICT_BEFORE_LOAD: bool = false;
+
 static GENERATOR_WORKER: OnceLock<mpsc::Sender<GeneratorJob>> = OnceLock::new();
-
-struct GeneratorCache {
-    entry: Option<GeneratorCacheEntry>,
-}
-
-struct GeneratorCacheEntry {
-    key: GeneratorCacheKey,
-    generator: Box<dyn Generator>,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GeneratorCacheKey {
@@ -47,53 +54,6 @@ pub(crate) struct GeneratorCacheKey {
 enum CacheWeightsSource {
     Dir(PathBuf, Fingerprint),
     File(PathBuf, Fingerprint),
-}
-
-/// Content-change proxy for a weights/adapter file (or HF snapshot dir) referenced in the cache key
-/// (sc-8841, F-039). The pre-fingerprint key identified weights/adapters by path + scale only, so a
-/// file replaced at the SAME path — a re-imported LoRA, a re-converted checkpoint — was served from
-/// the resident generator with the OLD tensors until the 300 s idle timeout ("my new LoRA does
-/// nothing"). Folding `(size, mtime)` into the key self-heals for ANY overwrite path (in-process
-/// re-import/re-convert, out-of-band replacement, manual swap) without an explicit evict hook that
-/// only fires for the code paths that remember to call it.
-///
-/// We deliberately stat metadata rather than hashing contents: mtime+size is a cheap, good
-/// content-change proxy, and hashing multi-GB weight files on every generation would be a severe
-/// perf regression.
-///
-/// For a `Dir` (an HF snapshot) we fingerprint the DIRECTORY's own metadata. A re-convert lands via
-/// the finalize/rename path (`finalize_converted_dir`), which replaces directory entries and bumps
-/// the dir's mtime, so a re-converted snapshot at the same path is a distinct key. `size` for a dir
-/// is its own metadata length (not the recursive content size) — it only needs to move on change,
-/// not be meaningful; mtime carries the signal.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Fingerprint {
-    /// `metadata()` succeeded: `(len, modified)`. `modified` is `None` on the rare platform/FS that
-    /// does not report an mtime, in which case `len` alone carries the (weaker) signal.
-    Present {
-        size: u64,
-        mtime: Option<SystemTime>,
-    },
-    /// `metadata()` errored (path missing, transient stat failure, permissions). Kept DISTINCT from
-    /// any `Present` value so a stat error forces a cache MISS (rebuild) rather than serving a stale
-    /// entry — the load that follows surfaces the real error. Two `Unavailable`s compare equal
-    /// (`Eq` must stay reflexive), but that only arises when the file is genuinely gone on both the
-    /// cached and the incoming key, in which case the reload fails loudly anyway.
-    Unavailable,
-}
-
-impl Fingerprint {
-    /// Snapshot `(size, mtime)` for `path` once, at key-construction time, so the fingerprint is
-    /// stable across the lookup within a single generation (no mtime drift mid-request).
-    fn of(path: &Path) -> Self {
-        match std::fs::metadata(path) {
-            Ok(meta) => Self::Present {
-                size: meta.len(),
-                mtime: meta.modified().ok(),
-            },
-            Err(_) => Self::Unavailable,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -156,50 +116,6 @@ impl From<&AdapterSpec> for CacheAdapterSpec {
     }
 }
 
-impl GeneratorCache {
-    fn new() -> Self {
-        Self { entry: None }
-    }
-
-    /// Drop the resident generator so the next job reloads from scratch.
-    fn evict(&mut self) -> Option<GeneratorCacheKey> {
-        self.entry.take().map(|entry| entry.key)
-    }
-
-    fn with_generator<R>(
-        &mut self,
-        key: GeneratorCacheKey,
-        spec: LoadSpec,
-        load_error_context: String,
-        run: impl FnOnce(&dyn Generator) -> WorkerResult<R>,
-    ) -> WorkerResult<R> {
-        if self.entry.as_ref().map_or(true, |entry| entry.key != key) {
-            self.entry = None;
-            // Pre-load unified-memory fit-gate + residency selection (epic 10834; sc-10835 Phase 0,
-            // sc-10839 Phase 1): BEFORE gen_core::load allocates, either reject a model that can't fit
-            // this machine's unified memory (a wired overcommit SIGKILLs the worker mid-load rather
-            // than returning a catchable error) OR, for a provider that supports sequential component
-            // residency, select `OffloadPolicy::Sequential` when the resident sum won't fit but the
-            // staged max-single-component will. Cold-load path only (a warm cache hit takes the branch
-            // above and skips it), so an already-resident model is never re-gated.
-            let spec = crate::mlx_fit_gate::apply_residency_policy(spec, &key.engine_id)?;
-            let generator = gen_core::load(&key.engine_id, &spec)
-                .map_err(|error| crate::classify_engine_error(&load_error_context, error))?;
-            self.entry = Some(GeneratorCacheEntry {
-                key: key.clone(),
-                generator,
-            });
-        }
-
-        let Some(entry) = self.entry.as_ref() else {
-            return Err(WorkerError::Engine(
-                "Generator cache entry missing after load.".to_owned(),
-            ));
-        };
-        run(entry.generator.as_ref())
-    }
-}
-
 fn generator_worker() -> &'static mpsc::Sender<GeneratorJob> {
     GENERATOR_WORKER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<GeneratorJob>();
@@ -214,60 +130,23 @@ fn generator_worker() -> &'static mpsc::Sender<GeneratorJob> {
     })
 }
 
+/// Thin wrapper over the generic [`cache_thread::run_cache_worker`]: no evict-before-load
+/// ([`GENERATOR_EVICT_BEFORE_LOAD`]) and the generator-specific idle-eviction log.
 fn run_generator_cache_worker(rx: mpsc::Receiver<GeneratorJob>, idle_timeout: Option<Duration>) {
-    let mut cache = GeneratorCache::new();
-    loop {
-        let job = match recv_generator_job(&rx, idle_timeout) {
-            GeneratorWorkerEvent::Job(job) => job,
-            GeneratorWorkerEvent::IdleTimeout => {
-                if let Some(key) = cache.evict() {
-                    release_backend_cache_after_evict();
-                    // Documented event (docs/observability.md): expected idle-timeout
-                    // eviction, so info level with the engine + idle window.
-                    tracing::info!(
-                        event = "generator_cache_idle_evicted",
-                        engine = %key.engine_id,
-                        idleSeconds = idle_timeout.map_or(0, |timeout| timeout.as_secs()),
-                    );
-                }
-                continue;
-            }
-            GeneratorWorkerEvent::Disconnected => break,
-        };
-        // Backstop: contain any panic that escapes a job's own guard so this single
-        // shared cache thread can never die and poison every later generation (sc-6067).
-        // A job normally catches its own panic, replies with a clean error, and evicts;
-        // this catches anything it misses. On a contained panic the cache is reset
-        // because post-abort MLX/Metal state is suspect.
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&mut cache))).is_err()
-            && cache.evict().is_some()
-        {
-            release_backend_cache_after_evict();
-        }
-    }
-}
-
-enum GeneratorWorkerEvent {
-    Job(GeneratorJob),
-    IdleTimeout,
-    Disconnected,
-}
-
-fn recv_generator_job(
-    rx: &mpsc::Receiver<GeneratorJob>,
-    idle_timeout: Option<Duration>,
-) -> GeneratorWorkerEvent {
-    match idle_timeout {
-        Some(timeout) => match rx.recv_timeout(timeout) {
-            Ok(job) => GeneratorWorkerEvent::Job(job),
-            Err(mpsc::RecvTimeoutError::Timeout) => GeneratorWorkerEvent::IdleTimeout,
-            Err(mpsc::RecvTimeoutError::Disconnected) => GeneratorWorkerEvent::Disconnected,
+    cache_thread::run_cache_worker(
+        rx,
+        idle_timeout,
+        GENERATOR_EVICT_BEFORE_LOAD,
+        |key: &GeneratorCacheKey, idle_seconds| {
+            // Documented event (docs/observability.md): expected idle-timeout eviction, so info
+            // level with the engine + idle window.
+            tracing::info!(
+                event = "generator_cache_idle_evicted",
+                engine = %key.engine_id,
+                idleSeconds = idle_seconds,
+            );
         },
-        None => match rx.recv() {
-            Ok(job) => GeneratorWorkerEvent::Job(job),
-            Err(_) => GeneratorWorkerEvent::Disconnected,
-        },
-    }
+    );
 }
 
 fn generator_cache_idle_timeout_from_env() -> Option<Duration> {
@@ -279,28 +158,8 @@ fn generator_cache_idle_timeout_from_env() -> Option<Duration> {
 }
 
 fn generator_cache_idle_timeout(raw: Option<&str>) -> Option<Duration> {
-    let seconds = raw
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_GENERATOR_CACHE_IDLE_SECONDS);
-    (seconds > 0).then(|| Duration::from_secs(seconds))
+    cache_thread::idle_timeout_from_secs(raw, DEFAULT_GENERATOR_CACHE_IDLE_SECONDS)
 }
-
-#[cfg(all(target_os = "macos", not(test)))]
-fn release_backend_cache_after_evict() {
-    mlx_rs::memory::clear_cache();
-}
-
-/// Off-Mac (candle/CUDA) this is intentionally a no-op (epic 10765, sc-10766). candle's CUDA backend
-/// uses cudarc's stream-ordered caching allocator, which exposes no `empty_cache` and does not reclaim
-/// on `Device::synchronize()`: dropping the evicted generator already returns its pages to candle's
-/// in-process pool (where the next load reuses them), but there is no supported way to hand those pages
-/// back to the driver — so `nvidia-smi` resident VRAM stays flat across an evict regardless. A real
-/// driver-level trim would need a candle/cudarc fork (tracked as a separate optional spike under epic
-/// 10765), not this seam. The VRAM fit-gate therefore budgets on predicted peak, not resident deltas.
-#[cfg(any(not(target_os = "macos"), test))]
-fn release_backend_cache_after_evict() {}
 
 /// Apply the user-configured GPU memory ceiling to the MLX runtime (epic 7819, sc-7820).
 ///
@@ -418,18 +277,15 @@ pub(crate) fn sync_gpu_memory_limit(_config_dir: &Path) {}
 #[cfg(any(not(target_os = "macos"), test))]
 pub(crate) fn spawn_gpu_telemetry(_config_dir: PathBuf) {}
 
-/// Best-effort human-readable text from a caught panic payload — the `&str`/`String` a `panic!`
-/// produces. mlx-rs `.unwrap()`/`.expect()` panics carry their formatted message as a `String`
-/// (e.g. the `[metal::malloc] Attempting to allocate …` Metal OOM), so this surfaces the real cause.
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_owned()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "unknown panic payload".to_owned()
-    }
-}
+/// User-facing message strings for the generator cache seam, preserving the exact wording the worker
+/// emitted before the `cache_thread` extraction (sc-11191, F-019).
+const GENERATOR_SEAM_MESSAGES: SeamMessages = SeamMessages {
+    entry_missing: "Generator cache entry missing after load.",
+    panic_reset: "MLX generation panicked and was contained (the engine likely ran out of memory; \
+                  the cached generator was reset)",
+    worker_stopped: "MLX generator cache worker stopped",
+    worker_dropped: "MLX generator cache worker dropped the job result",
+};
 
 pub(crate) async fn with_cached_generator<R>(
     engine_id: &'static str,
@@ -442,35 +298,24 @@ where
 {
     let key = GeneratorCacheKey::from_load_spec(engine_id, &spec);
     let load_error_context = load_error_context.into();
-    let (reply_tx, reply_rx) = oneshot::channel::<WorkerResult<R>>();
-    let job = Box::new(move |cache: &mut GeneratorCache| {
-        // Contain a panic from inside the engine (e.g. mlx-rs `.unwrap()`-ing a Metal allocation
-        // failure) so it fails THIS job with a clean error instead of unwinding out of the shared
-        // cache thread and stopping every subsequent generation (sc-6067). The cached generator is
-        // evicted on panic — post-abort MLX/Metal state is suspect, so the next job reloads fresh.
-        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            cache.with_generator(key, spec, load_error_context, run)
-        })) {
-            Ok(result) => result,
-            Err(panic) => {
-                if cache.evict().is_some() {
-                    release_backend_cache_after_evict();
-                }
-                Err(WorkerError::Engine(format!(
-                    "MLX generation panicked and was contained (the engine likely ran out of \
-                     memory; the cached generator was reset): {}",
-                    panic_message(panic.as_ref())
-                )))
-            }
-        };
-        let _ = reply_tx.send(result);
-    });
-    generator_worker()
-        .send(job)
-        .map_err(|_| WorkerError::Engine("MLX generator cache worker stopped".to_owned()))?;
-    reply_rx.await.map_err(|_| {
-        WorkerError::Engine("MLX generator cache worker dropped the job result".to_owned())
-    })?
+    // The loader owns the generator-specific cold-load policy. Pre-load unified-memory fit-gate +
+    // residency selection (epic 10834; sc-10835 Phase 0, sc-10839 Phase 1): BEFORE gen_core::load
+    // allocates, either reject a model that can't fit this machine's unified memory (a wired
+    // overcommit SIGKILLs the worker mid-load rather than returning a catchable error) OR, for a
+    // provider that supports sequential component residency, select `OffloadPolicy::Sequential` when
+    // the resident sum won't fit but the staged max-single-component will. This runs only on a cold
+    // miss (a warm cache hit never invokes the loader), so an already-resident model is never re-gated.
+    let load = move || {
+        let spec = crate::mlx_fit_gate::apply_residency_policy(spec, engine_id)?;
+        gen_core::load(engine_id, &spec)
+            .map_err(|error| crate::classify_engine_error(&load_error_context, error))
+    };
+    // Adapt the user's `&dyn Generator` run closure to the generic cache's resident
+    // `Box<dyn Generator>`. The `&Box<_>` param is inherent to the seam (the cache stores the boxed
+    // trait object), so silence the borrowed-box lint here rather than boxing/unboxing again.
+    #[allow(clippy::borrowed_box)]
+    let run = move |generator: &Box<dyn Generator>| run(&**generator);
+    cache_thread::run_cached(generator_worker(), key, load, run, GENERATOR_SEAM_MESSAGES).await
 }
 
 /// Run `run` against a freshly-loaded, **uncached** generator on the shared cache thread (epic 10451
@@ -492,14 +337,15 @@ pub(crate) async fn with_uncached_generator<R>(
 where
     R: Send + 'static,
 {
-    let (reply_tx, reply_rx) = oneshot::channel::<WorkerResult<R>>();
-    let job = Box::new(move |cache: &mut GeneratorCache| {
+    use crate::WorkerError;
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<WorkerResult<R>>();
+    let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Free the resident cached generator (if any) before loading the fresh one, so the pool has
             // room for the large in-place weights. On CUDA `release_backend_cache_after_evict` is a
             // no-op (cudarc has no empty_cache); the drop returns the tensors' allocation to the pool.
             if cache.evict().is_some() {
-                release_backend_cache_after_evict();
+                cache_thread::release_backend_cache_after_evict();
             }
             let generator = load()?;
             run(generator.as_ref())
@@ -507,10 +353,10 @@ where
             Ok(result) => result,
             Err(panic) => {
                 // Post-panic backend state is suspect; the resident (already-evicted) cache stays empty.
-                release_backend_cache_after_evict();
+                cache_thread::release_backend_cache_after_evict();
                 Err(WorkerError::Engine(format!(
                     "generation panicked and was contained (the engine likely ran out of memory): {}",
-                    panic_message(panic.as_ref())
+                    cache_thread::panic_message(panic.as_ref())
                 )))
             }
         };
@@ -527,6 +373,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WorkerError;
 
     #[test]
     fn cache_key_includes_adapter_fingerprint() {
@@ -556,6 +403,7 @@ mod tests {
     #[test]
     fn fingerprint_tracks_content_change_and_missing_files() {
         use std::io::Write;
+        use std::time::SystemTime;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("weights.safetensors");
@@ -784,13 +632,15 @@ mod tests {
         GeneratorCacheKey::from_load_spec("sc3724_stub", &spec)
     }
 
-    fn stub_cache_entry() -> GeneratorCacheEntry {
-        GeneratorCacheEntry {
-            key: stub_cache_key(),
-            generator: Box::new(StubGenerator {
+    /// Seed the generic cache with a resident stub generator (the test replacement for directly
+    /// assigning the old `GeneratorCache.entry`, now that the entry lives in `cache_thread`).
+    fn seed_stub_entry(cache: &mut GeneratorCache) {
+        cache.install(
+            stub_cache_key(),
+            Box::new(StubGenerator {
                 descriptor: stub_descriptor(),
             }),
-        }
+        );
     }
 
     #[test]
@@ -822,7 +672,7 @@ mod tests {
         });
         let (seed_tx, seed_rx) = mpsc::channel();
         tx.send(Box::new(move |cache: &mut GeneratorCache| {
-            cache.entry = Some(stub_cache_entry());
+            seed_stub_entry(cache);
             seed_tx.send(()).expect("ack cache seed");
         }))
         .expect("seed cache entry");
@@ -842,9 +692,7 @@ mod tests {
             thread::sleep(Duration::from_millis(50));
             let (reply_tx, reply_rx) = mpsc::channel();
             tx.send(Box::new(move |cache: &mut GeneratorCache| {
-                reply_tx
-                    .send(cache.entry.is_none())
-                    .expect("send cache state");
+                reply_tx.send(cache.is_empty()).expect("send cache state");
             }))
             .expect("check cache state");
             if reply_rx
@@ -871,7 +719,7 @@ mod tests {
         });
         let (seed_tx, seed_rx) = mpsc::channel();
         tx.send(Box::new(move |cache: &mut GeneratorCache| {
-            cache.entry = Some(stub_cache_entry());
+            seed_stub_entry(cache);
             seed_tx.send(()).expect("ack cache seed");
         }))
         .expect("seed cache entry");
@@ -883,9 +731,7 @@ mod tests {
 
         let (reply_tx, reply_rx) = mpsc::channel();
         tx.send(Box::new(move |cache: &mut GeneratorCache| {
-            reply_tx
-                .send(cache.entry.is_some())
-                .expect("send cache state");
+            reply_tx.send(!cache.is_empty()).expect("send cache state");
         }))
         .expect("check cache state");
 
