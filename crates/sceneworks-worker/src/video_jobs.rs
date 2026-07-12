@@ -301,7 +301,7 @@ fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> Ca
         // the editing/reference/multi-source modes (v2v / r2v / rv2v / mv2v / ads2v). A DISTINCT engine
         // (`gen_core::load("bernini")`), NOT a wan/ltx `is_candle_video_engine` id, so it is routed off the
         // model id BEFORE the generic candle-video arm below. Routed by model id, not weight availability —
-        // `generate_candle_bernini` resolves-or-errors loudly if the `SceneWorks/bernini-candle` snapshot is
+        // `generate_candle_bernini` resolves-or-errors loudly if the `SceneWorks/bernini` snapshot is
         // unprovisioned (sc-11003), never degrading to a stub. The per-mode source media is validated when
         // the conditioning is assembled (`resolve_candle_bernini_conditioning`), mirroring the MLX lane.
         CandleVideoRoute::Bernini(engine_id)
@@ -690,7 +690,7 @@ pub(crate) async fn run_video_generate_job(
                 // the planner conditioning (`resolve_candle_bernini_conditioning`) — empty for t2v, one or
                 // more `VideoClip`s for the edit modes, `MultiReference` for the reference modes. The off-Mac
                 // sibling of the macOS `generate_bernini`; resolves-or-errors loudly (no torch fallback — a
-                // distinct candle engine, GPU-val gated on the `SceneWorks/bernini-candle` weights, sc-11003).
+                // distinct candle engine, GPU-val gated on the `SceneWorks/bernini` weights, sc-11003).
                 let decoded = generate_candle_bernini(
                     api,
                     settings,
@@ -6654,9 +6654,9 @@ async fn generate_bernini(
 // from dropping the registration). Serves `text_to_video` + the editing/reference/multi-source video
 // modes (v2v / r2v / rv2v / mv2v / ads2v); `generate_candle_bernini` maps the SceneWorks mode to the
 // engine guidance task and resolves the source media into the planner conditioning. Loads the converted
-// `SceneWorks/bernini-candle` snapshot DENSE (the candle loader reads the tree as-is; the off-Mac
-// packed-tier select is deferred WITH the still lane until the `bernini-candle` tier layout lands —
-// GPU-val is gated on sc-11003, the not-yet-published weights). No LoRA (the engine reports
+// `SceneWorks/bernini` snapshot DENSE (the candle loader reads the tree as-is; the off-Mac
+// packed-tier select is deferred WITH the still lane until the `SceneWorks/bernini` tier layout lands —
+// GPU-val is gated on sc-11003). No LoRA (the engine reports
 // `supports_lora=false`). A distinct candle engine — NO torch fallback (a missing snapshot fails loud
 // at load, never a silent stub).
 // ---------------------------------------------------------------------------
@@ -6816,7 +6816,7 @@ async fn resolve_candle_bernini_conditioning(
 /// shared [`generate_video`] path. The SceneWorks mode resolves to the engine `video_mode` task
 /// ([`candle_bernini_engine_video_mode`]) and the source media into the planner conditioning
 /// ([`resolve_candle_bernini_conditioning`]) — empty for t2v, one or more `VideoClip`s for
-/// v2v/mv2v/rv2v/ads2v, and `MultiReference` for r2v/rv2v/ads2v. The converted `SceneWorks/bernini-candle`
+/// v2v/mv2v/rv2v/ads2v, and `MultiReference` for r2v/rv2v/ads2v. The converted `SceneWorks/bernini`
 /// snapshot loads DENSE (no load-time quant — the off-Mac packed-tier select is deferred with the still
 /// lane, sc-11003), resolved via the shared [`crate::image_jobs::resolve_candle_bernini_model_dir`] so
 /// video + still load from the same tier. No LoRA (the engine reports `supports_lora=false`); steps /
@@ -10139,7 +10139,7 @@ mod tests {
     /// sc-10997 (epic 6562): the candle Bernini VIDEO lane routes t2v + every editing/reference/
     /// multi-source mode to `CandleVideoRoute::Bernini` (a DISTINCT engine, NOT the generic wan/ltx
     /// txt2video arm), and only when the backend-candle flag is on. This per-mode dispatch is the
-    /// story's validation (GPU-val is gated on the `SceneWorks/bernini-candle` weights, sc-11003).
+    /// story's validation (GPU-val is gated on the `SceneWorks/bernini` weights, sc-11003).
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
     fn candle_video_route_bernini_every_mode() {

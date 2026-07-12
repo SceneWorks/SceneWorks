@@ -4521,7 +4521,7 @@ fn candle_image_route_gates_on_flag_then_pose_reject_then_txt2img() {
 // (`CandleImageRoute::Bernini` → `generate_candle_bernini_image_stream`), NOT the generic txt2img arm
 // (the engine is `Modality::Video`, so `bernini_image` is not an `is_candle_engine` id). Routed on the
 // model id alone (no staged weights), the candle sibling of the MLX `ImageRoute::Bernini` arm — this is
-// the dispatch proof for the story (GPU-val is blocked on the `SceneWorks/bernini-candle` weights,
+// the dispatch proof for the story (GPU-val is blocked on the `SceneWorks/bernini` weights,
 // sc-11003).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]

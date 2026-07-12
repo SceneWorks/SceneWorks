@@ -1740,8 +1740,8 @@ candle-gen-scail2 = { git = "https://github.com/michaeltrefry/candle-gen", rev =
 # generator (`candle-gen-bernini/src/bernini.rs`, `gen_core::load("bernini")`) into the shared gen_core
 # inventory; force-linked in image_jobs.rs (`use candle_gen_bernini as _;`) and reached by the dedicated
 # `generate_candle_bernini_image_stream` (forces `frames:1` + `video_mode:"t2i"|"i2i"` so the engine
-# returns a single still). Weights = the converted `SceneWorks/bernini-candle` snapshot (sc-11003, not
-# yet published → GPU-val blocked). Same git rev as every candle-gen provider above (c26c6fb = candle-gen
+# returns a single still). Weights = the converted `SceneWorks/bernini` snapshot (sc-11003, published
+# PUBLIC with bf16/Q8/Q4 tiers). Same git rev as every candle-gen provider above (c26c6fb = candle-gen
 # main HEAD, the merged #421 planner-components commit — contains the #419 full generator sc-10995) — its
 # gen-core pin (951227a) MATCHES the worker's mlx pin, so `--features backend-candle --target all`
 # resolves ONE gen-core rev (no skew).
