@@ -676,7 +676,16 @@ async fn wait_for_parent_stdin_close() {
                     Err(_) => break,
                 }
             }
-            let _ = signal.send(true);
+            // `send_replace` (NOT `send`) so the latch is updated UNCONDITIONALLY even
+            // when `receiver_count() == 0`: `send` returns `Err` WITHOUT storing the value
+            // if no receiver is currently subscribed, and receivers only exist while a
+            // `wait_for_parent_stdin_close` future is being polled. In the synchronous gap
+            // between the poll-phase `select!` and the run_job `select!` no receiver is
+            // subscribed, so an EOF landing in that window would be lost forever and every
+            // later waiter would block on `changed()` indefinitely (the reader is
+            // single-shot and has exited). `send_replace` latches `true` regardless, so the
+            // next `subscribe()`'s `borrow_and_update()` observes it immediately (sc-11184).
+            let _ = signal.send_replace(true);
         });
         tx
     });
