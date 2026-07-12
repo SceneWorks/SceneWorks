@@ -1063,8 +1063,8 @@ fn bernini_image_i2i_real_weights_generates_one_image() {
 
 /// Real-weight GPU smoke (sc-11003, epic 6562): candle Bernini t2i THROUGH THE WORKER LANE. Exercises
 /// the exact off-Mac still path `generate_candle_bernini_image_stream` drives —
-/// `resolve_candle_bernini_tier_dir_and_quant(bits)` (the `SCENEWORKS_CANDLE_BERNINI_DIR` root resolver
-/// + `bf16/`|`q8/`|`q4/` tier-select) → `load_spec(dir, quant, …)` → `gen_core::load("bernini")` (the
+/// `resolve_candle_bernini_tier_dir_and_quant(bits)` (the `SCENEWORKS_CANDLE_BERNINI_DIR` root resolver +
+/// `bf16/`|`q8/`|`q4/` tier-select) → `load_spec(dir, quant, …)` → `gen_core::load("bernini")` (the
 /// force-linked `candle_gen_bernini` registration) → `bernini_image_generate_one(frames:1,
 /// video_mode:"t2i")` — minus only the API/job/asset-write plumbing. Default bits (no `mlxQuantize`)
 /// selects the **bf16 dense** tier (the off-Mac validated baseline). Env: point
