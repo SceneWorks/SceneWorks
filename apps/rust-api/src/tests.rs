@@ -3465,6 +3465,212 @@ async fn failed_or_unwritten_training_job_registers_no_lora() {
         .all(|item| item["name"] != json!("Aurora Style")));
 }
 
+/// Writes the final trained adapter into a training job's resolved output dir so
+/// that — absent a gate — a `completed` report *would* register a LoRA. Returns
+/// the adapter file name the registration would use.
+fn stage_trained_adapter(output_dir: &std::path::Path, adapter_path: &std::path::Path) {
+    std::fs::create_dir_all(output_dir).expect("output dir creates");
+    write_test_safetensors(adapter_path);
+}
+
+/// sc-11213 (F-028): a `completed` report that lost the race with cancel/sweep/
+/// reclaim (the job is already terminal) must receive the 409 AND must NOT
+/// register a ghost LoRA — the completion side-effects have to run strictly after
+/// ownership + terminal status are confirmed, not before.
+#[tokio::test]
+async fn terminal_training_job_completed_report_registers_no_lora_and_409s() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (job_id, output_dir, adapter_path) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    // Stage the final adapter so registration would succeed if the gate were absent.
+    stage_trained_adapter(&output_dir, &adapter_path);
+
+    // The user cancels the job before the (late/racing) worker report arrives:
+    // the queued job goes straight to the terminal `canceled` status.
+    let (status, canceled) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/cancel"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(canceled["status"], "canceled");
+
+    // The losing-race `completed` report must be rejected with 409 (terminal job
+    // is immutable) and must NOT have registered the adapter as a LoRA.
+    let (status, _rejected) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "Trained LoRA saved.",
+            "result": { "outputPath": adapter_path.display().to_string() }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a completed report for an already-canceled job must 409"
+    );
+
+    // No ghost catalog entry: the canceled training run left nothing registered.
+    let (status, loras) = request(
+        app,
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        loras
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .all(|item| item["name"] != json!("Aurora Style")),
+        "a canceled training job must not register a ghost LoRA"
+    );
+}
+
+/// sc-11213 (F-028): a `completed` report from a caller that does not own the job
+/// (here, any report carrying a `workerId` for a job whose owner is unset) must
+/// receive the 409 AND must NOT register a LoRA — the ownership check has to gate
+/// the completion side-effects, not fire too late.
+#[tokio::test]
+async fn non_owner_completed_report_registers_no_lora_and_409s() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (job_id, output_dir, adapter_path) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    // Stage the final adapter so registration would succeed if the gate were absent.
+    stage_trained_adapter(&output_dir, &adapter_path);
+
+    // The job was never claimed, so its owner is unset. A report carrying a
+    // `workerId` is therefore from a non-owner and must be rejected as such —
+    // exactly the "any authenticated caller can trigger the writes" hole.
+    let (status, _rejected) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "Trained LoRA saved.",
+            "workerId": "impostor-worker",
+            "result": { "outputPath": adapter_path.display().to_string() }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a completed report from a non-owner must 409"
+    );
+
+    // No catalog entry: a non-owned report must not register a LoRA.
+    let (status, loras) = request(
+        app,
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        loras
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .all(|item| item["name"] != json!("Aurora Style")),
+        "a non-owner report must not register a LoRA"
+    );
+}
+
+/// sc-11213 (F-028): the guard must preserve the happy path — a legitimate
+/// winning `completed` report (owner reporting a non-terminal job) still
+/// registers the trained LoRA into the catalog exactly as before.
+#[tokio::test]
+async fn winning_completed_report_still_registers_lora() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (job_id, output_dir, adapter_path) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    stage_trained_adapter(&output_dir, &adapter_path);
+
+    // A trusted (owner-equivalent, worker_id unset both sides) report against the
+    // still-non-terminal job wins the race and registers normally.
+    let (status, completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "Trained LoRA saved.",
+            "result": { "outputPath": adapter_path.display().to_string() }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["status"], "completed");
+    assert_eq!(completed["result"]["loraRegistered"], true);
+
+    let (status, loras) = request(
+        app,
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        loras
+            .as_array()
+            .expect("loras array")
+            .iter()
+            .any(|item| item["name"] == json!("Aurora Style")),
+        "a legitimate winning completed report must still register the LoRA"
+    );
+}
+
 #[tokio::test]
 async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
