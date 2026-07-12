@@ -112,6 +112,111 @@ thread_local! {
     static POINT_TRACKER: RefCell<Option<(Sam3CacheKey, Sam3Tracker)>> = const { RefCell::new(None) };
 }
 
+/// A unit of work handed to the dedicated smart-select thread: a boxed closure that runs there and
+/// signals completion through its own captured reply channel.
+type Sam3Job = Box<dyn FnOnce() + Send + 'static>;
+
+/// After this long with **no** smart-select activity the dedicated thread drops its resident
+/// quantized models (~0.9 GB Q8 each) so an otherwise-idle worker doesn't pin them forever. This is
+/// the deliberate equivalent of the pre-sc-11180 behavior, where a smart-select model lived in a
+/// tokio **blocking-pool** thread-local and was freed only when tokio reaped that thread after its
+/// idle keep-alive (~10 s). We keep a slightly longer window here (a stable dedicated thread never
+/// gets reaped, and interactive clicks arrive in bursts with pauses) so a working session stays warm
+/// while a user who has moved on gets the memory back. The next click rebuilds from the still-cached
+/// dense [`WEIGHTS`] (layer assembly + `quantize` over already-resident arrays).
+const SAM3_IDLE_DROP: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Owns the single OS thread that every `!Send` smart-select SAM3 model is pinned to (sc-11180,
+/// F-012).
+///
+/// The smart-select box/point paths run under `tokio::task::spawn_blocking` ([`segment_jobs`]), so
+/// successive interactive clicks land on **arbitrary** tokio blocking-pool threads. With the
+/// per-thread [`BOX_SEGMENTER`]/[`POINT_TRACKER`] caches (sc-8846), a click that hops to a fresh
+/// blocking thread both rebuilds **and** retains its own ~0.9 GB Q8 model there until tokio reaps
+/// that idle thread — so a burst of clicks interleaved with other blocking jobs could pin several GB
+/// of **duplicate** model memory on a unified-memory Mac and re-pay the seconds-long build+quantize
+/// the cache was meant to avoid.
+///
+/// Routing **both** smart-select operations through this one thread pins the `!Send` model
+/// (`Rc<Backbone>`) to exactly one thread, so the thread-local caches above hold at most a single
+/// instance each and it is built/quantized at most once. Requests serialize on the thread — which is
+/// what per-thread caching already effectively forced (one model, one op at a time) — so no
+/// throughput is lost. The dense checkpoint stays in the process-wide [`WEIGHTS`] cache, still shared
+/// with the video paths that keep running on their own `spawn_blocking` threads.
+struct Sam3Executor {
+    tx: Mutex<std::sync::mpsc::Sender<Sam3Job>>,
+}
+
+static SAM3_EXECUTOR: OnceLock<Sam3Executor> = OnceLock::new();
+
+/// The process-wide smart-select executor, spawned on first use.
+fn sam3_executor() -> &'static Sam3Executor {
+    SAM3_EXECUTOR.get_or_init(Sam3Executor::spawn)
+}
+
+impl Sam3Executor {
+    fn spawn() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<Sam3Job>();
+        std::thread::Builder::new()
+            .name("sam3-smart-select".into())
+            .spawn(move || loop {
+                match rx.recv_timeout(SAM3_IDLE_DROP) {
+                    // Each job internally `catch_unwind`s (see `run_on_sam3_thread`), so a panicking
+                    // model build/forward is surfaced to that one caller without unwinding here —
+                    // the thread survives and keeps serving later clicks.
+                    Ok(job) => job(),
+                    // Idle window elapsed → free the resident quantized models (equivalent
+                    // idle-drop). Cheap no-op when the caches are already empty.
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        BOX_SEGMENTER.with(|c| *c.borrow_mut() = None);
+                        POINT_TRACKER.with(|c| *c.borrow_mut() = None);
+                    }
+                    // Every `Sender` dropped → the process is shutting down; let the thread exit
+                    // rather than spin. (The `static` holds one `Sender` for the process lifetime, so
+                    // in practice this only fires at teardown.)
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            })
+            .expect("spawn sam3 smart-select executor thread");
+        Self { tx: Mutex::new(tx) }
+    }
+
+    /// Enqueue a job. Returns an `Engine` error (never hangs) if the thread is somehow gone.
+    fn submit(&self, job: Sam3Job) -> WorkerResult<()> {
+        self.tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .send(job)
+            .map_err(|_| WorkerError::Engine("sam3 smart-select executor thread is gone".into()))
+    }
+}
+
+/// Run `job` on the dedicated smart-select thread and block for its result, so the `!Send` SAM3
+/// model it touches lives on exactly one thread (sc-11180, F-012). Each job is wrapped in
+/// `catch_unwind` so a panic in the model build/forward is surfaced to **this** caller as an
+/// `Engine` error instead of killing the shared thread (which would strand every later click); the
+/// thread therefore survives job panics and only exits at worker shutdown. A dead thread or dropped
+/// reply is reported as an error rather than hanging the caller.
+fn run_on_sam3_thread<T: Send + 'static>(
+    job: impl FnOnce() -> WorkerResult<T> + Send + 'static,
+) -> WorkerResult<T> {
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel::<WorkerResult<T>>();
+    let boxed: Sam3Job = Box::new(move || {
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).unwrap_or_else(|_| {
+                Err(WorkerError::Engine(
+                    "sam3 smart-select thread panicked".into(),
+                ))
+            });
+        // The caller may have gone away (its task dropped); a closed reply channel is not an error.
+        let _ = reply_tx.send(outcome);
+    });
+    sam3_executor().submit(boxed)?;
+    reply_rx
+        .recv()
+        .map_err(|_| WorkerError::Engine("sam3 smart-select thread dropped the reply".into()))?
+}
+
 /// Load the shared dense checkpoint into the process-wide [`WEIGHTS`] cache (poison-recovery) and run
 /// `build` against it — the common cache-miss body for the smart-select single-image builders.
 fn with_cached_weights<T>(
@@ -349,15 +454,45 @@ fn normalize_box_cxcywh(box_xyxy: [f32; 4], width: u32, height: u32) -> [f32; 4]
     ]
 }
 
-/// Smart-select (epic 6087, sc-6105): segment whatever lies under a single box prompt on ONE still
-/// image with the native-MLX SAM3 box-prompted PVS path ([`Sam3ImageSegmenter::segment_with_boxes`],
-/// epic 4910 sc-4923). `box_xyxy` is in source-image pixel coords; `concept` is the optional text
-/// concept paired with the box (empty = rely on the geometric prompt). Returns one binary mask
-/// (row-major `width*height`, `0`/`255`, white = the selected region) at the source dims — the
-/// `maskAssetId` the editor's inpaint flow (sc-2436/2476) consumes. Errors when SAM3 returns no
-/// instance for the box. Loads the segmenter from the shared (cached) SAM3 checkpoint and quantizes
-/// it (Q8 default); run under `spawn_blocking` (MLX is synchronous + holds the autorelease pool).
+/// Smart-select BOX path (epic 6087, sc-6105): public entry point. Routes the whole compute onto the
+/// ONE dedicated smart-select thread (sc-11180, F-012) so the `!Send` [`Sam3ImageSegmenter`] is
+/// built/quantized/cached on exactly that thread — never duplicated across the tokio blocking-pool
+/// threads `spawn_blocking` hops between. `concept` is copied to an owned `String` so the submitted
+/// closure is `'static`; all other args are already owned/`Copy`. See [`segment_box_on_thread`] for
+/// the segmentation itself.
 pub(crate) fn segment_box_blocking(
+    model_path: PathBuf,
+    tokenizer_path: PathBuf,
+    image: image::RgbImage,
+    box_xyxy: [f32; 4],
+    concept: &str,
+    threshold: f32,
+    mask_threshold: f32,
+) -> WorkerResult<Vec<u8>> {
+    let concept = concept.to_owned();
+    run_on_sam3_thread(move || {
+        segment_box_on_thread(
+            model_path,
+            tokenizer_path,
+            image,
+            box_xyxy,
+            &concept,
+            threshold,
+            mask_threshold,
+        )
+    })
+}
+
+/// Segment whatever lies under a single box prompt on ONE still image with the native-MLX SAM3
+/// box-prompted PVS path ([`Sam3ImageSegmenter::segment_with_boxes`], epic 4910 sc-4923). `box_xyxy`
+/// is in source-image pixel coords; `concept` is the optional text concept paired with the box
+/// (empty = rely on the geometric prompt). Returns one binary mask (row-major `width*height`,
+/// `0`/`255`, white = the selected region) at the source dims — the `maskAssetId` the editor's
+/// inpaint flow (sc-2436/2476) consumes. Errors when SAM3 returns no instance for the box. Loads the
+/// segmenter from the shared (cached) SAM3 checkpoint and quantizes it (Q8 default). **Runs on the
+/// dedicated smart-select thread** (via [`segment_box_blocking`]); MLX is synchronous + holds the
+/// autorelease pool.
+fn segment_box_on_thread(
     model_path: PathBuf,
     tokenizer_path: PathBuf,
     image: image::RgbImage,
@@ -460,18 +595,31 @@ pub(crate) fn segment_box_blocking(
     mask_to_frame(&grid_mask, grid, width, height)
 }
 
-/// Smart-select POINT path (epic 6087, sc-6346): segment whatever lies under fg/bg click points on
-/// ONE still image with the native-MLX SAM3 **tracker's** single-frame PVS point prompt
-/// ([`Sam3Tracker::segment_points`]). SAM3 does interactive point refinement via its tracker (the
-/// SAM2-lineage promptable mask decoder); the box smart-select (sc-6105) uses the concept *detector*
-/// (`Sam3ImageSegmenter::segment_with_boxes`) while points use the *tracker* — but both load from the
-/// SAME `facebook/sam3` checkpoint, so no second model/download. `points` are `(x, y, label)` in
-/// source-image pixel coords, `label` `1` = foreground / `0` = background. Returns one binary mask
-/// (row-major `width*height`, `0`/`255`, white = the selected region) at the source dims — the same
-/// `maskAssetId` shape the box path returns for the editor's inpaint flow (sc-2436/2476). Loads the
-/// tracker from the shared (cached) SAM3 checkpoint + quantizes it (Q8 default); run under
-/// `spawn_blocking` (MLX is synchronous + holds the autorelease pool).
+/// Smart-select POINT path (epic 6087, sc-6346): public entry point. Routes the whole compute onto
+/// the ONE dedicated smart-select thread (sc-11180, F-012) so the `!Send` [`Sam3Tracker`] is
+/// built/quantized/cached on exactly that thread — never duplicated across the tokio blocking-pool
+/// threads `spawn_blocking` hops between. See [`segment_points_on_thread`] for the segmentation
+/// itself.
 pub(crate) fn segment_points_blocking(
+    model_path: PathBuf,
+    image: image::RgbImage,
+    points: Vec<(f32, f32, i32)>,
+) -> WorkerResult<Vec<u8>> {
+    run_on_sam3_thread(move || segment_points_on_thread(model_path, image, points))
+}
+
+/// Segment whatever lies under fg/bg click points on ONE still image with the native-MLX SAM3
+/// **tracker's** single-frame PVS point prompt ([`Sam3Tracker::segment_points`]). SAM3 does
+/// interactive point refinement via its tracker (the SAM2-lineage promptable mask decoder); the box
+/// smart-select (sc-6105) uses the concept *detector* (`Sam3ImageSegmenter::segment_with_boxes`)
+/// while points use the *tracker* — but both load from the SAME `facebook/sam3` checkpoint, so no
+/// second model/download. `points` are `(x, y, label)` in source-image pixel coords, `label` `1` =
+/// foreground / `0` = background. Returns one binary mask (row-major `width*height`, `0`/`255`,
+/// white = the selected region) at the source dims — the same `maskAssetId` shape the box path
+/// returns for the editor's inpaint flow (sc-2436/2476). Loads the tracker from the shared (cached)
+/// SAM3 checkpoint + quantizes it (Q8 default). **Runs on the dedicated smart-select thread** (via
+/// [`segment_points_blocking`]); MLX is synchronous + holds the autorelease pool.
+fn segment_points_on_thread(
     model_path: PathBuf,
     image: image::RgbImage,
     points: Vec<(f32, f32, i32)>,
@@ -806,6 +954,68 @@ mod tests {
         // x spans [50,200] (clamped from 300) → cx = 125/200 = 0.625, w = 150/200 = 0.75
         assert!((b[0] - 0.625).abs() < 1e-6, "cx {}", b[0]);
         assert!((b[2] - 0.75).abs() < 1e-6, "w {}", b[2]);
+    }
+
+    /// sc-11180 / F-012: the dedicated smart-select executor runs EVERY submitted job on the SAME
+    /// single OS thread — the property that pins the `!Send` SAM3 model to one thread so it is never
+    /// duplicated across tokio blocking-pool threads. Submit a batch of jobs from several caller
+    /// threads and assert they all report one stable executor thread id, distinct from every caller.
+    #[test]
+    fn executor_runs_all_jobs_on_one_stable_thread() {
+        // A first job establishes the executor thread's id.
+        let executor_tid =
+            run_on_sam3_thread(|| Ok::<_, WorkerError>(std::thread::current().id())).unwrap();
+
+        // Many more jobs, submitted from distinct caller threads, must all land on that same id.
+        let mut callers = Vec::new();
+        for _ in 0..8 {
+            callers.push(std::thread::spawn(move || {
+                run_on_sam3_thread(|| Ok::<_, WorkerError>(std::thread::current().id())).unwrap()
+            }));
+        }
+        for c in callers {
+            let tid = c.join().expect("caller thread");
+            assert_eq!(
+                tid, executor_tid,
+                "every job must run on the one executor thread"
+            );
+        }
+        // And it is not the calling test thread — the model genuinely lives elsewhere.
+        assert_ne!(
+            executor_tid,
+            std::thread::current().id(),
+            "executor must be a dedicated thread, not the caller"
+        );
+    }
+
+    /// sc-11180 / F-012: results and errors propagate back from the executor thread unchanged.
+    #[test]
+    fn executor_propagates_results_and_errors() {
+        let ok = run_on_sam3_thread(|| Ok::<_, WorkerError>(vec![1u8, 2, 3])).unwrap();
+        assert_eq!(ok, vec![1, 2, 3], "value returned from the executor thread");
+
+        let err =
+            run_on_sam3_thread(|| Err::<Vec<u8>, _>(WorkerError::InvalidPayload("boom".into())));
+        assert!(
+            matches!(err, Err(WorkerError::InvalidPayload(ref m)) if m == "boom"),
+            "error surfaced verbatim, got {err:?}"
+        );
+    }
+
+    /// sc-11180 / F-012: a panicking job is caught and surfaced as an `Engine` error to that caller
+    /// WITHOUT killing the shared thread — a subsequent job on the same executor still succeeds.
+    #[test]
+    fn executor_survives_a_panicking_job() {
+        let panicked = run_on_sam3_thread(|| -> WorkerResult<()> {
+            panic!("deliberate job panic");
+        });
+        assert!(
+            matches!(panicked, Err(WorkerError::Engine(ref m)) if m.contains("panicked")),
+            "panic surfaced as Engine error, got {panicked:?}"
+        );
+        // The thread survived: a later job runs normally on the same executor thread.
+        let after = run_on_sam3_thread(|| Ok::<_, WorkerError>(42u32)).unwrap();
+        assert_eq!(after, 42, "executor thread still serving after a job panic");
     }
 
     #[test]
