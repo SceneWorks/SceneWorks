@@ -79,22 +79,28 @@ pub(crate) type BoxNorm = (f64, f64, f64, f64);
 
 /// Resolve already-present SAM2 weights: an explicit env pin
 /// (`SCENEWORKS_SAM2_WEIGHTS`), then the app cache `<data_dir>/cache/person-segment/`,
-/// then the model dir `<data_dir>/models/person-segment/`. Returns `None` when nothing
+/// then the model dir `<data_dir>/models/person-segment/`. Returns `Ok(None)` when nothing
 /// is staged (then `ensure_segmenter_weights` downloads it).
-pub(crate) fn resolve_segmenter_weights(settings: &Settings) -> Option<PathBuf> {
-    if let Ok(pinned) = std::env::var("SCENEWORKS_SAM2_WEIGHTS") {
-        let path = PathBuf::from(pinned);
-        if path.exists() {
-            return Some(path);
-        }
+///
+/// A set-but-missing `SCENEWORKS_SAM2_WEIGHTS` is an operator error: it fails loudly
+/// (`InvalidPayload`) via [`crate::util::resolve_env_file_pin`] instead of silently falling
+/// through to the cache/HF download and loading different weights than the operator asked
+/// for (sc-11175/F-011, mirroring the sc-8911 upscaler pin).
+pub(crate) fn resolve_segmenter_weights(settings: &Settings) -> WorkerResult<Option<PathBuf>> {
+    if let Some(path) = crate::util::resolve_env_file_pin(
+        "SCENEWORKS_SAM2_WEIGHTS",
+        std::env::var_os("SCENEWORKS_SAM2_WEIGHTS"),
+        "the local SAM2 segmenter weights",
+    )? {
+        return Ok(Some(path));
     }
     for sub in ["cache/person-segment", "models/person-segment"] {
         let candidate = settings.data_dir.join(sub).join(SEG_FILE);
         if candidate.exists() {
-            return Some(candidate);
+            return Ok(Some(candidate));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Resolve the SAM2 weights, downloading them from HuggingFace on first use (into the
@@ -103,7 +109,7 @@ pub(crate) async fn ensure_segmenter_weights(
     settings: &Settings,
     context: &DownloadContext<'_>,
 ) -> WorkerResult<PathBuf> {
-    if let Some(path) = resolve_segmenter_weights(settings) {
+    if let Some(path) = resolve_segmenter_weights(settings)? {
         return Ok(path);
     }
     let target = settings
@@ -472,5 +478,62 @@ mod tests {
         // A box over the left half of the block → ~half the foreground inside.
         let half = mask_box_coverage(&pixels, (0.0, 0.0, 0.4, 1.0), w, h);
         assert!((half - 0.5).abs() < 1e-9, "half coverage was {half}");
+    }
+
+    fn f011_test_settings(data_dir: PathBuf) -> Settings {
+        Settings {
+            api_url: "http://127.0.0.1:0".to_owned(),
+            access_token: None,
+            data_dir,
+            config_dir: PathBuf::from("config"),
+            worker_id: "test-worker".to_owned(),
+            gpu_id: "cpu".to_owned(),
+            is_child_worker: true,
+            poll_seconds: 1,
+            heartbeat_seconds: 5,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: 8u64 * 1024 * 1024 * 1024,
+            max_model_url_bytes: 256u64 * 1024 * 1024 * 1024,
+            allow_private_lora_urls: true,
+            utility_workers: 1,
+            backend_mlx_enabled: true,
+            backend_candle_enabled: false,
+            gpu_memory_limit_bytes: 0,
+            external_model_roots: Vec::new(),
+        }
+    }
+
+    /// sc-11175/F-011: a set-but-missing `SCENEWORKS_SAM2_WEIGHTS` pin must fail loudly
+    /// (`InvalidPayload`) via `resolve_env_file_pin` instead of silently falling through to
+    /// the cache/HF download; an unset pin (with nothing staged) falls through to `Ok(None)`.
+    /// `RUST_TEST_THREADS=1` is forced workspace-wide, so the env mutation is serial.
+    #[test]
+    fn resolve_segmenter_weights_env_pin_missing_errors_and_unset_falls_through() {
+        let key = "SCENEWORKS_SAM2_WEIGHTS";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = f011_test_settings(dir.path().to_path_buf());
+        let prior = std::env::var_os(key);
+
+        std::env::set_var(key, "/nonexistent/sam2/does-not-exist.safetensors");
+        let missing = resolve_segmenter_weights(&settings);
+        assert!(
+            matches!(missing, Err(WorkerError::InvalidPayload(ref m)) if m.contains(key) && m.contains("does not exist")),
+            "a set-but-missing SAM2 pin must error loudly, got {missing:?}"
+        );
+
+        std::env::remove_var(key);
+        let unset = resolve_segmenter_weights(&settings);
+        assert!(
+            matches!(unset, Ok(None)),
+            "an unset SAM2 pin must fall through to Ok(None), got {unset:?}"
+        );
+
+        match prior {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
     }
 }

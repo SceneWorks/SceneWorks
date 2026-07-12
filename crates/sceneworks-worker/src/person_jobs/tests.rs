@@ -711,3 +711,65 @@ fn person_detect_candle_real_weights_finds_person() {
     assert!(b["width"].as_f64().unwrap() > 0.0 && b["height"].as_f64().unwrap() > 0.0);
     assert_eq!(top["maskState"], "missing");
 }
+
+fn f011_test_settings(data_dir: PathBuf) -> Settings {
+    Settings {
+        api_url: "http://127.0.0.1:0".to_owned(),
+        access_token: None,
+        data_dir,
+        config_dir: PathBuf::from("config"),
+        worker_id: "test-worker".to_owned(),
+        gpu_id: "cpu".to_owned(),
+        is_child_worker: true,
+        poll_seconds: 1,
+        heartbeat_seconds: 5,
+        shutdown_timeout_seconds: 1,
+        huggingface_base_url: "http://127.0.0.1:0".to_owned(),
+        huggingface_token: None,
+        credentials: Vec::new(),
+        max_lora_url_bytes: 8u64 * 1024 * 1024 * 1024,
+        max_model_url_bytes: 256u64 * 1024 * 1024 * 1024,
+        allow_private_lora_urls: true,
+        utility_workers: 1,
+        backend_mlx_enabled: true,
+        backend_candle_enabled: false,
+        gpu_memory_limit_bytes: 0,
+        external_model_roots: Vec::new(),
+    }
+}
+
+/// sc-11175/F-011: a set-but-missing `SCENEWORKS_PERSON_DETECTOR_WEIGHTS` pin must fail
+/// loudly (`InvalidPayload`) via `resolve_env_file_pin` instead of silently falling through
+/// to the cache/HF download; an unset pin (with nothing staged) falls through to `Ok(None)`.
+/// `RUST_TEST_THREADS=1` is forced workspace-wide, so the env mutation is serial.
+#[test]
+fn resolve_detector_weights_env_pin_missing_errors_and_unset_falls_through() {
+    let key = "SCENEWORKS_PERSON_DETECTOR_WEIGHTS";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let settings = f011_test_settings(dir.path().to_path_buf());
+    let prior = std::env::var_os(key);
+
+    // Set but missing → loud InvalidPayload naming the key.
+    std::env::set_var(
+        key,
+        "/nonexistent/person-detector/does-not-exist.safetensors",
+    );
+    let missing = resolve_detector_weights(&settings);
+    assert!(
+        matches!(missing, Err(WorkerError::InvalidPayload(ref m)) if m.contains(key) && m.contains("does not exist")),
+        "a set-but-missing detector pin must error loudly, got {missing:?}"
+    );
+
+    // Unset + nothing staged in the temp data_dir → fall through.
+    std::env::remove_var(key);
+    let unset = resolve_detector_weights(&settings);
+    assert!(
+        matches!(unset, Ok(None)),
+        "an unset detector pin must fall through to Ok(None), got {unset:?}"
+    );
+
+    match prior {
+        Some(value) => std::env::set_var(key, value),
+        None => std::env::remove_var(key),
+    }
+}

@@ -965,22 +965,28 @@ pub(crate) fn detect_people_blocking(
 /// Resolve already-present detector weights (the MLX safetensors on macOS / the ONNX export
 /// off-Mac, per `DET_FILE`): explicit env pin (`SCENEWORKS_PERSON_DETECTOR_WEIGHTS`), then the
 /// app cache `<data_dir>/cache/person-detect/`, then the model dir
-/// `<data_dir>/models/person-detect/`. Returns `None` when nothing is staged (then
+/// `<data_dir>/models/person-detect/`. Returns `Ok(None)` when nothing is staged (then
 /// `ensure_detector_weights` downloads it).
-pub(crate) fn resolve_detector_weights(settings: &Settings) -> Option<PathBuf> {
-    if let Ok(pinned) = std::env::var("SCENEWORKS_PERSON_DETECTOR_WEIGHTS") {
-        let path = PathBuf::from(pinned);
-        if path.exists() {
-            return Some(path);
-        }
+///
+/// A set-but-missing `SCENEWORKS_PERSON_DETECTOR_WEIGHTS` is an operator error: it fails
+/// loudly (`InvalidPayload`) via [`crate::util::resolve_env_file_pin`] instead of silently
+/// falling through to the cache/HF download and loading different weights than the operator
+/// asked for (sc-11175/F-011, mirroring the sc-8911 upscaler pin).
+pub(crate) fn resolve_detector_weights(settings: &Settings) -> WorkerResult<Option<PathBuf>> {
+    if let Some(path) = crate::util::resolve_env_file_pin(
+        "SCENEWORKS_PERSON_DETECTOR_WEIGHTS",
+        std::env::var_os("SCENEWORKS_PERSON_DETECTOR_WEIGHTS"),
+        "the local person-detector weights (MLX safetensors / ONNX export)",
+    )? {
+        return Ok(Some(path));
     }
     for sub in ["cache/person-detect", "models/person-detect"] {
         let candidate = settings.data_dir.join(sub).join(DET_FILE);
         if candidate.exists() {
-            return Some(candidate);
+            return Ok(Some(candidate));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Resolve the detector weights (MLX safetensors on macOS / ONNX export off-Mac, per
@@ -990,7 +996,7 @@ pub(crate) async fn ensure_detector_weights(
     settings: &Settings,
     context: &DownloadContext<'_>,
 ) -> WorkerResult<PathBuf> {
-    if let Some(path) = resolve_detector_weights(settings) {
+    if let Some(path) = resolve_detector_weights(settings)? {
         return Ok(path);
     }
     let target = settings

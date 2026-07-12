@@ -44,6 +44,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::downloads::{ensure_hf_cached_file, DownloadContext};
 use crate::generator_cache::with_cached_generator;
+use crate::util::resolve_env_file_pin;
 use gen_core::{
     CancelFlag, Conditioning, GenerationOutput, GenerationRequest, Image as GenImage, LoadSpec,
     WeightsSource,
@@ -324,7 +325,10 @@ impl Upscaler {
                 Tensor::from_array((vec![1i64, 3, ch as i64, cw as i64], data)).map_err(ort_err)?;
             let outputs = self.session.run(ort::inputs![tensor]).map_err(ort_err)?;
             let (oshape, odata) = outputs[0].try_extract_tensor::<f32>().map_err(ort_err)?;
-            let (och, ocw) = (oshape[2] as usize, oshape[3] as usize);
+            // Validate the reported output shape/length against the `(1, 3, ch*factor,
+            // cw*factor)` contract before indexing `odata` (sc-11175/F-010) so a mis-scaled
+            // pinned export can't slice out of bounds and panic inside `spawn_blocking`.
+            let (och, ocw) = validate_upscale_output(oshape, odata.len(), cw, ch, factor)?;
 
             // inner (unpadded) region within the upscaled crop → destination
             let ix0 = (tl.x0 - cx0) * factor;
@@ -346,6 +350,54 @@ impl Upscaler {
         RgbImage::from_raw(ow as u32, oh as u32, output)
             .ok_or_else(|| WorkerError::InvalidPayload("upscale buffer size mismatch".to_owned()))
     }
+}
+
+/// Validate the Real-ESRGAN ONNX output shape/length before indexing `odata` (sc-11175/F-010).
+///
+/// The generic `SCENEWORKS_REALESRGAN_ONNX` pin serves both the x2 and x4 exports, so an
+/// operator can pin an x2 export and run a 4× job (or any mismatched export). The output
+/// dims would then be half (or otherwise not `input × factor`) the assumed size and the
+/// `odata[c * och * ocw + sy * ocw + sx]` reads below would slice out of bounds → panic
+/// inside `spawn_blocking`, killing the job as a join error and poisoning the `UPSCALERS`
+/// lock for every subsequent job. Validate the `(1, 3, ch·factor, cw·factor)` contract and
+/// return a `WorkerError::Engine` with expected-vs-actual dims instead — mirroring the
+/// sc-8904/F-102 sibling decode-path guards in `person_jobs::decode` / `pose_jobs`.
+///
+/// `cw`/`ch` are the (even-padded) per-tile model *input* width/height; a valid export
+/// returns `(1, 3, ch·factor, cw·factor)`. Returns the validated `(och, ocw)`.
+fn validate_upscale_output(
+    oshape: &[i64],
+    odata_len: usize,
+    cw: usize,
+    ch: usize,
+    factor: usize,
+) -> WorkerResult<(usize, usize)> {
+    if oshape.len() != 4 {
+        return Err(WorkerError::Engine(format!(
+            "real-esrgan output rank {} != 4 (expected (1, 3, H·factor, W·factor)); is the \
+             pinned SCENEWORKS_REALESRGAN_ONNX export the right model?",
+            oshape.len()
+        )));
+    }
+    let och = oshape[2].max(0) as usize;
+    let ocw = oshape[3].max(0) as usize;
+    let exp_h = ch.saturating_mul(factor);
+    let exp_w = cw.saturating_mul(factor);
+    if och != exp_h || ocw != exp_w {
+        return Err(WorkerError::Engine(format!(
+            "real-esrgan output dims {och}×{ocw} != expected {exp_h}×{exp_w} \
+             (input {ch}×{cw} × factor {factor}); is the pinned SCENEWORKS_REALESRGAN_ONNX \
+             export the wrong scale (e.g. an x2 export run as a {factor}× job)?"
+        )));
+    }
+    let needed = 3usize.saturating_mul(och).saturating_mul(ocw);
+    if odata_len < needed {
+        return Err(WorkerError::Engine(format!(
+            "real-esrgan output has {odata_len} values but the (3 × {och} × {ocw}) contract \
+             needs {needed}"
+        )));
+    }
+    Ok((och, ocw))
 }
 
 /// Blocking upscale: load+cache the factor's session (amortising the CoreML/CUDA graph
@@ -383,29 +435,6 @@ fn upscale_blocking(
 // ---------------------------------------------------------------------------
 // ONNX weight provisioning (download-on-first-use, mirrors Python resolution order)
 // ---------------------------------------------------------------------------
-
-/// Resolve an explicit env-pinned weight *file* (sc-8911). Unset → `Ok(None)` (fall
-/// through to cache/download). Set + existing → `Ok(Some(path))`. Set but missing → an
-/// `InvalidPayload` error so a typo fails loudly instead of silently loading whatever the
-/// download resolves. `what` names the expected file in the error. Takes the raw value
-/// explicitly so it's unit-testable without mutating the process environment.
-fn resolve_env_file_pin(
-    key: &str,
-    value: Option<std::ffi::OsString>,
-    what: &str,
-) -> WorkerResult<Option<PathBuf>> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let path = PathBuf::from(&value);
-    if path.exists() {
-        return Ok(Some(path));
-    }
-    Err(WorkerError::InvalidPayload(format!(
-        "{key} is set to {} but that path does not exist. Point it at {what}, or unset it to download on first use.",
-        path.display()
-    )))
-}
 
 /// Resolve the `SCENEWORKS_SEEDVR2_CHECKPOINT` dir pin (sc-8911). Unset → `Ok(None)`. Set
 /// and holding both checkpoint files → `Ok(Some(dir))`. Set but incomplete → an
