@@ -618,7 +618,88 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        // Windows has no per-child SIGTERM, so a supervised child ALSO treats stdin-EOF
+        // as a graceful-shutdown request: the supervisor holds the write end of the
+        // child's piped stdin and closing it (see `supervisor::terminate_child`)
+        // delivers EOF here — the Windows analogue of the unix SIGTERM path (sc-11184 /
+        // F-014). This trips the same sc-8845 graceful-cancel wind-down, so an in-flight
+        // job posts a terminal `Canceled` instead of dying mid-GPU-write. The top-level
+        // supervisor process is NOT a child (its stdin is the real console, not a
+        // supervisor-held pipe), so it keeps Ctrl-C only; gate the stdin path to child
+        // workers via the `SCENEWORKS_WORKER_CHILD` marker the supervisor sets.
+        if std::env::var_os("SCENEWORKS_WORKER_CHILD").is_some() {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = wait_for_parent_stdin_close() => {}
+            }
+        } else {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+/// Resolve once the supervisor closes the write end of this child's stdin pipe
+/// (sc-11184 / F-014) — the Windows graceful-shutdown signal, standing in for the unix
+/// SIGTERM the supervisor cannot deliver per-child on Windows.
+///
+/// `shutdown_signal()` is awaited on every worker-loop turn, so opening a fresh reader
+/// per call would risk parking a blocking thread on each turn. Instead a SINGLE
+/// background reader is started once (guarded by a `OnceLock`) and its EOF result is
+/// fanned out over a `watch` channel; every caller just subscribes. The channel latches
+/// `true` on close and stays there, so a caller that subscribes AFTER the pipe already
+/// closed still returns immediately. The reader drains stdin on std's blocking handle
+/// inside `spawn_blocking` (rather than `tokio::io::stdin`, which needs the `io-std`
+/// feature this crate does not enable).
+#[cfg(not(unix))]
+async fn wait_for_parent_stdin_close() {
+    use std::sync::OnceLock;
+    use tokio::sync::watch;
+
+    static CLOSED: OnceLock<watch::Sender<bool>> = OnceLock::new();
+    let sender = CLOSED.get_or_init(|| {
+        let (tx, _rx) = watch::channel(false);
+        let signal = tx.clone();
+        // One dedicated blocking reader for the whole process, so repeated turns never
+        // each park a fresh thread. Detached: dropping the JoinHandle lets it run on.
+        tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            let mut stdin = std::io::stdin();
+            let mut scratch = [0_u8; 64];
+            loop {
+                match stdin.read(&mut scratch) {
+                    // EOF: the supervisor dropped the write end → graceful shutdown.
+                    Ok(0) => break,
+                    // A worker child consumes stdin for nothing else, so discard any
+                    // stray bytes; only closure is meaningful.
+                    Ok(_) => continue,
+                    // Treat a read error as closure too, so shutdown never hangs on it.
+                    Err(_) => break,
+                }
+            }
+            // `send_replace` (NOT `send`) so the latch is updated UNCONDITIONALLY even
+            // when `receiver_count() == 0`: `send` returns `Err` WITHOUT storing the value
+            // if no receiver is currently subscribed, and receivers only exist while a
+            // `wait_for_parent_stdin_close` future is being polled. In the synchronous gap
+            // between the poll-phase `select!` and the run_job `select!` no receiver is
+            // subscribed, so an EOF landing in that window would be lost forever and every
+            // later waiter would block on `changed()` indefinitely (the reader is
+            // single-shot and has exited). `send_replace` latches `true` regardless, so the
+            // next `subscribe()`'s `borrow_and_update()` observes it immediately (sc-11184).
+            let _ = signal.send_replace(true);
+        });
+        tx
+    });
+
+    let mut receiver = sender.subscribe();
+    if *receiver.borrow_and_update() {
+        return;
+    }
+    // Wait until the reader latches `true`. `changed()` cannot error from a dropped
+    // sender: the `OnceLock` holds it for the process lifetime.
+    while receiver.changed().await.is_ok() {
+        if *receiver.borrow() {
+            return;
+        }
     }
 }
 

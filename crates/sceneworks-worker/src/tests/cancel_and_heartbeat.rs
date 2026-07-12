@@ -964,3 +964,61 @@ async fn keepalive_cancels_the_job_even_when_the_task_cannot_observe_the_flag() 
     );
 }
 
+/// sc-11184 (F-014) — the Windows stdin-close latch must survive a zero-receiver window.
+///
+/// `wait_for_parent_stdin_close` (the `#[cfg(not(unix))]` graceful-shutdown signal) fans a single
+/// stdin-EOF over a `tokio::sync::watch` channel whose `Sender` lives in a process-lifetime
+/// `OnceLock`; receivers exist ONLY while a caller is polling the wait future. Between the poll-phase
+/// `select!` and the run_job `select!` `receiver_count()` is 0, and the dedicated reader is
+/// single-shot (it breaks on EOF, latches once, exits). The reader originally used
+/// `watch::Sender::send`, which returns `Err` WITHOUT storing the value when there is no receiver —
+/// so an EOF landing in that window was lost forever and every later waiter blocked on `changed()`
+/// indefinitely, defeating F-014's graceful shutdown. The fix trips the latch with `send_replace`,
+/// which stores the value unconditionally.
+///
+/// This asserts the semantics directly (the reader task itself is `#[cfg(not(unix))]` and can't be
+/// driven on the macOS/Linux test host): construct the channel EXACTLY as the reader does, drop the
+/// initial receiver so `receiver_count() == 0`, trip via `send_replace`, THEN subscribe (mirroring
+/// `sender.subscribe()` in the wait fn) and assert the fresh receiver observes `true` immediately via
+/// `borrow_and_update()` (the wait fn's entry-borrow), so its wait future is ready with no `changed()`
+/// await. It also documents that plain `send` would have failed this scenario.
+#[tokio::test]
+async fn stdin_close_latch_retained_across_zero_receiver_window() {
+    use tokio::sync::watch;
+
+    // Same construction the reader uses: initial `_rx` is dropped, so no receiver is subscribed.
+    let (tx, rx) = watch::channel(false);
+    drop(rx);
+    assert_eq!(
+        tx.receiver_count(),
+        0,
+        "precondition: the zero-receiver window (initial rx dropped, no waiter polling)"
+    );
+
+    // Regression guard: the OLD `send` drops the value in this window (returns Err, latch stays
+    // false) — this is exactly the missed-wakeup the fix removes.
+    assert!(
+        tx.send(true).is_err(),
+        "watch::Sender::send returns Err with zero receivers — proves the pre-fix bug"
+    );
+    assert!(
+        !*tx.borrow(),
+        "and `send` left the latched value UNCHANGED (false) — the lost graceful-shutdown request"
+    );
+
+    // The fix: `send_replace` stores the value unconditionally, even with zero receivers.
+    tx.send_replace(true);
+    assert!(
+        *tx.borrow(),
+        "send_replace latches `true` regardless of receiver_count"
+    );
+
+    // A waiter that subscribes AFTER the trip (the run_job select!'s fresh `subscribe()`) must see
+    // the latched value immediately via the entry-borrow, never blocking on `changed()`.
+    let mut receiver = tx.subscribe();
+    assert!(
+        *receiver.borrow_and_update(),
+        "a receiver created after the trip observes shutdown immediately (entry-borrow), not a hang"
+    );
+}
+

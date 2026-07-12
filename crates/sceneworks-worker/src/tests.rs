@@ -70,7 +70,8 @@ use super::model_jobs::{
 use super::supervisor::terminating_signal;
 use super::supervisor::{
     auto_worker_specs, child_died_abnormally, child_environment, restart_exited_children_at,
-    restart_exited_children_with_spawner, utility_worker_specs, SupervisedChild, WorkerSpec,
+    restart_exited_children_with_spawner, stop_children, utility_worker_specs, SupervisedChild,
+    WorkerSpec,
 };
 use super::{
     allow_pattern_matches, bounded_tail, cancel_requested_peek, cleanup_uploaded_import_source,

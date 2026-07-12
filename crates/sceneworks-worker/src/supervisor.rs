@@ -140,7 +140,26 @@ where
         if child.next_restart_at.is_some() {
             continue;
         }
-        if let Some(status) = child.process.try_wait()? {
+        // A transient `try_wait` failure must NOT tear the whole supervisor down and
+        // orphan the still-running healthy siblings — log it and revisit this child on
+        // the next 1 s tick, exactly as a not-yet-exited child would be (sc-11184 /
+        // F-013).
+        let status = match child.process.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                emit_event_value(
+                    Level::ERROR,
+                    json!({
+                        "event": "worker_wait_failed",
+                        "workerId": worker_id,
+                        "gpuId": child.spec.gpu_id,
+                        "error": error.to_string(),
+                    }),
+                );
+                continue;
+            }
+        };
+        if let Some(status) = status {
             // A child that ran healthily for a while before exiting starts its
             // backoff fresh, so rare widely-spaced crashes don't ratchet the delay
             // up to the cap forever (sc-4282 / F-MLXW-20).
@@ -198,9 +217,35 @@ where
         let Some(child) = children.get_mut(&worker_id) else {
             continue;
         };
-        child.process = spawner(settings, &child.spec)?;
-        child.spawned_at = now;
-        child.next_restart_at = None;
+        match spawner(settings, &child.spec) {
+            Ok(process) => {
+                child.process = process;
+                child.spawned_at = now;
+                child.next_restart_at = None;
+            }
+            Err(error) => {
+                // A failed respawn (an AV-locked exe mid-update, momentary resource
+                // exhaustion) is treated like another crash: log it, re-arm the backoff
+                // with a fresh deadline, and try again on a later tick — rather than
+                // propagating the error out of the supervision loop, which would kill
+                // the whole supervisor and orphan the healthy siblings still running
+                // (sc-11184 / F-013). Advancing the attempt keeps the backoff climbing
+                // so a persistently unspawnable child doesn't hot-loop the exec.
+                child.restart_attempt = child.restart_attempt.saturating_add(1);
+                let delay = retry_delay(settings.poll_seconds, child.restart_attempt);
+                child.next_restart_at = Some(now + Duration::from_secs(delay));
+                emit_event_value(
+                    Level::ERROR,
+                    json!({
+                        "event": "worker_respawn_failed",
+                        "workerId": worker_id,
+                        "gpuId": child.spec.gpu_id,
+                        "restartInSeconds": delay,
+                        "error": error.to_string(),
+                    }),
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -252,6 +297,20 @@ pub(crate) async fn terminate_child(child: &mut Child) {
             return;
         }
     }
+    // Windows graceful signal (sc-11184 / F-014): the child was spawned with a
+    // supervisor-held stdin pipe (see `start_child_worker`), so dropping the write end
+    // here delivers EOF to the child. Its `shutdown_signal()` selects on that EOF and
+    // trips the sc-8845 graceful-cancel machinery, letting an in-flight job post its
+    // terminal `Canceled` during the grace window in `stop_children` before we escalate
+    // to `start_kill()` — the Windows analogue of the unix SIGTERM→wait→SIGKILL ladder.
+    // Falls through to `start_kill()` if the pipe is absent (never piped / already
+    // taken), so a child with no graceful channel is still stopped.
+    #[cfg(not(unix))]
+    {
+        if child.stdin.take().is_some() {
+            return;
+        }
+    }
     let _ = child.start_kill();
 }
 
@@ -267,6 +326,15 @@ pub(crate) fn start_child_worker(_settings: &Settings, spec: &WorkerSpec) -> Wor
     );
     let mut command = Command::new(executable);
     command.envs(child_environment(spec));
+    // Windows graceful-shutdown channel (sc-11184 / F-014). Windows has no per-child
+    // SIGTERM, so give the child a supervisor-held stdin pipe: closing the write end in
+    // `terminate_child` delivers EOF, which the child's `shutdown_signal()` selects on
+    // to begin the sc-8845 graceful wind-down instead of being killed mid-GPU-write.
+    // Unix is unchanged — the child keeps inherited stdin and SIGTERM is its signal.
+    #[cfg(not(unix))]
+    {
+        command.stdin(std::process::Stdio::piped());
+    }
     command.spawn().map_err(Into::into)
 }
 
