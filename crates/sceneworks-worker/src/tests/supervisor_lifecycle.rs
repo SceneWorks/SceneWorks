@@ -220,6 +220,160 @@ async fn supervisor_backoff_on_one_child_does_not_stall_another() {
     }
 }
 
+/// sc-11184 / F-013: a transient respawn failure must NOT tear the supervisor down.
+/// A spawner that errors once (an AV-locked exe mid-update, momentary resource
+/// exhaustion) is handled like another crash — the tick returns `Ok`, the child's
+/// backoff is re-armed with a fresh deadline, and a later tick respawns it — instead
+/// of propagating the error out of the supervision loop and orphaning the healthy
+/// siblings that are still running.
+#[tokio::test]
+async fn supervisor_survives_a_transient_respawn_failure_and_retries() {
+    let settings = test_settings("http://127.0.0.1".to_owned(), None);
+    let spec = WorkerSpec {
+        worker_id: "worker-gpu-auto-0".to_owned(),
+        gpu_id: "0".to_owned(),
+    };
+    let mut exited = spawn_exit_child();
+    for _ in 0..20 {
+        if exited.try_wait().expect("child status checks").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let mut children = HashMap::from([(
+        spec.worker_id.clone(),
+        SupervisedChild {
+            spec,
+            process: exited,
+            restart_attempt: 0,
+            spawned_at: std::time::Instant::now(),
+            next_restart_at: None,
+        },
+    )]);
+
+    let attempts = std::cell::Cell::new(0_u32);
+    let mut spawner = |_settings: &_, _spec: &WorkerSpec| {
+        let attempt = attempts.get() + 1;
+        attempts.set(attempt);
+        if attempt == 1 {
+            // The first respawn attempt fails transiently.
+            Err(WorkerError::Io(std::io::Error::other(
+                "simulated transient spawn failure",
+            )))
+        } else {
+            Ok(spawn_sleep_child())
+        }
+    };
+
+    // Detection tick: reap the exit and stamp a backoff deadline (no spawn yet).
+    let t0 = std::time::Instant::now();
+    restart_exited_children_at(&settings, &mut children, &mut spawner, t0)
+        .await
+        .expect("exit detection never errors");
+    assert_eq!(attempts.get(), 0, "detection tick does not spawn");
+    assert_eq!(children["worker-gpu-auto-0"].restart_attempt, 1);
+
+    // First restart tick (past the backoff): the spawner fails once. The tick must
+    // still return Ok, and the child must be re-armed with a fresh, later deadline —
+    // NOT dropped and NOT propagated as an error out of the loop.
+    restart_exited_children_at(
+        &settings,
+        &mut children,
+        &mut spawner,
+        t0 + Duration::from_secs(10),
+    )
+    .await
+    .expect("a transient respawn failure does NOT propagate out of the tick");
+    assert_eq!(attempts.get(), 1, "the spawner was attempted exactly once");
+    {
+        let child = &children["worker-gpu-auto-0"];
+        let deadline = child
+            .next_restart_at
+            .expect("the failed respawn re-arms the backoff instead of dropping the child");
+        assert!(
+            deadline > t0 + Duration::from_secs(10),
+            "the re-armed deadline is in the future so the retry backs off"
+        );
+        assert_eq!(
+            child.restart_attempt, 2,
+            "a failed respawn advances the backoff attempt like a crash"
+        );
+    }
+
+    // Second restart tick (past the re-armed deadline): the spawner now succeeds and
+    // the child comes back — proving the supervisor kept going and eventually recovered.
+    restart_exited_children_at(
+        &settings,
+        &mut children,
+        &mut spawner,
+        t0 + Duration::from_secs(60),
+    )
+    .await
+    .expect("the retried respawn succeeds");
+    assert_eq!(attempts.get(), 2, "the child was respawned on the retry");
+    let child = children
+        .get_mut("worker-gpu-auto-0")
+        .expect("respawned child stays tracked");
+    assert!(
+        child.next_restart_at.is_none(),
+        "a successful respawn clears the backoff deadline"
+    );
+    assert!(child
+        .process
+        .try_wait()
+        .expect("child status checks")
+        .is_none());
+    let _ = child.process.start_kill();
+    let _ = child.process.wait().await;
+}
+
+/// sc-11184 / F-014: the supervisor's shutdown ladder (`terminate_child` → grace
+/// wait → `start_kill`) stops every supervised child and clears the map. This
+/// exercises the same terminate-then-escalate path the Windows stdin-close graceful
+/// signal plugs into: on unix the SIGTERM reaps the sleeper within the grace window;
+/// on Windows the child that ignores the stdin-close is escalated to `start_kill`
+/// after the grace deadline — either way the map ends empty.
+#[tokio::test]
+async fn stop_children_terminates_and_clears_every_child() {
+    let settings = test_settings("http://127.0.0.1".to_owned(), None);
+    let mut children = HashMap::from([
+        (
+            "worker-gpu-auto-0".to_owned(),
+            SupervisedChild {
+                spec: WorkerSpec {
+                    worker_id: "worker-gpu-auto-0".to_owned(),
+                    gpu_id: "0".to_owned(),
+                },
+                process: spawn_sleep_child(),
+                restart_attempt: 0,
+                spawned_at: std::time::Instant::now(),
+                next_restart_at: None,
+            },
+        ),
+        (
+            "worker-gpu-auto-1".to_owned(),
+            SupervisedChild {
+                spec: WorkerSpec {
+                    worker_id: "worker-gpu-auto-1".to_owned(),
+                    gpu_id: "1".to_owned(),
+                },
+                process: spawn_sleep_child(),
+                restart_attempt: 0,
+                spawned_at: std::time::Instant::now(),
+                next_restart_at: None,
+            },
+        ),
+    ]);
+
+    stop_children(&settings, &mut children).await;
+
+    assert!(
+        children.is_empty(),
+        "every supervised child is stopped and untracked after a graceful stop"
+    );
+}
+
 /// sc-4282 / F-MLXW-20: a child that ran healthily past the reset threshold
 /// before exiting starts its restart backoff fresh, rather than carrying a
 /// counter that has saturated upward over many widely-spaced crashes.
