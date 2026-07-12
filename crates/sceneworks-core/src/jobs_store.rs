@@ -4684,6 +4684,107 @@ mod candle_routing_tests {
     }
 
     #[test]
+    fn bernini_video_candle_serves_every_mode_in_native_shape() {
+        // sc-10997 (epic 6562): the candle Bernini VIDEO lane serves t2v + the editing/reference/
+        // multi-source modes on the distinct `bernini` engine — the off-Mac parity of the MLX
+        // `video_mode_is_mlx_eligible(bernini, mode)` gate. Each mode claims the candle lane (routed on
+        // id + mode; the worker validates the per-mode media + `SceneWorks/bernini-candle` weights loudly,
+        // sc-11003). The story's "i2v"/"edit" map onto Bernini's `video_to_video` — its Wan2.2-T2V
+        // renderer has no classic still-image-to-video (mirrors the MLX lane's mode set exactly).
+        for (mode, payload) in [
+            (
+                "text_to_video",
+                json!({ "model": "bernini", "mode": "text_to_video", "prompt": "a kite" }),
+            ),
+            (
+                "video_to_video",
+                json!({ "model": "bernini", "mode": "video_to_video", "sourceClipAssetId": "clip_1" }),
+            ),
+            (
+                "reference_to_video",
+                json!({ "model": "bernini", "mode": "reference_to_video", "referenceAssetIds": ["ref_1"] }),
+            ),
+            (
+                "reference_video_to_video",
+                json!({
+                    "model": "bernini",
+                    "mode": "reference_video_to_video",
+                    "sourceClipAssetId": "clip_1",
+                    "referenceAssetIds": ["ref_1"]
+                }),
+            ),
+            (
+                "multi_video_to_video",
+                json!({
+                    "model": "bernini",
+                    "mode": "multi_video_to_video",
+                    "sourceClipAssetIds": ["clip_1", "clip_2"]
+                }),
+            ),
+            (
+                "ads2v",
+                json!({
+                    "model": "bernini",
+                    "mode": "ads2v",
+                    "sourceClipAssetId": "clip_1",
+                    "referenceClipAssetId": "clip_2",
+                    "referenceAssetIds": ["ref_1"]
+                }),
+            ),
+        ] {
+            assert!(
+                bernini_video_candle_eligible("bernini", &object(payload.clone())),
+                "bernini {mode} must be candle-eligible"
+            );
+            // Through the full VideoGenerate claim gate (the OR-in wiring reaches the candle worker).
+            assert!(
+                video_job_is_candle_eligible(&video_generate_job(payload.clone())),
+                "bernini {mode} must route to the candle worker via video_job_is_candle_eligible"
+            );
+        }
+        // An explicit tier request (`mlxQuantize`) is lineage-only — it does NOT push Bernini off candle
+        // (the loader reads the converted tree dense; there is no torch Bernini to fall back to, sc-11003).
+        let mut quant = object(json!({ "model": "bernini", "mode": "text_to_video" }));
+        quant.insert("advanced".into(), json!({ "mlxQuantize": 8 }));
+        assert!(
+            bernini_video_candle_eligible("bernini", &quant),
+            "a tier-requesting bernini job stays on candle (dense load + lineage bits)"
+        );
+    }
+
+    #[test]
+    fn bernini_video_candle_rejects_wrong_model_or_mode() {
+        // Only the `bernini` id claims the Bernini candle VIDEO lane; other video models (and the still
+        // `bernini_image` id) keep their own routing.
+        for model in ["wan_2_2", "scail2_14b", "bernini_image", "ltx_2_3"] {
+            assert!(
+                !bernini_video_candle_eligible(model, &object(json!({ "mode": "text_to_video" }))),
+                "{model} must not claim the bernini video candle lane"
+            );
+        }
+        // A mode Bernini does not serve (no classic i2v; replace/animate/clip modes belong to other
+        // engines) is not this lane — mirrors the MLX `video_mode_is_mlx_eligible(bernini, ..)` set.
+        for mode in [
+            "image_to_video",
+            "replace_person",
+            "animate_character",
+            "first_last_frame",
+            "extend_clip",
+            "",
+        ] {
+            assert!(
+                !bernini_video_candle_eligible("bernini", &object(json!({ "mode": mode }))),
+                "bernini {mode:?} is not a served candle video mode"
+            );
+        }
+        // No mode at all → not eligible (a real bernini job always carries an explicit mode).
+        assert!(!bernini_video_candle_eligible(
+            "bernini",
+            &object(json!({ "prompt": "p" }))
+        ));
+    }
+
+    #[test]
     fn scail2_candle_rejects_incomplete_or_wrong_shape() {
         // animate_character needs BOTH a reference image and a driving clip.
         assert!(!scail2_animate_candle_eligible(

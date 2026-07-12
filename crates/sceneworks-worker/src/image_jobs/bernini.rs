@@ -338,7 +338,7 @@ fn bernini_image_candle_available(request: &ImageRequest) -> bool {
 /// candle SCAIL-2 / Wan-VACE resolvers, a missing checkpoint surfaces a clear re-download error instead
 /// of degrading to a stub. The candle sibling of the MLX `resolve_bernini_model_dir` (video_jobs.rs).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn resolve_candle_bernini_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
+pub(crate) fn resolve_candle_bernini_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
     if let Ok(dir) = std::env::var("SCENEWORKS_CANDLE_BERNINI_DIR") {
         let path = PathBuf::from(dir.trim());
         if path.join("transformer").is_dir() {

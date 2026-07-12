@@ -107,6 +107,14 @@ use candle_gen_seedvr2 as _;
 // anchor above.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_scail2 as _;
+// Candle Bernini (sc-10997, epic 6562): the full Qwen planner + Wan2.2-T2V-A14B renderer `Generator`
+// registers under `bernini` via `inventory::submit!`; force-link so the registration survives the MSVC
+// release linker (reached only through `gen_core::load("bernini")`, no direct type contact — the "no
+// generator registered" trap). The off-Mac VIDEO sibling of the macOS `mlx_gen_bernini` anchor above
+// (image_jobs.rs already force-links the same crate for the still lane; inventory is global, but the
+// video lane keeps its own anchor for parity with the `candle_gen_scail2` video anchor).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_bernini as _;
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -254,6 +262,11 @@ enum CandleVideoRoute {
     AnimateScail2(&'static str),
     /// `extend_clip` / `video_bridge` → candle Wan-VACE extend/bridge (sc-5494).
     WanVaceExtendBridge,
+    /// A `bernini` VIDEO job (t2v + the editing/reference/multi-source modes) → `generate_candle_bernini`
+    /// (sc-10997, epic 6562). A DISTINCT engine (the full Qwen planner + Wan2.2-T2V-A14B renderer), NOT a
+    /// wan/ltx `is_candle_video_engine` id, so it is routed off the model id before the generic arm below.
+    /// Carries the resolved engine id.
+    Bernini(&'static str),
     /// A candle txt2video engine id → `generate_candle_video` (sc-5097).
     CandleVideo,
     /// An in-place ComfyUI Wan2.2 base model (`external_base_*`) → `generate_candle_wan_comfyui`
@@ -283,6 +296,15 @@ fn resolve_candle_video_route(request: &VideoRequest, settings: &Settings) -> Ca
         CandleVideoRoute::AnimateScail2(engine_id)
     } else if matches!(request.mode.as_str(), "extend_clip" | "video_bridge") {
         CandleVideoRoute::WanVaceExtendBridge
+    } else if let Some(engine_id) = candle_bernini_engine_id(&request.model) {
+        // Bernini (sc-10997, epic 6562): the full Qwen planner + Wan2.2-T2V-A14B renderer serves t2v +
+        // the editing/reference/multi-source modes (v2v / r2v / rv2v / mv2v / ads2v). A DISTINCT engine
+        // (`gen_core::load("bernini")`), NOT a wan/ltx `is_candle_video_engine` id, so it is routed off the
+        // model id BEFORE the generic candle-video arm below. Routed by model id, not weight availability —
+        // `generate_candle_bernini` resolves-or-errors loudly if the `SceneWorks/bernini-candle` snapshot is
+        // unprovisioned (sc-11003), never degrading to a stub. The per-mode source media is validated when
+        // the conditioning is assembled (`resolve_candle_bernini_conditioning`), mirroring the MLX lane.
+        CandleVideoRoute::Bernini(engine_id)
     } else if wan_comfyui_available(request, settings) {
         // In-place ComfyUI Wan2.2 base (sc-10671): an `external_base_*` id, so it matches no
         // `is_candle_video_engine` arm below — route it off the forwarded `modelManifestEntry`.
@@ -658,6 +680,31 @@ pub(crate) async fn run_video_generate_job(
                     decoded,
                     CANDLE_WAN_VACE_ADAPTER,
                     wan_vace_extend_raw_settings(&request),
+                    None::<Value>,
+                )
+            }
+            CandleVideoRoute::Bernini(engine_id) => {
+                // sc-10997 (epic 6562): the candle Bernini VIDEO lane — the full Qwen planner +
+                // Wan2.2-T2V-A14B renderer. `generate_candle_bernini` maps the SceneWorks mode to the engine
+                // `video_mode` task (t2v / v2v / r2v / rv2v / mv2v / ads2v) and resolves the source media into
+                // the planner conditioning (`resolve_candle_bernini_conditioning`) — empty for t2v, one or
+                // more `VideoClip`s for the edit modes, `MultiReference` for the reference modes. The off-Mac
+                // sibling of the macOS `generate_bernini`; resolves-or-errors loudly (no torch fallback — a
+                // distinct candle engine, GPU-val gated on the `SceneWorks/bernini-candle` weights, sc-11003).
+                let decoded = generate_candle_bernini(
+                    api,
+                    settings,
+                    job,
+                    &request,
+                    &project_path,
+                    engine_id,
+                    backend,
+                )
+                .await?;
+                (
+                    decoded,
+                    CANDLE_BERNINI_ADAPTER,
+                    candle_bernini_raw_settings(&request),
                     None::<Value>,
                 )
             }
@@ -6600,6 +6647,213 @@ async fn generate_bernini(
 }
 
 // ---------------------------------------------------------------------------
+// Real candle Bernini VIDEO generation (Windows/CUDA, via candle-gen-bernini, sc-10997 / epic 6562):
+// the off-Mac sibling of the macOS `generate_bernini` above. The full Qwen2.5-VL planner + Wan2.2-T2V-
+// A14B renderer registers under `bernini` (`Modality::Video`); the video path reaches it via
+// `gen_core::load("bernini")` (no direct type contact — the force-link near the top keeps the linker
+// from dropping the registration). Serves `text_to_video` + the editing/reference/multi-source video
+// modes (v2v / r2v / rv2v / mv2v / ads2v); `generate_candle_bernini` maps the SceneWorks mode to the
+// engine guidance task and resolves the source media into the planner conditioning. Loads the converted
+// `SceneWorks/bernini-candle` snapshot DENSE (the candle loader reads the tree as-is; the off-Mac
+// packed-tier select is deferred WITH the still lane until the `bernini-candle` tier layout lands —
+// GPU-val is gated on sc-11003, the not-yet-published weights). No LoRA (the engine reports
+// `supports_lora=false`). A distinct candle engine — NO torch fallback (a missing snapshot fails loud
+// at load, never a silent stub).
+// ---------------------------------------------------------------------------
+
+/// Adapter id recorded on a real candle Bernini VIDEO asset — the `candle_<family>` sibling of the MLX
+/// `mlx_bernini` label (same spelling as the still lane's `CANDLE_BERNINI_IMAGE_ADAPTER`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_BERNINI_ADAPTER: &str = "candle_bernini";
+
+/// SceneWorks Bernini model id → candle registry id, or `None` if `model` is not the Bernini video
+/// family. The candle sibling of the macOS `bernini_engine_id`; drives the `CandleVideoRoute::Bernini`
+/// arm (routed on the model id, not weight availability).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_bernini_engine_id(model: &str) -> Option<&'static str> {
+    (model == "bernini").then_some("bernini")
+}
+
+/// Map a SceneWorks video mode to the Bernini engine `video_mode` task string (which selects the
+/// renderer guidance mode). The candle sibling of the macOS `bernini_engine_video_mode` — the identical
+/// mapping so the two lanes render the same mode for the same request. Unknown / `text_to_video` ⇒
+/// plain `t2v`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_bernini_engine_video_mode(mode: &str) -> &'static str {
+    match mode {
+        "video_to_video" => "v2v",
+        "reference_to_video" => "r2v",
+        "reference_video_to_video" => "rv2v",
+        // Multi-source-video modes (sc-5425): mv2v (multiple source clips) and ads2v (source video +
+        // reference video + reference images). Both resolve to the engine's `V2vApg` guidance; they
+        // differ only in the supplied media.
+        "multi_video_to_video" => "mv2v",
+        "ads2v" => "ads2v",
+        _ => "t2v",
+    }
+}
+
+/// Raw-settings recorded on a real candle Bernini VIDEO asset (mirrors the macOS `bernini_raw_settings`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_bernini_raw_settings(request: &VideoRequest) -> Value {
+    let mut raw = request.advanced.clone();
+    raw.insert("realModelInference".to_owned(), Value::Bool(true));
+    raw.insert("model".to_owned(), Value::String(request.model.clone()));
+    raw.insert("frameCount".to_owned(), json!(request.frame_count()));
+    raw.insert("fps".to_owned(), json!(request.fps));
+    // The engine guidance task the SceneWorks mode resolved to (lineage / observability).
+    raw.insert(
+        "berniniTask".to_owned(),
+        Value::String(candle_bernini_engine_video_mode(&request.mode).to_owned()),
+    );
+    Value::Object(raw)
+}
+
+/// Resolve the source media for a candle Bernini editing/reference request into the planner
+/// conditioning — the candle sibling of the macOS `resolve_bernini_conditioning`. Source clips →
+/// [`Conditioning::VideoClip`] (the edit structure, VAE/ViT-encoded by the engine) and subject
+/// reference images → [`Conditioning::MultiReference`]. `text_to_video` needs none. The single-clip
+/// modes (v2v / rv2v / ads2v) use `sourceClipAssetId`; mv2v supplies several via `sourceClipAssetIds`;
+/// ads2v additionally appends the reference video (`referenceClipAssetId`) as a second clip after the
+/// source clip (sc-5425). Clips are emitted videos-first, in submission order, then images — matching
+/// the engine's `collect_conditioning` / `assign_source_ids` ordering. Each mode's required media is
+/// enforced here (defense in depth — the API validates the same), so a mis-built request fails loud
+/// instead of silently rendering an unconditioned clip. Clips decode to the output frame count via the
+/// candle-shared [`extract_clip_frames`]; reference images load via the shared `load_reference_image`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn resolve_candle_bernini_conditioning(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+) -> WorkerResult<Vec<Conditioning>> {
+    let mode = request.mode.as_str();
+
+    // Source video clips, in the order the engine assigns source ids (videos first; for ads2v the
+    // source clip leads the reference video).
+    let mut clip_ids: Vec<&str> = Vec::new();
+    match mode {
+        "video_to_video" | "reference_video_to_video" | "ads2v" => {
+            let clip_id = request.source_clip_asset_id.as_deref().ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "bernini {} requires a source clip (sourceClipAssetId).",
+                    request.mode.replace('_', " ")
+                ))
+            })?;
+            clip_ids.push(clip_id);
+        }
+        "multi_video_to_video" => {
+            if request.source_clip_asset_ids.len() < 2 {
+                return Err(WorkerError::InvalidPayload(
+                    "bernini multi video to video requires at least two source clips \
+                     (sourceClipAssetIds)."
+                        .to_owned(),
+                ));
+            }
+            clip_ids.extend(request.source_clip_asset_ids.iter().map(String::as_str));
+        }
+        _ => {}
+    }
+    if mode == "ads2v" {
+        let ref_clip_id = request.reference_clip_asset_id.as_deref().ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "bernini ads2v requires a reference video (referenceClipAssetId).".to_owned(),
+            )
+        })?;
+        clip_ids.push(ref_clip_id);
+    }
+
+    let mut conditioning = Vec::new();
+    for clip_id in clip_ids {
+        let frames = extract_clip_frames(
+            api,
+            settings,
+            job,
+            &request.project_id,
+            project_path,
+            clip_id,
+            request.width,
+            request.height,
+            wan_frame_count(request.raw_frame_count()),
+        )
+        .await?;
+        conditioning.push(Conditioning::VideoClip {
+            frames,
+            frame_idx: 0,
+            strength: 1.0,
+        });
+    }
+
+    // Subject reference images → MultiReference (r2v / rv2v / ads2v).
+    let needs_refs = matches!(
+        mode,
+        "reference_to_video" | "reference_video_to_video" | "ads2v"
+    );
+    if needs_refs {
+        if request.reference_asset_ids.is_empty() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "bernini {} requires at least one reference image (referenceAssetIds).",
+                request.mode.replace('_', " ")
+            )));
+        }
+        let mut images = Vec::with_capacity(request.reference_asset_ids.len());
+        for asset_id in &request.reference_asset_ids {
+            images.push(crate::image_jobs::load_reference_image(
+                &settings.data_dir,
+                &request.project_id,
+                asset_id,
+                project_path,
+            )?);
+        }
+        conditioning.push(Conditioning::MultiReference { images });
+    }
+
+    Ok(conditioning)
+}
+
+/// Real candle Bernini video generation (sc-10997 / epic 6562): build the `VideoGenInput` and run the
+/// shared [`generate_video`] path. The SceneWorks mode resolves to the engine `video_mode` task
+/// ([`candle_bernini_engine_video_mode`]) and the source media into the planner conditioning
+/// ([`resolve_candle_bernini_conditioning`]) — empty for t2v, one or more `VideoClip`s for
+/// v2v/mv2v/rv2v/ads2v, and `MultiReference` for r2v/rv2v/ads2v. The converted `SceneWorks/bernini-candle`
+/// snapshot loads DENSE (no load-time quant — the off-Mac packed-tier select is deferred with the still
+/// lane, sc-11003), resolved via the shared [`crate::image_jobs::resolve_candle_bernini_model_dir`] so
+/// video + still load from the same tier. No LoRA (the engine reports `supports_lora=false`); steps /
+/// guidance stay at the engine defaults. Frame count uses the Wan 1-mod-4 stride (the renderer is Wan).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn generate_candle_bernini(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    engine_id: &'static str,
+    backend: &str,
+) -> WorkerResult<DecodedVideo> {
+    let negative_prompt = non_empty_negative_prompt(request);
+    let conditioning =
+        resolve_candle_bernini_conditioning(api, settings, job, request, project_path).await?;
+    let input = VideoGenInput {
+        sampler: None,
+        scheduler: None,
+        engine_id,
+        model_dir: crate::image_jobs::resolve_candle_bernini_model_dir(settings)?,
+        conditioning,
+        prompt: request.prompt.clone(),
+        negative_prompt,
+        width: request.width,
+        height: request.height,
+        frames: wan_frame_count(request.raw_frame_count()),
+        fps: request.fps,
+        seed: resolve_video_seed(request) as u64,
+        video_mode: Some(candle_bernini_engine_video_mode(&request.mode).to_owned()),
+        ..VideoGenInput::default()
+    };
+    generate_video(api, settings, job, backend, &request.advanced, input).await
+}
+
+// ---------------------------------------------------------------------------
 // Real MLX SCAIL-2 generation (macOS, via mlx-gen-scail2, epic 5439 / sc-5448): end-to-end character
 // animation — a reference character image + a driving video → an animated clip of the character
 // performing the driving motion. The worker paints the color-coded segmentation masks the engine
@@ -8005,7 +8259,16 @@ fn resolve_clip_media_path(
 /// generation's snapped frame count (`8k+1`); a clip shorter than `count` yields fewer frames,
 /// which the engine VAE encode accepts. Extracted via the shared [`run_ffmpeg`] (binary
 /// resolution + heartbeat/cancel), then loaded off the async runtime.
-#[cfg(target_os = "macos")]
+///
+/// Shared by the macOS MLX Bernini conditioning and the candle Bernini VIDEO lane (sc-10997): both
+/// resolve arbitrary source-clip asset ids (mv2v supplies several via `sourceClipAssetIds`, ads2v
+/// appends the reference video) into planner `VideoClip` conditioning, so the per-asset-id loader is
+/// gated to both lanes (unlike `load_source_video_frames`, which reads only the request's single
+/// `sourceClipAssetId`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[allow(clippy::too_many_arguments)]
 async fn extract_clip_frames(
     api: &ApiClient,
@@ -9871,6 +10134,74 @@ mod tests {
             resolve_candle_video_route(&extend, &settings),
             CandleVideoRoute::WanVaceExtendBridge,
         );
+    }
+
+    /// sc-10997 (epic 6562): the candle Bernini VIDEO lane routes t2v + every editing/reference/
+    /// multi-source mode to `CandleVideoRoute::Bernini` (a DISTINCT engine, NOT the generic wan/ltx
+    /// txt2video arm), and only when the backend-candle flag is on. This per-mode dispatch is the
+    /// story's validation (GPU-val is gated on the `SceneWorks/bernini-candle` weights, sc-11003).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn candle_video_route_bernini_every_mode() {
+        let mut settings = Settings::from_env();
+        settings.backend_candle_enabled = true;
+        let engine = candle_bernini_engine_id("bernini").expect("bernini engine id");
+        for mode in [
+            "text_to_video",
+            "video_to_video",
+            "reference_to_video",
+            "reference_video_to_video",
+            "multi_video_to_video",
+            "ads2v",
+        ] {
+            let req = request(json!({ "projectId": "p", "model": "bernini", "mode": mode }));
+            assert_eq!(
+                resolve_candle_video_route(&req, &settings),
+                CandleVideoRoute::Bernini(engine),
+                "bernini {mode} must route to CandleVideoRoute::Bernini",
+            );
+        }
+        // Backend-candle off → Stub (routing unchanged until the flag is set), even for bernini.
+        settings.backend_candle_enabled = false;
+        let off = request(json!({
+            "projectId": "p", "model": "bernini", "mode": "text_to_video",
+        }));
+        assert_eq!(
+            resolve_candle_video_route(&off, &settings),
+            CandleVideoRoute::Stub,
+        );
+    }
+
+    /// sc-10997: the candle Bernini engine id + the SceneWorks-mode → engine `video_mode` task mapping,
+    /// the byte-identical twin of the MLX `bernini_engine_id` / `bernini_engine_video_mode`.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn candle_bernini_engine_id_and_video_mode_mapping() {
+        assert_eq!(candle_bernini_engine_id("bernini"), Some("bernini"));
+        // The still `bernini_image` id + every other video family keep their own routing.
+        assert_eq!(candle_bernini_engine_id("bernini_image"), None);
+        assert_eq!(candle_bernini_engine_id("wan_2_2"), None);
+        assert_eq!(candle_bernini_engine_id("scail2_14b"), None);
+        assert_eq!(candle_bernini_engine_id(""), None);
+
+        assert_eq!(candle_bernini_engine_video_mode("text_to_video"), "t2v");
+        assert_eq!(candle_bernini_engine_video_mode("video_to_video"), "v2v");
+        assert_eq!(
+            candle_bernini_engine_video_mode("reference_to_video"),
+            "r2v"
+        );
+        assert_eq!(
+            candle_bernini_engine_video_mode("reference_video_to_video"),
+            "rv2v"
+        );
+        assert_eq!(
+            candle_bernini_engine_video_mode("multi_video_to_video"),
+            "mv2v"
+        );
+        assert_eq!(candle_bernini_engine_video_mode("ads2v"), "ads2v");
+        // Unknown / image_to_video ⇒ plain t2v (the renderer is text-conditioned Wan2.2-T2V).
+        assert_eq!(candle_bernini_engine_video_mode("image_to_video"), "t2v");
+        assert_eq!(candle_bernini_engine_video_mode(""), "t2v");
     }
 
     #[cfg(target_os = "macos")]

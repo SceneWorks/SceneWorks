@@ -724,8 +724,16 @@ pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
     VideoModelCaps::new("wan_2_2_i2v_14b", true, true, true, true),
     // SVD (`svd` → `svd_xt`, sc-3523 MLX; sc-5493 candle): image→video ONLY. Not a VACE model.
     VideoModelCaps::new("svd", true, true, true, false),
-    // Bernini (epic 4699 / sc-4707): MLX-only — Qwen2.5-VL planner + Wan2.2-T2V-A14B renderer.
-    VideoModelCaps::new("bernini", true, false, false, false),
+    // Bernini (epic 4699 / sc-4707 MLX; sc-10997 candle): Qwen2.5-VL planner + Wan2.2-T2V-A14B
+    // renderer. Both backends wired — `mlx-gen-bernini` (macOS) + `candle-gen-bernini` (Windows/CUDA,
+    // the full planner+renderer `bernini` generator, `gen_core::load("bernini")`), so
+    // `candle_video_routed = true`. Serves t2v + the editing/reference/multi-source modes (v2v / r2v /
+    // rv2v / mv2v / ads2v) on both lanes; the candle worker routes those via the dedicated
+    // `bernini_video_candle_eligible` gate + the `CandleVideoRoute::Bernini` dispatch (NOT the generic
+    // wan/ltx txt2video arm — Bernini is a distinct engine). Not an i2v/VACE model, so those columns
+    // stay false. Off-Mac packed-tier select is deferred until the `SceneWorks/bernini-candle` tier
+    // layout lands (sc-11003) — the candle lane loads the converted snapshot dense today.
+    VideoModelCaps::new("bernini", true, true, false, false),
     // SCAIL-2 (epic 5439 / sc-5448): MLX end-to-end character animation; the candle SCAIL-2 engine
     // (sc-6837) is a DISTINCT engine gated by its own predicates, NOT Wan-VACE membership — so its
     // candle-video columns are all false (it is deliberately absent from `CANDLE_VIDEO_*`).
@@ -1096,6 +1104,9 @@ mod tests {
         "wan_2_2_t2v_14b",
         "wan_2_2_i2v_14b",
         "svd",
+        // Bernini VIDEO lane (sc-10997, epic 6562): the full candle planner+renderer serves t2v + the
+        // editing/reference/multi-source modes. Not in the i2v/VACE subsets (a distinct engine).
+        "bernini",
     ];
 
     const EXPECTED_CANDLE_VIDEO_I2V_ROUTED_MODELS: &[&str] = &["wan_2_2_i2v_14b", "svd"];
