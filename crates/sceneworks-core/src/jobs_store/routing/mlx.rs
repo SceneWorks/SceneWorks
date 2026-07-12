@@ -433,23 +433,51 @@ pub(crate) fn boogu_mlx_eligible(payload: &Map<String, Value>) -> bool {
 
 /// Krea 2 Turbo (epic 7565 / sc-7572) + Krea 2 Raw (epic 9992) MLX-eligibility. Both variants serve
 /// text-to-image on the native `mlx-gen-krea` engine. Krea 2 **Raw** additionally serves the
-/// Kontext-style image-edit surface (epic 10871): an `edit_image` job with a `sourceAssetId` routes to
-/// the dual-conditioned edit lane (source image as in-context VAE tokens + Qwen3-VL vision-tower
-/// grounding), which the community `krea2_identity_edit` LoRA needs. Edit is Raw-only — it denoises from
-/// pure noise under full CFG (the tier the LoRA targets and the one validated on Metal, sc-10881); the
-/// distilled few-step **Turbo** sampler has no validated edit recipe, so Turbo stays t2i-only and its
-/// `features.edit` (the `model_mac_support` probe) stays false. An `edit_image` shape without a source is
-/// rejected (the same defensive shape the t2i-only engines reject).
+/// Kontext-style image-edit surface (epic 10871): an `edit_image` job with a conditioning image routes
+/// to the dual-conditioned edit lane (source image as in-context VAE tokens + Qwen3-VL vision-tower
+/// grounding), which the community `krea2_identity_edit` LoRA needs. The conditioning image can arrive as
+/// a plain `sourceAssetId`, a single `referenceAssetId`, or the two-reference scene+person set
+/// (`referenceAssetIds` — scene = image 1, person = image 2, `sourceAssetId` null) — the same fields the
+/// worker's `edit_reference_ids` resolves, checked here by [`edit_has_reference`] so the router and worker
+/// agree. Edit is Raw-only — it denoises from pure noise under full CFG (the tier the LoRA targets and the
+/// one validated on Metal, sc-10881); the distilled few-step **Turbo** sampler has no validated edit
+/// recipe, so Turbo stays t2i-only and its `features.edit` (the `model_mac_support` probe) stays false. An
+/// `edit_image` shape with no conditioning image at all is rejected (the defensive shape t2i-only engines
+/// reject).
 pub(crate) fn krea_mlx_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         let is_raw = payload.get("model").and_then(Value::as_str) == Some("krea_2_raw");
-        let has_source = payload
-            .get("sourceAssetId")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty());
-        return is_raw && has_source;
+        // The edit needs an image to condition on, but it can arrive in any of the fields the worker's
+        // `edit_reference_ids` (base.rs) accepts, in the same priority: the two-reference scene+person
+        // set (`referenceAssetIds`, epic 10871 — scene = image 1, person = image 2, `sourceAssetId`
+        // null), a single `referenceAssetId`, or a plain `sourceAssetId`. Checking only `sourceAssetId`
+        // here stranded the two-ref form: the mlx worker refused it and, with no torch/candle Krea edit
+        // lane on Mac, it sat on "Waiting for an available GPU worker" forever.
+        return is_raw && edit_has_reference(payload);
     }
     true
+}
+
+/// Whether an `edit_image` payload carries a conditioning image in any field the worker's
+/// [`edit_reference_ids`](../../../sceneworks-worker) resolves — a non-empty `referenceAssetIds`
+/// list, a `referenceAssetId`, or a `sourceAssetId`. Mirrors that worker helper so the router and
+/// the worker agree on what counts as a runnable edit.
+fn edit_has_reference(payload: &Map<String, Value>) -> bool {
+    let has_nonempty_str = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    let has_reference_list = payload
+        .get("referenceAssetIds")
+        .and_then(Value::as_array)
+        .is_some_and(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .any(|id| !id.trim().is_empty())
+        });
+    has_reference_list || has_nonempty_str("referenceAssetId") || has_nonempty_str("sourceAssetId")
 }
 
 /// Stable Diffusion 3.5 Large / Large Turbo / Medium (epic 7841, surfaced S4 sc-7873) MLX-eligibility.
@@ -793,5 +821,53 @@ mod tests {
             "MLX_ROUTED_MODELS ids with no reachable arm in `image_request_mlx_eligible` — the mlx \
              worker can never claim these, so their jobs queue forever: {stranded:?}"
         );
+    }
+
+    /// The two-reference (scene + person) Krea 2 Raw edit (epic 10871) carries its conditioning image in
+    /// `referenceAssetIds` with `sourceAssetId` absent — the shape the web sends for the "Person image"
+    /// surface. The router MUST route it to the mlx worker: the worker's `edit_reference_ids` accepts it,
+    /// but when the router gated on `sourceAssetId` alone it refused, and with no torch/candle Krea edit
+    /// lane on Mac the job stranded on "Waiting for an available GPU worker." forever.
+    #[test]
+    fn krea_raw_two_reference_edit_is_mlx_eligible() {
+        let two_ref = json!({
+            "model": "krea_2_raw",
+            "mode": "edit_image",
+            "sourceAssetId": Value::Null,
+            "referenceAssetIds": ["asset-scene", "asset-person"],
+        });
+        assert!(image_request_mlx_eligible(
+            "krea_2_raw",
+            two_ref.as_object().expect("probe is an object")
+        ));
+
+        // A single `referenceAssetId` (no plural list, no source) is equally a valid edit source.
+        let single_ref = json!({
+            "model": "krea_2_raw",
+            "mode": "edit_image",
+            "referenceAssetId": "asset-1",
+        });
+        assert!(image_request_mlx_eligible(
+            "krea_2_raw",
+            single_ref.as_object().expect("probe is an object")
+        ));
+
+        // An edit with NO conditioning image in any field is still rejected (defensive shape).
+        let no_source = json!({ "model": "krea_2_raw", "mode": "edit_image" });
+        assert!(!image_request_mlx_eligible(
+            "krea_2_raw",
+            no_source.as_object().expect("probe is an object")
+        ));
+
+        // Turbo has no validated edit recipe — even with a reference it stays t2i-only.
+        let turbo_ref = json!({
+            "model": "krea_2_turbo",
+            "mode": "edit_image",
+            "referenceAssetIds": ["asset-scene"],
+        });
+        assert!(!image_request_mlx_eligible(
+            "krea_2_turbo",
+            turbo_ref.as_object().expect("probe is an object")
+        ));
     }
 }
