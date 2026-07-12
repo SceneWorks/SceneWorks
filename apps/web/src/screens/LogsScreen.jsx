@@ -29,6 +29,19 @@ const POLL_MS = 2000;
 // no shared constant across the HTTP/FFI boundary, so this is pinned by comment.
 const SESSION_LOG_CAPACITY = 5000; // == sceneworks-core session_log DEFAULT_CAPACITY
 const MAX_ROWS = SESSION_LOG_CAPACITY;
+// Render-window cap (sc-11224 / F-033). The in-memory snapshot mirrors the whole
+// 5,000-entry server buffer so search stays complete, but mounting all 5,000 as DOM
+// rows — and re-rendering them every 2s poll — is the actual cost. The viewer is a
+// live tail: newest rows matter, so we render only the last LOG_RENDER_WINDOW rows of
+// the (already search-filtered) list. Search still runs over the ENTIRE snapshot
+// (visibleEntries below); windowing only bounds how many *matches* we paint, always
+// the newest — which is what auto-scroll-to-bottom shows anyway.
+const LOG_RENDER_WINDOW = 400;
+// Poll backoff (sc-11224 / F-033). A healthy poll keeps the 2s cadence; consecutive
+// failures back off exponentially up to a cap so a dead API (e.g. remote-auth mode
+// with an unreachable host) isn't hammered every 2s forever. Mirrors the media-ticket
+// / access-probe backoff loop in hooks/useAccessGate.js. Reset to POLL_MS on success.
+const POLL_BACKOFF_MAX_MS = 30000;
 // The full snapshot is already in memory, so text search filters client-side
 // over the held `entries` instead of refetching. We still debounce the term
 // before it drives the (cheap, in-memory) filter to keep typing snappy on large
@@ -97,9 +110,11 @@ export function LogsScreen() {
     }
   }, [token, source, level]);
 
-  // Incremental tail: append only entries newer than the last seq we hold.
+  // Incremental tail: append only entries newer than the last seq we hold. Returns
+  // `true` when the tick is healthy (a successful fetch, or a paused no-op) and
+  // `false` when the fetch failed, so the scheduler below can back off (sc-11224).
   const poll = useCallback(async () => {
-    if (pausedRef.current) return;
+    if (pausedRef.current) return true;
     try {
       // Incremental: afterSeq means the server only returns rows newer than the
       // ones we hold, so this is a small delta each tick — raising the cap to the
@@ -111,15 +126,20 @@ export function LogsScreen() {
         source,
         level,
       });
-      if (!rows.length) return;
+      if (!rows.length) {
+        setError("");
+        return true;
+      }
       lastSeqRef.current = rows[rows.length - 1].seq;
       setEntries((prev) => {
         const merged = prev.concat(rows);
         return merged.length > MAX_ROWS ? merged.slice(merged.length - MAX_ROWS) : merged;
       });
       setError("");
+      return true;
     } catch (err) {
       setError(String(err?.message ?? err));
+      return false;
     }
   }, [token, source, level]);
 
@@ -150,9 +170,44 @@ export function LogsScreen() {
     });
   }, [entries, debouncedSearch]);
 
+  // Windowed render tail (sc-11224 / F-033): `visibleEntries` already ran the search
+  // over the ENTIRE snapshot, so every match is accounted for; we only paint the last
+  // LOG_RENDER_WINDOW of them. The live tail auto-scrolls to the newest row, so the
+  // window is exactly what the user sees. `hiddenCount` surfaces how many older
+  // (matching) rows are scrolled out of the rendered window.
+  const renderedEntries =
+    visibleEntries.length > LOG_RENDER_WINDOW ? visibleEntries.slice(-LOG_RENDER_WINDOW) : visibleEntries;
+  const hiddenCount = visibleEntries.length - renderedEntries.length;
+
+  // Self-scheduling poll with failure backoff (sc-11224 / F-033). Replaces a fixed
+  // setInterval that fired every 2s regardless of outcome — a dead API in remote-auth
+  // mode was hammered forever. A healthy tick re-arms at POLL_MS; consecutive failures
+  // grow the delay exponentially up to POLL_BACKOFF_MAX_MS and reset on the next
+  // success. Mirrors the media-ticket / access-probe backoff in useAccessGate.js.
   useEffect(() => {
-    const id = setInterval(poll, POLL_MS);
-    return () => clearInterval(id);
+    let closed = false;
+    let timer = null;
+    let attempt = 0;
+    const schedule = (ms) => {
+      timer = setTimeout(run, ms);
+    };
+    async function run() {
+      const ok = await poll();
+      if (closed) return;
+      if (ok) {
+        attempt = 0;
+        schedule(POLL_MS);
+      } else {
+        const delay = Math.min(POLL_BACKOFF_MAX_MS, POLL_MS * 2 ** attempt);
+        attempt += 1;
+        schedule(delay);
+      }
+    }
+    schedule(POLL_MS);
+    return () => {
+      closed = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [poll]);
 
   // Auto-scroll to newest unless the user paused (or scrolled up).
@@ -233,7 +288,12 @@ export function LogsScreen() {
         {visibleEntries.length === 0 && !error ? (
           <p className="logs-empty">No log entries yet for this session.</p>
         ) : null}
-        {visibleEntries.map((entry) => {
+        {hiddenCount > 0 ? (
+          <p className="logs-windowed" role="status">
+            Showing the latest {renderedEntries.length.toLocaleString()} of {visibleEntries.length.toLocaleString()} entries.
+          </p>
+        ) : null}
+        {renderedEntries.map((entry) => {
           const eventName = entry.event?.event;
           const highlighted = eventName && HIGHLIGHT_EVENTS.has(eventName);
           const isOpen = expanded === entry.seq;
