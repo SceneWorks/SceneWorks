@@ -52,6 +52,18 @@ const INSTANTID_ANGLE_CONTROLNET_SCALE: f32 = 0.65;
 const INSTANTID_OPENPOSE_REPO: &str = "xinsir/controlnet-openpose-sdxl-1.0";
 /// Pinned revision for the xinsir OpenPose-SDXL ControlNet (sc-9879, F-077 follow-up).
 const INSTANTID_OPENPOSE_REVISION: &str = "23f966cd5cfdd3f7729c903e243d87152162d2b7";
+/// Pinned commit revisions for the MLX PuLID-FLUX download repos (sc-11168, F-007 — completes the sc-9879
+/// rollout on the MLX lane). The MLX PuLID route (`pulid.rs`) fetches its adapter + EVA/BiSeNet bundle
+/// through `ensure_instantid_file`, so those repos route through `instantid_revision` below and were
+/// falling back to the mutable `main` branch — the candle twin (`pulid_candle.rs`) already pins them, so
+/// the MLX side was the last unpinned lane. Pin each to its exact commit for defense-in-depth. The repo
+/// NAMES are the macOS-only `pulid.rs` `PULID_ADAPTER_REPO` / `PULID_MLX_REPO` consts; they are matched
+/// here as string literals because `instantid.rs` also compiles on the candle lane where those macOS-only
+/// consts do not exist (a macOS test ties the literals back to the consts). These shas MUST equal the
+/// candle `PULID_CANDLE_ADAPTER_REVISION` / `PULID_CANDLE_MLX_REVISION` (same repos). PuLID's third repo
+/// (SCRFD / ArcFace) IS `SceneWorks/instantid-mlx`, already pinned above by `INSTANTID_MLX_REVISION`.
+const PULID_ADAPTER_REVISION: &str = "492b1451255dc9d9bc3c857259690b5f8b998d4a";
+const PULID_MLX_REVISION: &str = "78ef91f977eae16d66fb191caf003154b7a0a0b8";
 /// Torch-parity default OpenPose lock (`instantid_adapter.py::_openpose_scale`, default 0.7).
 const INSTANTID_OPENPOSE_SCALE: f32 = 0.7;
 /// The face-restore re-render side (the engine's production crop size, sc-3380).
@@ -358,6 +370,11 @@ fn instantid_revision(repo: &str) -> &'static str {
         INSTANTID_MLX_REPO => INSTANTID_MLX_REVISION,
         INSTANTID_CONTROLNET_REPO => INSTANTID_CONTROLNET_REVISION,
         INSTANTID_OPENPOSE_REPO => INSTANTID_OPENPOSE_REVISION,
+        // The MLX PuLID lane (`pulid.rs`) fetches its adapter + EVA/BiSeNet bundle through
+        // `ensure_instantid_file`, so pin those two repos here too (sc-11168 / F-007). Matched as string
+        // literals because `pulid.rs`'s `PULID_ADAPTER_REPO` / `PULID_MLX_REPO` consts are macOS-only.
+        "guozinan/PuLID" => PULID_ADAPTER_REVISION,
+        "SceneWorks/pulid-flux-mlx" => PULID_MLX_REVISION,
         _ => "main",
     }
 }

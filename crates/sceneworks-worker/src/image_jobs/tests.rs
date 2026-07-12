@@ -3721,6 +3721,57 @@ fn mlx_control_weight_filenames_reject_traversal() {
     assert!(resolve_qwen_control_weights(&plain, &settings).is_ok());
 }
 
+/// sc-11168 / F-006: the Krea strict-pose lanes accept a payload-supplied `advanced.controlWeights.path`
+/// (a studio-trained / registered LOCAL overlay the API resolved) and load it directly. That untrusted
+/// value must be confined to an app-managed root, or a crafted job turns the overlay loader into an
+/// arbitrary-file read across the LAN boundary (epic 4484). Exercise the confinement helper on whichever
+/// twin the current build compiles (MLX on macOS / candle off-Mac — both define the same-named helper):
+/// an out-of-root path is rejected with the house `InvalidPayload`, a path under the data dir resolves,
+/// and an absent key yields `None`. Mirrors `app_managed_helpers_resolve_symlinks_before_root_check`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn krea_control_payload_overlay_path_confines_to_app_root() {
+    let data = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = data.path().to_path_buf();
+    settings.external_model_roots = Vec::new();
+
+    // No `controlWeights.path` in the payload → nothing to confine.
+    let none = request(json!({ "projectId": "p" }));
+    assert!(krea_control_payload_overlay_path(&settings, &none)
+        .expect("an absent overlay path is Ok(None)")
+        .is_none());
+
+    // An out-of-root absolute path (the arbitrary-file-read primitive) is rejected.
+    let escape_file = outside.path().join("evil.safetensors");
+    std::fs::write(&escape_file, b"x").unwrap();
+    let escape = request(json!({
+        "projectId": "p",
+        "advanced": { "controlWeights": { "path": escape_file.display().to_string() } }
+    }));
+    let err = krea_control_payload_overlay_path(&settings, &escape)
+        .expect_err("an out-of-root overlay path is rejected");
+    assert!(err.to_string().contains("app-managed"), "{err}");
+
+    // A path under the app data dir resolves (canonicalized) and is loadable.
+    let managed = settings.data_dir.join("models").join("overlay.safetensors");
+    std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+    std::fs::write(&managed, b"weights").unwrap();
+    let ok = request(json!({
+        "projectId": "p",
+        "advanced": { "controlWeights": { "path": managed.display().to_string() } }
+    }));
+    let resolved = krea_control_payload_overlay_path(&settings, &ok)
+        .expect("a managed overlay path is Ok")
+        .expect("a present key yields Some");
+    assert_eq!(resolved, managed.canonicalize().unwrap());
+    assert!(resolved.is_file());
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn flux2_control_raw_settings_records_control_recipe() {
@@ -8748,6 +8799,26 @@ fn instantid_revisions_are_pinned_commits_not_main() {
         INSTANTID_CONTROLNET_REVISION,
     );
     assert_pinned_revision("INSTANTID_OPENPOSE_REVISION", INSTANTID_OPENPOSE_REVISION);
+    // sc-11168 / F-007: the MLX PuLID lane (`pulid.rs`) fetches its adapter + EVA/BiSeNet bundle repos
+    // through `ensure_instantid_file` → `instantid_revision`, so those two repos must be pinned here too
+    // (they were falling back to `main`; the candle twin already pins them).
+    assert_pinned_revision("PULID_ADAPTER_REVISION", PULID_ADAPTER_REVISION);
+    assert_pinned_revision("PULID_MLX_REVISION", PULID_MLX_REVISION);
+    assert_eq!(instantid_revision("guozinan/PuLID"), PULID_ADAPTER_REVISION);
+    assert_eq!(
+        instantid_revision("SceneWorks/pulid-flux-mlx"),
+        PULID_MLX_REVISION
+    );
+    // Tie the literal repo names matched in `instantid_revision` back to `pulid.rs`'s consts (macOS-only,
+    // so a rename of either const can't silently desync the pin from the repo it guards).
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(
+            instantid_revision(PULID_ADAPTER_REPO),
+            PULID_ADAPTER_REVISION
+        );
+        assert_eq!(instantid_revision(PULID_MLX_REPO), PULID_MLX_REVISION);
+    }
     // `instantid_revision` returns the pin for a known repo and falls back to `main` otherwise.
     assert_eq!(
         instantid_revision(INSTANTID_MLX_REPO),
@@ -8764,6 +8835,12 @@ fn mlx_control_and_distill_revisions_are_pinned_commits_not_main() {
     assert_pinned_revision("FLUX1_CONTROL_REVISION", FLUX1_CONTROL_REVISION);
     assert_pinned_revision("FLUX2_CONTROL_REVISION", FLUX2_CONTROL_REVISION);
     assert_pinned_revision("QWEN_LIGHTNING_LORA_REVISION", QWEN_LIGHTNING_LORA_REVISION);
+    // sc-11168 / F-007: the default MLX Krea pose-control overlay repo is a fixed, non-overridable const,
+    // so its pin must be a fixed commit rather than the mutable `main` branch.
+    assert_pinned_revision(
+        "KREA_CONTROL_OVERLAY_REVISION",
+        KREA_CONTROL_OVERLAY_REVISION,
+    );
 }
 
 /// The candle-only strict-control pins (qwen / kolors / zimage / flux1 / flux2 control branches). These
@@ -8782,6 +8859,13 @@ fn candle_control_revisions_are_pinned_commits_not_main() {
     assert_pinned_revision(
         "FLUX2_CONTROL_CANDLE_REVISION",
         FLUX2_CONTROL_CANDLE_REVISION,
+    );
+    // sc-11168 / F-007: the default candle Krea pose-control overlay repo is a fixed, non-overridable
+    // const, so its pin must be a fixed commit rather than the mutable `main` branch (twin of the MLX
+    // `KREA_CONTROL_OVERLAY_REVISION` assert on the macOS lane).
+    assert_pinned_revision(
+        "KREA_CONTROL_OVERLAY_REVISION",
+        KREA_CONTROL_OVERLAY_REVISION,
     );
 }
 
@@ -8819,6 +8903,19 @@ fn candle_ipadapter_and_pulid_revisions_are_pinned_commits_not_main() {
         PULID_CANDLE_FACE_REVISION
     );
     assert_eq!(pulid_candle_revision("some/override-repo"), "main");
+    // sc-11168 / F-007: the candle Kolors IP-Adapter-Plus fetch carried the mutable `refs/pr/4` ref;
+    // it is now pinned to the exact commit at that PR's tip (a force-push can't swap the weights).
+    assert_pinned_revision("KOLORS_IPADAPTER_REVISION", KOLORS_IPADAPTER_REVISION);
+    // sc-11168 / F-007: the MLX PuLID pins (in `instantid.rs`) fetch the SAME repos as these candle pins,
+    // so a bump to one lane without the other must fail loudly (twin-drift guard).
+    assert_eq!(
+        PULID_ADAPTER_REVISION, PULID_CANDLE_ADAPTER_REVISION,
+        "MLX + candle PuLID adapter (guozinan/PuLID) pins must agree"
+    );
+    assert_eq!(
+        PULID_MLX_REVISION, PULID_CANDLE_MLX_REVISION,
+        "MLX + candle PuLID EVA/BiSeNet bundle (SceneWorks/pulid-flux-mlx) pins must agree"
+    );
 }
 
 /// The candle-only Krea 2 ConvRot bf16-base pin (`base.rs`, sc-9300 tier). Fetches the fixed

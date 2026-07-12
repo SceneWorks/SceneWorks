@@ -2942,6 +2942,19 @@ const WAN_TI2V_5B_REPO: &str = "SceneWorks/wan2.2-ti2v-5b-mlx";
 #[cfg(target_os = "macos")]
 const WAN_TI2V_5B_REVISION: &str = "bb1b055249614cf9d7cf4373fbdbc184b77dee88";
 
+/// Pinned commit revision for the A14B Lightning distill-LoRA repo `lightx2v/Wan2.2-Lightning` (sc-11168 /
+/// F-007 — completes the sc-9879 rollout). Both the MLX (`ensure_wan_lightning_present`) and candle
+/// (`candle_ensure_wan_lightning_present`) self-heal fetches were pulling the mutable `main` branch, so an
+/// upstream re-push (or a compromised token) could silently swap the high/low distill weights we load.
+/// Pin the exact commit for defense-in-depth (the `hf` CLI still verifies each file's own hash on
+/// download). Shared by BOTH lanes so the twins agree. Gated to the lanes that actually fetch it (macOS
+/// MLX or the candle build) so a Linux-non-candle build doesn't flag it dead.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const WAN_LIGHTNING_REVISION: &str = "18bccf8884ec0a078eed79785eb4ef13ea16ce1e";
+
 /// The files that make an **A14B** (dual-expert MoE) Wan tier subdir COMPLETE: both experts + the T5
 /// encoder + VAE + tokenizer + `config.json`.
 #[cfg(target_os = "macos")]
@@ -3166,7 +3179,13 @@ async fn ensure_wan_lightning_present(
         format!("{subdir}/low_noise_model.safetensors"),
     ];
     let result = crate::model_jobs::download_model_with_hf_cli(
-        api, settings, job, REPO, "main", &files, &scratch,
+        api,
+        settings,
+        job,
+        REPO,
+        WAN_LIGHTNING_REVISION,
+        &files,
+        &scratch,
     )
     .await;
     let _ = tokio::fs::remove_dir_all(&scratch).await;
@@ -5017,7 +5036,13 @@ async fn candle_ensure_wan_lightning_present(
         format!("{subdir}/low_noise_model.safetensors"),
     ];
     let result = crate::model_jobs::download_model_with_hf_cli(
-        api, settings, job, REPO, "main", &files, &scratch,
+        api,
+        settings,
+        job,
+        REPO,
+        WAN_LIGHTNING_REVISION,
+        &files,
+        &scratch,
     )
     .await;
     let _ = tokio::fs::remove_dir_all(&scratch).await;
@@ -10046,6 +10071,35 @@ mod tests {
             SEEDVR2_REPO,
             crate::upscale_jobs::SEEDVR2_REPO,
             "video and image SeedVR2 must reference the same upstream mirror repo"
+        );
+    }
+
+    /// sc-11168 / F-007 (completes the sc-9879 rollout on the video lanes): both the MLX
+    /// (`ensure_wan_lightning_present`) and candle (`candle_ensure_wan_lightning_present`) A14B Lightning
+    /// self-heal fetches pull the FIXED `lightx2v/Wan2.2-Lightning` distill pair from the SHARED
+    /// `WAN_LIGHTNING_REVISION` const, so it must pin an exact commit rather than the mutable `main`
+    /// branch — an upstream re-push would otherwise silently swap the high/low distill weights we load.
+    /// Lock the pin to a real 40-hex lowercase commit id (mirrors the SeedVR2 format test above).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn wan_lightning_revision_is_pinned_commit_not_main() {
+        assert_ne!(
+            WAN_LIGHTNING_REVISION, "main",
+            "Wan Lightning distill pair must pin a fixed revision"
+        );
+        assert_eq!(
+            WAN_LIGHTNING_REVISION.len(),
+            40,
+            "a pinned HF revision is a 40-char commit sha"
+        );
+        assert!(
+            WAN_LIGHTNING_REVISION
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "the pinned revision must be lowercase hex"
         );
     }
 
