@@ -31,6 +31,12 @@ const PNG_BYTES: &[u8] = b"fake-png-payload-0001";
 const JPG_BYTES: &[u8] = b"fake-jpeg-payload-0002";
 const PNG_PATH: &str = "assets/images/genset_1/img_0001.png";
 const JPG_PATH: &str = "assets/images/genset_1/img_0002.jpg";
+// F-041 (sc-11236): an asset that exceeds the per-image inline cap (4 MiB), so
+// generate_image must fall back to the ticketed-link response shape instead of
+// base64-inlining it.
+const LARGE_PATH: &str = "assets/images/genset_1/img_large.png";
+const LARGE_IMAGE_LEN: usize = 5 * 1024 * 1024;
+const TICKET: &str = "tkt-abc123";
 
 /// Scripted `/api/v1` job pipeline: the submit returns a queued JobSnapshot,
 /// then each `GET /jobs/:id` poll steps through `snapshots` (the last repeats,
@@ -116,16 +122,22 @@ fn stub_api_router(state: StubState) -> Router {
             "/api/v1/projects/:project_id/files/*relative_path",
             get(
                 |Path((_project_id, relative_path)): Path<(String, String)>| async move {
-                    let (bytes, mime) = match relative_path.as_str() {
-                        PNG_PATH => (PNG_BYTES, "image/png"),
-                        JPG_PATH => (JPG_BYTES, "image/jpeg"),
+                    let (bytes, mime): (Vec<u8>, &str) = match relative_path.as_str() {
+                        PNG_PATH => (PNG_BYTES.to_vec(), "image/png"),
+                        JPG_PATH => (JPG_BYTES.to_vec(), "image/jpeg"),
+                        LARGE_PATH => (vec![0x42u8; LARGE_IMAGE_LEN], "image/png"),
                         _ => return Err(StatusCode::NOT_FOUND),
                     };
                     let mut headers = HeaderMap::new();
                     headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
-                    Ok((headers, bytes.to_vec()))
+                    Ok((headers, bytes))
                 },
             ),
+        )
+        // F-041: the oversize-payload fallback mints a media ticket for its links.
+        .route(
+            "/api/v1/files/ticket",
+            post(|| async { Json(json!({ "ticket": TICKET, "expiresInSeconds": 600 })) }),
         )
         .with_state(state)
 }
@@ -718,6 +730,76 @@ async fn invalid_mode_is_rejected_before_submitting_a_job() {
         harness.submitted.lock().unwrap().is_empty(),
         "no job may be submitted for an invalid mode"
     );
+
+    let _ = harness.client.cancel().await;
+}
+
+/// F-041 (sc-11236): an over-cap result (one 5 MiB image, above the 4 MiB
+/// per-image inline cap) must NOT be base64-inlined — the tool falls back to the
+/// `get_job_result` ticketed-link shape (resource links + a JSON summary carrying
+/// ticketed URLs, zero inline image bytes).
+#[tokio::test]
+async fn oversize_result_falls_back_to_ticketed_links() {
+    let harness = harness(vec![
+        snapshot("running", 0.5, "generating", json!({})),
+        snapshot(
+            "completed",
+            1.0,
+            "completed",
+            json!({ "result": { "assets": [image_asset("asset_big", LARGE_PATH, "image/png")] } }),
+        ),
+    ])
+    .await;
+
+    let result = harness
+        .client
+        .call_tool(
+            CallToolRequestParams::new("generate_image").with_arguments(generate_args(json!({}))),
+        )
+        .await
+        .expect("generate_image succeeds");
+    assert_ne!(result.is_error, Some(true), "unexpected error: {result:?}");
+
+    // Zero inline image blocks: the oversize payload spilled to links.
+    assert!(
+        !result
+            .content
+            .iter()
+            .any(|block| block.as_image().is_some()),
+        "an over-cap result must not inline base64 image bytes: {result:?}"
+    );
+
+    // Exactly one ticketed resource link for the asset.
+    let links: Vec<_> = result
+        .content
+        .iter()
+        .filter_map(|block| block.as_resource_link())
+        .collect();
+    assert_eq!(links.len(), 1, "one ticketed link: {result:?}");
+    assert!(
+        links[0].uri.contains("/api/v1/projects/p1/files/")
+            && links[0].uri.contains(&format!("?ticket={TICKET}")),
+        "link is the ticketed media URL: {}",
+        links[0].uri
+    );
+
+    // The JSON summary is the get_job_result shape (completed status + ticketed url).
+    let summary: Value = serde_json::from_str(
+        &result
+            .content
+            .iter()
+            .rev()
+            .find_map(|block| block.as_text())
+            .expect("summary text block")
+            .text,
+    )
+    .expect("summary is JSON");
+    assert_eq!(summary["jobId"], "job-1");
+    assert_eq!(summary["status"], "completed");
+    assert_eq!(summary["assets"][0]["id"], "asset_big");
+    assert!(summary["assets"][0]["url"]
+        .as_str()
+        .is_some_and(|url| url.contains(&format!("?ticket={TICKET}"))));
 
     let _ = harness.client.cancel().await;
 }

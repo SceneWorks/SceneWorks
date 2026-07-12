@@ -370,6 +370,7 @@ fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         mcp_job_poll_interval: sceneworks_mcp::JobWaitConfig::default().poll_interval,
         mcp_job_timeout: sceneworks_mcp::JobWaitConfig::default().timeout,
         external_model_roots: Vec::new(),
+        mcp_allowed_hosts_extra: Vec::new(),
     }
 }
 

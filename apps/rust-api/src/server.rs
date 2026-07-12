@@ -118,6 +118,16 @@ pub struct Settings {
     /// `SCENEWORKS_EXTERNAL_MODEL_ROOTS`; empty (feature off) by default and always empty
     /// on macOS — see `sceneworks_core::external_roots`.
     pub external_model_roots: Vec<PathBuf>,
+    /// F-040 (sc-11236) — operator-declared extra Host-header authorities the
+    /// `/mcp` DNS-rebinding defense accepts, on top of the always-allowed loopback
+    /// set. Read from `SCENEWORKS_MCP_ALLOWED_HOSTS` (comma-separated `host` or
+    /// `host:port` entries). Only needed for the wildcard LAN bind
+    /// (`SCENEWORKS_API_HOST=0.0.0.0`), whose reachable interface addresses can't
+    /// be enumerated: set it to the machine's LAN hostname/IP(s) to keep the
+    /// Host check ON for remote clients. Empty by default; irrelevant for a
+    /// loopback bind (loopback is always allowed) — see
+    /// [`sceneworks_mcp::mcp_allowed_hosts`].
+    pub mcp_allowed_hosts_extra: Vec<String>,
 }
 
 impl Settings {
@@ -189,6 +199,13 @@ impl Settings {
                 sceneworks_mcp::JobWaitConfig::default().timeout,
             ),
             external_model_roots: sceneworks_core::external_roots::external_model_roots_from_env(),
+            // F-040: extra Host authorities for the /mcp DNS-rebinding allow-list.
+            mcp_allowed_hosts_extra: env_string("SCENEWORKS_MCP_ALLOWED_HOSTS", "")
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect(),
         }
     }
 
