@@ -2719,13 +2719,14 @@
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         // Two-reference Kontext edit (epic 10871 P1.3): the `krea2_identity_edit` edit optionally takes a
-        // SECOND source — scene = image 1 (the required Source image), person = image 2 (optional) — in a
-        // FIXED order (swapping degrades identity per the LoRA authors). Presence of this object makes the
-        // Studio render the optional person slot in Edit mode; the worker + engine (`krea_2_edit`
-        // MultiReference) cap at two and preserve order. Ignored outside `edit_image` (t2i/img2img).
+        // SECOND source — any two images, image 1 (the required Source image) + image 2 (optional) — in a
+        // FIXED order (swapping degrades results per the LoRA authors; the instruction describes how to
+        // combine them). Presence of this object makes the Studio render the optional second-image slot in
+        // Edit mode; the worker + engine (`krea_2_edit` MultiReference) cap at two and preserve order.
+        // Ignored outside `edit_image` (t2i/img2img).
         "editReferences": {
-          "secondaryLabel": "Person image",
-          "secondaryHint": "Optional — a person to place into the scene. Fixed order: the Source image is the scene (image 1), this is the person (image 2)."
+          "secondaryLabel": "Image 2 (optional)",
+          "secondaryHint": "Optional — a second image to combine with Image 1. Order is fixed (Image 1, then Image 2); describe in your instruction how to combine them (e.g. place the subject from Image 2 into Image 1)."
         },
         "label": "Krea 2 Raw",
         "description": "Krea 2 Raw — Krea AI's undistilled 12B single-stream rectified-flow DiT with a Qwen3-VL-4B text encoder, native MLX (Apple Silicon). The full-fidelity, TRUE classifier-free-guidance counterpart to the fast CFG-free Krea 2 Turbo: run ~52 steps with a real guidance scale (~3.5) and an optional negative prompt for the highest quality and the most control. Pre-quantized Q8 (~20.5 GB download, default); the dense bf16 tier doubles as the Krea 2 LoRA training base. Krea 2 Community License (non-commercial). Runs on Apple Silicon (MLX) and Windows/Linux NVIDIA GPUs (candle/CUDA, sc-9994); needs a 48 GB-class Mac or a ~32 GB-class CUDA GPU.",

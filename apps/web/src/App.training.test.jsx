@@ -662,6 +662,66 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("persists an unsaved caption edit when a Doctor fix-action runs (sc-11164)", async () => {
+    // Regression guard for F-005: the memoized `datasetDoctor` bundle used to freeze its six
+    // fix-action handlers at the render where readiness last resolved, so a caption edit made
+    // afterward was invisible to the captured `persistDataset()` closure — clicking any Doctor
+    // action then saved (and reverted to) the stale pre-edit snapshot.
+    const updateDataset = vi.fn(async (datasetId, payload) => ({ id: datasetId, name: payload.name, version: 4, items: payload.items }));
+    const createAnalysisJob = vi.fn(async () => ({ id: "job-analyze-1" }));
+    // Readiness resolves ONCE at open; the Doctor bundle's deps [readiness, readinessLoading]
+    // never change again, so a frozen handler captures the pre-edit state — the exact bug.
+    const loadReadiness = vi.fn(async () => ({
+      gate: "needs_attention",
+      subScores: { technical: 0.8 },
+      counts: { info: 0, warn: 1, fatal: 0 },
+      itemCount: 1,
+      items: [],
+      datasetFlags: [],
+    }));
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withTrainingDataSetsLibraryContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets: [{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }],
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          loadDataset: vi.fn(async () => singleItemDataset()),
+          loadReadiness,
+          createAnalysisJob,
+          updateDataset,
+        }),
+      );
+    });
+    await openPortraitSet();
+    await settle();
+
+    // The Doctor readout (and its always-available "Analyze photos" action) is present.
+    expect(loadReadiness).toHaveBeenCalled();
+    const analyzeButton = [...document.body.querySelectorAll("button")].find((button) => button.textContent.includes("Analyze photos"));
+    expect(analyzeButton).toBeTruthy();
+
+    // Edit a caption AFTER readiness resolved (memo deps stay unchanged from here on).
+    const caption = document.body.querySelector(".training-caption-card-text");
+    expect(caption.value).toBe("mira portrait");
+    await changeField(caption, "mira studio portrait");
+
+    // Fire the Doctor fix-action; it routes through persistDataset().
+    await act(async () => {
+      analyzeButton.click();
+    });
+    await settle();
+
+    // The persisted payload must carry the NEW caption — proving the handler read current
+    // state, not the frozen pre-edit snapshot (which would silently revert the edit).
+    expect(updateDataset).toHaveBeenCalledWith(
+      "dataset-a",
+      expect.objectContaining({
+        items: [expect.objectContaining({ assetId: "asset-a", caption: expect.objectContaining({ text: "mira studio portrait" }) })],
+      }),
+    );
+  });
+
   it("queues a caption job for all images via the caption dialog (sc-2025)", async () => {
     const updateDataset = vi.fn(async (datasetId, payload) => ({ id: datasetId, name: payload.name, version: 4, items: singleItemDataset().items }));
     const createCaptionJob = vi.fn(async () => ({ id: "job-caption-1", type: "training_caption" }));

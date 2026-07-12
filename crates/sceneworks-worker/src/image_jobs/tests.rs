@@ -1111,6 +1111,253 @@ fn bernini_image_i2i_real_weights_generates_one_image() {
     );
 }
 
+/// Real-weight GPU smoke (sc-11003, epic 6562): candle Bernini t2i THROUGH THE WORKER LANE. Exercises
+/// the exact off-Mac still path `generate_candle_bernini_image_stream` drives —
+/// `resolve_candle_bernini_tier_dir_and_quant(bits)` (the `SCENEWORKS_CANDLE_BERNINI_DIR` root resolver +
+/// `bf16/`|`q8/`|`q4/` tier-select) → `load_spec(dir, quant, …)` → `gen_core::load("bernini")` (the
+/// force-linked `candle_gen_bernini` registration) → `bernini_image_generate_one(frames:1,
+/// video_mode:"t2i")` — minus only the API/job/asset-write plumbing. Default bits (no `mlxQuantize`)
+/// selects the **bf16 dense** tier (the off-Mac validated baseline). Env: point
+/// `SCENEWORKS_CANDLE_BERNINI_DIR` at the tier ROOT (containing `bf16/`|`q8/`|`q4/`, e.g.
+/// `E:\bernini-tiers`) or directly at a tier; optional `BERNINI_W`/`BERNINI_H`/`BERNINI_STEPS`/
+/// `BERNINI_GUIDANCE`/`BERNINI_PROMPT`/`BERNINI_SEED`/`BERNINI_OUT` (PNG). Run on demand (RTX PRO 6000,
+/// sm_120):
+/// `cargo test -p sceneworks-worker --release --features backend-candle -- --ignored --nocapture bernini_image_t2i_candle_real_weights`
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[ignore = "real-weight GPU smoke; needs a candle Bernini tier root at $SCENEWORKS_CANDLE_BERNINI_DIR + a CUDA device"]
+#[test]
+fn bernini_image_t2i_candle_real_weights_generates_one_image() {
+    // Anchor the provider's inventory registration into the test binary (parity with scail2_gpu_smoke).
+    use candle_gen_bernini as _;
+
+    fn env_u32(key: &str, default: u32) -> u32 {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(default)
+    }
+
+    let settings = Settings::from_env();
+    // The ACTUAL worker resolver: root (env → managed → HF) + tier-select. `None` bits ⇒ bf16 dense.
+    let (weights_dir, quant) = match resolve_candle_bernini_tier_dir_and_quant(&settings, None) {
+        Ok(pair) => pair,
+        Err(error) => {
+            eprintln!(
+                "skipping bernini_image_t2i_candle_real_weights: no candle Bernini tier ({error})"
+            );
+            return;
+        }
+    };
+    let width = env_u32("BERNINI_W", 768);
+    let height = env_u32("BERNINI_H", 768);
+    let steps = env_u32("BERNINI_STEPS", 20);
+    let seed = env_u32("BERNINI_SEED", 42) as i64;
+    let guidance = std::env::var("BERNINI_GUIDANCE")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .or(Some(4.0));
+    let prompt = std::env::var("BERNINI_PROMPT").unwrap_or_else(|_| {
+        "a weathered lighthouse on a rocky cliff at golden hour, photorealistic, cinematic"
+            .to_owned()
+    });
+
+    println!(
+        "[bernini-smoke] tier_dir={} quant={quant:?} {width}x{height} steps={steps} seed={seed} guidance={guidance:?}",
+        weights_dir.display()
+    );
+
+    // Byte-identical to the lane's `load_spec(weights_dir, quant, …)` — bf16 dense loads quant None.
+    let spec = load_spec(weights_dir, quant, Vec::new(), None);
+    let start = std::time::Instant::now();
+    let generator = gen_core::load("bernini", &spec).expect("load bernini candle provider");
+    println!(
+        "[bernini-smoke] loaded in {:.1}s",
+        start.elapsed().as_secs_f64()
+    );
+
+    let cancel = gen_core::CancelFlag::new();
+    let mut steps_seen = 0u32;
+    let gen_start = std::time::Instant::now();
+    // The EXACT request-builder the worker lane calls (frames:1 + video_mode:"t2i").
+    let (w, h, pixels) = bernini_image_generate_one(
+        generator.as_ref(),
+        &prompt,
+        None,
+        width,
+        height,
+        seed,
+        steps,
+        guidance,
+        "t2i",
+        Vec::new(),
+        &cancel,
+        &mut |p| {
+            if let gen_core::Progress::Step { current, .. } = p {
+                steps_seen = steps_seen.max(current);
+            }
+        },
+    )
+    .expect("bernini candle t2i generate");
+    let secs = gen_start.elapsed().as_secs_f64();
+
+    assert_eq!(pixels.len(), (w * h * 3) as usize, "RGB8-sized buffer");
+    assert_eq!((w, h), (width, height), "engine honored the requested dims");
+    assert!(steps_seen >= 1, "expected denoise step progress");
+
+    // Coherence: a real render is neither constant nor a collapsed (all-black / NaN-clamped) frame.
+    let n = pixels.len() as f64;
+    let mean = pixels.iter().map(|&v| v as f64).sum::<f64>() / n;
+    let var = pixels
+        .iter()
+        .map(|&v| (v as f64 - mean).powi(2))
+        .sum::<f64>()
+        / n;
+    let std = var.sqrt();
+    println!(
+        "[bernini-smoke] DONE {w}x{h} in {secs:.1}s | steps_seen={steps_seen} mean={mean:.1} std={std:.1}"
+    );
+    if let Ok(out) = std::env::var("BERNINI_OUT") {
+        image::RgbImage::from_raw(w, h, pixels.clone())
+            .expect("rgb buffer")
+            .save(out.trim())
+            .expect("save output png");
+        println!("[bernini-smoke] wrote {}", out.trim());
+    }
+    assert!(
+        pixels.windows(2).any(|x| x[0] != x[1]),
+        "non-constant image"
+    );
+    assert!(
+        std > 8.0,
+        "frame looks degenerate (std {std:.1}) — possible NaN / all-black decode"
+    );
+}
+
+/// Real-weight GPU smoke (sc-11003, epic 6562): candle Bernini t2v THROUGH THE VIDEO LANE's load seam.
+/// The video lane `crate::video_jobs::generate_candle_bernini` resolves the SAME tier
+/// (`resolve_candle_bernini_tier_dir_and_quant`) → `load_spec(dir, quant, …)` → `gen_core::load("bernini")`
+/// → a `GenerationRequest{frames:N, video_mode:"t2v"}` → `GenerationOutput::Video`. This drives that
+/// identical seam directly (minus the API/job/`generate_video` streaming plumbing), asserting the
+/// video-modality engine returns a coherent multi-frame clip on GPU. `bf16` dense tier (bits `None`).
+/// Env: `SCENEWORKS_CANDLE_BERNINI_DIR` (tier root) + optional `BERNINI_V_FRAMES`/`BERNINI_V_W`/
+/// `BERNINI_V_H`/`BERNINI_V_STEPS`/`BERNINI_V_OUT` (frame PNG dir). Heavier than t2i — run on demand:
+/// `cargo test -p sceneworks-worker --release --features backend-candle -- --ignored --nocapture bernini_t2v_candle_real_weights`
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[ignore = "real-weight GPU smoke; heavy Wan renderer — needs a candle Bernini tier root + a CUDA device"]
+#[test]
+fn bernini_t2v_candle_real_weights_generates_a_clip() {
+    use candle_gen_bernini as _;
+
+    fn env_u32(key: &str, default: u32) -> u32 {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(default)
+    }
+
+    let settings = Settings::from_env();
+    let (weights_dir, quant) = match resolve_candle_bernini_tier_dir_and_quant(&settings, None) {
+        Ok(pair) => pair,
+        Err(error) => {
+            eprintln!("skipping bernini_t2v_candle_real_weights: no candle Bernini tier ({error})");
+            return;
+        }
+    };
+    // Wan 1-mod-4 frame stride (the renderer is Wan2.2-A14B) — 17 = 4*4+1 keeps the clip short.
+    let frames = env_u32("BERNINI_V_FRAMES", 17);
+    let width = env_u32("BERNINI_V_W", 512);
+    let height = env_u32("BERNINI_V_H", 512);
+    let steps = env_u32("BERNINI_V_STEPS", 10);
+
+    println!(
+        "[bernini-v-smoke] tier_dir={} quant={quant:?} {width}x{height} frames={frames} steps={steps}",
+        weights_dir.display()
+    );
+
+    let spec = load_spec(weights_dir, quant, Vec::new(), None);
+    let start = std::time::Instant::now();
+    let generator = gen_core::load("bernini", &spec).expect("load bernini candle provider");
+    println!(
+        "[bernini-v-smoke] loaded in {:.1}s",
+        start.elapsed().as_secs_f64()
+    );
+
+    // The video lane's request shape: frames>1 + video_mode "t2v" ⇒ GenerationOutput::Video.
+    let request = gen_core::GenerationRequest {
+        prompt: "a slow cinematic drone shot over a misty pine forest at dawn".to_owned(),
+        negative_prompt: None,
+        width,
+        height,
+        count: 1,
+        seed: Some(42),
+        steps: Some(steps),
+        guidance: Some(4.0),
+        frames: Some(frames),
+        fps: Some(16),
+        video_mode: Some("t2v".to_owned()),
+        cancel: gen_core::CancelFlag::new(),
+        ..Default::default()
+    };
+    let mut last = String::new();
+    let gen_start = std::time::Instant::now();
+    let output = generator
+        .generate(&request, &mut |p| {
+            let s = format!("{p:?}");
+            if s != last {
+                println!("[progress] {s}");
+                last = s;
+            }
+        })
+        .expect("bernini candle t2v generate");
+    let secs = gen_start.elapsed().as_secs_f64();
+
+    let out_frames = match output {
+        gen_core::GenerationOutput::Video { frames, .. } => frames,
+        other => panic!("expected Video output, got {other:?}"),
+    };
+    assert!(!out_frames.is_empty(), "engine returned no frames");
+    let avg_std = {
+        let mut total = 0f64;
+        for f in &out_frames {
+            let n = f.pixels.len() as f64;
+            let mean = f.pixels.iter().map(|&v| v as f64).sum::<f64>() / n;
+            let var = f
+                .pixels
+                .iter()
+                .map(|&v| (v as f64 - mean).powi(2))
+                .sum::<f64>()
+                / n;
+            total += var.sqrt();
+        }
+        total / out_frames.len() as f64
+    };
+    println!(
+        "[bernini-v-smoke] DONE {} frames {}x{} in {secs:.1}s | avg per-frame std {avg_std:.1}",
+        out_frames.len(),
+        out_frames[0].width,
+        out_frames[0].height,
+    );
+    if let Ok(dir) = std::env::var("BERNINI_V_OUT") {
+        std::fs::create_dir_all(dir.trim()).ok();
+        for (i, f) in out_frames.iter().enumerate() {
+            let p = std::path::Path::new(dir.trim()).join(format!("frame_{i:03}.png"));
+            image::RgbImage::from_raw(f.width, f.height, f.pixels.clone())
+                .expect("rgb buffer")
+                .save(&p)
+                .expect("save frame");
+        }
+        println!(
+            "[bernini-v-smoke] wrote {} frames to {}",
+            out_frames.len(),
+            dir.trim()
+        );
+    }
+    assert!(
+        avg_std > 8.0,
+        "clip looks degenerate (avg std {avg_std:.1}) — possible NaN / all-black decode"
+    );
+}
+
 /// sc-8827 (F-025): the worker feeds the PuLID-FLUX engine its adapter / EVA / face-stack paths on
 /// `LoadSpec::identity` instead of mutating the process-global `PULID_*` env vars at job time. This
 /// asserts the mapping `PulidWeights -> IdentityWeights` (encoder=File(adapter), eva=File(eva),
@@ -3721,6 +3968,57 @@ fn mlx_control_weight_filenames_reject_traversal() {
     assert!(resolve_qwen_control_weights(&plain, &settings).is_ok());
 }
 
+/// sc-11168 / F-006: the Krea strict-pose lanes accept a payload-supplied `advanced.controlWeights.path`
+/// (a studio-trained / registered LOCAL overlay the API resolved) and load it directly. That untrusted
+/// value must be confined to an app-managed root, or a crafted job turns the overlay loader into an
+/// arbitrary-file read across the LAN boundary (epic 4484). Exercise the confinement helper on whichever
+/// twin the current build compiles (MLX on macOS / candle off-Mac — both define the same-named helper):
+/// an out-of-root path is rejected with the house `InvalidPayload`, a path under the data dir resolves,
+/// and an absent key yields `None`. Mirrors `app_managed_helpers_resolve_symlinks_before_root_check`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn krea_control_payload_overlay_path_confines_to_app_root() {
+    let data = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = data.path().to_path_buf();
+    settings.external_model_roots = Vec::new();
+
+    // No `controlWeights.path` in the payload → nothing to confine.
+    let none = request(json!({ "projectId": "p" }));
+    assert!(krea_control_payload_overlay_path(&settings, &none)
+        .expect("an absent overlay path is Ok(None)")
+        .is_none());
+
+    // An out-of-root absolute path (the arbitrary-file-read primitive) is rejected.
+    let escape_file = outside.path().join("evil.safetensors");
+    std::fs::write(&escape_file, b"x").unwrap();
+    let escape = request(json!({
+        "projectId": "p",
+        "advanced": { "controlWeights": { "path": escape_file.display().to_string() } }
+    }));
+    let err = krea_control_payload_overlay_path(&settings, &escape)
+        .expect_err("an out-of-root overlay path is rejected");
+    assert!(err.to_string().contains("app-managed"), "{err}");
+
+    // A path under the app data dir resolves (canonicalized) and is loadable.
+    let managed = settings.data_dir.join("models").join("overlay.safetensors");
+    std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+    std::fs::write(&managed, b"weights").unwrap();
+    let ok = request(json!({
+        "projectId": "p",
+        "advanced": { "controlWeights": { "path": managed.display().to_string() } }
+    }));
+    let resolved = krea_control_payload_overlay_path(&settings, &ok)
+        .expect("a managed overlay path is Ok")
+        .expect("a present key yields Some");
+    assert_eq!(resolved, managed.canonicalize().unwrap());
+    assert!(resolved.is_file());
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn flux2_control_raw_settings_records_control_recipe() {
@@ -4672,6 +4970,96 @@ fn candle_image_route_gates_on_flag_then_pose_reject_then_txt2img() {
     // A non-candle model → None (stubs / MLX-only elsewhere).
     let unknown = request(json!({ "projectId": "p", "model": "not_a_candle_engine", "count": 1 }));
     assert_eq!(resolve_candle_image_route(&unknown, &settings), None);
+}
+
+// sc-11171 (F-008): a strict-pose job on a WIRED candle pose family (e.g. `z_image_turbo`) whose control
+// base snapshot is NOT installed must route to the loud `PoseControlBaseMissing` reject, NOT fall through
+// to the plain candle txt2img lane (which would silently render an unconditioned image and drop the
+// poses). The scheduler routes it to candle weight-blind (`zimage_control_candle_eligible` checks only the
+// payload, "minus the local weight-resolve check"), and `image_job_candle_pose_reject` does not catch it
+// (`model_has_candle_pose_lane("z_image_turbo")` is true), so the worker is the last line of defense.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_image_route_rejects_wired_pose_when_control_base_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    // A tempdir data_dir holds no HF snapshot, so `resolve_zimage_control_base` yields `None` → the
+    // Z-Image control lane's weight-gate (`zimage_control_available`) fails and the job falls through.
+    settings.data_dir = dir.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+
+    // z_image_turbo + poses, control base absent → the loud missing-base reject, never plain txt2img.
+    let zimage_pose = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "count": 1,
+        "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    let route = resolve_candle_image_route(&zimage_pose, &settings);
+    assert_eq!(route, Some(CandleImageRoute::PoseControlBaseMissing));
+    assert_ne!(
+        route,
+        Some(CandleImageRoute::CandleTxt2Img),
+        "a wired pose family with an absent control base must NOT silently render plain txt2img",
+    );
+
+    // The same family without poses still routes to the generic candle txt2img lane — the reject is
+    // scoped to the strict-pose shape, not the model id.
+    let zimage_t2i = request(json!({ "projectId": "p", "model": "z_image_turbo", "count": 1 }));
+    assert_eq!(
+        resolve_candle_image_route(&zimage_t2i, &settings),
+        Some(CandleImageRoute::CandleTxt2Img),
+    );
+
+    // A non-wired candle family with poses (e.g. sdxl, which has no candle pose lane at all) still hits
+    // the sc-5968 `PoseReject`, not the missing-base variant.
+    let sdxl_pose = request(json!({
+        "projectId": "p", "model": "sdxl", "count": 1,
+        "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&sdxl_pose, &settings),
+        Some(CandleImageRoute::PoseReject),
+    );
+}
+
+// sc-11171 (F-009): the candle plan bakes the resolved route's real image total into `expectedCount`
+// (via `CandleImageRoute::image_count`), mirroring the macOS `ImageRoute::image_count`. A strict-pose
+// control route renders one image per pose (`pose_entries().len()`), NOT `request.count`, so a pose set
+// whose length differs from the requested count must report the pose count — otherwise the gallery
+// streams against the wrong total (stuck placeholders).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_strict_pose_route_image_count_is_pose_set_length() {
+    let settings = Settings::from_env();
+    // 4 images requested, but 3 poses → the strict-pose lane renders 3 (one per pose).
+    let zimage_pose = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "count": 4,
+        "advanced": { "poses": [{ "id": "a" }, { "id": "b" }, { "id": "c" }] }
+    }));
+    assert_eq!(pose_entries(&zimage_pose).len(), 3);
+    assert_ne!(
+        zimage_pose.count, 3,
+        "guard: request.count must differ from the pose count to prove the fix",
+    );
+    assert_eq!(
+        CandleImageRoute::ZimageControl.image_count(&zimage_pose, &settings),
+        3,
+        "a strict-pose route's plan total is the pose-set length, not request.count",
+    );
+    // Every other strict-pose control lane counts the same way.
+    for route in [
+        CandleImageRoute::QwenControl,
+        CandleImageRoute::KolorsControl,
+        CandleImageRoute::Flux2Control,
+        CandleImageRoute::Flux1Control,
+        CandleImageRoute::KreaControl,
+    ] {
+        assert_eq!(route.image_count(&zimage_pose, &settings), 3);
+    }
+    // A plain txt2img route keeps the requested count.
+    assert_eq!(
+        CandleImageRoute::CandleTxt2Img.image_count(&zimage_pose, &settings),
+        zimage_pose.count,
+    );
 }
 
 // sc-10996 (epic 6562): `bernini_image` t2i / i2i route to the dedicated candle Bernini lane
@@ -8748,6 +9136,26 @@ fn instantid_revisions_are_pinned_commits_not_main() {
         INSTANTID_CONTROLNET_REVISION,
     );
     assert_pinned_revision("INSTANTID_OPENPOSE_REVISION", INSTANTID_OPENPOSE_REVISION);
+    // sc-11168 / F-007: the MLX PuLID lane (`pulid.rs`) fetches its adapter + EVA/BiSeNet bundle repos
+    // through `ensure_instantid_file` → `instantid_revision`, so those two repos must be pinned here too
+    // (they were falling back to `main`; the candle twin already pins them).
+    assert_pinned_revision("PULID_ADAPTER_REVISION", PULID_ADAPTER_REVISION);
+    assert_pinned_revision("PULID_MLX_REVISION", PULID_MLX_REVISION);
+    assert_eq!(instantid_revision("guozinan/PuLID"), PULID_ADAPTER_REVISION);
+    assert_eq!(
+        instantid_revision("SceneWorks/pulid-flux-mlx"),
+        PULID_MLX_REVISION
+    );
+    // Tie the literal repo names matched in `instantid_revision` back to `pulid.rs`'s consts (macOS-only,
+    // so a rename of either const can't silently desync the pin from the repo it guards).
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(
+            instantid_revision(PULID_ADAPTER_REPO),
+            PULID_ADAPTER_REVISION
+        );
+        assert_eq!(instantid_revision(PULID_MLX_REPO), PULID_MLX_REVISION);
+    }
     // `instantid_revision` returns the pin for a known repo and falls back to `main` otherwise.
     assert_eq!(
         instantid_revision(INSTANTID_MLX_REPO),
@@ -8764,6 +9172,12 @@ fn mlx_control_and_distill_revisions_are_pinned_commits_not_main() {
     assert_pinned_revision("FLUX1_CONTROL_REVISION", FLUX1_CONTROL_REVISION);
     assert_pinned_revision("FLUX2_CONTROL_REVISION", FLUX2_CONTROL_REVISION);
     assert_pinned_revision("QWEN_LIGHTNING_LORA_REVISION", QWEN_LIGHTNING_LORA_REVISION);
+    // sc-11168 / F-007: the default MLX Krea pose-control overlay repo is a fixed, non-overridable const,
+    // so its pin must be a fixed commit rather than the mutable `main` branch.
+    assert_pinned_revision(
+        "KREA_CONTROL_OVERLAY_REVISION",
+        KREA_CONTROL_OVERLAY_REVISION,
+    );
 }
 
 /// The candle-only strict-control pins (qwen / kolors / zimage / flux1 / flux2 control branches). These
@@ -8782,6 +9196,13 @@ fn candle_control_revisions_are_pinned_commits_not_main() {
     assert_pinned_revision(
         "FLUX2_CONTROL_CANDLE_REVISION",
         FLUX2_CONTROL_CANDLE_REVISION,
+    );
+    // sc-11168 / F-007: the default candle Krea pose-control overlay repo is a fixed, non-overridable
+    // const, so its pin must be a fixed commit rather than the mutable `main` branch (twin of the MLX
+    // `KREA_CONTROL_OVERLAY_REVISION` assert on the macOS lane).
+    assert_pinned_revision(
+        "KREA_CONTROL_OVERLAY_REVISION",
+        KREA_CONTROL_OVERLAY_REVISION,
     );
 }
 
@@ -8819,6 +9240,19 @@ fn candle_ipadapter_and_pulid_revisions_are_pinned_commits_not_main() {
         PULID_CANDLE_FACE_REVISION
     );
     assert_eq!(pulid_candle_revision("some/override-repo"), "main");
+    // sc-11168 / F-007: the candle Kolors IP-Adapter-Plus fetch carried the mutable `refs/pr/4` ref;
+    // it is now pinned to the exact commit at that PR's tip (a force-push can't swap the weights).
+    assert_pinned_revision("KOLORS_IPADAPTER_REVISION", KOLORS_IPADAPTER_REVISION);
+    // sc-11168 / F-007: the MLX PuLID pins (in `instantid.rs`) fetch the SAME repos as these candle pins,
+    // so a bump to one lane without the other must fail loudly (twin-drift guard).
+    assert_eq!(
+        PULID_ADAPTER_REVISION, PULID_CANDLE_ADAPTER_REVISION,
+        "MLX + candle PuLID adapter (guozinan/PuLID) pins must agree"
+    );
+    assert_eq!(
+        PULID_MLX_REVISION, PULID_CANDLE_MLX_REVISION,
+        "MLX + candle PuLID EVA/BiSeNet bundle (SceneWorks/pulid-flux-mlx) pins must agree"
+    );
 }
 
 /// The candle-only Krea 2 ConvRot bf16-base pin (`base.rs`, sc-9300 tier). Fetches the fixed

@@ -14,10 +14,12 @@
 /// The Kolors IP-Adapter-Plus repo (CLIP ViT-L/14-336 `image_encoder/` + the `image_proj` Resampler +
 /// `ip_adapter.*` K/V). Same repo the MLX path uses (`kolors.rs` `KOLORS_IP_ADAPTER_REPO`).
 const KOLORS_IPADAPTER_REPO: &str = "Kwai-Kolors/Kolors-IP-Adapter-Plus";
-/// The repo revision carrying the **safetensors** (`refs/pr/4`): the repo's `main` ships only `.bin`
-/// (a torch pickle candle can't read); PR-4 adds `ip_adapter_plus_general.safetensors` +
-/// `image_encoder/model.safetensors`. The torch/MLX download flow uses this same rev.
-const KOLORS_IPADAPTER_REVISION: &str = "refs/pr/4";
+/// The repo revision carrying the **safetensors**: the repo's `main` ships only `.bin` (a torch pickle
+/// candle can't read); PR-4 adds `ip_adapter_plus_general.safetensors` + `image_encoder/model.safetensors`.
+/// Pinned to the exact commit at the tip of `refs/pr/4` rather than the mutable `refs/pr/4` ref itself
+/// (sc-11168 / F-007 — completes the sc-9879 rollout): a force-push to the PR could otherwise swap the
+/// adapter/encoder weights we load. The `hf` CLI still verifies each file's own hash on download.
+const KOLORS_IPADAPTER_REVISION: &str = "5c72aa86cd8d9d23ff406d293c5473820e09e1d9";
 /// The IP-Adapter-Plus bundle file (root of the snapshot).
 const KOLORS_IPADAPTER_BUNDLE: &str = "ip_adapter_plus_general.safetensors";
 /// The CLIP ViT-L/14-336 image-encoder files inside the repo (config + weights).

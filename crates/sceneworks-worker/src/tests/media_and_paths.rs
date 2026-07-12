@@ -252,6 +252,53 @@ fn lora_paths_resolve_symlinks_before_root_check() {
     assert!(error.to_string().contains("LoRA path must be inside"));
 }
 
+/// sc-11649: the Hugging Face hub cache stores each file as an extensionless
+/// `blobs/<sha>` object with a `snapshots/…/<name>.safetensors` **symlink** pointing at
+/// it. Confining an HF-cached adapter canonicalizes that symlink to the blob, which has no
+/// `.safetensors` extension — and mlx-rs's safetensors loader rejects an extensionless path
+/// with "Unsupported file format", so every Krea 2 edit (whose required
+/// `krea2_identity_edit` LoRA is HF-cached, its `installedPath` pointing straight at the
+/// snapshot symlink) failed to load. The confinement must therefore return a path that both
+/// resolves to the confined blob AND keeps the `.safetensors` extension the loader needs.
+#[cfg(unix)]
+#[test]
+fn lora_paths_keep_safetensors_extension_for_hf_blob_symlink() {
+    let temp = tempdir().expect("tempdir creates");
+    let data_dir = temp.path().join("data");
+    // Mimic the HF hub layout under a managed root: an extensionless `blobs/<sha>` object
+    // with a `snapshots/<rev>/<name>.safetensors` symlink pointing at it.
+    let repo = data_dir
+        .join("loras")
+        .join("models--acme--krea2-identity-edit");
+    let blobs = repo.join("blobs");
+    let snapshot = repo.join("snapshots").join("deadbeef");
+    std::fs::create_dir_all(&blobs).expect("blobs dir creates");
+    std::fs::create_dir_all(&snapshot).expect("snapshot dir creates");
+    let blob = blobs.join("78b403a45024d51c24b618046ec1176c346416951f8f4c6c707d1b337ae1d40f");
+    std::fs::write(&blob, b"adapter").expect("blob writes");
+    let link = snapshot.join("krea2_identity_edit_v1_1_r128.safetensors");
+    std::os::unix::fs::symlink(&blob, &link).expect("snapshot symlink creates");
+
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.data_dir = data_dir;
+
+    // The adapter resolves (its canonical target is confined) AND the returned path keeps the
+    // `.safetensors` extension mlx-rs demands — not the extensionless canonical blob.
+    let resolved = super::normalize_app_managed_lora_path(&settings, &link)
+        .expect("HF-cached adapter is accepted");
+    assert_eq!(
+        resolved.extension().and_then(|extension| extension.to_str()),
+        Some("safetensors"),
+        "confined adapter path must keep the .safetensors extension (got {})",
+        resolved.display()
+    );
+    assert_eq!(
+        resolved.canonicalize().expect("resolved path canonicalizes"),
+        blob.canonicalize().expect("blob canonicalizes"),
+        "the extension-preserving path must still name the confined blob"
+    );
+}
+
 /// epic 10451 / sc-10452: an operator-configured external root (a ComfyUI `models/`
 /// tree) is readable for adapters, in place — no copy into `<data>/loras`. The same
 /// path is rejected when no root is configured, which is the default and therefore

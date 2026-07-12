@@ -511,11 +511,12 @@ export function ImageStudio() {
   const [referenceAssetIds, setReferenceAssetIds] = useState(() =>
     Array.isArray(saved.referenceAssetIds) ? saved.referenceAssetIds : [],
   );
-  // Optional SECOND (person) source for a Krea-style two-reference edit (epic 10871 P1.3). Scene =
-  // the `sourceAssetId` above (image 1), person = this (image 2), a fixed order. Only surfaced when
-  // the model declares `ui.editReferences`; empty otherwise. When set, submit sends an ordered
-  // `referenceAssetIds: [scene, person]` pair instead of the single `sourceAssetId`.
-  const [editPersonAssetId, setEditPersonAssetId] = useState("");
+  // Optional SECOND source for a Krea-style two-reference edit (epic 10871 P1.3). Any two images —
+  // the `sourceAssetId` above is image 1 (required), this is image 2 (optional), a fixed order (the
+  // instruction describes how to combine them). Only surfaced when the model declares
+  // `ui.editReferences`; empty otherwise. When set, submit sends an ordered
+  // `referenceAssetIds: [image1, image2]` pair instead of the single `sourceAssetId`.
+  const [editSecondAssetId, setEditSecondAssetId] = useState("");
   // Edit fit mode (epic 2551): how the source is fitted to the output W×H. Never stretch.
   const [fitMode, setFitMode] = useState(saved.fitMode ?? "crop");
   const [characterId, setCharacterId] = useState("");
@@ -911,20 +912,21 @@ export function ImageStudio() {
   // FLUX.2-dev only (its DiT sequence-gated chunking keeps the multi-reference edit under 96 GB).
   const multiReference = Boolean(selectedModel?.ui?.multiReference);
   // Krea-style two-reference edit (epic 10871 P1.3): a model whose `ui.editReferences` adds an optional
-  // SECOND (person) source to the single-source edit — scene = image 1, person = image 2, fixed order.
-  // Only in single-source edit mode (never alongside the flat `multiReference` multi-select). Null →
-  // the plain single-source edit for every other model/mode.
+  // SECOND source to the single-source edit — any two images, image 1 (required) + image 2 (optional),
+  // fixed order. Only in single-source edit mode (never alongside the flat `multiReference`
+  // multi-select). Null → the plain single-source edit for every other model/mode.
   const editReferences =
     mode === "edit_image" && !multiReference ? (selectedModel?.ui?.editReferences ?? null) : null;
-  // The ordered [scene, person] pair, sent as `referenceAssetIds` when a person is chosen; null → the
-  // single `sourceAssetId` path. The scene is required too (a person with no scene is meaningless).
-  const editPersonPair =
-    editReferences && sourceAssetId && editPersonAssetId ? [sourceAssetId, editPersonAssetId] : null;
-  // Drop a stale person selection when the two-reference edit surface goes away (model/mode change),
-  // so it can never leak into a payload for a model that doesn't support it.
+  // The ordered [image1, image2] pair, sent as `referenceAssetIds` when a second image is chosen;
+  // null → the single `sourceAssetId` path. Image 1 is required too (a second image with no first is
+  // meaningless).
+  const editSecondPair =
+    editReferences && sourceAssetId && editSecondAssetId ? [sourceAssetId, editSecondAssetId] : null;
+  // Drop a stale second-image selection when the two-reference edit surface goes away (model/mode
+  // change), so it can never leak into a payload for a model that doesn't support it.
   useEffect(() => {
     if (!editReferences) {
-      setEditPersonAssetId("");
+      setEditSecondAssetId("");
     }
   }, [editReferences]);
   // Mac UI gating (sc-3486): disable the per-model feature controls the selected model can't run
@@ -1781,20 +1783,20 @@ export function ImageStudio() {
         // (strict_control.rs `resolve_control_source`). Passthrough mode uses `advanced.controlImage`.
         sourceAssetId:
           mode === "edit_image" && !multiReference
-            ? // A two-reference edit sends the ordered [scene, person] pair as referenceAssetIds instead
-              // (epic 10871 P1.3), so the single sourceAssetId is dropped when a person is chosen.
-              editPersonPair
+            ? // A two-reference edit sends the ordered [image1, image2] pair as referenceAssetIds instead
+              // (epic 10871 P1.3), so the single sourceAssetId is dropped when a second image is chosen.
+              editSecondPair
               ? null
               : sourceAssetId || null
             : controlPreprocessSourceId,
         // Multi-reference edit (sc-6211): the plural reference set the FLUX.2-dev edit conditions on.
         // Only sent in edit_image mode for a multiReference model; the worker routes a non-empty list
         // to Conditioning::MultiReference (one image ⇒ a normal single-reference edit). The Krea
-        // two-reference edit (epic 10871 P1.3) reuses this channel with the ordered [scene, person] pair.
+        // two-reference edit (epic 10871 P1.3) reuses this channel with the ordered [image1, image2] pair.
         referenceAssetIds:
           mode === "edit_image" && multiReference && referenceAssetIds.length
             ? referenceAssetIds
-            : (editPersonPair ?? undefined),
+            : (editSecondPair ?? undefined),
         // Fit mode applies to edits only; coerced so a stale "outpaint" never reaches a
         // non-inpaint model (epic 2551). Omitted for non-edit modes (worker default crop).
         fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
@@ -1895,14 +1897,14 @@ export function ImageStudio() {
     characterLookId: mode === "character_image" ? characterLookId || null : null,
     sourceAssetId:
       mode === "edit_image" && !multiReference
-        ? editPersonPair
+        ? editSecondPair
           ? null
           : sourceAssetId || null
         : controlPreprocessSourceId,
     referenceAssetIds:
       mode === "edit_image" && multiReference && referenceAssetIds.length
         ? referenceAssetIds
-        : (editPersonPair ?? undefined),
+        : (editSecondPair ?? undefined),
     fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
     referenceAssetId: mode === "character_image" ? referenceAssetId || null : null,
     loras: buildLorasPayload(),
@@ -2560,26 +2562,26 @@ export function ImageStudio() {
                       characters={characters}
                       emptyLabel="No source image selected"
                       importAsset={importAsset}
-                      label={editReferences ? "Source image (scene)" : "Source image"}
+                      label={editReferences ? "Image 1" : "Source image"}
                       onChange={setSourceAssetId}
                       projectId={activeProject?.id}
                       value={sourceAssetId}
                     />
-                    {/* Optional second (person) source for a two-reference edit (epic 10871 P1.3).
-                        Fixed order: the source above is the scene (image 1); this is the person
-                        (image 2). Only rendered when the model declares `ui.editReferences`. */}
+                    {/* Optional second source for a two-reference edit (epic 10871 P1.3). Any two
+                        images in a fixed order: the source above is image 1 (required); this is
+                        image 2 (optional). Only rendered when the model declares `ui.editReferences`. */}
                     {editReferences ? (
                       <>
                         <ImageEditSourcePickerField
                           assets={editImageAssets}
                           buttonLabel="Select image"
                           characters={characters}
-                          emptyLabel="No person image selected (optional)"
+                          emptyLabel="No second image selected (optional)"
                           importAsset={importAsset}
-                          label={editReferences.secondaryLabel ?? "Second image (optional)"}
-                          onChange={setEditPersonAssetId}
+                          label={editReferences.secondaryLabel ?? "Image 2 (optional)"}
+                          onChange={setEditSecondAssetId}
                           projectId={activeProject?.id}
-                          value={editPersonAssetId}
+                          value={editSecondAssetId}
                         />
                         {editReferences.secondaryHint ? (
                           <p className="field-hint">{editReferences.secondaryHint}</p>
