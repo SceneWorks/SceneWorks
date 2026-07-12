@@ -1243,10 +1243,16 @@ pub(crate) fn write_image_asset(
     let rgb_image = image::RgbImage::from_raw(width, height, pixels)
         .ok_or_else(|| WorkerError::InvalidPayload("image buffer size mismatch".to_owned()))?;
 
+    // Sanitize the payload-supplied model id before it becomes a path component: it
+    // arrives verbatim from the untrusted job payload, and a `../` / `\` / absolute id
+    // would otherwise traverse out of the project dir here (F-003 / sc-11159). rust-api
+    // now rejects such ids at enqueue, but the worker is the trust boundary and must
+    // re-confine — slugify neutralizes any separator/`..` to a single readable component.
+    let model_slug = slugify(&request.model, "model", None);
     let filename = format!(
         "{}_{}_{}_{:04}.png",
         &plan.created_at[..10],
-        request.model,
+        model_slug,
         plan.slug,
         index + 1
     );
@@ -1458,10 +1464,13 @@ fn write_upscaled_asset(
     let index = base_fact.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
     let (width, height) = (upscaled.width(), upscaled.height());
 
+    // Sanitize the untrusted model id before it becomes a path component (F-003 / sc-11159),
+    // mirroring `write_image_asset` so the upscaled variant is confined identically.
+    let model_slug = slugify(&request.model, "model", None);
     let filename = format!(
         "{}_{}_{}_{:04}_up{factor}x.png",
         &plan.created_at[..10],
-        request.model,
+        model_slug,
         plan.slug,
         index + 1
     );

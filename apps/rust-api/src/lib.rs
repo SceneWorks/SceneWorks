@@ -2473,10 +2473,46 @@ fn validate_prompt_extras(negative_prompt: &str, advanced: &JsonObject) -> Resul
     Ok(())
 }
 
+/// Reject a `model` id that is not a safe single path component (F-003 / sc-11159).
+///
+/// The id flows verbatim from the untrusted job payload into the worker's asset
+/// filename — `write_image_asset` / `write_upscaled_asset` / `VideoPlan::new` each
+/// `format!(".._{model}_..")` a project-relative path, then `create_dir_all` +
+/// atomic-rename the file into place. A `model` containing `../`, `..\`, or an
+/// absolute path would therefore traverse out of the project dir and hand a remote
+/// caller an arbitrary-write primitive. The worker now slugifies the id as a last
+/// line of defense, but the API is the first gate and rejects such ids outright,
+/// mirroring the worker's `safe_weight_filename` posture for payload-supplied
+/// filename components.
+///
+/// SCOPE (sc-11159): this enforces *path-safety only*, NOT catalog membership. The
+/// worker's stub lane deliberately serves uncatalogued model ids for dev/testing,
+/// and the API test harness (which does not seed the shipped model manifests)
+/// routinely enqueues real-but-uncatalogued ids and expects success, so a catalog
+/// rejection here would break that legitimate lane. Path-safety alone fully closes
+/// the traversal/arbitrary-write vulnerability: an uncatalogued-but-path-safe id
+/// can never escape the project dir.
+fn validate_model_id(model: &str) -> Result<(), ApiError> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::bad_request("model is required"));
+    }
+    let mut components = std::path::Path::new(trimmed).components();
+    let single_normal = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none();
+    if !single_normal || trimmed.contains('/') || trimmed.contains('\\') {
+        return Err(ApiError::bad_request(
+            "model must be a plain model id (no path separators or '..')",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
     }
+    validate_model_id(&payload.model)?;
     if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
         return Err(ApiError::bad_request(
             "prompt must be between 1 and 4000 characters",
@@ -2527,6 +2563,7 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
     }
+    validate_model_id(&payload.model)?;
     if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
         return Err(ApiError::bad_request(
             "prompt must be between 1 and 4000 characters",

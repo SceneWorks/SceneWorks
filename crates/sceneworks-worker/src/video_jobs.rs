@@ -800,12 +800,18 @@ impl VideoPlan {
         let created_at = now_rfc3339();
         let family = resolve_family(request);
         let slug = slugify(&request.prompt, "video", Some(42));
+        // Sanitize the untrusted model id before it becomes a path component: it arrives
+        // verbatim from the job payload, and a `../` / `\` / absolute id would otherwise
+        // traverse out of the project dir here (F-003 / sc-11159). rust-api rejects such ids
+        // at enqueue, but the worker is the trust boundary and must re-confine — slugify
+        // collapses any separator/`..` to a single readable component (mirrors write_image_asset).
+        let model_slug = slugify(&request.model, "model", None);
         // Nest under the per-generation id so two renders sharing date+model+slug
         // cannot collide on a flat path (mirrors the image + Python video adapters).
         let media_rel = format!(
             "assets/videos/{genset_id}/{}_{}_{slug}.mp4",
             &created_at[..10],
-            request.model
+            model_slug
         );
         let media_path = project_path.join(&media_rel);
         Self {
@@ -10242,13 +10248,50 @@ mod tests {
             .media_rel
             .starts_with(&format!("assets/videos/{}/", plan.genset_id)));
         assert!(plan.media_rel.ends_with(".mp4"));
-        assert!(plan.media_rel.contains("_ltx_2_3_"));
+        // The model id is slugified into the filename (F-003 / sc-11159): `ltx_2_3` -> `ltx-2-3`.
+        assert!(plan.media_rel.contains("_ltx-2-3_"));
         assert!(plan.asset_id.starts_with("asset_"));
         assert_eq!(plan.family, "ltx-video");
         assert_eq!(
             plan.media_path,
             Path::new("/tmp/project").join(&plan.media_rel)
         );
+    }
+
+    /// F-003 / sc-11159: a path-traversal / absolute model id in the payload must NOT let the
+    /// rendered `.mp4` escape the project dir. The model id becomes a filename component in
+    /// `media_rel`, so a `../`, `..\`, or `/abs` id would otherwise place the media path (and
+    /// its later `create_dir_all` + write) outside `project_path`. Assert confinement per vector.
+    #[test]
+    fn plan_confines_malicious_model_id() {
+        let project = Path::new("/tmp/project");
+        for evil in [
+            "../../../../etc/passwd",
+            "..\\..\\..\\windows\\evil",
+            "/etc/cron.d/pwn",
+            "sub/dir/model",
+        ] {
+            let request = request(json!({
+                "projectId": "p", "model": evil, "prompt": "A red fox runs"
+            }));
+            let plan = VideoPlan::new(&request, project);
+            assert!(
+                !plan.media_rel.contains(".."),
+                "media_rel must not contain `..` for model id {evil:?}: {}",
+                plan.media_rel
+            );
+            assert!(
+                plan.media_rel
+                    .starts_with(&format!("assets/videos/{}/", plan.genset_id)),
+                "media_rel escaped the videos dir for model id {evil:?}: {}",
+                plan.media_rel
+            );
+            assert!(
+                plan.media_path.starts_with(project),
+                "media_path {:?} escaped project dir for model id {evil:?}",
+                plan.media_path
+            );
+        }
     }
 
     #[test]
