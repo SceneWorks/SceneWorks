@@ -1640,14 +1640,20 @@ mlx-gen-scail2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0d2a
 # #412 bernini — additive candle-only, no worker surface change). Both the default lane AND
 # `--features backend-candle --target all` resolve the SINGLE gen-core rev `19573a9a`. ALL mlx-gen-* +
 # candle-gen-* pins move together.
-# Bumped mlx-gen `19573a9a` -> `0d2a2be6` + candle-gen `95a2ebcc` -> `1086bd0f` IN LOCKSTEP (sc-11006,
+# Bumped candle-gen `95a2ebcc` -> `c20a589c` (epic 10871, sc-10882/10883): candle-gen #416 is the candle
+# Krea 2 image-edit ENGINE (Kontext seq-concat edit forward + Qwen3-VL vision-tower grounding). The new
+# candle `KreaEdit` worker lane (`krea_edit_candle.rs`) consumes its `candle_gen_krea::pipeline::{
+# load_components, load_edit_components, render_edit}`. candle-gen-ONLY this time — `c20a589c` re-pins the
+# SAME gen-core `19573a9a` (mlx-gen HEAD, unchanged), so the skew gate stays satisfied with NO mlx-gen
+# move (the edit engine is additive to candle-gen-krea; `git diff 95a2ebcc..c20a589c -- gen-core*` empty).
+# Bumped mlx-gen `19573a9a` -> `0d2a2be6` + candle-gen `c20a589c` -> `1086bd0f` IN LOCKSTEP (sc-11006,
 # epic 10834): qwen-image-EDIT + qwen-image-CONTROL sequential component residency (the fan-out completion
 # of the qwen family after sc-11000; PURE mlx-gen-qwen-image provider Rust, mlx-gen #695). `git diff
 # 19573a9a..0d2a2be6 -- gen-core/ gen-core-testkit/` is EMPTY (gen-core BYTE-IDENTICAL) — but the skew gate
 # keys on the git REV, so candle-gen moves too. `0d2a2be6` is mlx-gen main HEAD (the #695 merge, a superset
-# of the prior `19573a9a`/#693 Krea pin). `1086bd0f` is candle-gen main HEAD after #417 (the gen-core
-# `19573a9a` -> `0d2a2be6` rev-align), a superset of the prior `95a2ebcc` pin (adds #414 flux2 test + #416
-# candle Krea 2 edit) — no candle provider regression. The worker also adds `"qwen_image_edit"` +
+# of `19573a9a`/#693). `1086bd0f` is candle-gen main HEAD after #417 (the gen-core `19573a9a` -> `0d2a2be6`
+# rev-align), a DIRECT descendant of the prior `c20a589c`/#416 pin (adds only #417) — candle-gen-krea +
+# every candle provider unchanged, no regression. The worker also adds `"qwen_image_edit"` +
 # `"qwen_image_control"` to `SEQUENTIAL_CAPABLE_ENGINES` and folds `spec.control` bytes into the fit-gate
 # heavy side (mlx_fit_gate.rs). Both skew lanes resolve the SINGLE gen-core rev `0d2a2be6`. ALL mlx-gen-* +
 # candle-gen-* pins move together.

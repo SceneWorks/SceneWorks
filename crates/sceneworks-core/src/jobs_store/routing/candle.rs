@@ -142,6 +142,14 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if model == "boogu_image_edit" && boogu_edit_candle_eligible(&job.payload) {
         return true;
     }
+    // Krea 2 Kontext-style dual-conditioned image-edit (epic 10871): a `krea_2_raw` `edit_image` job with
+    // a source image is the bespoke candle `KreaEdit` lane (`generate_candle_krea_edit_stream`), NOT
+    // txt2img — `krea_2_raw` is MLX-only for t2i (not a candle txt2img id), so an off-Mac Krea edit would
+    // otherwise fall through to torch. Branch it out here (disjoint from the Krea control lane below,
+    // which is `krea_2_turbo` + `advanced.poses`). Mirrors the worker's `krea_edit_candle_available`.
+    if model == "krea_2_raw" && krea_edit_candle_eligible(&job.payload) {
+        return true;
+    }
     // SDXL IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): an sdxl-family model with a
     // reference image is a bespoke candle lane (`generate_candle_sdxl_ipadapter_stream`), NOT txt2img —
     // the `image_request_candle_eligible` gate below rejects `referenceAssetId`. Branch it out first
@@ -648,6 +656,23 @@ pub(crate) fn qwen_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// worker's `zimage_edit_candle_available` gate (minus the local weight-resolve check) so the router and
 /// worker agree. Candle-only — macOS keeps the MLX `z_image_turbo` registry generator's `Reference` path.
 pub(crate) fn zimage_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// Krea 2 Kontext-style dual-conditioned image-edit candle-routing conditions (epic 10871). The bespoke
+/// candle Krea edit lane (`generate_candle_krea_edit_stream`) serves `edit_image` mode with a
+/// `sourceAssetId` on `krea_2_raw` — the source rides as in-context VAE tokens AND grounds the Qwen3-VL
+/// vision tower, requiring the `krea2_identity_edit` LoRA (checked worker-side, R5). Same payload
+/// predicate as the other edit gates, gated to `krea_2_raw` by the caller. Mirrors the worker's
+/// `krea_edit_candle_available` gate (minus the local weight-resolve check) so the router and worker
+/// agree. Candle-only — macOS keeps the MLX `krea_2_edit` registry generator's edit path (`krea_edit.rs`).
+pub(crate) fn krea_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }

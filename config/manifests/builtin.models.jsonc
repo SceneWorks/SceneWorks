@@ -610,6 +610,28 @@
         "families": ["qwen-image"],
         "types": ["style", "enhance", "character"]
       },
+      // candle/CUDA VRAM gate (epic 10765 sc-11019, the EDIT measure-sibling of the qwen txt2img sc-10969
+      // + flux2 sc-10920) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at 1024²/8-step via the
+      // candle-gen-qwen-image edit offload A/B harness (qwen_edit_probed_generate_for_offload_ab,
+      // device-level nvidia-smi peak on an idle GPU 0), pointed at each staged
+      // SceneWorks/qwen-image-edit-2511-mlx tier. Two peaks per tier: `vramGbByTier` = RESIDENT (the dense
+      // Qwen2.5-VL TE + MMDiT + Qwen-Image VAE co-resident, the default cross-request-cached path);
+      // `sequentialPeakGb` = SEQUENTIAL residency (the ~16 GB dense bf16 Qwen2.5-VL text encoder — loaded
+      // f32, ~32 GB — plus the VAE encoder DROPPED after they encode the reference, before the MMDiT
+      // loads, sc-10968) — always lower, and the resident/sequential pixels are byte-identical (q8 md5
+      // 5b7ae2ee…, bf16 md5 4b53dc72…). The edit fit-gate (qwen_edit_candle.rs, sc-10968) compares the
+      // resident peak against free VRAM to choose sequential-offload vs reject, then (sc-10856) REJECTS if
+      // even the sequential peak won't fit rather than run into a reactive OOM. q4 resident/sequential
+      // from the sc-10968 GPU A/B (56.7 / 36.9); q8 (69.0 / 39.3) + bf16 (81.7 / 52.2) measured here. bf16
+      // is the dense 5-shard DiT + dense f32 TE (81.7 GB resident) — it fits a 96 GB card but overflows
+      // the epic's small-card targets even sequentially, so the gate rejects it there. minMemoryGb 59
+      // gates the DEFAULT (q4) tier (resident 56.7 GB).
+      "candle": {
+        "minMemoryGb": 59,
+        "vramGbByTier": { "q4": 56.7, "q8": 69.0, "bf16": 81.7 },
+        "sequentialPeakGb": { "q4": 36.9, "q8": 39.3, "bf16": 52.2 },
+        "measured": true
+      },
       "ui": {
         "label": "Qwen Image Edit (2511)",
         "description": "December 2025 iteration of Qwen-Image-Edit (Qwen/Qwen-Image-Edit-2511) on the multi-image `QwenImageEditPlusPipeline`. Mitigates image drift, improves character consistency in multi-person scenes, integrates popular LoRAs into the base, and strengthens geometric reasoning. Apache-2.0, ungated. Recommended 40 steps at trueCfgScale 4.0 / guidanceScale 1.0; bf16 MPS-supported per Qwen. trueCfgScale is the slider lever — identity stays steady across the range, the knob is a prompt-adherence vs reference-surroundings tradeoff (sc-2013 spike on the 2509 release; same Plus pipeline shape).",
@@ -706,6 +728,21 @@
       "loraCompatibility": {
         "families": ["qwen-image"],
         "types": ["style", "enhance", "character"]
+      },
+      // candle/CUDA VRAM gate (epic 10765 sc-11019) — the Lightning distill shares the IDENTICAL
+      // Qwen-Image-Edit-2511 base weights (the same SceneWorks/qwen-image-edit-2511-mlx q4/q8/bf16 tiers)
+      // and the identical dense Qwen2.5-VL sequential floor, so it carries the base (true-CFG, 8-step)
+      // measurements from `qwen_image_edit_2511`. Lightning runs 4-step CFG-OFF (a single MMDiT forward,
+      // no cond/uncond batch doubling), so its real peaks are ≤ these — a conservative upper bound that
+      // never under-admits. measured:false — the CFG-off distill path (with the lightx2v LoRA fused) was
+      // not itself A/B-measured (needs the harness lightning flag + the distill LoRA staged); tracked as a
+      // follow-up. The numbers still drive the edit fit-gate identically: it reads vramGbByTier /
+      // sequentialPeakGb regardless of the `measured` provenance flag.
+      "candle": {
+        "minMemoryGb": 59,
+        "vramGbByTier": { "q4": 56.7, "q8": 69.0, "bf16": 81.7 },
+        "sequentialPeakGb": { "q4": 36.9, "q8": 39.3, "bf16": 52.2 },
+        "measured": false
       },
       "ui": {
         "label": "Qwen Image Edit (2511) Lightning",
