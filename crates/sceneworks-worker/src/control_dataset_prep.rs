@@ -44,6 +44,12 @@ use crate::{WorkerError, WorkerResult};
 /// Doctor's richer quality pass runs separately); only genuinely tiny images are dropped.
 pub(crate) const DEFAULT_MIN_EDGE: u32 = 256;
 
+/// Message the prep loop raises when it observes a tripped [`gen_core::CancelFlag`] between items
+/// (sc-11155). The B1 studio job posts its own terminal `Canceled` once the blocking task has stopped,
+/// so this is the internal signal; a descriptive string keeps any bare surfacing readable.
+pub(crate) const PREP_CANCEL_MESSAGE: &str =
+    "ControlNet training canceled while rendering conditions.";
+
 /// Optional person-presence gate for pose/people corpora: drop targets with no detected person so a
 /// pose ControlNet isn't trained on empty skeletons. Uses the worker's YOLO11 person detector
 /// (`person_jobs::detect_people_blocking`), so it is only available on a neural-inference build.
@@ -229,10 +235,17 @@ pub(crate) fn write_manifest(
 /// The preprocessor is built ONCE and reused across the corpus. Skipped inputs are collected in the
 /// report, not fatal. Blocking (decode + preprocess + PNG encode per image) — call under
 /// `spawn_blocking`; `on_progress(done, total)` is invoked before each item and once at the end.
+///
+/// `cancel` is polled between items (sc-11155/sc-9123): the B1 studio job supervises this loop under
+/// the heartbeat+progress scaffold and trips the shared flag on a user cancel, so the render stops at
+/// the next item boundary with a typed [`WorkerError::Canceled`] instead of running the whole corpus
+/// to its natural end. Any pairs already written sit in the caller's job-scoped cache dir and are
+/// inert.
 pub(crate) fn prepare_control_dataset(
     inputs: &[ControlPrepInput],
     config: &ControlPrepConfig,
     out_dir: &Path,
+    cancel: &gen_core::CancelFlag,
     mut on_progress: impl FnMut(usize, usize),
 ) -> WorkerResult<PrepReport> {
     let label = control_kind_label(&config.kind);
@@ -248,6 +261,12 @@ pub(crate) fn prepare_control_dataset(
     let mut skipped: Vec<(PathBuf, SkipReason)> = Vec::new();
 
     for (index, input) in inputs.iter().enumerate() {
+        // Worker-code cancel checkpoint (sc-11155/sc-9123): bail between items when the studio job's
+        // heartbeat loop trips the shared flag, so a user cancel stops the render at the next item
+        // boundary instead of running the whole corpus to its natural end.
+        if cancel.is_cancelled() {
+            return Err(WorkerError::Canceled(PREP_CANCEL_MESSAGE.to_owned()));
+        }
         on_progress(index, total);
         let id = format!("{:06}", index + 1);
 
@@ -351,9 +370,11 @@ mod tests {
         }];
         let out = dir.path().join("dataset");
         let mut ticks = Vec::new();
-        let report =
-            prepare_control_dataset(&inputs, &canny_config(), &out, |d, t| ticks.push((d, t)))
-                .expect("prep");
+        let cancel = gen_core::CancelFlag::new();
+        let report = prepare_control_dataset(&inputs, &canny_config(), &out, &cancel, |d, t| {
+            ticks.push((d, t))
+        })
+        .expect("prep");
 
         assert_eq!(report.items.len(), 1, "one pair written");
         assert!(report.skipped.is_empty(), "nothing skipped");
@@ -421,8 +442,9 @@ mod tests {
             },
         ];
         let out = dir.path().join("ds");
-        let report =
-            prepare_control_dataset(&inputs, &canny_config(), &out, |_, _| {}).expect("prep");
+        let cancel = gen_core::CancelFlag::new();
+        let report = prepare_control_dataset(&inputs, &canny_config(), &out, &cancel, |_, _| {})
+            .expect("prep");
 
         assert_eq!(report.items.len(), 1, "only the good image is written");
         assert_eq!(report.skipped.len(), 2);
@@ -436,6 +458,65 @@ mod tests {
             .any(|(_, r)| matches!(r, SkipReason::TooSmall { .. })));
         // The good image is renumbered by input index, so its id reflects position (000003).
         assert_eq!(report.items[0].id, "000003");
+    }
+
+    #[test]
+    fn bails_between_items_when_cancel_is_tripped() {
+        // A pre-tripped flag stops the render before the first item is written, returning the typed
+        // `Canceled` (sc-11155): the studio job's heartbeat loop trips this same flag on a user cancel.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let good = dir.path().join("good.png");
+        sample_image(320, 320).save(&good).unwrap();
+        let inputs = vec![ControlPrepInput {
+            target_path: good,
+            caption: "z".to_owned(),
+        }];
+        let out = dir.path().join("ds");
+        let cancel = gen_core::CancelFlag::new();
+        cancel.cancel();
+
+        let mut ticks = Vec::new();
+        let result = prepare_control_dataset(&inputs, &canny_config(), &out, &cancel, |d, t| {
+            ticks.push((d, t))
+        });
+        assert!(
+            matches!(result, Err(WorkerError::Canceled(_))),
+            "prep bails with a typed Canceled"
+        );
+        assert!(
+            ticks.is_empty(),
+            "no item progress emitted once cancel is observed before the first item"
+        );
+    }
+
+    #[test]
+    fn streams_per_item_progress_then_the_final_tick() {
+        // The `on_progress(done, total)` callback fires before each item AND once at the end so the
+        // studio job can stream render progress (sc-11155 — the callback was previously discarded).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let inputs: Vec<ControlPrepInput> = (0..3)
+            .map(|i| {
+                let path = dir.path().join(format!("img{i}.png"));
+                sample_image(320, 320).save(&path).unwrap();
+                ControlPrepInput {
+                    target_path: path,
+                    caption: format!("caption {i}"),
+                }
+            })
+            .collect();
+        let out = dir.path().join("ds");
+        let cancel = gen_core::CancelFlag::new();
+        let mut ticks = Vec::new();
+        prepare_control_dataset(&inputs, &canny_config(), &out, &cancel, |d, t| {
+            ticks.push((d, t))
+        })
+        .expect("prep");
+
+        assert_eq!(
+            ticks,
+            vec![(0, 3), (1, 3), (2, 3), (3, 3)],
+            "one pre-item tick per input plus the terminal (total,total)"
+        );
     }
 
     #[test]
