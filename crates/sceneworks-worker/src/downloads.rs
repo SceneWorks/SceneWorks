@@ -1,5 +1,41 @@
 use super::*;
 use std::net::SocketAddr;
+use std::time::Duration;
+
+/// Connect timeout applied to every outbound worker HTTP client. A peer that
+/// completes the TCP handshake but never sends response headers must not wedge the
+/// worker: reqwest's default is *no* timeout, so `send().await` would block forever.
+/// This is especially load-bearing for the pre-heartbeat HEAD probes
+/// (`remote_content_length` / `lora_source_content_length`), which run before any
+/// cancel checkpoint exists — without a bound the process would never heartbeat or
+/// claim again (sc-11149).
+pub(crate) const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Chunk-level read timeout: the longest gap tolerated between received bytes on a
+/// streaming download. This bounds a stalled mid-stream peer WITHOUT a total timeout,
+/// so legitimate multi-GB weight streams still complete as long as bytes keep
+/// arriving (sc-11149).
+pub(crate) const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Apply the standard connect + chunk-level read timeouts to a download client
+/// builder. Streaming downloads deliberately get NO total `timeout` (that would cap a
+/// large weight transfer); a stalled peer is caught by `read_timeout` instead
+/// (sc-11149).
+pub(crate) fn apply_download_timeouts(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    builder
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .read_timeout(HTTP_READ_TIMEOUT)
+}
+
+/// A reqwest client for streaming weight/asset downloads, pre-configured with the
+/// worker's standard connect + read timeouts (sc-11149). Replaces bare
+/// `reqwest::Client::new()` at download call sites so no outbound download can hang
+/// the worker indefinitely.
+pub(crate) fn streaming_download_client() -> reqwest::Client {
+    apply_download_timeouts(reqwest::Client::builder())
+        .build()
+        .expect("static download client config is always valid")
+}
 
 // The cross-process download lock (F-098 / sc-8900) is only reachable from
 // `ensure_cached_file_verified`, which is gated to the macOS MLX runtime and the
@@ -764,9 +800,10 @@ pub(crate) async fn download_snapshot_into_cache(
     // A no-redirect client so the metadata HEAD reads huggingface.co's headers
     // (X-Repo-Commit, and X-Linked-Etag for LFS) rather than the CDN's after a
     // redirect — exactly how huggingface_hub resolves an etag/commit.
-    let meta_client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    let meta_client = apply_download_timeouts(
+        reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()),
+    )
+    .build()?;
     let mut commit: Option<String> = None;
     let mut placements: Vec<(String, String)> = Vec::with_capacity(snapshot.files.len());
 
@@ -1173,7 +1210,9 @@ pub(crate) fn build_source_url_client(
     url: &reqwest::Url,
     validated_addrs: Option<&[SocketAddr]>,
 ) -> WorkerResult<reqwest::Client> {
-    let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    let mut builder = apply_download_timeouts(
+        reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()),
+    );
     if let (Some(host), Some(addrs)) = (url.host_str(), validated_addrs) {
         builder = builder.resolve_to_addrs(host, addrs);
     }
@@ -1462,5 +1501,77 @@ mod ensure_cached_file_tests {
             tokio::fs::read(&target).await.expect("read"),
             b"already here"
         );
+    }
+}
+
+/// sc-11149 (F-001): every outbound download client MUST carry a connect + read
+/// timeout so a server that accepts the TCP connection but never responds cannot
+/// wedge the worker at `send().await` forever. reqwest exposes no getter for its
+/// configured timeouts, so these tests pin the intent (the constants) and prove the
+/// read-timeout mechanism actually fires against a stalled peer.
+#[cfg(test)]
+mod http_timeout_tests {
+    use super::{
+        apply_download_timeouts, streaming_download_client, HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn download_timeout_constants_are_bounded_and_ordered() {
+        // Non-zero: a zero Duration would mean "no timeout" for connect and is a
+        // footgun for read — guard against an accidental regression to that.
+        assert!(HTTP_CONNECT_TIMEOUT > Duration::ZERO);
+        assert!(HTTP_READ_TIMEOUT > Duration::ZERO);
+        // The chunk-level read window is generous enough to outlast a slow-but-live
+        // multi-GB stream, hence longer than the connect handshake budget.
+        assert!(HTTP_READ_TIMEOUT >= HTTP_CONNECT_TIMEOUT);
+    }
+
+    #[test]
+    fn streaming_client_builds() {
+        // The `.expect(...)` in the constructor must never fire for the static config.
+        let _client = streaming_download_client();
+    }
+
+    /// A server that accepts the connection and then goes silent must not hang the
+    /// caller: with a read timeout, `send().await` returns an error rather than
+    /// blocking forever (the exact pre-heartbeat wedge from the finding). The
+    /// production read timeout is 60s; here we build the same client via the shared
+    /// helper and override only the read window to keep the test fast.
+    #[tokio::test]
+    async fn request_to_a_stalled_server_times_out_instead_of_hanging() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local addr");
+
+        // Accept the connection but never send a byte of response.
+        let server = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                // Hold the socket open, silent, well past the client's read timeout.
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                drop(stream);
+            }
+        });
+
+        let client = apply_download_timeouts(reqwest::Client::builder())
+            .read_timeout(Duration::from_millis(400))
+            .build()
+            .expect("client builds");
+
+        let started = std::time::Instant::now();
+        let result = client.get(format!("http://{addr}/")).send().await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "a stalled server must surface a timeout error, not a response"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the request should time out promptly (took {elapsed:?})"
+        );
+
+        server.abort();
     }
 }

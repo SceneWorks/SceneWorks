@@ -159,7 +159,7 @@ async fn ensure_sdxl_ipadapter_weights(
         }
     }
     // Download-on-first-use into the app cache (flat dest, nested source — the InstantID bundle pattern).
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = DownloadContext {
         api,
         client: &client,

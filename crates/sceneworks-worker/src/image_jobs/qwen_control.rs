@@ -229,7 +229,7 @@ async fn ensure_qwen_control_weights(
             return Ok(f);
         }
     }
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = DownloadContext {
         api,
         client: &client,

@@ -199,7 +199,7 @@ async fn ensure_pulid_weights(
     if let Some(preset) = pulid_weights_env_preset() {
         return Ok(preset);
     }
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = DownloadContext {
         api,
         client: &client,

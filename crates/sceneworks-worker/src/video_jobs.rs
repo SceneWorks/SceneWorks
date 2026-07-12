@@ -1687,7 +1687,7 @@ async fn ensure_seedvr2_weights(
     let dir = std::env::var("SCENEWORKS_SEEDVR2_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| settings.data_dir.join("cache").join("seedvr2-mlx"));
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = crate::downloads::DownloadContext {
         api,
         client: &client,
@@ -5683,7 +5683,7 @@ async fn resolve_candle_scail2_conditioning(
     .await?;
 
     // SAM3 segmenter weights (download-on-first-use), shared by both segmentation passes.
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = crate::downloads::DownloadContext {
         api,
         client: &client,
@@ -5854,7 +5854,7 @@ async fn resolve_candle_scail2_replace_conditioning(
 
     // The reference color mask: a candle SAM3 pass on the reference image → the primary person painted
     // blue on a black background (replacement discards the reference's surrounding world).
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = crate::downloads::DownloadContext {
         api,
         client: &client,
@@ -7156,7 +7156,7 @@ async fn resolve_scail2_conditioning(
     .await?;
 
     // SAM3 segmenter weights (download-on-first-use), shared by both segmentation passes.
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = crate::downloads::DownloadContext {
         api,
         client: &client,
@@ -7341,7 +7341,7 @@ async fn resolve_scail2_replace_conditioning(
 
     // The reference color mask: a fresh native-SAM3 pass on the reference image → the primary person
     // painted blue on a black background (replacement discards the reference's surrounding world).
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = crate::downloads::DownloadContext {
         api,
         client: &client,

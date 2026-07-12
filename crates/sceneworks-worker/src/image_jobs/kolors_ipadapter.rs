@@ -127,7 +127,7 @@ async fn ensure_kolors_ipadapter_weights(
         }
     }
     // Download-on-first-use into the app cache (the snapshot layout: bundle at root + image_encoder/).
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = DownloadContext {
         api,
         client: &client,

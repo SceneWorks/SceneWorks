@@ -322,7 +322,7 @@ async fn ensure_depth_estimator_dir(
         }
     }
     let dir = settings.data_dir.join("cache").join("depth-anything-v2");
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = crate::downloads::DownloadContext {
         api,
         client: &client,
