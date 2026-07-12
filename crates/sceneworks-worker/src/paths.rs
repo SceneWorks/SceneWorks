@@ -238,7 +238,43 @@ pub(crate) fn normalize_app_managed_lora_path(
     }
     let normalized = normalize_absolute_path(path)?;
     let resolved = normalize_existing_or_absolute(&normalized)?;
-    ensure_path_under(resolved, &roots, "LoRA path")
+    let confined = ensure_path_under(resolved, &roots, "LoRA path")?;
+    Ok(loadable_confined_lora_path(&normalized, confined))
+}
+
+/// Return a *loadable* form of a confined adapter path (sc-11649). mlx-rs's safetensors
+/// loader dispatches on the file **extension**: it rejects any path whose final component is
+/// not literally `*.safetensors` with `IoError::UnsupportedFormat` ("Unsupported file
+/// format"). The Hugging Face hub cache stores each file as an extensionless `blobs/<sha>`
+/// object with a `snapshots/…/<name>.safetensors` **symlink** pointing at it, so
+/// canonicalizing an HF-cached adapter — which the confinement above does, to resolve
+/// symlink escapes — strips the `.safetensors` extension. The engine's adapter load then
+/// dies with "Unsupported file format". This bit every Krea 2 **edit**, whose required
+/// `krea2_identity_edit` LoRA is HF-cached (its `installedPath` points straight at the
+/// snapshot symlink), so no edit could load once a second adapter (or, in fact, any) rode
+/// along — the identity LoRA itself never loaded.
+///
+/// When the confined canonical path has lost the `.safetensors` extension but the
+/// pre-canonical path kept it, and both resolve to the **same on-disk file**, hand back the
+/// extension-bearing path. The confinement decision already ran on the canonical target and
+/// the same-file check guarantees we load exactly that vetted blob, so this cannot widen the
+/// confined set (a symlink escape still resolves outside the roots and was already rejected).
+/// The `.safetensors` directory case is unaffected: [`resolve_adapter_in_dir`] joins the
+/// declared filename onto the confined dir, keeping the extension.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn loadable_confined_lora_path(precanonical: &Path, confined: PathBuf) -> PathBuf {
+    let is_safetensors = |path: &Path| {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
+    };
+    if is_safetensors(&confined) || !is_safetensors(precanonical) {
+        return confined;
+    }
+    match (precanonical.canonicalize(), confined.canonicalize()) {
+        (Ok(pre), Ok(conf)) if pre == conf => precanonical.to_path_buf(),
+        _ => confined,
+    }
 }
 
 pub(crate) fn normalize_existing_or_absolute(path: &Path) -> WorkerResult<PathBuf> {
