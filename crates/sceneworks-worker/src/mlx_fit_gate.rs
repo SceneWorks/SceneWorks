@@ -36,11 +36,24 @@ use gen_core::{LoadSpec, OffloadPolicy, WeightsSource};
 use crate::{WorkerError, WorkerResult};
 
 /// The MLX engine ids whose provider honors [`OffloadPolicy::Sequential`] — the sc-10839 Phase 1
-/// providers (SDXL + Z-Image-turbo). The gate only SELECTS sequential residency for these; for any
-/// other engine `Sequential` would be a no-op (the advisory contract treats it as `Resident`), so
-/// predicting "it fits staged" and then holding everything resident would SIGKILL — hence the
-/// allowlist. Extended per family as the fan-out (sc-10840) wires each engine.
-const SEQUENTIAL_CAPABLE_ENGINES: &[&str] = &["sdxl", "z_image_turbo", "qwen_image"];
+/// providers (SDXL + Z-Image-turbo), the sc-11000 T2I `qwen_image`, the sc-11006 fan-out completion of
+/// the qwen family (`qwen_image_edit` drops the Qwen2.5-VL vision-language encoder after the vision+LM
+/// pass; `qwen_image_control` keeps its VACE control branch on the heavy side of the split), and the
+/// sc-11030 `lens` + `lens_turbo` (one crate/arch — drops the gpt-oss text encoder before the DiT +
+/// denoise activations materialize; needs mlx-gen-lens's consuming encoder loader so the encoder LOAD
+/// spike isn't the peak). The gate only SELECTS sequential residency for these; for any other engine
+/// `Sequential` would be a no-op (the advisory contract treats it as `Resident`), so predicting "it
+/// fits staged" and then holding everything resident would SIGKILL — hence the allowlist, which moves
+/// in LOCKSTEP with the provider wiring. Extended per family as the fan-out (sc-10840) wires each engine.
+const SEQUENTIAL_CAPABLE_ENGINES: &[&str] = &[
+    "sdxl",
+    "z_image_turbo",
+    "qwen_image",
+    "qwen_image_edit",
+    "qwen_image_control",
+    "lens",
+    "lens_turbo",
+];
 
 /// Whether `engine_id`'s provider drops components in phase order under [`OffloadPolicy::Sequential`].
 pub(crate) fn engine_supports_sequential(engine_id: &str) -> bool {
@@ -219,6 +232,16 @@ pub(crate) fn sum_safetensors_bytes(dir: &Path) -> u64 {
     total
 }
 
+/// On-disk `.safetensors` bytes of a [`WeightsSource`]: the recursive sum for a `Dir`, the file length
+/// for a single-file `File`. Used to fold a separate control/overlay checkpoint ([`LoadSpec::control`])
+/// into the fit total — its weights are not under the base `spec.weights` tree.
+fn weights_source_bytes(src: &WeightsSource) -> u64 {
+    match src {
+        WeightsSource::Dir(dir) => sum_safetensors_bytes(dir),
+        WeightsSource::File(file) => std::fs::metadata(file).map_or(0, |meta| meta.len()),
+    }
+}
+
 /// Sum the on-disk `.safetensors` bytes of the model's TEXT-ENCODER component(s) — the phase-A
 /// component the `Sequential` residency drops before the DiT loads (sc-10839). Matches the diffusers
 /// snapshot's top-level `text_encoder` / `text_encoder_2` / `text_encoder_*` subdirs (SDXL has both
@@ -352,11 +375,20 @@ pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerR
         return Ok(spec);
     }
     let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
-    let (total_bytes, te_bytes) = match &spec.weights {
+    let (mut total_bytes, te_bytes) = match &spec.weights {
         WeightsSource::Dir(dir) => (sum_safetensors_bytes(dir), sum_text_encoder_bytes(dir)),
         // A single-file source has no component split to stage — resident-or-reject only.
         WeightsSource::File(file) => (std::fs::metadata(file).map_or(0, |meta| meta.len()), 0),
     };
+    // A ControlNet/overlay checkpoint (`spec.control`, e.g. qwen_image_control's VACE branch) lives in
+    // a SEPARATE weights source, not under `spec.weights`, so it is missing from the sums above. It is
+    // a HEAVY-side component (loaded + quantized with the base DiT, never dropped with the text
+    // encoder), so fold its bytes into `total_bytes` only — leaving `te_bytes` alone keeps the staged
+    // split `rest = total − te` counting it on the DiT side. Without this the staged-peak prediction
+    // under-counts and could select Sequential when even the staged working set won't fit (→ SIGKILL).
+    if let Some(control) = &spec.control {
+        total_bytes += weights_source_bytes(control);
+    }
     match decide_residency(
         total_bytes,
         te_bytes,
@@ -506,13 +538,50 @@ mod tests {
     }
 
     #[test]
+    fn weights_source_bytes_counts_both_file_and_dir_control_checkpoints() {
+        // The qwen_image_control VACE branch ships either as a single `.safetensors` File or as a Dir
+        // of shards; both must be counted so `apply_residency_policy` folds the control branch into the
+        // heavy side of the staged-peak split (else the DiT-phase working set is under-counted).
+        let root = std::env::temp_dir().join(format!(
+            "mlx_fit_gate_ctrl_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&root).expect("mk root");
+
+        // Single-file control checkpoint ⇒ its file length.
+        let file = root.join("control.safetensors");
+        std::fs::write(&file, vec![0u8; 4096]).expect("control file");
+        assert_eq!(
+            weights_source_bytes(&WeightsSource::File(file.clone())),
+            4096
+        );
+
+        // Dir control checkpoint ⇒ the recursive `.safetensors` sum (AppleDouble sidecars skipped).
+        let dir = root.join("control_dir");
+        std::fs::create_dir_all(&dir).expect("mk control dir");
+        std::fs::write(dir.join("part-1.safetensors"), vec![0u8; 1000]).expect("shard 1");
+        std::fs::write(dir.join("part-2.safetensors"), vec![0u8; 2000]).expect("shard 2");
+        std::fs::write(dir.join("._part-1.safetensors"), vec![0u8; 999]).expect("sidecar");
+        assert_eq!(weights_source_bytes(&WeightsSource::Dir(dir)), 3000);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn engine_supports_sequential_is_the_wired_provider_allowlist() {
         assert!(engine_supports_sequential("sdxl"));
         assert!(engine_supports_sequential("z_image_turbo"));
         assert!(engine_supports_sequential("qwen_image"));
-        // Not-yet-wired providers must NOT be offered sequential (they'd ignore it and SIGKILL) — this
-        // includes the qwen edit/control siblings (separate engine ids, tracked in sc-11006).
-        assert!(!engine_supports_sequential("qwen_image_edit"));
+        // The sc-11006 fan-out wired the qwen edit + control siblings (separate engine ids).
+        assert!(engine_supports_sequential("qwen_image_edit"));
+        assert!(engine_supports_sequential("qwen_image_control"));
+        // lens + lens_turbo share one crate/arch (sc-11030): both engine ids are wired. The Q8/Q4 win
+        // (Resident 34.5 → Sequential 22.3 GiB at 768², fits a 32 GB Mac) needs the consuming encoder
+        // loader — see mlx-gen-lens `with_selected_layers`.
+        assert!(engine_supports_sequential("lens"));
+        assert!(engine_supports_sequential("lens_turbo"));
+        // Not-yet-wired providers must NOT be offered sequential (they'd ignore it and SIGKILL).
         assert!(!engine_supports_sequential("z_image_turbo_control"));
         assert!(!engine_supports_sequential("flux"));
     }
