@@ -51,6 +51,47 @@ mod imp {
     /// (Dataset Doctor runs the richer quality pass).
     const PERSON_GATE_MIN_CONF: f32 = 0.25;
 
+    /// RAII guard for the job-scoped rendered-control-dataset work dir (sc-11186, F-015). The rendered
+    /// dataset under `cache/control-datasets/<job.id>` is a full letterboxed copy of the training corpus
+    /// — a `.target.png` + `.pose.png` pair per image, easily GBs — and it is consumed only by the
+    /// training executor that runs to completion inside [`run_control_training_job`]. Nothing else in
+    /// the repo sweeps that tree, so before this guard every `control_training` run leaked the whole
+    /// rendered corpus onto disk (success, failure, AND cancel), silently growing the app data dir.
+    /// `Drop` removes the tree on EVERY exit path (success, prep/train error, deferred cancel, panic
+    /// unwind), so no early return can skip cleanup. Best-effort: a removal failure is logged, never
+    /// fatal (a cleanup error must not fail an otherwise-complete job). `Drop` can't be async, so it
+    /// uses the sync `std::fs` API. The dir is keyed by `job.id`, so this only ever removes the current
+    /// job's own tree — never a concurrent sibling worker's active dataset.
+    struct WorkDirGuard {
+        path: std::path::PathBuf,
+    }
+
+    impl WorkDirGuard {
+        fn new(path: std::path::PathBuf) -> Self {
+            Self { path }
+        }
+    }
+
+    impl Drop for WorkDirGuard {
+        fn drop(&mut self) {
+            match std::fs::remove_dir_all(&self.path) {
+                Ok(()) => {}
+                // A missing dir is a benign NotFound (nothing was rendered before an early bail) —
+                // silently ignore it. Anything else is a real cleanup failure worth surfacing, but the
+                // job's outcome is already decided, so we only warn.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(
+                        event = "control_dataset_cleanup_failed",
+                        work_dir = %self.path.display(),
+                        %error,
+                        "failed to remove the rendered control-dataset work dir; it may leak on disk"
+                    );
+                }
+            }
+        }
+    }
+
     /// Run a `control_training` job: render conditions, then train the control branch.
     pub(crate) async fn run_control_training_job(
         api: &ApiClient,
@@ -158,13 +199,17 @@ mod imp {
         let input_count = inputs.len();
 
         // The rendered control dataset lands in an app-managed cache dir keyed by job id, so it is
-        // confined (the executor re-resolves item paths under this root) and cleaned with the cache.
+        // confined (the executor re-resolves item paths under this root).
         let work_dir = settings
             .data_dir
             .join("cache")
             .join("control-datasets")
             .join(&job.id);
         tokio::fs::create_dir_all(&work_dir).await?;
+        // Guard the job-scoped tree so it is removed on EVERY exit path below — success, prep/train
+        // error, deferred cancel, or panic (sc-11186, F-015). Nothing else sweeps
+        // `cache/control-datasets/<job.id>`, so without this the rendered corpus leaked on disk.
+        let _work_dir_guard = WorkDirGuard::new(work_dir.clone());
 
         update_job(
             api,
@@ -399,7 +444,53 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use super::{control_kind_from_label, ControlKind};
+        use super::{control_kind_from_label, ControlKind, WorkDirGuard};
+
+        /// A unique temp path per test (process id + line) so parallel/leftover runs don't collide.
+        fn unique_temp(tag: &str, line: u32) -> std::path::PathBuf {
+            std::env::temp_dir().join(format!(
+                "sw_control_work_{tag}_{}_{line}",
+                std::process::id()
+            ))
+        }
+
+        #[test]
+        fn work_dir_guard_removes_populated_tree_on_drop() {
+            // A rendered control dataset is a nested tree of PNG pairs + a manifest — the guard must
+            // remove the WHOLE subtree, not just the top dir, on drop (sc-11186, F-015).
+            let root = unique_temp("drop", line!());
+            let nested = root.join("images");
+            std::fs::create_dir_all(&nested).expect("create nested work dir");
+            std::fs::write(nested.join("0001.target.png"), b"target").expect("write target");
+            std::fs::write(nested.join("0001.pose.png"), b"pose").expect("write pose");
+            std::fs::write(root.join("manifest.jsonl"), b"{}\n").expect("write manifest");
+            assert!(root.exists(), "precondition: work dir exists before drop");
+
+            {
+                let _guard = WorkDirGuard::new(root.clone());
+                // Still present inside the guarded scope — cleanup happens on drop, not construction.
+                assert!(root.exists(), "guard construction must not remove the dir");
+            }
+
+            assert!(
+                !root.exists(),
+                "guard Drop must remove the entire rendered-dataset tree"
+            );
+        }
+
+        #[test]
+        fn work_dir_guard_drop_on_missing_dir_is_a_noop() {
+            // An early bail before anything is rendered leaves no dir; Drop must treat the resulting
+            // NotFound as benign (best-effort cleanup) and NOT panic.
+            let root = unique_temp("missing", line!());
+            assert!(!root.exists(), "precondition: dir was never created");
+            // Would panic here if Drop unwrapped the io::Error instead of tolerating NotFound.
+            drop(WorkDirGuard::new(root.clone()));
+            assert!(
+                !root.exists(),
+                "a missing dir stays absent, no side effects"
+            );
+        }
 
         #[test]
         fn control_kind_label_maps_studio_types_and_defaults_to_pose() {
