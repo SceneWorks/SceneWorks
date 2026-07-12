@@ -2802,28 +2802,27 @@
         "minMemoryGb": 42,
         "quantize": 4
       },
-      // candle/CUDA VRAM gate (epic 10765). bf16 DIRECTLY MEASURED (sc-11008) on an RTX PRO 6000 (Blackwell
+      // candle/CUDA VRAM gate (epic 10765). ALL TIERS DIRECTLY MEASURED on an RTX PRO 6000 (Blackwell
       // sm_120) at 1024²/4-step CFG-free via the candle-gen-flux2 klein offload A/B harness
       // (flux2_klein_probed_generate_for_offload_ab, device-level nvidia-smi PeakSampler on an idle GPU 0),
-      // the FLUX.2-dev (sc-10920) methodology: resident 77284 MiB = 75.5 GB (dense Qwen3 TE + 9B DiT + VAE
-      // co-resident); sequential 54564 MiB = 53.3 GB (sc-10868 — the 8B Qwen3 TE dropped before the DiT
-      // loads); pixels byte-identical (md5 4e36816e). The 22.7 GB reclaim is large because, like flux2-dev,
-      // klein runs reference/attention math in f32, so the dense TE + f32 activations are huge — this CORRECTS
-      // the old sc-10920 arch-scale (bf16 39/23), which was ~2× low. q4/q8 are DERIVED (still measured:false)
-      // from the measured bf16 by subtracting the on-disk transformer quant delta (only the 9B DiT packs; the
-      // 8B Qwen3 TE stays dense bf16 in EVERY tier — DENSE_TE_TIER): bf16->q4 -12.0 GB, bf16->q8 -7.9 GB. They
-      // CANNOT be run or directly measured on candle today — the SceneWorks/flux2-klein-9b-mlx q4/q8 tiers are
-      // MLX-format (not candle-loadable) and load_klein rejects on-the-fly quant; a candle klein packed-quant
-      // loader (sc-11031) is the prerequisite to run/measure them and flip measured:true. Behavior: on the
-      // epic's 8–16 GB target cards klein rejects every tier (the 16 GB dense TE alone overflows them); even
-      // q4 needs ~41 GB sequential, so off-Mac klein is a big-card/offload family. minMemoryGb 42 is the
-      // conservative static admit floor (≈ q4 sequential); the dynamic fit-gate drives the true per-card
-      // resident/sequential/reject decision.
+      // two separate processes per tier (resident vs sequential), the FLUX.2-dev (sc-10920) methodology.
+      // bf16 = sc-11008; q4/q8 = sc-11031 after candle klein DiT quant landed (candle-gen #422 — the 9B
+      // DiT quantizes on-the-fly, the 8B Qwen3 TE stays dense in EVERY tier, DENSE_TE). vramGbByTier =
+      // RESIDENT (TE + DiT + VAE co-resident); sequentialPeakGb = TE dropped before the DiT loads. Pixels
+      // byte-identical resident vs sequential per tier (md5 q4 69cbac63 / q8 7fb8686f / bf16 4e36816e).
+      // MEASURED (MiB/1024): q4 res 47300=46.2 / seq 24740=24.2; q8 res 51812=50.6 / seq 29380=28.7;
+      // bf16 res 77284=75.5 / seq 54564=53.3. The ~22 GB reclaim is CONSTANT across tiers because candle
+      // runs at dtype=F32, so the dense Qwen3 TE is ~32 GB F32 resident (NOT ~16 GB bf16) and IS the
+      // sequential floor — dropping it dominates the reclaim regardless of DiT tier. This CORRECTS the
+      // sc-11008 re-anchored ESTIMATES (q4 63.5/41.3, q8 67.6/45.4), which under-counted the F32 TE by
+      // ~17–23 GB. Behavior: on the epic's 8–16 GB target cards klein rejects every tier (the 32 GB F32
+      // TE alone overflows them); even q4 needs ~24 GB sequential, so off-Mac klein is a big-card/offload
+      // family. minMemoryGb 25 ≈ the q4 sequential floor; the dynamic fit-gate drives the per-card decision.
       "candle": {
-        "minMemoryGb": 42,
-        "vramGbByTier": { "q4": 63.5, "q8": 67.6, "bf16": 75.5 },
-        "sequentialPeakGb": { "q4": 41.3, "q8": 45.4, "bf16": 53.3 },
-        "measured": false
+        "minMemoryGb": 25,
+        "vramGbByTier": { "q4": 46.2, "q8": 50.6, "bf16": 75.5 },
+        "sequentialPeakGb": { "q4": 24.2, "q8": 28.7, "bf16": 53.3 },
+        "measured": true
       },
       // SceneWorks public/ungated re-host (LICENSE.md travels with the weights). FLUX
       // Non-Commercial License — generations are non-commercial use only, matching SceneWorks's
