@@ -11,10 +11,12 @@
 use super::*;
 // Generic (non-recipe-specific) helpers reused from the recipe-preset module: slug,
 // duplicate-id/name suffixing, and the shared payload/field validators.
-use super::recipe_presets::{
-    next_duplicate_preset_id, next_duplicate_preset_name, slugify_preset_id, take_string_field,
-    validate_required_string_field,
+use super::manifest_entity::{
+    create_manifest_entry, delete_manifest_entry, duplicate_manifest_entry,
+    filter_manifest_catalog, find_manifest_entry, manifest_location_if_present,
+    update_manifest_entry, ManifestWriteLocation,
 };
+use super::recipe_presets::{take_string_field, validate_required_string_field};
 
 const MANIFEST_FIELD: &str = "batches";
 
@@ -23,13 +25,14 @@ pub(crate) async fn list_prompt_batches(
     Query(query): Query<PromptBatchesQuery>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
     validate_prompt_batch_query(&query)?;
-    let mut batches = prompt_batch_catalog(&state, query.project_id.as_deref()).await?;
-    if !query.include_archived.unwrap_or(false) {
-        batches.retain(|batch| !prompt_batch_archived(batch));
-    }
-    if let Some(scope) = query.scope.as_deref() {
-        batches.retain(|batch| batch.get("scope").and_then(Value::as_str) == Some(scope));
-    }
+    let batches = prompt_batch_catalog(&state, query.project_id.as_deref()).await?;
+    // Prompt batches have no model/workflow filter, so the extra predicate is a no-op.
+    let batches = filter_manifest_catalog(
+        batches,
+        query.include_archived.unwrap_or(false),
+        query.scope.as_deref(),
+        |_| true,
+    );
     Ok(Json(batches))
 }
 
@@ -39,17 +42,14 @@ pub(crate) async fn get_prompt_batch(
     Query(query): Query<PromptBatchesQuery>,
 ) -> Result<Json<Value>, ApiError> {
     validate_prompt_batch_query(&query)?;
-    let batch = prompt_batch_catalog(&state, query.project_id.as_deref())
-        .await?
-        .into_iter()
-        .find(|batch| batch.get("id").and_then(Value::as_str) == Some(batch_id.as_str()))
-        .filter(|batch| {
-            query.scope.as_deref().map_or(true, |scope| {
-                batch.get("scope").and_then(Value::as_str) == Some(scope)
-            })
-        })
-        .filter(|batch| query.include_archived.unwrap_or(false) || !prompt_batch_archived(batch))
-        .ok_or_else(prompt_batch_not_found)?;
+    let catalog = prompt_batch_catalog(&state, query.project_id.as_deref()).await?;
+    let batch = find_manifest_entry(
+        catalog,
+        &batch_id,
+        query.scope.as_deref(),
+        query.include_archived.unwrap_or(false),
+        prompt_batch_not_found,
+    )?;
     Ok(Json(batch))
 }
 
@@ -64,39 +64,17 @@ pub(crate) async fn create_prompt_batch(
     let project_id = prompt_batch_context_project_id(&query, &mut batch);
     let manifest_path =
         prompt_batch_write_manifest_path(&state, &scope, project_id.as_deref()).await?;
-    let object = batch
-        .as_object_mut()
-        .ok_or_else(|| ApiError::bad_request("Prompt batch must be an object"))?;
-    let id = object
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            object
-                .get("name")
-                .and_then(Value::as_str)
-                .map(slugify_preset_id)
-        })
-        .ok_or_else(|| ApiError::bad_request("Prompt batch name is required"))?;
-    object.insert("id".to_owned(), Value::String(id.clone()));
-    let timestamp = now_rfc3339();
-    object
-        .entry("createdAt".to_owned())
-        .or_insert_with(|| Value::String(timestamp.clone()));
-    object.insert("updatedAt".to_owned(), Value::String(timestamp));
-    let batch = mutate_manifest_entries(&state, &manifest_path, MANIFEST_FIELD, |mut entries| {
-        let batch = normalize_prompt_batch_for_write(batch, &scope, true)?;
-        if entries
-            .iter()
-            .any(|entry| entry.get("id").and_then(Value::as_str) == Some(id.as_str()))
-        {
-            return Err(ApiError::bad_request("Prompt batch already exists"));
-        }
-        entries.push(batch.clone());
-        Ok((entries, batch))
-    })
+    let batch = create_manifest_entry(
+        &state,
+        &manifest_path,
+        MANIFEST_FIELD,
+        batch,
+        &scope,
+        "Prompt batch must be an object",
+        "Prompt batch name is required",
+        "Prompt batch already exists",
+        normalize_prompt_batch_for_write,
+    )
     .await?;
     Ok((StatusCode::CREATED, Json(batch)))
 }
@@ -118,26 +96,15 @@ pub(crate) async fn update_prompt_batch(
         query.scope.as_deref(),
     )
     .await?;
-    let batch = mutate_manifest_entries(
+    let batch = update_manifest_entry(
         &state,
         &location.manifest_path,
         MANIFEST_FIELD,
-        |mut entries| {
-            let Some(index) = entries.iter().position(|entry| {
-                entry.get("id").and_then(Value::as_str) == Some(batch_id.as_str())
-            }) else {
-                return Err(prompt_batch_not_found());
-            };
-            let mut batch = entries[index].clone();
-            merge_object(&mut batch, patch);
-            if let Some(object) = batch.as_object_mut() {
-                object.insert("id".to_owned(), Value::String(batch_id.clone()));
-                object.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
-            }
-            let batch = normalize_prompt_batch_for_write(batch, &location.scope, false)?;
-            entries[index] = batch.clone();
-            Ok((entries, batch))
-        },
+        &batch_id,
+        &location.scope,
+        patch,
+        prompt_batch_not_found,
+        normalize_prompt_batch_for_write,
     )
     .await?;
     Ok(Json(batch))
@@ -156,25 +123,14 @@ pub(crate) async fn delete_prompt_batch(
         query.scope.as_deref(),
     )
     .await?;
-    let batch = mutate_manifest_entries(
+    let batch = delete_manifest_entry(
         &state,
         &location.manifest_path,
         MANIFEST_FIELD,
-        |mut entries| {
-            let Some(index) = entries.iter().position(|entry| {
-                entry.get("id").and_then(Value::as_str) == Some(batch_id.as_str())
-            }) else {
-                return Err(prompt_batch_not_found());
-            };
-            let mut batch = entries[index].clone();
-            if let Some(object) = batch.as_object_mut() {
-                object.insert("archived".to_owned(), Value::Bool(true));
-                object.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
-            }
-            let batch = normalize_prompt_batch_for_write(batch, &location.scope, false)?;
-            entries[index] = batch.clone();
-            Ok((entries, batch))
-        },
+        &batch_id,
+        &location.scope,
+        prompt_batch_not_found,
+        normalize_prompt_batch_for_write,
     )
     .await?;
     Ok(Json(batch))
@@ -193,50 +149,26 @@ pub(crate) async fn duplicate_prompt_batch(
         query.scope.as_deref(),
     )
     .await?;
-    let batch = mutate_manifest_entries(
+    let batch = duplicate_manifest_entry(
         &state,
         &location.manifest_path,
         MANIFEST_FIELD,
-        |mut entries| {
-            let Some(source) = entries
-                .iter()
-                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(batch_id.as_str()))
-                .cloned()
-            else {
-                return Err(prompt_batch_not_found());
-            };
-            let mut duplicate = source;
-            if let Some(object) = duplicate.as_object_mut() {
-                object.remove("manifestPath");
-            }
-            let base_id = duplicate
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or(batch_id.as_str());
-            let duplicate_id = next_duplicate_preset_id(&entries, base_id);
-            let duplicate_name = next_duplicate_preset_name(
-                &entries,
-                duplicate
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or(base_id),
-            );
-            let timestamp = now_rfc3339();
-            if let Some(object) = duplicate.as_object_mut() {
-                object.insert("id".to_owned(), Value::String(duplicate_id));
-                object.insert("name".to_owned(), Value::String(duplicate_name));
-                object.insert("scope".to_owned(), Value::String(location.scope.clone()));
-                object.insert("archived".to_owned(), Value::Bool(false));
-                object.insert("createdAt".to_owned(), Value::String(timestamp.clone()));
-                object.insert("updatedAt".to_owned(), Value::String(timestamp));
-            }
-            let duplicate = normalize_prompt_batch_for_write(duplicate, &location.scope, true)?;
-            entries.push(duplicate.clone());
-            Ok((entries, duplicate))
-        },
+        &batch_id,
+        &location.scope,
+        prompt_batch_not_found,
+        // Prompt-batch duplicate strips only the runtime `manifestPath` (its field-strip
+        // set deliberately differs from recipe presets — F-056, sc-11277 — left as-is).
+        strip_prompt_batch_runtime_fields,
+        normalize_prompt_batch_for_write,
     )
     .await?;
     Ok((StatusCode::CREATED, Json(batch)))
+}
+
+fn strip_prompt_batch_runtime_fields(batch: &mut Value) {
+    if let Some(object) = batch.as_object_mut() {
+        object.remove("manifestPath");
+    }
 }
 
 pub(crate) async fn prompt_batch_catalog(
@@ -306,13 +238,6 @@ fn normalize_prompt_batch_entry(
         Value::String(manifest_path.display().to_string()),
     );
     Ok(batch)
-}
-
-fn prompt_batch_archived(batch: &Value) -> bool {
-    batch
-        .get("archived")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
 }
 
 fn prompt_batch_from_payload(payload: Value) -> Result<Value, ApiError> {
@@ -396,11 +321,6 @@ async fn prompt_batch_write_manifest_path(
     }
 }
 
-struct PromptBatchWriteLocation {
-    scope: String,
-    manifest_path: PathBuf,
-}
-
 fn prompt_batch_not_found() -> ApiError {
     ApiError {
         status: StatusCode::NOT_FOUND,
@@ -413,7 +333,7 @@ async fn find_prompt_batch_write_location(
     batch_id: &str,
     project_id: Option<&str>,
     scope: Option<&str>,
-) -> Result<PromptBatchWriteLocation, ApiError> {
+) -> Result<ManifestWriteLocation, ApiError> {
     match scope {
         Some("global") => {
             return prompt_batch_location_if_present(state, batch_id, "global", project_id).await
@@ -440,20 +360,17 @@ async fn prompt_batch_location_if_present(
     batch_id: &str,
     scope: &str,
     project_id: Option<&str>,
-) -> Result<PromptBatchWriteLocation, ApiError> {
+) -> Result<ManifestWriteLocation, ApiError> {
     let manifest_path = prompt_batch_write_manifest_path(state, scope, project_id).await?;
-    let entries = load_manifest_entries(state, &manifest_path, MANIFEST_FIELD).await?;
-    if entries
-        .iter()
-        .any(|entry| entry.get("id").and_then(Value::as_str) == Some(batch_id))
-    {
-        Ok(PromptBatchWriteLocation {
-            scope: scope.to_owned(),
-            manifest_path,
-        })
-    } else {
-        Err(prompt_batch_not_found())
-    }
+    manifest_location_if_present(
+        state,
+        batch_id,
+        scope,
+        MANIFEST_FIELD,
+        manifest_path,
+        prompt_batch_not_found,
+    )
+    .await
 }
 
 fn normalize_prompt_batch_for_write(

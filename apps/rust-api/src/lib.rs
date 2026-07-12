@@ -187,6 +187,7 @@ use loras::{
 };
 #[cfg(test)]
 use loras::{lora_artifact_paths, lora_families, sweep_stale_lora_uploads_before};
+mod manifest_entity;
 mod recipe_presets;
 use recipe_presets::{
     create_recipe_preset, delete_recipe_preset, duplicate_recipe_preset, get_recipe_preset,
