@@ -712,20 +712,33 @@ pub(crate) fn zimage_edit_candle_eligible(payload: &Map<String, Value>) -> bool 
 }
 
 /// Krea 2 Kontext-style dual-conditioned image-edit candle-routing conditions (epic 10871). The bespoke
-/// candle Krea edit lane (`generate_candle_krea_edit_stream`) serves `edit_image` mode with a
-/// `sourceAssetId` on `krea_2_raw` — the source rides as in-context VAE tokens AND grounds the Qwen3-VL
-/// vision tower, requiring the `krea2_identity_edit` LoRA (checked worker-side, R5). Same payload
-/// predicate as the other edit gates, gated to `krea_2_raw` by the caller. Mirrors the worker's
+/// candle Krea edit lane (`generate_candle_krea_edit_stream`) serves `edit_image` mode on `krea_2_raw` —
+/// the conditioning image rides as in-context VAE tokens AND grounds the Qwen3-VL vision tower, requiring
+/// the `krea2_identity_edit` LoRA (checked worker-side, R5). The image can arrive as the two-reference
+/// scene+person set (`referenceAssetIds`, scene = image 1, person = image 2, `sourceAssetId` null) or a
+/// plain `sourceAssetId` — the same fields the worker's `krea_edit_candle_reference_ids` resolves (no
+/// singular `referenceAssetId`, unlike the MLX lane). Gating on `sourceAssetId` alone stranded the two-ref
+/// form (the candle worker owns the lane with no fallback), the off-Mac twin of the MLX
+/// `krea_mlx_eligible` bug. Gated to `krea_2_raw` by the caller. Mirrors the worker's
 /// `krea_edit_candle_available` gate (minus the local weight-resolve check) so the router and worker
 /// agree. Candle-only — macOS keeps the MLX `krea_2_edit` registry generator's edit path (`krea_edit.rs`).
 pub(crate) fn krea_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
         return false;
     }
-    payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
+    let has_reference_list = payload
+        .get("referenceAssetIds")
+        .and_then(Value::as_array)
+        .is_some_and(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .any(|id| !id.trim().is_empty())
+        });
+    has_reference_list
+        || payload
+            .get("sourceAssetId")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
 }
 
 /// Ideogram 4 img2img / Remix + mask inpaint / outpaint edit candle-routing conditions (sc-6598, epic
