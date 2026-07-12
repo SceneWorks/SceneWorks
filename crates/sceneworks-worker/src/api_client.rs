@@ -13,7 +13,15 @@ pub(crate) struct ApiClient {
 impl ApiClient {
     pub(crate) fn new(settings: &Settings) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            // Non-streaming control-plane calls (register / claim / progress). A total
+            // `timeout` is safe here (no large bodies) and guarantees a hung API server
+            // can never wedge the worker at `send().await` — reqwest's default is *no*
+            // timeout (sc-11149).
+            client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("static API client config is always valid"),
             api_url: settings.api_url.trim_end_matches('/').to_owned(),
             access_token: settings.access_token.clone(),
             worker_id: settings.worker_id.clone(),

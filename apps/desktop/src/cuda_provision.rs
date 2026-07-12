@@ -512,7 +512,13 @@ pub(crate) async fn provision(app: &AppHandle) -> Result<(), String> {
         false,
     );
 
+    // Streaming multi-GB fetch: a connect + chunk-level read timeout so a server that
+    // accepts the connection but stalls (pre- or mid-stream) can't freeze the first-run
+    // setup screen forever. No total `timeout` — that would cap the legitimate ~2.7 GB
+    // transfer (sc-11149).
     let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|error| format!("http client: {error}"))?;
 

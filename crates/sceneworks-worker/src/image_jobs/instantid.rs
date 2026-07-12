@@ -387,7 +387,7 @@ pub(crate) async fn ensure_scrfd_weights(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<PathBuf> {
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = DownloadContext {
         api,
         client: &client,
@@ -426,7 +426,7 @@ pub(crate) async fn ensure_face_stack_dir(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<PathBuf> {
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = DownloadContext {
         api,
         client: &client,
@@ -458,7 +458,7 @@ async fn ensure_instantid_weights(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<(WeightsSource, PathBuf, PathBuf, PathBuf)> {
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = DownloadContext {
         api,
         client: &client,
@@ -555,7 +555,7 @@ async fn ensure_instantid_openpose(
             return Ok(WeightsSource::Dir(snapshot));
         }
     }
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = DownloadContext {
         api,
         client: &client,

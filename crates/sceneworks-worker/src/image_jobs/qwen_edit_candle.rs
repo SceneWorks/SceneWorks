@@ -223,7 +223,7 @@ async fn ensure_qwen_lightning_lora_cached(
     } else {
         "main"
     };
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let snapshot = crate::downloads::HuggingFaceSnapshot::resolve(
         &client,
         settings,

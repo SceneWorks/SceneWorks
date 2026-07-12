@@ -147,7 +147,7 @@ async fn ensure_flux_ipadapter_weights(
         }
     }
 
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = DownloadContext {
         api,
         client: &client,
