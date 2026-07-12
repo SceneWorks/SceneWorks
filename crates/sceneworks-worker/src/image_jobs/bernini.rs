@@ -331,17 +331,46 @@ fn bernini_image_candle_available(request: &ImageRequest) -> bool {
     request.model == "bernini_image"
 }
 
-/// Resolve the candle Bernini snapshot dir: `SCENEWORKS_CANDLE_BERNINI_DIR` override → app-managed
-/// `<data>/models/candle/bernini` → the turnkey `SceneWorks/bernini` HF snapshot. Sentinel = the
-/// `transformer/` subdir (the converted renderer's first DiT expert; the `candle-gen-bernini` `load`
-/// validates the full component set and reports the precise gap). Errors loudly when absent — like the
-/// candle SCAIL-2 / Wan-VACE resolvers, a missing checkpoint surfaces a clear re-download error instead
-/// of degrading to a stub. The candle sibling of the MLX `resolve_bernini_model_dir` (video_jobs.rs).
+/// The candle Bernini quant-tier subfolders published under the turnkey `SceneWorks/bernini` root
+/// (sc-11003): each holds a full component tree (`transformer/` `transformer_2/` `mllm/` `connector/`
+/// `vit_decoder/` `vae/` …) at that precision. `bf16/` is the dense default; `q8/`/`q4/` are the
+/// packed tiers (validated clean on sm_120, sc-11003). Mirrors the MLX `q4`/`q8`/`bf16` convention
+/// ([`crate::video_jobs::bernini_tier_subdir`]).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_BERNINI_TIERS: &[&str] = &["bf16", "q8", "q4"];
+
+/// True when `dir` carries a Bernini component tree — sentinel = the `transformer/` subdir (the
+/// converted renderer's first DiT expert; the `candle-gen-bernini` `load` validates the full set and
+/// reports the precise gap). Used both for a tier subfolder (`<root>/bf16/transformer`) and a legacy
+/// flat snapshot (`<root>/transformer`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_bernini_tree_present(dir: &Path) -> bool {
+    dir.join("transformer").is_dir()
+}
+
+/// True when `root` is a usable candle Bernini snapshot: it either nests the published tier
+/// subfolders (`bf16/`|`q8/`|`q4/` each with a `transformer/` tree) or is a legacy flat tree
+/// (`transformer/` AT root). The env/managed sentinels accept either shape.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_bernini_snapshot_ok(root: &Path) -> bool {
+    candle_bernini_tree_present(root)
+        || CANDLE_BERNINI_TIERS
+            .iter()
+            .any(|tier| candle_bernini_tree_present(&root.join(tier)))
+}
+
+/// Resolve the candle Bernini snapshot ROOT: `SCENEWORKS_CANDLE_BERNINI_DIR` override → app-managed
+/// `<data>/models/candle/bernini` → the turnkey `SceneWorks/bernini` HF snapshot. Sentinel =
+/// [`candle_bernini_snapshot_ok`] (a `transformer/` tree at root OR under a `bf16/`|`q8/`|`q4/` tier
+/// subfolder — the published layout, sc-11003). Errors loudly when absent — like the candle SCAIL-2 /
+/// Wan-VACE resolvers, a missing checkpoint surfaces a clear re-download error instead of degrading to
+/// a stub. The candle sibling of the MLX `resolve_bernini_model_dir` (video_jobs.rs). Callers descend
+/// into the requested quant tier via [`resolve_candle_bernini_tier_dir_and_quant`].
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) fn resolve_candle_bernini_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
     if let Ok(dir) = std::env::var("SCENEWORKS_CANDLE_BERNINI_DIR") {
         let path = PathBuf::from(dir.trim());
-        if path.join("transformer").is_dir() {
+        if candle_bernini_snapshot_ok(&path) {
             return Ok(path);
         }
     }
@@ -350,7 +379,7 @@ pub(crate) fn resolve_candle_bernini_model_dir(settings: &Settings) -> WorkerRes
         .join("models")
         .join("candle")
         .join("bernini");
-    if managed.join("transformer").is_dir() {
+    if candle_bernini_snapshot_ok(&managed) {
         return Ok(managed);
     }
     if let Some(dir) = huggingface_snapshot_dir(&settings.data_dir, CANDLE_BERNINI_REPO) {
@@ -359,9 +388,71 @@ pub(crate) fn resolve_candle_bernini_model_dir(settings: &Settings) -> WorkerRes
     Err(WorkerError::InvalidPayload(format!(
         "bernini (candle): no weights found. Download the turnkey {CANDLE_BERNINI_REPO} snapshot via \
          the Model Manager, set $SCENEWORKS_CANDLE_BERNINI_DIR, or place a converted full-Bernini \
-         snapshot (transformer/ + transformer_2/ + text_encoder/ + vae/ + tokenizer/ + mllm/ + \
-         connector/ + vit_decoder/) at {}.",
+         snapshot (bf16/|q8/|q4/ tier subfolders — or a flat tree — each with transformer/ + \
+         transformer_2/ + text_encoder/ + vae/ + tokenizer/ + mllm/ + connector/ + vit_decoder/) at {}.",
         managed.display(),
+    )))
+}
+
+/// The candle Bernini tier search order for a request's `mlxQuantize` bits — preferred tier first,
+/// then the always-present fallbacks so a partial repo still loads (mirrors
+/// [`crate::video_jobs::bernini_tier_order`]). The candle DEFAULT is **bf16 dense** (no explicit pick
+/// ⇒ `bf16`), NOT the MLX q4-first default: off-Mac the box has ample VRAM and the dense path is the
+/// validated baseline, so a packed tier is strictly opt-in (`mlxQuantize:4`|`:8`). `<= 0` also pins
+/// bf16.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_bernini_tier_order(bits: Option<i64>) -> &'static [&'static str] {
+    match bits {
+        None => &["bf16", "q8", "q4"],
+        Some(b) if b <= 0 => &["bf16", "q8", "q4"],
+        Some(b) if b <= 4 => &["q4", "q8", "bf16"],
+        Some(_) => &["q8", "q4", "bf16"],
+    }
+}
+
+/// The load-time [`Quant`] a resolved candle Bernini tier subfolder loads at: `q4/` ⇒ [`Quant::Q4`],
+/// `q8/` ⇒ [`Quant::Q8`], `bf16/` ⇒ `None` (dense). Passed to [`load_spec`] so the packed tiers
+/// (validated clean on sm_120, sc-11003) build packed while the default stays dense.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_bernini_tier_quant(tier: &str) -> Option<Quant> {
+    match tier {
+        "q4" => Some(Quant::Q4),
+        "q8" => Some(Quant::Q8),
+        _ => None,
+    }
+}
+
+/// Resolve the candle Bernini `(weights_dir, load-time quant)` for a generation: descend the resolved
+/// snapshot root into the requested quant-tier subfolder (`bf16/`|`q8/`|`q4/`, sc-11003) and pair it
+/// with the matching load quant. The published `SceneWorks/bernini` layout nests each tier's component
+/// tree under a tier subdir, so the dense/default path loads `bf16/` (quant `None`) and an explicit
+/// Q4/Q8 pick loads `q4/`|`q8/` with [`Quant::Q4`]/[`Quant::Q8`]. Falls back through the smaller
+/// complete tiers so a partial repo still loads, then to `root` itself when it is a legacy flat tree
+/// (`transformer/` AT root, dense). Errors loud when neither a tier subfolder nor the root carries a
+/// `transformer/` tree (defense in depth — the root resolver already gates on the same sentinel).
+/// Shared by the still ([`generate_candle_bernini_image_stream`]) and video
+/// ([`crate::video_jobs::generate_candle_bernini`]) lanes so both load the same tier.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn resolve_candle_bernini_tier_dir_and_quant(
+    settings: &Settings,
+    bits: Option<i64>,
+) -> WorkerResult<(PathBuf, Option<Quant>)> {
+    let root = resolve_candle_bernini_model_dir(settings)?;
+    for tier in candle_bernini_tier_order(bits) {
+        let dir = root.join(tier);
+        if candle_bernini_tree_present(&dir) {
+            return Ok((dir, candle_bernini_tier_quant(tier)));
+        }
+    }
+    // Legacy flat snapshot: the component tree sits directly at the root (dense, no tier subdirs).
+    if candle_bernini_tree_present(&root) {
+        return Ok((root, None));
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "bernini (candle): the resolved snapshot at {} has no tier subfolder (bf16/|q8/|q4/) with a \
+         transformer/ tree, nor a flat transformer/ at root. Re-download the turnkey \
+         {CANDLE_BERNINI_REPO} snapshot via the Model Manager.",
+        root.display(),
     )))
 }
 
@@ -400,7 +491,6 @@ async fn generate_candle_bernini_image_stream(
     } else {
         model.backend()
     };
-    let weights_dir = resolve_candle_bernini_model_dir(settings)?;
     let steps = resolve_steps(request, &model);
     // Standard guidance family: `guidance` carries the CFG scale (engine `omega_txt`); the negative
     // prompt is forwarded (the descriptor advertises both). No true-CFG.
@@ -408,13 +498,15 @@ async fn generate_candle_bernini_image_stream(
     let negative_prompt = resolve_negative_prompt(request, &model);
     let repo = model_repo(request, &model);
     let task = bernini_image_engine_task(&request.mode);
-    // Requested tier bits (advanced `mlxQuantize`) recorded for lineage only — the candle lane loads the
-    // converted snapshot DENSE (the loader reads the tree as-is; the descriptor advertises Q4/Q8 but the
-    // off-Mac packed-tier select is a follow-up once the `SceneWorks/bernini` tier layout lands, sc-11003).
+    // Requested tier bits (advanced `mlxQuantize`): selects WHICH published tier subfolder
+    // (`bf16/`|`q8/`|`q4/`) the candle lane loads and the matching load-time quant (sc-11003). No
+    // explicit pick ⇒ bf16 dense (the off-Mac validated baseline); `mlxQuantize:4`|`:8` opt into the
+    // packed tiers (validated clean on sm_120, sc-11003).
     let tier_bits = request
         .advanced
         .get("mlxQuantize")
         .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let (weights_dir, quant) = resolve_candle_bernini_tier_dir_and_quant(settings, tier_bits)?;
 
     // i2i (`edit_image`): resolve the source image into the engine's `Conditioning::Reference` (the
     // engine ViT/VAE-encodes it at native resolution, no worker-side fit, and ignores the reference
@@ -453,8 +545,9 @@ async fn generate_candle_bernini_image_stream(
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
 
-    // Dense load (quant None): the converted snapshot is read as-is by the candle loader.
-    let spec = load_spec(weights_dir, None, Vec::new(), None);
+    // Load the resolved tier subfolder at its matching quant: `bf16/` dense (quant `None`), or the
+    // packed `q4/`|`q8/` tree with `Quant::Q4`|`Quant::Q8` (sc-11003).
+    let spec = load_spec(weights_dir, quant, Vec::new(), None);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,

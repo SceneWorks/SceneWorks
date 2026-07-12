@@ -6817,10 +6817,11 @@ async fn resolve_candle_bernini_conditioning(
 /// ([`candle_bernini_engine_video_mode`]) and the source media into the planner conditioning
 /// ([`resolve_candle_bernini_conditioning`]) — empty for t2v, one or more `VideoClip`s for
 /// v2v/mv2v/rv2v/ads2v, and `MultiReference` for r2v/rv2v/ads2v. The converted `SceneWorks/bernini`
-/// snapshot loads DENSE (no load-time quant — the off-Mac packed-tier select is deferred with the still
-/// lane, sc-11003), resolved via the shared [`crate::image_jobs::resolve_candle_bernini_model_dir`] so
-/// video + still load from the same tier. No LoRA (the engine reports `supports_lora=false`); steps /
-/// guidance stay at the engine defaults. Frame count uses the Wan 1-mod-4 stride (the renderer is Wan).
+/// snapshot descends into the requested quant tier subfolder (`bf16/`|`q8/`|`q4/`, sc-11003) via the
+/// shared [`crate::image_jobs::resolve_candle_bernini_tier_dir_and_quant`] so video + still load from
+/// the same tier: no explicit `mlxQuantize` ⇒ bf16 dense, `:4`|`:8` opt into the packed tiers. No LoRA
+/// (the engine reports `supports_lora=false`); steps / guidance stay at the engine defaults. Frame
+/// count uses the Wan 1-mod-4 stride (the renderer is Wan).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_bernini(
     api: &ApiClient,
@@ -6834,11 +6835,20 @@ async fn generate_candle_bernini(
     let negative_prompt = non_empty_negative_prompt(request);
     let conditioning =
         resolve_candle_bernini_conditioning(api, settings, job, request, project_path).await?;
+    // Select the published tier subfolder + matching load quant (sc-11003): parse `mlxQuantize` (int
+    // or numeric string) the same way the still lane does, defaulting to bf16 dense.
+    let tier_bits = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let (model_dir, quant) =
+        crate::image_jobs::resolve_candle_bernini_tier_dir_and_quant(settings, tier_bits)?;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
-        model_dir: crate::image_jobs::resolve_candle_bernini_model_dir(settings)?,
+        model_dir,
+        quant,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
