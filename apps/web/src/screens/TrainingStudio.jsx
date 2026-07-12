@@ -1399,20 +1399,43 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // sc-8942 (F-140): one cohesive bundle of the Dataset Doctor readout props, shaped like
   // the DatasetDoctorReadout signature. Both the Dataset editor and Configure-job panels
   // take this single prop instead of the eight individually-threaded props they each used
-  // to mirror. The six fix-action handlers are hoisted function declarations (stable), so
-  // this memo only re-creates when the report or its loading flag changes.
+  // to mirror.
+  //
+  // sc-11164 (F-005): the six fix-action handlers are recreated every render (function
+  // declarations are NOT stable across renders), so memoizing the bundle on
+  // `[readiness, readinessLoading]` used to FREEZE the handler instances from the render at
+  // which readiness last resolved. Every handler calls `persistDataset()`, which closes over
+  // the live `selectedAssetIds` / `captionDraftById` / `draftName` / `associatedCharacterId`;
+  // readiness only refetches on dataset-version change, so any image-add or caption-edit made
+  // since the last save was invisible to the frozen handlers — clicking a Doctor fix saved the
+  // stale pre-edit snapshot and `setActiveDataset(saved)` then reverted the newer edits.
+  //
+  // Fix: bridge the handlers through a ref that is repointed at the latest closures every
+  // render (the same ref-bridge pattern ImageEditor uses for its tool callbacks). The memo now
+  // closes over stable wrappers that read `doctorHandlersRef.current`, so consumers keep a
+  // referentially-stable bundle while the handlers always see current state.
+  const doctorHandlersRef = useRef({});
+  doctorHandlersRef.current = {
+    onRemoveDuplicates: removeDuplicates,
+    onUpscaleLowRes: upscaleLowRes,
+    onSmartCrop: smartCropItems,
+    onStripExif: stripExifItems,
+    onAnalyzeDataset: analyzeDataset,
+    onAnalyzeFaces: analyzeFaces,
+  };
   const datasetDoctor = useMemo(
     () => ({
       report: readiness,
       loading: readinessLoading,
-      onRemoveDuplicates: removeDuplicates,
-      onUpscaleLowRes: upscaleLowRes,
-      onSmartCrop: smartCropItems,
-      onStripExif: stripExifItems,
-      onAnalyzeDataset: analyzeDataset,
-      onAnalyzeFaces: analyzeFaces,
+      onRemoveDuplicates: (...args) => doctorHandlersRef.current.onRemoveDuplicates(...args),
+      onUpscaleLowRes: (...args) => doctorHandlersRef.current.onUpscaleLowRes(...args),
+      onSmartCrop: (...args) => doctorHandlersRef.current.onSmartCrop(...args),
+      onStripExif: (...args) => doctorHandlersRef.current.onStripExif(...args),
+      onAnalyzeDataset: (...args) => doctorHandlersRef.current.onAnalyzeDataset(...args),
+      onAnalyzeFaces: (...args) => doctorHandlersRef.current.onAnalyzeFaces(...args),
     }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- action handlers are stable hoisted fn decls
+    // The wrappers are stable (they only read the ref); the bundle need only change when the
+    // report or its loading flag changes.
     [readiness, readinessLoading],
   );
 
