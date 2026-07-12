@@ -1,3 +1,8 @@
+use super::manifest_entity::{
+    create_manifest_entry, delete_manifest_entry, duplicate_manifest_entry,
+    filter_manifest_catalog, find_manifest_entry, manifest_location_if_present,
+    update_manifest_entry, ManifestWriteLocation,
+};
 use super::*;
 
 pub(crate) async fn list_recipe_presets(
@@ -5,19 +10,21 @@ pub(crate) async fn list_recipe_presets(
     Query(query): Query<RecipePresetsQuery>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
     validate_recipe_preset_query(&query)?;
-    let mut presets = recipe_preset_catalog(&state, query.project_id.as_deref()).await?;
-    if !query.include_archived.unwrap_or(false) {
-        presets.retain(|preset| !recipe_preset_archived(preset));
-    }
-    if let Some(model) = query.model.as_deref() {
-        presets.retain(|preset| preset.get("model").and_then(Value::as_str) == Some(model));
-    }
-    if let Some(workflow) = query.workflow.as_deref() {
-        presets.retain(|preset| preset.get("workflow").and_then(Value::as_str) == Some(workflow));
-    }
-    if let Some(scope) = query.scope.as_deref() {
-        presets.retain(|preset| preset.get("scope").and_then(Value::as_str) == Some(scope));
-    }
+    let presets = recipe_preset_catalog(&state, query.project_id.as_deref()).await?;
+    // Recipe presets additionally filter by model and workflow; the shared helper applies
+    // the archived + scope filters and this entity-specific predicate.
+    let presets = filter_manifest_catalog(
+        presets,
+        query.include_archived.unwrap_or(false),
+        query.scope.as_deref(),
+        |preset| {
+            query.model.as_deref().map_or(true, |model| {
+                preset.get("model").and_then(Value::as_str) == Some(model)
+            }) && query.workflow.as_deref().map_or(true, |workflow| {
+                preset.get("workflow").and_then(Value::as_str) == Some(workflow)
+            })
+        },
+    );
     Ok(Json(presets))
 }
 
@@ -27,20 +34,14 @@ pub(crate) async fn get_recipe_preset(
     Query(query): Query<RecipePresetsQuery>,
 ) -> Result<Json<Value>, ApiError> {
     validate_recipe_preset_query(&query)?;
-    let preset = recipe_preset_catalog(&state, query.project_id.as_deref())
-        .await?
-        .into_iter()
-        .find(|preset| preset.get("id").and_then(Value::as_str) == Some(preset_id.as_str()))
-        .filter(|preset| {
-            query.scope.as_deref().map_or(true, |scope| {
-                preset.get("scope").and_then(Value::as_str) == Some(scope)
-            })
-        })
-        .filter(|preset| query.include_archived.unwrap_or(false) || !recipe_preset_archived(preset))
-        .ok_or_else(|| ApiError {
-            status: StatusCode::NOT_FOUND,
-            detail: "Recipe preset not found".to_owned(),
-        })?;
+    let catalog = recipe_preset_catalog(&state, query.project_id.as_deref()).await?;
+    let preset = find_manifest_entry(
+        catalog,
+        &preset_id,
+        query.scope.as_deref(),
+        query.include_archived.unwrap_or(false),
+        recipe_preset_not_found,
+    )?;
     Ok(Json(preset))
 }
 
@@ -55,43 +56,21 @@ pub(crate) async fn create_recipe_preset(
     let project_id = recipe_preset_context_project_id(&query, &mut preset);
     let manifest_path =
         recipe_preset_write_manifest_path(&state, &scope, project_id.as_deref()).await?;
-    let object = preset
-        .as_object_mut()
-        .ok_or_else(|| ApiError::bad_request("Recipe preset must be an object"))?;
-    let id = object
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            object
-                .get("name")
-                .and_then(Value::as_str)
-                .map(slugify_preset_id)
-        })
-        .ok_or_else(|| ApiError::bad_request("Recipe preset name is required"))?;
-    object.insert("id".to_owned(), Value::String(id.clone()));
-    let timestamp = now_rfc3339();
-    object
-        .entry("createdAt".to_owned())
-        .or_insert_with(|| Value::String(timestamp.clone()));
-    object.insert("updatedAt".to_owned(), Value::String(timestamp));
     let models = model_catalog(&state).await?;
     let loras = lora_catalog(&state, project_id.as_deref()).await?;
-    let preset = mutate_manifest_entries(&state, &manifest_path, "presets", |mut entries| {
-        let preset = normalize_recipe_preset_for_write(preset, &scope, true)?;
-        validate_recipe_preset_model_workflow(&models, &preset)?;
-        validate_recipe_preset_lora_compatibility(&models, &loras, &preset)?;
-        if entries
-            .iter()
-            .any(|entry| entry.get("id").and_then(Value::as_str) == Some(id.as_str()))
-        {
-            return Err(ApiError::bad_request("Recipe preset already exists"));
-        }
-        entries.push(preset.clone());
-        Ok((entries, preset))
-    })
+    let preset = create_manifest_entry(
+        &state,
+        &manifest_path,
+        "presets",
+        preset,
+        &scope,
+        "Recipe preset must be an object",
+        "Recipe preset name is required",
+        "Recipe preset already exists",
+        |value, scope, require_all| {
+            recipe_preset_finalize_for_write(value, scope, require_all, &models, &loras)
+        },
+    )
     .await?;
     Ok((StatusCode::CREATED, Json(finalized_recipe_preset(preset)?)))
 }
@@ -115,26 +94,19 @@ pub(crate) async fn update_recipe_preset(
     .await?;
     let models = model_catalog(&state).await?;
     let loras = lora_catalog(&state, project_id.as_deref()).await?;
-    let preset =
-        mutate_manifest_entries(&state, &location.manifest_path, "presets", |mut entries| {
-            let Some(index) = entries.iter().position(|entry| {
-                entry.get("id").and_then(Value::as_str) == Some(preset_id.as_str())
-            }) else {
-                return Err(recipe_preset_not_found());
-            };
-            let mut preset = entries[index].clone();
-            merge_object(&mut preset, patch);
-            if let Some(object) = preset.as_object_mut() {
-                object.insert("id".to_owned(), Value::String(preset_id.clone()));
-                object.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
-            }
-            let preset = normalize_recipe_preset_for_write(preset, &location.scope, false)?;
-            validate_recipe_preset_model_workflow(&models, &preset)?;
-            validate_recipe_preset_lora_compatibility(&models, &loras, &preset)?;
-            entries[index] = preset.clone();
-            Ok((entries, preset))
-        })
-        .await?;
+    let preset = update_manifest_entry(
+        &state,
+        &location.manifest_path,
+        "presets",
+        &preset_id,
+        &location.scope,
+        patch,
+        recipe_preset_not_found,
+        |value, scope, require_all| {
+            recipe_preset_finalize_for_write(value, scope, require_all, &models, &loras)
+        },
+    )
+    .await?;
     Ok(Json(finalized_recipe_preset(preset)?))
 }
 
@@ -151,23 +123,19 @@ pub(crate) async fn delete_recipe_preset(
         query.scope.as_deref(),
     )
     .await?;
-    let preset =
-        mutate_manifest_entries(&state, &location.manifest_path, "presets", |mut entries| {
-            let Some(index) = entries.iter().position(|entry| {
-                entry.get("id").and_then(Value::as_str) == Some(preset_id.as_str())
-            }) else {
-                return Err(recipe_preset_not_found());
-            };
-            let mut preset = entries[index].clone();
-            if let Some(object) = preset.as_object_mut() {
-                object.insert("archived".to_owned(), Value::Bool(true));
-                object.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
-            }
-            let preset = normalize_recipe_preset_for_write(preset, &location.scope, false)?;
-            entries[index] = preset.clone();
-            Ok((entries, preset))
-        })
-        .await?;
+    // Delete deliberately finalizes with normalize only (no model/LoRA catalog validation),
+    // matching the prior behavior — archiving a preset whose model later became invalid must
+    // still succeed.
+    let preset = delete_manifest_entry(
+        &state,
+        &location.manifest_path,
+        "presets",
+        &preset_id,
+        &location.scope,
+        recipe_preset_not_found,
+        normalize_recipe_preset_for_write,
+    )
+    .await?;
     Ok(Json(finalized_recipe_preset(preset)?))
 }
 
@@ -186,46 +154,37 @@ pub(crate) async fn duplicate_recipe_preset(
     .await?;
     let models = model_catalog(&state).await?;
     let loras = lora_catalog(&state, query.project_id.as_deref()).await?;
-    let preset =
-        mutate_manifest_entries(&state, &location.manifest_path, "presets", |mut entries| {
-            let Some(source) = entries
-                .iter()
-                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(preset_id.as_str()))
-                .cloned()
-            else {
-                return Err(recipe_preset_not_found());
-            };
-            let mut duplicate = source;
-            strip_recipe_preset_runtime_fields(&mut duplicate);
-            let base_id = duplicate
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or(preset_id.as_str());
-            let duplicate_id = next_duplicate_preset_id(&entries, base_id);
-            let duplicate_name = next_duplicate_preset_name(
-                &entries,
-                duplicate
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or(base_id),
-            );
-            let timestamp = now_rfc3339();
-            if let Some(object) = duplicate.as_object_mut() {
-                object.insert("id".to_owned(), Value::String(duplicate_id));
-                object.insert("name".to_owned(), Value::String(duplicate_name));
-                object.insert("scope".to_owned(), Value::String(location.scope.clone()));
-                object.insert("archived".to_owned(), Value::Bool(false));
-                object.insert("createdAt".to_owned(), Value::String(timestamp.clone()));
-                object.insert("updatedAt".to_owned(), Value::String(timestamp));
-            }
-            let duplicate = normalize_recipe_preset_for_write(duplicate, &location.scope, true)?;
-            validate_recipe_preset_model_workflow(&models, &duplicate)?;
-            validate_recipe_preset_lora_compatibility(&models, &loras, &duplicate)?;
-            entries.push(duplicate.clone());
-            Ok((entries, duplicate))
-        })
-        .await?;
+    let preset = duplicate_manifest_entry(
+        &state,
+        &location.manifest_path,
+        "presets",
+        &preset_id,
+        &location.scope,
+        recipe_preset_not_found,
+        // Recipe-preset duplicate strips manifestPath/builtInLoras/appliedDefaults/lastUsedAt
+        // (a wider set than prompt batches — F-056, sc-11277 — carried verbatim).
+        strip_recipe_preset_runtime_fields,
+        |value, scope, require_all| {
+            recipe_preset_finalize_for_write(value, scope, require_all, &models, &loras)
+        },
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(finalized_recipe_preset(preset)?)))
+}
+
+/// Normalize a preset for write, then validate it against the model and LoRA catalogs.
+/// This is the finalize step for create/update/duplicate (delete uses normalize alone).
+fn recipe_preset_finalize_for_write(
+    value: Value,
+    scope: &str,
+    require_all: bool,
+    models: &[Value],
+    loras: &[Value],
+) -> Result<Value, ApiError> {
+    let value = normalize_recipe_preset_for_write(value, scope, require_all)?;
+    validate_recipe_preset_model_workflow(models, &value)?;
+    validate_recipe_preset_lora_compatibility(models, loras, &value)?;
+    Ok(value)
 }
 
 pub(crate) async fn recipe_preset_catalog(
@@ -481,13 +440,6 @@ pub(crate) fn recipe_preset_loras(preset: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-pub(crate) fn recipe_preset_archived(preset: &Value) -> bool {
-    preset
-        .get("archived")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
 pub(crate) fn finalized_recipe_preset(mut preset: Value) -> Result<Value, ApiError> {
     // Write paths require an explicit model before this point, so single-preset
     // response finalization does not need the read-side model catalog fallback.
@@ -605,12 +557,6 @@ pub(crate) async fn recipe_preset_write_manifest_path(
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct RecipePresetWriteLocation {
-    scope: String,
-    manifest_path: PathBuf,
-}
-
 pub(crate) fn recipe_preset_not_found() -> ApiError {
     ApiError {
         status: StatusCode::NOT_FOUND,
@@ -623,7 +569,7 @@ pub(crate) async fn find_recipe_preset_write_location(
     preset_id: &str,
     project_id: Option<&str>,
     scope: Option<&str>,
-) -> Result<RecipePresetWriteLocation, ApiError> {
+) -> Result<ManifestWriteLocation, ApiError> {
     match scope {
         Some("builtin") => {
             return recipe_preset_readonly_or_not_found(state, preset_id, project_id).await
@@ -660,27 +606,24 @@ pub(crate) async fn recipe_preset_location_if_present(
     preset_id: &str,
     scope: &str,
     project_id: Option<&str>,
-) -> Result<RecipePresetWriteLocation, ApiError> {
+) -> Result<ManifestWriteLocation, ApiError> {
     let manifest_path = recipe_preset_write_manifest_path(state, scope, project_id).await?;
-    let entries = load_manifest_entries(state, &manifest_path, "presets").await?;
-    if entries
-        .iter()
-        .any(|entry| entry.get("id").and_then(Value::as_str) == Some(preset_id))
-    {
-        Ok(RecipePresetWriteLocation {
-            scope: scope.to_owned(),
-            manifest_path,
-        })
-    } else {
-        Err(recipe_preset_not_found())
-    }
+    manifest_location_if_present(
+        state,
+        preset_id,
+        scope,
+        "presets",
+        manifest_path,
+        recipe_preset_not_found,
+    )
+    .await
 }
 
 pub(crate) async fn recipe_preset_readonly_or_not_found(
     state: &AppState,
     preset_id: &str,
     project_id: Option<&str>,
-) -> Result<RecipePresetWriteLocation, ApiError> {
+) -> Result<ManifestWriteLocation, ApiError> {
     let catalog = recipe_preset_catalog(state, project_id).await?;
     if catalog.iter().any(|preset| {
         preset.get("id").and_then(Value::as_str) == Some(preset_id)
