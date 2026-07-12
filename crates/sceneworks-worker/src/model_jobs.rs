@@ -1308,46 +1308,51 @@ pub(crate) async fn run_model_convert_job(
     // weights), so honor cancel up front and run on a blocking thread. On any failure the partial
     // temp dir is removed so it can never be promoted by the atomic rename below. The Flux2 path's
     // borrowed vae/text-encoder/tokenizer are absolute symlinks that survive the rename.
-    check_cancel(
-        api,
-        &job.id,
-        &format!("{backend} conversion canceled by user."),
-    )
-    .await?;
+    let convert_cancel_message = format!("{backend} conversion canceled by user.");
+    check_cancel(api, &job.id, &convert_cancel_message).await?;
     let temp = temp_dir.clone();
     // An LTX conversion is always the eros fine-tune (the base model installs as a pre-converted
     // turnkey bundle and never hits this path), and its bare checkpoint ships no bundled Gemma-3 text
     // encoder — provision the bundle `gemma/` after promotion so the install is self-contained.
     let plan_is_ltx = matches!(plan, ConvertPlan::Ltx { .. });
-    let outcome = match plan {
+    // Each native converter maps its `Result<(), String>` into a `WorkerResult<()>` so the whole
+    // convert can ride `run_blocking_with_heartbeat` below — the failure detail keeps the same
+    // "{backend} conversion failed. {detail}" shape the old inline match produced.
+    let convert_task = match plan {
         ConvertPlan::Flux2 {
             source_file,
             base_dir,
         } => {
+            let backend = backend.clone();
             tokio::task::spawn_blocking(move || {
-                convert_flux2_klein_diffusers(&source_file, &base_dir, &temp)
+                convert_flux2_klein_diffusers(&source_file, &base_dir, &temp).map_err(|detail| {
+                    WorkerError::Engine(format!("{backend} conversion failed. {detail}"))
+                })
             })
-            .await
         }
         ConvertPlan::Ltx {
             source_file,
             upscaler_dir,
             bits,
         } => {
+            let backend = backend.clone();
             tokio::task::spawn_blocking(move || {
-                convert_ltx_native(&source_file, &upscaler_dir, &temp, bits)
+                convert_ltx_native(&source_file, &upscaler_dir, &temp, bits).map_err(|detail| {
+                    WorkerError::Engine(format!("{backend} conversion failed. {detail}"))
+                })
             })
-            .await
         }
         ConvertPlan::Flux2Dev {
             source_dir,
             bits,
             group_size,
         } => {
+            let backend = backend.clone();
             tokio::task::spawn_blocking(move || {
-                convert_flux2_dev_prequant(&source_dir, &temp, bits, group_size)
+                convert_flux2_dev_prequant(&source_dir, &temp, bits, group_size).map_err(|detail| {
+                    WorkerError::Engine(format!("{backend} conversion failed. {detail}"))
+                })
             })
-            .await
         }
         ConvertPlan::Sd3 {
             source_dir,
@@ -1355,10 +1360,12 @@ pub(crate) async fn run_model_convert_job(
             bits,
             group_size,
         } => {
+            let backend = backend.clone();
             tokio::task::spawn_blocking(move || {
-                convert_sd3_prequant(&source_dir, &temp, variant, bits, group_size)
+                convert_sd3_prequant(&source_dir, &temp, variant, bits, group_size).map_err(
+                    |detail| WorkerError::Engine(format!("{backend} conversion failed. {detail}")),
+                )
             })
-            .await
         }
         ConvertPlan::Anima {
             dit_source,
@@ -1367,6 +1374,7 @@ pub(crate) async fn run_model_convert_job(
             dit_filename,
             group_size,
         } => {
+            let backend = backend.clone();
             tokio::task::spawn_blocking(move || {
                 convert_anima_prequant(
                     &dit_source,
@@ -1376,25 +1384,34 @@ pub(crate) async fn run_model_convert_job(
                     &temp,
                     group_size,
                 )
+                .map_err(|detail| {
+                    WorkerError::Engine(format!("{backend} conversion failed. {detail}"))
+                })
             })
-            .await
         }
     };
-    match outcome {
-        Ok(Ok(())) => {}
-        Ok(Err(detail)) => {
-            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-            return Err(WorkerError::Engine(format!(
-                "{backend} conversion failed. {detail}"
-            )));
-        }
-        Err(join_error) => {
-            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-            return Err(task_join_error(
-                &format!("{backend} conversion task"),
-                join_error,
-            ));
-        }
+    // The native converters are multi-minute blocking phases with no internal heartbeat loop, so a
+    // large conversion used to run silent past the API's ~90s stale-sweep and get flipped to
+    // `interrupted` mid-work — then the terminal `Completed` POST 409'd, surfacing a confusing "failed
+    // install" even though the output was promoted (sc-11155). Wrap them in `run_blocking_with_heartbeat`
+    // so the worker keeps pinging `Busy` across the convert. `cancel = None` is the explicit per-engine
+    // decision: the converters are one bounded native pass with no per-step loop for a flag to poll, so
+    // the bounded join already gives everything a cancel flag would (the missing piece was only the
+    // keepalive); the up-front `check_cancel` above still honors a cancel requested before it starts.
+    if let Err(error) = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        None,
+        &convert_cancel_message,
+        "model conversion task",
+        crate::no_cancel_ack(),
+        convert_task,
+    )
+    .await
+    {
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+        return Err(error);
     }
 
     // Promote the completed conversion atomically; on any rename failure the partial

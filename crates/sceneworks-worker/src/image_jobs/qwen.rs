@@ -500,7 +500,7 @@ async fn ensure_distill_lora_cached(
     } else {
         "main"
     };
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let snapshot =
         HuggingFaceSnapshot::resolve(&client, settings, repo, revision, &[file.to_owned()]).await?;
     if snapshot.files.is_empty() {

@@ -78,6 +78,56 @@ fn render_and_save_writes_png_and_contract_fact() {
     );
 }
 
+/// F-003 / sc-11159: a path-traversal / absolute model id in the payload must NOT let the
+/// written PNG escape the project dir. The model id becomes a filename component, so a `../`,
+/// `..\`, or `/abs` id would otherwise land the asset (and its `create_dir_all` + rename)
+/// outside `project_path`. Assert the resolved media path stays confined for each vector.
+#[test]
+fn write_image_asset_confines_malicious_model_id() {
+    for evil in [
+        "../../../../etc/passwd",
+        "..\\..\\..\\windows\\system32\\evil",
+        "/etc/cron.d/pwn",
+        "sub/dir/model",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path();
+        std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+        let req = request(json!({
+            "projectId": "p", "model": evil, "prompt": "Mist over hills",
+            "count": 1, "width": 256, "height": 256, "seed": 1
+        }));
+        let plan = ImagePlan::new(&req);
+        let pixels = stub_rgb8(req.width, req.height, 1);
+        let fact = write_image_asset(
+            &plan,
+            0,
+            1,
+            req.width,
+            req.height,
+            pixels,
+            STUB_ADAPTER,
+            stub_raw_settings(&req),
+            project_path,
+        )
+        .unwrap();
+
+        let media_rel = fact.get("mediaPath").and_then(Value::as_str).unwrap();
+        // The sanitized model slug carries no separator, so the relative path is a single
+        // segment under `assets/images/<genset>/` and never contains `..`.
+        assert!(
+            !media_rel.contains(".."),
+            "media path must not contain `..` for model id {evil:?}: {media_rel}"
+        );
+        let resolved =
+            std::fs::canonicalize(project_path.join(media_rel)).expect("written asset resolves");
+        assert!(
+            resolved.starts_with(std::fs::canonicalize(project_path).unwrap()),
+            "written asset {resolved:?} escaped project dir for model id {evil:?}"
+        );
+    }
+}
+
 #[test]
 fn resolve_seed_matches_python_precedence() {
     // base seed wins (seed + index), even over an explicit seeds list.
@@ -879,6 +929,55 @@ fn bernini_image_task_and_quant_mapping() {
         &request(json!({ "projectId": "p", "model": "z_image_turbo", "prompt": "p" })),
         &Settings::from_env()
     ));
+}
+
+/// Candle Bernini tier-subdir selection (sc-11003): the published `SceneWorks/bernini` layout nests
+/// `bf16/`|`q8/`|`q4/` component trees, so the candle lane descends into the requested quant tier and
+/// pairs it with the matching load quant. Asserts the pure selection helpers: bf16-dense DEFAULT
+/// (unlike the MLX q4-first video default), explicit Q4/Q8 opt-in, the smaller-tier fallback when the
+/// preferred subfolder is absent, and the legacy flat-tree (`transformer/` at root) path. Runs in CI
+/// on the candle build (no weights — just directory sentinels).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_bernini_tier_subdir_selection() {
+    // Tier order: no pick / <=0 ⇒ bf16-first; explicit 4 ⇒ q4-first; >=8 ⇒ q8-first (all with the
+    // always-present smaller fallbacks).
+    assert_eq!(candle_bernini_tier_order(None), &["bf16", "q8", "q4"]);
+    assert_eq!(candle_bernini_tier_order(Some(0)), &["bf16", "q8", "q4"]);
+    assert_eq!(candle_bernini_tier_order(Some(4)), &["q4", "q8", "bf16"]);
+    assert_eq!(candle_bernini_tier_order(Some(8)), &["q8", "q4", "bf16"]);
+    // Tier → load quant: q4/q8 packed, bf16 dense (None).
+    assert!(matches!(
+        candle_bernini_tier_quant("q4"),
+        Some(gen_core::Quant::Q4)
+    ));
+    assert!(matches!(
+        candle_bernini_tier_quant("q8"),
+        Some(gen_core::Quant::Q8)
+    ));
+    assert!(candle_bernini_tier_quant("bf16").is_none());
+
+    // Sentinels on a temp root: a tier subfolder with a `transformer/` tree, plus a bare root.
+    let root = std::env::temp_dir().join(format!("candle-bernini-tier-{}", std::process::id()));
+    std::fs::remove_dir_all(&root).ok();
+    let make_tier = |tier: &str| {
+        std::fs::create_dir_all(root.join(tier).join("transformer")).unwrap();
+    };
+    make_tier("q8");
+    make_tier("q4");
+    // A tier root (has subfolders) is a usable snapshot; a bare/empty dir is not.
+    assert!(candle_bernini_snapshot_ok(&root));
+    let empty = root.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    assert!(!candle_bernini_snapshot_ok(&empty));
+    // `transformer/` sentinel resolves the tier tree, not a bare dir.
+    assert!(candle_bernini_tree_present(&root.join("q4")));
+    assert!(!candle_bernini_tree_present(&root));
+    // A legacy flat tree (`transformer/` AT root) is accepted as a snapshot too.
+    let flat = root.join("flat");
+    std::fs::create_dir_all(flat.join("transformer")).unwrap();
+    assert!(candle_bernini_snapshot_ok(&flat));
+    std::fs::remove_dir_all(&root).ok();
 }
 
 /// Resolve the Bernini MLX snapshot dir for the real-weight smokes: env override → the local
@@ -3622,6 +3721,57 @@ fn mlx_control_weight_filenames_reject_traversal() {
     assert!(resolve_qwen_control_weights(&plain, &settings).is_ok());
 }
 
+/// sc-11168 / F-006: the Krea strict-pose lanes accept a payload-supplied `advanced.controlWeights.path`
+/// (a studio-trained / registered LOCAL overlay the API resolved) and load it directly. That untrusted
+/// value must be confined to an app-managed root, or a crafted job turns the overlay loader into an
+/// arbitrary-file read across the LAN boundary (epic 4484). Exercise the confinement helper on whichever
+/// twin the current build compiles (MLX on macOS / candle off-Mac — both define the same-named helper):
+/// an out-of-root path is rejected with the house `InvalidPayload`, a path under the data dir resolves,
+/// and an absent key yields `None`. Mirrors `app_managed_helpers_resolve_symlinks_before_root_check`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn krea_control_payload_overlay_path_confines_to_app_root() {
+    let data = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = data.path().to_path_buf();
+    settings.external_model_roots = Vec::new();
+
+    // No `controlWeights.path` in the payload → nothing to confine.
+    let none = request(json!({ "projectId": "p" }));
+    assert!(krea_control_payload_overlay_path(&settings, &none)
+        .expect("an absent overlay path is Ok(None)")
+        .is_none());
+
+    // An out-of-root absolute path (the arbitrary-file-read primitive) is rejected.
+    let escape_file = outside.path().join("evil.safetensors");
+    std::fs::write(&escape_file, b"x").unwrap();
+    let escape = request(json!({
+        "projectId": "p",
+        "advanced": { "controlWeights": { "path": escape_file.display().to_string() } }
+    }));
+    let err = krea_control_payload_overlay_path(&settings, &escape)
+        .expect_err("an out-of-root overlay path is rejected");
+    assert!(err.to_string().contains("app-managed"), "{err}");
+
+    // A path under the app data dir resolves (canonicalized) and is loadable.
+    let managed = settings.data_dir.join("models").join("overlay.safetensors");
+    std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+    std::fs::write(&managed, b"weights").unwrap();
+    let ok = request(json!({
+        "projectId": "p",
+        "advanced": { "controlWeights": { "path": managed.display().to_string() } }
+    }));
+    let resolved = krea_control_payload_overlay_path(&settings, &ok)
+        .expect("a managed overlay path is Ok")
+        .expect("a present key yields Some");
+    assert_eq!(resolved, managed.canonicalize().unwrap());
+    assert!(resolved.is_file());
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn flux2_control_raw_settings_records_control_recipe() {
@@ -4355,6 +4505,64 @@ fn inline_upscaled_asset_links_back_to_base_for_library_fold() {
         !fact.contains_key("upscaledFrom"),
         "the unread `upscaledFrom` field must not be written"
     );
+}
+
+/// F-003 / sc-11159: the upscaled variant builds its own `_up{factor}x.png` filename from the
+/// same payload model id, so it must be confined identically to the base PNG.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn write_upscaled_asset_confines_malicious_model_id() {
+    for evil in ["../../../../etc/passwd", "..\\..\\evil", "/abs/pwn"] {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path();
+        std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+        let req = request(json!({
+            "projectId": "p", "model": evil, "prompt": "Mist over hills",
+            "count": 1, "width": 256, "height": 256, "seed": 1
+        }));
+        let plan = ImagePlan::new(&req);
+        let pixels = stub_rgb8(req.width, req.height, 1);
+        let base_fact = write_image_asset(
+            &plan,
+            0,
+            1,
+            req.width,
+            req.height,
+            pixels,
+            STUB_ADAPTER,
+            stub_raw_settings(&req),
+            project_path,
+        )
+        .unwrap();
+
+        let upscaled =
+            image::RgbImage::from_pixel(req.width * 2, req.height * 2, image::Rgb([1, 2, 3]));
+        let fact = write_upscaled_asset(
+            &plan,
+            &base_fact,
+            &upscaled,
+            "seedvr2",
+            2,
+            0.5,
+            project_path,
+        )
+        .unwrap();
+
+        let media_rel = fact.get("mediaPath").and_then(Value::as_str).unwrap();
+        assert!(
+            !media_rel.contains(".."),
+            "upscaled media path must not contain `..` for model id {evil:?}: {media_rel}"
+        );
+        let resolved = std::fs::canonicalize(project_path.join(media_rel))
+            .expect("written upscaled asset resolves");
+        assert!(
+            resolved.starts_with(std::fs::canonicalize(project_path).unwrap()),
+            "upscaled asset {resolved:?} escaped project dir for model id {evil:?}"
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -8591,6 +8799,26 @@ fn instantid_revisions_are_pinned_commits_not_main() {
         INSTANTID_CONTROLNET_REVISION,
     );
     assert_pinned_revision("INSTANTID_OPENPOSE_REVISION", INSTANTID_OPENPOSE_REVISION);
+    // sc-11168 / F-007: the MLX PuLID lane (`pulid.rs`) fetches its adapter + EVA/BiSeNet bundle repos
+    // through `ensure_instantid_file` → `instantid_revision`, so those two repos must be pinned here too
+    // (they were falling back to `main`; the candle twin already pins them).
+    assert_pinned_revision("PULID_ADAPTER_REVISION", PULID_ADAPTER_REVISION);
+    assert_pinned_revision("PULID_MLX_REVISION", PULID_MLX_REVISION);
+    assert_eq!(instantid_revision("guozinan/PuLID"), PULID_ADAPTER_REVISION);
+    assert_eq!(
+        instantid_revision("SceneWorks/pulid-flux-mlx"),
+        PULID_MLX_REVISION
+    );
+    // Tie the literal repo names matched in `instantid_revision` back to `pulid.rs`'s consts (macOS-only,
+    // so a rename of either const can't silently desync the pin from the repo it guards).
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(
+            instantid_revision(PULID_ADAPTER_REPO),
+            PULID_ADAPTER_REVISION
+        );
+        assert_eq!(instantid_revision(PULID_MLX_REPO), PULID_MLX_REVISION);
+    }
     // `instantid_revision` returns the pin for a known repo and falls back to `main` otherwise.
     assert_eq!(
         instantid_revision(INSTANTID_MLX_REPO),
@@ -8607,6 +8835,12 @@ fn mlx_control_and_distill_revisions_are_pinned_commits_not_main() {
     assert_pinned_revision("FLUX1_CONTROL_REVISION", FLUX1_CONTROL_REVISION);
     assert_pinned_revision("FLUX2_CONTROL_REVISION", FLUX2_CONTROL_REVISION);
     assert_pinned_revision("QWEN_LIGHTNING_LORA_REVISION", QWEN_LIGHTNING_LORA_REVISION);
+    // sc-11168 / F-007: the default MLX Krea pose-control overlay repo is a fixed, non-overridable const,
+    // so its pin must be a fixed commit rather than the mutable `main` branch.
+    assert_pinned_revision(
+        "KREA_CONTROL_OVERLAY_REVISION",
+        KREA_CONTROL_OVERLAY_REVISION,
+    );
 }
 
 /// The candle-only strict-control pins (qwen / kolors / zimage / flux1 / flux2 control branches). These
@@ -8625,6 +8859,13 @@ fn candle_control_revisions_are_pinned_commits_not_main() {
     assert_pinned_revision(
         "FLUX2_CONTROL_CANDLE_REVISION",
         FLUX2_CONTROL_CANDLE_REVISION,
+    );
+    // sc-11168 / F-007: the default candle Krea pose-control overlay repo is a fixed, non-overridable
+    // const, so its pin must be a fixed commit rather than the mutable `main` branch (twin of the MLX
+    // `KREA_CONTROL_OVERLAY_REVISION` assert on the macOS lane).
+    assert_pinned_revision(
+        "KREA_CONTROL_OVERLAY_REVISION",
+        KREA_CONTROL_OVERLAY_REVISION,
     );
 }
 
@@ -8662,6 +8903,19 @@ fn candle_ipadapter_and_pulid_revisions_are_pinned_commits_not_main() {
         PULID_CANDLE_FACE_REVISION
     );
     assert_eq!(pulid_candle_revision("some/override-repo"), "main");
+    // sc-11168 / F-007: the candle Kolors IP-Adapter-Plus fetch carried the mutable `refs/pr/4` ref;
+    // it is now pinned to the exact commit at that PR's tip (a force-push can't swap the weights).
+    assert_pinned_revision("KOLORS_IPADAPTER_REVISION", KOLORS_IPADAPTER_REVISION);
+    // sc-11168 / F-007: the MLX PuLID pins (in `instantid.rs`) fetch the SAME repos as these candle pins,
+    // so a bump to one lane without the other must fail loudly (twin-drift guard).
+    assert_eq!(
+        PULID_ADAPTER_REVISION, PULID_CANDLE_ADAPTER_REVISION,
+        "MLX + candle PuLID adapter (guozinan/PuLID) pins must agree"
+    );
+    assert_eq!(
+        PULID_MLX_REVISION, PULID_CANDLE_MLX_REVISION,
+        "MLX + candle PuLID EVA/BiSeNet bundle (SceneWorks/pulid-flux-mlx) pins must agree"
+    );
 }
 
 /// The candle-only Krea 2 ConvRot bf16-base pin (`base.rs`, sc-9300 tier). Fetches the fixed

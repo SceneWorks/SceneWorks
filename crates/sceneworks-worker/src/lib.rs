@@ -697,7 +697,7 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     }
     let gpu = discover_gpu(&settings).await;
     let api = ApiClient::new(&settings);
-    let http_client = reqwest::Client::new();
+    let http_client = crate::downloads::streaming_download_client();
     register_worker_with_retry(&api, &settings, &gpu).await?;
     let mut lock_failures = 0_u32;
     let mut idle_heartbeat = IdleHeartbeat::new(progress_report_interval(&settings));

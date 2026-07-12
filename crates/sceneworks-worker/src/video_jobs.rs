@@ -800,12 +800,18 @@ impl VideoPlan {
         let created_at = now_rfc3339();
         let family = resolve_family(request);
         let slug = slugify(&request.prompt, "video", Some(42));
+        // Sanitize the untrusted model id before it becomes a path component: it arrives
+        // verbatim from the job payload, and a `../` / `\` / absolute id would otherwise
+        // traverse out of the project dir here (F-003 / sc-11159). rust-api rejects such ids
+        // at enqueue, but the worker is the trust boundary and must re-confine — slugify
+        // collapses any separator/`..` to a single readable component (mirrors write_image_asset).
+        let model_slug = slugify(&request.model, "model", None);
         // Nest under the per-generation id so two renders sharing date+model+slug
         // cannot collide on a flat path (mirrors the image + Python video adapters).
         let media_rel = format!(
             "assets/videos/{genset_id}/{}_{}_{slug}.mp4",
             &created_at[..10],
-            request.model
+            model_slug
         );
         let media_path = project_path.join(&media_rel);
         Self {
@@ -1687,7 +1693,7 @@ async fn ensure_seedvr2_weights(
     let dir = std::env::var("SCENEWORKS_SEEDVR2_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| settings.data_dir.join("cache").join("seedvr2-mlx"));
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = crate::downloads::DownloadContext {
         api,
         client: &client,
@@ -2936,6 +2942,19 @@ const WAN_TI2V_5B_REPO: &str = "SceneWorks/wan2.2-ti2v-5b-mlx";
 #[cfg(target_os = "macos")]
 const WAN_TI2V_5B_REVISION: &str = "bb1b055249614cf9d7cf4373fbdbc184b77dee88";
 
+/// Pinned commit revision for the A14B Lightning distill-LoRA repo `lightx2v/Wan2.2-Lightning` (sc-11168 /
+/// F-007 — completes the sc-9879 rollout). Both the MLX (`ensure_wan_lightning_present`) and candle
+/// (`candle_ensure_wan_lightning_present`) self-heal fetches were pulling the mutable `main` branch, so an
+/// upstream re-push (or a compromised token) could silently swap the high/low distill weights we load.
+/// Pin the exact commit for defense-in-depth (the `hf` CLI still verifies each file's own hash on
+/// download). Shared by BOTH lanes so the twins agree. Gated to the lanes that actually fetch it (macOS
+/// MLX or the candle build) so a Linux-non-candle build doesn't flag it dead.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const WAN_LIGHTNING_REVISION: &str = "18bccf8884ec0a078eed79785eb4ef13ea16ce1e";
+
 /// The files that make an **A14B** (dual-expert MoE) Wan tier subdir COMPLETE: both experts + the T5
 /// encoder + VAE + tokenizer + `config.json`.
 #[cfg(target_os = "macos")]
@@ -3160,7 +3179,13 @@ async fn ensure_wan_lightning_present(
         format!("{subdir}/low_noise_model.safetensors"),
     ];
     let result = crate::model_jobs::download_model_with_hf_cli(
-        api, settings, job, REPO, "main", &files, &scratch,
+        api,
+        settings,
+        job,
+        REPO,
+        WAN_LIGHTNING_REVISION,
+        &files,
+        &scratch,
     )
     .await;
     let _ = tokio::fs::remove_dir_all(&scratch).await;
@@ -5011,7 +5036,13 @@ async fn candle_ensure_wan_lightning_present(
         format!("{subdir}/low_noise_model.safetensors"),
     ];
     let result = crate::model_jobs::download_model_with_hf_cli(
-        api, settings, job, REPO, "main", &files, &scratch,
+        api,
+        settings,
+        job,
+        REPO,
+        WAN_LIGHTNING_REVISION,
+        &files,
+        &scratch,
     )
     .await;
     let _ = tokio::fs::remove_dir_all(&scratch).await;
@@ -5683,7 +5714,7 @@ async fn resolve_candle_scail2_conditioning(
     .await?;
 
     // SAM3 segmenter weights (download-on-first-use), shared by both segmentation passes.
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = crate::downloads::DownloadContext {
         api,
         client: &client,
@@ -5854,7 +5885,7 @@ async fn resolve_candle_scail2_replace_conditioning(
 
     // The reference color mask: a candle SAM3 pass on the reference image → the primary person painted
     // blue on a black background (replacement discards the reference's surrounding world).
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = crate::downloads::DownloadContext {
         api,
         client: &client,
@@ -6817,10 +6848,11 @@ async fn resolve_candle_bernini_conditioning(
 /// ([`candle_bernini_engine_video_mode`]) and the source media into the planner conditioning
 /// ([`resolve_candle_bernini_conditioning`]) — empty for t2v, one or more `VideoClip`s for
 /// v2v/mv2v/rv2v/ads2v, and `MultiReference` for r2v/rv2v/ads2v. The converted `SceneWorks/bernini`
-/// snapshot loads DENSE (no load-time quant — the off-Mac packed-tier select is deferred with the still
-/// lane, sc-11003), resolved via the shared [`crate::image_jobs::resolve_candle_bernini_model_dir`] so
-/// video + still load from the same tier. No LoRA (the engine reports `supports_lora=false`); steps /
-/// guidance stay at the engine defaults. Frame count uses the Wan 1-mod-4 stride (the renderer is Wan).
+/// snapshot descends into the requested quant tier subfolder (`bf16/`|`q8/`|`q4/`, sc-11003) via the
+/// shared [`crate::image_jobs::resolve_candle_bernini_tier_dir_and_quant`] so video + still load from
+/// the same tier: no explicit `mlxQuantize` ⇒ bf16 dense, `:4`|`:8` opt into the packed tiers. No LoRA
+/// (the engine reports `supports_lora=false`); steps / guidance stay at the engine defaults. Frame
+/// count uses the Wan 1-mod-4 stride (the renderer is Wan).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_bernini(
     api: &ApiClient,
@@ -6834,11 +6866,20 @@ async fn generate_candle_bernini(
     let negative_prompt = non_empty_negative_prompt(request);
     let conditioning =
         resolve_candle_bernini_conditioning(api, settings, job, request, project_path).await?;
+    // Select the published tier subfolder + matching load quant (sc-11003): parse `mlxQuantize` (int
+    // or numeric string) the same way the still lane does, defaulting to bf16 dense.
+    let tier_bits = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let (model_dir, quant) =
+        crate::image_jobs::resolve_candle_bernini_tier_dir_and_quant(settings, tier_bits)?;
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
         engine_id,
-        model_dir: crate::image_jobs::resolve_candle_bernini_model_dir(settings)?,
+        model_dir,
+        quant,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,
@@ -7156,7 +7197,7 @@ async fn resolve_scail2_conditioning(
     .await?;
 
     // SAM3 segmenter weights (download-on-first-use), shared by both segmentation passes.
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = crate::downloads::DownloadContext {
         api,
         client: &client,
@@ -7341,7 +7382,7 @@ async fn resolve_scail2_replace_conditioning(
 
     // The reference color mask: a fresh native-SAM3 pass on the reference image → the primary person
     // painted blue on a black background (replacement discards the reference's surrounding world).
-    let client = reqwest::Client::new();
+    let client = crate::downloads::streaming_download_client();
     let context = crate::downloads::DownloadContext {
         api,
         client: &client,
@@ -10033,6 +10074,35 @@ mod tests {
         );
     }
 
+    /// sc-11168 / F-007 (completes the sc-9879 rollout on the video lanes): both the MLX
+    /// (`ensure_wan_lightning_present`) and candle (`candle_ensure_wan_lightning_present`) A14B Lightning
+    /// self-heal fetches pull the FIXED `lightx2v/Wan2.2-Lightning` distill pair from the SHARED
+    /// `WAN_LIGHTNING_REVISION` const, so it must pin an exact commit rather than the mutable `main`
+    /// branch — an upstream re-push would otherwise silently swap the high/low distill weights we load.
+    /// Lock the pin to a real 40-hex lowercase commit id (mirrors the SeedVR2 format test above).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn wan_lightning_revision_is_pinned_commit_not_main() {
+        assert_ne!(
+            WAN_LIGHTNING_REVISION, "main",
+            "Wan Lightning distill pair must pin a fixed revision"
+        );
+        assert_eq!(
+            WAN_LIGHTNING_REVISION.len(),
+            40,
+            "a pinned HF revision is a 40-char commit sha"
+        );
+        assert!(
+            WAN_LIGHTNING_REVISION
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "the pinned revision must be lowercase hex"
+        );
+    }
+
     /// sc-9879 (F-077 follow-up): `ensure_ltx_q8_present` pulls `q8/*` from the FIXED SceneWorks LTX-2.3
     /// bundle const (non-overridable here), so it must pin an exact commit rather than the mutable `main`
     /// branch — an upstream re-push would otherwise silently swap the Q8 checkpoint we load. Lock the pin
@@ -10242,13 +10312,50 @@ mod tests {
             .media_rel
             .starts_with(&format!("assets/videos/{}/", plan.genset_id)));
         assert!(plan.media_rel.ends_with(".mp4"));
-        assert!(plan.media_rel.contains("_ltx_2_3_"));
+        // The model id is slugified into the filename (F-003 / sc-11159): `ltx_2_3` -> `ltx-2-3`.
+        assert!(plan.media_rel.contains("_ltx-2-3_"));
         assert!(plan.asset_id.starts_with("asset_"));
         assert_eq!(plan.family, "ltx-video");
         assert_eq!(
             plan.media_path,
             Path::new("/tmp/project").join(&plan.media_rel)
         );
+    }
+
+    /// F-003 / sc-11159: a path-traversal / absolute model id in the payload must NOT let the
+    /// rendered `.mp4` escape the project dir. The model id becomes a filename component in
+    /// `media_rel`, so a `../`, `..\`, or `/abs` id would otherwise place the media path (and
+    /// its later `create_dir_all` + write) outside `project_path`. Assert confinement per vector.
+    #[test]
+    fn plan_confines_malicious_model_id() {
+        let project = Path::new("/tmp/project");
+        for evil in [
+            "../../../../etc/passwd",
+            "..\\..\\..\\windows\\evil",
+            "/etc/cron.d/pwn",
+            "sub/dir/model",
+        ] {
+            let request = request(json!({
+                "projectId": "p", "model": evil, "prompt": "A red fox runs"
+            }));
+            let plan = VideoPlan::new(&request, project);
+            assert!(
+                !plan.media_rel.contains(".."),
+                "media_rel must not contain `..` for model id {evil:?}: {}",
+                plan.media_rel
+            );
+            assert!(
+                plan.media_rel
+                    .starts_with(&format!("assets/videos/{}/", plan.genset_id)),
+                "media_rel escaped the videos dir for model id {evil:?}: {}",
+                plan.media_rel
+            );
+            assert!(
+                plan.media_path.starts_with(project),
+                "media_path {:?} escaped project dir for model id {evil:?}",
+                plan.media_path
+            );
+        }
     }
 
     #[test]

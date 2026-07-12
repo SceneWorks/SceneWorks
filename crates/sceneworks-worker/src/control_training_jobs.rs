@@ -34,7 +34,7 @@ mod imp {
 
     use crate::control_dataset_prep::{
         prepare_control_dataset, ControlPrepConfig, ControlPrepInput, PersonFilter,
-        DEFAULT_MIN_EDGE,
+        DEFAULT_MIN_EDGE, PREP_CANCEL_MESSAGE,
     };
     use crate::control_preprocess::{control_kind_label, PreprocessResources};
     use crate::downloads::DownloadContext;
@@ -180,8 +180,16 @@ mod imp {
         )
         .await?;
 
-        // A2 prep is blocking (decode + neural preprocess + PNG encode per image); run it off the
-        // async runtime. Ownership moves into the closure; the report + work dir come back out.
+        // A2 prep is a multi-minute blocking phase (per-image decode + neural preprocess + PNG encode);
+        // run it off the async runtime under the same heartbeat + cancel + per-item progress scaffold
+        // the batched analysis jobs use (`analysis_jobs_common`, sc-8836), so the API's ~90s stale-sweep
+        // can't false-interrupt a moderately sized dataset mid-render (sc-11155). The keepalive is the
+        // `heartbeat` ping on the interval tick below — posting job progress does NOT refresh the
+        // worker's `last_seen` (only the heartbeat does), so the loop must tick even between per-item
+        // progress posts. The prep loop is worker code, so it takes a REAL `CancelFlag` (sc-9123) that
+        // `prepare_control_dataset` polls between items and bails with the typed `Canceled`; any pairs
+        // already written sit in the job-scoped cache dir and are inert. `on_progress` is streamed over
+        // `tx` (previously discarded) so the studio job shows render progress.
         let config = ControlPrepConfig {
             kind,
             resources,
@@ -189,11 +197,93 @@ mod imp {
             person_filter,
         };
         let prep_dir = work_dir.clone();
-        let report = tokio::task::spawn_blocking(move || {
-            prepare_control_dataset(&inputs, &config, &prep_dir, |_done, _total| {})
-        })
-        .await
-        .map_err(|error| WorkerError::Engine(format!("control prep task panicked: {error}")))??;
+        let cancel = gen_core::CancelFlag::new();
+        let task_cancel = cancel.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(usize, usize)>(64);
+        let blocking = tokio::task::spawn_blocking(move || {
+            prepare_control_dataset(&inputs, &config, &prep_dir, &task_cancel, |done, total| {
+                // A closed channel means the consumer loop returned early (POST failure / 409 stale-
+                // sweep reclaim); trip the cancel flag so the prep bails at its next per-item check
+                // instead of rendering the whole corpus to its natural end (sc-8804, F-003 — the
+                // swallowed-closed-channel leak).
+                if tx.blocking_send((done, total)).is_err() {
+                    task_cancel.cancel();
+                }
+            })
+        });
+
+        // Bind the blocking prep to its cancel flag (sc-8804, F-003): every `update_job`/`heartbeat`
+        // `?` below returns early on a transient POST failure or a 409 reclaim; on that early return the
+        // guard trips `cancel` and bounded-joins the prep thread instead of dropping-and-running it.
+        let mut guard = CancelJoinGuard::new(cancel.clone(), blocking);
+        let mut interval = tokio::time::interval(progress_report_interval(settings));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Defer the terminal `Canceled`: a cancel poll only trips the engine flag (so the prep stops at
+        // its next item boundary) and marks `canceled`; the terminal write happens AFTER the task stops,
+        // so the worker row isn't freed while the render is still on the GPU (sc-8917, mirrors
+        // `consume_training_events` / `run_batched_analysis_job`).
+        let mut canceled = false;
+        let loop_result: WorkerResult<()> = async {
+            loop {
+                tokio::select! {
+                    event = rx.recv() => {
+                        match event {
+                            Some((done, total)) => {
+                                // Per-item render progress scaled into the prep band 0.05..0.20 (the
+                                // plan rewrite + training take the rest). This is a UI signal only; the
+                                // stale-sweep keepalive is the heartbeat on the interval tick.
+                                let frac = done as f64 / total.max(1) as f64;
+                                update_job(
+                                    api,
+                                    &job.id,
+                                    training_progress(
+                                        JobStatus::Preparing,
+                                        ProgressStage::Preparing,
+                                        0.05 + 0.15 * frac,
+                                        &format!(
+                                            "Rendering {label} conditions ({done}/{total})."
+                                        ),
+                                        None,
+                                        backend,
+                                    ),
+                                )
+                                .await?;
+                            }
+                            None => break,
+                        }
+                    }
+                    _ = interval.tick() => {
+                        heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+                        // sc-9618: a process shutdown is a cancel checkpoint too — short-circuit the API
+                        // poll (a local flag read) so a quit stops the render at its next item check.
+                        if !canceled
+                            && (shutdown_requested() || cancel_requested_peek(api, &job.id).await)
+                        {
+                            cancel.cancel();
+                            canceled = true;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = loop_result {
+            guard.cancel_and_join().await;
+            return Err(error);
+        }
+
+        // Loop exited cleanly (channel closed) — reclaim the handle (disarming the drop-guard) and join.
+        let join_result = guard
+            .into_handle()
+            .await
+            .map_err(|error| task_join_error("control prep task", error))?;
+        if canceled {
+            // The prep has actually stopped now, so post the TERMINAL `Canceled` here.
+            mark_job_canceled(api, &job.id, PREP_CANCEL_MESSAGE).await?;
+            return Err(WorkerError::Canceled(PREP_CANCEL_MESSAGE.to_owned()));
+        }
+        let report = join_result?;
 
         // Surface the per-image skip tally rather than silently shrinking the corpus (the report
         // exists for exactly this). The manifest path + the individual reasons go to the log; the

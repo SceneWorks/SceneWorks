@@ -7,6 +7,16 @@
 
 use serde_json::Value;
 
+/// Connect timeout for every MCP tool's API call: bounds the TCP/TLS handshake so an
+/// unreachable API can't hang the tool. Mirrors the worker's `HTTP_CONNECT_TIMEOUT`
+/// (separate crate, so it's redeclared locally rather than shared) (sc-11149).
+const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Total-request timeout for every MCP tool's API call: guarantees a hung upstream can
+/// never hang the tool call forever (the "a stuck job can never hang the call"
+/// contract). These are non-streaming requests with no large bodies (sc-11149).
+const HTTP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// How the MCP tools reach the SceneWorks API. `base_url` normally comes from
 /// `SCENEWORKS_API_URL` (the same variable the Rust worker uses) and the token is
 /// the API's own `SCENEWORKS_ACCESS_TOKEN` — sent as `X-SceneWorks-Token`, the
@@ -83,7 +93,15 @@ impl From<reqwest::Error> for ApiClientError {
 impl ApiClient {
     pub fn new(config: ApiClientConfig) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            // Every MCP tool call is a non-streaming API request. A connect + total
+            // timeout guarantees a hung upstream can never hang the tool call forever
+            // (the tool's core "a stuck job can never hang the call" contract) —
+            // reqwest's default is *no* timeout (sc-11149).
+            client: reqwest::Client::builder()
+                .connect_timeout(HTTP_CONNECT_TIMEOUT)
+                .timeout(HTTP_REQUEST_TIMEOUT)
+                .build()
+                .expect("static API client config is always valid"),
             base_url: config.base_url.trim_end_matches('/').to_owned(),
             // An empty/whitespace token means auth is off — send no header, exactly
             // like the worker's `Settings::from_env` filter.
