@@ -27,8 +27,9 @@ use candle_gen_sam3::{Sam3TextConfig, Sam3Tokenizer, Sam3VideoModel, VideoFrameO
 use gen_core::CancelFlag;
 
 use crate::person_segment_sam3_common::{
-    mask_centroid_x, mask_to_frame, normalize_chw, select_object, BoxNorm, Sam3FrameOutput,
-    CONCEPT_PROMPT, INPUT_SIZE, MASK_GRID,
+    check_segment_canceled, frame_mask_for_object, normalize_chw, paint_order, per_frame_masks,
+    select_object, BoxNorm, Sam3FrameOutput, SegmentProgress, CANCEL_MESSAGE, CONCEPT_PROMPT,
+    INPUT_SIZE,
 };
 use crate::{WorkerError, WorkerResult};
 
@@ -48,26 +49,6 @@ impl Sam3FrameOutput for VideoFrameOutput {
     fn masks(&self) -> &[Vec<f32>] {
         &self.masks
     }
-}
-
-/// Cancel copy surfaced when a segmentation is interrupted by a user cancel — the candle sibling
-/// of `person_segment::CANCEL_MESSAGE` (Mac-only, so duplicated like the other shared helpers).
-pub(crate) const CANCEL_MESSAGE: &str = "Person segmentation canceled by user.";
-
-/// Per-propagated-frame progress callback `(frame_index, total_frames)` — the candle sibling of
-/// `person_segment::SegmentProgress` (Mac-only, so duplicated like the other shared helpers).
-pub(crate) type SegmentProgress = Box<dyn FnMut(usize, usize) + Send>;
-
-/// Bail out with [`WorkerError::Canceled`] when the threaded flag has been tripped — the coarse
-/// cancel seam guarding frame decode, the cold multi-GB checkpoint parse, and model build/quantize
-/// (sc-8807). The same flag is also threaded into `Sam3VideoModel::propagate`'s per-frame cancel
-/// contract (sc-8972, the candle sibling of gen-core d8038beb), so a tripped flag stops the clip
-/// between propagated frames too.
-fn check_segment_canceled(cancel: Option<&CancelFlag>) -> WorkerResult<()> {
-    if cancel.is_some_and(CancelFlag::is_cancelled) {
-        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
-    }
-    Ok(())
 }
 
 /// Affine-quantization level for the segmenter, from `SCENEWORKS_SAM3_QUANT`: **dense by default**
@@ -239,29 +220,6 @@ pub(crate) fn segment_track_blocking(
     Ok(masks)
 }
 
-/// Emit the selected object's binary mask on one SAM3 frame, or an empty vec when the object
-/// isn't present (legitimate per-frame absence → orchestrator box-fallback). Guards the
-/// `obj_ids`/`masks` parallel-vec assumption: an id present in `obj_ids` but with no matching
-/// entry in `masks` is a malformed engine output, surfaced as an `Engine` error rather than
-/// indexing OOB (sc-8905, F-103). Kept in sync with the MLX twin.
-fn frame_mask_for_object(
-    frame: &VideoFrameOutput,
-    selected: i32,
-    width: u32,
-    height: u32,
-) -> WorkerResult<Vec<u8>> {
-    let Some(i) = frame.obj_ids.iter().position(|&o| o == selected) else {
-        return Ok(Vec::new());
-    };
-    let logits = frame.masks.get(i).ok_or_else(|| {
-        WorkerError::Engine(format!(
-            "sam3 frame has obj id {selected} at index {i} but only {} masks",
-            frame.masks.len()
-        ))
-    })?;
-    mask_to_frame(logits, MASK_GRID, width, height)
-}
-
 /// Segment + track every "person" across already-decoded RGB `frames` with the off-Mac candle SAM3
 /// text-concept (PCS) video pipeline (sc-6837), returning all objects' per-frame masks + the
 /// left-to-right paint order — the input to [`crate::scail2_masks`]. The candle sibling of
@@ -353,45 +311,11 @@ pub(crate) fn segment_all_persons_in_memory(
             e => WorkerError::Engine(format!("sam3 propagate: {e}")),
         })?;
 
-    // Paint order: each object's centroid-x in the FIRST frame it appears, ascending (tie-break on
-    // first-seen frame, then object id, so repeated runs agree). Shared with the MLX module.
-    use std::collections::BTreeMap;
-    let mut first_seen: BTreeMap<i32, (usize, f64)> = BTreeMap::new();
-    for (f, frame) in outputs.iter().enumerate() {
-        for (oid, logits) in frame.obj_ids.iter().zip(&frame.masks) {
-            if first_seen.contains_key(oid) {
-                continue;
-            }
-            if let Some(cx) = mask_centroid_x(logits, MASK_GRID) {
-                first_seen.insert(*oid, (f, cx));
-            }
-        }
-    }
-    let mut order: Vec<i32> = first_seen.keys().copied().collect();
-    order.sort_by(|a, b| {
-        let (fa, xa) = first_seen[a];
-        let (fb, xb) = first_seen[b];
-        xa.partial_cmp(&xb)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(fa.cmp(&fb))
-            .then(a.cmp(b))
-    });
-
-    // `zip` already bounds to the shorter of obj_ids/masks; `mask_to_frame` now returns an
-    // `Engine` error on a malformed (grid-mismatched) mask instead of the empty-vec sentinel,
-    // so propagate rather than silently dropping it (sc-8905, F-103). Kept in sync with the MLX
-    // twin.
-    let per_frame = outputs
-        .iter()
-        .map(|frame| {
-            frame
-                .obj_ids
-                .iter()
-                .zip(&frame.masks)
-                .map(|(oid, logits)| Ok((*oid, mask_to_frame(logits, MASK_GRID, width, height)?)))
-                .collect::<WorkerResult<Vec<_>>>()
-        })
-        .collect::<WorkerResult<Vec<_>>>()?;
+    // Paint order + per-frame masks are backend-neutral pure logic shared with the MLX twin via
+    // `person_segment_sam3_common` (sc-11191, F-018), so the tie-break and mask selection stay
+    // byte-identical on both platforms.
+    let order = paint_order(&outputs);
+    let per_frame = per_frame_masks(&outputs, width, height)?;
 
     Ok(AllPersonMasks {
         order,

@@ -62,6 +62,12 @@ mod api_client;
 // (sc-5891). Compiles on all targets; the socket I/O is `cfg(unix)` and inert unless
 // the desktop injects `SCENEWORKS_CRED_IPC_*`, so server/Docker/Windows are unaffected.
 mod credentials_ipc;
+// Generic single-resident, dedicated-thread model cache scaffolding (sc-11191, F-019): the
+// `CacheThread<K, M>` + `Fingerprint` + panic/idle-timeout/oneshot-seam machinery shared verbatim by
+// `generator_cache` and `refine_model_cache`. All-targets like its two consumers; off macOS the
+// production seams are cfg'd out, so allow dead_code there (mirrors the generator_cache precedent).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod cache_thread;
 // Backend-neutral generator load/run cache (epic 3720, sc-3724). Typed entirely against
 // `gen_core::*` (no tensor types leak), so it links on ALL targets — the production load seam
 // (`with_cached_generator`) is reached only from the macOS image/video paths, but the all-targets

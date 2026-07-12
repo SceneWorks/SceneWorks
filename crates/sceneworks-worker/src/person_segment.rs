@@ -30,25 +30,14 @@ use mlx_gen_sam2::{Sam2ModelSize, Sam2VideoPredictor};
 
 use crate::{Settings, WorkerError, WorkerResult};
 
-/// Cancel copy surfaced when a segmentation is interrupted by a user cancel — either by the
-/// engine's per-frame propagate cancel contract (gen-core d8038beb) or by the coarse checks
-/// around the cold weight load (sc-8807). Shared by the SAM2/SAM3 segmenter modules.
-pub(crate) const CANCEL_MESSAGE: &str = "Person segmentation canceled by user.";
-
-/// Per-frame propagate progress callback `(frame_index, total_frames)`, invoked from the blocking
-/// thread after each propagated frame (the gen-core d8038beb video per-step progress contract).
-/// Boxed + `Send` so call sites can move it into `spawn_blocking`.
-pub(crate) type SegmentProgress = Box<dyn FnMut(usize, usize) + Send>;
-
-/// Bail out with [`WorkerError::Canceled`] when the threaded flag has been tripped — the coarse
-/// cancel seam guarding the phases the engine cannot observe (frame decode, the cold multi-GB
-/// weight load/parse, quantize). The engine itself checks the same flag between frames (sc-8807).
-pub(crate) fn check_segment_canceled(cancel: Option<&CancelFlag>) -> WorkerResult<()> {
-    if cancel.is_some_and(CancelFlag::is_cancelled) {
-        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
-    }
-    Ok(())
-}
+// The cancel copy / progress alias / coarse-cancel helper shared by the SAM2/SAM3 segmenter modules
+// are hoisted to `person_segment_sam3_common` (sc-11191, F-018): the off-Mac candle SAM3 twin cannot
+// reach this Mac-only module, so a single home there gives all three modules ONE definition (a tweak
+// in one can no longer silently diverge). Re-exported here so existing `person_segment::…` references
+// (and this module's own SAM2 path) keep resolving unchanged.
+pub(crate) use crate::person_segment_sam3_common::{
+    check_segment_canceled, SegmentProgress, CANCEL_MESSAGE,
+};
 
 /// The production SAM2 size (matches the spike + the `SceneWorks/sam2-mlx` upload).
 const SEG_FILE: &str = "sam2.1_hiera_large.safetensors";
