@@ -150,6 +150,16 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if model == "krea_2_raw" && krea_edit_candle_eligible(&job.payload) {
         return true;
     }
+    // Bernini still-image i2i (sc-10996, epic 6562): a `bernini_image` `edit_image` job with a source
+    // image runs the candle `candle-gen-bernini` still lane (`generate_candle_bernini_image_stream`,
+    // engine id `bernini`, `frames:1`) — NOT the generic txt2img gate, which rejects the whole
+    // `edit_image` family. The source is fed to the engine as `Conditioning::Reference` (the planner
+    // ViT/VAE-encodes it, a structural re-render). Plain t2i (any non-edit mode) is the generic gate
+    // below (`bernini_image` is now in CANDLE_ROUTED_MODELS). Branch it out here, gated to the id.
+    // Mirrors the worker's dedicated `CandleImageRoute::Bernini` dispatch + the MLX `bernini_image_mlx_eligible`.
+    if model == "bernini_image" && bernini_image_edit_candle_eligible(&job.payload) {
+        return true;
+    }
     // SDXL IP-Adapter-Plus reference conditioning (sc-5488, epic 5480): an sdxl-family model with a
     // reference image is a bespoke candle lane (`generate_candle_sdxl_ipadapter_stream`), NOT txt2img —
     // the `image_request_candle_eligible` gate below rejects `referenceAssetId`. Branch it out first
@@ -728,6 +738,25 @@ pub(crate) fn boogu_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
                 .any(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()))
         });
     single || plural
+}
+
+/// Bernini still-image i2i candle-routing conditions (sc-10996, epic 6562). The candle
+/// `candle-gen-bernini` still lane serves `edit_image` mode with a `sourceAssetId` — the source is fed
+/// to the engine as `Conditioning::Reference` (the planner ViT/VAE-encodes it into a structural
+/// re-render; the reference strength is ignored). Same payload predicate as the other edit gates (a
+/// `sourceAssetId` is required — an `edit_image` job with nothing to edit stays off candle), gated to
+/// `bernini_image` by the caller. Unlike Ideogram/Boogu (which edit on their SAME txt2img engine in the
+/// generic stream), Bernini has a DEDICATED worker stream (`generate_candle_bernini_image_stream`,
+/// `frames:1`) — but the routing predicate is identical. The exact candle twin of the MLX
+/// `bernini_image_mlx_eligible` (mlx.rs).
+pub(crate) fn bernini_image_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 /// SDXL IP-Adapter-Plus candle-routing conditions (sc-5488, epic 5480). The candle `IpAdapterSdxl`

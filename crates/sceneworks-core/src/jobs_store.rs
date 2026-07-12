@@ -3539,11 +3539,13 @@ mod candle_routing_tests {
 
     #[test]
     fn non_candle_families_and_variants_are_never_candle_eligible() {
-        // A family with no candle provider at all (`bernini_image`) AND the still-unwired weight/shape
-        // variants of wired families (edit ids) all stay on the Python torch worker.
+        // A family with no candle provider at all (`sana_1600m` — MLX-only) AND the still-unwired
+        // weight/shape variants of wired families (edit ids) all stay on the Python torch worker.
         // (chroma / kolors / sensenova ARE candle-routed now — sc-5484 / sc-5576 — for txt2img; the
-        // FLUX.2-klein `_kv` / `_true_v2` weight variants are too — sc-7459 — see the dedicated test below.)
-        for model in ["bernini_image", "z_image_edit", "qwen_image_edit"] {
+        // FLUX.2-klein `_kv` / `_true_v2` weight variants are too — sc-7459 — see the dedicated test below.
+        // `bernini_image` is now candle-routed off-Mac too — sc-10996 — see `bernini_candle_txt2img_and_\
+        // i2i_route_to_candle` below.)
+        for model in ["sana_1600m", "z_image_edit", "qwen_image_edit"] {
             assert!(
                 !image_request_candle_eligible(model, &object(json!({ "prompt": "p" }))),
                 "{model} must fall back to the Python worker"
@@ -3677,6 +3679,55 @@ mod candle_routing_tests {
                 &object(json!({ "referenceAssetId": "a" }))
             ));
         }
+    }
+
+    #[test]
+    fn bernini_candle_txt2img_and_i2i_route_to_candle() {
+        // sc-10996 (epic 6562): the candle parity of the MLX `bernini_image` still lane. `bernini_image`
+        // is in `CANDLE_ROUTED_MODELS`, so plain t2i routes to candle via the generic
+        // `image_request_candle_eligible` gate; i2i (`edit_image` + a `sourceAssetId`) routes via the
+        // bespoke `bernini_image_edit_candle_eligible` branch in `image_job_is_candle_eligible` (the
+        // dedicated `generate_candle_bernini_image_stream` worker lane, `frames:1`). Mirrors the MLX
+        // `bernini_image_mlx_eligible` predicate exactly.
+        //
+        // Plain t2i → the generic gate.
+        assert!(
+            image_request_candle_eligible(
+                "bernini_image",
+                &object(json!({ "prompt": "a marble bust" }))
+            ),
+            "bernini_image plain t2i must be candle-eligible"
+        );
+        assert!(image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "bernini_image", "prompt": "a marble bust"
+        }))));
+        // i2i → the bespoke edit branch (needs a source).
+        let i2i =
+            json!({ "model": "bernini_image", "mode": "edit_image", "sourceAssetId": "asset_1" });
+        assert!(bernini_image_edit_candle_eligible(&object(i2i.clone())));
+        assert!(
+            image_job_is_candle_eligible(&image_edit_job(i2i.clone())),
+            "bernini_image i2i job must route to candle"
+        );
+        // The generic txt2img gate still rejects the edit_image family (the bespoke lane handles it).
+        assert!(!image_request_candle_eligible(
+            "bernini_image",
+            &object(i2i)
+        ));
+        // `edit_image` WITHOUT a source → nothing to edit → not this lane (mirrors `bernini_image_mlx_eligible`).
+        assert!(!bernini_image_edit_candle_eligible(&object(json!({
+            "model": "bernini_image", "mode": "edit_image"
+        }))));
+        assert!(!image_job_is_candle_eligible(&image_edit_job(json!({
+            "model": "bernini_image", "mode": "edit_image"
+        }))));
+        // NOT `candle_quant` (sc-10996): the off-Mac packed-tier select is deferred (sc-11003), so an
+        // explicit `mlxQuantize` request defers to torch rather than staying on candle — the descriptor
+        // advertises Q4/Q8 but no consumable off-Mac tier exists yet.
+        assert!(!image_request_candle_eligible(
+            "bernini_image",
+            &object(json!({ "prompt": "a marble bust", "advanced": { "mlxQuantize": 8 } }))
+        ));
     }
 
     #[test]
@@ -4039,6 +4090,9 @@ mod candle_routing_tests {
             "kolors",
             "sensenova_u1_8b",
             "sensenova_u1_8b_fast",
+            // sc-10996 (epic 6562): the candle Bernini still-image companion routes to candle for plain
+            // t2i (the dedicated `generate_candle_bernini_image_stream` lane, `frames:1`).
+            "bernini_image",
         ] {
             assert!(
                 worker_supports_job(
@@ -4048,11 +4102,11 @@ mod candle_routing_tests {
                 "candle worker should claim {model} plain txt2img"
             );
         }
-        // Refuses a family with no candle provider, and a conditioning shape on a wired family —
-        // both defer to torch.
+        // Refuses a family with no candle provider (`sana_1600m` — MLX-only, candle_routed=false), and a
+        // conditioning shape on a wired family — both defer to torch.
         assert!(!worker_supports_job(
             &candle,
-            &image_generate_job(json!({ "model": "bernini_image", "prompt": "p" }))
+            &image_generate_job(json!({ "model": "sana_1600m", "prompt": "p" }))
         ));
         assert!(!worker_supports_job(
             &candle,
@@ -4209,10 +4263,11 @@ mod candle_routing_tests {
         // the candle worker now owns-to-reject (sc-5968, asserted at the end of this test): torch
         // declines those so it can't silently render an unconditioned T2I image.
         let torch = gpu_worker(TORCH_CAPS);
-        // A family with no candle provider, and a conditioning shape on a wired family.
+        // A family with no candle provider (`sana_1600m` — MLX-only, candle_routed=false; `bernini_image`
+        // is now candle-routed off-Mac, sc-10996), and a conditioning shape on a wired family.
         assert!(worker_supports_job(
             &torch,
-            &image_generate_job(json!({ "model": "bernini_image", "prompt": "p" }))
+            &image_generate_job(json!({ "model": "sana_1600m", "prompt": "p" }))
         ));
         assert!(worker_supports_job(
             &torch,

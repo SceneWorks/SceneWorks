@@ -37,8 +37,12 @@ fn bernini_image_available(request: &ImageRequest, settings: &Settings) -> bool 
 
 /// The Bernini engine task string for a SceneWorks image mode: `edit_image` → `i2i` (source-image
 /// edit), everything else → `t2i` (text→image). Selects the engine guidance/conditioning path
-/// (`resolve_vit_mode`/`task_to_vit_mode`); both still tasks resolve to `vae_txt_vit_wapg`.
-#[cfg(target_os = "macos")]
+/// (`resolve_vit_mode`/`task_to_vit_mode`); both still tasks resolve to `vae_txt_vit_wapg`. Shared by
+/// the MLX and candle (sc-10996) still lanes — the engine task string is backend-neutral.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn bernini_image_engine_task(mode: &str) -> &'static str {
     if mode == "edit_image" {
         "i2i"
@@ -65,10 +69,15 @@ fn resolve_bernini_image_quant(request: &ImageRequest) -> (Option<Quant>, Option
     }
 }
 
-/// Flat telemetry for a real MLX Bernini image generation (parity with the other edit handlers +
+/// Flat telemetry for a real Bernini image generation (parity with the other edit handlers +
 /// `bernini_raw_settings`). Records the engine task so the lineage shows whether the planner ran t2i
-/// or i2i, plus the standard repo/steps/guidance/quant knobs.
-#[cfg(target_os = "macos")]
+/// or i2i, plus the standard repo/steps/guidance/quant knobs. Shared by the MLX and candle (sc-10996)
+/// still lanes — the recorded knobs are backend-neutral (the candle lane records `candle` in `backend`
+/// and `editEngine` stays `bernini`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn bernini_image_raw_settings(
     request: &ImageRequest,
     repo: &str,
@@ -99,7 +108,10 @@ fn bernini_image_raw_settings(
 /// shared `conditioning`. Standard guidance family (`guidance` carries the CFG scale, negative prompt
 /// forwarded); no LoRA.
 #[allow(clippy::too_many_arguments)]
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn bernini_image_generate_one(
     generator: &dyn Generator,
     prompt: &str,
@@ -271,6 +283,213 @@ async fn generate_bernini_image_stream(
         project_path,
         backend,
         BERNINI_IMAGE_ADAPTER,
+        &raw_settings,
+        count,
+        rx,
+        cancel,
+        blocking,
+        asset_writes,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Candle (Windows/CUDA) Bernini still-image lane (sc-10996, epic 6562)
+//
+// The off-Mac sibling of `generate_bernini_image_stream` above: the full candle Bernini planner+renderer
+// `Generator` (candle-gen-bernini, engine id `bernini`, `Modality::Video`) is reached via
+// `gen_core::load("bernini")` with `frames:1` + `video_mode:"t2i"|"i2i"` so it returns a SINGLE still —
+// exactly the MLX shape, only the tensor backend + weights snapshot differ. Not `is_candle_engine` (the
+// engine is video-modality), so it rides this dedicated stream rather than the generic
+// `generate_candle_stream` txt2img lane. Shares the neutral harness (`load_spec` /
+// `start_cached_gen_stream` / `drive_gen_items` / `bernini_image_generate_one` / `consume_gen_events`)
+// and the backend-neutral resolvers (`resolve_steps` / `resolve_guidance` / `resolve_negative_prompt`)
+// with the MLX path. GPU-val is BLOCKED on the converted `SceneWorks/bernini-candle` weights (sc-11003,
+// the 168 GB conversion, not yet published), so this delivers routing + lane wiring; a missing snapshot
+// fails loud at load (never a silent stub).
+// ---------------------------------------------------------------------------
+
+/// Adapter id recorded on a real candle Bernini image asset — the `candle_<family>` sibling of the MLX
+/// `mlx_bernini` label (parity with `candle_adapter_label`, though Bernini's bespoke stream passes it
+/// directly rather than through that generic map).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_BERNINI_IMAGE_ADAPTER: &str = "candle_bernini";
+
+/// The turnkey candle Bernini snapshot repo (sc-11003): the converted full-Bernini tree (`transformer/`
+/// `transformer_2/` `text_encoder/` `vae/` `tokenizer/` `mllm/` `connector/` `vit_decoder/`) the
+/// `candle-gen-bernini` `load` reads. Distinct from the MLX `SceneWorks/bernini-mlx` turnkey (different
+/// tensor layout). NOT yet published — GPU-val is blocked on it (sc-11003).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_BERNINI_REPO: &str = "SceneWorks/bernini-candle";
+
+/// True when this is a candle Bernini still-image job: the `bernini_image` id. Routed on the model id
+/// alone (like the sdxl candle txt2img arm) — NOT weight-gated — so a missing snapshot fails loud at
+/// load rather than silently stubbing, and the routing decision needs no staged 168 GB weights. Both
+/// t2i and i2i (`edit_image`) route here; the stream enforces the i2i source (`sourceAssetId`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn bernini_image_candle_available(request: &ImageRequest) -> bool {
+    request.model == "bernini_image"
+}
+
+/// Resolve the candle Bernini snapshot dir: `SCENEWORKS_CANDLE_BERNINI_DIR` override → app-managed
+/// `<data>/models/candle/bernini` → the turnkey `SceneWorks/bernini-candle` HF snapshot. Sentinel = the
+/// `transformer/` subdir (the converted renderer's first DiT expert; the `candle-gen-bernini` `load`
+/// validates the full component set and reports the precise gap). Errors loudly when absent — like the
+/// candle SCAIL-2 / Wan-VACE resolvers, a missing checkpoint surfaces a clear re-download error instead
+/// of degrading to a stub. The candle sibling of the MLX `resolve_bernini_model_dir` (video_jobs.rs).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_candle_bernini_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
+    if let Ok(dir) = std::env::var("SCENEWORKS_CANDLE_BERNINI_DIR") {
+        let path = PathBuf::from(dir.trim());
+        if path.join("transformer").is_dir() {
+            return Ok(path);
+        }
+    }
+    let managed = settings
+        .data_dir
+        .join("models")
+        .join("candle")
+        .join("bernini");
+    if managed.join("transformer").is_dir() {
+        return Ok(managed);
+    }
+    if let Some(dir) = huggingface_snapshot_dir(&settings.data_dir, CANDLE_BERNINI_REPO) {
+        return Ok(dir);
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "bernini (candle): no weights found. Download the turnkey {CANDLE_BERNINI_REPO} snapshot via \
+         the Model Manager, set $SCENEWORKS_CANDLE_BERNINI_DIR, or place a converted full-Bernini \
+         snapshot (transformer/ + transformer_2/ + text_encoder/ + vae/ + tokenizer/ + mllm/ + \
+         connector/ + vit_decoder/) at {}.",
+        managed.display(),
+    )))
+}
+
+/// Real candle Bernini still-image generation (sc-10996, epic 6562): the off-Mac sibling of
+/// [`generate_bernini_image_stream`]. Loads the full candle planner+renderer once from the converted
+/// `SceneWorks/bernini-candle` snapshot (dense — the candle loader reads the converted tree as-is), then
+/// one image per seed: t2i from the prompt alone, or i2i conditioned on the `sourceAssetId` source (the
+/// engine ViT/VAE-encodes it at native resolution, no worker-side fit). Forces `frames:1` + the engine
+/// task string so the video-modality engine returns a single still. Standard guidance family (no LoRA;
+/// the descriptor reports `supports_lora:false`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn generate_candle_bernini_image_stream(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    _device_backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    let request = &plan.request;
+    // Join the MODEL_TABLE `bernini_image` row with the linked candle `bernini` descriptor (the same
+    // backend-neutral resolver the MLX path + `generate_candle_stream` use). `None` means the candle
+    // provider crate wasn't linked/registered — fail loud rather than silently stubbing.
+    let model = mlx_model(&request.model).ok_or_else(|| {
+        WorkerError::Engine(format!(
+            "candle backend not linked for model {} (no registered generator)",
+            request.model
+        ))
+    })?;
+    let engine_id = model.engine_id();
+    // Report the descriptor's tensor backend ("candle") on the streamed events (parity with
+    // `generate_candle_stream`), so the worker log + the UI architecture pill attribute the run to Candle.
+    let backend = if model.backend().is_empty() {
+        "candle"
+    } else {
+        model.backend()
+    };
+    let weights_dir = resolve_candle_bernini_model_dir(settings)?;
+    let steps = resolve_steps(request, &model);
+    // Standard guidance family: `guidance` carries the CFG scale (engine `omega_txt`); the negative
+    // prompt is forwarded (the descriptor advertises both). No true-CFG.
+    let guidance = resolve_guidance(request, &model);
+    let negative_prompt = resolve_negative_prompt(request, &model);
+    let repo = model_repo(request, &model);
+    let task = bernini_image_engine_task(&request.mode);
+    // Requested tier bits (advanced `mlxQuantize`) recorded for lineage only — the candle lane loads the
+    // converted snapshot DENSE (the loader reads the tree as-is; the descriptor advertises Q4/Q8 but the
+    // off-Mac packed-tier select is a follow-up once the `bernini-candle` tier layout lands, sc-11003).
+    let tier_bits = request
+        .advanced
+        .get("mlxQuantize")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+
+    // i2i (`edit_image`): resolve the source image into the engine's `Conditioning::Reference` (the
+    // engine ViT/VAE-encodes it at native resolution, no worker-side fit, and ignores the reference
+    // strength — a planner-guided structural re-render). t2i has no conditioning. The routing gate
+    // (`bernini_image_edit_candle_eligible`) already requires a `sourceAssetId` for `edit_image`, so
+    // this is defense in depth. Mirrors the MLX path exactly.
+    let conditioning: Vec<Conditioning> = if task == "i2i" {
+        let source_id = request
+            .source_asset_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "bernini_image edit_image requires a source image (sourceAssetId).".to_owned(),
+                )
+            })?;
+        let image = load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            source_id,
+            project_path,
+        )?;
+        vec![Conditioning::Reference {
+            image,
+            strength: None,
+        }]
+    } else {
+        Vec::new()
+    };
+
+    let raw_settings =
+        bernini_image_raw_settings(request, &repo, steps, tier_bits, guidance, task);
+    let count = request.count as usize;
+    let seeds: Vec<i64> = (0..count).map(|index| resolve_seed(request, index)).collect();
+    let prompt = request.prompt.clone();
+    let (width, height) = (request.width, request.height);
+
+    // Dense load (quant None): the converted snapshot is read as-is by the candle loader.
+    let spec = load_spec(weights_dir, None, Vec::new(), None);
+    let (cancel, rx, blocking) = start_cached_gen_stream(
+        job.id.clone(),
+        engine_id,
+        0,
+        spec,
+        format!("{engine_id} load failed"),
+        move |generator, tx, cancel| {
+            drive_gen_items(tx, seeds, move |_index, seed, on_progress| {
+                let (out_w, out_h, pixels) = bernini_image_generate_one(
+                    generator,
+                    &prompt,
+                    negative_prompt.clone(),
+                    width,
+                    height,
+                    seed,
+                    steps,
+                    guidance,
+                    task,
+                    conditioning.clone(),
+                    &cancel,
+                    on_progress,
+                )?;
+                Ok(Some((seed, out_w, out_h, pixels)))
+            })
+        },
+    );
+
+    consume_gen_events(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        backend,
+        CANDLE_BERNINI_IMAGE_ADAPTER,
         &raw_settings,
         count,
         rx,
