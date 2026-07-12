@@ -6034,3 +6034,111 @@ fn mlx_worker_refuses_anima_edit_image_jobs() {
         "an Anima edit_image job must not be claimed by the mlx worker"
     );
 }
+
+/// sc-11202 / F-025 — the store now keeps ONE long-lived write connection behind
+/// its mutex instead of opening a fresh one per op. This drives many sequential
+/// claim → heartbeat → progress round-trips through that single connection and
+/// asserts every op stays correct (jobs claimed once, progressed, and completed;
+/// the worker returns to idle). It also confirms WAL is established on the shared
+/// db file (a fresh reader sees `journal_mode = wal`), proving the long-lived
+/// connection preserves the concurrency contract the per-op opener guaranteed.
+#[test]
+fn long_lived_connection_survives_many_sequential_ops() {
+    let path = temp_db("long-lived-sequential");
+    let store = JobsStore::new(path.clone());
+    store.initialize().expect("store initializes");
+    register_image_worker(&store);
+
+    const OPS: usize = 40;
+    for i in 0..OPS {
+        let job = store
+            .create_job(image_job(object(json!({ "prompt": format!("seq-{i}") }))))
+            .expect("job creates");
+
+        let claimed = store
+            .claim_next_job("worker-1")
+            .expect("claim ok")
+            .expect("worker claims the queued job");
+        assert_eq!(
+            claimed.id, job.id,
+            "op {i}: the just-created job is claimed"
+        );
+
+        // Heartbeat mid-run (a hot-path write on the long-lived connection).
+        store
+            .heartbeat_worker(WorkerHeartbeat {
+                worker_id: "worker-1".to_owned(),
+                status: WorkerStatus::Busy,
+                current_job_id: Some(job.id.clone()),
+                loaded_models: Vec::new(),
+                utilization: None,
+            })
+            .expect("heartbeat ok");
+
+        // A running progress update, then terminal completion.
+        let running = store
+            .update_job_progress(
+                &job.id,
+                ProgressUpdate {
+                    status: JobStatus::Running,
+                    stage: ProgressStage::Running,
+                    progress: 0.5,
+                    message: "halfway".to_owned(),
+                    error: None,
+                    result: None,
+                    eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
+                    backend: None,
+                    worker_id: Some("worker-1".to_owned()),
+                },
+            )
+            .expect("running progress ok");
+        assert_eq!(running.status, JobStatus::Running, "op {i}: job is running");
+
+        let done = store
+            .update_job_progress(
+                &job.id,
+                ProgressUpdate {
+                    status: JobStatus::Completed,
+                    stage: ProgressStage::Completed,
+                    progress: 1.0,
+                    message: "done".to_owned(),
+                    error: None,
+                    result: None,
+                    eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
+                    backend: None,
+                    worker_id: Some("worker-1".to_owned()),
+                },
+            )
+            .expect("completion ok");
+        assert_eq!(done.status, JobStatus::Completed, "op {i}: job completed");
+    }
+
+    // Every job ran exactly once and finished: no queued/running leftovers, and
+    // the worker is idle again.
+    let summary = store.queue_summary().expect("queue summary");
+    assert!(
+        summary.active_jobs.is_empty(),
+        "no active jobs remain after {OPS} sequential round-trips: {:?}",
+        summary.active_jobs
+    );
+    let worker = store.get_worker("worker-1").expect("worker read");
+    assert_eq!(worker.status, WorkerStatus::Idle, "worker idle at the end");
+    assert!(
+        worker.current_job_id.is_none(),
+        "worker holds no job at the end"
+    );
+
+    // WAL is established on the shared db file — a fresh independent reader sees it.
+    let reader = Connection::open(&path).expect("reader opens");
+    let journal_mode: String = reader
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .expect("journal_mode reads");
+    assert_eq!(
+        journal_mode, "wal",
+        "WAL journal mode persisted on the db file"
+    );
+}

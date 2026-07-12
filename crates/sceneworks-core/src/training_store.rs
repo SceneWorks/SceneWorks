@@ -9,7 +9,7 @@ use crate::dataset_quality::{
     caption_hash, CachedTier0Scalars, DatasetEmbeddings, DatasetFaceRecords, QualityAck,
     QualityCheck,
 };
-use crate::project_store::{apply_project_migrations, ProjectStoreError, ProjectStoreResult};
+use crate::project_store::{connect_project_db_migrated, ProjectStoreError, ProjectStoreResult};
 use crate::store_util::{
     atomic_write, ensure_column, is_safe_id, is_safe_relative_path, parse_string_enum, random_hex,
     read_json, relative_string, write_json,
@@ -1266,7 +1266,7 @@ fn resolve_asset_source(
     if !is_safe_id(asset_id) {
         return Err(ProjectStoreError::BadRequest("Invalid asset ID".to_owned()));
     }
-    let connection = Connection::open(project_path.join("project.db"))?;
+    let connection = connect_project_db_migrated(project_path)?;
     let (file_path, sidecar_path): (String, Option<String>) = connection
         .query_row(
             "select file_path, sidecar_path from assets where id = ?1",
@@ -1371,10 +1371,11 @@ fn ensure_dataset_project(project_id: &str, dataset: &TrainingDataset) -> Projec
 }
 
 pub fn ensure_training_dataset_table(project_path: &Path) -> ProjectStoreResult<()> {
-    let connection = Connection::open(project_path.join("project.db"))?;
-    // Route through the version-gated comprehensive migration so the training
-    // path stops replaying DDL on every call (the table is created either way).
-    apply_project_migrations(&connection)
+    // Route through the shared helper: it applies the version-gated comprehensive
+    // migration (so the training path stops replaying DDL on every call — the
+    // table is created either way) AND sets the same busy_timeout as every other
+    // opener (sc-11202 / F-026).
+    connect_project_db_migrated(project_path).map(|_| ())
 }
 
 pub fn apply_training_dataset_migrations(connection: &Connection) -> ProjectStoreResult<()> {
@@ -1406,7 +1407,7 @@ fn list_dataset_summaries_from_index(
     project_path: &Path,
     project_id: &str,
 ) -> ProjectStoreResult<Vec<TrainingDatasetSummary>> {
-    let connection = Connection::open(project_path.join("project.db"))?;
+    let connection = connect_project_db_migrated(project_path)?;
     let mut statement = connection.prepare(
         "
         select id, project_id, name, modality, status, version, item_count, created_at, updated_at, file_path, character_id
@@ -1480,7 +1481,7 @@ fn index_dataset(
 ) -> ProjectStoreResult<()> {
     ensure_training_dataset_table(project_path)?;
     let rel_path = relative_string(project_path, manifest_path)?;
-    let connection = Connection::open(project_path.join("project.db"))?;
+    let connection = connect_project_db_migrated(project_path)?;
     connection.execute(
         "
         insert or replace into training_datasets (
@@ -1506,7 +1507,7 @@ fn index_dataset(
 
 fn remove_dataset_index(project_path: &Path, dataset_id: &str) -> ProjectStoreResult<()> {
     ensure_training_dataset_table(project_path)?;
-    let connection = Connection::open(project_path.join("project.db"))?;
+    let connection = connect_project_db_migrated(project_path)?;
     connection.execute(
         "delete from training_datasets where id = ?1",
         params![dataset_id],
@@ -2262,5 +2263,44 @@ mod tests {
 
         // Metadata write: the dataset version is untouched (the pixels didn't change).
         assert_eq!(store.get_dataset("proj", "ds_test").unwrap().version, 1);
+    }
+
+    /// sc-11202 / F-026: the training path's project.db openers were raw
+    /// `Connection::open` with no `busy_timeout` (so concurrent worker+API access
+    /// got an immediate `SQLITE_BUSY` instead of waiting) and `resolve_asset_source`
+    /// skipped migrations. They now route through the shared
+    /// `connect_project_db_migrated` helper. This pins that a connection from that
+    /// helper carries the same 5s `busy_timeout` every other opener sets AND that
+    /// migrations ran (the `training_datasets` table exists), so the training path
+    /// no longer differs from the rest of the store.
+    #[test]
+    fn training_path_connection_has_busy_timeout_and_runs_migrations() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let project_path = dir.path();
+
+        let connection = connect_project_db_migrated(project_path).expect("project.db opens");
+
+        let busy_timeout: i64 = connection
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .expect("busy_timeout pragma reads");
+        assert_eq!(
+            busy_timeout, 5000,
+            "training-path project.db connections get the shared 5s busy_timeout"
+        );
+
+        // Migrations ran: the comprehensive migration creates `training_datasets`,
+        // which the old raw-open `resolve_asset_source` path never guaranteed.
+        let table_count: i64 = connection
+            .query_row(
+                "select count(*) from sqlite_master \
+                 where type = 'table' and name = 'training_datasets'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("schema probe query");
+        assert_eq!(
+            table_count, 1,
+            "connect_project_db_migrated applied the project migrations"
+        );
     }
 }
