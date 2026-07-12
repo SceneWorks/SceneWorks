@@ -78,6 +78,56 @@ fn render_and_save_writes_png_and_contract_fact() {
     );
 }
 
+/// F-003 / sc-11159: a path-traversal / absolute model id in the payload must NOT let the
+/// written PNG escape the project dir. The model id becomes a filename component, so a `../`,
+/// `..\`, or `/abs` id would otherwise land the asset (and its `create_dir_all` + rename)
+/// outside `project_path`. Assert the resolved media path stays confined for each vector.
+#[test]
+fn write_image_asset_confines_malicious_model_id() {
+    for evil in [
+        "../../../../etc/passwd",
+        "..\\..\\..\\windows\\system32\\evil",
+        "/etc/cron.d/pwn",
+        "sub/dir/model",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path();
+        std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+        let req = request(json!({
+            "projectId": "p", "model": evil, "prompt": "Mist over hills",
+            "count": 1, "width": 256, "height": 256, "seed": 1
+        }));
+        let plan = ImagePlan::new(&req);
+        let pixels = stub_rgb8(req.width, req.height, 1);
+        let fact = write_image_asset(
+            &plan,
+            0,
+            1,
+            req.width,
+            req.height,
+            pixels,
+            STUB_ADAPTER,
+            stub_raw_settings(&req),
+            project_path,
+        )
+        .unwrap();
+
+        let media_rel = fact.get("mediaPath").and_then(Value::as_str).unwrap();
+        // The sanitized model slug carries no separator, so the relative path is a single
+        // segment under `assets/images/<genset>/` and never contains `..`.
+        assert!(
+            !media_rel.contains(".."),
+            "media path must not contain `..` for model id {evil:?}: {media_rel}"
+        );
+        let resolved =
+            std::fs::canonicalize(project_path.join(media_rel)).expect("written asset resolves");
+        assert!(
+            resolved.starts_with(std::fs::canonicalize(project_path).unwrap()),
+            "written asset {resolved:?} escaped project dir for model id {evil:?}"
+        );
+    }
+}
+
 #[test]
 fn resolve_seed_matches_python_precedence() {
     // base seed wins (seed + index), even over an explicit seeds list.
@@ -4404,6 +4454,64 @@ fn inline_upscaled_asset_links_back_to_base_for_library_fold() {
         !fact.contains_key("upscaledFrom"),
         "the unread `upscaledFrom` field must not be written"
     );
+}
+
+/// F-003 / sc-11159: the upscaled variant builds its own `_up{factor}x.png` filename from the
+/// same payload model id, so it must be confined identically to the base PNG.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn write_upscaled_asset_confines_malicious_model_id() {
+    for evil in ["../../../../etc/passwd", "..\\..\\evil", "/abs/pwn"] {
+        let dir = tempfile::tempdir().unwrap();
+        let project_path = dir.path();
+        std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+        let req = request(json!({
+            "projectId": "p", "model": evil, "prompt": "Mist over hills",
+            "count": 1, "width": 256, "height": 256, "seed": 1
+        }));
+        let plan = ImagePlan::new(&req);
+        let pixels = stub_rgb8(req.width, req.height, 1);
+        let base_fact = write_image_asset(
+            &plan,
+            0,
+            1,
+            req.width,
+            req.height,
+            pixels,
+            STUB_ADAPTER,
+            stub_raw_settings(&req),
+            project_path,
+        )
+        .unwrap();
+
+        let upscaled =
+            image::RgbImage::from_pixel(req.width * 2, req.height * 2, image::Rgb([1, 2, 3]));
+        let fact = write_upscaled_asset(
+            &plan,
+            &base_fact,
+            &upscaled,
+            "seedvr2",
+            2,
+            0.5,
+            project_path,
+        )
+        .unwrap();
+
+        let media_rel = fact.get("mediaPath").and_then(Value::as_str).unwrap();
+        assert!(
+            !media_rel.contains(".."),
+            "upscaled media path must not contain `..` for model id {evil:?}: {media_rel}"
+        );
+        let resolved = std::fs::canonicalize(project_path.join(media_rel))
+            .expect("written upscaled asset resolves");
+        assert!(
+            resolved.starts_with(std::fs::canonicalize(project_path).unwrap()),
+            "upscaled asset {resolved:?} escaped project dir for model id {evil:?}"
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]

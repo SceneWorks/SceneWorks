@@ -11,9 +11,9 @@ use super::{
     parse_inprocess_utility_worker_count, safe_download_dir, seed_mode_for_config_dir,
     serialize_job_lora, should_warn_open_bind, strip_jsonc_comments,
     sweep_stale_asset_uploads_before, sweep_stale_lora_uploads_before, sweep_stale_uploads,
-    Settings, WorkerCapability, WorkerSnapshot, WorkerStatus, API_MANAGED_MANIFEST_HEADER,
-    DEFAULT_API_HOST, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA, HEARTBEAT_SSE_WIRE,
-    TEST_MAX_LORA_UPLOAD_BYTES,
+    validate_model_id, Settings, WorkerCapability, WorkerSnapshot, WorkerStatus,
+    API_MANAGED_MANIFEST_HEADER, DEFAULT_API_HOST, EVENT_BUFFER_SIZE, HEARTBEAT_SSE_DATA,
+    HEARTBEAT_SSE_WIRE, TEST_MAX_LORA_UPLOAD_BYTES,
 };
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -29,6 +29,82 @@ fn default_api_host_is_loopback() {
     // sc-4201 (F-API-1): an out-of-the-box bind must not expose the API to the LAN.
     let ip: std::net::IpAddr = DEFAULT_API_HOST.parse().expect("default host parses");
     assert!(ip.is_loopback(), "default API host must be loopback");
+}
+
+/// F-003 / sc-11159: the enqueue gate must reject a path-unsafe `model` id (traversal /
+/// separators / absolute), since it flows verbatim into the worker's asset filename. A
+/// plain single-component id — including an uncatalogued one the stub lane serves — is
+/// accepted (path-safety only, not catalog membership).
+#[test]
+fn validate_model_id_rejects_traversal_and_separators() {
+    // Path-unsafe ids are rejected.
+    for evil in [
+        "../../../../etc/passwd",
+        "..\\..\\..\\windows\\system32",
+        "/etc/cron.d/pwn",
+        "a/b",
+        "a\\b",
+        "..",
+        ".",
+        "",
+        "   ",
+    ] {
+        assert!(
+            validate_model_id(evil).is_err(),
+            "expected {evil:?} to be rejected as an unsafe model id"
+        );
+    }
+    // Legitimate single-component ids (incl. uncatalogued stub-lane ids) are accepted.
+    for ok in [
+        "z_image_turbo",
+        "ltx_2_3",
+        "ideogram_4",
+        "vid-model",
+        "external_base_my-comfy-model",
+        "unknown_stub_model",
+    ] {
+        assert!(
+            validate_model_id(ok).is_ok(),
+            "expected {ok:?} to be accepted as a safe model id"
+        );
+    }
+}
+
+/// F-003 / sc-11159: a path-traversal `model` id is rejected at the POST boundary for BOTH
+/// the image and video enqueue lanes (before any job is created), closing the remote
+/// arbitrary-write primitive the worker filename builders would otherwise expose.
+#[tokio::test]
+async fn image_and_video_jobs_reject_path_unsafe_model_id() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    for (endpoint, mode) in [
+        ("/api/v1/image/jobs", "text_to_image"),
+        ("/api/v1/video/jobs", "text_to_video"),
+    ] {
+        for evil in ["../../../../etc/passwd", "..\\..\\evil", "/abs/pwn", "a/b"] {
+            let (status, body) = request(
+                app.clone(),
+                "POST",
+                endpoint,
+                json!({
+                    "projectId": "project-1",
+                    "mode": mode,
+                    "prompt": "a fox",
+                    "model": evil,
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{endpoint} {evil:?}");
+            assert!(
+                body["detail"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("model must be a plain model id"),
+                "{endpoint} {evil:?}: unexpected error {body}"
+            );
+        }
+    }
 }
 
 #[test]
