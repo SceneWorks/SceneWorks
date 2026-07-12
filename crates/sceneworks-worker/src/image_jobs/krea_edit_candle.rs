@@ -15,12 +15,16 @@
 // `resolve_advanced_or_manifest_u32`/`start_gen_stream`/`drive_gen_items`/`consume_gen_events`/`non_empty`/
 // `gen_core`/`AdapterSpec`/… all in scope).
 //
-// Edit is Krea 2 **Raw** only (the full-CFG variant the `krea2_identity_edit` LoRA targets; Turbo has no
-// validated edit recipe). One or two references in fixed order — scene = image 1, person = image 2
-// ([`KREA_EDIT_CANDLE_MAX_REFERENCES`]).
+// Both Krea image variants edit: **Raw** on the full-CFG loop (epic 10871) and **Turbo** on the CFG-free
+// distilled few-step loop (`render_edit(distilled = true)`, sc-11640 — the fast-path); the same
+// `krea2_identity_edit` LoRA drives both (family match, no base gating). One or two references in fixed
+// order — scene = image 1, person = image 2 ([`KREA_EDIT_CANDLE_MAX_REFERENCES`]).
 
 /// Krea edit denoise steps default — Raw undistilled, full-CFG (mirrors `candle_gen_krea` `RAW_STEPS`).
 const KREA_EDIT_CANDLE_DEFAULT_STEPS: u32 = 52;
+/// Krea Turbo edit denoise steps default — the distilled CFG-free few-step student (sc-11640; mirrors
+/// `candle_gen_krea` `TURBO_STEPS`).
+const KREA_EDIT_CANDLE_TURBO_STEPS: u32 = 8;
 /// Raw full-CFG guidance default (mirrors `candle_gen_krea` `RAW_GUIDANCE`).
 const KREA_EDIT_CANDLE_DEFAULT_GUIDANCE: f32 = 3.5;
 /// The adapter/engine id recorded on candle Krea edit assets + telemetry (distinct from the `candle_krea`
@@ -72,13 +76,20 @@ fn krea_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
     Vec::new()
 }
 
-/// True when this is a Krea edit job: `krea_2_raw` + `edit_image` mode + at least one source reference.
-/// Mirrors the core router's `krea_edit_candle_eligible` + the macOS `krea_edit_available` (minus the
-/// weight-resolve check).
+/// True when this is a Krea edit job: `krea_2_raw` / `krea_2_turbo` + `edit_image` mode + at least one
+/// source reference. Both Krea image variants edit — Raw on the full-CFG loop, Turbo on the CFG-free
+/// distilled few-step loop (sc-11640). Mirrors the core router's `krea_edit_candle_eligible` (gated to the
+/// two models by its caller) + the macOS `krea_edit_available` (minus the weight-resolve check).
 fn krea_edit_candle_mode(request: &ImageRequest) -> bool {
-    request.model == "krea_2_raw"
+    matches!(request.model.as_str(), "krea_2_raw" | "krea_2_turbo")
         && request.mode == "edit_image"
         && !krea_edit_candle_reference_ids(request).is_empty()
+}
+
+/// Whether this Krea edit runs the distilled CFG-free Turbo recipe (`krea_2_turbo` — few-step
+/// `turbo_schedule`, guidance forced to 0) rather than the undistilled full-CFG Raw loop (sc-11640).
+fn krea_edit_candle_distilled(request: &ImageRequest) -> bool {
+    request.model == "krea_2_turbo"
 }
 
 /// True when this is a candle-eligible Krea edit job whose Raw weights resolve locally. Mirrors
@@ -89,9 +100,15 @@ fn krea_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bo
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
-/// Resolve denoise steps: `advanced.steps` (clamped 1..=100) → manifest `steps` → the Raw default (52).
+/// Resolve denoise steps: `advanced.steps` (clamped 1..=100) → manifest `steps` → the per-variant default
+/// (Raw 52 / Turbo 8, sc-11640).
 fn krea_edit_candle_steps(request: &ImageRequest) -> u32 {
-    resolve_advanced_or_manifest_u32(request, "steps", KREA_EDIT_CANDLE_DEFAULT_STEPS, 1..=100)
+    let default = if krea_edit_candle_distilled(request) {
+        KREA_EDIT_CANDLE_TURBO_STEPS
+    } else {
+        KREA_EDIT_CANDLE_DEFAULT_STEPS
+    };
+    resolve_advanced_or_manifest_u32(request, "steps", default, 1..=100)
 }
 
 /// Resolve guidance: `advanced.guidanceScale` → manifest `guidanceScale` → the Raw default (3.5).
@@ -195,7 +212,14 @@ async fn generate_candle_krea_edit_stream(
     }
 
     let steps = krea_edit_candle_steps(request);
-    let guidance = krea_edit_candle_guidance(request);
+    // Turbo edit is CFG-free — `render_edit(distilled = true)` forces guidance 0 and runs the few-step
+    // `turbo_schedule`; Raw honors the resolved guidance on the full-CFG loop (sc-11640).
+    let distilled = krea_edit_candle_distilled(request);
+    let guidance = if distilled {
+        0.0
+    } else {
+        krea_edit_candle_guidance(request)
+    };
     let negative = request.negative_prompt.clone();
     // The selected LoRAs → adapter specs (the edit LoRA + any user LoRAs), folded into the DiT at load.
     let adapters = resolve_adapters(request, settings)?;
@@ -275,6 +299,7 @@ async fn generate_candle_krea_edit_stream(
                     &edit,
                     &req,
                     &references,
+                    distilled,
                     &device,
                     &mut *on_progress,
                 );

@@ -142,12 +142,13 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if model == "boogu_image_edit" && boogu_edit_candle_eligible(&job.payload) {
         return true;
     }
-    // Krea 2 Kontext-style dual-conditioned image-edit (epic 10871): a `krea_2_raw` `edit_image` job with
-    // a source image is the bespoke candle `KreaEdit` lane (`generate_candle_krea_edit_stream`), NOT
-    // txt2img — `krea_2_raw` is MLX-only for t2i (not a candle txt2img id), so an off-Mac Krea edit would
-    // otherwise fall through to torch. Branch it out here (disjoint from the Krea control lane below,
-    // which is `krea_2_turbo` + `advanced.poses`). Mirrors the worker's `krea_edit_candle_available`.
-    if model == "krea_2_raw" && krea_edit_candle_eligible(&job.payload) {
+    // Krea 2 Kontext-style dual-conditioned image-edit (epic 10871 Raw + sc-11640 Turbo): a `krea_2_raw` /
+    // `krea_2_turbo` `edit_image` job with a source image is the bespoke candle `KreaEdit` lane
+    // (`generate_candle_krea_edit_stream`), NOT txt2img — Raw runs the full-CFG loop, Turbo the CFG-free
+    // distilled few-step loop (`render_edit(distilled)`). Branch it out here (disjoint from the Krea control
+    // lane below, which is `krea_2_turbo` + `advanced.poses`). Mirrors the worker's
+    // `krea_edit_candle_available`.
+    if matches!(model, "krea_2_raw" | "krea_2_turbo") && krea_edit_candle_eligible(&job.payload) {
         return true;
     }
     // Bernini still-image i2i (sc-10996, epic 6562): a `bernini_image` `edit_image` job with a source

@@ -6318,32 +6318,47 @@ mod mlx_routing_tests {
     }
 
     #[test]
-    fn krea_2_turbo_text_to_image_routes_to_mlx() {
-        // sc-7572: Krea 2 Turbo has a native `mlx-gen-krea` text-to-image engine and should not be
-        // hidden by the Mac model-card gating. It is T2I-only, so edit remains ineligible.
+    fn krea_2_turbo_text_to_image_and_edit_route_to_mlx() {
+        // sc-7572: Krea 2 Turbo has a native `mlx-gen-krea` text-to-image engine. sc-11640: it ALSO serves
+        // the Kontext-style edit surface on the CFG-free distilled few-step recipe (`krea_2_turbo_edit`) —
+        // the fast-path counterpart to the ~52-step Raw edit — so an `edit_image` job WITH a source routes
+        // to the edit lane and `features.edit` flips true, exactly like Raw. Without a source it is rejected.
         assert!(image_request_mlx_eligible(
             "krea_2_turbo",
             &object(json!({ "model": "krea_2_turbo", "prompt": "cinematic editorial portrait" }))
         ));
         assert!(image_request_mlx_eligible("krea_2_turbo", &Map::new()));
-        assert!(!image_request_mlx_eligible(
-            "krea_2_turbo",
-            &object(
-                json!({ "model": "krea_2_turbo", "mode": "edit_image", "sourceAssetId": "asset_1" })
-            )
-        ));
+        assert!(
+            image_request_mlx_eligible(
+                "krea_2_turbo",
+                &object(
+                    json!({ "model": "krea_2_turbo", "mode": "edit_image", "sourceAssetId": "asset_1" })
+                )
+            ),
+            "krea_2_turbo edit_image with a source must route to the edit lane (sc-11640)"
+        );
+        assert!(
+            !image_request_mlx_eligible(
+                "krea_2_turbo",
+                &object(json!({ "model": "krea_2_turbo", "mode": "edit_image" }))
+            ),
+            "krea_2_turbo edit_image without a source is rejected"
+        );
 
         let support = model_mac_support("krea_2_turbo", "image");
         assert!(support.supported, "krea_2_turbo must be Mac-supported");
-        assert!(!support.features.edit, "krea_2_turbo is text-to-image only");
+        assert!(
+            support.features.edit,
+            "krea_2_turbo advertises the edit tab (sc-11640)"
+        );
     }
 
     #[test]
     fn krea_2_raw_edit_image_routes_to_mlx() {
         // epic 10871 (sc-10882): Krea 2 Raw serves BOTH text-to-image and the Kontext-style edit
         // surface. A t2i job routes to MLX; an `edit_image` job WITH a source routes to the edit lane;
-        // an `edit_image` job WITHOUT a source is rejected (the defensive shape). Edit is Raw-only, so
-        // the `features.edit` oracle flips true for Raw while Turbo (validated above) stays false.
+        // an `edit_image` job WITHOUT a source is rejected (the defensive shape). Both Krea variants edit
+        // (Raw full-CFG, Turbo CFG-free sc-11640), so the `features.edit` oracle flips true for each.
         assert!(image_request_mlx_eligible(
             "krea_2_raw",
             &object(json!({ "model": "krea_2_raw", "prompt": "full-CFG editorial portrait" }))
