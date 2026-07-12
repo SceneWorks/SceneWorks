@@ -1,5 +1,7 @@
 # SceneWorks Plan
 
+> **Historical — superseded.** This plan frames SceneWorks as a "local Docker-based web app" on a FastAPI + Python-worker stack, which has since been deleted and replaced by the desktop-native Rust engine (MLX on macOS, candle/CUDA on Windows; Docker is now an optional server that runs the Rust API/workers). The product intent still informs the app, but the architecture here is out of date — see the [README](../README.md) for the current architecture.
+
 ## Product Summary
 
 SceneWorks is a local Docker-based AI image and video generation web app for semi-technical AI hobbyists who want ComfyUI-class power without managing node graphs. It is also being designed first for the creator's own workflow.

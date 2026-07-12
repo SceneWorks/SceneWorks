@@ -1,5 +1,7 @@
 # SceneWorks Implementation Plan
 
+> **Historical — superseded.** This plan describes the original local Docker / FastAPI backend + Python-worker architecture, which has since been deleted and replaced by the desktop-native Rust engine (MLX on macOS, candle/CUDA on Windows; Docker is now an optional server that runs the Rust API/workers). Kept for historical context — see the [README](../README.md) for the current architecture.
+
 This document turns the SceneWorks product plan into a practical implementation sequence. It assumes the current goal is to build a local Docker-based AI image/video generation and editing app with a React + Vite frontend, FastAPI backend, Python workers, SQLite metadata, file-backed assets, and model adapters.
 
 ## Guiding Principles

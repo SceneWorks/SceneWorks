@@ -20,8 +20,10 @@ from conftest import require_tool
 # file and test_rust_api_contract_snapshots.py.
 from rust_api_harness import (
     PNG_1X1,
+    SpawnedProcess,
     free_port,
     minimal_safetensors as _minimal_safetensors,
+    spawn_process,
     wait_for_health,
 )
 
@@ -212,12 +214,12 @@ def _launch_command(binary_env: str, package: str, purpose: str) -> list[str]:
     return ["cargo", "run", "-q", "-p", package]
 
 
-def wait_for_job_status(base_url: str, job_id: str, status: str, process: subprocess.Popen) -> dict:
+def wait_for_job_status(base_url: str, job_id: str, status: str, process: SpawnedProcess) -> dict:
     deadline = time.monotonic() + 30
     last_job: dict | None = None
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            stderr = process.stderr.read() if process.stderr else ""
+            stderr = process.stderr_text()
             raise AssertionError(f"Rust worker exited early with code {process.returncode}: {stderr}")
         response = httpx.get(f"{base_url}/api/v1/jobs/{job_id}", timeout=5)
         response.raise_for_status()
@@ -249,14 +251,7 @@ def rust_api(tmp_path):
             "SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE": "1",
         }
     )
-    process = subprocess.Popen(
-        command,
-        cwd=ROOT,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    process = spawn_process(command, cwd=ROOT, env=env)
     try:
         wait_for_health(base_url, process)
         yield base_url
@@ -519,14 +514,7 @@ def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(ru
             "SCENEWORKS_HEARTBEAT_SECONDS": "5",
         }
     )
-    worker = subprocess.Popen(
-        worker_command,
-        cwd=ROOT,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    worker = spawn_process(worker_command, cwd=ROOT, env=env)
     try:
         created = httpx.post(
             f"{rust_api}/api/v1/loras/import",
@@ -579,14 +567,7 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
             "SCENEWORKS_HEARTBEAT_SECONDS": "5",
         }
     )
-    worker = subprocess.Popen(
-        worker_command,
-        cwd=ROOT,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    worker = spawn_process(worker_command, cwd=ROOT, env=env)
     try:
         created_project = httpx.post(f"{rust_api}/api/v1/projects", json={"name": "FFmpeg Smoke"}, timeout=5)
         created_project.raise_for_status()
