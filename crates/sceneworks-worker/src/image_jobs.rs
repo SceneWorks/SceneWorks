@@ -963,6 +963,21 @@ pub(crate) async fn run_image_generate_job(
                     )
                     .await?;
                 }
+                // Krea 2 Kontext-style dual-conditioned edit (epic 10871) — `krea_2_raw` + `edit_image` +
+                // a source, routed to the bespoke candle KreaEdit stream (disjoint from the Krea control
+                // lane, which is `krea_2_turbo` + `advanced.poses`).
+                CandleImageRoute::KreaEdit => {
+                    generate_candle_krea_edit_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
                 // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane (e.g.
                 // sdxl) must be REJECTED with a clear error, not silently rendered as plain txt2img (poses
                 // dropped) and not bounced to torch. The candle worker CLAIMS these (jobs_store
@@ -1777,6 +1792,11 @@ include!("image_jobs/flux2_edit_candle.rs");
 // candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 include!("image_jobs/qwen_edit_candle.rs");
+// Krea 2 Kontext-style dual-conditioned image-edit — the Windows/CUDA candle lane ONLY (epic 10871).
+// macOS keeps the MLX Krea edit path (krea_edit.rs, the `krea_2_edit` registry generator); the candle
+// Krea edit is a bespoke pipeline, so this is candle-exclusive.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+include!("image_jobs/krea_edit_candle.rs");
 // Kolors IP-Adapter-Plus reference conditioning — the Windows/CUDA candle lane ONLY (sc-5488). macOS
 // keeps the MLX Kolors IP path (kolors.rs, the registry `Reference` route); the candle `IpAdapterKolors`
 // is a bespoke provider, so this is candle-exclusive.
