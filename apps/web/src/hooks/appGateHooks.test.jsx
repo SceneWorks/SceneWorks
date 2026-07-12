@@ -10,6 +10,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAccessGate } from "./useAccessGate.js";
 import { useJobEvents } from "./useJobEvents.js";
+import { useTimelines } from "./useTimelines.js";
+import { apiFetch } from "../api.js";
 
 // Controllable apiFetch: each call resolves with whatever the per-path map returns (or
 // rejects when the value is an Error), so a test can drive the /access probe, the
@@ -313,5 +315,96 @@ describe("useJobEvents (sc-9750)", () => {
     act(() => root.unmount());
     root = null;
     expect(source.closed).toBe(true);
+  });
+});
+
+// sc-11231 (F-037): useJobEvents' SSE effect captures enqueueTimelineGenerationApply and
+// hasVisibleLocalFailure at SUBSCRIBE time (deps are only [access.authRequired, ready,
+// token]). If those inputs are plain per-render function declarations, the stream keeps
+// invoking the closure from the subscribe render — a latent stale-closure. These tests
+// pin the useTimelines side of the fix: the exposed enqueue callback is identity-stable
+// AND, because it delegates through a per-commit ref, the callback captured at subscribe
+// time still runs against live state (the fresh token) — exactly what the SSE handler needs.
+describe("useTimelines.enqueueTimelineGenerationApply stability + liveness (sc-11231)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    apiResponders.clear();
+    apiFetch.mockClear();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    act(() => root?.unmount());
+    container.remove();
+  });
+
+  function mount() {
+    const activeProject = { id: "p1", name: "P1" };
+    // Stable across renders — mirrors App, where setError is a useState setter (stable).
+    const stable = {
+      activeProject,
+      activeProjectRef: { current: activeProject },
+      setError: () => {},
+      setActiveView: () => {},
+      createVideoJob: async () => null,
+    };
+    let latest = null;
+    function Harness() {
+      const [token, setToken] = useState("t1");
+      const api = useTimelines({
+        token,
+        requestedGpu: "auto",
+        ...stable,
+      });
+      latest = { enqueue: api.enqueueTimelineGenerationApply, setToken };
+      return null;
+    }
+    root = createRoot(container);
+    act(() => root.render(<Harness />));
+    return { get: () => latest };
+  }
+
+  it("keeps a stable enqueue identity that still applies with the live token after a re-render", async () => {
+    // A completed generation whose result carries assets — enough to reach the timeline
+    // GET inside applyCompletedTimelineGeneration, where the live token is threaded.
+    const job = {
+      id: "job-1",
+      projectId: "p1",
+      status: "completed",
+      payload: { advanced: { timelineContext: { timelineId: "tl1" } } },
+      result: { assetIds: ["a1"] },
+    };
+    apiResponders.set("/api/v1/projects/p1/timelines/tl1", { id: "tl1", tracks: [] });
+
+    const { get } = mount();
+    await settle();
+    // Capture the callback at "subscribe time" (as useJobEvents would).
+    const enqueueAtSubscribe = get().enqueue;
+
+    // Token advances on an unrelated re-render (fresh login / rotation).
+    await act(async () => get().setToken("t2"));
+    await settle();
+
+    // Stability: the captured callback is the SAME identity the hook still exposes — so a
+    // stream that subscribed earlier is not holding a dead closure.
+    expect(typeof enqueueAtSubscribe).toBe("function");
+    expect(enqueueAtSubscribe).toBe(get().enqueue);
+
+    // Liveness: invoking the callback captured BEFORE the token changed must still run
+    // against the live token ("t2"), not the stale "t1". Pre-fix (plain fn delegating to a
+    // per-render closure) the subscribe-time callback would have used "t1".
+    await act(async () => {
+      enqueueAtSubscribe(job);
+      await settle();
+    });
+    const timelineGet = apiFetch.mock.calls.find(
+      (call) => call[0] === "/api/v1/projects/p1/timelines/tl1" && (call[2]?.method ?? "GET") === "GET",
+    );
+    expect(timelineGet).toBeTruthy();
+    expect(timelineGet[1]).toBe("t2");
   });
 });

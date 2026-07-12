@@ -1076,6 +1076,27 @@ export function App() {
     return () => controller.abort();
   }, [activeProject?.id, ready, token]);
 
+  // sc-11231 (F-037): useJobEvents captures whichever callback existed at subscribe time
+  // (its SSE effect deps are only [access.authRequired, ready, token]), so this MUST have a
+  // stable identity — else the live stream keeps calling a stale closure. It reads no props
+  // directly, only the two live refs (kept in sync by the effects above), so an empty-dep
+  // useCallback is both stable and always current — the `stableRefreshData` ref-delegation
+  // pattern used elsewhere in this file, expressed inline here since the whole body is refs.
+  const hasVisibleLocalFailure = useCallback((job) => {
+    const active = activeViewRef.current;
+    const localIds = localGenerationJobIdsRef.current;
+    if (active === "Image" && localIds.image.includes(job.id)) {
+      return true;
+    }
+    if (active === "Video" && localIds.video.includes(job.id)) {
+      return true;
+    }
+    if (active === "Document" && localIds.document.includes(job.id)) {
+      return true;
+    }
+    return active === "Models" && job.type === "model_download";
+  }, []);
+
   // Live job/worker/queue SSE stream, extracted to a hook (sc-9750). The handlers reach
   // back into App state through the identity-stable setters/refs/callbacks passed here;
   // the hook re-subscribes only on [access.authRequired, ready, token] (see useJobEvents).
@@ -1560,21 +1581,6 @@ export function App() {
       [kind]: [job.id, ...current[kind].filter((id) => id !== job.id)].slice(0, localJobStackLimit),
     }));
   }, []);
-
-  function hasVisibleLocalFailure(job) {
-    const active = activeViewRef.current;
-    const localIds = localGenerationJobIdsRef.current;
-    if (active === "Image" && localIds.image.includes(job.id)) {
-      return true;
-    }
-    if (active === "Video" && localIds.video.includes(job.id)) {
-      return true;
-    }
-    if (active === "Document" && localIds.document.includes(job.id)) {
-      return true;
-    }
-    return active === "Models" && job.type === "model_download";
-  }
 
   const sendAssetToImage = useCallback((asset, mode = null) => {
     if (!asset) {

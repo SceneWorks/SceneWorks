@@ -119,14 +119,55 @@ export function useAccessGate({ setError, pushNotice, dismissNoticeKind }) {
   // Probe whether the deployment requires a password, then release `accessResolved`
   // so an authenticated client (or one not requiring auth) can load its data. Mirrors
   // the health fetch's mount timing but owns only the access state (App keeps health).
+  //
+  // sc-11231 (F-038): the gate releases ONLY on a successful probe. The prior code did
+  // `.finally(() => setAccessResolved(true))`, so a single failed GET /api/v1/access
+  // released the gate while `access` stayed `{ authRequired: false }` → `authenticated`
+  // flipped true with no token, protected data + SSE fired unauthenticated, and the login
+  // band (which needs `access.authRequired`) never rendered — on an auth-required remote
+  // deployment that is a 401 storm with no login path, recoverable only by reload (fail
+  // OPEN). Instead we hold the gate closed and retry with exponential backoff — mirroring
+  // the media-ticket mint loop above — so a transient failure self-heals and a persistent
+  // outage surfaces an "access-probe" notice rather than silently authenticating.
   useEffect(() => {
-    apiFetch("/api/v1/access", "")
-      .then(setAccess)
-      .catch((err) => setError(err.message))
-      // Either way the auth state is now as resolved as it'll get; release the gate so
-      // an authenticated client (or one not requiring auth) can load its data.
-      .finally(() => setAccessResolved(true));
-    // Mount-only probe (matches the pre-extraction App effect); setError is stable.
+    let closed = false;
+    let timer = null;
+    let attempt = 0;
+    async function probe() {
+      try {
+        const result = await apiFetch("/api/v1/access", "");
+        if (closed) {
+          return;
+        }
+        setAccess(result);
+        setAccessResolved(true);
+        dismissNoticeKind("access-probe");
+      } catch (err) {
+        if (closed) {
+          return;
+        }
+        // Keep accessResolved false (gate stays closed → no unauthenticated loads), tell
+        // the user why, and schedule a backoff retry so recovery is automatic.
+        setError(err.message);
+        pushNotice(
+          "access-probe",
+          "access check: couldn't reach the host to determine whether a password is required. Retrying in the background.",
+        );
+        const delay = Math.min(30000, 1000 * 2 ** attempt);
+        attempt += 1;
+        timer = window.setTimeout(probe, delay);
+      }
+    }
+    probe();
+    return () => {
+      closed = true;
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+    };
+    // Mount-only probe (matches the pre-extraction App effect); setError, pushNotice, and
+    // dismissNoticeKind are App-owned and identity-stable, so the retry loop captures them
+    // once safely.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
