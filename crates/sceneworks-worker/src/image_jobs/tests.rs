@@ -4972,6 +4972,96 @@ fn candle_image_route_gates_on_flag_then_pose_reject_then_txt2img() {
     assert_eq!(resolve_candle_image_route(&unknown, &settings), None);
 }
 
+// sc-11171 (F-008): a strict-pose job on a WIRED candle pose family (e.g. `z_image_turbo`) whose control
+// base snapshot is NOT installed must route to the loud `PoseControlBaseMissing` reject, NOT fall through
+// to the plain candle txt2img lane (which would silently render an unconditioned image and drop the
+// poses). The scheduler routes it to candle weight-blind (`zimage_control_candle_eligible` checks only the
+// payload, "minus the local weight-resolve check"), and `image_job_candle_pose_reject` does not catch it
+// (`model_has_candle_pose_lane("z_image_turbo")` is true), so the worker is the last line of defense.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_image_route_rejects_wired_pose_when_control_base_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    // A tempdir data_dir holds no HF snapshot, so `resolve_zimage_control_base` yields `None` → the
+    // Z-Image control lane's weight-gate (`zimage_control_available`) fails and the job falls through.
+    settings.data_dir = dir.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+
+    // z_image_turbo + poses, control base absent → the loud missing-base reject, never plain txt2img.
+    let zimage_pose = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "count": 1,
+        "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    let route = resolve_candle_image_route(&zimage_pose, &settings);
+    assert_eq!(route, Some(CandleImageRoute::PoseControlBaseMissing));
+    assert_ne!(
+        route,
+        Some(CandleImageRoute::CandleTxt2Img),
+        "a wired pose family with an absent control base must NOT silently render plain txt2img",
+    );
+
+    // The same family without poses still routes to the generic candle txt2img lane — the reject is
+    // scoped to the strict-pose shape, not the model id.
+    let zimage_t2i = request(json!({ "projectId": "p", "model": "z_image_turbo", "count": 1 }));
+    assert_eq!(
+        resolve_candle_image_route(&zimage_t2i, &settings),
+        Some(CandleImageRoute::CandleTxt2Img),
+    );
+
+    // A non-wired candle family with poses (e.g. sdxl, which has no candle pose lane at all) still hits
+    // the sc-5968 `PoseReject`, not the missing-base variant.
+    let sdxl_pose = request(json!({
+        "projectId": "p", "model": "sdxl", "count": 1,
+        "advanced": { "poses": [{ "id": "a" }] }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&sdxl_pose, &settings),
+        Some(CandleImageRoute::PoseReject),
+    );
+}
+
+// sc-11171 (F-009): the candle plan bakes the resolved route's real image total into `expectedCount`
+// (via `CandleImageRoute::image_count`), mirroring the macOS `ImageRoute::image_count`. A strict-pose
+// control route renders one image per pose (`pose_entries().len()`), NOT `request.count`, so a pose set
+// whose length differs from the requested count must report the pose count — otherwise the gallery
+// streams against the wrong total (stuck placeholders).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_strict_pose_route_image_count_is_pose_set_length() {
+    let settings = Settings::from_env();
+    // 4 images requested, but 3 poses → the strict-pose lane renders 3 (one per pose).
+    let zimage_pose = request(json!({
+        "projectId": "p", "model": "z_image_turbo", "count": 4,
+        "advanced": { "poses": [{ "id": "a" }, { "id": "b" }, { "id": "c" }] }
+    }));
+    assert_eq!(pose_entries(&zimage_pose).len(), 3);
+    assert_ne!(
+        zimage_pose.count, 3,
+        "guard: request.count must differ from the pose count to prove the fix",
+    );
+    assert_eq!(
+        CandleImageRoute::ZimageControl.image_count(&zimage_pose, &settings),
+        3,
+        "a strict-pose route's plan total is the pose-set length, not request.count",
+    );
+    // Every other strict-pose control lane counts the same way.
+    for route in [
+        CandleImageRoute::QwenControl,
+        CandleImageRoute::KolorsControl,
+        CandleImageRoute::Flux2Control,
+        CandleImageRoute::Flux1Control,
+        CandleImageRoute::KreaControl,
+    ] {
+        assert_eq!(route.image_count(&zimage_pose, &settings), 3);
+    }
+    // A plain txt2img route keeps the requested count.
+    assert_eq!(
+        CandleImageRoute::CandleTxt2Img.image_count(&zimage_pose, &settings),
+        zimage_pose.count,
+    );
+}
+
 // sc-10996 (epic 6562): `bernini_image` t2i / i2i route to the dedicated candle Bernini lane
 // (`CandleImageRoute::Bernini` → `generate_candle_bernini_image_stream`), NOT the generic txt2img arm
 // (the engine is `Modality::Video`, so `bernini_image` is not an `is_candle_engine` id). Routed on the

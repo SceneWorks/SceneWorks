@@ -233,6 +233,12 @@ enum CandleImageRoute {
     KreaControl,
     /// A strict-pose job on a candle model with NO pose lane → reject loudly, never silent T2I (sc-5968).
     PoseReject,
+    /// A strict-pose job on a WIRED candle pose family (one with a `…_control_available` lane) whose
+    /// control base snapshot is NOT installed — the lane's local weight-gate failed, so the job reached
+    /// the fall-through arm. Reject loudly ("control base snapshot not installed") rather than silently
+    /// rendering plain txt2img and dropping the poses (sc-11171, F-008). Distinct from `PoseReject`,
+    /// which is a family that has no candle pose lane at all.
+    PoseControlBaseMissing,
     /// An in-place ComfyUI Z-Image base model (`external_base_*`) → `generate_candle_zimage_comfyui_stream`
     /// (epic 10451 Phase 2, sc-10668). Not an `is_candle_engine` id — routed off the forwarded row.
     ZimageComfyui,
@@ -251,6 +257,52 @@ enum CandleImageRoute {
     Bernini,
     /// A plain candle txt2img engine id → `generate_candle_stream`.
     CandleTxt2Img,
+}
+
+/// Candle-routed image model ids that HAVE a bespoke worker strict-pose control lane — each is claimed
+/// by an `else if …_control_available(…)` arm in [`resolve_candle_image_route`] BEFORE the generic
+/// txt2img arm, but only when its control base snapshot resolves locally. This is the SINGLE source for
+/// (a) the fall-through reject branch below (a wired family reaching the fall-through means its control
+/// base is absent → [`CandleImageRoute::PoseControlBaseMissing`], never silent txt2img) and (b) the
+/// reject error message that enumerates the wired families — previously hand-duplicated across the
+/// `resolve_candle_image_route` `matches!` guard, the handler comment, and the reject error string, which
+/// had already drifted (the handler comment omitted `krea_2_turbo`). (sc-11171, F-008.)
+///
+/// NOTE: deliberately DISTINCT from the router's `model_has_candle_pose_lane` (sceneworks-core), which
+/// omits `krea_2_turbo` so the co-resident torch worker declines krea pose jobs and candle reliably wins
+/// them — do not conflate the two lists.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const WIRED_CANDLE_POSE_FAMILIES: &[&str] = &[
+    "qwen_image",
+    "kolors",
+    "z_image_turbo",
+    "z_image",
+    "flux2_dev",
+    "flux_dev",
+    "krea_2_turbo",
+];
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+impl CandleImageRoute {
+    /// The real image total this candle route produces, baked into the plan's `expectedCount` so the
+    /// streamed gallery total matches what actually lands (sc-11171, F-009 — the candle sibling of the
+    /// macOS `ImageRoute::image_count`). The strict-pose control lanes each render one image per pose
+    /// (`pose_entries().len()`), InstantID renders its active angle/pose collection, every other lane
+    /// renders the requested `count`.
+    fn image_count(self, request: &ImageRequest, settings: &Settings) -> u32 {
+        match self {
+            CandleImageRoute::QwenControl
+            | CandleImageRoute::KolorsControl
+            | CandleImageRoute::ZimageControl
+            | CandleImageRoute::Flux2Control
+            | CandleImageRoute::Flux1Control
+            | CandleImageRoute::KreaControl => pose_entries(request).len() as u32,
+            CandleImageRoute::InstantId => instantid_image_count(request, settings),
+            // Every other lane (plain txt2img, the edit/reference/identity/comfyui/bernini lanes, and the
+            // pose-reject arms — which error before generation) produces the requested count.
+            _ => request.count,
+        }
+    }
 }
 
 /// Run the candle image dispatch predicate ladder ONCE and return the [`CandleImageRoute`] (or `None`
@@ -332,22 +384,23 @@ fn resolve_candle_image_route(
         // `ImageRoute::Bernini` weight-gates instead only because it must fall through to `mlx_available`).
         Some(CandleImageRoute::Bernini)
     } else if is_candle_engine(&request.model)
-        && !matches!(
-            request.model.as_str(),
-            "qwen_image"
-                | "kolors"
-                | "z_image_turbo"
-                | "z_image"
-                | "flux2_dev"
-                | "flux_dev"
-                | "krea_2_turbo"
-        )
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
     {
-        // No-silent-T2I (sc-5968): a strict-pose job on a candle model with NO pose lane (e.g. sdxl) must
-        // be REJECTED, not silently rendered as plain txt2img. Checked BEFORE the txt2img arm below.
-        Some(CandleImageRoute::PoseReject)
+        // A strict-pose candle job that reached here was NOT claimed by any `…_control_available` lane
+        // above, so it must be REJECTED, not silently rendered as plain txt2img (poses dropped). Two
+        // sub-cases, distinguished by whether the family has a wired candle pose lane at all:
+        //  - WIRED pose family (`WIRED_CANDLE_POSE_FAMILIES`): the lane exists but its control base
+        //    snapshot is absent (the lane's local weight-gate failed) → `PoseControlBaseMissing`
+        //    ("control base snapshot not installed"). Previously this family was excluded from the reject
+        //    entirely and fell through to `CandleTxt2Img`, silently dropping the poses (sc-11171, F-008).
+        //  - No candle pose lane (e.g. sdxl) → the sc-5968 no-silent-T2I `PoseReject`.
+        // Checked BEFORE the txt2img arm below.
+        if WIRED_CANDLE_POSE_FAMILIES.contains(&request.model.as_str()) {
+            Some(CandleImageRoute::PoseControlBaseMissing)
+        } else {
+            Some(CandleImageRoute::PoseReject)
+        }
     } else if is_candle_engine(&request.model) {
         Some(CandleImageRoute::CandleTxt2Img)
     } else {

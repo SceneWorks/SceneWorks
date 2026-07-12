@@ -409,17 +409,17 @@ pub(crate) async fn run_image_generate_job(
         &request,
         route.map_or(request.count, |route| route.image_count(&request, settings)) * upscale_mult,
     );
-    // Windows/CUDA candle lane: an InstantID angle/pose set produces N images (the active angle
-    // collection's length, or the pose count), not `request.count` — bake the real total into the plan
-    // so the generation set + streamed `expectedCount` match (sc-5491, mirroring the macOS route's
-    // `image_count`). Any other candle job stays `request.count`.
+    // Windows/CUDA candle lane: resolve the candle dispatch branch once and bake THAT branch's real
+    // total into the plan, exactly as the macOS arm does with `resolve_image_route`. An InstantID
+    // angle/pose set produces N images (the active angle collection's length, or the pose count) and
+    // every strict-pose control lane produces one image per pose (`pose_entries().len()`), not
+    // `request.count` — so the generation set + streamed `expectedCount` match what lands in the gallery
+    // (sc-5491 InstantID; sc-11171 F-009 strict-pose). `resolve_candle_image_route` returns `None` when
+    // candle is disabled, so any other job (or a disabled backend) keeps `request.count`.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let plan = {
-        let count = if settings.backend_candle_enabled && instantid_available(&request, settings) {
-            instantid_image_count(&request, settings)
-        } else {
-            request.count
-        };
+        let count = resolve_candle_image_route(&request, settings)
+            .map_or(request.count, |route| route.image_count(&request, settings));
         ImagePlan::with_count(&request, count * upscale_mult)
     };
     #[cfg(all(
@@ -1007,14 +1007,27 @@ pub(crate) async fn run_image_generate_job(
                 // sdxl) must be REJECTED with a clear error, not silently rendered as plain txt2img (poses
                 // dropped) and not bounced to torch. The candle worker CLAIMS these (jobs_store
                 // `image_job_candle_pose_reject`) precisely to fail them loudly here. SDXL identity-pose
-                // ships via InstantID; the wired candle pose families are qwen_image / kolors /
-                // z_image_turbo / z_image / flux2_dev / flux_dev.
+                // ships via InstantID; the wired candle pose families are `WIRED_CANDLE_POSE_FAMILIES`.
                 CandleImageRoute::PoseReject => {
                     return Err(WorkerError::InvalidPayload(format!(
                         "strict pose (advanced.poses) is not supported for model '{}' on the candle backend — \
                          refusing rather than silently generating an unconditioned image (wired candle pose \
-                         families: qwen_image, kolors, z_image_turbo, z_image, flux2_dev, flux_dev, \
-                         krea_2_turbo; SDXL identity-pose runs via InstantID)",
+                         families: {}; SDXL identity-pose runs via InstantID)",
+                        request.model,
+                        WIRED_CANDLE_POSE_FAMILIES.join(", ")
+                    )));
+                }
+                // No-silent-T2I (sc-11171, F-008): a strict-pose job on a WIRED candle pose family whose
+                // control base snapshot is NOT installed (the family's `…_control_available` weight-gate
+                // failed, so it fell through to here). The scheduler routed it to candle weight-blind
+                // (`zimage_control_candle_eligible` & siblings check only the payload), so REFUSE loudly
+                // rather than silently rendering plain txt2img and dropping the poses.
+                CandleImageRoute::PoseControlBaseMissing => {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "strict pose (advanced.poses) requested for model '{}' on the candle backend, but \
+                         its control base snapshot is not installed — refusing rather than silently \
+                         generating an unconditioned image; install the control base model to enable \
+                         strict-pose generation",
                         request.model
                     )));
                 }
