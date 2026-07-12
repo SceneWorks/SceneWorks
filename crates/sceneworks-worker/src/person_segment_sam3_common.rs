@@ -63,31 +63,48 @@ pub(crate) trait Sam3FrameOutput {
 /// Resolve already-present SAM3 weights: an explicit env pin (`SCENEWORKS_SAM3_WEIGHTS`, a dir or
 /// the `model.safetensors` inside it), then the app cache `<data_dir>/cache/person-segment-sam3/`,
 /// then the model dir `<data_dir>/models/person-segment-sam3/`. Both `model.safetensors` and
-/// `tokenizer.json` must be present. Returns `(model_path, tokenizer_path)` or `None` (then
-/// [`ensure_segmenter_weights`] downloads them).
-pub(crate) fn resolve_segmenter_weights(settings: &Settings) -> Option<(PathBuf, PathBuf)> {
+/// `tokenizer.json` must be present. Returns `Ok(Some((model_path, tokenizer_path)))` or `Ok(None)`
+/// (then [`ensure_segmenter_weights`] downloads them).
+///
+/// A set-but-missing `SCENEWORKS_SAM3_WEIGHTS` is an operator error: it fails loudly
+/// (`InvalidPayload`) instead of silently falling through to the cache/HF download and loading
+/// different weights than the operator asked for (sc-11175/F-011, mirroring the sc-8911 upscaler
+/// pin). [`crate::util::resolve_env_file_pin`] errors if the pinned path itself is absent; an
+/// incomplete pinned dir (missing either file of the pair) is likewise a loud error, not a
+/// silent fall-through.
+pub(crate) fn resolve_segmenter_weights(
+    settings: &Settings,
+) -> WorkerResult<Option<(PathBuf, PathBuf)>> {
     let pair_in = |dir: &Path| -> Option<(PathBuf, PathBuf)> {
         let model = dir.join(MODEL_FILE);
         let tokenizer = dir.join(TOKENIZER_FILE);
         (model.exists() && tokenizer.exists()).then_some((model, tokenizer))
     };
-    if let Ok(pinned) = std::env::var("SCENEWORKS_SAM3_WEIGHTS") {
-        let p = PathBuf::from(pinned);
-        let dir = if p.is_file() {
-            p.parent().map(Path::to_path_buf).unwrap_or(p)
+    if let Some(pinned) = crate::util::resolve_env_file_pin(
+        "SCENEWORKS_SAM3_WEIGHTS",
+        std::env::var_os("SCENEWORKS_SAM3_WEIGHTS"),
+        "a local facebook/sam3 snapshot dir (or its model.safetensors)",
+    )? {
+        let dir = if pinned.is_file() {
+            pinned.parent().map(Path::to_path_buf).unwrap_or(pinned)
         } else {
-            p
+            pinned
         };
-        if let Some(pair) = pair_in(&dir) {
-            return Some(pair);
-        }
+        return pair_in(&dir).map(Some).ok_or_else(|| {
+            crate::WorkerError::InvalidPayload(format!(
+                "SCENEWORKS_SAM3_WEIGHTS is set to {} but that directory is missing {MODEL_FILE} \
+                 and/or {TOKENIZER_FILE}. Point it at a complete facebook/sam3 snapshot dir, or \
+                 unset it to download on first use.",
+                dir.display()
+            ))
+        });
     }
     for sub in ["cache/person-segment-sam3", "models/person-segment-sam3"] {
         if let Some(pair) = pair_in(&settings.data_dir.join(sub)) {
-            return Some(pair);
+            return Ok(Some(pair));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Resolve the SAM3 weights, downloading `model.safetensors` + `tokenizer.json` from HuggingFace
@@ -96,7 +113,7 @@ pub(crate) async fn ensure_segmenter_weights(
     settings: &Settings,
     context: &DownloadContext<'_>,
 ) -> WorkerResult<(PathBuf, PathBuf)> {
-    if let Some(pair) = resolve_segmenter_weights(settings) {
+    if let Some(pair) = resolve_segmenter_weights(settings)? {
         return Ok(pair);
     }
     let dir = settings.data_dir.join("cache").join("person-segment-sam3");
@@ -416,5 +433,76 @@ mod tests {
             matches!(result, Err(crate::WorkerError::Engine(ref m)) if m.contains("logits")),
             "mismatched grid length must be rejected, got {result:?}"
         );
+    }
+
+    fn f011_test_settings(data_dir: PathBuf) -> Settings {
+        Settings {
+            api_url: "http://127.0.0.1:0".to_owned(),
+            access_token: None,
+            data_dir,
+            config_dir: PathBuf::from("config"),
+            worker_id: "test-worker".to_owned(),
+            gpu_id: "cpu".to_owned(),
+            is_child_worker: true,
+            poll_seconds: 1,
+            heartbeat_seconds: 5,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: 8u64 * 1024 * 1024 * 1024,
+            max_model_url_bytes: 256u64 * 1024 * 1024 * 1024,
+            allow_private_lora_urls: true,
+            utility_workers: 1,
+            backend_mlx_enabled: true,
+            backend_candle_enabled: false,
+            gpu_memory_limit_bytes: 0,
+            external_model_roots: Vec::new(),
+        }
+    }
+
+    /// sc-11175/F-011: `SCENEWORKS_SAM3_WEIGHTS` (a dir or its `model.safetensors`) must fail
+    /// loudly when set-but-missing OR set to an incomplete dir (missing either file of the
+    /// `{model.safetensors, tokenizer.json}` pair), instead of silently falling through to the
+    /// cache/HF download. An unset pin (nothing staged) falls through to `Ok(None)`.
+    /// `RUST_TEST_THREADS=1` is forced workspace-wide, so the env mutation is serial.
+    #[test]
+    fn resolve_segmenter_weights_env_pin_missing_and_incomplete_error_unset_falls_through() {
+        let key = "SCENEWORKS_SAM3_WEIGHTS";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = f011_test_settings(dir.path().to_path_buf());
+        let prior = std::env::var_os(key);
+
+        // (a) pinned path does not exist at all → loud, via resolve_env_file_pin.
+        std::env::set_var(key, dir.path().join("nonexistent-sam3-dir"));
+        let missing = resolve_segmenter_weights(&settings);
+        assert!(
+            matches!(missing, Err(crate::WorkerError::InvalidPayload(ref m)) if m.contains(key) && m.contains("does not exist")),
+            "a set-but-missing SAM3 pin must error loudly, got {missing:?}"
+        );
+
+        // (b) pinned dir exists but is missing tokenizer.json → still loud (the pair check).
+        let incomplete = dir.path().join("sam3-incomplete");
+        std::fs::create_dir_all(&incomplete).expect("mk dir");
+        std::fs::write(incomplete.join(MODEL_FILE), b"weights").expect("write model");
+        std::env::set_var(key, &incomplete);
+        let partial = resolve_segmenter_weights(&settings);
+        assert!(
+            matches!(partial, Err(crate::WorkerError::InvalidPayload(ref m)) if m.contains(key) && m.contains(TOKENIZER_FILE)),
+            "an incomplete SAM3 pin dir must error loudly, got {partial:?}"
+        );
+
+        // (c) unset + nothing staged → fall through.
+        std::env::remove_var(key);
+        let unset = resolve_segmenter_weights(&settings);
+        assert!(
+            matches!(unset, Ok(None)),
+            "an unset SAM3 pin must fall through to Ok(None), got {unset:?}"
+        );
+
+        match prior {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
     }
 }

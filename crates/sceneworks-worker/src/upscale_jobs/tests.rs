@@ -731,3 +731,43 @@ fn dataset_repoint_body_maps_records_with_a_null_asset_id() {
         "dataset fix re-points to bytes, not a minted child asset"
     );
 }
+
+/// sc-11175/F-010: the Real-ESRGAN ONNX output shape/length must be validated against the
+/// `(1, 3, ch·factor, cw·factor)` contract before `odata` is indexed. A mis-scaled pinned
+/// export (e.g. an x2 export run as a 4× job) must produce a `WorkerError::Engine` with
+/// expected-vs-actual dims — NOT an out-of-bounds slice panic inside `spawn_blocking` (which
+/// would kill the job as a join error and poison the `UPSCALERS` lock). Mirrors the
+/// sc-8904/F-102 sibling decode-path guards in `person_jobs`/`pose_jobs`.
+#[test]
+fn validate_upscale_output_rejects_mismatched_shapes() {
+    // Input tile: 8×8, factor 4 → a valid export returns (1, 3, 32, 32) with 3·32·32 values.
+    let (cw, ch, factor) = (8usize, 8usize, 4usize);
+    let good_len = 3 * 32 * 32;
+
+    // Happy path: exact contract → Ok((32, 32)).
+    let ok = validate_upscale_output(&[1, 3, 32, 32], good_len, cw, ch, factor)
+        .expect("valid (1,3,32,32) output must pass");
+    assert_eq!(ok, (32, 32));
+
+    // Rank != 4 → Engine (would have panicked on `oshape[2]`/`oshape[3]`).
+    let rank = validate_upscale_output(&[1, 3, 32], good_len, cw, ch, factor);
+    assert!(
+        matches!(rank, Err(WorkerError::Engine(ref m)) if m.contains("rank") && m.contains("!= 4")),
+        "rank<4 must be an Engine error, got {rank:?}"
+    );
+
+    // Dims not input·factor (an x2 export: 16×16 instead of 32×32) → Engine with expected-vs-actual.
+    let scale = validate_upscale_output(&[1, 3, 16, 16], 3 * 16 * 16, cw, ch, factor);
+    assert!(
+        matches!(scale, Err(WorkerError::Engine(ref m))
+            if m.contains("16×16") && m.contains("32×32") && m.contains("factor 4")),
+        "a half-scale export must be an Engine error naming expected vs actual, got {scale:?}"
+    );
+
+    // Right dims but a short `odata` buffer → Engine (would have sliced OOB on `odata[…]`).
+    let short = validate_upscale_output(&[1, 3, 32, 32], good_len - 1, cw, ch, factor);
+    assert!(
+        matches!(short, Err(WorkerError::Engine(ref m)) if m.contains("needs") && m.contains(&good_len.to_string())),
+        "a short output buffer must be an Engine error, got {short:?}"
+    );
+}

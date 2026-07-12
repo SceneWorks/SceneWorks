@@ -121,3 +121,40 @@ pub(crate) async fn with_hf_auth(
         None => request,
     }
 }
+
+/// Resolve an explicit env-pinned weight *file* (sc-8911, sc-11175/F-011). Unset →
+/// `Ok(None)` (fall through to cache/download). Set + existing → `Ok(Some(path))`. Set but
+/// missing → an `InvalidPayload` error so a typo fails loudly instead of silently loading
+/// whatever the download resolves. `what` names the expected file in the error. Takes the
+/// raw value explicitly so it's unit-testable without mutating the process environment.
+///
+/// This is the worker-wide house helper the loud-env-pin fixes route through: the
+/// upscaler (`SCENEWORKS_REALESRGAN_*_ONNX`, sc-8911), the person detector
+/// (`SCENEWORKS_PERSON_DETECTOR_WEIGHTS`), and SAM2/SAM3
+/// (`SCENEWORKS_SAM2_WEIGHTS`/`SCENEWORKS_SAM3_WEIGHTS`, sc-11175/F-011).
+///
+/// Gated to the union of its callers' cfgs (upscaler / person detector / SAM2 / SAM3),
+/// all of which compile only on macOS OR the off-Mac candle lane. On the Linux `parity`
+/// lane (non-macOS, default features) none of those callers compile, so leaving this
+/// helper ungated makes it dead code under `-D warnings` (sc-11175, Linux parity fix).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn resolve_env_file_pin(
+    key: &str,
+    value: Option<std::ffi::OsString>,
+    what: &str,
+) -> WorkerResult<Option<PathBuf>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(&value);
+    if path.exists() {
+        return Ok(Some(path));
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "{key} is set to {} but that path does not exist. Point it at {what}, or unset it to download on first use.",
+        path.display()
+    )))
+}
