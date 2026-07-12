@@ -1645,15 +1645,13 @@ mlx-gen-scail2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "ab46
 # #412 bernini — additive candle-only, no worker surface change). Both the default lane AND
 # `--features backend-candle --target all` resolve the SINGLE gen-core rev `19573a9a`. ALL mlx-gen-* +
 # candle-gen-* pins move together.
-#
-# CURRENT (epic 10871 P1.3, Krea two-reference edit): mlx-gen `ab46fcbf` + candle-gen `f08051c3`,
-# SINGLE gen-core rev `ab46fcbf`. mlx-gen #698 makes `krea_2_edit` accept a scene+person
-# `Conditioning::MultiReference` (macOS `KreaEdit` lane passes two ordered sources; validated on Metal).
-# `ab46fcbf` = mlx-gen main HEAD (#698 merge, superset of #697 krea-pose-MLX); gen-core BYTE-IDENTICAL to
-# the prior `951227a9` (#698 touches mlx-gen-krea only), so candle-gen re-pins its gen-core in lockstep.
-# `f08051c3` = candle-gen main HEAD (the #424 SQUASH-merge: gen-core `951227a9` -> `ab46fcbf` rev-align,
-# a superset of main's #1434 bernini pin `c26c6fb`). candle two-reference itself still needs the candle
-# `krea_2_edit` seam registration — sc-11085. ALL mlx-gen-* + candle-gen-* pins move together.
+# Bumped candle-gen `c26c6fb` -> `e350e9b` (sc-11031, epic 10765): candle-gen #422 enables FLUX.2-klein
+# on-the-fly Q4/Q8 DiT quant (only the 9B DiT quantizes; the 8B Qwen3 TE stays dense bf16 in EVERY tier —
+# DENSE_TE), making klein's q4/q8 candle tiers directly GPU-measurable. candle-gen-ONLY: `e350e9b` re-pins
+# gen-core to mlx-gen `951227a` (via #418), which this worker ALREADY pins, so the skew gate stays
+# satisfied with NO mlx-gen move. `e350e9b` is a direct descendant of the `c26c6fb`/#421 pin (adds only
+# #422). Drives the flux2_klein_9b `candle` block to measured:true (q4 46.2/24.2, q8 50.6/28.7, bf16 75.5/
+# 53.3, all GPU-measured on sm_120). Worker backend-candle check --locked green.
 candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "f08051c3c22fa7b70c9f35ac63db14b6056192b1", features = ["cuda"], optional = true }
 # Candle image providers (sc-5096) -- Windows/CUDA siblings of the mlx-gen image crates above. Each
 # self-registers its engine id into the shared gen_core inventory registry; force-linked in

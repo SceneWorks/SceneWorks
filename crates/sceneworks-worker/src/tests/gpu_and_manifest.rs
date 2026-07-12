@@ -524,8 +524,8 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
     );
 
     // klein carries a candle block so ITS fit-gate is live: on a 16 GB epic-target card klein rejects
-    // even sequentially (the ~16 GB dense Qwen3 TE is the sequential floor). q4 sequential is now the
-    // MEASURED-anchored ~41 GB (sc-11008 bf16 A/B, q4 derived) — well over 16 either way.
+    // even sequentially (the ~32 GB F32-resident Qwen3 TE is the sequential floor). q4 sequential is the
+    // MEASURED ~24 GB (sc-11031 klein DiT-quant A/B) — well over the 16 GB card either way.
     let klein = builtin_model_entry("flux2_klein_9b");
     let klein_entry = klein.as_object().expect("flux2_klein_9b entry object");
     assert!(
@@ -538,7 +538,7 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
     assert_eq!(
         sequential_overflow_gb(Some(klein_seq), card16),
         Some(klein_seq),
-        "klein sequential ~41 > 16 GB → reject on the epic's small-card target"
+        "klein sequential ~24 > 16 GB → reject on the epic's small-card target"
     );
 }
 
