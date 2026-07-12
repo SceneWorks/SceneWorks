@@ -358,9 +358,11 @@ pub(crate) fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
 /// (reference/mask/first-last-frame conditioning, LoRAs) must fall back to the Python torch worker, so
 /// the candle worker refuses it here. SCAIL-2 (`scail2_14b`) adds a DISTINCT candle engine off-Mac —
 /// `animate_character` + `replace_person` (sc-6837, epic 6563) — gated separately (it is not a VACE
-/// model). The per-model shape gates are [`video_request_candle_eligible`] (base),
-/// [`video_request_candle_vace_eligible`] (VACE modes), and
-/// [`scail2_animate_candle_eligible`] / [`scail2_replace_candle_eligible`].
+/// model). Bernini (`bernini`) adds another DISTINCT candle engine off-Mac — t2v + the editing/
+/// reference/multi-source video modes (sc-10997, epic 6562) — also gated separately. The per-model
+/// shape gates are [`video_request_candle_eligible`] (base),
+/// [`video_request_candle_vace_eligible`] (VACE modes), [`bernini_video_candle_eligible`] (Bernini),
+/// and [`scail2_animate_candle_eligible`] / [`scail2_replace_candle_eligible`].
 pub(crate) fn video_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     let Some(model) = job.payload.get("model").and_then(Value::as_str) else {
         return false;
@@ -371,6 +373,9 @@ pub(crate) fn video_job_is_candle_eligible(job: &JobSnapshot) -> bool {
         JobType::VideoGenerate => {
             video_request_candle_eligible(model, &job.payload)
                 || scail2_animate_candle_eligible(model, &job.payload)
+                // Bernini (sc-10997, epic 6562): t2v + the editing/reference/multi-source modes on the
+                // distinct candle `bernini` engine — its own gate (not the generic txt2video path).
+                || bernini_video_candle_eligible(model, &job.payload)
         }
         // replace_person → candle Wan-VACE (sc-5494) OR candle SCAIL-2 (sc-6837, routed by model id).
         JobType::PersonReplace => {
@@ -576,6 +581,37 @@ pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, 
         return false;
     }
     true
+}
+
+/// Candle Bernini VIDEO eligibility (sc-10997, epic 6562). Bernini is a DISTINCT candle engine (the
+/// full Qwen planner + Wan2.2-T2V-A14B renderer, `gen_core::load("bernini")`), so it has its own gate
+/// rather than routing through the generic [`video_request_candle_eligible`] txt2video path — that
+/// path only admits `text_to_video`, but Bernini also serves the editing/reference/multi-source modes.
+/// Mirrors the MLX `video_mode_is_mlx_eligible(bernini, mode)` shape (mode-only, `bernini` id + the six
+/// served modes), expressed as a candle-claim gate: `text_to_video` (base), `video_to_video` (v2v edit),
+/// `reference_to_video` (r2v), `reference_video_to_video` (rv2v), `multi_video_to_video` (mv2v), and
+/// `ads2v`. Routed on the model id + mode, not weight availability — the worker's dedicated
+/// `CandleVideoRoute::Bernini` dispatch resolves-or-errors loudly if the `SceneWorks/bernini-candle`
+/// snapshot is unprovisioned (sc-11003), and validates the per-mode source media when it assembles the
+/// conditioning. No LoRA (the engine reports `supports_lora=false`); an explicit `mlxQuantize` is
+/// recorded for lineage but does NOT push the job off candle (the loader reads the converted tree dense,
+/// exactly like the still lane, sc-10996) — there is no torch Bernini to fall back to. Factored out so
+/// the routing tests can probe it with synthetic payloads (parity with [`video_request_candle_eligible`]).
+pub(crate) fn bernini_video_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    if model != "bernini" {
+        return false;
+    }
+    matches!(
+        payload.get("mode").and_then(Value::as_str),
+        Some(
+            "text_to_video"
+                | "video_to_video"
+                | "reference_to_video"
+                | "reference_video_to_video"
+                | "multi_video_to_video"
+                | "ads2v"
+        )
+    )
 }
 
 /// InstantID candle-routing conditions (sc-5491, epic 5480). The candle `candle-gen-instantid`
