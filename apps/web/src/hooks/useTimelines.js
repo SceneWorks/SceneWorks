@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
 import { ensureItemVersionFields } from "../timeline.js";
 
@@ -267,11 +267,26 @@ export function useTimelines({
     return { ...timeline, tracks };
   }
 
-  function enqueueTimelineGenerationApply(job) {
-    timelineApplyQueueRef.current = timelineApplyQueueRef.current
-      .then(() => applyCompletedTimelineGeneration(job))
-      .catch((err) => setError(err.message));
-  }
+  // sc-11231 (F-037): useJobEvents' SSE effect captures this at subscribe time (its deps
+  // are only [access.authRequired, ready, token]), so it MUST be identity-stable — a plain
+  // per-render function declaration left the stream calling a stale closure (the same
+  // stale-closure class as the prior F-009 fix). The queue push itself only touches refs,
+  // but applyCompletedTimelineGeneration is recreated every render and closes over the live
+  // `token`, so we publish it into a ref each commit (the `stableRefreshData` ref-delegation
+  // pattern) and expose a stable callback that always runs the freshest body. useLayoutEffect
+  // matches App's ref-publish ordering so the ref holds the newest committed closure.
+  const applyCompletedTimelineGenerationRef = useRef(null);
+  useLayoutEffect(() => {
+    applyCompletedTimelineGenerationRef.current = applyCompletedTimelineGeneration;
+  });
+  const enqueueTimelineGenerationApply = useCallback(
+    (job) => {
+      timelineApplyQueueRef.current = timelineApplyQueueRef.current
+        .then(() => applyCompletedTimelineGenerationRef.current?.(job))
+        .catch((err) => setError(err.message));
+    },
+    [setError],
+  );
 
   async function applyCompletedTimelineGeneration(job) {
     const timelineId = job.payload?.advanced?.timelineContext?.timelineId;

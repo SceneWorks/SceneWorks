@@ -41,9 +41,13 @@ const ACTION_KEYS = {
     "createTrainingDatasetAnalysisJob", "createTrainingDatasetFaceAnalysisJob",
     "smartCropTrainingDataset", "stripExifTrainingDataset", "createTrainingJob",
   ],
+  // sc-11231 (F-037): enqueueTimelineGenerationApply is fed to useJobEvents, whose SSE
+  // effect captures it at subscribe time — so it MUST be identity-stable too, else the
+  // live stream keeps calling a stale closure. It was a plain per-render function
+  // declaration before the fix (new identity every render → this assertion would fail).
   useTimelines: [
     "refreshTimelines", "createTimeline", "saveTimeline", "exportTimeline",
-    "extractTimelineFrame", "queueTimelineVideoJob",
+    "extractTimelineFrame", "queueTimelineVideoJob", "enqueueTimelineGenerationApply",
   ],
 };
 

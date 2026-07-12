@@ -16,11 +16,16 @@ import {
 // ready, token] dependency array, same cleanup.
 //
 // The handlers reach back into App state through the setters/refs/callbacks passed in.
-// App feeds them identity-stable (useCallback actions, useState setters, and refs), so
-// the effect's deps are exactly the three inputs that must re-subscribe the stream —
-// auth mode, readiness, and the token — mirroring the pre-extraction effect. `access`
-// is read only for `access.authRequired`; the whole object is passed so the dep array
-// (`access.authRequired`) matches the original render-scope reference.
+// Every one of these is fed identity-stable: useState setters (stable by React),
+// useRef handles, and the two callbacks — `hasVisibleLocalFailure` (an empty-dep
+// useCallback reading only refs) and `enqueueTimelineGenerationApply` (a stable
+// ref-delegating useCallback in useTimelines) — which sc-11231 (F-037) hardened after
+// finding them plain per-render declarations that the SSE effect captured stale at
+// subscribe time. Because they are stable, the effect's deps are exactly the three
+// inputs that must re-subscribe the stream — auth mode, readiness, and the token —
+// mirroring the pre-extraction effect. `access` is read only for `access.authRequired`;
+// the whole object is passed so the dep array (`access.authRequired`) matches the
+// original render-scope reference.
 export function useJobEvents({
   access,
   ready,
@@ -206,8 +211,11 @@ export function useJobEvents({
     };
     // Deps deliberately limited to the three inputs that must re-subscribe the stream
     // (auth mode / readiness / token) — mirrors the pre-extraction App effect. The
-    // setters/refs/callbacks are fed identity-stable and read live inside the handlers,
-    // so listing them would only re-open the EventSource on unrelated re-renders.
+    // setters/refs/callbacks are fed identity-stable (see the header note; sc-11231
+    // closed the last two gaps) and read live inside the handlers, so listing them would
+    // only churn the EventSource, never satisfy the stream's actual re-subscribe contract.
+    // The disable stays because exhaustive-deps can't prove that stability statically — it
+    // would still demand ~15 always-stable handles in the array.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [access.authRequired, ready, token]);
 }

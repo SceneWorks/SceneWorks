@@ -420,4 +420,151 @@ describe("SceneWorks app shell", () => {
     });
   });
 
+  // sc-11231 (F-038): a failed mount-time GET /api/v1/access must NOT fail open. The prior
+  // `.finally(() => setAccessResolved(true))` released the gate while `access` stayed
+  // `{ authRequired: false }`, so `authenticated` flipped true with no token: protected data
+  // + the SSE stream fired unauthenticated (a 401 storm on an auth-required deployment), and
+  // the login band — which needs `access.authRequired` — never rendered, recoverable only by
+  // reload. The fix holds the gate closed on failure, surfaces a notice, and retries with
+  // backoff so a transient blip self-heals and a persistent outage shows an error.
+  describe("access-probe failure (sc-11231 F-038)", () => {
+    it("holds the gate closed — no unauthenticated load or SSE — and shows a notice when /access fails", async () => {
+      const requests = [];
+      global.fetch = vi.fn((url, options = {}) => {
+        const path = new URL(url).pathname;
+        requests.push({ path, method: options.method ?? "GET" });
+        if (path.endsWith("/health")) {
+          return Promise.resolve(response({ status: "ok", authRequired: true }));
+        }
+        if (path.endsWith("/access")) {
+          return Promise.resolve(errorResponse(500, "probe exploded"));
+        }
+        if (path.endsWith("/projects")) {
+          return Promise.resolve(response([{ id: "project-default", name: "Default Project" }]));
+        }
+        return Promise.resolve(response([]));
+      });
+
+      root = createRoot(container);
+      await act(async () => {
+        root.render(<App />);
+      });
+      await settle();
+
+      // No fail-open: the failed probe leaves accessResolved false, so `authenticated`
+      // never flips → zero protected loads and zero SSE connections (pre-fix both fired).
+      expect(requests.some((request) => request.path.endsWith("/projects"))).toBe(false);
+      expect(requests.some((request) => request.path.endsWith("/jobs/events/ticket"))).toBe(false);
+      expect(FakeEventSource.instances.length).toBe(0);
+      // And a notice names the unreachable host rather than silently authenticating.
+      const noticeTexts = [...document.body.querySelectorAll(".notice.error")].map((node) => node.textContent);
+      expect(noticeTexts.some((text) => text.includes("access check"))).toBe(true);
+    });
+
+    it("recovers on a backoff retry: a later /access success resolves the gate and clears the notice", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        let accessOk = false;
+        global.fetch = vi.fn((url) => {
+          const path = new URL(url).pathname;
+          if (path.endsWith("/health")) {
+            return Promise.resolve(response({ status: "ok", authRequired: true }));
+          }
+          if (path.endsWith("/access")) {
+            return Promise.resolve(accessOk ? response({ authRequired: true }) : errorResponse(500, "probe exploded"));
+          }
+          if (path.endsWith("/projects")) {
+            return Promise.resolve(response([{ id: "project-default", name: "Default Project" }]));
+          }
+          return Promise.resolve(response([]));
+        });
+
+        root = createRoot(container);
+        await act(async () => {
+          root.render(<App />);
+        });
+        await settle();
+
+        // Gate closed: no login band yet (auth requirement still unknown), notice is up.
+        expect(document.body.querySelector("#token")).toBeNull();
+        const failedTexts = [...document.body.querySelectorAll(".notice.error")].map((node) => node.textContent);
+        expect(failedTexts.some((text) => text.includes("access check"))).toBe(true);
+
+        // The first backoff retry fires after 1s; let it succeed (auth required this time).
+        accessOk = true;
+        await act(async () => {
+          vi.advanceTimersByTime(1000);
+        });
+        await settle();
+
+        // Probe resolved auth-required → the login band renders and the notice clears.
+        expect(document.body.querySelector("#token")).not.toBeNull();
+        const remaining = [...document.body.querySelectorAll(".notice.error")].map((node) => node.textContent);
+        expect(remaining.some((text) => text.includes("access check"))).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("leaves the successful probe path unchanged: auth-off resolves, data loads, no notice", async () => {
+      const requests = [];
+      global.fetch = vi.fn((url, options = {}) => {
+        const path = new URL(url).pathname;
+        requests.push({ path, method: options.method ?? "GET" });
+        if (path.endsWith("/health")) {
+          return Promise.resolve(response({ status: "ok", authRequired: false }));
+        }
+        if (path.endsWith("/access")) {
+          return Promise.resolve(response({ authRequired: false }));
+        }
+        if (path.endsWith("/jobs/events/ticket")) {
+          return Promise.resolve(response({ ticket: "stream-ticket" }));
+        }
+        if (path.endsWith("/projects")) {
+          return Promise.resolve(response([{ id: "project-default", name: "Default Project" }]));
+        }
+        return Promise.resolve(response([]));
+      });
+
+      root = createRoot(container);
+      await act(async () => {
+        root.render(<App />);
+      });
+      await settle();
+
+      // A successful probe still releases the gate and loads data with no access-probe notice.
+      expect(requests.some((request) => request.path.endsWith("/projects"))).toBe(true);
+      const noticeTexts = [...document.body.querySelectorAll(".notice.error")].map((node) => node.textContent);
+      expect(noticeTexts.some((text) => text.includes("access check"))).toBe(false);
+    });
+  });
+
+  // sc-11231 (F-037): the live SSE stream reaches hasVisibleLocalFailure through the
+  // subscribe-time closure. After hardening it into a stable useCallback, the failed-job
+  // path must still run (a TDZ from the const-move or a dead closure would crash the handler
+  // and swallow the notice). A failed job that isn't a locally-launched run surfaces a notice.
+  it("routes a failed SSE job through hasVisibleLocalFailure and surfaces a notice (sc-11231 F-037)", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+    expect(FakeEventSource.instances.length).toBe(1);
+
+    const failedJob = {
+      id: "job-remote-fail",
+      type: "image_generate",
+      status: "failed",
+      projectId: "project-default",
+      payload: { prompt: "x" },
+    };
+    await act(async () => {
+      FakeEventSource.instances[0].listeners["job.updated"]({ data: JSON.stringify(failedJob) });
+    });
+    await settle();
+
+    const noticeTexts = [...document.body.querySelectorAll(".notice.error")].map((node) => node.textContent);
+    expect(noticeTexts.some((text) => text.includes("Failed without additional worker detail."))).toBe(true);
+  });
+
 });
