@@ -36,19 +36,23 @@ use gen_core::{LoadSpec, OffloadPolicy, WeightsSource};
 use crate::{WorkerError, WorkerResult};
 
 /// The MLX engine ids whose provider honors [`OffloadPolicy::Sequential`] — the sc-10839 Phase 1
-/// providers (SDXL + Z-Image-turbo), the sc-11000 T2I `qwen_image`, and the sc-11006 fan-out
-/// completion of the qwen family (`qwen_image_edit` drops the Qwen2.5-VL vision-language encoder after
-/// the vision+LM pass; `qwen_image_control` keeps its VACE control branch on the heavy side of the
-/// split). The gate only SELECTS sequential residency for these; for any other engine `Sequential`
-/// would be a no-op (the advisory contract treats it as `Resident`), so predicting "it fits staged"
-/// and then holding everything resident would SIGKILL — hence the allowlist, which moves in LOCKSTEP
-/// with the provider wiring. Extended per family as the fan-out (sc-10840) wires each engine.
+/// providers (SDXL + Z-Image-turbo), the sc-11000 T2I `qwen_image`, the sc-11006 fan-out completion of
+/// the qwen family (`qwen_image_edit` drops the Qwen2.5-VL vision-language encoder after the vision+LM
+/// pass; `qwen_image_control` keeps its VACE control branch on the heavy side of the split), and the
+/// sc-11030 `lens` + `lens_turbo` (one crate/arch — drops the gpt-oss text encoder before the DiT +
+/// denoise activations materialize; needs mlx-gen-lens's consuming encoder loader so the encoder LOAD
+/// spike isn't the peak). The gate only SELECTS sequential residency for these; for any other engine
+/// `Sequential` would be a no-op (the advisory contract treats it as `Resident`), so predicting "it
+/// fits staged" and then holding everything resident would SIGKILL — hence the allowlist, which moves
+/// in LOCKSTEP with the provider wiring. Extended per family as the fan-out (sc-10840) wires each engine.
 const SEQUENTIAL_CAPABLE_ENGINES: &[&str] = &[
     "sdxl",
     "z_image_turbo",
     "qwen_image",
     "qwen_image_edit",
     "qwen_image_control",
+    "lens",
+    "lens_turbo",
 ];
 
 /// Whether `engine_id`'s provider drops components in phase order under [`OffloadPolicy::Sequential`].
@@ -572,6 +576,11 @@ mod tests {
         // The sc-11006 fan-out wired the qwen edit + control siblings (separate engine ids).
         assert!(engine_supports_sequential("qwen_image_edit"));
         assert!(engine_supports_sequential("qwen_image_control"));
+        // lens + lens_turbo share one crate/arch (sc-11030): both engine ids are wired. The Q8/Q4 win
+        // (Resident 34.5 → Sequential 22.3 GiB at 768², fits a 32 GB Mac) needs the consuming encoder
+        // loader — see mlx-gen-lens `with_selected_layers`.
+        assert!(engine_supports_sequential("lens"));
+        assert!(engine_supports_sequential("lens_turbo"));
         // Not-yet-wired providers must NOT be offered sequential (they'd ignore it and SIGKILL).
         assert!(!engine_supports_sequential("z_image_turbo_control"));
         assert!(!engine_supports_sequential("flux"));
