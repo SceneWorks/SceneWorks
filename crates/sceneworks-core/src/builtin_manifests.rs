@@ -57,8 +57,16 @@ pub enum SeedMode {
 
 /// Write the builtin manifests into `config_dir/manifests` according to `mode`.
 ///
-/// Each file is written atomically (temp + rename) so a crash or partial write
-/// can't leave a truncated manifest that parses to an empty/broken catalog.
+/// Each file is written through [`store_util::atomic_write`], the house
+/// atomic-write primitive: it stages into a uniquely-named temp in the same
+/// directory, `sync_all`s the temp (and best-effort the parent dir) so the bytes
+/// are durable *before* the rename, then renames into place. That closes the two
+/// windows a bare temp+rename left open — a power loss after the rename leaving a
+/// zero-length `builtin.*.jsonc` (sc-8949), and two processes seeding concurrently
+/// colliding on a shared deterministic temp name (sc-1633). A crash therefore
+/// cannot leave a truncated manifest that parses to an empty/broken catalog and
+/// then gets skipped by a later `IfMissing` seeding.
+///
 /// Returns an error — annotated with which manifest failed — if any required
 /// manifest can't be installed, so callers can abort startup rather than serving
 /// an empty catalog.
@@ -72,13 +80,8 @@ pub fn seed_builtin_manifests(config_dir: &Path, mode: SeedMode) -> std::io::Res
         if mode == SeedMode::IfMissing && target.exists() {
             continue;
         }
-        let temp = dir.join(format!("{name}.tmp"));
-        std::fs::write(&temp, contents)
-            .map_err(|error| std::io::Error::new(error.kind(), format!("write {name}: {error}")))?;
-        std::fs::rename(&temp, &target).map_err(|error| {
-            let _ = std::fs::remove_file(&temp);
-            std::io::Error::new(error.kind(), format!("install {name}: {error}"))
-        })?;
+        crate::store_util::atomic_write(&target, contents.as_bytes())
+            .map_err(|error| std::io::Error::other(format!("install {name}: {error}")))?;
     }
     Ok(())
 }
@@ -134,6 +137,33 @@ mod tests {
             std::fs::read_to_string(dir.join("builtin.loras.jsonc")).expect("loras written"),
             embedded("builtin.loras.jsonc")
         );
+    }
+
+    #[test]
+    fn overwrite_repairs_a_truncated_manifest_and_leaves_no_temp() {
+        // Simulate the crash the old temp+rename path could leave behind: a
+        // zero-length `builtin.*.jsonc`. Overwrite seeding must replace it with the
+        // full embedded copy and leave no atomic-write temp files behind.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let dir = temp.path().join("manifests");
+        std::fs::create_dir_all(&dir).expect("create manifests dir");
+        let truncated = dir.join("builtin.models.jsonc");
+        std::fs::write(&truncated, b"").expect("seed zero-length manifest");
+
+        seed_builtin_manifests(temp.path(), SeedMode::Overwrite).expect("seeding succeeds");
+
+        assert_eq!(
+            std::fs::read_to_string(&truncated).expect("read repaired"),
+            embedded("builtin.models.jsonc"),
+            "overwrite repairs the truncated manifest to the full embedded copy"
+        );
+        // atomic_write stages into `*.<token>.tmp` and renames it away; none survive.
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read manifests dir")
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "no atomic-write temp files remain");
     }
 
     #[test]
