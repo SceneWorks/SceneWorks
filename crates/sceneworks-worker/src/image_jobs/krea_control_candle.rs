@@ -11,15 +11,26 @@
 // the `image_jobs` module, so it shares that module's imports (`parse_poses`/`pose_entries`/`Settings`/
 // `WorkerResult`/`huggingface_snapshot_dir`/`start_gen_stream`/… all in scope unqualified).
 //
-// Krea 2 Turbo needs the DENSE diffusers snapshot (`transformer/ text_encoder/ vae/ tokenizer/`), NOT the
-// packed q8 turnkey the registered `krea_2_turbo` txt2img generator loads: the control branch is a
-// composable-forward overlay (`KreaTrainDit`), and it was trained against the bf16 base. Base + branch +
-// TE + VAE are dense on a single 96 GB card.
+// The base is any complete Krea 2 Turbo diffusers snapshot (`transformer/ text_encoder/ vae/ tokenizer/`):
+// the legacy dense `krea/Krea-2-Turbo`, OR — the common case now that the dense download is retired — the
+// installed `SceneWorks/krea-2-turbo-mlx` tier the txt2img lane uses (q8 default / q4 / bf16). The control
+// branch is a composable-forward overlay (`KreaTrainDit`) trained against the bf16 base; the packed q4/q8
+// tiers are key-compatible and load via candle-gen's dequant-on-load (composable DiT reconstructs the dense
+// grid from the packed triple — candle-gen #471, sc-11727), so q8 renders ≈ bf16 and q4 stays pose-locked.
+// Peak VRAM ≈ dense (dequant-to-bf16 in VRAM), well within a single 96 GB card.
 
-/// The dense Krea 2 Turbo diffusers repo when the manifest omits `repo`. Distinct from the packed q8
-/// turnkey (`SceneWorks/krea-2-turbo-mlx`) the txt2img lane uses — the control provider loads the dense
-/// bf16 composable base the overlay applies on.
+/// The dense Krea 2 Turbo diffusers repo when the manifest omits `repo` — a bring-your-own / legacy base
+/// (the manifest download entry was retired in favor of the `SceneWorks/krea-2-turbo-mlx` tiers, sc-9092).
+/// The control provider loads the dense bf16 composable base the overlay trained on; the packed mlx tiers
+/// below are key-compatible (the bf16 tier mirrors this tree) and load via candle-gen's dequant-on-load.
 const KREA_CONTROL_BASE_REPO: &str = "krea/Krea-2-Turbo";
+/// The `SceneWorks/krea-2-turbo-mlx` turnkey (q8 default / q4 / bf16 self-contained subdirs) — the SAME
+/// base the txt2img `krea_2_turbo` lane installs and loads. Now that the dense `krea/Krea-2-Turbo` download
+/// is retired, this is what a user actually has on disk, so the control base resolves the installed tier
+/// here (via the shared [`krea_model_subdir`]) when the legacy dense repo is absent. candle-gen packed-
+/// detects the tier and the composable control DiT dequantizes it on load (candle-gen #471, sc-11727):
+/// q8 renders ≈ bf16, q4 stays pose-locked (mild haze) — GPU-proven.
+const KREA_CONTROL_MLX_REPO: &str = "SceneWorks/krea-2-turbo-mlx";
 /// Pose ControlNet conditioning-scale default (candle-gen `Krea2Control::DEFAULT_CONTROL_SCALE`). The S0
 /// spike found the usable band ~0.5–0.85 for the distilled CFG-free base; ship a comfortable mid.
 const KREA_CONTROL_DEFAULT_SCALE: f32 = candle_gen_krea::DEFAULT_CONTROL_SCALE;
@@ -92,7 +103,24 @@ fn resolve_krea_control_base(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(KREA_CONTROL_BASE_REPO);
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo))
+    // Legacy / bring-your-own dense diffusers base (`krea/Krea-2-Turbo`), if separately cached — keeps
+    // existing dense-install behavior byte-identical.
+    if let Some(dense) = huggingface_snapshot_dir(&settings.data_dir, repo) {
+        return Ok(Some(dense));
+    }
+    // The installed `SceneWorks/krea-2-turbo-mlx` tier the user actually has (q8 default / q4 / bf16),
+    // resolved EXACTLY like the txt2img lane (`krea_model_subdir` honours `advanced.mlxQuantize` and falls
+    // back to any downloaded tier — so a q4-only or q8-only install resolves). candle-gen `from_dir`
+    // packed-detects the tier; the composable control DiT dequantizes the packed base on load (candle-gen
+    // #471, sc-11727). Gate on `transformer/` so a partial download surfaces "base not installed" rather
+    // than half-loading.
+    if let Some(root) = huggingface_snapshot_dir(&settings.data_dir, KREA_CONTROL_MLX_REPO) {
+        let tier = krea_model_subdir(&root, request);
+        if tier.join("transformer").is_dir() {
+            return Ok(Some(tier));
+        }
+    }
+    Ok(None)
 }
 
 /// True when this is a candle-eligible Krea 2 strict-pose job: `krea_2_turbo` with a non-empty
