@@ -2,19 +2,27 @@
 // Krea 2 image-edit (macOS, epic 10871): the Kontext-style dual-conditioned edit
 // surface. Routed here from `ImageRoute::KreaEdit` — an `edit_image` job on
 // `krea_2_raw` carrying a source image. Loads the `krea_2_edit` registry generator
-// (the Raw pipeline routed to `generate_edit_with_progress`: the source rides as
+// (the Raw pipeline routed to `generate_edit_with_progress`: each source rides as
 // in-context VAE tokens at a distinct RoPE frame AND grounds the Qwen3-VL vision
-// tower), passing the source as a single `Conditioning::Reference`. One output per
-// requested count, each an edit of the same source under the instruction prompt.
-// Krea is MLX-only, so this is the only Krea edit path (the candle mirror is a
-// separate slice, P1.2/P2.2). Mirrors `generate_flux2_edit_stream`'s blocking-
-// thread + streamed-events shape and reuses `consume_gen_events`.
+// tower). Conditions on one source (`Conditioning::Reference`) or two in FIXED order
+// — scene = image 1, person = image 2 (`Conditioning::MultiReference`, epic 10871
+// P1.3). One output per requested count, each an edit of the same source(s) under the
+// instruction prompt. Krea is MLX-only, so this is the only Krea edit path (the candle
+// mirror is a separate slice, P1.2/P2.2 + the sc-11085 seam registration). Mirrors
+// `generate_flux2_edit_stream`'s blocking-thread + streamed-events shape and reuses
+// `consume_gen_events`.
 // ---------------------------------------------------------------------------
 
 /// The engine registry id the edit lane loads: the Raw pipeline routed to the Kontext edit entrypoint
 /// (mlx-gen `krea_2_edit`, epic 10871). Distinct from the `krea_2_raw` t2i/img2img generator — the
 /// distinct id is what tells the engine to treat the source `Reference` as an edit, not an img2img init.
 const KREA_EDIT_ENGINE_ID: &str = "krea_2_edit";
+
+/// The most source images a Krea edit conditions on (epic 10871 P1.3): scene = image 1, person =
+/// image 2, a FIXED order (swapping degrades identity per the LoRA authors). Mirrors the engine cap
+/// (`mlx-gen-krea` / `candle-gen-krea` `MAX_EDIT_REFERENCES`); the worker rejects a longer list up
+/// front so the error is clear rather than surfacing from the engine seam.
+const KREA_MAX_EDIT_REFERENCES: usize = 2;
 
 /// True when a selected LoRA declares the image-edit conditioning role (`conditioningRole: image_edit`,
 /// e.g. the builtin `krea2_identity_edit`). The image-edit sibling of the LTX IC-LoRA detector
@@ -120,9 +128,10 @@ fn krea_edit_generate_one(
 }
 
 /// Real Krea 2 edit generation: load the `krea_2_edit` generator once, then one output per requested
-/// count, each an edit of the shared source under the instruction prompt. Mirrors
+/// count, each an edit of the shared source(s) under the instruction prompt. Mirrors
 /// [`generate_flux2_edit_stream`]'s blocking-thread + streamed-events shape and reuses
-/// [`consume_gen_events`]; differs in the required edit LoRA (R5) and the single-source conditioning.
+/// [`consume_gen_events`]; differs in the required edit LoRA (R5) and the scene+person edit
+/// conditioning (one `Reference` or a two-source `MultiReference`, epic 10871 P1.3).
 async fn generate_krea_edit_stream(
     api: &ApiClient,
     settings: &Settings,
@@ -158,32 +167,46 @@ async fn generate_krea_edit_stream(
     let repo = model_repo(request, &model);
     let adapter_label = model.adapter_label();
 
-    // Resolve the source image on the async side (decode → Send Image moved into the worker thread).
-    // Krea edit is single-source for now — the `krea_2_edit` generator conditions on exactly one
-    // `Reference` (a second person reference is P1.3). Take the first resolved edit reference.
+    // Resolve the source image(s) on the async side (decode → Send Image moved into the worker thread).
+    // Krea edit conditions on scene = image 1, person = image 2 (fixed order, epic 10871 P1.3): the
+    // multi-image picker sends the plural `referenceAssetIds`, and a single Image-Edit `sourceAssetId`
+    // is the one-source case (both via `edit_reference_ids`). Capped at [`KREA_MAX_EDIT_REFERENCES`] —
+    // `build_edit_conditioning` then emits a single `Reference` (1) or a `MultiReference` (2), which the
+    // `krea_2_edit` generator VAE-encodes at successive RoPE frames.
     let reference_ids = edit_reference_ids(request);
-    let source_id = reference_ids.first().ok_or_else(|| {
-        WorkerError::InvalidPayload("Krea 2 edit requires a source image (sourceAssetId).".to_owned())
-    })?;
-    let source = load_reference_image(
-        &settings.data_dir,
-        &request.project_id,
-        source_id,
-        project_path,
-    )?;
-    // Pre-fit the source to the target W×H (crop / pad / outpaint→pad) so an off-aspect source isn't
-    // squished into the latent grid; `stretch` keeps the legacy resize. Shared with the other edit lanes.
-    let source = fit_edit_references(vec![source], request, request.width, request.height)?
-        .pop()
-        .expect("fit_edit_references preserves the single source");
+    if reference_ids.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "Krea 2 edit requires a source image (sourceAssetId).".to_owned(),
+        ));
+    }
+    if reference_ids.len() > KREA_MAX_EDIT_REFERENCES {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Krea 2 edit takes at most {KREA_MAX_EDIT_REFERENCES} images (scene, then person)."
+        )));
+    }
+    let mut sources = Vec::with_capacity(reference_ids.len());
+    for id in &reference_ids {
+        sources.push(load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            id,
+            project_path,
+        )?);
+    }
+    // Pre-fit each source to the target W×H (crop / pad / outpaint→pad) so an off-aspect source isn't
+    // squished into the latent grid; `stretch` keeps the legacy resize. Fixed order preserved. Shared
+    // with the other edit lanes.
+    let sources = fit_edit_references(sources, request, request.width, request.height)?;
+    let reference_count = sources.len();
 
-    // Plain per-image work: `request.count` edits of the same source, each its own seed + the base
+    // Plain per-image work: `request.count` edits of the same source(s), each its own seed + the base
     // instruction prompt (Krea edit has no angle/pose grouping — that is the character_image path).
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
     let total = work.len();
-    let raw_settings = krea_edit_raw_settings(request, &repo, steps, quant_bits, guidance, 1);
+    let raw_settings =
+        krea_edit_raw_settings(request, &repo, steps, quant_bits, guidance, reference_count);
 
     let (width, height) = (request.width, request.height);
     let adapter_count = adapters.len();
@@ -199,7 +222,7 @@ async fn generate_krea_edit_stream(
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
-                let conditioning = build_edit_conditioning(std::slice::from_ref(&source));
+                let conditioning = build_edit_conditioning(&sources);
                 let (out_w, out_h, pixels) = krea_edit_generate_one(
                     generator,
                     &prompt,
