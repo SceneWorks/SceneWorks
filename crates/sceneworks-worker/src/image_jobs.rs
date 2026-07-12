@@ -511,6 +511,21 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::KreaControl => {
+                // Krea 2 Turbo strict-pose (advanced.poses on `krea_2_turbo`) → the trained control-branch
+                // overlay on the frozen dense base (sc-8465, epic 8459 S5), one image per pose. The MLX
+                // twin of the candle `CandleImageRoute::KreaControl` lane.
+                generate_krea_control_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::Flux1DevControl => {
                 // FLUX.1-dev strict control (advanced.poses) → Shakker Union-Pro-2.0, one image per pose
                 // (pose / canny / depth via advanced.controlMode).
@@ -938,6 +953,21 @@ pub(crate) async fn run_image_generate_job(
                 // base), diverted before the registry txt2img arm.
                 CandleImageRoute::KreaControl => {
                     generate_candle_krea_control_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // Krea 2 Kontext-style dual-conditioned edit (epic 10871) — `krea_2_raw` + `edit_image` +
+                // a source, routed to the bespoke candle KreaEdit stream (disjoint from the Krea control
+                // lane, which is `krea_2_turbo` + `advanced.poses`).
+                CandleImageRoute::KreaEdit => {
+                    generate_candle_krea_edit_stream(
                         api,
                         settings,
                         job,
@@ -1720,6 +1750,9 @@ include!("image_jobs/qwen.rs");
 // Krea 2 Kontext-style image-edit routing (epic 10871).
 include!("image_jobs/krea_edit.rs");
 #[cfg(target_os = "macos")]
+// Krea 2 pose-ControlNet (MLX) strict-pose routing (sc-8465, epic 8459 S5).
+include!("image_jobs/krea_control.rs");
+#[cfg(target_os = "macos")]
 // SenseNova edit routing.
 include!("image_jobs/sensenova.rs");
 #[cfg(target_os = "macos")]
@@ -1759,6 +1792,11 @@ include!("image_jobs/flux2_edit_candle.rs");
 // candle-exclusive.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 include!("image_jobs/qwen_edit_candle.rs");
+// Krea 2 Kontext-style dual-conditioned image-edit — the Windows/CUDA candle lane ONLY (epic 10871).
+// macOS keeps the MLX Krea edit path (krea_edit.rs, the `krea_2_edit` registry generator); the candle
+// Krea edit is a bespoke pipeline, so this is candle-exclusive.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+include!("image_jobs/krea_edit_candle.rs");
 // Kolors IP-Adapter-Plus reference conditioning — the Windows/CUDA candle lane ONLY (sc-5488). macOS
 // keeps the MLX Kolors IP path (kolors.rs, the registry `Reference` route); the candle `IpAdapterKolors`
 // is a bespoke provider, so this is candle-exclusive.

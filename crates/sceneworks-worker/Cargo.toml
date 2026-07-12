@@ -1640,16 +1640,32 @@ mlx-gen-scail2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "9512
 # #412 bernini — additive candle-only, no worker surface change). Both the default lane AND
 # `--features backend-candle --target all` resolve the SINGLE gen-core rev `19573a9a`. ALL mlx-gen-* +
 # candle-gen-* pins move together.
-# Bumped mlx-gen `19573a9a` -> `951227a9` + candle-gen `95a2ebcc` -> `f8443050` IN LOCKSTEP (sc-11030,
+# Bumped candle-gen `95a2ebcc` -> `c20a589c` (epic 10871, sc-10882/10883): candle-gen #416 is the candle
+# Krea 2 image-edit ENGINE (Kontext seq-concat edit forward + Qwen3-VL vision-tower grounding). The new
+# candle `KreaEdit` worker lane (`krea_edit_candle.rs`) consumes its `candle_gen_krea::pipeline::{
+# load_components, load_edit_components, render_edit}`. candle-gen-ONLY this time — `c20a589c` re-pins the
+# SAME gen-core `19573a9a` (mlx-gen HEAD, unchanged), so the skew gate stays satisfied with NO mlx-gen
+# move (the edit engine is additive to candle-gen-krea; `git diff 95a2ebcc..c20a589c -- gen-core*` empty).
+# Bumped mlx-gen `19573a9a` -> `0d2a2be6` + candle-gen `c20a589c` -> `1086bd0f` IN LOCKSTEP (sc-11006,
+# epic 10834): qwen-image-EDIT + qwen-image-CONTROL sequential component residency (the fan-out completion
+# of the qwen family after sc-11000; PURE mlx-gen-qwen-image provider Rust, mlx-gen #695). `git diff
+# 19573a9a..0d2a2be6 -- gen-core/ gen-core-testkit/` is EMPTY (gen-core BYTE-IDENTICAL) — but the skew gate
+# keys on the git REV, so candle-gen moves too. `0d2a2be6` is mlx-gen main HEAD (the #695 merge, a superset
+# of `19573a9a`/#693). `1086bd0f` is candle-gen main HEAD after #417 (the gen-core `19573a9a` -> `0d2a2be6`
+# rev-align), a DIRECT descendant of the prior `c20a589c`/#416 pin (adds only #417) — candle-gen-krea +
+# every candle provider unchanged, no regression. The worker also adds `"qwen_image_edit"` +
+# `"qwen_image_control"` to `SEQUENTIAL_CAPABLE_ENGINES` and folds `spec.control` bytes into the fit-gate
+# heavy side (mlx_fit_gate.rs). Both skew lanes resolve the SINGLE gen-core rev `0d2a2be6`. ALL mlx-gen-* +
+# candle-gen-* pins move together.
+# Bumped mlx-gen `0d2a2be6` -> `951227a9` + candle-gen `1086bd0f` -> `f8443050` IN LOCKSTEP (sc-11030,
 # epic 10834): mlx-gen #696 adds lens/lens_turbo sequential component residency + the consuming gpt-oss
-# encoder loader (the fit-gate selects `Sequential` for the `lens`/`lens_turbo` engine ids — see
-# mlx_fit_gate.rs; Q8 768² Resident 34.5 -> Sequential 22.3 GiB, fits a 32 GB Mac). `951227a9` is mlx-gen
-# main HEAD (the #696 merge; also carries #695 qwen-image edit/control residency). `git diff
-# 19573a9a..951227a9 -- gen-core/ gen-core-testkit/` is EMPTY (gen-core BYTE-IDENTICAL — PURE provider
-# Rust + an additive `src/weights.rs` `remove`/`remove_prefix`), but the skew gate keys on the git REV,
-# so candle-gen re-pins its gen-core in lockstep. `f8443050` is candle-gen main HEAD (the #418 merge, the
-# gen-core `0d2a2be` -> `951227a9` rev-align). Both the default lane AND `--features backend-candle
-# --target all` resolve the SINGLE gen-core rev `951227a9`. ALL mlx-gen-* + candle-gen-* pins move together.
+# encoder loader; this wiring adds `"lens"`/`"lens_turbo"` to `SEQUENTIAL_CAPABLE_ENGINES` (mlx_fit_gate.rs).
+# `951227a9` is mlx-gen main HEAD (the #696 merge). `git diff 0d2a2be6..951227a9 -- gen-core/
+# gen-core-testkit/` is EMPTY (gen-core BYTE-IDENTICAL — PURE mlx-gen-lens provider Rust + an additive
+# `src/weights.rs` `remove`/`remove_prefix`), but the skew gate keys on the git REV, so candle-gen re-pins
+# in lockstep. `f8443050` is candle-gen main HEAD (the #418 merge, the gen-core `0d2a2be6` -> `951227a9`
+# rev-align). Both skew lanes resolve the SINGLE gen-core rev `951227a9`. ALL mlx-gen-* + candle-gen-* pins
+# move together.
 candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "f84430501b1ca11715aa3a667b1aae8f204eb94e", features = ["cuda"], optional = true }
 # Candle image providers (sc-5096) -- Windows/CUDA siblings of the mlx-gen image crates above. Each
 # self-registers its engine id into the shared gen_core inventory registry; force-linked in
