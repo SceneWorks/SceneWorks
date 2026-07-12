@@ -33,23 +33,16 @@
         "provider": "huggingface",
         "repo": "SceneWorks/krea2-pose-controlnet-beta",
         // Pinned for defense-in-depth (parity with the worker's KREA_CONTROL_OVERLAY_REVISION) so a repo
-        // re-push can't swap the checkpoint under the cache install-state probe. `file` is the candle-lane
-        // artifact; the MLX lane resolves its own sibling `control_step5000.mlx.safetensors` (below).
+        // re-push can't swap the checkpoint under the cache install-state probe.
         "revision": "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac",
         "file": "control_step5000.safetensors"
       },
-      // Both backend artifacts live in the one repo (the entry is backend-NEUTRAL — `controlEngine`
-      // `krea_2_turbo_control` covers both lanes; the OS/feature cfg picks the provider). The candle lane
-      // (`krea_control_candle.rs`) loads `control_step5000.safetensors`; the macOS MLX lane
-      // (`krea_control.rs`, sc-8465 S5) loads `control_step5000.mlx.safetensors` — the epic-5594
-      // convert-once twin (candle `*.weight_p1` RMSNorm scales un-folded to the raw `*.weight` MLX
-      // re-folds at load; `examples/krea-control-convert.rs`). The MLX file is re-hosted alongside the
-      // candle one; bump `revision` to the commit that carries it once uploaded (currently the candle-only
-      // commit above — the MLX worker lane resolves the file from `main` until then).
-      "files": [
-        "control_step5000.safetensors",
-        "control_step5000.mlx.safetensors"
-      ],
+      // One artifact, both backends: the entry is backend-NEUTRAL (`controlEngine` `krea_2_turbo_control`
+      // covers both lanes; the OS/feature cfg picks the provider). The candle lane (`krea_control_candle.rs`)
+      // AND the macOS MLX lane (`krea_control.rs`, sc-8465 S5) both load THIS `control_step5000.safetensors`
+      // — the MLX branch reads the candle checkpoint DIRECTLY (mlx-gen `RmsScale` accepts the candle
+      // `*.weight_p1` norm convention verbatim), so there is no separate MLX artifact to host.
+      "files": ["control_step5000.safetensors"],
       "provenance": {
         "epic": "8459",
         "story": "8466",

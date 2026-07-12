@@ -35,12 +35,16 @@ const KREA_CONTROL_BASE_ENV: &str = "SCENEWORKS_KREA_CONTROL_BASE";
 /// Env override → a converted MLX control-branch overlay `.safetensors` (validation / bring-your-own).
 const KREA_CONTROL_WEIGHTS_ENV: &str = "SCENEWORKS_CONTROLNET_KREA";
 /// Default published Krea pose control-branch overlay repo (sc-8466) — the S0 spike (5,000-step)
-/// checkpoint. The MLX file is the epic-5594 convert-once artifact re-hosted alongside the candle
-/// `.safetensors` (a sibling `.mlx.safetensors` in the same repo). EXPERIMENTAL / not-for-production.
+/// checkpoint. EXPERIMENTAL / not-for-production.
 const KREA_CONTROL_OVERLAY_REPO: &str = "SceneWorks/krea2-pose-controlnet-beta";
-/// The MLX overlay file within [`KREA_CONTROL_OVERLAY_REPO`] — the converted twin of the candle
-/// `control_step5000.safetensors` (RMSNorm scales un-folded to the raw `*.weight` MLX re-folds at load).
-const KREA_CONTROL_OVERLAY_FILE: &str = "control_step5000.mlx.safetensors";
+/// The overlay file within [`KREA_CONTROL_OVERLAY_REPO`] — the SAME candle `control_step5000.safetensors`
+/// the candle lane loads. The MLX branch reads it DIRECTLY (mlx-gen `RmsScale` accepts the candle
+/// `*.weight_p1` norm convention verbatim, sc-8465), so there is no separate MLX artifact to host.
+const KREA_CONTROL_OVERLAY_FILE: &str = "control_step5000.safetensors";
+/// Pinned revision for the default overlay repo (defense-in-depth, parity with the candle lane's
+/// `KREA_CONTROL_OVERLAY_REVISION` — a repo re-push can't swap the checkpoint under us). Applied ONLY to
+/// the default repo; a `controlWeights.repo` override keeps `main`.
+const KREA_CONTROL_OVERLAY_REVISION: &str = "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac";
 
 /// Model ids the MLX Krea strict-pose control route accepts (the deployed base the overlay applies on).
 fn is_krea_control_model(model: &str) -> bool {
@@ -176,7 +180,14 @@ async fn ensure_krea_control_weights(
         .join("cache")
         .join("controlnet-krea")
         .join(&file);
-    ensure_hf_cached_file(&context, &repo, "main", &file, &dst).await?;
+    // Pin the exact commit for the default overlay repo so `main` moving under us can't swap the
+    // checkpoint (parity with the candle lane); a `controlWeights.repo` override carries its own layout.
+    let revision = if repo == KREA_CONTROL_OVERLAY_REPO {
+        KREA_CONTROL_OVERLAY_REVISION
+    } else {
+        "main"
+    };
+    ensure_hf_cached_file(&context, &repo, revision, &file, &dst).await?;
     Ok(dst)
 }
 
