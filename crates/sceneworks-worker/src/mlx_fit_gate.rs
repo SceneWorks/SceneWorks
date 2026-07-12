@@ -53,6 +53,10 @@ const SEQUENTIAL_CAPABLE_ENGINES: &[&str] = &[
     "qwen_image_control",
     "lens",
     "lens_turbo",
+    "krea_2_turbo",
+    "krea_2_raw",
+    "krea_2_edit",
+    "krea_2_turbo_control",
 ];
 
 /// Whether `engine_id`'s provider drops components in phase order under [`OffloadPolicy::Sequential`].
@@ -581,6 +585,13 @@ mod tests {
         // loader — see mlx-gen-lens `with_selected_layers`.
         assert!(engine_supports_sequential("lens"));
         assert!(engine_supports_sequential("lens_turbo"));
+        // The sc-11101 fan-out wired the WHOLE krea_2 family (one crate, TE < DiT — the qwen pattern):
+        // turbo/raw/edit (Q8, 22→18 / 26→20 GiB at 768²) + turbo_control (bf16, 43→35 GiB). The control
+        // branch's `spec.control` bytes are already counted by the fit-gate (sc-11006).
+        assert!(engine_supports_sequential("krea_2_turbo"));
+        assert!(engine_supports_sequential("krea_2_raw"));
+        assert!(engine_supports_sequential("krea_2_edit"));
+        assert!(engine_supports_sequential("krea_2_turbo_control"));
         // Not-yet-wired providers must NOT be offered sequential (they'd ignore it and SIGKILL).
         assert!(!engine_supports_sequential("z_image_turbo_control"));
         assert!(!engine_supports_sequential("flux"));
