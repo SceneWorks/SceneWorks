@@ -1111,6 +1111,253 @@ fn bernini_image_i2i_real_weights_generates_one_image() {
     );
 }
 
+/// Real-weight GPU smoke (sc-11003, epic 6562): candle Bernini t2i THROUGH THE WORKER LANE. Exercises
+/// the exact off-Mac still path `generate_candle_bernini_image_stream` drives —
+/// `resolve_candle_bernini_tier_dir_and_quant(bits)` (the `SCENEWORKS_CANDLE_BERNINI_DIR` root resolver +
+/// `bf16/`|`q8/`|`q4/` tier-select) → `load_spec(dir, quant, …)` → `gen_core::load("bernini")` (the
+/// force-linked `candle_gen_bernini` registration) → `bernini_image_generate_one(frames:1,
+/// video_mode:"t2i")` — minus only the API/job/asset-write plumbing. Default bits (no `mlxQuantize`)
+/// selects the **bf16 dense** tier (the off-Mac validated baseline). Env: point
+/// `SCENEWORKS_CANDLE_BERNINI_DIR` at the tier ROOT (containing `bf16/`|`q8/`|`q4/`, e.g.
+/// `E:\bernini-tiers`) or directly at a tier; optional `BERNINI_W`/`BERNINI_H`/`BERNINI_STEPS`/
+/// `BERNINI_GUIDANCE`/`BERNINI_PROMPT`/`BERNINI_SEED`/`BERNINI_OUT` (PNG). Run on demand (RTX PRO 6000,
+/// sm_120):
+/// `cargo test -p sceneworks-worker --release --features backend-candle -- --ignored --nocapture bernini_image_t2i_candle_real_weights`
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[ignore = "real-weight GPU smoke; needs a candle Bernini tier root at $SCENEWORKS_CANDLE_BERNINI_DIR + a CUDA device"]
+#[test]
+fn bernini_image_t2i_candle_real_weights_generates_one_image() {
+    // Anchor the provider's inventory registration into the test binary (parity with scail2_gpu_smoke).
+    use candle_gen_bernini as _;
+
+    fn env_u32(key: &str, default: u32) -> u32 {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(default)
+    }
+
+    let settings = Settings::from_env();
+    // The ACTUAL worker resolver: root (env → managed → HF) + tier-select. `None` bits ⇒ bf16 dense.
+    let (weights_dir, quant) = match resolve_candle_bernini_tier_dir_and_quant(&settings, None) {
+        Ok(pair) => pair,
+        Err(error) => {
+            eprintln!(
+                "skipping bernini_image_t2i_candle_real_weights: no candle Bernini tier ({error})"
+            );
+            return;
+        }
+    };
+    let width = env_u32("BERNINI_W", 768);
+    let height = env_u32("BERNINI_H", 768);
+    let steps = env_u32("BERNINI_STEPS", 20);
+    let seed = env_u32("BERNINI_SEED", 42) as i64;
+    let guidance = std::env::var("BERNINI_GUIDANCE")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .or(Some(4.0));
+    let prompt = std::env::var("BERNINI_PROMPT").unwrap_or_else(|_| {
+        "a weathered lighthouse on a rocky cliff at golden hour, photorealistic, cinematic"
+            .to_owned()
+    });
+
+    println!(
+        "[bernini-smoke] tier_dir={} quant={quant:?} {width}x{height} steps={steps} seed={seed} guidance={guidance:?}",
+        weights_dir.display()
+    );
+
+    // Byte-identical to the lane's `load_spec(weights_dir, quant, …)` — bf16 dense loads quant None.
+    let spec = load_spec(weights_dir, quant, Vec::new(), None);
+    let start = std::time::Instant::now();
+    let generator = gen_core::load("bernini", &spec).expect("load bernini candle provider");
+    println!(
+        "[bernini-smoke] loaded in {:.1}s",
+        start.elapsed().as_secs_f64()
+    );
+
+    let cancel = gen_core::CancelFlag::new();
+    let mut steps_seen = 0u32;
+    let gen_start = std::time::Instant::now();
+    // The EXACT request-builder the worker lane calls (frames:1 + video_mode:"t2i").
+    let (w, h, pixels) = bernini_image_generate_one(
+        generator.as_ref(),
+        &prompt,
+        None,
+        width,
+        height,
+        seed,
+        steps,
+        guidance,
+        "t2i",
+        Vec::new(),
+        &cancel,
+        &mut |p| {
+            if let gen_core::Progress::Step { current, .. } = p {
+                steps_seen = steps_seen.max(current);
+            }
+        },
+    )
+    .expect("bernini candle t2i generate");
+    let secs = gen_start.elapsed().as_secs_f64();
+
+    assert_eq!(pixels.len(), (w * h * 3) as usize, "RGB8-sized buffer");
+    assert_eq!((w, h), (width, height), "engine honored the requested dims");
+    assert!(steps_seen >= 1, "expected denoise step progress");
+
+    // Coherence: a real render is neither constant nor a collapsed (all-black / NaN-clamped) frame.
+    let n = pixels.len() as f64;
+    let mean = pixels.iter().map(|&v| v as f64).sum::<f64>() / n;
+    let var = pixels
+        .iter()
+        .map(|&v| (v as f64 - mean).powi(2))
+        .sum::<f64>()
+        / n;
+    let std = var.sqrt();
+    println!(
+        "[bernini-smoke] DONE {w}x{h} in {secs:.1}s | steps_seen={steps_seen} mean={mean:.1} std={std:.1}"
+    );
+    if let Ok(out) = std::env::var("BERNINI_OUT") {
+        image::RgbImage::from_raw(w, h, pixels.clone())
+            .expect("rgb buffer")
+            .save(out.trim())
+            .expect("save output png");
+        println!("[bernini-smoke] wrote {}", out.trim());
+    }
+    assert!(
+        pixels.windows(2).any(|x| x[0] != x[1]),
+        "non-constant image"
+    );
+    assert!(
+        std > 8.0,
+        "frame looks degenerate (std {std:.1}) — possible NaN / all-black decode"
+    );
+}
+
+/// Real-weight GPU smoke (sc-11003, epic 6562): candle Bernini t2v THROUGH THE VIDEO LANE's load seam.
+/// The video lane `crate::video_jobs::generate_candle_bernini` resolves the SAME tier
+/// (`resolve_candle_bernini_tier_dir_and_quant`) → `load_spec(dir, quant, …)` → `gen_core::load("bernini")`
+/// → a `GenerationRequest{frames:N, video_mode:"t2v"}` → `GenerationOutput::Video`. This drives that
+/// identical seam directly (minus the API/job/`generate_video` streaming plumbing), asserting the
+/// video-modality engine returns a coherent multi-frame clip on GPU. `bf16` dense tier (bits `None`).
+/// Env: `SCENEWORKS_CANDLE_BERNINI_DIR` (tier root) + optional `BERNINI_V_FRAMES`/`BERNINI_V_W`/
+/// `BERNINI_V_H`/`BERNINI_V_STEPS`/`BERNINI_V_OUT` (frame PNG dir). Heavier than t2i — run on demand:
+/// `cargo test -p sceneworks-worker --release --features backend-candle -- --ignored --nocapture bernini_t2v_candle_real_weights`
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[ignore = "real-weight GPU smoke; heavy Wan renderer — needs a candle Bernini tier root + a CUDA device"]
+#[test]
+fn bernini_t2v_candle_real_weights_generates_a_clip() {
+    use candle_gen_bernini as _;
+
+    fn env_u32(key: &str, default: u32) -> u32 {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(default)
+    }
+
+    let settings = Settings::from_env();
+    let (weights_dir, quant) = match resolve_candle_bernini_tier_dir_and_quant(&settings, None) {
+        Ok(pair) => pair,
+        Err(error) => {
+            eprintln!("skipping bernini_t2v_candle_real_weights: no candle Bernini tier ({error})");
+            return;
+        }
+    };
+    // Wan 1-mod-4 frame stride (the renderer is Wan2.2-A14B) — 17 = 4*4+1 keeps the clip short.
+    let frames = env_u32("BERNINI_V_FRAMES", 17);
+    let width = env_u32("BERNINI_V_W", 512);
+    let height = env_u32("BERNINI_V_H", 512);
+    let steps = env_u32("BERNINI_V_STEPS", 10);
+
+    println!(
+        "[bernini-v-smoke] tier_dir={} quant={quant:?} {width}x{height} frames={frames} steps={steps}",
+        weights_dir.display()
+    );
+
+    let spec = load_spec(weights_dir, quant, Vec::new(), None);
+    let start = std::time::Instant::now();
+    let generator = gen_core::load("bernini", &spec).expect("load bernini candle provider");
+    println!(
+        "[bernini-v-smoke] loaded in {:.1}s",
+        start.elapsed().as_secs_f64()
+    );
+
+    // The video lane's request shape: frames>1 + video_mode "t2v" ⇒ GenerationOutput::Video.
+    let request = gen_core::GenerationRequest {
+        prompt: "a slow cinematic drone shot over a misty pine forest at dawn".to_owned(),
+        negative_prompt: None,
+        width,
+        height,
+        count: 1,
+        seed: Some(42),
+        steps: Some(steps),
+        guidance: Some(4.0),
+        frames: Some(frames),
+        fps: Some(16),
+        video_mode: Some("t2v".to_owned()),
+        cancel: gen_core::CancelFlag::new(),
+        ..Default::default()
+    };
+    let mut last = String::new();
+    let gen_start = std::time::Instant::now();
+    let output = generator
+        .generate(&request, &mut |p| {
+            let s = format!("{p:?}");
+            if s != last {
+                println!("[progress] {s}");
+                last = s;
+            }
+        })
+        .expect("bernini candle t2v generate");
+    let secs = gen_start.elapsed().as_secs_f64();
+
+    let out_frames = match output {
+        gen_core::GenerationOutput::Video { frames, .. } => frames,
+        other => panic!("expected Video output, got {other:?}"),
+    };
+    assert!(!out_frames.is_empty(), "engine returned no frames");
+    let avg_std = {
+        let mut total = 0f64;
+        for f in &out_frames {
+            let n = f.pixels.len() as f64;
+            let mean = f.pixels.iter().map(|&v| v as f64).sum::<f64>() / n;
+            let var = f
+                .pixels
+                .iter()
+                .map(|&v| (v as f64 - mean).powi(2))
+                .sum::<f64>()
+                / n;
+            total += var.sqrt();
+        }
+        total / out_frames.len() as f64
+    };
+    println!(
+        "[bernini-v-smoke] DONE {} frames {}x{} in {secs:.1}s | avg per-frame std {avg_std:.1}",
+        out_frames.len(),
+        out_frames[0].width,
+        out_frames[0].height,
+    );
+    if let Ok(dir) = std::env::var("BERNINI_V_OUT") {
+        std::fs::create_dir_all(dir.trim()).ok();
+        for (i, f) in out_frames.iter().enumerate() {
+            let p = std::path::Path::new(dir.trim()).join(format!("frame_{i:03}.png"));
+            image::RgbImage::from_raw(f.width, f.height, f.pixels.clone())
+                .expect("rgb buffer")
+                .save(&p)
+                .expect("save frame");
+        }
+        println!(
+            "[bernini-v-smoke] wrote {} frames to {}",
+            out_frames.len(),
+            dir.trim()
+        );
+    }
+    assert!(
+        avg_std > 8.0,
+        "clip looks degenerate (avg std {avg_std:.1}) — possible NaN / all-black decode"
+    );
+}
+
 /// sc-8827 (F-025): the worker feeds the PuLID-FLUX engine its adapter / EVA / face-stack paths on
 /// `LoadSpec::identity` instead of mutating the process-global `PULID_*` env vars at job time. This
 /// asserts the mapping `PulidWeights -> IdentityWeights` (encoder=File(adapter), eva=File(eva),
