@@ -42,7 +42,7 @@ import {
   serializeCaption,
   validateCaption,
 } from "../ideogramCaption.js";
-import { buildImageJobAdvanced } from "../imageJobAdvanced.js";
+import { buildImageJobRequest } from "../imageJobRequest.js";
 import { usePoseLibrary, useUserPoseLoader } from "../poseLibrary.js";
 
 const PROMPT_SUGGESTION_POOL = [
@@ -1764,166 +1764,69 @@ export function ImageStudio() {
         }
         setSubmitError("");
       }
-      const job = await createImageJob({
-        mode,
-        prompt: promptToSend,
-        negativePrompt,
-        model,
-        count: posePayload.length ? 1 : count,
-        seed: seed === "" ? null : Number(seed),
-        width,
-        height,
-        recipePresetId: selectedPreset?.id ?? null,
-        characterId: mode === "character_image" ? characterId || null : null,
-        characterLookId: mode === "character_image" ? characterLookId || null : null,
-        // edit_image: a single source image, except for a multi-reference model (sc-6211,
-        // FLUX.2-dev) whose source picker is replaced by the multi-image reference picker below.
-        // text_to_image strict-control (sc-8245): canny/depth in preprocess (derive) mode send the
-        // uploaded control image here as the source the worker auto-derives the map FROM
-        // (strict_control.rs `resolve_control_source`). Passthrough mode uses `advanced.controlImage`.
-        sourceAssetId:
-          mode === "edit_image" && !multiReference
-            ? // A two-reference edit sends the ordered [image1, image2] pair as referenceAssetIds instead
-              // (epic 10871 P1.3), so the single sourceAssetId is dropped when a second image is chosen.
-              editSecondPair
-              ? null
-              : sourceAssetId || null
-            : controlPreprocessSourceId,
-        // Multi-reference edit (sc-6211): the plural reference set the FLUX.2-dev edit conditions on.
-        // Only sent in edit_image mode for a multiReference model; the worker routes a non-empty list
-        // to Conditioning::MultiReference (one image ⇒ a normal single-reference edit). The Krea
-        // two-reference edit (epic 10871 P1.3) reuses this channel with the ordered [image1, image2] pair.
-        referenceAssetIds:
-          mode === "edit_image" && multiReference && referenceAssetIds.length
-            ? referenceAssetIds
-            : (editSecondPair ?? undefined),
-        // Fit mode applies to edits only; coerced so a stale "outpaint" never reaches a
-        // non-inpaint model (epic 2551). Omitted for non-edit modes (worker default crop).
-        fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
-        // character_image: the IP-Adapter identity reference. Otherwise, on an img2img-capable model
-        // (Krea 2 Turbo, sc-8593), the reference picked in the "Start from an image" panel — sent so the
-        // worker's krea arm routes it to img2img latent-init (advanced.strength below).
-        referenceAssetId:
-          mode === "character_image"
-            ? referenceAssetId || null
-            : supportsImg2img
-              ? img2imgReferenceAssetId || null
-              : null,
-        loras: buildLorasPayload(),
-        ...(upscaleEnabled
-          ? {
-              upscale: {
-                enabled: true,
-                factor: upscaleFactor,
-                engine: upscaleEngine,
-                // SeedVR2-only detail/softness knob (sc-4815); omitted for engines that ignore it.
-                ...(upscaleEngineHasSoftness(upscaleEngine) ? { softness: upscaleSoftness } : {}),
-              },
-            }
-          : {}),
-        // advanced payload (sc-8854, F-052): assembled by the pure buildImageJobAdvanced
-        // builder so this async submit() stays focused on prompt resolution + the API
-        // call. Every omit-when-default rule (which keeps saved recipes byte-identical)
-        // lives in imageJobAdvanced.js and is covered by imageJobAdvanced.test.js.
-        advanced: buildImageJobAdvanced({
-          resolution,
-          sendStructured,
+      // sc-11219 (F-031): the single Generate payload is built by the shared buildJobRequest so
+      // it stays byte-identical to a batch run with the same visible settings. The only per-call
+      // difference is the resolved prompt / structured-caption override threaded in here.
+      const job = await createImageJob(
+        buildJobRequest({
+          promptToSend,
           submitIntent,
+          sendStructured,
           submitCaption,
           submitBackend,
-          sampler,
-          scheduler,
-          schedulerShift,
-          stepsOverride,
-          guidanceOverride,
-          guidanceMethod,
-          flashAttn,
-          promptEnhance,
-          enhancePrompt,
-          precisionToggle,
-          bf16Precision,
-          showTierPicker,
-          quantTier,
-          showPidToggle,
-          usePid,
-          pidTarget,
-          mode,
-          referenceAssetId,
-          hideReferenceStrength,
-          ipAdapterScale,
-          // img2img (sc-8593): emit advanced.strength when an img2img-capable model has a reference.
-          supportsImg2img,
-          img2imgReferenceAssetId,
-          img2imgStrength,
-          identityStructure,
-          controlnetScale,
-          variationStrength,
-          trueCfgScale,
-          viewAngles,
-          viewAngle,
-          posePayload,
-          faceRestore,
-          controlActive,
-          activeControlMode,
-          controlPassthroughId,
-          effectiveControlScale,
-          controlOverlayId,
         }),
-      });
+      );
       onLocalJobCreated?.(job);
     } finally {
       setSubmitting(false);
     }
   }
 
-  // One image-job request for a single resolved batch prompt. Reuses the current studio
-  // settings (model, loras, upscale, reference/source per mode, pose-library + strict-control
-  // conditioning, and the whole advanced knob set via the tested buildImageJobAdvanced).
-  // `count` multiplies within each job UNLESS poses are selected, in which case each job
-  // emits one image per pose (images = jobs × posePayload.length). For a structured-caption
-  // model (sc-9980) the caller passes the per-prompt auto-expanded caption via `opts`.
-  const buildBatchJobRequest = (resolvedPrompt, opts = {}) => ({
-    mode,
-    prompt: opts.promptToSend ?? resolvedPrompt,
-    negativePrompt,
-    model,
-    count: posePayload.length ? 1 : count,
-    seed: seed === "" ? null : Number(seed),
-    // A per-prompt [WxH] directive (sc-10063) overrides the studio resolution for this job.
-    width: opts.resolution?.width ?? width,
-    height: opts.resolution?.height ?? height,
-    recipePresetId: selectedPreset?.id ?? null,
-    characterId: mode === "character_image" ? characterId || null : null,
-    characterLookId: mode === "character_image" ? characterLookId || null : null,
-    sourceAssetId:
-      mode === "edit_image" && !multiReference
-        ? editSecondPair
-          ? null
-          : sourceAssetId || null
-        : controlPreprocessSourceId,
-    referenceAssetIds:
-      mode === "edit_image" && multiReference && referenceAssetIds.length
-        ? referenceAssetIds
-        : (editSecondPair ?? undefined),
-    fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
-    referenceAssetId: mode === "character_image" ? referenceAssetId || null : null,
-    loras: buildLorasPayload(),
-    ...(upscaleEnabled
-      ? {
-          upscale: {
-            enabled: true,
-            factor: upscaleFactor,
-            engine: upscaleEngine,
-            ...(upscaleEngineHasSoftness(upscaleEngine) ? { softness: upscaleSoftness } : {}),
-          },
-        }
-      : {}),
-    advanced: buildImageJobAdvanced({
-      resolution: opts.resolution ? `${opts.resolution.width}x${opts.resolution.height}` : resolution,
-      sendStructured: opts.sendStructured ?? false,
-      submitIntent: resolvedPrompt,
-      submitCaption: opts.submitCaption ?? caption,
-      submitBackend: opts.submitBackend ?? magicPromptBackend,
+  // sc-11219 (F-031): the single shared image-job-request builder used by BOTH single Generate
+  // (submit) and the batch run. It resolves the current studio state into the args the pure
+  // buildImageJobRequest assembles, so the two paths emit a byte-identical payload for the same
+  // visible settings. The ONLY intended difference is the per-item prompt / structured-caption /
+  // per-prompt-resolution override passed in `overrides` (promptToSend / submitIntent /
+  // sendStructured / submitCaption / submitBackend / resolutionOverride). This replaced a
+  // hand-copied batch twin that had drifted (dropped the img2img reference + pidTarget/img2img
+  // advanced knobs), silently ignoring an img2img reference and PiD "2K" tier on batch runs.
+  const buildJobRequest = (overrides = {}) =>
+    buildImageJobRequest({
+      // Overrides — the one legitimate single-vs-batch difference.
+      promptToSend: overrides.promptToSend,
+      submitIntent: overrides.submitIntent,
+      sendStructured: overrides.sendStructured ?? false,
+      submitCaption: overrides.submitCaption,
+      submitBackend: overrides.submitBackend,
+      resolutionOverride: overrides.resolutionOverride ?? null,
+      // Shared studio settings (identical for both paths).
+      resolution,
+      mode,
+      negativePrompt,
+      model,
+      count,
+      seed,
+      posePayload,
+      width,
+      height,
+      recipePresetId: selectedPreset?.id ?? null,
+      characterId,
+      characterLookId,
+      multiReference,
+      editSecondPair,
+      sourceAssetId,
+      controlPreprocessSourceId,
+      referenceAssetIds,
+      fitMode,
+      editInpaintCapable,
+      referenceAssetId,
+      supportsImg2img,
+      img2imgReferenceAssetId,
+      loras: buildLorasPayload(),
+      upscaleEnabled,
+      upscaleFactor,
+      upscaleEngine,
+      upscaleSoftness,
       sampler,
       scheduler,
       schedulerShift,
@@ -1939,25 +1842,39 @@ export function ImageStudio() {
       quantTier,
       showPidToggle,
       usePid,
-      mode,
-      referenceAssetId,
+      pidTarget,
       hideReferenceStrength,
       ipAdapterScale,
       identityStructure,
       controlnetScale,
       variationStrength,
       trueCfgScale,
+      img2imgStrength,
       viewAngles,
       viewAngle,
-      posePayload,
       faceRestore,
       controlActive,
       activeControlMode,
       controlPassthroughId,
       effectiveControlScale,
       controlOverlayId,
-    }),
-  });
+    });
+
+  // One image-job request for a single resolved batch prompt. Thin adapter over the shared
+  // buildJobRequest: resolves the per-prompt override defaults (structured-caption payload and a
+  // per-prompt [WxH] directive, sc-10063) against studio state, then delegates. `count`
+  // multiplies within each job UNLESS poses are selected, in which case each job emits one image
+  // per pose (images = jobs × posePayload.length). For a structured-caption model (sc-9980) the
+  // caller passes the per-prompt auto-expanded caption via `opts`.
+  const buildBatchJobRequest = (resolvedPrompt, opts = {}) =>
+    buildJobRequest({
+      promptToSend: opts.promptToSend ?? resolvedPrompt,
+      submitIntent: resolvedPrompt,
+      sendStructured: opts.sendStructured ?? false,
+      submitCaption: opts.submitCaption ?? caption,
+      submitBackend: opts.submitBackend ?? magicPromptBackend,
+      resolutionOverride: opts.resolution ?? null,
+    });
 
   // Fan out one image job per resolved prompt (mirrors the asset batch, sc-6112): each
   // posts independently so the worker runs them serially with its between-image cache
