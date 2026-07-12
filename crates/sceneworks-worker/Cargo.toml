@@ -1640,18 +1640,25 @@ mlx-gen-scail2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "0d2a
 # #412 bernini — additive candle-only, no worker surface change). Both the default lane AND
 # `--features backend-candle --target all` resolve the SINGLE gen-core rev `19573a9a`. ALL mlx-gen-* +
 # candle-gen-* pins move together.
-# Bumped mlx-gen `19573a9a` -> `0d2a2be6` + candle-gen `95a2ebcc` -> `194b9959` IN LOCKSTEP (sc-11028,
+# Bumped candle-gen `95a2ebcc` -> `c20a589c` (epic 10871, sc-10882/10883): candle-gen #416 is the candle
+# Krea 2 image-edit ENGINE (Kontext seq-concat edit forward + Qwen3-VL vision-tower grounding). The new
+# candle `KreaEdit` worker lane (`krea_edit_candle.rs`) consumes its `candle_gen_krea::pipeline::{
+# load_components, load_edit_components, render_edit}`. candle-gen-ONLY this time — `c20a589c` re-pins the
+# SAME gen-core `19573a9a` (mlx-gen HEAD, unchanged), so the skew gate stays satisfied with NO mlx-gen
+# move (the edit engine is additive to candle-gen-krea; `git diff 95a2ebcc..c20a589c -- gen-core*` empty).
+# Bumped mlx-gen `19573a9a` -> `0d2a2be6` + candle-gen `c20a589c` -> `194b9959` IN LOCKSTEP (sc-11028,
 # unblocks sc-10680): candle-gen #420 fixes the shared `QLinear` dense->QTensor fold silently quantizing
 # the WRONG rows for an offset view (`QTensor::quantize{,_onto}` reads raw storage, ignoring a narrow's
 # start offset) — the flux2 ComfyUI in-place fp8 DiT (sc-10680) loaded every double block's to_k/to_v as
-# a copy of to_q, an incoherent render. `194b9959` is candle-gen main HEAD (the #420 squash-merge; also
-# carries #416 krea-edit engine — additive candle-only — and #417, candle-gen's own gen-core
-# `19573a9a` -> `0d2a2be6` rev-align). `git diff 19573a9a..0d2a2be6 -- gen-core/ gen-core-testkit/` is
-# EMPTY (gen-core BYTE-IDENTICAL; mlx-gen #695 is additive mlx-gen-qwen-image residency, sc-11006), but
-# the skew gate keys on the git REV, so mlx-gen moves in lockstep. Both the default lane AND
-# `--features backend-candle --target all` resolve the SINGLE gen-core rev `0d2a2be6`. GPU-validated on
-# the sm_120 box: the sc-10680 comfyui lane renders coherent (rusty-robot A/B vs the packed-q8 baseline,
-# seed 42). ALL mlx-gen-* + candle-gen-* pins move together.
+# a copy of to_q, an incoherent render. `194b9959` is candle-gen main HEAD (the #420 squash-merge; a
+# descendant of `c20a589c` above, so the KreaEdit lane keeps the exact engine API it consumes; also
+# carries #417, candle-gen's own gen-core `19573a9a` -> `0d2a2be6` rev-align). `git diff
+# 19573a9a..0d2a2be6 -- gen-core/ gen-core-testkit/` is EMPTY (gen-core BYTE-IDENTICAL; mlx-gen #695 is
+# additive mlx-gen-qwen-image residency, sc-11006), but the skew gate keys on the git REV, so mlx-gen
+# moves in lockstep. Both the default lane AND `--features backend-candle --target all` resolve the
+# SINGLE gen-core rev `0d2a2be6`. GPU-validated on the sm_120 box: the sc-10680 comfyui lane renders
+# coherent (rusty-robot A/B vs the packed-q8 baseline, seed 42). ALL mlx-gen-* + candle-gen-* pins move
+# together.
 candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "194b99597b5ae84bafee22cfe80b4e3e10ab49a7", features = ["cuda"], optional = true }
 # Candle image providers (sc-5096) -- Windows/CUDA siblings of the mlx-gen image crates above. Each
 # self-registers its engine id into the shared gen_core inventory registry; force-linked in
