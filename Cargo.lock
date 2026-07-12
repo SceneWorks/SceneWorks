@@ -491,6 +491,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-gen-bernini"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=f08051c3c22fa7b70c9f35ac63db14b6056192b1#f08051c3c22fa7b70c9f35ac63db14b6056192b1"
+dependencies = [
+ "candle-gen",
+ "candle-gen-wan",
+ "image",
+ "inventory",
+ "safetensors 0.7.0",
+ "serde_json",
+ "tokenizers 0.22.2",
+]
+
+[[package]]
 name = "candle-gen-boogu"
 version = "0.0.0"
 source = "git+https://github.com/michaeltrefry/candle-gen?rev=f08051c3c22fa7b70c9f35ac63db14b6056192b1#f08051c3c22fa7b70c9f35ac63db14b6056192b1"
@@ -5959,6 +5973,7 @@ dependencies = [
  "axum",
  "candle-gen",
  "candle-gen-anima",
+ "candle-gen-bernini",
  "candle-gen-boogu",
  "candle-gen-chroma",
  "candle-gen-clip",
