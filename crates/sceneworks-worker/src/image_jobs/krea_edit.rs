@@ -13,10 +13,18 @@
 // `consume_gen_events`.
 // ---------------------------------------------------------------------------
 
-/// The engine registry id the edit lane loads: the Raw pipeline routed to the Kontext edit entrypoint
-/// (mlx-gen `krea_2_edit`, epic 10871). Distinct from the `krea_2_raw` t2i/img2img generator — the
-/// distinct id is what tells the engine to treat the source `Reference` as an edit, not an img2img init.
-const KREA_EDIT_ENGINE_ID: &str = "krea_2_edit";
+/// The engine registry id the edit lane loads, chosen by model: the undistilled Raw pipeline routed to
+/// the Kontext edit entrypoint (`krea_2_edit`, full-CFG ~52 steps, epic 10871) for `krea_2_raw`, or the
+/// distilled CFG-free few-step edit (`krea_2_turbo_edit`, guidance=0 ~8 steps, sc-11640) for
+/// `krea_2_turbo`. Distinct from the plain `krea_2_*` t2i/img2img generators — the distinct id is what
+/// tells the engine to treat the source `Reference` as an edit, not an img2img init.
+fn krea_edit_engine_id(model: &str) -> &'static str {
+    if model == "krea_2_turbo" {
+        "krea_2_turbo_edit"
+    } else {
+        "krea_2_edit"
+    }
+}
 
 /// The most source images a Krea edit conditions on (epic 10871 P1.3): scene = image 1, person =
 /// image 2, a FIXED order (swapping degrades identity per the LoRA authors). Mirrors the engine cap
@@ -41,12 +49,13 @@ fn request_has_image_edit_lora(request: &ImageRequest) -> bool {
     request.loras.iter().any(lora_declares_image_edit_role)
 }
 
-/// True when this is a Krea edit job whose weights resolve — routed to the `krea_2_edit` engine rather
-/// than the plain `krea_2_raw` t2i/img2img path. Edit is Krea 2 **Raw** only (the full-CFG variant the
-/// `krea2_identity_edit` LoRA targets; Turbo has no validated edit recipe), keyed on `edit_image` mode +
-/// a source asset. Mirrors the core router's `krea_mlx_eligible` edit branch (sc-10882).
+/// True when this is a Krea edit job whose weights resolve — routed to the `krea_2_edit` /
+/// `krea_2_turbo_edit` engine rather than the plain `krea_2_*` t2i/img2img path. Both Krea image
+/// variants edit: **Raw** on the full-CFG `krea_2_edit` (epic 10871) and **Turbo** on the CFG-free
+/// distilled `krea_2_turbo_edit` (sc-11640); both drive the same `krea2_identity_edit` LoRA. Keyed on
+/// `edit_image` mode + a source asset. Mirrors the core router's `krea_mlx_eligible` edit branch.
 fn krea_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
-    request.model == "krea_2_raw"
+    matches!(request.model.as_str(), "krea_2_raw" | "krea_2_turbo")
         && request.mode == "edit_image"
         && !edit_reference_ids(request).is_empty()
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
@@ -75,7 +84,7 @@ fn krea_edit_raw_settings(
     );
     raw.insert(
         "editEngine".to_owned(),
-        Value::String(KREA_EDIT_ENGINE_ID.to_owned()),
+        Value::String(krea_edit_engine_id(&request.model).to_owned()),
     );
     raw.insert("referenceCount".to_owned(), json!(reference_count));
     raw
@@ -211,12 +220,14 @@ async fn generate_krea_edit_stream(
     let (width, height) = (request.width, request.height);
     let adapter_count = adapters.len();
     let spec = load_spec(weights_dir, quant, adapters, None);
+    // Raw → `krea_2_edit` (full-CFG); Turbo → `krea_2_turbo_edit` (CFG-free distilled, sc-11640).
+    let engine_id = krea_edit_engine_id(&request.model);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
-        KREA_EDIT_ENGINE_ID,
+        engine_id,
         adapter_count,
         spec,
-        format!("{KREA_EDIT_ENGINE_ID} load failed"),
+        format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
             drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
                 if cancel.is_cancelled() {

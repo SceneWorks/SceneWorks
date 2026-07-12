@@ -371,6 +371,12 @@ describe("findModelEditLora (epic 10871)", () => {
     expect(findModelEditLora(catalogLoras, { id: "krea_2_raw", family: "krea_2" })).toBe(kreaEdit);
   });
 
+  it("finds the same image_edit LoRA for Krea 2 Turbo (sc-11640 — shared family, CFG-free edit)", () => {
+    // Turbo edit reuses the exact `krea2_identity_edit` LoRA (family krea_2, no base gating), so the
+    // auto-apply resolves the same adapter as Raw — the Studio surfaces it for either edit variant.
+    expect(findModelEditLora(catalogLoras, { id: "krea_2_turbo", family: "krea_2" })).toBe(kreaEdit);
+  });
+
   it("returns null for a model with no compatible image_edit LoRA (Qwen/FLUX edit)", () => {
     expect(findModelEditLora(catalogLoras, { id: "qwen_image_edit", family: "qwen-image" })).toBe(null);
   });
