@@ -4517,6 +4517,39 @@ fn candle_image_route_gates_on_flag_then_pose_reject_then_txt2img() {
     assert_eq!(resolve_candle_image_route(&unknown, &settings), None);
 }
 
+// sc-10996 (epic 6562): `bernini_image` t2i / i2i route to the dedicated candle Bernini lane
+// (`CandleImageRoute::Bernini` → `generate_candle_bernini_image_stream`), NOT the generic txt2img arm
+// (the engine is `Modality::Video`, so `bernini_image` is not an `is_candle_engine` id). Routed on the
+// model id alone (no staged weights), the candle sibling of the MLX `ImageRoute::Bernini` arm — this is
+// the dispatch proof for the story (GPU-val is blocked on the `SceneWorks/bernini-candle` weights,
+// sc-11003).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_image_route_selects_bernini_lane_for_bernini_image() {
+    let mut settings = Settings::from_env();
+
+    // Candle disabled (default) → None (the job stubs), regardless of model.
+    settings.backend_candle_enabled = false;
+    let t2i = request(json!({ "projectId": "p", "model": "bernini_image", "count": 1 }));
+    assert_eq!(resolve_candle_image_route(&t2i, &settings), None);
+
+    settings.backend_candle_enabled = true;
+    // Plain t2i → the dedicated Bernini lane (not CandleTxt2Img — bernini_image is not is_candle_engine).
+    assert_eq!(
+        resolve_candle_image_route(&t2i, &settings),
+        Some(CandleImageRoute::Bernini),
+    );
+    // i2i (edit_image + a source) → the SAME Bernini lane (the stream forces the engine i2i task).
+    let i2i = request(json!({
+        "projectId": "p", "model": "bernini_image", "count": 1,
+        "mode": "edit_image", "sourceAssetId": "asset_1"
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&i2i, &settings),
+        Some(CandleImageRoute::Bernini),
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn generic_lane_conditioning_defaults_when_no_reference() {

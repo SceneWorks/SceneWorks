@@ -243,6 +243,12 @@ enum CandleImageRoute {
     /// `generate_candle_flux2_comfyui_stream` (epic 10451 Phase 2e, sc-10680). Not an `is_candle_engine`
     /// id — routed off the forwarded row.
     Flux2Comfyui,
+    /// Bernini still-image companion (`bernini_image`, engine id `bernini`, `frames:1`) → the dedicated
+    /// `generate_candle_bernini_image_stream` (sc-10996, epic 6562). NOT an `is_candle_engine` txt2img id
+    /// (the engine is `Modality::Video`, reached with `frames:1`), so — like the MLX `ImageRoute::Bernini`
+    /// arm — it is routed on the model id BEFORE the generic txt2img arm; both t2i and i2i (`edit_image`)
+    /// route here.
+    Bernini,
     /// A plain candle txt2img engine id → `generate_candle_stream`.
     CandleTxt2Img,
 }
@@ -316,6 +322,15 @@ fn resolve_candle_image_route(
         // In-place ComfyUI FLUX.2-dev base (sc-10680): sibling of the Qwen-Image comfyui lane — an
         // `external_base_*` id routed off the forwarded row (family=="flux2", usable).
         Some(CandleImageRoute::Flux2Comfyui)
+    } else if bernini_image_candle_available(request) {
+        // Bernini still-image companion (sc-10996, epic 6562): t2i / i2i on the `bernini_image` id,
+        // routed to the same `engine_id:"bernini"` planner+renderer with `frames:1`. Must win over the
+        // generic `is_candle_engine` txt2img arm below — `bernini_image` is NOT an `is_candle_engine` id
+        // (its engine is `Modality::Video`, reached with `frames:1`), so it would otherwise fall through
+        // to `None` and stub. Routed on the model id alone (like the sdxl txt2img arm) — a missing
+        // `SceneWorks/bernini-candle` snapshot fails loud at load, never silently stubs (the MLX
+        // `ImageRoute::Bernini` weight-gates instead only because it must fall through to `mlx_available`).
+        Some(CandleImageRoute::Bernini)
     } else if is_candle_engine(&request.model)
         && !matches!(
             request.model.as_str(),

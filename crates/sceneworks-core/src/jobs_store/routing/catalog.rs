@@ -638,9 +638,18 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // torch-only image epic seam matched nothing and was retired (sc-8951).
     ModelCaps::new("lens", true, true, false, false, true),
     ModelCaps::new("lens_turbo", true, true, false, false, true),
-    // Bernini still-image companion (epic 4699 / sc-5424): MLX-only id — `engine_id:"bernini"`
-    // planner+renderer with `frames:1`. The video `bernini` id lives in the video table below.
-    ModelCaps::new("bernini_image", true, false, false, false, false),
+    // Bernini still-image companion (epic 4699 / sc-5424 MLX; sc-10996 candle): `engine_id:"bernini"`
+    // planner+renderer with `frames:1`. Both backends wired — `mlx-gen-bernini` (macOS) +
+    // `candle-gen-bernini` (Windows/CUDA, sc-10996 epic 6562: the full planner+renderer `bernini`
+    // generator, `gen_core::load("bernini")` with `frames:1`), so `candle_routed = true`. Both still
+    // tasks route to candle: t2i via the generic `image_request_candle_eligible` gate, i2i via the
+    // `bernini_image` `edit_image` branch in `image_job_is_candle_eligible` (a `sourceAssetId` edit, the
+    // bespoke `generate_candle_bernini_image_stream` lane — like the MLX `bernini_image_mlx_eligible`).
+    // NOT `candle_quant`: the descriptor advertises Q4/Q8, but the off-Mac packed-tier select is deferred
+    // until the `SceneWorks/bernini-candle` tier layout lands (sc-11003) — the candle lane loads the
+    // converted snapshot dense today. The video `bernini` id lives in the video table below (still
+    // MLX-only — no candle video route wired yet).
+    ModelCaps::new("bernini_image", true, true, false, false, false),
     // Ideogram 4 + Turbo (epic 4725 MLX; sc-6597 candle): 9.3B flow DiT + Qwen3-VL-8B TE. T2I + edit on
     // MLX (sc-6303); candle serves txt2img + the in-lane edit path (sc-6598) via the generic stream.
     // Candle advertises Q4/Q8 (sc-9607 flipped `supported_quants: [Q4, Q8]`, dropping the loader's
@@ -1011,6 +1020,8 @@ mod tests {
         "qwen_image",
         "lens",
         "lens_turbo",
+        // sc-10996 (epic 6562): the candle Bernini still-image companion joins the routed set.
+        "bernini_image",
         "chroma1_hd",
         "chroma1_base",
         "chroma1_flash",

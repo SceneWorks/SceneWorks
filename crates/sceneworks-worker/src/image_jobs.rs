@@ -186,6 +186,14 @@ use candle_gen_kolors as _;
 use candle_gen_sensenova as _;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_z_image as _;
+// Candle Bernini still-image companion (sc-10996, epic 6562): the full planner+renderer `Generator`
+// self-registers under `bernini` (`Modality::Video`, `frames:1` yields a single still); the image
+// path reaches it via `gen_core::load("bernini")` (no direct type contact). Force-link here — the
+// Windows/CUDA sibling of the `mlx_gen_bernini` anchor above — so the MSVC release linker keeps the
+// `register_generators!` registration (else `gen_core::load("bernini")` returns "no generator
+// registered"). The dedicated `generate_candle_bernini_image_stream` drives it (image_jobs/bernini.rs).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_bernini as _;
 // Lens / Lens-Turbo (epic 5107 engine / sc-5126 cutover) — the candle Windows/CUDA sibling of the
 // `mlx_gen_lens` anchor above, and the 8th candle image family (effectively). Self-registers `lens`
 // (20-step/CFG-5) + `lens_turbo` (4-step/g-1.0) into the shared gen_core inventory registry; the
@@ -799,6 +807,23 @@ pub(crate) async fn run_image_generate_job(
                 // + BFL→diffusers remap; TE/VAE/tokenizer from a resident FLUX.2-dev snapshot).
                 CandleImageRoute::Flux2Comfyui => {
                     generate_candle_flux2_comfyui_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                // Bernini still-image companion (sc-10996, epic 6562): `bernini_image` t2i / i2i on the
+                // `engine_id:"bernini"` planner+renderer with `frames:1` — the Windows/CUDA sibling of the
+                // macOS `ImageRoute::Bernini` arm. NOT `is_candle_engine` (its engine is `Modality::Video`),
+                // so it has its own bespoke stream that forces `frames:1` + the engine task string, exactly
+                // like the MLX `generate_bernini_image_stream`.
+                CandleImageRoute::Bernini => {
+                    generate_candle_bernini_image_stream(
                         api,
                         settings,
                         job,
@@ -1755,8 +1780,15 @@ include!("image_jobs/krea_control.rs");
 #[cfg(target_os = "macos")]
 // SenseNova edit routing.
 include!("image_jobs/sensenova.rs");
-#[cfg(target_os = "macos")]
-// Bernini still-image (t2i/i2i) routing.
+// Bernini still-image (t2i/i2i) routing. Included on macOS (the MLX `generate_bernini_image_stream`)
+// AND the candle lane (sc-10996: `generate_candle_bernini_image_stream` + the shared task/raw-settings/
+// generate-one helpers); each item inside is cfg-gated to its backend, so the neither build pulls in
+// nothing. (Unlike the other macOS-only routing files above, whose candle siblings live in dedicated
+// `*_candle.rs` files, Bernini keeps both lanes in one file to share the neutral still-image helpers.)
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 include!("image_jobs/bernini.rs");
 #[cfg(target_os = "macos")]
 // SDXL advanced routing.
