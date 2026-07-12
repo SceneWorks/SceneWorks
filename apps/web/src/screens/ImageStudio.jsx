@@ -102,6 +102,8 @@ function defaultCharacterPrompt(character) {
 }
 import {
   finiteNumberOrUndefined,
+  findModelEditLora,
+  loraIsInstalled,
   serializeLora,
   noPresetId,
 } from "../presetUtils.js";
@@ -279,6 +281,7 @@ export function ImageStudio() {
     imageCaption,
     imageDescribe,
     createModelDownloadJob,
+    createLoraDownloadJob,
     deleteAsset,
     purgeAsset,
     gpuOptions,
@@ -508,6 +511,11 @@ export function ImageStudio() {
   const [referenceAssetIds, setReferenceAssetIds] = useState(() =>
     Array.isArray(saved.referenceAssetIds) ? saved.referenceAssetIds : [],
   );
+  // Optional SECOND (person) source for a Krea-style two-reference edit (epic 10871 P1.3). Scene =
+  // the `sourceAssetId` above (image 1), person = this (image 2), a fixed order. Only surfaced when
+  // the model declares `ui.editReferences`; empty otherwise. When set, submit sends an ordered
+  // `referenceAssetIds: [scene, person]` pair instead of the single `sourceAssetId`.
+  const [editPersonAssetId, setEditPersonAssetId] = useState("");
   // Edit fit mode (epic 2551): how the source is fitted to the output W×H. Never stretch.
   const [fitMode, setFitMode] = useState(saved.fitMode ?? "crop");
   const [characterId, setCharacterId] = useState("");
@@ -902,6 +910,23 @@ export function ImageStudio() {
   // multi-select reference picker (plural `referenceAssetIds`) instead of the single source picker.
   // FLUX.2-dev only (its DiT sequence-gated chunking keeps the multi-reference edit under 96 GB).
   const multiReference = Boolean(selectedModel?.ui?.multiReference);
+  // Krea-style two-reference edit (epic 10871 P1.3): a model whose `ui.editReferences` adds an optional
+  // SECOND (person) source to the single-source edit — scene = image 1, person = image 2, fixed order.
+  // Only in single-source edit mode (never alongside the flat `multiReference` multi-select). Null →
+  // the plain single-source edit for every other model/mode.
+  const editReferences =
+    mode === "edit_image" && !multiReference ? (selectedModel?.ui?.editReferences ?? null) : null;
+  // The ordered [scene, person] pair, sent as `referenceAssetIds` when a person is chosen; null → the
+  // single `sourceAssetId` path. The scene is required too (a person with no scene is meaningless).
+  const editPersonPair =
+    editReferences && sourceAssetId && editPersonAssetId ? [sourceAssetId, editPersonAssetId] : null;
+  // Drop a stale person selection when the two-reference edit surface goes away (model/mode change),
+  // so it can never leak into a payload for a model that doesn't support it.
+  useEffect(() => {
+    if (!editReferences) {
+      setEditPersonAssetId("");
+    }
+  }, [editReferences]);
   // Mac UI gating (sc-3486): disable the per-model feature controls the selected model can't run
   // in the Rust/MLX flow on Mac, so the user never reaches a `mlx_unsupported` error after submit.
   const macEditBlock = macModelFeatureBlock(selectedModel, macCapabilities, "edit");
@@ -1250,6 +1275,59 @@ export function ImageStudio() {
     initialLoraWeights: saved.loraWeights ?? {},
     initialShowIncompatibleLoras: saved.showIncompatibleLoras ?? false,
   });
+
+  // ---- Krea-style image edit LoRA (epic 10871, P4.1) ----
+  // The Krea 2 edit surface REQUIRES a dual-conditioning `image_edit` LoRA (R5) that the base
+  // can't edit without. We MANAGE it for the user — no manual LoRA picking — rather than leave it
+  // in the picker: auto-applied to the payload when installed, or surfaced as a one-click download
+  // when not. `findModelEditLora` returns null for edit models that need no such LoRA (Qwen-Image-
+  // Edit, FLUX.2), so this whole block is inert for them.
+  const editLora = useMemo(
+    () => (mode === "edit_image" ? findModelEditLora(loras, selectedModel) : null),
+    [mode, loras, selectedModel],
+  );
+  const editLoraInstalled = loraIsInstalled(editLora);
+  // The managed LoRA is applied automatically; hide it from the manual picker so it isn't
+  // double-shown or accidentally toggled. Still deduped at payload time in case a saved selection
+  // carries it.
+  const managedEditLoraId = editLora && editLoraInstalled ? editLora.id : null;
+  const editLoraRequiredMissing = Boolean(editLora) && !editLoraInstalled;
+  const [editLoraDownloadRequested, setEditLoraDownloadRequested] = useState(false);
+  // Clear the transient "requested" state once the download lands (installState flips) or the
+  // edit LoRA leaves the picture (model/mode change).
+  useEffect(() => {
+    if (!editLoraRequiredMissing) {
+      setEditLoraDownloadRequested(false);
+    }
+  }, [editLoraRequiredMissing]);
+  const requestEditLoraDownload = useCallback(() => {
+    if (!editLora) {
+      return;
+    }
+    setEditLoraDownloadRequested(true);
+    createLoraDownloadJob?.(editLora);
+  }, [editLora, createLoraDownloadJob]);
+  // Serialize the outgoing LoRA payload, appending the auto-applied (managed) edit LoRA unless a
+  // saved selection already carries it — the worker's edit lane requires it (R5). Used by both the
+  // single-generate and batch submit paths so they stay identical.
+  const buildLorasPayload = useCallback(() => {
+    const out = selectedLoras.map((lora) => serializeLora(lora, { weight: effectiveLoraWeight(lora) }));
+    if (managedEditLoraId && !out.some((lora) => lora.id === managedEditLoraId)) {
+      out.push(serializeLora(editLora, { weight: effectiveLoraWeight(editLora) }));
+    }
+    return out;
+  }, [selectedLoras, effectiveLoraWeight, managedEditLoraId, editLora]);
+  // The manual LoRA picker hides the managed edit LoRA (it's applied automatically in the source
+  // band above), so it can't be double-shown or accidentally toggled off.
+  const pickerCompatibleLoras = managedEditLoraId
+    ? compatibleLoras.filter((lora) => lora.id !== managedEditLoraId)
+    : compatibleLoras;
+  const pickerSelectedLoras = managedEditLoraId
+    ? selectedLoras.filter((lora) => lora.id !== managedEditLoraId)
+    : selectedLoras;
+  const pickerSelectedLoraIds = managedEditLoraId
+    ? selectedLoraIds.filter((id) => id !== managedEditLoraId)
+    : selectedLoraIds;
   // sc-10516: a preset launch (Presets → "Use in Studio"). `availablePresets` filters on
   // mode + model, so the preset only resolves once both match — set them alongside the id.
   // Changing the model otherwise wipes the steps/guidance overrides (the advanced-defaults
@@ -1703,13 +1781,20 @@ export function ImageStudio() {
         // (strict_control.rs `resolve_control_source`). Passthrough mode uses `advanced.controlImage`.
         sourceAssetId:
           mode === "edit_image" && !multiReference
-            ? sourceAssetId || null
+            ? // A two-reference edit sends the ordered [scene, person] pair as referenceAssetIds instead
+              // (epic 10871 P1.3), so the single sourceAssetId is dropped when a person is chosen.
+              editPersonPair
+              ? null
+              : sourceAssetId || null
             : controlPreprocessSourceId,
         // Multi-reference edit (sc-6211): the plural reference set the FLUX.2-dev edit conditions on.
         // Only sent in edit_image mode for a multiReference model; the worker routes a non-empty list
-        // to Conditioning::MultiReference (one image ⇒ a normal single-reference edit).
+        // to Conditioning::MultiReference (one image ⇒ a normal single-reference edit). The Krea
+        // two-reference edit (epic 10871 P1.3) reuses this channel with the ordered [scene, person] pair.
         referenceAssetIds:
-          mode === "edit_image" && multiReference && referenceAssetIds.length ? referenceAssetIds : undefined,
+          mode === "edit_image" && multiReference && referenceAssetIds.length
+            ? referenceAssetIds
+            : (editPersonPair ?? undefined),
         // Fit mode applies to edits only; coerced so a stale "outpaint" never reaches a
         // non-inpaint model (epic 2551). Omitted for non-edit modes (worker default crop).
         fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
@@ -1722,7 +1807,7 @@ export function ImageStudio() {
             : supportsImg2img
               ? img2imgReferenceAssetId || null
               : null,
-        loras: selectedLoras.map((lora) => serializeLora(lora, { weight: effectiveLoraWeight(lora) })),
+        loras: buildLorasPayload(),
         ...(upscaleEnabled
           ? {
               upscale: {
@@ -1809,12 +1894,18 @@ export function ImageStudio() {
     characterId: mode === "character_image" ? characterId || null : null,
     characterLookId: mode === "character_image" ? characterLookId || null : null,
     sourceAssetId:
-      mode === "edit_image" && !multiReference ? sourceAssetId || null : controlPreprocessSourceId,
+      mode === "edit_image" && !multiReference
+        ? editPersonPair
+          ? null
+          : sourceAssetId || null
+        : controlPreprocessSourceId,
     referenceAssetIds:
-      mode === "edit_image" && multiReference && referenceAssetIds.length ? referenceAssetIds : undefined,
+      mode === "edit_image" && multiReference && referenceAssetIds.length
+        ? referenceAssetIds
+        : (editPersonPair ?? undefined),
     fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
     referenceAssetId: mode === "character_image" ? referenceAssetId || null : null,
-    loras: selectedLoras.map((lora) => serializeLora(lora, { weight: effectiveLoraWeight(lora) })),
+    loras: buildLorasPayload(),
     ...(upscaleEnabled
       ? {
           upscale: {
@@ -1998,6 +2089,12 @@ export function ImageStudio() {
       prompt,
       mode,
       characterId,
+      // Edit needs a source (single) or ≥1 reference (multiReference); a required edit LoRA must be
+      // downloaded first. Both silently gate Generate — the empty picker / the source-band download
+      // note are the visible affordances.
+      editSourceMissing:
+        mode === "edit_image" && (multiReference ? !referenceAssetIds.length : !sourceAssetId),
+      editLoraMissing: editLoraRequiredMissing,
       presetMissing: presetValidationResult.missing,
       presetIncompatible: presetValidationResult.incompatible,
       loraIncompatible: selectedLoraValidationResult.incompatible,
@@ -2010,6 +2107,10 @@ export function ImageStudio() {
       prompt,
       mode,
       characterId,
+      multiReference,
+      referenceAssetIds,
+      sourceAssetId,
+      editLoraRequiredMissing,
       presetValidationResult,
       selectedLoraValidationResult,
       selectedModel,
@@ -2452,23 +2553,70 @@ export function ImageStudio() {
                     values={referenceAssetIds}
                   />
                 ) : (
-                  <ImageEditSourcePickerField
-                    assets={editImageAssets}
-                    buttonLabel="Select image"
-                    characters={characters}
-                    emptyLabel="No source image selected"
-                    importAsset={importAsset}
-                    label="Source image"
-                    onChange={setSourceAssetId}
-                    projectId={activeProject?.id}
-                    value={sourceAssetId}
-                  />
+                  <>
+                    <ImageEditSourcePickerField
+                      assets={editImageAssets}
+                      buttonLabel="Select image"
+                      characters={characters}
+                      emptyLabel="No source image selected"
+                      importAsset={importAsset}
+                      label={editReferences ? "Source image (scene)" : "Source image"}
+                      onChange={setSourceAssetId}
+                      projectId={activeProject?.id}
+                      value={sourceAssetId}
+                    />
+                    {/* Optional second (person) source for a two-reference edit (epic 10871 P1.3).
+                        Fixed order: the source above is the scene (image 1); this is the person
+                        (image 2). Only rendered when the model declares `ui.editReferences`. */}
+                    {editReferences ? (
+                      <>
+                        <ImageEditSourcePickerField
+                          assets={editImageAssets}
+                          buttonLabel="Select image"
+                          characters={characters}
+                          emptyLabel="No person image selected (optional)"
+                          importAsset={importAsset}
+                          label={editReferences.secondaryLabel ?? "Second image (optional)"}
+                          onChange={setEditPersonAssetId}
+                          projectId={activeProject?.id}
+                          value={editPersonAssetId}
+                        />
+                        {editReferences.secondaryHint ? (
+                          <p className="field-hint">{editReferences.secondaryHint}</p>
+                        ) : null}
+                      </>
+                    ) : null}
+                  </>
                 )}
                 <FitModeControl
                   value={effectiveFitMode(fitMode, editInpaintCapable)}
                   onChange={setFitMode}
                   inpaintCapable={editInpaintCapable}
                 />
+                {/* Krea-style edit LoRA (epic 10871, P4.1): managed for the user — no manual
+                    picking. Applied automatically once installed; a one-click download when not
+                    (the base can't edit without it, R5). Inert for edit models that need none. */}
+                {editLora ? (
+                  editLoraInstalled ? (
+                    <p className="field-hint" role="status">
+                      <Icon.Sparkle size={13} /> {editLora.name} is applied automatically for editing.
+                    </p>
+                  ) : (
+                    <div className="inline-warning edit-lora-download">
+                      <span>
+                        {editLora.name} is required to edit — the base can’t edit without it.
+                      </span>
+                      <button
+                        type="button"
+                        className="secondary-action"
+                        onClick={requestEditLoraDownload}
+                        disabled={editLoraDownloadRequested}
+                      >
+                        {editLoraDownloadRequested ? "Downloading…" : "Download"}
+                      </button>
+                    </div>
+                  )
+                ) : null}
               </>
             ) : null}
 
@@ -3006,9 +3154,9 @@ export function ImageStudio() {
               </label>
               <LoraPickerSection
                 selectedModel={selectedModel}
-                selectedLoras={selectedLoras}
-                selectedLoraIds={selectedLoraIds}
-                compatibleLoras={compatibleLoras}
+                selectedLoras={pickerSelectedLoras}
+                selectedLoraIds={pickerSelectedLoraIds}
+                compatibleLoras={pickerCompatibleLoras}
                 userSelectedLoraCount={userSelectedLoraCount}
                 showIncompatibleLoras={showIncompatibleLoras}
                 setShowIncompatibleLoras={setShowIncompatibleLoras}

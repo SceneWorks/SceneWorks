@@ -53,6 +53,25 @@ describe("imageGenerateValidation", () => {
     expect(summarize(issues).surfaced).toEqual([]);
   });
 
+  it("requires a source image in edit mode, silently (epic 10871)", () => {
+    const issues = imageGenerateValidation({ ...whole, mode: "edit_image", editSourceMissing: true });
+    expect(kinds(issues, "source")).toEqual(["requirement"]);
+    expect(summarize(issues).surfaced).toEqual([]);
+    expect(summarize(issues).ready).toBe(false);
+  });
+
+  it("does not require a source once one is picked", () => {
+    const issues = imageGenerateValidation({ ...whole, mode: "edit_image", editSourceMissing: false });
+    expect(kinds(issues, "source")).toEqual([]);
+  });
+
+  it("gates on a missing edit LoRA silently — the source band carries the download note (epic 10871)", () => {
+    const issues = imageGenerateValidation({ ...whole, mode: "edit_image", editLoraMissing: true });
+    expect(kinds(issues, "editLora")).toEqual(["requirement"]);
+    expect(summarize(issues).surfaced).toEqual([]);
+    expect(summarize(issues).ready).toBe(false);
+  });
+
   it("surfaces preset-missing, preset-incompatible and lora-incompatible as errors", () => {
     const issues = imageGenerateValidation({
       ...whole,

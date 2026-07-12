@@ -213,6 +213,38 @@ export function loraLooksLikeIcLora(lora) {
   return text.includes("ic-lora") || text.includes("ltx-2-3-ic-");
 }
 
+// A Krea-style image-edit LoRA (epic 10871): declares `conditioningRole: image_edit` (the image
+// sibling of `ic_lora`). Unlike IC-LoRAs there is no filename/id convention to fall back on — the
+// role is the only signal — so this is a strict role/flag test, matching the worker's
+// `lora_declares_image_edit_role`. Selecting one activates the dual-conditioning edit recipe; the
+// base can't edit without it.
+export function loraLooksLikeImageEditLora(lora) {
+  if (lora?.imageEditLora === true) {
+    return true;
+  }
+  return (
+    String(lora?.conditioningRole ?? "").trim().toLowerCase().replaceAll("-", "_") === "image_edit"
+  );
+}
+
+// The image-edit LoRA a model's edit mode requires, resolved from the LoRA catalog (installed or
+// not), or null. A model "needs an edit LoRA" exactly when a compatible `image_edit`-role LoRA
+// exists — today only Krea 2 (the `krea2_identity_edit` builtin, family `krea_2`); other edit
+// models (Qwen-Image-Edit, FLUX.2) have none, so this returns null and their edit is unaffected.
+export function findModelEditLora(loras, model) {
+  if (!Array.isArray(loras) || !model) {
+    return null;
+  }
+  return loras.find((lora) => loraLooksLikeImageEditLora(lora) && loraMatchesModel(lora, model)) ?? null;
+}
+
+// Whether a catalog LoRA's weights are present locally (downloaded). Built-in LoRAs referenced
+// from Hugging Face start `installState: "missing"` until fetched; the worker can't load a missing
+// file (it does not download at job time), so an auto-applied edit LoRA must clear this first.
+export function loraIsInstalled(lora) {
+  return Boolean(lora) && lora.installState !== "missing";
+}
+
 export function presetMatchesWorkflow(preset, mode) {
   // A preset has one primary workflow for persistence, but modes describe every
   // Studio entry point where the picker should surface it.
@@ -299,6 +331,14 @@ export function serializeLora(lora, override = {}) {
     installedPath: lora.installedPath ?? null,
     sourcePath: lora.sourcePath ?? null,
     source: lora.source ?? null,
+    // The conditioning role (`ic_lora` / `image_edit`) is what tells the worker a LoRA
+    // is more than a plain style adapter — an LTX IC-LoRA or a Krea image-edit LoRA
+    // (epic 10871). The worker reads it straight off the payload `loras` entry (no catalog
+    // re-lookup), so it MUST round-trip here: without it, a selected edit LoRA fails the
+    // edit lane's role check (R5) even though the user picked it. `icLora` rides along for
+    // the flag-based half of the same test.
+    conditioningRole: lora.conditioningRole ?? null,
+    icLora: lora.icLora ?? false,
     // `installedPath` points at the LoRA directory; for trained LoRAs that
     // directory also holds step checkpoints, so the worker must be told the
     // exact adapter file. Forward the manifest's declared `files`/`file` —

@@ -5,13 +5,17 @@ import {
   cleanPresetDefaults,
   clearPresetDefault,
   editModelForAsset,
+  findModelEditLora,
   finiteNumberOrUndefined,
   loraHasResolvableFamily,
+  loraIsInstalled,
+  loraLooksLikeImageEditLora,
   loraMatchesModel,
   loraWeight,
   normalizeLoraFamily,
   presetMatchesModel,
   presetNameTaken,
+  serializeLora,
   slugifyPresetId,
   workflowForMode,
 } from "./presetUtils.js";
@@ -319,5 +323,69 @@ describe("editModelForAsset", () => {
   it("returns null for assets without a recipe model", () => {
     expect(editModelForAsset({ recipe: {} }, models)).toBe(null);
     expect(editModelForAsset(null, models)).toBe(null);
+  });
+});
+
+// epic 10871 (Krea image edit): the payload must carry the conditioning role so the worker's
+// edit lane can see it (it reads the role straight off `request.loras`, no catalog re-lookup).
+describe("serializeLora round-trips the conditioning role (epic 10871)", () => {
+  it("forwards conditioningRole and icLora", () => {
+    const out = serializeLora({ id: "krea2_identity_edit", family: "krea_2", conditioningRole: "image_edit" });
+    expect(out.conditioningRole).toBe("image_edit");
+    expect(out.icLora).toBe(false);
+  });
+
+  it("preserves an explicit icLora flag (LTX IC-LoRA)", () => {
+    const out = serializeLora({ id: "ltx_ic", conditioningRole: "ic_lora", icLora: true });
+    expect(out.conditioningRole).toBe("ic_lora");
+    expect(out.icLora).toBe(true);
+  });
+
+  it("defaults role to null / flag to false for a plain style LoRA", () => {
+    const out = serializeLora({ id: "plain" });
+    expect(out.conditioningRole).toBe(null);
+    expect(out.icLora).toBe(false);
+  });
+});
+
+describe("loraLooksLikeImageEditLora (epic 10871)", () => {
+  it("matches the image_edit conditioning role (case / separator insensitive)", () => {
+    expect(loraLooksLikeImageEditLora({ conditioningRole: "image_edit" })).toBe(true);
+    expect(loraLooksLikeImageEditLora({ conditioningRole: "Image-Edit" })).toBe(true);
+    expect(loraLooksLikeImageEditLora({ imageEditLora: true })).toBe(true);
+  });
+
+  it("does not match an IC-LoRA or a plain LoRA (role is the only signal)", () => {
+    expect(loraLooksLikeImageEditLora({ conditioningRole: "ic_lora" })).toBe(false);
+    expect(loraLooksLikeImageEditLora({ id: "krea2_identity_edit", name: "Krea 2 Identity Edit" })).toBe(false);
+    expect(loraLooksLikeImageEditLora({})).toBe(false);
+  });
+});
+
+describe("findModelEditLora (epic 10871)", () => {
+  const kreaEdit = { id: "krea2_identity_edit", family: "krea_2", conditioningRole: "image_edit" };
+  const kreaStyle = { id: "krea_style", family: "krea_2" };
+  const catalogLoras = [kreaStyle, kreaEdit];
+
+  it("finds the compatible image_edit LoRA for the model", () => {
+    expect(findModelEditLora(catalogLoras, { id: "krea_2_raw", family: "krea_2" })).toBe(kreaEdit);
+  });
+
+  it("returns null for a model with no compatible image_edit LoRA (Qwen/FLUX edit)", () => {
+    expect(findModelEditLora(catalogLoras, { id: "qwen_image_edit", family: "qwen-image" })).toBe(null);
+  });
+
+  it("returns null on missing inputs", () => {
+    expect(findModelEditLora(null, { family: "krea_2" })).toBe(null);
+    expect(findModelEditLora(catalogLoras, null)).toBe(null);
+  });
+});
+
+describe("loraIsInstalled (epic 10871)", () => {
+  it("is false only when the catalog row is explicitly missing", () => {
+    expect(loraIsInstalled({ installState: "installed" })).toBe(true);
+    expect(loraIsInstalled({})).toBe(true); // installed local rows carry no installState
+    expect(loraIsInstalled({ installState: "missing" })).toBe(false);
+    expect(loraIsInstalled(null)).toBe(false);
   });
 });

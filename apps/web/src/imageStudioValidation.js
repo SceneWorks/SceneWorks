@@ -24,6 +24,8 @@ export function imageGenerateValidation({
   prompt,
   mode,
   characterId,
+  editSourceMissing = false,
+  editLoraMissing = false,
   presetMissing = [],
   presetIncompatible = [],
   loraIncompatible = [],
@@ -44,6 +46,16 @@ export function imageGenerateValidation({
   }
   if (mode === "character_image" && !characterId) {
     issues.push(issue.requirement("character", "Choose a character"));
+  }
+  // Edit mode needs a source image to edit — silent, the empty source picker is the affordance.
+  if (editSourceMissing) {
+    issues.push(issue.requirement("source", "Select a source image to edit"));
+  }
+  // A Krea-style edit LoRA that isn't downloaded yet (epic 10871): a silent gate — the edit
+  // source band renders the actionable "required to edit — Download" note, so this only blocks
+  // Generate without duplicating that message.
+  if (editLoraMissing) {
+    issues.push(issue.requirement("editLora", "Download the required edit LoRA to run edits"));
   }
   issues.push(...presetLoraIssues({ presetMissing, presetIncompatible, loraIncompatible, modelName }));
   return issues;

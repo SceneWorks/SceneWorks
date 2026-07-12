@@ -577,6 +577,202 @@ describe("ImageStudio edit source picker", () => {
   });
 });
 
+// The Krea 2 image-edit surface (epic 10871, P4.1): edit REQUIRES the `image_edit`-role LoRA (R5),
+// which the studio MANAGES for the user — auto-applied when installed, a one-click download when
+// not — rather than leaving it to be hand-picked.
+describe("ImageStudio Krea image edit LoRA (epic 10871)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  const KREA_RAW = {
+    ...Z_IMAGE,
+    id: "krea_2_raw",
+    name: "Krea 2 Raw",
+    family: "krea_2",
+    capabilities: ["text_to_image", "edit_image"],
+  };
+  const EDIT_LORA = {
+    id: "krea2_identity_edit",
+    name: "Krea 2 Identity Edit",
+    family: "krea_2",
+    conditioningRole: "image_edit",
+    defaultWeight: 1,
+    scope: "builtin",
+    installedPath: "/loras/krea2_identity_edit",
+    installState: "installed",
+  };
+  const SOURCE = { id: "src-plate", projectId: "project_1", type: "image", displayName: "Plate", status: {} };
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+  const enterEdit = () =>
+    click([...document.body.querySelectorAll(".mode-tabs button")].find((b) => b.textContent === "Edit"));
+
+  it("auto-applies the installed edit LoRA to the payload with its conditioning role (R5)", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(
+      baseContext({ createImageJob, imageModels: [KREA_RAW], loras: [EDIT_LORA], assets: [SOURCE], selectedAsset: null }),
+    );
+    await enterEdit();
+    // The managed note tells the user it's automatic — no manual picking.
+    expect(container.textContent).toContain("applied automatically");
+
+    // Pick the source image, then generate.
+    await click([...document.body.querySelectorAll(".asset-picker-head button")].find((b) => b.textContent === "Select image"));
+    const dialog = document.body.querySelector('[role="dialog"]');
+    await act(async () => dialog.querySelector(".asset-picker-card").click());
+    await click([...dialog.querySelectorAll("button")].find((b) => b.textContent === "Use Selection"));
+    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
+
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.mode).toBe("edit_image");
+    expect(payload.sourceAssetId).toBe("src-plate");
+    const editEntry = payload.loras.find((l) => l.id === "krea2_identity_edit");
+    expect(editEntry).toBeTruthy();
+    expect(editEntry.conditioningRole).toBe("image_edit");
+    // Deduped — auto-applied exactly once.
+    expect(payload.loras.filter((l) => l.id === "krea2_identity_edit")).toHaveLength(1);
+  });
+
+  it("offers a one-click download and blocks Generate when the edit LoRA is not installed", async () => {
+    const createLoraDownloadJob = vi.fn();
+    await render(
+      baseContext({
+        imageModels: [KREA_RAW],
+        loras: [{ ...EDIT_LORA, installState: "missing", installedPath: null }],
+        assets: [SOURCE],
+        createLoraDownloadJob,
+      }),
+    );
+    await enterEdit();
+
+    const download = [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Download");
+    expect(download).toBeTruthy();
+    const generate = [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate");
+    expect(generate.disabled).toBe(true);
+
+    await click(download);
+    expect(createLoraDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "krea2_identity_edit" }));
+  });
+
+  it("keeps the managed edit LoRA out of the manual picker while still offering other LoRAs", async () => {
+    const KREA_STYLE = { id: "krea_style", name: "Krea Style", family: "krea_2", scope: "global", installState: "installed", installedPath: "/loras/krea_style" };
+    await render(baseContext({ imageModels: [KREA_RAW], loras: [EDIT_LORA, KREA_STYLE], assets: [SOURCE] }));
+    await enterEdit();
+    await click(document.body.querySelector(".advanced-section-toggle"));
+
+    // The managed edit LoRA is filtered out — only the non-managed style LoRA is on offer.
+    const addButton = document.body.querySelector(".lora-add");
+    expect(addButton.getAttribute("data-count")).toBe("· 1 available");
+    await click(addButton);
+    const rows = [...document.body.querySelectorAll(".lora-pick-row")].map((node) => node.textContent);
+    expect(rows.some((text) => text.includes("Krea Style"))).toBe(true);
+    expect(rows.some((text) => text.includes("Krea 2 Identity Edit"))).toBe(false);
+  });
+
+  // Two-reference edit (epic 10871 P1.3): a model whose `ui.editReferences` adds an optional second
+  // (person) source — scene = image 1, person = image 2, fixed order.
+  const KREA_RAW_TWOREF = {
+    ...KREA_RAW,
+    ui: {
+      editReferences: {
+        secondaryLabel: "Person image",
+        secondaryHint: "Optional — a person to place into the scene.",
+      },
+    },
+  };
+  const SCENE = { id: "scene-plate", projectId: "project_1", type: "image", displayName: "Scene Plate", status: {} };
+  const PERSON = { id: "person-plate", projectId: "project_1", type: "image", displayName: "Person Plate", status: {} };
+
+  // Select an asset into the next empty source picker (the scene picker's button flips to "Change"
+  // once set, so the remaining "Select image" button is always the next empty slot).
+  async function pickNextSource(assetName) {
+    const btn = [...document.body.querySelectorAll(".asset-picker-head button")].find(
+      (b) => b.textContent === "Select image",
+    );
+    await click(btn);
+    const dialog = document.body.querySelector('[role="dialog"]');
+    const card = [...dialog.querySelectorAll(".asset-picker-card")].find((c) => c.textContent.includes(assetName));
+    await act(async () => card.click());
+    await click([...dialog.querySelectorAll("button")].find((b) => b.textContent === "Use Selection"));
+  }
+
+  it("renders the optional person picker only when the model declares ui.editReferences", async () => {
+    const { root: root2, container: c2 } = mountRoot();
+    // Plain Krea (no editReferences) → no person slot.
+    await act(async () => {
+      root2.render(
+        <AppContext.Provider value={baseContext({ imageModels: [KREA_RAW], loras: [EDIT_LORA], assets: [SCENE] })}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+    await click([...document.body.querySelectorAll(".mode-tabs button")].find((b) => b.textContent === "Edit"));
+    expect(document.body.textContent).not.toContain("Person image");
+    await unmountRoot(root2, c2);
+
+    // Krea with editReferences → the labeled optional person slot appears.
+    await render(baseContext({ imageModels: [KREA_RAW_TWOREF], loras: [EDIT_LORA], assets: [SCENE, PERSON] }));
+    await enterEdit();
+    expect(container.textContent).toContain("Person image");
+    expect(container.textContent).toContain("No person image selected (optional)");
+  });
+
+  it("sends the ordered [scene, person] pair as referenceAssetIds when a person is chosen", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(
+      baseContext({ createImageJob, imageModels: [KREA_RAW_TWOREF], loras: [EDIT_LORA], assets: [SCENE, PERSON], selectedAsset: null }),
+    );
+    await enterEdit();
+    await pickNextSource("Scene Plate"); // → sourceAssetId (scene, image 1)
+    await pickNextSource("Person Plate"); // → editPersonAssetId (person, image 2)
+    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
+
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.mode).toBe("edit_image");
+    // Fixed order preserved: scene first, person second.
+    expect(payload.referenceAssetIds).toEqual(["scene-plate", "person-plate"]);
+    // The single sourceAssetId is dropped in favor of the ordered pair.
+    expect(payload.sourceAssetId).toBeNull();
+    // The edit LoRA is still auto-applied (R5).
+    expect(payload.loras.some((l) => l.id === "krea2_identity_edit")).toBe(true);
+  });
+
+  it("falls back to the single sourceAssetId when no person is chosen (person is optional)", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    await render(
+      baseContext({ createImageJob, imageModels: [KREA_RAW_TWOREF], loras: [EDIT_LORA], assets: [SCENE, PERSON], selectedAsset: null }),
+    );
+    await enterEdit();
+    await pickNextSource("Scene Plate");
+    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
+
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.sourceAssetId).toBe("scene-plate");
+    expect(payload.referenceAssetIds).toBeUndefined();
+  });
+});
+
 describe("ImageStudio model picker capability gating", () => {
   let container;
   let root;
