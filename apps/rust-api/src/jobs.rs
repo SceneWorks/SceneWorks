@@ -377,27 +377,53 @@ pub(crate) async fn update_job_progress(
     let peak_gpu_load_pct =
         optional_number_to_f64(payload.peak_gpu_load_pct.as_ref(), "peakGpuLoadPct")?;
     let mut result = payload.result;
-    // On a completing real training run, register the produced adapter as a
-    // SceneWorks LoRA *before* recording completion, and fold the outcome into
-    // the job result (story 1418). Doing it here keeps the result write atomic
-    // and makes a registration failure visible in the job record rather than
-    // silently dropping the trained output.
-    if matches!(payload.status, JobStatus::Completed) {
-        if let Some(status) = register_completed_training_lora(&state, &job_id).await {
-            result.get_or_insert_with(JsonObject::new).extend(status);
+    // sc-11213 (F-028): the three completion side-effects below
+    // (`register_completed_training_lora`, `register_completed_control_overlay`,
+    // and `persist_reported_assets`) each write catalog/project state. They must
+    // fire ONLY when the forthcoming `store.update_job_progress` will actually
+    // accept this report — i.e. the reporter still owns the job and the job is
+    // not already terminal. Otherwise a report that lost the race with
+    // cancel/sweep/reclaim, or an authenticated non-owner, could register a ghost
+    // LoRA/overlay or persist assets the user explicitly canceled, and only
+    // *then* receive the 409. So read the job snapshot once and gate the
+    // side-effects on ownership + non-terminal status, mirroring the store's own
+    // `TerminalJobImmutable`/`NotJobOwner` checks. When the gate rejects, we fall
+    // straight through to `store.update_job_progress`, whose in-transaction
+    // re-check is the authoritative final gate and returns the same 409 unchanged.
+    let snapshot = store_call(state.clone(), {
+        let job_id = job_id.to_owned();
+        move |store, _timeout| store.get_job(&job_id)
+    })
+    .await?;
+    let reporter_owns_job = match (payload.worker_id.as_deref(), snapshot.worker_id.as_deref()) {
+        (Some(reporter), Some(owner)) => reporter == owner,
+        (None, None) => true,
+        _ => false,
+    };
+    let job_is_terminal = TERMINAL_STATUSES.contains(&snapshot.status.as_str());
+    if reporter_owns_job && !job_is_terminal {
+        // On a completing real training run, register the produced adapter as a
+        // SceneWorks LoRA *before* recording completion, and fold the outcome into
+        // the job result (story 1418). Doing it here keeps the result write atomic
+        // and makes a registration failure visible in the job record rather than
+        // silently dropping the trained output.
+        if matches!(payload.status, JobStatus::Completed) {
+            if let Some(status) = register_completed_training_lora(&state, &job_id).await {
+                result.get_or_insert_with(JsonObject::new).extend(status);
+            }
+            // A completing ControlTraining run registers its trained overlay into the control-overlay
+            // manifest so it is selectable + runnable in generation (sc-10165, B4). Gates on
+            // `JobType::ControlTraining`, so exactly one of these two fires per job.
+            if let Some(status) = register_completed_control_overlay(&state, &job_id).await {
+                result.get_or_insert_with(JsonObject::new).extend(status);
+            }
         }
-        // A completing ControlTraining run registers its trained overlay into the control-overlay
-        // manifest so it is selectable + runnable in generation (sc-10165, B4). Gates on
-        // `JobType::ControlTraining`, so exactly one of these two fires per job.
-        if let Some(status) = register_completed_control_overlay(&state, &job_id).await {
-            result.get_or_insert_with(JsonObject::new).extend(status);
+        // Persist any generated assets the worker reported as `assetWrites` facts and
+        // re-inject the built sidecars into the result so the UI keeps streaming them
+        // (story 1656 — Rust is the single project-store writer).
+        if let Some(result_obj) = result.as_mut() {
+            persist_reported_assets(&state, &job_id, result_obj).await?;
         }
-    }
-    // Persist any generated assets the worker reported as `assetWrites` facts and
-    // re-inject the built sidecars into the result so the UI keeps streaming them
-    // (story 1656 — Rust is the single project-store writer).
-    if let Some(result_obj) = result.as_mut() {
-        persist_reported_assets(&state, &job_id, result_obj).await?;
     }
     let (job, status_changed) = store_call(state.clone(), move |store, _timeout| {
         // Read the prior status in the same blocking round-trip so we can tell a
