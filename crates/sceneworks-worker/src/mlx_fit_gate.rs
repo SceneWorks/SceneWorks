@@ -246,13 +246,32 @@ fn weights_source_bytes(src: &WeightsSource) -> u64 {
     }
 }
 
+/// Resolve the TEXT-ENCODER on-disk bytes for the staged split (sc-10894), preferring the provider-owned
+/// per-component footprint over the `text_encoder*` subdir scan.
+///
+/// The subdir scan ([`sum_text_encoder_bytes`]) only recognizes the *diffusers* `text_encoder*` naming;
+/// it returns **zero** for a family whose encoder lives elsewhere — boogu's `mllm/`, bernini's flat
+/// `t5_encoder.safetensors`, anima's `text_encoders/` under a `split_files/` root — or that has no
+/// separable encoder at all (sensenova's flat unified MoT). A zero text-encoder collapses the staged
+/// (`max(te, rest)`) peak back to the resident peak, so no `Sequential` saving is ever selected. The
+/// provider's `gen_core::footprint` computes the split from the exact subdirs *its own* loader resolves,
+/// so it is authoritative per family. `footprint_te` is `Some` when the provider declared a footprint,
+/// `None` otherwise (or the query errored) — in which case this falls back to the subdir scan, the
+/// historical behavior. The whole-model `total` stays the recursive [`sum_safetensors_bytes`] sum, so
+/// `rest = total − te` accounts for the DiT + VAE + anything else regardless of the footprint's own
+/// dit/vae split (and keeps the sc-11006 control-branch folding intact).
+pub(crate) fn resolve_text_encoder_bytes(footprint_te: Option<u64>, dir: &Path) -> u64 {
+    footprint_te.unwrap_or_else(|| sum_text_encoder_bytes(dir))
+}
+
 /// Sum the on-disk `.safetensors` bytes of the model's TEXT-ENCODER component(s) — the phase-A
 /// component the `Sequential` residency drops before the DiT loads (sc-10839). Matches the diffusers
 /// snapshot's top-level `text_encoder` / `text_encoder_2` / `text_encoder_*` subdirs (SDXL has both
 /// CLIP encoders; Z-Image the single Qwen encoder), reusing [`sum_safetensors_bytes`] per subdir so
 /// the HF-cache symlink + AppleDouble handling is shared. `0` if the dir is missing or has no
 /// recognizable text-encoder subdir — which makes the staged estimate fall back to the resident sum
-/// (no claimed saving), the safe direction.
+/// (no claimed saving), the safe direction. Superseded, when a provider declares a footprint, by
+/// [`resolve_text_encoder_bytes`] (sc-10894); still the fallback for providers that do not.
 pub(crate) fn sum_text_encoder_bytes(dir: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
@@ -379,10 +398,26 @@ pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerR
         return Ok(spec);
     }
     let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
+    // Prefer the provider-owned per-component footprint for the text-encoder split (sc-10894): it is
+    // authoritative per family, unlike the `text_encoder*` subdir guess which reads ZERO for boogu
+    // (`mllm/`), bernini (flat `t5_encoder.safetensors`), anima (`text_encoders/` under `split_files/`),
+    // etc. `Ok(None)` (provider declares no footprint) or an `Err` (unknown id / single-file source)
+    // fall open to the subdir scan. Query BEFORE the match so both `Dir`/`File` arms see it.
+    let footprint_te = gen_core::footprint(engine_id, &spec)
+        .ok()
+        .flatten()
+        .map(|fp| fp.text_encoder);
     let (mut total_bytes, te_bytes) = match &spec.weights {
-        WeightsSource::Dir(dir) => (sum_safetensors_bytes(dir), sum_text_encoder_bytes(dir)),
-        // A single-file source has no component split to stage — resident-or-reject only.
-        WeightsSource::File(file) => (std::fs::metadata(file).map_or(0, |meta| meta.len()), 0),
+        WeightsSource::Dir(dir) => (
+            sum_safetensors_bytes(dir),
+            resolve_text_encoder_bytes(footprint_te, dir),
+        ),
+        // A single-file source has no diffusers component tree; honor a footprint TE if the provider
+        // somehow computed one, else 0 (resident-or-reject only).
+        WeightsSource::File(file) => (
+            std::fs::metadata(file).map_or(0, |meta| meta.len()),
+            footprint_te.unwrap_or(0),
+        ),
     };
     // A ControlNet/overlay checkpoint (`spec.control`, e.g. qwen_image_control's VACE branch) lives in
     // a SEPARATE weights source, not under `spec.weights`, so it is missing from the sums above. It is
@@ -799,5 +834,63 @@ mod tests {
         assert_eq!(sum_safetensors_bytes(&root.join("snapshots/hash")), 4096);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// sc-10894: on a boogu-style snapshot (text encoder under `mllm/`, not `text_encoder*`), the
+    /// subdir scan reads ZERO, but `resolve_text_encoder_bytes` PREFERS a provider footprint value when
+    /// present and only falls back to the scan when it is `None`.
+    #[test]
+    fn resolve_text_encoder_prefers_footprint_over_subdir_scan() {
+        let root = std::env::temp_dir().join(format!(
+            "mlx_fit_gate_resolve_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        // Encoder under `mllm/`, DiT `transformer/`, VAE `vae/` — NO `text_encoder*` subdir.
+        for (sub, bytes) in [("mllm", 1500usize), ("transformer", 9000), ("vae", 400)] {
+            let dir = root.join(sub);
+            std::fs::create_dir_all(&dir).expect("mk subdir");
+            std::fs::write(dir.join("model.safetensors"), vec![0u8; bytes]).expect("weights");
+        }
+        // The historical subdir scan finds no `text_encoder*` → 0 (the bug this seam fixes).
+        assert_eq!(sum_text_encoder_bytes(&root), 0);
+        // The whole-model sum still sees every component.
+        assert_eq!(sum_safetensors_bytes(&root), 10900);
+        // No footprint declared ⇒ fall back to the (zero) subdir scan.
+        assert_eq!(resolve_text_encoder_bytes(None, &root), 0);
+        // A provider footprint (the `mllm/` bytes) is preferred, even though the scan reads zero.
+        assert_eq!(resolve_text_encoder_bytes(Some(1500), &root), 1500);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// sc-10894 end-to-end: a non-zero footprint text encoder flips the residency decision from Reject to
+    /// Sequential where the zero-reading subdir scan (the fallback) would reject. This is the whole point
+    /// of the seam — the staged peak is only real when the text-encoder split is measured.
+    #[test]
+    fn footprint_text_encoder_flips_reject_to_sequential() {
+        let gib = 1024 * 1024 * 1024_u64;
+        // boogu-class: whole model 22 GiB (mllm 13 + transformer 8 + vae 1). No `text_encoder*` subdir,
+        // so the subdir scan reads 0.
+        let total = 22 * gib;
+        let budget = Some(MemoryBudget { total_gb: 25.0 });
+
+        // Fallback path (footprint None on a dir with no `text_encoder*`) → te = 0 → staged == resident
+        // peak (22 + 10 = 32) > 25 → Reject, even though one-component-at-a-time WOULD fit.
+        let te_fallback = resolve_text_encoder_bytes(None, std::path::Path::new("/nonexistent"));
+        assert_eq!(te_fallback, 0);
+        assert!(matches!(
+            decide_residency(total, te_fallback, budget, true),
+            ResidencyOutcome::Reject { .. }
+        ));
+
+        // Provider footprint (te = 13 GiB) → staged = max(13, 22 − 13 = 9) + 10 = 23 ≤ 25 → Sequential.
+        let te_footprint =
+            resolve_text_encoder_bytes(Some(13 * gib), std::path::Path::new("/ignored"));
+        assert_eq!(te_footprint, 13 * gib);
+        assert_eq!(
+            decide_residency(total, te_footprint, budget, true),
+            ResidencyOutcome::Sequential
+        );
     }
 }
