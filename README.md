@@ -316,6 +316,9 @@ data/
 docker/       Service Dockerfiles (rust.Dockerfile, web.Dockerfile)
 ```
 
+The proposed consolidation of the SceneWorks product and inference repositories is
+captured in the [multi-repository rearchitecture plan](documents/MULTI_REPO_REARCHITECTURE_PLAN.md).
+
 ## Development
 
 Build the desktop app or run it in dev:
