@@ -2515,7 +2515,26 @@
         // path as q4/q8/bf16 (the third of the three ConvRot gates; the candle lane + sm_89 compute-cap
         // are the worker's `int8_convrot` capability).
         "vramGbByTier": { "q4": 26.4, "q8": 31.0, "bf16": 44.0, "int8-convrot": 31.0 },
-        "measured": false
+        "measured": false,
+        // Pose-ControlNet lane VRAM fit ladder (sc-11754, epic 8459 → epic 10765). The control lane loads
+        // the base at the installed tier PLUS the trained ~6.6 GB bf16 control branch, so its render peak
+        // (the end-of-render VAE-decode spike, sc-11744) EXCEEDS the txt2img `vramGbByTier` above — it needs
+        // its own numbers. The worker's Krea control fit-gate (`krea_control_fit`) reads these vs live/capped
+        // free VRAM and, only when constrained, engages the cheapest sufficient rung. @1024²/8-step/scale 0.6
+        // on an RTX PRO 6000 (Blackwell sm_120).
+        "control": {
+          // Overall render peak (GB) by BASE tier, bf16 control branch, NO rungs engaged. q4 MEASURED 30.9
+          // (sc-11744 GPU timeline, the VAE-decode spike); bf16 MEASURED 46.2 (sc-11743, dense base + bf16
+          // branch); q8 ESTIMATED ~35.5 (between the two) pending measurement.
+          "peakGbByTier": { "q4": 30.9, "q8": 35.5, "bf16": 46.2 },
+          // Last-resort rung: the peak reduction (GB) from quantizing the control branch bf16 → q8/q4
+          // (candle-gen #483, sc-11743), MEASURED (dense base holds the rest fixed to isolate the branch):
+          // q8 −8.4 (near-lossless), q4 −10.2 (pose-locked; non-pose details drift). The gate prefers q8
+          // before q4. Cheaper rungs (VAE-decode tiling sc-11744, activation chunking / res-cap sc-11745)
+          // engage BEFORE this once their candle-gen mechanism ships; their deltas land with those stories.
+          "branchQuantSaveGb": { "q8": 8.4, "q4": 10.2 },
+          "measured": false
+        }
       },
       "licenseUrl": "https://www.krea.ai/krea-2-licensing",
       "ui": {
