@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { PoseLibraryPicker } from "./PoseLibraryPicker.jsx";
 import { ImageEditSourcePickerField } from "./AssetPicker.jsx";
 import { ControlOverlayPicker } from "./ControlOverlayPicker.jsx";
+import { Icon } from "./Icons.jsx";
 
 // Strict-control panel for the text-to-image studios (epic 8236, sc-8245). One picker gated by the
 // selected backbone's supported control modes (`ui.controlModes`, mirrored from the manifest /
@@ -56,8 +57,10 @@ export function ControlPanel({
   onControlScaleChange,
 }) {
   const modes = Array.isArray(supportedModes) ? supportedModes : [];
-  // Collapsed by default (this is a large, optional section); the user opts in when they want to
-  // lock structure to a reference.
+  // Collapsed by default (this is a large, optional section on an already-busy page); the user opts
+  // in when they want to lock structure. The whole body — mode tabs, overlay selector, pose picker,
+  // control-strength slider — folds under one disclosure that looks and behaves like the shared
+  // Advanced toggle (design handoff sc-8245 Fix 1). Local-only state (Advanced doesn't persist).
   const [open, setOpen] = useState(false);
   if (!modes.length) {
     return null;
@@ -69,23 +72,22 @@ export function ControlPanel({
     <div className={`control-panel${open ? " open" : " collapsed"}`}>
       <button
         aria-expanded={open}
-        className="control-panel-head"
+        className="advanced-toggle control-panel-toggle"
         onClick={() => setOpen((prev) => !prev)}
         type="button"
       >
-        <span className="control-panel-caret" aria-hidden="true">
-          {open ? "▾" : "▸"}
-        </span>
-        <span className="control-panel-headings">
-          <span className="control-panel-label">Structure control</span>
-          <span className="muted">
-            Lock the output's pose, edges, or depth to a reference.
-          </span>
-        </span>
+        <Icon.ChevDown
+          className={open ? "control-panel-chev" : "control-panel-chev collapsed"}
+          size={14}
+        />
+        Structure control
       </button>
 
       {open ? (
         <>
+          <p className="control-panel-desc">
+            Lock the output's pose, edges, or depth to a reference.
+          </p>
           <div
             className="control-mode-tabs"
             role="tablist"
@@ -122,6 +124,7 @@ export function ControlPanel({
                   />
                 ) : null}
                 <PoseLibraryPicker
+                  categoryFilter
                   loadUserPoses={loadUserPoses}
                   onClear={onClearPoses}
                   onToggle={onTogglePose}

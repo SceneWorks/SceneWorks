@@ -2684,35 +2684,29 @@ label {
   gap: 12px;
 }
 
-.control-panel-head {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  width: 100%;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-  color: inherit;
+/* Section header reuses the shared .advanced-toggle disclosure look (13px/500/muted). The
+   whole Structure Control body folds under it; the chevron points down when open and rotates
+   -90deg when collapsed (design handoff sc-8245 Fix 1). */
+.control-panel-toggle {
+  justify-self: start;
+  margin-left: -6px;
 }
 
-.control-panel-caret {
-  font-size: 11px;
-  line-height: 18px;
-  color: var(--text-muted);
+.control-panel-chev {
   flex: 0 0 auto;
+  transition: transform 0.18s ease;
 }
 
-.control-panel-headings {
-  display: grid;
-  gap: 2px;
+.control-panel-chev.collapsed {
+  transform: rotate(-90deg);
 }
 
-.control-panel-label {
+/* The former section caption, now a quiet helper line inside the expanded body, indented to
+   align under the label text (past the chevron). */
+.control-panel-desc {
+  margin: 0 0 0 20px;
   font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
+  color: var(--text-faint);
 }
 
 .control-mode-tabs {
@@ -2979,6 +2973,127 @@ label {
   font-size: 10px;
   line-height: 1.2;
   text-align: center;
+}
+
+/* Category-filter layout (design handoff sc-8245 Fix 2): one category grid at a time behind a
+   wrapping chip row, capping the panel height instead of the full-list scroll. Only the Image
+   Studio Structure Control panel opts in (via the categoryFilter prop); the shared flat layout
+   above is untouched. */
+.pose-library.category-filter {
+  gap: 10px;
+}
+
+.pose-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.pose-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.pose-chip.active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border-color: transparent;
+  font-weight: 600;
+}
+
+.pose-chip-label {
+  text-transform: capitalize;
+}
+
+.pose-chip-count {
+  font-size: 11px;
+  opacity: 0.5;
+}
+
+.pose-chip.active .pose-chip-count {
+  opacity: 0.65;
+}
+
+.pose-chip-badge {
+  min-width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.pose-category-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.pose-category-name {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--accent-strong);
+}
+
+.pose-category-count {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.pose-library.category-filter .pose-grid {
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  max-height: 288px;
+  padding: 2px;
+}
+
+.pose-library.category-filter .pose-thumb {
+  position: relative;
+  gap: 4px;
+  padding: 5px;
+  border-radius: 9px;
+}
+
+.pose-library.category-filter .pose-thumb.selected {
+  background: var(--surface-hover);
+}
+
+.pose-library.category-filter .pose-thumb img {
+  border-radius: 6px;
+}
+
+.pose-thumb-check {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 17px;
+  height: 17px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 11px;
+  font-weight: 800;
 }
 
 .pose-library-details summary {

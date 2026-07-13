@@ -1900,7 +1900,7 @@ describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
     [...document.body.querySelectorAll(".control-mode-tab")].find((b) => b.textContent.trim() === label);
   // The structure-control panel is collapsed by default; expand it so the gated inner content
   // (mode tabs, control-image upload, slider) mounts before the assertions below.
-  const expandControlPanel = async () => click(document.body.querySelector(".control-panel-head"));
+  const expandControlPanel = async () => click(document.body.querySelector(".control-panel-toggle"));
   const generate = async () =>
     click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
 
