@@ -2732,7 +2732,15 @@ fn resolve_identity_init(
 /// `generate_turbo_img2img` (sc-10135), whose `preprocess_init_image` LANCZOS-resizes the reference to
 /// the output W×H — so, like Z-Image's [`resolve_identity_init`], the reference is fed raw (the
 /// `edit_image`-only [`should_fit_edit_source`] crop/pad-fit never applies to Krea's t2i-only surface).
-#[cfg(target_os = "macos")]
+///
+/// Available to the candle lane too (sc-10134): the candle `generate_candle_stream` calls this to resolve
+/// the Krea 2 Turbo img2img init off-Mac, feeding the same `(image, strength)` into `generate_one`'s
+/// `reference` → `Conditioning::Reference` → the engine's `render_img2img`. (The broader `ui.img2img`
+/// candle roll-out for SD3.5 / Z-Image / Boogu / Ideogram is sc-10265.)
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn resolve_img2img_init_generic(
     request: &ImageRequest,
     settings: &Settings,
@@ -2766,7 +2774,14 @@ fn resolve_img2img_init_generic(
 /// model-specific reference arms (z-image identity-init, FLUX IP-Adapter, Kolors, Ideogram edit) so
 /// those bespoke surfaces keep precedence; the generic arm then catches Krea + SD3.5 + any future
 /// `ui.img2img` model uniformly.
-#[cfg(target_os = "macos")]
+///
+/// Available to the candle lane too (sc-10134): `generate_candle_stream` gates its Krea 2 Turbo img2img
+/// resolve on this same manifest flag off-Mac. (Today the candle router only lets `krea_2_turbo` reach the
+/// candle lane with a reference; the other `ui.img2img` families follow in sc-10265.)
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn model_supports_img2img(request: &ImageRequest) -> bool {
     request
         .model_manifest_entry
@@ -4079,6 +4094,23 @@ async fn generate_candle_stream(
     } else {
         Vec::new()
     };
+    // Krea 2 Turbo img2img (reference-guided latent-init, sc-10134, epic 8588): a `ui.img2img` model in a
+    // NON-edit mode carrying a `referenceAssetId` resolves to the img2img init `(image, advanced.strength)`,
+    // threaded to `generate_one` as the single `Conditioning::Reference` the candle Krea engine routes to
+    // `render_img2img` (VAE-encode the reference → blend at `sigmas[init_time_step]` → CFG-free denoise).
+    // The candle router (`krea_img2img_candle_eligible`) only lets `krea_2_turbo` reach this lane with a
+    // reference today; the other `ui.img2img` families (SD3.5 / Z-Image / Boogu / Ideogram) follow in
+    // sc-10265. Disjoint from the Ideogram `edit_reference` (edit_image vs text_to_image) and Boogu's
+    // `multi_references` (guarded here so a future overlap never double-drives the single `reference` slot).
+    let img2img_reference = if edit_reference.is_none()
+        && boogu_refs.is_empty()
+        && request.mode != "edit_image"
+        && model_supports_img2img(request)
+    {
+        resolve_img2img_init_generic(request, settings, project_path)?
+    } else {
+        None
+    };
     let (width, height) = (request.width, request.height);
     // Per-payload sampler / scheduler / schedule-shift, mirroring the MLX `generate_stream` lane (the
     // 1753 front-half advanced carrier — epic 7114 P5, sc-7127). RealVisXL Lightning (sc-7176) forces the
@@ -4298,7 +4330,10 @@ async fn generate_candle_stream(
                         steps,
                         guidance,
                         negative_prompt.clone(),
-                        edit_reference.as_ref(),
+                        // Ideogram edit source (edit_image) OR the Krea 2 Turbo img2img init (sc-10134) —
+                        // mutually exclusive by mode/family; whichever resolved seeds the single
+                        // `Conditioning::Reference` slot.
+                        edit_reference.as_ref().or(img2img_reference.as_ref()),
                         &boogu_refs,
                         edit_mask.as_ref(),
                         true_cfg,
