@@ -18,17 +18,17 @@
 //!     cost, no quality cost) to cap the end-of-render decode spike. Engaged first, when the measured
 //!     `decodeTileSaveGb` is enough to fit; also stays on underneath the quant rungs (it is cheaper than
 //!     quant and every bit helps).
-//!  3. **activation chunking / resolution cap** (sc-11745) — engage when the denoise steady state is the
-//!     overflow. Still pending its candle-gen mechanism (`WIRED_ACTIVATION_CHUNKING = false`); slots in
-//!     here between tiling and branch-quant when it lands.
+//!  3. **activation chunking** (sc-11745, candle-gen #496) — engage sc-6217-style query-row attention
+//!     chunking on the composable base stack + control branch when the denoise steady state is the
+//!     overflow. A *speed* cost (~+6%) with byte-identical output; slots between tiling and branch-quant.
+//!     Gated by the presence of the measured scalar `chunkAttnSaveGb`.
 //!  4. **control-branch quant** (sc-11743, candle-gen #483) — bf16 → q8 → q4. A *quality cost* (the
 //!     residual is precision-sensitive, RMS-clamped at τ), so it is the **last-resort rung**. Composes
-//!     with tiling (both reduce the decode-dominated peak).
+//!     with the cheaper rungs (all reduce the co-resident peak).
 //!
-//! Rung 3 needs its own candle-gen mechanism (sc-11745); until then it is declared but **not yet
-//! engageable** — the ladder walks packed → tiling → branch-quant and, if even (tiling + q4) won't fit,
-//! rejects-before-OOM noting the pending activation-chunking rung. `decodeTileSaveGb` absent for a tier
-//! (unmeasured) ⇒ the tiling rung is skipped for that tier exactly like an unmeasured branch-quant save.
+//! `decodeTileSaveGb` / `chunkAttnSaveGb` absent (unmeasured) ⇒ that rung is skipped exactly like an
+//! unmeasured branch-quant save — the ladder walks the rungs it *can* measure and, if even
+//! (tiling + chunking + q4) won't fit, rejects-before-OOM at the honest best-case peak.
 //!
 //! Everything here is pure and unit-tested; the live `nvidia-smi` reading lives in [`crate::gpu`] and the
 //! wiring is in `generate_candle_krea_control_stream` (image_jobs/krea_control_candle.rs).
@@ -42,13 +42,6 @@ use serde_json::Value;
 /// slack + activation spikes not captured by the steady peak.
 const HEADROOM_GB: f64 = 2.0;
 
-/// Whether the activation-chunking / resolution-cap rung (sc-11745) is wired yet. `false` until that
-/// story ships its candle-gen mechanism + the `Krea2ControlRequest` toggle it engages; the ladder then
-/// inserts it between the VAE-tiling rung (sc-11744, already wired below) and the branch-quant rung.
-/// Flipping this (and threading the toggle) is sc-11745's one-line hook into this gate. (The VAE-tiling
-/// rung is now live — gated instead by the presence of the measured `decodeTileSaveGb`.)
-const WIRED_ACTIVATION_CHUNKING: bool = false;
-
 /// The outcome of walking the Krea control fit ladder. `Unknown` = no signal (no `candle.control` block,
 /// or a non-NVIDIA host) ⇒ never block, run the bf16 branch — exactly like [`crate::vram_gate::FitDecision::Unknown`].
 #[derive(Clone, Debug, PartialEq)]
@@ -56,14 +49,18 @@ pub(crate) enum KreaControlFit {
     /// No measured control peak or no live budget ⇒ don't gate; load the default bf16 branch.
     Unknown,
     /// The predicted peak fits after engaging the minimal sufficient set of rungs. The big-card fast
-    /// path is `{ tile_vae_decode: false, branch_quant: None }` (monolithic full-speed decode, bf16
-    /// branch, zero penalty). `tile_vae_decode = true` is the cheapest rung (sc-11744 — a *speed* cost
-    /// only, seam-free); `branch_quant = Some(Q8)`/`Some(Q4)` is the last-resort *quality* rung, engaged
-    /// only after tiling was insufficient.
+    /// path is `{ tile_vae_decode: false, chunk_attention: false, branch_quant: None }` (monolithic
+    /// full-speed decode, unchunked attention, bf16 branch, zero penalty). `tile_vae_decode = true` is the
+    /// cheapest rung (sc-11744 — a *speed* cost only, seam-free); `chunk_attention = true` is the next rung
+    /// (sc-11745 — a *speed* cost only, byte-identical output); `branch_quant = Some(Q8)`/`Some(Q4)` is the
+    /// last-resort *quality* rung, engaged only after both cheaper rungs were insufficient.
     Fits {
         /// Force the seam-free tiled VAE decode (sc-11744) to cap the end-of-render decode spike. The
         /// worker threads this into `Krea2ControlRequest::tile_vae_decode`.
         tile_vae_decode: bool,
+        /// Engage sc-6217-style query-row attention chunking (sc-11745) to bound the denoise activation
+        /// peak. The worker threads this into `Krea2ControlPaths::chunk_attention` (a load-time toggle).
+        chunk_attention: bool,
         branch_quant: Option<Quant>,
     },
     /// Won't fit even at the last rung (q4 branch). Reject-before-OOM with an actionable message rather
@@ -116,20 +113,38 @@ pub(crate) fn decode_tile_save_gb(manifest_entry: &JsonObject, tier_key: &str) -
         .and_then(json_f64)
 }
 
+/// Measured peak reduction (GB) from engaging sc-6217-style query-row attention chunking on the composable
+/// base stack + control branch (sc-11745, candle-gen #496): `candle.control.chunkAttnSaveGb`. Bounds the
+/// DENOISE-phase activation peak — a *speed* cost (~+6%) with byte-identical output (the chunked forward is
+/// numerically identical to the unchunked one, the sc-6217 query-row-independence invariant). Unlike the
+/// tier-keyed [`decode_tile_save_gb`]/[`predicted_control_peak_gb`], this is a SCALAR: the denoise activation
+/// peak is bf16 regardless of the base weight tier, so the saving is tier-independent. `None` when unmeasured
+/// ⇒ the chunking rung is unavailable and the ladder walks tiling → branch-quant. Published measured (RTX PRO
+/// 6000, dense bf16 base, 1024²/8-step): −2.43 GiB.
+pub(crate) fn chunk_attn_save_gb(manifest_entry: &JsonObject) -> Option<f64> {
+    manifest_entry
+        .get("candle")?
+        .get("control")?
+        .get("chunkAttnSaveGb")
+        .and_then(json_f64)
+}
+
 /// Walk the fit ladder: given the bf16-branch predicted peak, the (capped) live budget, the measured
-/// VAE-decode tiling saving, and the measured branch-quant savings, engage the minimal sufficient set of
-/// rungs in increasing (Δcost) order and return the [`KreaControlFit`].
+/// VAE-decode tiling saving, the measured activation-chunking saving, and the measured branch-quant
+/// savings, engage the minimal sufficient set of rungs in increasing (Δcost) order and return the
+/// [`KreaControlFit`].
 ///
-/// Walk: if the monolithic peak fits, run untiled at the bf16 branch (big-card fast path, no penalty);
-/// else force the seam-free tiled decode (sc-11744 — a *speed* cost only); else — keeping tiling on —
-/// quantize the control branch, preferring q8 (near-lossless) then q4 (pose-locked, non-pose drift);
-/// else reject-before-OOM. The activation-chunking rung (sc-11745) slots between tiling and branch-quant
-/// once [`WIRED_ACTIVATION_CHUNKING`] flips. An unmeasured saving skips that rung. Missing peak or budget
-/// ⇒ [`KreaControlFit::Unknown`] (never block).
+/// Walk: if the monolithic peak fits, run untiled/unchunked at the bf16 branch (big-card fast path, no
+/// penalty); else force the seam-free tiled decode (sc-11744 — a *speed* cost only); else — keeping tiling
+/// on — engage query-row attention chunking (sc-11745 — a *speed* cost only, byte-identical); else —
+/// keeping both speed rungs on — quantize the control branch, preferring q8 (near-lossless) then q4
+/// (pose-locked, non-pose drift); else reject-before-OOM. Any unmeasured saving (`None`) skips its rung.
+/// Missing peak or budget ⇒ [`KreaControlFit::Unknown`] (never block).
 pub(crate) fn fit_ladder(
     peak_bf16_branch_gb: Option<f64>,
     budget: Option<crate::vram_gate::VramBudget>,
     decode_tile_save_gb: Option<f64>,
+    chunk_attn_save_gb: Option<f64>,
     q8_save_gb: Option<f64>,
     q4_save_gb: Option<f64>,
 ) -> KreaControlFit {
@@ -139,54 +154,71 @@ pub(crate) fn fit_ladder(
     let free = budget.free_gb;
     let fits = |needed: f64| free + f64::EPSILON >= needed;
 
-    // (The activation-chunking / res-cap rung, sc-11745, engages here — between tiling and branch-quant —
-    //  once it wires its candle-gen toggle; see WIRED_ACTIVATION_CHUNKING.)
-    let _ = WIRED_ACTIVATION_CHUNKING;
-
     // Rung 1 (packed base, always on) — big-card fast path: the monolithic bf16-branch peak already fits,
-    // so nothing engages: full-speed decode, zero quality penalty.
+    // so nothing engages: full-speed decode, unchunked attention, zero quality penalty.
     if fits(peak) {
         return KreaControlFit::Fits {
             tile_vae_decode: false,
+            chunk_attention: false,
             branch_quant: None,
         };
     }
     // Rung 2 (VAE-decode tiling, sc-11744) — cheapest: a *speed* cost, no quality loss (seam-free). An
-    // unmeasured tier saving (None) leaves this rung unavailable, degenerating to the old quant-only walk.
+    // unmeasured tier saving (None) leaves this rung unavailable, degenerating toward the quant-only walk.
     if let Some(tile_save) = decode_tile_save_gb {
         if fits(peak - tile_save) {
             return KreaControlFit::Fits {
                 tile_vae_decode: true,
+                chunk_attention: false,
                 branch_quant: None,
             };
         }
     }
-    // Past here tiling alone was insufficient, so keep it on beneath the quant rungs (it is cheaper than
-    // quant and every GB helps); if it was unmeasured, `tile_on` stays false and the peak is unreduced.
+    // Past here tiling alone was insufficient, so keep it on beneath the deeper rungs (it is cheaper than
+    // chunking or quant and every GB helps); if it was unmeasured, `tile_on` stays false / the peak unreduced.
     let tile_on = decode_tile_save_gb.is_some();
     let peak_after_tile = peak - decode_tile_save_gb.unwrap_or(0.0);
+
+    // Rung 3 (activation chunking, sc-11745, candle-gen #496) — a *speed* cost (~+6%), byte-identical output
+    // (the chunked forward is numerically identical). Cheaper than the quality-costing branch quant, so it is
+    // engaged BEFORE it. An unmeasured saving (None) leaves this rung unavailable.
+    if let Some(chunk_save) = chunk_attn_save_gb {
+        if fits(peak_after_tile - chunk_save) {
+            return KreaControlFit::Fits {
+                tile_vae_decode: tile_on,
+                chunk_attention: true,
+                branch_quant: None,
+            };
+        }
+    }
+    // Chunking alone was insufficient too, so keep it on beneath the quant rungs (byte-identical, cheaper
+    // than quant); if it was unmeasured, `chunk_on` stays false and the peak is unreduced by it.
+    let chunk_on = chunk_attn_save_gb.is_some();
+    let peak_after_chunk = peak_after_tile - chunk_attn_save_gb.unwrap_or(0.0);
 
     // Rung 4 (control-branch quant, sc-11743) — last resort, a *quality* cost. Prefer q8 (effectively
     // free quality) before q4 (visible non-pose drift). Each save is measured; an unmeasured save skips.
     if let Some(save) = q8_save_gb {
-        if fits(peak_after_tile - save) {
+        if fits(peak_after_chunk - save) {
             return KreaControlFit::Fits {
                 tile_vae_decode: tile_on,
+                chunk_attention: chunk_on,
                 branch_quant: Some(Quant::Q8),
             };
         }
     }
     if let Some(save) = q4_save_gb {
-        if fits(peak_after_tile - save) {
+        if fits(peak_after_chunk - save) {
             return KreaControlFit::Fits {
                 tile_vae_decode: tile_on,
+                chunk_attention: chunk_on,
                 branch_quant: Some(Quant::Q4),
             };
         }
     }
-    // Won't fit even at (tiling + q4). Report the best-case peak (tiling on + the deepest branch quant) so
-    // the reject message is honest about what still overflows (the sc-11745 rung would add more headroom).
-    let best_case = peak_after_tile - q4_save_gb.or(q8_save_gb).unwrap_or(0.0);
+    // Won't fit even at (tiling + chunking + q4). Report the best-case peak (every cheaper rung on + the
+    // deepest branch quant) so the reject message is honest about what still overflows.
+    let best_case = peak_after_chunk - q4_save_gb.or(q8_save_gb).unwrap_or(0.0);
     KreaControlFit::TooBig {
         needed_gb: best_case,
         available_gb: free,
@@ -228,10 +260,28 @@ mod tests {
         }))
     }
 
-    /// Read the q4 rung savings the ladder tests exercise (tiling + both branch quants).
-    fn q4_saves(m: &JsonObject) -> (Option<f64>, Option<f64>, Option<f64>) {
+    /// [`krea_manifest`] plus a measured scalar `chunkAttnSaveGb` (sc-11745, candle-gen #496) — exercises
+    /// the activation-chunking rung between VAE-decode tiling and branch-quant. `2.43` mirrors the shipped
+    /// measured Δ (RTX PRO 6000, dense bf16 base, 1024²/8-step).
+    fn krea_manifest_with_chunking() -> JsonObject {
+        let mut m = krea_manifest();
+        m.get_mut("candle")
+            .and_then(Value::as_object_mut)
+            .and_then(|candle| candle.get_mut("control"))
+            .and_then(Value::as_object_mut)
+            .expect("control block")
+            .insert("chunkAttnSaveGb".to_owned(), json!(2.43));
+        m
+    }
+
+    /// Read the q4-tier rung savings the ladder tests exercise: (tiling, chunking, q8-branch, q4-branch).
+    /// [`krea_manifest`] measures no chunking (the scalar `chunkAttnSaveGb` is absent), so `chunk` is None
+    /// here — the existing tests stay a tiling→quant regression walk; the activation-chunking rung has its
+    /// own chunk-enabled manifest + tests below ([`chunking_is_the_rung_before_branch_quant`]).
+    fn q4_saves(m: &JsonObject) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
         (
             decode_tile_save_gb(m, "q4"),
+            chunk_attn_save_gb(m),
             branch_quant_save_gb(m, "q8"),
             branch_quant_save_gb(m, "q4"),
         )
@@ -287,6 +337,7 @@ mod tests {
     fn fits_untiled_bf16() -> KreaControlFit {
         KreaControlFit::Fits {
             tile_vae_decode: false,
+            chunk_attention: false,
             branch_quant: None,
         }
     }
@@ -295,10 +346,10 @@ mod tests {
     fn big_card_keeps_the_bf16_branch_with_no_penalty() {
         let m = krea_manifest();
         let peak = predicted_control_peak_gb(&m, "q4");
-        let (tile, q8, q4) = q4_saves(&m);
+        let (tile, chunk, q8, q4) = q4_saves(&m);
         // 96 GB card: the monolithic peak fits outright — nothing engages (no tiling, no quant).
         assert_eq!(
-            fit_ladder(peak, Some(budget(90.0)), tile, q8, q4),
+            fit_ladder(peak, Some(budget(90.0)), tile, chunk, q8, q4),
             fits_untiled_bf16()
         );
     }
@@ -308,13 +359,14 @@ mod tests {
         let m = krea_manifest();
         // q4 base: monolithic peak 30.9 + 2 = 32.9; tiling saves 6.9 ⇒ tiled peak 26.0.
         let peak = predicted_control_peak_gb(&m, "q4");
-        let (tile, q8, q4) = q4_saves(&m);
+        let (tile, chunk, q8, q4) = q4_saves(&m);
         // 26 GB card: monolithic (32.9) won't fit, but the tiled decode (26.0) does ⇒ tile on, bf16 branch
         // kept (no quality penalty). Without sc-11744 this card would have dropped to a q8 branch.
         assert_eq!(
-            fit_ladder(peak, Some(budget(26.0)), tile, q8, q4),
+            fit_ladder(peak, Some(budget(26.0)), tile, chunk, q8, q4),
             KreaControlFit::Fits {
                 tile_vae_decode: true,
+                chunk_attention: false,
                 branch_quant: None,
             }
         );
@@ -324,28 +376,30 @@ mod tests {
     fn tiling_composes_with_branch_quant_when_still_constrained() {
         let m = krea_manifest();
         let peak = predicted_control_peak_gb(&m, "q4"); // 32.9; tiled 26.0
-        let (tile, q8, q4) = q4_saves(&m);
+        let (tile, chunk, q8, q4) = q4_saves(&m);
         // 24 GB card: tiled peak 26.0 > 24; tiling stays on and q8 engages (26.0 − 8.4 = 17.6 ≤ 24) ⇒
         // tiling + q8 (near-lossless) instead of the old tiling-less q4-branch drop.
         assert_eq!(
-            fit_ladder(peak, Some(budget(24.0)), tile, q8, q4),
+            fit_ladder(peak, Some(budget(24.0)), tile, chunk, q8, q4),
             KreaControlFit::Fits {
                 tile_vae_decode: true,
+                chunk_attention: false,
                 branch_quant: Some(Quant::Q8),
             }
         );
         // 16 GB card: tiling + q8 (17.6) > 16; tiling + q4 (26.0 − 10.2 = 15.8 ≤ 16) fits ⇒ the deepest
         // rung. Without the tiling rung this card OOM-rejected (q4-alone peak 22.7 > 16).
         assert_eq!(
-            fit_ladder(peak, Some(budget(16.0)), tile, q8, q4),
+            fit_ladder(peak, Some(budget(16.0)), tile, chunk, q8, q4),
             KreaControlFit::Fits {
                 tile_vae_decode: true,
+                chunk_attention: false,
                 branch_quant: Some(Quant::Q4),
             }
         );
         // 15 GB card: even tiling + q4 (15.8) won't fit ⇒ reject-before-OOM at the best-case peak.
         assert_too_big(
-            fit_ladder(peak, Some(budget(15.0)), tile, q8, q4),
+            fit_ladder(peak, Some(budget(15.0)), tile, chunk, q8, q4),
             15.8,
             15.0,
         );
@@ -375,33 +429,36 @@ mod tests {
         // tiling rung is unavailable and the walk degenerates to the old quant-only ladder. Peak 48.2.
         let peak = predicted_control_peak_gb(&m, "bf16");
         let tile = decode_tile_save_gb(&m, "bf16"); // None
+        let chunk = chunk_attn_save_gb(&m); // None (base manifest measures no chunking)
         let q8 = branch_quant_save_gb(&m, "q8"); // 8.4
         let q4 = branch_quant_save_gb(&m, "q4"); // 10.2
 
         // 48.2 fits ⇒ untiled bf16 branch.
         assert_eq!(
-            fit_ladder(peak, Some(budget(49.0)), tile, q8, q4),
+            fit_ladder(peak, Some(budget(49.0)), tile, chunk, q8, q4),
             fits_untiled_bf16()
         );
         // 48.2 > 41, 48.2 − 8.4 = 39.8 ≤ 41 ⇒ q8 (preferred, near-lossless), tiling unavailable.
         assert_eq!(
-            fit_ladder(peak, Some(budget(41.0)), tile, q8, q4),
+            fit_ladder(peak, Some(budget(41.0)), tile, chunk, q8, q4),
             KreaControlFit::Fits {
                 tile_vae_decode: false,
+                chunk_attention: false,
                 branch_quant: Some(Quant::Q8),
             }
         );
         // 39.8 > 39, 48.2 − 10.2 = 38.0 ≤ 39 ⇒ q4 (last resort).
         assert_eq!(
-            fit_ladder(peak, Some(budget(39.0)), tile, q8, q4),
+            fit_ladder(peak, Some(budget(39.0)), tile, chunk, q8, q4),
             KreaControlFit::Fits {
                 tile_vae_decode: false,
+                chunk_attention: false,
                 branch_quant: Some(Quant::Q4),
             }
         );
         // Even q4 (~38.0) won't fit a 30 GB budget ⇒ reject, reporting the best-case peak.
         assert_too_big(
-            fit_ladder(peak, Some(budget(30.0)), tile, q8, q4),
+            fit_ladder(peak, Some(budget(30.0)), tile, chunk, q8, q4),
             38.0,
             30.0,
         );
@@ -411,15 +468,15 @@ mod tests {
     fn missing_signal_never_blocks() {
         let m = krea_manifest();
         let peak = predicted_control_peak_gb(&m, "q4");
-        let (tile, q8, q4) = q4_saves(&m);
+        let (tile, chunk, q8, q4) = q4_saves(&m);
         // No live budget ⇒ Unknown (never block).
         assert_eq!(
-            fit_ladder(peak, None, tile, q8, q4),
+            fit_ladder(peak, None, tile, chunk, q8, q4),
             KreaControlFit::Unknown
         );
         // No measured peak ⇒ Unknown.
         assert_eq!(
-            fit_ladder(None, Some(budget(8.0)), tile, q8, q4),
+            fit_ladder(None, Some(budget(8.0)), tile, chunk, q8, q4),
             KreaControlFit::Unknown
         );
     }
@@ -431,9 +488,89 @@ mod tests {
                                                         // No tiling save and no branch-quant savings measured ⇒ no rung is available, so a too-small card
                                                         // rejects reporting the raw peak itself (nothing to subtract).
         assert_too_big(
-            fit_ladder(peak, Some(budget(20.0)), None, None, None),
+            fit_ladder(peak, Some(budget(20.0)), None, None, None, None),
             32.9,
             20.0,
+        );
+    }
+
+    #[test]
+    fn chunk_attn_save_reads_the_measured_scalar() {
+        // Present (chunk-enabled manifest) ⇒ the measured scalar; tier-independent (no tier arg).
+        assert_eq!(
+            chunk_attn_save_gb(&krea_manifest_with_chunking()),
+            Some(2.43)
+        );
+        // Absent in the base manifest ⇒ None (the chunking rung is unavailable).
+        assert_eq!(chunk_attn_save_gb(&krea_manifest()), None);
+        // No control block / no candle block ⇒ None.
+        assert_eq!(chunk_attn_save_gb(&obj(json!({}))), None);
+    }
+
+    #[test]
+    fn chunking_is_the_rung_before_branch_quant() {
+        let m = krea_manifest_with_chunking();
+        // q4 base: monolithic peak 32.9; tiled 26.0; tiled + chunked 26.0 − 2.43 = 23.57.
+        let peak = predicted_control_peak_gb(&m, "q4");
+        let (tile, chunk, q8, q4) = q4_saves(&m); // chunk now Some(2.43)
+
+        // 24 GB card: tiling alone (26.0) > 24, but tiling + chunking (23.57 ≤ 24) fits ⇒ the bf16 branch is
+        // KEPT (both cheaper rungs are speed-only, byte-identical). Without sc-11745 this dropped to q8.
+        assert_eq!(
+            fit_ladder(peak, Some(budget(24.0)), tile, chunk, q8, q4),
+            KreaControlFit::Fits {
+                tile_vae_decode: true,
+                chunk_attention: true,
+                branch_quant: None,
+            }
+        );
+        // 16 GB card: tiling + chunking (23.57) > 16; both stay on beneath q8 (23.57 − 8.4 = 15.17 ≤ 16) ⇒
+        // tiling + chunking + q8 (near-lossless) — a shallower branch quant than the chunk-less walk needed
+        // (which reached q4 at 16 GB, see tiling_composes_with_branch_quant_when_still_constrained).
+        assert_eq!(
+            fit_ladder(peak, Some(budget(16.0)), tile, chunk, q8, q4),
+            KreaControlFit::Fits {
+                tile_vae_decode: true,
+                chunk_attention: true,
+                branch_quant: Some(Quant::Q8),
+            }
+        );
+        // 14 GB card: q8 (15.17) > 14; q4 (23.57 − 10.2 = 13.37 ≤ 14) fits ⇒ every cheaper rung on + q4.
+        assert_eq!(
+            fit_ladder(peak, Some(budget(14.0)), tile, chunk, q8, q4),
+            KreaControlFit::Fits {
+                tile_vae_decode: true,
+                chunk_attention: true,
+                branch_quant: Some(Quant::Q4),
+            }
+        );
+        // 13 GB card: even (tiling + chunking + q4) = 13.37 won't fit ⇒ reject at the best-case peak.
+        assert_too_big(
+            fit_ladder(peak, Some(budget(13.0)), tile, chunk, q8, q4),
+            13.37,
+            13.0,
+        );
+    }
+
+    #[test]
+    fn chunking_engages_without_tiling_when_the_tier_has_no_tiling_measurement() {
+        let m = krea_manifest_with_chunking();
+        // The bf16 base tier carries no `decodeTileSaveGb` (the decode spike isn't its peak), but the SCALAR
+        // chunk saving applies to every tier. Peak 48.2; chunked (tiling unavailable) 48.2 − 2.43 = 45.77.
+        let peak = predicted_control_peak_gb(&m, "bf16");
+        let tile = decode_tile_save_gb(&m, "bf16"); // None
+        let chunk = chunk_attn_save_gb(&m); // Some(2.43)
+        let q8 = branch_quant_save_gb(&m, "q8");
+        let q4 = branch_quant_save_gb(&m, "q4");
+        // 46 GB card: monolithic (48.2) > 46; tiling unavailable; chunking alone (45.77 ≤ 46) fits ⇒ chunk
+        // on, tiling off, bf16 branch kept — the denoise-peak rung standing in for the absent decode rung.
+        assert_eq!(
+            fit_ladder(peak, Some(budget(46.0)), tile, chunk, q8, q4),
+            KreaControlFit::Fits {
+                tile_vae_decode: false,
+                chunk_attention: true,
+                branch_quant: None,
+            }
         );
     }
 }
