@@ -22,6 +22,23 @@ export function detailCapableModels(imageModels) {
   return (imageModels ?? []).filter((model) => (model.capabilities ?? []).includes("image_detail"));
 }
 
+// The SDXL tile ControlNet the Detail enhancer requires — every `image_detail` run feeds the working
+// image through it (worker `detail.rs`). It ships as a standalone `type:"utility"` catalog entry, so it
+// is ABSENT from the image-only picker list (`imageModels`): a detail-capable backbone can be installed
+// while this dependency is not, and the job would fail at run time with "tile ControlNet weights not
+// found". Look it up in the FULL catalog so the Detail panel can gate the run + offer a one-click install.
+export const TILE_CONTROLNET_MODEL_ID = "controlnet_tile_sdxl";
+
+export function tileControlNetModel(models) {
+  return (models ?? []).find((model) => model.id === TILE_CONTROLNET_MODEL_ID) ?? null;
+}
+
+// Installed == present with any non-"missing" install state (matches App.jsx's `imageModels` gate).
+export function tileControlNetInstalled(models) {
+  const model = tileControlNetModel(models);
+  return Boolean(model) && model.installState !== "missing";
+}
+
 // The `POST /api/v1/image/jobs` body for a prompt edit (sc-2435). Reuses the existing
 // `mode:"edit_image"` flow: a `sourceAssetId` image is edited to the new `width`×`height`
 // (the worker fits the source per `fitMode`). Pure for unit testing.

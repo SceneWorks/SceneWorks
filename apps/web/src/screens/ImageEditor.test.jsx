@@ -34,6 +34,9 @@ import {
   maskHasContent,
   detailCapableModels,
   buildDetailJobBody,
+  tileControlNetModel,
+  tileControlNetInstalled,
+  TILE_CONTROLNET_MODEL_ID,
   rectToBbox,
   bboxToRect,
   isValidHexColor,
@@ -777,6 +780,32 @@ describe("detail job", () => {
         advanced: { strength: 0.55, cnScale: 0.7 },
       },
     });
+  });
+
+  // The tile ControlNet is a `type:"utility"` dependency the Detail run needs but the image-only
+  // picker never lists — the panel looks it up in the full catalog to gate the run + offer an install.
+  it("finds the tile ControlNet in the full catalog by its utility id", () => {
+    const models = [
+      { id: "realvisxl", type: "image", installState: "installed" },
+      { id: TILE_CONTROLNET_MODEL_ID, type: "utility", installState: "missing" },
+    ];
+    expect(tileControlNetModel(models)?.id).toBe(TILE_CONTROLNET_MODEL_ID);
+    expect(tileControlNetModel([{ id: "realvisxl" }])).toBeNull();
+    expect(tileControlNetModel(undefined)).toBeNull();
+  });
+
+  it("treats the tile ControlNet as ready only when present and not 'missing'", () => {
+    // Absent from the catalog → not ready (so the run is gated, not silently allowed to fail).
+    expect(tileControlNetInstalled([{ id: "realvisxl", installState: "installed" }])).toBe(false);
+    expect(tileControlNetInstalled(undefined)).toBe(false);
+    // Present but not downloaded → not ready.
+    expect(
+      tileControlNetInstalled([{ id: TILE_CONTROLNET_MODEL_ID, installState: "missing" }]),
+    ).toBe(false);
+    // Present and installed → ready.
+    expect(
+      tileControlNetInstalled([{ id: TILE_CONTROLNET_MODEL_ID, installState: "installed" }]),
+    ).toBe(true);
   });
 });
 
