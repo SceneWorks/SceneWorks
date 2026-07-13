@@ -2611,17 +2611,19 @@ fn candle_supported_rejects_unsupported_strict_pose() {
 
 #[test]
 fn candle_supported_flags_a_torch_only_image_model() {
-    // `sana_1600m` is MLX-only (no candle provider, not in CANDLE_ROUTED_MODELS), so the candle/CUDA
-    // oracle must flag it as an unsupported image model off-Mac. (`bernini_image` used to be the example
-    // here but is now candle-routed — sc-10996, epic 6562.)
+    // `sana_sprint_1600m` (the CFG-free SANA-Sprint distill) is MLX-only — it has no candle provider and
+    // is not in CANDLE_ROUTED_MODELS — so the candle/CUDA oracle must flag it as an unsupported image
+    // model off-Mac. (`bernini_image` used to be the example here but is now candle-routed — sc-10996,
+    // epic 6562; the base `sana_1600m` was the example next but is now candle-routed too — sc-11780,
+    // epic 8485. SANA-Sprint stays the still-torch-only representative.)
     let store = store("candle-oracle-torch-model");
     let job = job_of(
         &store,
         JobType::ImageGenerate,
-        json!({ "model": "sana_1600m", "prompt": "p" }),
+        json!({ "model": "sana_sprint_1600m", "prompt": "p" }),
     );
     let reason = candle_supported(&job).unwrap_err();
-    assert_eq!(reason.model.as_deref(), Some("sana_1600m"));
+    assert_eq!(reason.model.as_deref(), Some("sana_sprint_1600m"));
     assert!(reason
         .candle_error_message()
         .starts_with("candle_unsupported:"));

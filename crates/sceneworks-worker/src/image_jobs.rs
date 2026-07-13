@@ -157,6 +157,13 @@ use candle_gen_anima as _;
 // registered"). The Windows/CUDA sibling of the `mlx_gen_sd3` anchor above. Pure txt2img; Q4/Q8 quant.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use candle_gen_sd3 as _;
+// Candle SANA 1600M (sc-11780, epic 8485): `sana_1600m` self-registers into the shared gen_core
+// inventory; the `as _;` keeps the MSVC release linker from GC-ing the `inventory::submit!`
+// registration (else `gen_core::load("sana_1600m")` returns "no generator registered" off-Mac). The
+// Windows/CUDA + Linux sibling of the `mlx_gen_sana` anchor above (candle-gen #495). Pure txt2img,
+// true-CFG (20 steps / guidance 4.5); no inference LoRA / quant on the candle base path.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use candle_gen_sana as _;
 // Candle Ideogram 4 (sc-6596, epic 6561): `ideogram_4` + `ideogram_4_turbo` self-register into the
 // shared gen_core inventory; `as _;` keeps the MSVC release linker from GC-ing the registrations.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

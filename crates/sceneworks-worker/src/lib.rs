@@ -233,6 +233,13 @@ mod flux2_dev_gpu_smoke;
 // the evidence that unblocks flipping `macOnly: false` / `candle_routed = true` (sc-10625).
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod anima_gpu_smoke;
+// Real-weight GPU smoke for the candle SANA 1600M lane (epic 8485, sc-11780). Test-only + candle-only;
+// drives the WORKER's `resolve_weights_dir("sana_1600m")` (the diffusers-snapshot-root resolution) +
+// `gen_core::load("sana_1600m")` against the whole `Efficient-Large-Model/Sana_1600M_1024px_diffusers`
+// snapshot, proving the candle SANA port renders a coherent true-CFG 1024² image on real CUDA — the
+// hardware evidence backing `macOnly: false` / `candle_routed = true`.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod sana_candle_gpu_smoke;
 // Real-weight GPU smoke for the candle InstantID + PiD super-resolving decode (epic 7840, sc-8386).
 // Test-only + candle-only; drives the bespoke `candle_gen_instantid::InstantId` provider across
 // Identity/Angle/Pose with the `pid_sdxl` student attached, asserting the PiD decode 4×-super-resolves

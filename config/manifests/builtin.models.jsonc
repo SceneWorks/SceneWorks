@@ -4097,23 +4097,30 @@
       // ported natively to mlx-gen (engine id `sana_1600m`). A 1.6B Linear-DiT trunk (ReLU linear
       // attention + Mix-FFN + NoPE) conditioned by a gemma-2-2b-it Complex-Human-Instruction (CHI)
       // caption encoder (reused from the PiD epic 7840 — SceneWorks/gemma-2-2b-it) + the deeply-
-      // compressed 32× DC-AE (f32) decoder. Native MLX only (mlx-gen-sana, no torch/candle backend) →
-      // macOnly. True-CFG text-to-image (20 steps / guidance 4.5). `adapter` is the asset stamp
-      // (mirrors mlx_<family>). Worker routing through engines::MODEL_TABLE / the gen_core registry +
-      // the MLX_ROUTED_MODELS gate (jobs_store.rs) lands in this same story (sc-8489 Phase B2).
+      // compressed 32× DC-AE (f32) decoder. Runs on MLX (macOS) AND the candle off-Mac lane
+      // (Windows/Linux CUDA): the candle port sc-11780 (candle-gen #495, `candle-gen-sana`) is
+      // catalog-routed off-Mac, so `macOnly: false` — availability is driven by the routing tables
+      // (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag. True-CFG text-to-image (20 steps
+      // / guidance 4.5). `adapter` is the asset stamp (mirrors mlx_<family>).
       //
       // NVIDIA non-commercial: SANA-1.6B is distributed under the NVIDIA Open Model License /
-      // NSCLv1 (research & evaluation, non-commercial). The re-hosted `SceneWorks/Sana_1600M_1024px_mlx`
-      // mirror carries the upstream LICENSE + NOTICE + attribution (the Krea/Ideogram re-host
-      // precedent — OK to ship gated-with-notice). SceneWorks's overall non-commercial posture covers
-      // this; generations are for non-commercial use only.
+      // NSCLv1 (research & evaluation, non-commercial). On macOS the re-hosted
+      // `SceneWorks/Sana_1600M_1024px_mlx` mirror carries the upstream LICENSE + NOTICE + attribution
+      // (the Krea/Ideogram re-host precedent). Off-Mac the candle lane pulls the ORIGINAL public NVIDIA
+      // repo `Efficient-Large-Model/Sana_1600M_1024px_diffusers` (un-gated — `gated: false` on HF), which
+      // ships the upstream LICENSE.txt (the NVIDIA Open Model License) alongside the weights; the bundled
+      // gemma-2-2b-it text encoder remains under the Gemma Terms of Use. `candle-gen-sana`'s NOTICE
+      // documents the same. SceneWorks's overall non-commercial posture covers this; generations are for
+      // non-commercial / research use only.
       "autoDownload": false,
       "name": "SANA 1600M",
       "family": "sana",
       "type": "image",
       "adapter": "mlx_sana",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      "macOnly": false,
+      "nonCommercial": true,
+      "gated": false,
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8489/sc-8513, epic 8506): per-tier
         // subdirs (q4/ default, q8/, bf16/), each a complete `SanaPipeline::from_snapshot`-loadable
@@ -4151,6 +4158,23 @@
           "platforms": ["macos"],
           "estimatedSizeBytes": 9704258849,
           "footprint": { "diskSizeBytes": 9704258849, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // Candle off-Mac dense (sc-11780, epic 8485): the ORIGINAL public NVIDIA diffusers repo, pulled
+          // WHOLE (empty `files` list = the whole-repo HF snapshot, per the model-download convention).
+          // The `candle-gen-sana` pipeline (`from_diffusers_snapshot`) reads the diffusers-layout tree
+          // (`transformer/` Linear-DiT + `vae/` 32× DC-AE f32 + `text_encoder/` gemma-2-2b-it CHI encoder +
+          // `tokenizer/`) directly and `resolve_component_files` tolerates the repo's fp16/fp32 +
+          // single/sharded duplication, so NO curated allow-list is needed — the whole snapshot loads
+          // dense bf16 (there is no packed q4/q8 tier off-Mac; the worker resolves this repo's snapshot
+          // ROOT, never a tier subdir). Un-gated on HF (`gated: false`); ships the upstream NVIDIA Open
+          // Model License LICENSE.txt. Size is the whole-repo on-disk footprint (fp16 + fp32 duplication).
+          "provider": "huggingface",
+          "repo": "Efficient-Large-Model/Sana_1600M_1024px_diffusers",
+          "files": [],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 25830116527,
+          "footprint": { "diskSizeBytes": 25830116527, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {

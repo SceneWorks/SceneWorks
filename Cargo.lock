@@ -751,6 +751,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-gen-sana"
+version = "0.0.0"
+source = "git+https://github.com/michaeltrefry/candle-gen?rev=293f2afcf22c0b986e3d5ef6589ed5c6639890fc#293f2afcf22c0b986e3d5ef6589ed5c6639890fc"
+dependencies = [
+ "candle-gen",
+ "candle-gen-pid",
+ "rand 0.9.4",
+]
+
+[[package]]
 name = "candle-gen-scail2"
 version = "0.0.0"
 source = "git+https://github.com/michaeltrefry/candle-gen?rev=293f2afcf22c0b986e3d5ef6589ed5c6639890fc#293f2afcf22c0b986e3d5ef6589ed5c6639890fc"
@@ -5992,6 +6002,7 @@ dependencies = [
  "candle-gen-pulid",
  "candle-gen-qwen-image",
  "candle-gen-sam3",
+ "candle-gen-sana",
  "candle-gen-scail2",
  "candle-gen-sd3",
  "candle-gen-sdxl",
