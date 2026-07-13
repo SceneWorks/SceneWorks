@@ -4147,7 +4147,10 @@ mod candle_routing_tests {
                 "{model} Q{bits} tier-select should stay on candle"
             );
         }
-        // Every conditioning shape defers (txt2img + LoRA only).
+        // Every conditioning shape defers AT THE TXT2IMG GATE (txt2img + LoRA only). NB `referenceAssetId`
+        // here tests the low-level `image_request_candle_eligible` gate, which still rejects a raw
+        // reference; the sc-10134 img2img lane is a SEPARATE branch in `image_job_is_candle_eligible` that
+        // claims a `krea_2_turbo` reference BEFORE this gate (see `krea_2_turbo_img2img_routes_to_candle`).
         for case in [
             json!({ "mode": "edit_image", "sourceAssetId": "a" }),
             json!({ "referenceAssetId": "a" }),
@@ -4159,6 +4162,49 @@ mod candle_routing_tests {
                 "{model} conditioning shape must fall back to torch: {case}"
             );
         }
+    }
+
+    #[test]
+    fn krea_2_turbo_img2img_routes_to_candle() {
+        // sc-10134 (epic 8588 slice A): a `krea_2_turbo` job in a NON-edit mode carrying a
+        // `referenceAssetId` is the bespoke candle `render_img2img` lane, branched out in
+        // `image_job_is_candle_eligible` BEFORE the txt2img gate (which still rejects any raw reference —
+        // see `krea_lora_and_quant_stay_on_candle_but_conditioning_defers`). The job-level predicate is
+        // what claims it; the gate keeps deferring the reference shape.
+        let img2img = json!({
+            "model": "krea_2_turbo",
+            "referenceAssetId": "asset_1",
+            "advanced": { "strength": 0.55 }
+        });
+        assert!(
+            image_job_is_candle_eligible(&image_generate_job(img2img.clone())),
+            "krea_2_turbo img2img (referenceAssetId, non-edit) must be candle-eligible"
+        );
+        assert!(krea_img2img_candle_eligible(&object(img2img)));
+        // An explicit `text_to_image` mode is still img2img (the tile may send the mode or omit it).
+        assert!(image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "krea_2_turbo",
+            "mode": "text_to_image",
+            "referenceAssetId": "asset_1"
+        }))));
+        // NOT the img2img lane: an `edit_image` reference is the Kontext `KreaEdit` surface.
+        assert!(!krea_img2img_candle_eligible(&object(json!({
+            "mode": "edit_image",
+            "referenceAssetId": "asset_1"
+        }))));
+        // A plain txt2img job (no reference) is not img2img — it falls to the generic candle txt2img lane.
+        assert!(!krea_img2img_candle_eligible(&object(
+            json!({ "prompt": "an emerald forest" })
+        )));
+        // Raw img2img is the separate sc-10226 — the img2img branch is gated to `krea_2_turbo`, so a
+        // `krea_2_raw` reference job has no candle img2img lane yet and defers.
+        assert!(
+            !image_job_is_candle_eligible(&image_generate_job(json!({
+                "model": "krea_2_raw",
+                "referenceAssetId": "asset_1"
+            }))),
+            "krea_2_raw img2img has no candle lane yet (sc-10226)"
+        );
     }
 
     #[test]
