@@ -5005,6 +5005,44 @@ fn candle_image_route_sends_krea_img2img_to_txt2img() {
     );
 }
 
+/// RAII guard isolating the HF hub-cache env (`HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE` / `HF_HOME`) to an
+/// explicit (empty) dir for a test, restoring the previous values on drop. The candle control-base
+/// resolvers read the GLOBAL HF hub cache in preference to `settings.data_dir` (`hf_home.rs`
+/// `huggingface_hub_cache_dir` checks the env vars first), so a "control base absent" test must point that
+/// cache at an empty dir — otherwise it observes the machine's / CI runner's REAL cache. When that cache
+/// happens to hold `alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1` (e.g. after any Z-Image control
+/// work on the box) the base is NOT absent and the route flips `PoseControlBaseMissing` → `ZimageControl`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+struct HfHubCacheGuard {
+    prev: [(&'static str, Option<String>); 3],
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+impl HfHubCacheGuard {
+    fn isolate_to(hub: &std::path::Path) -> Self {
+        let prev = ["HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME"]
+            .map(|key| (key, std::env::var(key).ok()));
+        // `HF_HUB_CACHE` is consulted first; point it at the empty dir and clear the lower-priority
+        // fallbacks so nothing resolves to the real cache.
+        std::env::set_var("HF_HUB_CACHE", hub);
+        std::env::remove_var("HUGGINGFACE_HUB_CACHE");
+        std::env::remove_var("HF_HOME");
+        Self { prev }
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+impl Drop for HfHubCacheGuard {
+    fn drop(&mut self) {
+        for (key, value) in &self.prev {
+            match value {
+                Some(val) => std::env::set_var(key, val),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
 // sc-11171 (F-008): a strict-pose job on a WIRED candle pose family (e.g. `z_image_turbo`) whose control
 // base snapshot is NOT installed must route to the loud `PoseControlBaseMissing` reject, NOT fall through
 // to the plain candle txt2img lane (which would silently render an unconditioned image and drop the
@@ -5015,9 +5053,12 @@ fn candle_image_route_sends_krea_img2img_to_txt2img() {
 #[test]
 fn candle_image_route_rejects_wired_pose_when_control_base_absent() {
     let dir = tempfile::tempdir().unwrap();
+    // Isolate the HF hub cache to the empty tempdir so the control base is genuinely absent regardless of
+    // the machine's real cache (the resolver reads the global HF cache in preference to `data_dir`).
+    let _hf = HfHubCacheGuard::isolate_to(dir.path());
     let mut settings = Settings::from_env();
-    // A tempdir data_dir holds no HF snapshot, so `resolve_zimage_control_base` yields `None` → the
-    // Z-Image control lane's weight-gate (`zimage_control_available`) fails and the job falls through.
+    // A tempdir data_dir + isolated HF cache holds no HF snapshot, so `resolve_zimage_control_base` yields
+    // `None` → the Z-Image control lane's weight-gate (`zimage_control_available`) fails and it falls through.
     settings.data_dir = dir.path().to_path_buf();
     settings.backend_candle_enabled = true;
 
