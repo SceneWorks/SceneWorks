@@ -1558,6 +1558,7 @@ mod tests {
             modality: gen_core::Modality::Image,
             supports_lora: true,
             supports_lokr: true,
+            supports_control: false,
         }
     }
     #[cfg(any(target_os = "macos", not(feature = "backend-candle")))]
