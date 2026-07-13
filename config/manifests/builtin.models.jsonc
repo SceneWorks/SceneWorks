@@ -4266,23 +4266,30 @@
       // (SceneWorks/gemma-2-2b-it, reused — NOT duplicated) + 32× DC-AE (f32) decoder as base SANA. The
       // distillation is CFG-FREE: a guidance scalar is folded into the trunk via a guidance-embedding
       // (no negative-prompt second pass) and sampled by the SCM (continuous-time consistency / trigflow)
-      // sampler, so it runs in ~2 steps. Native MLX only (mlx-gen-sana, no torch/candle backend) →
-      // macOnly. `adapter` is the asset stamp (mirrors mlx_<family>). Worker routing through
-      // engines::MODEL_TABLE / the gen_core registry + the MLX_ROUTED_MODELS gate (jobs_store.rs) lands in
-      // this story (sc-8490 Phase B).
+      // sampler, so it runs in ~2 steps. Runs on MLX (macOS) AND the candle off-Mac lane (Windows/Linux
+      // CUDA): the candle Sprint port sc-11781 (candle-gen #498, `candle-gen-sana`'s Sprint pipeline +
+      // adapter) is catalog-routed off-Mac, so `macOnly: false` — availability is driven by the routing
+      // tables (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag. `adapter` is the asset stamp
+      // (mirrors mlx_<family>).
       //
       // NVIDIA non-commercial: SANA-Sprint is distributed under the NVIDIA Open Model License / NSCLv1
-      // (research & evaluation, non-commercial). The re-hosted `SceneWorks/Sana_Sprint_1.6B_1024px_mlx`
-      // mirror carries the upstream LICENSE + NOTICE + attribution (the Krea/Ideogram re-host precedent —
-      // OK to ship gated-with-notice). SceneWorks's overall non-commercial posture covers this;
-      // generations are for non-commercial use only.
+      // (research & evaluation, non-commercial). On macOS the re-hosted `SceneWorks/Sana_Sprint_1.6B_1024px_mlx`
+      // mirror carries the upstream LICENSE + NOTICE + attribution (the Krea/Ideogram re-host precedent).
+      // Off-Mac the candle lane pulls the ORIGINAL public NVIDIA repo
+      // `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` (un-gated — `gated: false` on HF), which
+      // ships the upstream LICENSE.txt (the NVIDIA Open Model License) alongside the weights; the bundled
+      // gemma-2-2b-it text encoder remains under the Gemma Terms of Use. `candle-gen-sana`'s NOTICE documents
+      // the same. SceneWorks's overall non-commercial posture covers this; generations are for
+      // non-commercial / research use only.
       "autoDownload": false,
       "name": "SANA-Sprint 1.6B",
       "family": "sana",
       "type": "image",
       "adapter": "mlx_sana",
       "capabilities": ["text_to_image"],
-      "macOnly": true,
+      "macOnly": false,
+      "nonCommercial": true,
+      "gated": false,
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8490/sc-8513, epic 8506): per-tier subdirs
         // (q4/ default, q8/, bf16/), each a complete `SanaPipeline::new_sprint`-loadable tree —
@@ -4319,6 +4326,25 @@
           "platforms": ["macos"],
           "estimatedSizeBytes": 9715818241,
           "footprint": { "diskSizeBytes": 9715818241, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // Candle off-Mac dense (sc-11781, epic 8485): the ORIGINAL public NVIDIA Sprint diffusers repo,
+          // pulled WHOLE (empty `files` list = the whole-repo HF snapshot, per the model-download
+          // convention). The `candle-gen-sana` Sprint pipeline (`from_diffusers_snapshot` with the Sprint
+          // config) reads the diffusers-layout tree (`transformer/` Sprint Linear-DiT + guidance embedder +
+          // `vae/` 32× DC-AE f32 + `text_encoder/` gemma-2-2b-it CHI encoder + `tokenizer/`) directly and
+          // `resolve_component_files` tolerates the repo's fp16/fp32 + single/sharded duplication, so NO
+          // curated allow-list is needed — the whole snapshot loads dense bf16 (there is no packed q4/q8
+          // tier off-Mac; the worker resolves this repo's snapshot ROOT, never a tier subdir). CFG-free
+          // 1–4 step SCM/TrigFlow. Un-gated on HF (`gated: false`); ships the upstream NVIDIA Open Model
+          // License LICENSE.txt. Size is the whole-repo on-disk footprint (single-precision — unlike the
+          // base repo the Sprint diffusers tree ships no fp16/fp32 duplication, so it is the smaller ~9.7GB).
+          "provider": "huggingface",
+          "repo": "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
+          "files": [],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 9736976627,
+          "footprint": { "diskSizeBytes": 9736976627, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {

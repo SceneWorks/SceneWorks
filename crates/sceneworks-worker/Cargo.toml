@@ -1752,6 +1752,13 @@ mlx-gen-scail2 = { git = "https://github.com/michaeltrefry/mlx-gen", rev = "4679
 # mlx-gen move. Additive (a Raw txt2img job with no reference is byte-identical). Points at the branch content
 # commit (durable ancestor once #497's merge reconciles onto candle-gen main). ALL candle-gen-* pins move
 # together; backend-candle check --locked green.
+# Bumped candle-gen `293f2af` -> `a71772f` (sc-11781, epic 8485): candle-gen PR #498 (candle-gen main tip)
+# adds the SANA-**Sprint** pipeline + gen-core adapter to `candle-gen-sana` — the CFG-free 1–4 step SCM/
+# TrigFlow distill self-registering the `sana_sprint_1600m` id (the base `sana_1600m` pipeline is unchanged).
+# candle-gen-sana source-ONLY (`git diff 293f2af..a71772f -- gen-core/ gen-core-testkit/` is EMPTY), still
+# gen-core `b568fdb` matching this worker's mlx-gen pin, so `--features backend-candle` resolves the SINGLE
+# gen-core rev with NO mlx-gen move. Purely additive (the base SANA lane is byte-identical). ALL candle-gen-*
+# pins move together; backend-candle check --locked green.
 candle-gen-sdxl = { git = "https://github.com/michaeltrefry/candle-gen", rev = "7a16611a707f940d56fc0ec599a31904f2c369bf", features = ["cuda"], optional = true }
 # Candle image providers (sc-5096) -- Windows/CUDA siblings of the mlx-gen image crates above. Each
 # self-registers its engine id into the shared gen_core inventory registry; force-linked in
@@ -1783,16 +1790,19 @@ candle-gen-anima = { git = "https://github.com/michaeltrefry/candle-gen", rev = 
 # gen-core pin); the rev (185fe4a) pins gen-core b6538cb — IDENTICAL to the worker's mlx-gen pin, so
 # `--features backend-candle --target all` still resolves a SINGLE gen-core rev.
 candle-gen-sd3 = { git = "https://github.com/michaeltrefry/candle-gen", rev = "7a16611a707f940d56fc0ec599a31904f2c369bf", features = ["cuda"], optional = true }
-# Candle SANA 1600M provider (sc-11780, epic 8485) — Windows/CUDA + Linux sibling of mlx-gen-sana
-# (candle-gen #495, PART 4a). Self-registers ONE T2I id: `sana_1600m` (NVIDIA's 1.6B Linear-DiT +
-# 32x DC-AE f32 autoencoder + the shared gemma-2-2b-it CHI caption encoder reused from candle-gen-pid).
-# True-CFG flow-match (20 steps / guidance 4.5). Loads the WHOLE `Efficient-Large-Model/
-# Sana_1600M_1024px_diffusers` HF snapshot (diffusers layout: transformer/ + vae/ + text_encoder/) —
-# NOT the MLX-packed turnkey — via `resolve_weights_dir`'s candle-sana branch. No LoRA / quant on the
-# candle base path (descriptor advertises neither). Force-linked in `image_jobs.rs`
-# (`use candle_gen_sana as _;`). Same git rev as every candle-gen provider above (one candle build,
-# single gen-core pin) — 293f2af pins gen-core b568fdbf, IDENTICAL to the worker's mlx-gen pin, so
-# `--features backend-candle --target all` still resolves a SINGLE gen-core rev (the skew gate stays green).
+# Candle SANA 1600M provider (sc-11780 base / sc-11781 Sprint, epic 8485) — Windows/CUDA + Linux sibling
+# of mlx-gen-sana. Self-registers TWO T2I ids: `sana_1600m` (candle-gen #495 PART 4a — NVIDIA's 1.6B
+# Linear-DiT + 32x DC-AE f32 autoencoder + the shared gemma-2-2b-it CHI caption encoder reused from
+# candle-gen-pid; true-CFG flow-match 20 steps / guidance 4.5) AND `sana_sprint_1600m` (candle-gen #498
+# PART 5a — the SAME trunk with a guidance embedder, distilled CFG-FREE for 1–4 step SCM/TrigFlow
+# sampling). Each loads the WHOLE diffusers snapshot (`Efficient-Large-Model/Sana_1600M_1024px_diffusers`
+# for base / `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` for Sprint — diffusers layout:
+# transformer/ + vae/ + text_encoder/) — NOT the MLX-packed turnkey — via `resolve_weights_dir`'s
+# candle-sana branch. No LoRA / quant / control on either candle base path (the descriptors advertise
+# none — those shapes defer to torch). Force-linked in `image_jobs.rs` (`use candle_gen_sana as _;`).
+# Same git rev as every candle-gen provider above (one candle build, single gen-core pin) — a71772f pins
+# gen-core b568fdbf, IDENTICAL to the worker's mlx-gen pin, so `--features backend-candle --target all`
+# still resolves a SINGLE gen-core rev (the skew gate stays green).
 candle-gen-sana = { git = "https://github.com/michaeltrefry/candle-gen", rev = "7a16611a707f940d56fc0ec599a31904f2c369bf", features = ["cuda"], optional = true }
 # Candle Ideogram 4 provider (sc-6596, epic 6561) - Windows/CUDA sibling of mlx-gen-ideogram.
 # Self-registers `ideogram_4` (asymmetric two-DiT CFG) + `ideogram_4_turbo` (CFG-free single DiT +

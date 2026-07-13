@@ -94,13 +94,47 @@ enum ImageRoute {
     SdxlAdvanced,
     SensenovaEdit,
     Bernini,
-    /// A `krea_2_turbo` strict-pose job whose control base (the `SceneWorks/krea-2-turbo-mlx` turnkey)
-    /// isn't installed, so `krea_control_available` failed. Reject loudly instead of falling through to
-    /// `Mlx` (plain txt2img) and silently dropping the poses (sc-11796) — the MLX twin of the candle
-    /// `CandleImageRoute::PoseControlBaseMissing`.
-    KreaPoseControlBaseMissing,
+    /// A strict-pose job on a WIRED MLX pose family (one with a `…_control_available` lane, i.e. a
+    /// [`WIRED_MLX_POSE_FAMILIES`] id) whose control base/overlay is NOT installed — its
+    /// `…_control_available` gate failed, so it reached the fall-through. Reject loudly instead of
+    /// falling through to `Mlx` (plain txt2img) and silently dropping the poses (sc-11796 generalized to
+    /// every wired family, sc-11814) — the MLX twin of the candle `CandleImageRoute::PoseControlBaseMissing`.
+    PoseControlBaseMissing,
+    /// A strict-pose job on an MLX model with NO pose-control lane (e.g. a plain `sdxl` pose job with no
+    /// reference — SDXL identity-pose ships via InstantID / IP-Adapter) that `mlx_available` would
+    /// otherwise render as plain txt2img, dropping the poses. Reject loudly (sc-5968) — the MLX twin of
+    /// the candle `CandleImageRoute::PoseReject`.
+    PoseReject,
     Mlx,
 }
+
+/// Image model ids the MLX router HAS a bespoke strict-pose control lane for — each is claimed by an
+/// `… _control_available` arm in [`resolve_image_route`] BEFORE the generic `mlx_available` txt2img arm,
+/// but only when its control base/overlay resolves locally. This is the SINGLE source for the
+/// fall-through reject: a wired family that reached the fall-through means its control base is absent
+/// (its lane's local weight-gate failed) → [`ImageRoute::PoseControlBaseMissing`], never silent txt2img.
+/// The MLX twin of [`WIRED_CANDLE_POSE_FAMILIES`] (sc-11171/F-008), and the SAME id set — every candle
+/// wired family has a matching MLX control lane:
+///   - `z_image_turbo` → `zimage_control_available` (Turbo Fun-Controlnet-Union)
+///   - `z_image`       → `zimage_base_control_available` (base full-CFG Fun-Controlnet-Union, sc-8251)
+///   - `qwen_image`    → `qwen_control_available` (2512 Fun-Controlnet-Union)
+///   - `kolors`        → `kolors_control_available` (Kolors ControlNet; also needs a reference)
+///   - `krea_2_turbo`  → `krea_control_available` (trained control-branch overlay, sc-8465)
+///   - `flux_dev`      → `flux1_dev_control_available` (Shakker Union-Pro-2.0)
+///   - `flux2_dev`     → `flux2_dev_control_available` (Fun-Controlnet-Union)
+///
+/// Distinct from a non-wired MLX pose family (e.g. `sdxl`), which reaches the sc-5968
+/// [`ImageRoute::PoseReject`] instead. (sc-11814.)
+#[cfg(target_os = "macos")]
+const WIRED_MLX_POSE_FAMILIES: &[&str] = &[
+    "z_image_turbo",
+    "z_image",
+    "qwen_image",
+    "kolors",
+    "krea_2_turbo",
+    "flux_dev",
+    "flux2_dev",
+];
 
 #[cfg(target_os = "macos")]
 fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<ImageRoute> {
@@ -153,18 +187,30 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         // `mlx_available` would match it), but the generic `generate_stream` leaves `frames`/
         // `video_mode` unset, which the engine treats as a multi-frame video request.
         Some(ImageRoute::Bernini)
-    } else if is_krea_control_model(&request.model)
-        && request.mode != "edit_image"
+    } else if request.mode != "edit_image"
         && !pose_entries(request).is_empty()
+        && (WIRED_MLX_POSE_FAMILIES.contains(&request.model.as_str())
+            || mlx_available(request, settings))
     {
-        // A `krea_2_turbo` strict-pose job that fell past `krea_control_available` above means its control
-        // base (the `SceneWorks/krea-2-turbo-mlx` turnkey) isn't installed. Reject loudly BEFORE the
-        // generic `mlx_available` arm — `krea_2_turbo` is in MODEL_TABLE, so `mlx_available` would match it
-        // and render plain txt2img, silently dropping the poses (the reported sc-11796 bug). The MLX twin
-        // of the candle `CandleImageRoute::PoseControlBaseMissing` reject (base.rs, sc-11171/F-008).
-        // NOTE: only krea is guarded here; full candle-parity reject across every wired MLX pose family
-        // (qwen/kolors/z-image/flux) is tracked separately.
-        Some(ImageRoute::KreaPoseControlBaseMissing)
+        // A strict-pose job that fell past every `…_control_available` lane above (and the edit / identity /
+        // bernini lanes) must be REJECTED, not silently rendered as plain txt2img with the poses dropped —
+        // the MLX twin of the candle fall-through reject (base.rs, sc-11171/F-008 + sc-5968). Two sub-cases,
+        // distinguished by whether the family has a wired MLX pose lane at all:
+        //  - WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`): its control lane exists but the base/overlay
+        //    snapshot is absent (the lane's `…_control_available` weight-gate failed) → `PoseControlBaseMissing`.
+        //    Fires regardless of whether the plain base weights resolve, because the control gate can fail while
+        //    `mlx_available` succeeds — for `krea_2_turbo` the control base (`resolve_krea_control_base`) diverges
+        //    from the txt2img base (the reported sc-11796 silent-drop), and for `kolors` the lane additionally
+        //    needs a `referenceAssetId`. Generalizes the sc-11796 krea-only reject to every wired family (sc-11814).
+        //  - A non-wired MLX pose family that `mlx_available` would render as plain txt2img (e.g. a plain `sdxl`
+        //    pose job with no reference — SDXL identity-pose ships via InstantID / IP-Adapter, claimed above) →
+        //    the sc-5968 no-silent-T2I `PoseReject`.
+        // Checked BEFORE the generic `mlx_available` arm.
+        if WIRED_MLX_POSE_FAMILIES.contains(&request.model.as_str()) {
+            Some(ImageRoute::PoseControlBaseMissing)
+        } else {
+            Some(ImageRoute::PoseReject)
+        }
     } else if mlx_available(request, settings) {
         Some(ImageRoute::Mlx)
     } else {
@@ -194,12 +240,14 @@ impl ImageRoute {
             // PuLID-FLUX is one identity image per seed (no angle/pose grouping) — like the base
             // MLX + SDXL-advanced + Bernini paths, the effective count is the requested count. Krea
             // edit (epic 10871) is likewise plain per-image: `count` edits of the one source. The
-            // pose-control-base-missing reject errors before generation, so its count is inert.
+            // pose reject arms (`PoseControlBaseMissing` / `PoseReject`) error before generation, so
+            // their count is inert.
             ImageRoute::PulidFlux
             | ImageRoute::SdxlAdvanced
             | ImageRoute::Bernini
             | ImageRoute::KreaEdit
-            | ImageRoute::KreaPoseControlBaseMissing
+            | ImageRoute::PoseControlBaseMissing
+            | ImageRoute::PoseReject
             | ImageRoute::Mlx => request.count,
         }
     }
@@ -553,6 +601,17 @@ const IDEOGRAM_BF16_REPO: &str = "SceneWorks/ideogram-4";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const SANA_CANDLE_DIFFUSERS_REPO: &str = "Efficient-Large-Model/Sana_1600M_1024px_diffusers";
 
+/// The whole-repo `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` HF snapshot the candle
+/// SANA-Sprint lane loads (sc-11781, epic 8485). The `candle-gen-sana` Sprint pipeline reads the same
+/// diffusers-layout tree (`transformer/` Sprint Linear-DiT + guidance embedder + `vae/` + `text_encoder/`)
+/// as base SANA, so the off-Mac lane resolves this repo's snapshot root — NOT the MLX-packed
+/// `SceneWorks/Sana_Sprint_1.6B_1024px_mlx` turnkey (the `MODEL_TABLE` `default_repo`, which the macOS/MLX
+/// path loads) and NOT a `q4/q8/bf16` tier subdir. Matches the manifest's windows/linux whole-repo
+/// download entry.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const SANA_SPRINT_CANDLE_DIFFUSERS_REPO: &str =
+    "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers";
+
 /// Resolve the weights snapshot directory: an explicit `modelPath` dir wins, else the
 /// HuggingFace cache snapshot for the model repo. `None` when the model is not a known
 /// engine family or its snapshot is absent. Available on the candle lane too (sc-5501): the
@@ -669,6 +728,20 @@ pub(crate) fn resolve_weights_dir(
         return Ok(huggingface_snapshot_dir(
             &settings.data_dir,
             SANA_CANDLE_DIFFUSERS_REPO,
+        ));
+    }
+    // SANA-Sprint 1.6B off-Mac (candle, sc-11781, epic 8485): identical treatment to base SANA above —
+    // the `candle-gen-sana` Sprint pipeline loads the WHOLE `Efficient-Large-Model/
+    // Sana_Sprint_1.6B_1024px_diffusers` HF snapshot (same diffusers layout: `transformer/` + `vae/` +
+    // `text_encoder/`), NOT the MLX-packed turnkey and NOT a `q4/q8/bf16` tier subdir. Resolve the
+    // diffusers repo's snapshot ROOT directly, BYPASSING the `STANDARD_TIER_MODELS` descent below
+    // (`sana_sprint_1600m` is registered there for the MLX turnkey, which would otherwise append a
+    // nonexistent `q4/`). macOS never compiles this branch (it keeps the MLX turnkey path).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if request.model == "sana_sprint_1600m" {
+        return Ok(huggingface_snapshot_dir(
+            &settings.data_dir,
+            SANA_SPRINT_CANDLE_DIFFUSERS_REPO,
         ));
     }
     // Catalog-wide quant-matrix models (sc-8513, epic 8506) ship as SceneWorks pre-quantized
@@ -3924,9 +3997,17 @@ fn is_candle_engine(model: &str) -> bool {
             // Sana_1600M_1024px_diffusers` diffusers snapshot (transformer/ + vae/ + text_encoder/) via the
             // candle-sana branch in `resolve_weights_dir` — NOT the MLX-packed turnkey, NOT a tier subdir.
             // Pure txt2img (20 steps / guidance 4.5 + negative prompt); no edit/reference/control/LoRA/quant
-            // candle path (those defer to torch via `image_request_candle_eligible`). SANA-Sprint stays
-            // MLX-only (the CFG-free distill is not ported on candle).
+            // candle path (those defer to torch via `image_request_candle_eligible`).
             | "sana_1600m"
+            // SANA-Sprint 1.6B (sc-11781, epic 8485): NVIDIA's CFG-free few-step distill of SANA rides the
+            // generic candle lane too (the `candle-gen-sana` Sprint pipeline, candle-gen #498 — the off-Mac
+            // sibling of `mlx-gen-sana`'s Sprint id). `generate_candle_stream` resolves the whole
+            // `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` diffusers snapshot (transformer/ +
+            // vae/ + text_encoder/) via the candle-sana branch in `resolve_weights_dir` — NOT the MLX-packed
+            // turnkey, NOT a tier subdir. Pure txt2img, CFG-free 1–4 step SCM/TrigFlow (guidance embedded,
+            // no negative-prompt second pass); no edit/reference/control/LoRA/quant candle path (the Sprint
+            // adapter rejects those — they defer to torch via `image_request_candle_eligible`).
+            | "sana_sprint_1600m"
             // Anima 2B base / aesthetic / turbo (sc-10676, epic 10512): the candle port (sc-10525,
             // GPU-validated sc-10625) rides the generic candle txt2img lane off-Mac. `generate_candle_\
             // stream` dense-loads bf16 from the raw `circlestone-labs/Anima` split_files/ tree (no
@@ -3967,8 +4048,9 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "krea_2_turbo" | "krea_2_raw" => "candle_krea",
         // Stable Diffusion 3.5 (sc-7880): Large / Large Turbo / Medium share the candle SD3.5 engine.
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => "candle_sd3",
-        // SANA 1600M (sc-11780): the off-Mac sibling of the `mlx_sana` label.
-        "sana_1600m" => "candle_sana",
+        // SANA 1600M + SANA-Sprint (sc-11780 / sc-11781): both share the candle SANA engine (the off-Mac
+        // sibling of the `mlx_sana` label).
+        "sana_1600m" | "sana_sprint_1600m" => "candle_sana",
         // Anima 2B (sc-10676): base / aesthetic / turbo share the candle Anima engine (the off-Mac
         // sibling of the `mlx_anima` label).
         "anima_base" | "anima_aesthetic" | "anima_turbo" => "candle_anima",

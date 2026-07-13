@@ -692,10 +692,17 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // (Windows/CUDA + Linux, candle-gen #495 — loads the whole `Efficient-Large-Model/
     // Sana_1600M_1024px_diffusers` HF snapshot dense), so `candle_routed = true`. Pure txt2img; NOT
     // `candle_quant` / `candle_lora`: the candle base path advertises neither (dense bf16, no adapter
-    // fold) — an `mlxQuantize` or LoRA request defers to torch off-Mac. SANA-Sprint stays MLX-only
-    // (the CFG-free SCM/Sprint distill is not ported on the candle side).
+    // fold) — an `mlxQuantize` or LoRA request defers to torch off-Mac.
     ModelCaps::new("sana_1600m", true, true, false, false, false),
-    ModelCaps::new("sana_sprint_1600m", true, false, false, false, false),
+    // SANA-Sprint 1.6B (epic 8485 / sc-8490 MLX; sc-11781 candle): NVIDIA's few-step CFG-FREE distill of
+    // SANA — the SAME 1.6B Linear-DiT trunk with a guidance embedder, sampled by the SCM/TrigFlow
+    // continuous-time consistency loop in 1–4 steps. Both backends wired — `mlx-gen-sana` (macOS,
+    // MLX-packed q4/q8/bf16 turnkey) + `candle-gen-sana`'s Sprint pipeline (Windows/CUDA + Linux,
+    // candle-gen #498 — loads the whole `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` HF
+    // snapshot dense), so `candle_routed = true`. Pure txt2img; NOT `candle_quant` / `candle_lora`: the
+    // candle Sprint path advertises neither (the adapter rejects quant / LoRA / control) — an `mlxQuantize`
+    // or LoRA request defers to torch off-Mac.
+    ModelCaps::new("sana_sprint_1600m", true, true, false, false, false),
     // Anima base / aesthetic / turbo (epic 10512): anime txt2img on BOTH backends — native-MLX (macOS,
     // install-time Q4/Q8 quant) and the candle off-Mac lane (sc-10676), which sc-10625 GPU-validated on
     // real CUDA (candle-gen #380). `candle_routed = true`; `candle_lora = true` because the candle engine
@@ -1056,8 +1063,11 @@ mod tests {
         "sd3_5_medium",
         // sc-11780 (epic 8485): the candle SANA 1600M provider (candle-gen #495) joins the routed set —
         // true-CFG txt2img on the whole `Efficient-Large-Model/Sana_1600M_1024px_diffusers` snapshot.
-        // SANA-Sprint stays MLX-only (the CFG-free distill is not ported on candle).
         "sana_1600m",
+        // sc-11781 (epic 8485): the candle SANA-Sprint provider (candle-gen #498) joins the routed set too —
+        // CFG-free 1–4 step SCM/TrigFlow txt2img on the whole `Efficient-Large-Model/
+        // Sana_Sprint_1.6B_1024px_diffusers` snapshot.
+        "sana_sprint_1600m",
         "anima_base",
         "anima_aesthetic",
         "anima_turbo",
