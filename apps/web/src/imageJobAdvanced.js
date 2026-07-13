@@ -56,6 +56,9 @@ export function buildImageJobAdvanced(state) {
     supportsImg2img,
     img2imgReferenceAssetId,
     img2imgStrength,
+    // Krea "text style" tap-reweight gain (sc-11878).
+    supportsTextStyle,
+    textStyleGain,
     viewAngles,
     viewAngle,
     // Pose library.
@@ -180,6 +183,14 @@ export function buildImageJobAdvanced(state) {
     // worker owns the band semantics (the usable window is model-specific — A0/sc-8589).
     ...(supportsImg2img && img2imgReferenceAssetId
       ? { strength: img2imgStrength }
+      : {}),
+    // Krea "text style" tap-reweight gain (sc-11878): emit advanced.textStyleGain only when the model
+    // declares the control AND it's off the 1.0 no-op default — keeps existing recipes byte-identical.
+    // The worker clamps to [0.25, 1.75]; candle-gen-krea reweights the Qwen3-VL taps (Krea-only).
+    ...(supportsTextStyle &&
+    Number.isFinite(Number(textStyleGain)) &&
+    Number(textStyleGain) !== 1
+      ? { textStyleGain: Number(textStyleGain) }
       : {}),
     // View angle (InstantID) — only when a specific angle is chosen and no pose is
     // selected (a library pose drives the whole body, superseding the head angle).
