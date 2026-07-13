@@ -4120,9 +4120,14 @@
         "model": "${HF_CACHE}/SceneWorks/Sana_1600M_1024px_mlx"
       },
       "defaults": {
-        // diffusers `SanaPipeline` reference defaults: flow-match Euler with a static time-shift of
-        // 3.0, 20 steps, true CFG 4.5 (negative-prompt capable). The shift is the orthogonal
-        // schedulerShift knob (epic 7114) rather than a scheduler choice.
+        // Flow-match Euler, static time-shift 3.0, 20 steps, true CFG 4.5 (negative-prompt capable).
+        // The shift is the orthogonal schedulerShift knob (epic 7114), not a scheduler choice.
+        // IMPORTANT (sc-11760): NVIDIA's shipped `Sana_1600M_1024px_diffusers` pipeline actually
+        // DEFAULTS to `DPMSolverMultistepScheduler` (2nd-order flow), NOT Euler — but that 2nd-order
+        // DPM solver produces a garish / over-saturated / chromatic-aberration artifact on this base
+        // model (clean fox/apple/portrait under Euler render blown + false-color under DPM, same
+        // weights/seed). We deliberately run flow-match Euler. Do NOT "restore" a DPM-Solver default
+        // to "match the reference" — it reintroduces the artifact.
         "resolution": "1024x1024",
         "steps": 20,
         "guidanceScale": 4.5,
