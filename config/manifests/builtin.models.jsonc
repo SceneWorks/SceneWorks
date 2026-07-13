@@ -2537,11 +2537,19 @@
           // essentially the denoise steady floor. Higher tiers omit it (their denoise steady-state, not the
           // decode, is the peak — tiling there recovers little, so branch-quant is the operative rung).
           "decodeTileSaveGb": { "q4": 6.7 },
+          // MIDDLE rung (sc-11745, candle-gen #496): the peak reduction (GB) from engaging sc-6217-style
+          // query-row attention chunking on the composable base stack + control branch
+          // (`Krea2ControlPaths.chunk_attention`) — a SPEED cost, no quality cost (the chunked forward is
+          // byte-identical to the unchunked one). Bounds the DENOISE-phase activation peak, so it slots
+          // between VAE-decode tiling (decode-phase) and the last-resort branch quant. GPU-MEASURED on an
+          // RTX PRO 6000 (Blackwell sm_120), dense bf16 base, 1024²/8-step: the ~11 GB-of-activations denoise
+          // steady-state peak drops −2.43 GiB, at a cost of +2.6 s (~+6%). A SCALAR (not tier-keyed): the
+          // activation peak is bf16 regardless of the base weight tier, so the saving is tier-independent.
+          "chunkAttnSaveGb": 2.43,
           // Last-resort rung: the peak reduction (GB) from quantizing the control branch bf16 → q8/q4
           // (candle-gen #483, sc-11743), MEASURED (dense base holds the rest fixed to isolate the branch):
           // q8 −8.4 (near-lossless), q4 −10.2 (pose-locked; non-pose details drift). The gate prefers q8
-          // before q4, and composes it with the tiling rung above. The activation-chunking / res-cap rung
-          // (sc-11745) slots between tiling and branch-quant once its candle-gen mechanism ships.
+          // before q4, and composes it with the two cheaper (speed-only) rungs above — tiling then chunking.
           "branchQuantSaveGb": { "q8": 8.4, "q4": 10.2 },
           "measured": false
         }
@@ -2749,8 +2757,9 @@
         // generic arm (resolve_img2img_init_generic → Conditioning::Reference) to the engine's Raw CFG
         // entrypoint `generate_base_img2img_with_progress` (mlx-gen #670 / sc-10224), so guidance + the
         // negative prompt are honored. Full 0–1 slider (default 0.5), NOT clamped — usable band is
-        // model-specific. macOS/MLX only for now (the worker generic img2img arm is Mac-gated); the
-        // candle/Windows-Linux twin is sc-10226.
+        // model-specific. Both backends: MLX (sc-10224/10225) and candle/CUDA (sc-10226 —
+        // `krea_2_raw` router branch + engine `render_base_img2img`; the worker generic img2img arm is
+        // cross-platform, gated on this `ui.img2img` flag).
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         // Two-reference Kontext edit (epic 10871 P1.3): the `krea2_identity_edit` edit optionally takes a

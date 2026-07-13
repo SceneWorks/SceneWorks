@@ -248,14 +248,19 @@
                     "description": "Measured peak reduction (GB) from the CHEAPEST rung — forcing the seam-free tiled VAE decode (sc-11744, candle-gen #492; Krea2ControlRequest.tile_vae_decode), keyed by BASE quant tier. A SPEED cost, no quality cost. The fit-gate subtracts this from peakGbByTier and engages it BEFORE branch-quant. Measured only for the tier(s) where the end-of-render decode spike IS the render peak (q4); omitted where the denoise steady-state dominates and tiling recovers little.",
                     "additionalProperties": { "type": "number" }
                   },
+                  "chunkAttnSaveGb": {
+                    "type": "number",
+                    "description": "Measured peak reduction (GB) from the MIDDLE rung — engaging sc-6217-style query-row attention chunking on the composable base stack + control branch (sc-11745, candle-gen #496; Krea2ControlPaths.chunk_attention). A SPEED cost, no quality cost (the chunked forward is byte-identical). Bounds the DENOISE-phase activation peak, so the fit-gate engages it between decodeTileSaveGb (decode-phase) and the last-resort branch quant. A SCALAR (not tier-keyed): the activation peak is bf16 regardless of the base weight tier.",
+                    "minimum": 0
+                  },
                   "branchQuantSaveGb": {
                     "type": "object",
-                    "description": "Measured peak reduction (GB) from the last-resort rung — quantizing the control branch bf16 → q8/q4 (candle-gen #483, sc-11743), keyed by target quant (q8 / q4). The fit-gate subtracts this (composed with decodeTileSaveGb) from peakGbByTier to decide whether the branch-quant rung makes the lane fit, preferring q8 (near-lossless) before q4 (pose-locked; non-pose drift).",
+                    "description": "Measured peak reduction (GB) from the last-resort rung — quantizing the control branch bf16 → q8/q4 (candle-gen #483, sc-11743), keyed by target quant (q8 / q4). The fit-gate subtracts this (composed with the cheaper decodeTileSaveGb + chunkAttnSaveGb rungs) from peakGbByTier to decide whether the branch-quant rung makes the lane fit, preferring q8 (near-lossless) before q4 (pose-locked; non-pose drift).",
                     "additionalProperties": { "type": "number" }
                   },
                   "measured": {
                     "type": "boolean",
-                    "description": "true when peakGbByTier / decodeTileSaveGb / branchQuantSaveGb were MEASURED on a real GPU; false when partially ESTIMATED (e.g. an interpolated q8 base peak) pending measurement."
+                    "description": "true when peakGbByTier / decodeTileSaveGb / chunkAttnSaveGb / branchQuantSaveGb were MEASURED on a real GPU; false when partially ESTIMATED (e.g. an interpolated q8 base peak) pending measurement."
                   }
                 }
               },
