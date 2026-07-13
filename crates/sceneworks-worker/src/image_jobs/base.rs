@@ -4113,13 +4113,14 @@ async fn generate_candle_stream(
     } else {
         Vec::new()
     };
-    // Krea 2 Turbo img2img (reference-guided latent-init, sc-10134, epic 8588): a `ui.img2img` model in a
+    // Generic img2img (reference-guided latent-init, sc-10134, epic 8588): a `ui.img2img` model in a
     // NON-edit mode carrying a `referenceAssetId` resolves to the img2img init `(image, advanced.strength)`,
-    // threaded to `generate_one` as the single `Conditioning::Reference` the candle Krea engine routes to
-    // `render_img2img` (VAE-encode the reference → blend at `sigmas[init_time_step]` → CFG-free denoise).
-    // The candle router (`krea_img2img_candle_eligible`) only lets `krea_2_turbo` reach this lane with a
-    // reference today; the other `ui.img2img` families (SD3.5 / Z-Image / Boogu / Ideogram) follow in
-    // sc-10265. Disjoint from the Ideogram `edit_reference` (edit_image vs text_to_image) and Boogu's
+    // threaded to `generate_one` as the single `Conditioning::Reference` the candle engine routes to its
+    // img2img entrypoint (VAE-encode the reference → blend at `sigmas[init_time_step]` → denoise; CFG-free
+    // for distilled families, two-forward CFG for the base ones like Krea Raw `render_base_img2img`,
+    // sc-10226). Model-agnostic here — the candle router gates which ids reach this lane with a reference
+    // (`krea_2_turbo`/`krea_2_raw`, SD3.5, Z-Image, Boogu, Ideogram all wired). Disjoint from the Ideogram
+    // `edit_reference` (edit_image vs text_to_image) and Boogu's
     // `multi_references` (guarded here so a future overlap never double-drives the single `reference` slot).
     let img2img_reference = if edit_reference.is_none()
         && boogu_refs.is_empty()
