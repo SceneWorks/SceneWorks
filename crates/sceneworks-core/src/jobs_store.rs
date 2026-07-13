@@ -4312,6 +4312,37 @@ mod candle_routing_tests {
     }
 
     #[test]
+    fn sd3_img2img_routes_to_candle() {
+        // sc-11784 (epic 8588): each SD3.5 variant in a non-edit mode with a `referenceAssetId` is the
+        // REGISTRY img2img path — the candle `candle-gen-sd3` generators advertise `Reference` and
+        // VAE-encode it into the reduced denoise tail (real CFG for Large/Medium, distilled for Turbo).
+        // Branched before the txt2img gate that rejects references. Candle/CUDA parity of MLX sc-10189.
+        for model in ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
+            let img2img = json!({
+                "model": model,
+                "referenceAssetId": "asset_1",
+                "advanced": { "strength": 0.6 }
+            });
+            assert!(
+                image_job_is_candle_eligible(&image_generate_job(img2img.clone())),
+                "{model} img2img (referenceAssetId, non-edit) must be candle-eligible (sc-11784)"
+            );
+            assert!(is_sd3_family_candle_model(model));
+            assert!(sd3_img2img_candle_eligible(&object(img2img)));
+            // A plain txt2img (no reference) still rides the generic candle gate — not the img2img branch.
+            assert!(!sd3_img2img_candle_eligible(&object(
+                json!({ "model": model })
+            )));
+            // The `edit_image` shape is NOT registry img2img (SD3.5 has no candle edit lane).
+            assert!(!sd3_img2img_candle_eligible(&object(json!({
+                "model": model,
+                "mode": "edit_image",
+                "referenceAssetId": "asset_1"
+            }))));
+        }
+    }
+
+    #[test]
     fn sdxl_advanced_shapes_fall_back_to_torch() {
         // Every conditioning shape the txt2img candle lane can't honor must be ineligible. A LoRA is NOT
         // in this set anymore (sc-10767): the SDXL family advertises inference LoRA on candle, so a plain

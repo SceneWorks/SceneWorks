@@ -253,6 +253,18 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if model == "z_image_turbo" && zimage_img2img_candle_eligible(&job.payload) {
         return true;
     }
+    // SD3.5 img2img (reference-guided latent-init, sc-11784, epic 8588): `sd3_5_large` / `sd3_5_large_turbo`
+    // / `sd3_5_medium` in a non-edit mode with a `referenceAssetId` is now the REGISTRY img2img path — the
+    // candle SD3.5 generators advertise `Reference` and their `generate` VAE-encodes a single
+    // `Conditioning::Reference` and denoises the reduced schedule tail (real CFG for Large/Medium, the
+    // CFG-free distilled loop for Turbo — `candle-gen-sd3` `resolve_reference` + `init_time_step` + `render`,
+    // candle-gen #493). The candle/CUDA parity of the MLX `denoise_img2img_cfg` lane (sc-10189). SD3.5 has no
+    // candle identity / edit / control lane, so the only reference shape is img2img — branch it out before
+    // the txt2img gate below (which rejects any `referenceAssetId`). The worker resolves the init generically
+    // (`model_supports_img2img`, sc-10134).
+    if is_sd3_family_candle_model(model) && sd3_img2img_candle_eligible(&job.payload) {
+        return true;
+    }
     // FLUX.1-dev strict-control Shakker Union-Pro-2.0 (sc-8412, epic 8236): `flux_dev` + `advanced.poses` is
     // the bespoke candle `Flux1DevControl` lane (`generate_candle_flux1_control_stream`), NOT txt2img — the
     // `image_request_candle_eligible` gate below DEFERS any `advanced.poses` job to torch, and the
@@ -817,6 +829,32 @@ pub(crate) fn krea_img2img_candle_eligible(payload: &Map<String, Value>) -> bool
 /// identity-init (`character_image` + `referenceStrength`), the `edit_image` masked-edit, or the
 /// pose-control (`advanced.poses`) shapes — all branched first.
 pub(crate) fn zimage_img2img_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// The three registered candle SD3.5 txt2img ids (`candle-gen-sd3`): Large (CFG), Large Turbo
+/// (distilled), Medium (MMDiT-X CFG). Shared by the SD3.5 img2img branch (sc-11784) so the id set has
+/// one home; each also rides the generic txt2img gate below (all three are in `CANDLE_ROUTED_MODELS`).
+pub(crate) fn is_sd3_family_candle_model(model: &str) -> bool {
+    matches!(model, "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium")
+}
+
+/// SD3.5 img2img (reference-guided latent-init) candle-routing conditions (sc-11784, epic 8588). The
+/// registered `sd3_5_*` candle generators serve registry img2img — a single `Conditioning::Reference`
+/// in a non-edit request VAE-encodes to the clean init latent and denoises the reduced schedule tail
+/// (`candle-gen-sd3` `resolve_reference` + `init_time_step` + `render`, candle-gen #493; real CFG for
+/// Large/Medium, the distilled loop for Turbo). So an SD3.5 job in a non-edit mode with a
+/// `referenceAssetId` is candle-eligible; the worker resolves the init generically
+/// (`model_supports_img2img`, sc-10134). Same payload shape as [`zimage_img2img_candle_eligible`], gated
+/// to the SD3.5 ids by the caller. SD3.5 has no candle identity / `edit_image` / pose-control lane, so
+/// the only reference shape on these ids is img2img — no earlier branch to keep precedence behind.
+pub(crate) fn sd3_img2img_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
