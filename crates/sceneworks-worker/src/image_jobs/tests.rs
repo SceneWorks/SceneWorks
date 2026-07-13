@@ -4972,6 +4972,39 @@ fn candle_image_route_gates_on_flag_then_pose_reject_then_txt2img() {
     assert_eq!(resolve_candle_image_route(&unknown, &settings), None);
 }
 
+// sc-10134 (epic 8588): a `krea_2_turbo` job in a NON-edit mode carrying a `referenceAssetId` (the img2img
+// "Start from an image" tile) routes to the generic candle txt2img lane — NOT the Krea edit lane
+// (`edit_image`-only, `krea_edit_candle_mode`) nor the pose-control lane (needs `advanced.poses`).
+// `generate_candle_stream` then resolves the img2img init `(image, advanced.strength)` and feeds it as the
+// single `Conditioning::Reference` the candle Krea engine routes to `render_img2img`. This locks the ROUTE
+// decision; the resolve + render are exercised by the candle-gen engine tests + the CUDA smoke.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_image_route_sends_krea_img2img_to_txt2img() {
+    let mut settings = Settings::from_env();
+    settings.backend_candle_enabled = true;
+
+    // krea_2_turbo + a reference, no poses, non-edit mode → the generic candle txt2img lane (the img2img
+    // init is resolved inside `generate_candle_stream`, not a distinct route).
+    let krea_img2img = request(json!({
+        "projectId": "p", "model": "krea_2_turbo", "count": 1,
+        "referenceAssetId": "asset_1",
+        "advanced": { "strength": 0.5 }
+    }));
+    assert_eq!(
+        resolve_candle_image_route(&krea_img2img, &settings),
+        Some(CandleImageRoute::CandleTxt2Img),
+    );
+
+    // Plain krea_2_turbo txt2img (no reference) routes to the same generic lane — the img2img resolve just
+    // no-ops without a reference.
+    let krea_t2i = request(json!({ "projectId": "p", "model": "krea_2_turbo", "count": 1 }));
+    assert_eq!(
+        resolve_candle_image_route(&krea_t2i, &settings),
+        Some(CandleImageRoute::CandleTxt2Img),
+    );
+}
+
 // sc-11171 (F-008): a strict-pose job on a WIRED candle pose family (e.g. `z_image_turbo`) whose control
 // base snapshot is NOT installed must route to the loud `PoseControlBaseMissing` reject, NOT fall through
 // to the plain candle txt2img lane (which would silently render an unconditioned image and drop the
