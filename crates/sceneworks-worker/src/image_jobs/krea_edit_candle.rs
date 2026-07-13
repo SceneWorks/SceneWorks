@@ -18,7 +18,8 @@
 // Both Krea image variants edit: **Raw** on the full-CFG loop (epic 10871) and **Turbo** on the CFG-free
 // distilled few-step loop (`render_edit(distilled = true)`, sc-11640 — the fast-path); the same
 // `krea2_identity_edit` LoRA drives both (family match, no base gating). One or two references in fixed
-// order — scene = image 1, person = image 2 ([`KREA_EDIT_CANDLE_MAX_REFERENCES`]).
+// order — image 1 (required) + image 2 (optional), either can be a person
+// ([`KREA_EDIT_CANDLE_MAX_REFERENCES`]).
 
 /// Krea edit denoise steps default — Raw undistilled, full-CFG (mirrors `candle_gen_krea` `RAW_STEPS`).
 const KREA_EDIT_CANDLE_DEFAULT_STEPS: u32 = 52;
@@ -30,7 +31,8 @@ const KREA_EDIT_CANDLE_DEFAULT_GUIDANCE: f32 = 3.5;
 /// The adapter/engine id recorded on candle Krea edit assets + telemetry (distinct from the `candle_krea`
 /// txt2img lane — the edit is a separate surface with the required edit LoRA).
 const KREA_EDIT_CANDLE_ENGINE: &str = "candle_krea_edit";
-/// Reference cap — the edit LoRA's fixed-order contract: scene = image 1, person = image 2. Swapping the
+/// Reference cap — the edit LoRA's fixed-order contract: image 1 (required) + image 2 (optional), either
+/// can be a person. Swapping the
 /// order degrades results (the LoRA authors' note); more than two is off-contract.
 const KREA_EDIT_CANDLE_MAX_REFERENCES: usize = 2;
 
@@ -52,7 +54,7 @@ fn krea_edit_candle_has_lora(request: &ImageRequest) -> bool {
     request.loras.iter().any(krea_edit_candle_lora_role)
 }
 
-/// Reference asset ids for a Krea edit, in fixed order (scene = image 1, person = image 2), capped at
+/// Reference asset ids for a Krea edit, in fixed order (image 1 (required) + image 2 (optional)), capped at
 /// [`KREA_EDIT_CANDLE_MAX_REFERENCES`]. The multi-image picker sends the plural `referenceAssetIds`; with
 /// no plural list it falls back to the single Image-Edit `sourceAssetId`. Mirrors
 /// `flux2_edit_candle_reference_ids` (capped to the Krea 1..=2 contract).
@@ -274,7 +276,7 @@ async fn generate_candle_krea_edit_stream(
                     return Ok(None);
                 }
                 // One image per streamed item: `render_edit` batches on `count`, so pass `count = 1` and
-                // the item's seed. The scene/person references are passed directly (not via
+                // the item's seed. The image 1 / image 2 references are passed directly (not via
                 // `conditioning`) in fixed order.
                 let req = gen_core::GenerationRequest {
                     prompt,
