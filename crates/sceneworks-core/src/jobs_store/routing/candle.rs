@@ -131,6 +131,21 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     {
         return true;
     }
+    // Ideogram 4 / Turbo img2img (reference-guided latent-init, sc-10261, epic 8588): an ideogram-family
+    // job in a **non-edit** mode with a `referenceAssetId` is the "Image reference" `ui.img2img` tile —
+    // a single `Conditioning::Reference` with NO `Mask`, which the candle `candle-gen-ideogram` pipeline's
+    // `resolve_edit` denoises as plain img2img (VAE-encode the source → start from the strength-derived
+    // step, no keep-region mask), exactly as the MLX edit path does (sc-10192, worker #1266). DISJOINT
+    // from the Ideogram `edit_image` Remix/inpaint branch above (that arm is `edit_image` + `sourceAssetId`;
+    // this arm is `text_to_image` + `referenceAssetId`), and the txt2img gate below rejects any
+    // `referenceAssetId`, so branch it out here. The worker `generate_candle_stream` already resolves the
+    // init generically (`model_supports_img2img`, sc-10134) — no worker or candle-gen change, just this
+    // router branch. Mirrors the Z-Image / SD3.5 / Boogu img2img routing.
+    if matches!(model, "ideogram_4" | "ideogram_4_turbo")
+        && ideogram_img2img_candle_eligible(&job.payload)
+    {
+        return true;
+    }
     // Boogu instruction edit (sc-7524, epic 6831): a `boogu_image_edit` `edit_image` job with a source
     // image runs the candle `candle-gen-boogu` edit path. Like Ideogram (and unlike the SDXL/FLUX.2/Qwen/
     // Z-Image bespoke streams above), Boogu has no separate edit stream — the SAME registered
@@ -300,9 +315,20 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     // `image_request_candle_eligible` gate below rejects ANY `referenceAssetId`, so an img2img job would
     // otherwise fall to the "conditioned shape on a txt2img candle family" gap. Branch it out AFTER the
     // pose-control lane (a pose job with an identity reference stays on control) and BEFORE the txt2img
-    // gate. Turbo-only: Raw img2img is the separate sc-10226. Mirrors the worker's `krea_2_turbo` img2img
-    // resolve in `generate_candle_stream`.
+    // gate. Mirrors the worker's `krea_2_turbo` img2img resolve in `generate_candle_stream`.
     if model == "krea_2_turbo" && krea_img2img_candle_eligible(&job.payload) {
+        return true;
+    }
+    // Krea 2 Raw img2img (reference-guided latent-init under full CFG, sc-10226, epic 8588): the
+    // undistilled `krea_2_raw` sibling of the Turbo lane above — a non-edit `referenceAssetId` seeds the
+    // engine's `render_base_img2img` (VAE-encode the reference → blend at `sigmas[init_time_step]` → the
+    // two-forward CFG denoise, honoring guidance + a user negative prompt). Same payload predicate as
+    // Turbo (`krea_img2img_candle_eligible`, gated to the id by this caller); `krea_2_raw` is a registered
+    // candle txt2img id, so without diverting first the `image_request_candle_eligible` gate below would
+    // reject the reference and drop it to the "conditioned shape on a txt2img candle family" gap. Behind
+    // the Krea edit lane (`edit_image`, branched earlier) so an edit never reaches here. The worker's
+    // generic `ui.img2img` arm in `generate_candle_stream` resolves the init for Raw exactly as Turbo.
+    if model == "krea_2_raw" && krea_img2img_candle_eligible(&job.payload) {
         return true;
     }
     // PuLID-FLUX face identity (sc-5492, epic 5480): `pulid_flux_dev` is a distinct model id (not a
@@ -800,13 +826,14 @@ pub(crate) fn krea_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
             .is_some_and(|value| !value.trim().is_empty())
 }
 
-/// Krea 2 Turbo img2img (reference-guided latent-init) candle-routing conditions (sc-10134, epic 8588).
-/// The bespoke candle `render_img2img` lane serves a `krea_2_turbo` job in a **non-edit** mode carrying a
-/// `referenceAssetId` — the "Start from an image" tile: the reference is VAE-encoded and blended into the
-/// init latent at `advanced.strength`, then the CFG-free denoise runs from `sigmas[start]`. Distinct from
-/// the Krea **edit** lane (`edit_image` mode + the Kontext dual-conditioning, `krea_edit_candle_eligible`)
-/// and the pose-control lane (`advanced.poses`, branched first). Gated to `krea_2_turbo` by the caller
-/// (Raw img2img is the separate sc-10226). Mirrors the worker's `krea_2_turbo` img2img resolve in
+/// Krea 2 img2img (reference-guided latent-init) candle-routing conditions (sc-10134 Turbo, sc-10226 Raw;
+/// epic 8588). The candle img2img lane serves a `krea_2_turbo` / `krea_2_raw` job in a **non-edit** mode
+/// carrying a `referenceAssetId` — the "Start from an image" tile: the reference is VAE-encoded and blended
+/// into the init latent at `advanced.strength`, then the denoise runs from `sigmas[start]` (CFG-free
+/// `render_img2img` for Turbo, two-forward CFG `render_base_img2img` for Raw). Distinct from the Krea
+/// **edit** lane (`edit_image` mode + the Kontext dual-conditioning, `krea_edit_candle_eligible`) and the
+/// pose-control lane (`advanced.poses`, branched first). Gated to each id by the caller (Turbo + Raw have
+/// separate branches so the precedence comments stay per-id). Mirrors the worker's img2img resolve in
 /// `generate_candle_stream` (the `model_supports_img2img` + `resolve_img2img_init_generic` path).
 pub(crate) fn krea_img2img_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
@@ -879,6 +906,26 @@ pub(crate) fn ideogram_edit_candle_eligible(payload: &Map<String, Value>) -> boo
     }
     payload
         .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// Ideogram 4 / Turbo img2img (reference-guided latent-init) candle-routing conditions (sc-10261, epic
+/// 8588). The registered `ideogram_4` / `ideogram_4_turbo` candle generators serve the `ui.img2img`
+/// "Image reference" tile: a single `Conditioning::Reference` (no `Mask`) in a **non-edit** request is
+/// VAE-encoded to the clean init latent and denoised from the strength-derived step to the schedule tail
+/// (`candle-gen-ideogram` `resolve_edit` → `prepare_edit` with `mask = None`, sc-6598). So an ideogram
+/// job in a non-edit mode with a `referenceAssetId` is candle-eligible; the worker resolves the init
+/// generically (`model_supports_img2img`, sc-10134). Same payload predicate as
+/// [`boogu_img2img_candle_eligible`] / [`sd3_img2img_candle_eligible`], gated to the ideogram ids by the
+/// caller. DISJOINT from the [`ideogram_edit_candle_eligible`] Remix/inpaint lane (that arm is
+/// `edit_image` + `sourceAssetId`). Mirrors the mlx generic img2img arm (sc-10192).
+pub(crate) fn ideogram_img2img_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("referenceAssetId")
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty())
 }

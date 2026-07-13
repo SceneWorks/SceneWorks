@@ -99,6 +99,20 @@ mod tests {
     }
 
     #[test]
+    fn no_builtin_manifest_has_a_duplicate_key() {
+        // Guard against the silent last-key-wins class (sc-10199): serde_json accepts a
+        // duplicate object key without error and keeps only the last value, so a future
+        // "add a field that already exists in another block" edit could drop data with no
+        // parse failure — exactly how the img2img `ui` flag was lost (sc-10198, #1249).
+        // Every shipped manifest, comments stripped, must be free of duplicate keys.
+        for (name, contents) in BUILTIN_MANIFESTS {
+            let stripped = crate::jsonc::strip_jsonc_comments(contents);
+            crate::jsonc::reject_duplicate_keys(&stripped)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+        }
+    }
+
+    #[test]
     fn seeds_every_manifest_into_a_fresh_dir() {
         let temp = tempfile::tempdir().expect("temp dir");
         seed_builtin_manifests(temp.path(), SeedMode::IfMissing).expect("seeding succeeds");
