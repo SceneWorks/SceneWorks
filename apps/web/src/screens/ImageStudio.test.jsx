@@ -649,6 +649,10 @@ describe("ImageStudio Krea image edit LoRA (epic 10871)", () => {
     const editEntry = payload.loras.find((l) => l.id === "krea2_identity_edit");
     expect(editEntry).toBeTruthy();
     expect(editEntry.conditioningRole).toBe("image_edit");
+    // Identity strength (sc-11798): with no slider interaction the payload carries the manifest
+    // default weight, and the Identity strength control renders for the managed edit LoRA.
+    expect(editEntry.weight).toBe(1);
+    expect(container.textContent).toContain("Identity strength");
     // Deduped — auto-applied exactly once.
     expect(payload.loras.filter((l) => l.id === "krea2_identity_edit")).toHaveLength(1);
   });

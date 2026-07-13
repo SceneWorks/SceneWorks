@@ -1905,6 +1905,8 @@ export function ImageEditor() {
           // The boxes-layout edit runs the same edit model, so it also needs the managed
           // image-edit LoRA when the model requires one (Krea R5) — sc-11069.
           editLora: managedEditLoraId ? editLora : null,
+          // Identity strength (sc-11798): the user's edit-LoRA weight override, or the default.
+          editLoraWeight: managedEditLoraId ? editLoraSelection.weightFor(editLora) : null,
         }),
     });
   }
@@ -2140,6 +2142,8 @@ export function ImageEditor() {
           // Auto-apply the model's managed image-edit LoRA (R5) when installed — deduped inside
           // buildEditJobBody, so a run needs no manual picking (epic 10871, sc-11069).
           editLora: managedEditLoraId ? editLora : null,
+          // Identity strength (sc-11798): the user's edit-LoRA weight override, or the default.
+          editLoraWeight: managedEditLoraId ? editLoraSelection.weightFor(editLora) : null,
           guidanceScale: editGuidance,
         }),
     });
@@ -2970,6 +2974,28 @@ export function ImageEditor() {
           editLoraInstalled ? (
             <div className="ie-section">
               <p className="ie-note">✨ {editLora.name} is applied automatically for editing.</p>
+              {/* Identity strength (sc-11798): the managed edit LoRA is hidden from the manual
+                  picker, so expose its apply weight here — threaded into buildEditJobBody's
+                  editLoraWeight → the payload edit-LoRA `weight`. Higher = stronger conditioning. */}
+              <div className="lora-slot-weight edit-lora-strength">
+                <label>
+                  <span>Identity strength</span>
+                  <span className="lora-slot-weight-value">
+                    {editLoraSelection.weightFor(editLora).toFixed(2)}
+                  </span>
+                </label>
+                <input
+                  aria-label={`${editLora.name} identity strength`}
+                  max="2"
+                  min="0"
+                  onChange={(event) =>
+                    editLoraSelection.setWeight(editLora.id, Number(event.target.value))
+                  }
+                  step="0.05"
+                  type="range"
+                  value={editLoraSelection.weightFor(editLora)}
+                />
+              </div>
             </div>
           ) : (
             <div className="ie-section">

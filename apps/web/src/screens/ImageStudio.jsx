@@ -2517,9 +2517,32 @@ export function ImageStudio() {
                     (the base can't edit without it, R5). Inert for edit models that need none. */}
                 {editLora ? (
                   editLoraInstalled ? (
-                    <p className="field-hint" role="status">
-                      <Icon.Sparkle size={13} /> {editLora.name} is applied automatically for editing.
-                    </p>
+                    <>
+                      <p className="field-hint" role="status">
+                        <Icon.Sparkle size={13} /> {editLora.name} is applied automatically for editing.
+                      </p>
+                      {/* Identity strength (sc-11798): the managed edit LoRA is hidden from the manual
+                          picker, so expose its apply weight here. `effectiveLoraWeight`/`setLoraWeight`
+                          already back the value, and `buildLorasPayload` serializes it into the edit
+                          LoRA's payload `weight` — higher = stronger identity/edit conditioning. */}
+                      <div className="lora-slot-weight edit-lora-strength">
+                        <label>
+                          <span>Identity strength</span>
+                          <span className="lora-slot-weight-value">
+                            {effectiveLoraWeight(editLora).toFixed(2)}
+                          </span>
+                        </label>
+                        <input
+                          aria-label={`${editLora.name} identity strength`}
+                          max="2"
+                          min="0"
+                          onChange={(event) => setLoraWeight(editLora.id, Number(event.target.value))}
+                          step="0.05"
+                          type="range"
+                          value={effectiveLoraWeight(editLora)}
+                        />
+                      </div>
+                    </>
                   ) : (
                     <div className="inline-warning edit-lora-download">
                       <span>

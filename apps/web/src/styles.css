@@ -6747,6 +6747,12 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 6px;
 }
 
+/* Identity-strength slider for the managed Krea edit LoRA (sc-11798): sits under the
+   "applied automatically" note in both edit surfaces; reuses the LoRA weight-slider styling. */
+.edit-lora-strength {
+  margin-top: 8px;
+}
+
 .lora-slot-weight > label {
   display: flex;
   align-items: center;
