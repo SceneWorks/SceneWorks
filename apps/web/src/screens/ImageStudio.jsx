@@ -533,6 +533,10 @@ export function ImageStudio() {
   // band is model-specific, so no clamp beyond the slider's 0–1).
   const [img2imgReferenceAssetId, setImg2imgReferenceAssetId] = useState("");
   const [img2imgStrength, setImg2imgStrength] = useState(saved.img2imgStrength ?? 0.5);
+  // Krea "text style" tap-reweight gain (sc-11878): the ui.textStyleGain slider (Krea/Qwen-family).
+  // 1.0 = no-op; >1 warmer/richer (early Qwen3-VL taps), <1 late-biased. Resets to the model default on
+  // model change like the other tuning knobs; emitted to advanced.textStyleGain only when off default.
+  const [textStyleGain, setTextStyleGain] = useState(saved.textStyleGain ?? 1.0);
   const [controlnetScale, setControlnetScale] = useState(saved.controlnetScale ?? 0.8);
   // Variation knob for backbones whose CFG is decoupled from IP-Adapter:
   // FLUX (true_cfg_scale alongside ipAdapterScale) and Qwen-Image-Edit (true_cfg_scale
@@ -820,6 +824,11 @@ export function ImageStudio() {
   // `ui.img2imgStrength` optionally overrides the slider label/range.
   const supportsImg2img = Boolean(selectedModel?.ui?.img2img);
   const img2imgStrengthConfig = selectedModel?.ui?.img2imgStrength ?? null;
+  // Krea "text style" control (sc-11878): the `ui.textStyleGain` slider descriptor. Presence gates the
+  // control — only Krea (Qwen-Image-family) declares it, so the slider (and advanced.textStyleGain) are
+  // Krea-only. Absent ⇒ no slider, no payload key.
+  const textStyleGainConfig = selectedModel?.ui?.textStyleGain ?? null;
+  const supportsTextStyle = Boolean(textStyleGainConfig);
   // Whether the edit model can outpaint (generate the padded border) — only models that
   // accept an inpaint mask (image_inpaint, SDXL family). Gates the Outpaint fit option.
   const editInpaintCapable = (selectedModel?.capabilities ?? []).includes("image_inpaint");
@@ -995,6 +1004,8 @@ export function ImageStudio() {
     const nextModes = supportedControlModes(imageModels.find((item) => item.id === model));
     setControlMode((current) => (nextModes.includes(current) ? current : nextModes[0] ?? "pose"));
     setControlScale(typeof ui.controlScale?.default === "number" ? ui.controlScale.default : null);
+    // Krea text-style gain: snap to the new model's declared default (1.0 = no-op when undeclared).
+    setTextStyleGain(typeof ui.textStyleGain?.default === "number" ? ui.textStyleGain.default : 1.0);
     setControlImageAssetId("");
     setControlImagePassthrough(false);
     // Clear a stale overlay pick so an id trained for a different backbone can't leak into a submit
@@ -1591,6 +1602,7 @@ export function ImageStudio() {
       ["guidanceMethod", setGuidanceMethod],
       ["ipAdapterScale", setIpAdapterScale],
       ["img2imgStrength", setImg2imgStrength],
+      ["textStyleGain", setTextStyleGain],
       ["controlnetScale", setControlnetScale],
       ["trueCfgScale", setTrueCfgScale],
       ["viewAngle", setViewAngle],
@@ -1850,6 +1862,8 @@ export function ImageStudio() {
       variationStrength,
       trueCfgScale,
       img2imgStrength,
+      supportsTextStyle,
+      textStyleGain,
       viewAngles,
       viewAngle,
       faceRestore,
@@ -2921,6 +2935,20 @@ export function ImageStudio() {
                   value={guidanceOverride}
                 />
               </label>
+              {supportsTextStyle ? (
+                <label className="text-style-gain">
+                  {textStyleGainConfig?.label ?? "Text style"}
+                  <input
+                    max={textStyleGainConfig?.max ?? 1.75}
+                    min={textStyleGainConfig?.min ?? 0.25}
+                    onChange={(event) => setTextStyleGain(Number(event.target.value))}
+                    step={textStyleGainConfig?.step ?? 0.05}
+                    type="range"
+                    value={textStyleGain}
+                  />
+                  <span>{Number(textStyleGain).toFixed(2)}</span>
+                </label>
+              ) : null}
               {showGuidanceMethodPicker ? (
                 <label>
                   Guidance method
