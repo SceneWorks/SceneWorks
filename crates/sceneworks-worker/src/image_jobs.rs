@@ -679,17 +679,30 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
-            ImageRoute::KreaPoseControlBaseMissing => {
-                // A `krea_2_turbo` strict-pose job whose control base (the `SceneWorks/krea-2-turbo-mlx`
-                // turnkey) isn't installed. Refuse loudly rather than silently rendering an unconditioned
-                // image via the plain MLX lane and dropping the poses (sc-11796) — the MLX twin of the
-                // candle `PoseControlBaseMissing` reject.
+            ImageRoute::PoseControlBaseMissing => {
+                // A strict-pose job on a WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`) whose control
+                // base/overlay snapshot is NOT installed (its `…_control_available` weight-gate failed, so
+                // it fell through). Refuse loudly rather than silently rendering an unconditioned image via
+                // the plain MLX lane and dropping the poses (sc-11796 for krea, generalized to every wired
+                // family in sc-11814) — the MLX twin of the candle `PoseControlBaseMissing` reject.
                 return Err(WorkerError::InvalidPayload(format!(
-                    "strict pose (advanced.poses) requested for model '{}', but its Krea 2 Turbo control \
-                     base (SceneWorks/krea-2-turbo-mlx) is not installed — refusing rather than silently \
-                     generating an unconditioned image; install a Krea 2 Turbo tier to enable strict-pose \
-                     generation",
+                    "strict pose (advanced.poses) requested for model '{}', but its control base snapshot \
+                     is not installed — refusing rather than silently generating an unconditioned image; \
+                     install the control base model to enable strict-pose generation",
                     request.model
+                )));
+            }
+            ImageRoute::PoseReject => {
+                // No-silent-T2I (sc-5968): a strict-pose job on an MLX model with NO pose-control lane
+                // (e.g. a plain `sdxl` pose job with no reference — SDXL identity-pose ships via InstantID /
+                // IP-Adapter) that `mlx_available` would otherwise render as plain txt2img, dropping the
+                // poses. Refuse loudly — the MLX twin of the candle `PoseReject` reject.
+                return Err(WorkerError::InvalidPayload(format!(
+                    "strict pose (advanced.poses) is not supported for model '{}' on the MLX backend — \
+                     refusing rather than silently generating an unconditioned image (wired MLX pose \
+                     families: {}; SDXL identity-pose runs via InstantID)",
+                    request.model,
+                    WIRED_MLX_POSE_FAMILIES.join(", ")
                 )));
             }
             ImageRoute::Mlx => {
