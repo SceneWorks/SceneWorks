@@ -624,7 +624,7 @@ mod tests {
     }
 
     inventory::submit! {
-        gen_core::registry::ModelRegistration { descriptor: stub_descriptor, load: stub_load }
+        gen_core::registry::ModelRegistration { descriptor: stub_descriptor, load: stub_load, footprint: None }
     }
 
     fn stub_cache_key() -> GeneratorCacheKey {
