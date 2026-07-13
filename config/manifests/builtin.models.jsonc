@@ -2757,8 +2757,9 @@
         // generic arm (resolve_img2img_init_generic → Conditioning::Reference) to the engine's Raw CFG
         // entrypoint `generate_base_img2img_with_progress` (mlx-gen #670 / sc-10224), so guidance + the
         // negative prompt are honored. Full 0–1 slider (default 0.5), NOT clamped — usable band is
-        // model-specific. macOS/MLX only for now (the worker generic img2img arm is Mac-gated); the
-        // candle/Windows-Linux twin is sc-10226.
+        // model-specific. Both backends: MLX (sc-10224/10225) and candle/CUDA (sc-10226 —
+        // `krea_2_raw` router branch + engine `render_base_img2img`; the worker generic img2img arm is
+        // cross-platform, gated on this `ui.img2img` flag).
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         // Two-reference Kontext edit (epic 10871 P1.3): the `krea2_identity_edit` edit optionally takes a

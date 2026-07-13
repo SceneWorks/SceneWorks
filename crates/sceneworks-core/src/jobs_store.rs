@@ -4277,15 +4277,23 @@ mod candle_routing_tests {
         assert!(!krea_img2img_candle_eligible(&object(
             json!({ "prompt": "an emerald forest" })
         )));
-        // Raw img2img is the separate sc-10226 — the img2img branch is gated to `krea_2_turbo`, so a
-        // `krea_2_raw` reference job has no candle img2img lane yet and defers.
+        // Raw img2img (sc-10226): the undistilled `krea_2_raw` sibling gets its own branch (engine
+        // `render_base_img2img`), so a non-edit `krea_2_raw` reference job is candle-eligible too.
+        let raw_img2img = json!({
+            "model": "krea_2_raw",
+            "referenceAssetId": "asset_1",
+            "advanced": { "strength": 0.55 }
+        });
         assert!(
-            !image_job_is_candle_eligible(&image_generate_job(json!({
-                "model": "krea_2_raw",
-                "referenceAssetId": "asset_1"
-            }))),
-            "krea_2_raw img2img has no candle lane yet (sc-10226)"
+            image_job_is_candle_eligible(&image_generate_job(raw_img2img.clone())),
+            "krea_2_raw img2img (referenceAssetId, non-edit) must be candle-eligible (sc-10226)"
         );
+        assert!(krea_img2img_candle_eligible(&object(raw_img2img)));
+        // An `edit_image` `krea_2_raw` reference is still the Kontext edit surface, not img2img.
+        assert!(!krea_img2img_candle_eligible(&object(json!({
+            "mode": "edit_image",
+            "referenceAssetId": "asset_1"
+        }))));
     }
 
     #[test]

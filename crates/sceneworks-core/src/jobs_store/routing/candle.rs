@@ -315,9 +315,20 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     // `image_request_candle_eligible` gate below rejects ANY `referenceAssetId`, so an img2img job would
     // otherwise fall to the "conditioned shape on a txt2img candle family" gap. Branch it out AFTER the
     // pose-control lane (a pose job with an identity reference stays on control) and BEFORE the txt2img
-    // gate. Turbo-only: Raw img2img is the separate sc-10226. Mirrors the worker's `krea_2_turbo` img2img
-    // resolve in `generate_candle_stream`.
+    // gate. Mirrors the worker's `krea_2_turbo` img2img resolve in `generate_candle_stream`.
     if model == "krea_2_turbo" && krea_img2img_candle_eligible(&job.payload) {
+        return true;
+    }
+    // Krea 2 Raw img2img (reference-guided latent-init under full CFG, sc-10226, epic 8588): the
+    // undistilled `krea_2_raw` sibling of the Turbo lane above — a non-edit `referenceAssetId` seeds the
+    // engine's `render_base_img2img` (VAE-encode the reference → blend at `sigmas[init_time_step]` → the
+    // two-forward CFG denoise, honoring guidance + a user negative prompt). Same payload predicate as
+    // Turbo (`krea_img2img_candle_eligible`, gated to the id by this caller); `krea_2_raw` is a registered
+    // candle txt2img id, so without diverting first the `image_request_candle_eligible` gate below would
+    // reject the reference and drop it to the "conditioned shape on a txt2img candle family" gap. Behind
+    // the Krea edit lane (`edit_image`, branched earlier) so an edit never reaches here. The worker's
+    // generic `ui.img2img` arm in `generate_candle_stream` resolves the init for Raw exactly as Turbo.
+    if model == "krea_2_raw" && krea_img2img_candle_eligible(&job.payload) {
         return true;
     }
     // PuLID-FLUX face identity (sc-5492, epic 5480): `pulid_flux_dev` is a distinct model id (not a
@@ -815,13 +826,14 @@ pub(crate) fn krea_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
             .is_some_and(|value| !value.trim().is_empty())
 }
 
-/// Krea 2 Turbo img2img (reference-guided latent-init) candle-routing conditions (sc-10134, epic 8588).
-/// The bespoke candle `render_img2img` lane serves a `krea_2_turbo` job in a **non-edit** mode carrying a
-/// `referenceAssetId` — the "Start from an image" tile: the reference is VAE-encoded and blended into the
-/// init latent at `advanced.strength`, then the CFG-free denoise runs from `sigmas[start]`. Distinct from
-/// the Krea **edit** lane (`edit_image` mode + the Kontext dual-conditioning, `krea_edit_candle_eligible`)
-/// and the pose-control lane (`advanced.poses`, branched first). Gated to `krea_2_turbo` by the caller
-/// (Raw img2img is the separate sc-10226). Mirrors the worker's `krea_2_turbo` img2img resolve in
+/// Krea 2 img2img (reference-guided latent-init) candle-routing conditions (sc-10134 Turbo, sc-10226 Raw;
+/// epic 8588). The candle img2img lane serves a `krea_2_turbo` / `krea_2_raw` job in a **non-edit** mode
+/// carrying a `referenceAssetId` — the "Start from an image" tile: the reference is VAE-encoded and blended
+/// into the init latent at `advanced.strength`, then the denoise runs from `sigmas[start]` (CFG-free
+/// `render_img2img` for Turbo, two-forward CFG `render_base_img2img` for Raw). Distinct from the Krea
+/// **edit** lane (`edit_image` mode + the Kontext dual-conditioning, `krea_edit_candle_eligible`) and the
+/// pose-control lane (`advanced.poses`, branched first). Gated to each id by the caller (Turbo + Raw have
+/// separate branches so the precedence comments stay per-id). Mirrors the worker's img2img resolve in
 /// `generate_candle_stream` (the `model_supports_img2img` + `resolve_img2img_init_generic` path).
 pub(crate) fn krea_img2img_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
