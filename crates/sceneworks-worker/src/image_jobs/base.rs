@@ -2591,6 +2591,10 @@ fn generate_one(
     // generator was loaded with `LoadSpec::with_pid` (the engine rejects a mismatch); the caller keeps
     // the two in lockstep. The candle path passes `false` (candle PiD is Phase 4, sc-7853).
     use_pid: bool,
+    // Krea "text style" tap-reweight gain (sc-11878) — `None` for every non-Krea family (the engine
+    // ignores the field regardless). The caller resolves it from the manifest `textStyleGain` slider +
+    // `advanced` only when the model declares the control, so a non-Krea render passes `None`.
+    text_style_gain: Option<f32>,
     enhance: &PromptEnhance,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
@@ -2632,6 +2636,7 @@ fn generate_one(
         scheduler_shift,
         guidance_method: guidance_method.map(str::to_owned),
         use_pid,
+        text_style_gain,
         conditioning,
         cancel: cancel.clone(),
         ..Default::default()
@@ -3679,6 +3684,15 @@ async fn generate_stream(
     // base picks whether the output lands on ~2K or ~4K. `4k`/native leave the requested dims untouched;
     // `2k` caps the base (also lowering the F-013 decode peak). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
+    // Krea "text style" tap-reweight gain (sc-11878): set ONLY when the model's manifest (`ui`) declares
+    // the `textStyleGain` slider — Krea/Qwen-Image-family only, so this self-gates and every other family
+    // passes `None`. The user value comes from `advanced.textStyleGain` (the manifest object isn't a
+    // scalar, so the helper's `1.0` default applies when absent), clamped to the GPU-validated [0.25, 1.75].
+    let text_style_gain = request
+        .model_manifest_entry
+        .get("textStyleGain")
+        .is_some()
+        .then(|| advanced::f32_clamped(&request.advanced, "textStyleGain", 1.0, 0.25..=1.75));
     let mut spec = load_spec(weights_dir, quant, adapters, flux_ip_dir);
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
@@ -3742,6 +3756,7 @@ async fn generate_stream(
                         scheduler_shift,
                         guidance_method.as_deref(),
                         use_pid,
+                        text_style_gain,
                         &enhance,
                         &cancel,
                         on_progress,
@@ -4242,6 +4257,15 @@ async fn generate_candle_stream(
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
+    // Krea "text style" tap-reweight gain (sc-11878): set ONLY when the model's manifest (`ui`) declares
+    // the `textStyleGain` slider — Krea/Qwen-Image-family only, so this self-gates and every other family
+    // passes `None`. The user value comes from `advanced.textStyleGain` (the manifest object isn't a
+    // scalar, so the helper's `1.0` default applies when absent), clamped to the GPU-validated [0.25, 1.75].
+    let text_style_gain = request
+        .model_manifest_entry
+        .get("textStyleGain")
+        .is_some()
+        .then(|| advanced::f32_clamped(&request.advanced, "textStyleGain", 1.0, 0.25..=1.75));
     // VRAM fit-gate (epic 10765, sc-10766 Phase 0 + sc-10821 Phase 1b + sc-10856): when the selected
     // tier's predicted resident peak won't fit the card, either RUN SEQUENTIALLY (a provider that
     // supports sequential component residency — the candle FLUX lane, sc-10769 — drops the text encoders
@@ -4410,6 +4434,7 @@ async fn generate_candle_stream(
                         // else the native VAE. Every candle image provider reads `spec.pid` (sc-7853), so
                         // the whole off-Mac catalog honors the toggle in lockstep with `spec.pid` above.
                         use_pid,
+                        text_style_gain,
                         &enhance,
                         &cancel,
                         on_progress,

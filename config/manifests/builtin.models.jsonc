@@ -2563,6 +2563,13 @@
         // Full 0–1 slider (default 0.5), NOT clamped — usable band is model-specific (A0/sc-8589 ~0.35–0.65).
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
+        // "Text style" — Krea Qwen3-VL tap reweight (sc-11878, impl of the sc-8596 spike). Presence of this
+        // slider is the gate: only Krea (Qwen-Image-family) declares it, so the worker sets
+        // `GenerationRequest.text_style_gain` (candle-gen-krea `tap_gain_weights`) only for these models.
+        // A single scalar > 1 emphasizes the early (low-level) Qwen3-VL taps for a warmer/richer look; < 1
+        // biases the late (semantic) taps; 1.0 (default) is a byte-exact no-op. NOT reference/identity
+        // transfer — a stylistic nudge distinct from `img2imgStrength`. GPU-validated safe over [0.25, 1.75].
+        "textStyleGain": { "label": "Text style", "default": 1.0, "min": 0.25, "max": 1.75, "step": 0.05 },
         // Two-reference Kontext edit (sc-11640, mirrors Krea 2 Raw): the `krea2_identity_edit` edit
         // optionally takes a SECOND source — any two images, image 1 (the required Source image) + image 2
         // (optional) — in a FIXED order (swapping degrades results per the LoRA authors; the instruction
@@ -2762,6 +2769,11 @@
         // cross-platform, gated on this `ui.img2img` flag).
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
+        // "Text style" — Krea Qwen3-VL tap reweight (sc-11878, impl of the sc-8596 spike). Same control as
+        // Turbo; on Raw it reweights the POSITIVE context of the TRUE-CFG denoise (the CFG-negative is left
+        // untouched, so the knob steers only the conditional prediction). > 1 warmer/richer, < 1 late-biased,
+        // 1.0 (default) no-op. GPU-validated safe over [0.25, 1.75]; Krea/Qwen-Image-family only.
+        "textStyleGain": { "label": "Text style", "default": 1.0, "min": 0.25, "max": 1.75, "step": 0.05 },
         // Two-reference Kontext edit (epic 10871 P1.3): the `krea2_identity_edit` edit optionally takes a
         // SECOND source — any two images, image 1 (the required Source image) + image 2 (optional) — in a
         // FIXED order (swapping degrades results per the LoRA authors; the instruction describes how to
