@@ -94,6 +94,11 @@ enum ImageRoute {
     SdxlAdvanced,
     SensenovaEdit,
     Bernini,
+    /// A `krea_2_turbo` strict-pose job whose control base (the `SceneWorks/krea-2-turbo-mlx` turnkey)
+    /// isn't installed, so `krea_control_available` failed. Reject loudly instead of falling through to
+    /// `Mlx` (plain txt2img) and silently dropping the poses (sc-11796) — the MLX twin of the candle
+    /// `CandleImageRoute::PoseControlBaseMissing`.
+    KreaPoseControlBaseMissing,
     Mlx,
 }
 
@@ -148,6 +153,18 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         // `mlx_available` would match it), but the generic `generate_stream` leaves `frames`/
         // `video_mode` unset, which the engine treats as a multi-frame video request.
         Some(ImageRoute::Bernini)
+    } else if is_krea_control_model(&request.model)
+        && request.mode != "edit_image"
+        && !pose_entries(request).is_empty()
+    {
+        // A `krea_2_turbo` strict-pose job that fell past `krea_control_available` above means its control
+        // base (the `SceneWorks/krea-2-turbo-mlx` turnkey) isn't installed. Reject loudly BEFORE the
+        // generic `mlx_available` arm — `krea_2_turbo` is in MODEL_TABLE, so `mlx_available` would match it
+        // and render plain txt2img, silently dropping the poses (the reported sc-11796 bug). The MLX twin
+        // of the candle `CandleImageRoute::PoseControlBaseMissing` reject (base.rs, sc-11171/F-008).
+        // NOTE: only krea is guarded here; full candle-parity reject across every wired MLX pose family
+        // (qwen/kolors/z-image/flux) is tracked separately.
+        Some(ImageRoute::KreaPoseControlBaseMissing)
     } else if mlx_available(request, settings) {
         Some(ImageRoute::Mlx)
     } else {
@@ -176,11 +193,13 @@ impl ImageRoute {
             },
             // PuLID-FLUX is one identity image per seed (no angle/pose grouping) — like the base
             // MLX + SDXL-advanced + Bernini paths, the effective count is the requested count. Krea
-            // edit (epic 10871) is likewise plain per-image: `count` edits of the one source.
+            // edit (epic 10871) is likewise plain per-image: `count` edits of the one source. The
+            // pose-control-base-missing reject errors before generation, so its count is inert.
             ImageRoute::PulidFlux
             | ImageRoute::SdxlAdvanced
             | ImageRoute::Bernini
             | ImageRoute::KreaEdit
+            | ImageRoute::KreaPoseControlBaseMissing
             | ImageRoute::Mlx => request.count,
         }
     }
