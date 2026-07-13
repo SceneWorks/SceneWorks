@@ -4936,6 +4936,136 @@ fn image_route_count_follows_dispatch_order() {
     assert_eq!(route.image_count(&zimage_base_t2i, &settings), 4);
 }
 
+// sc-11814: a strict-pose job on any WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`) whose control
+// base/overlay is NOT installed must route to the loud `PoseControlBaseMissing` reject, NOT fall through
+// to the plain MLX txt2img lane (`ImageRoute::Mlx`), which would silently render an unconditioned image
+// and drop the poses. Generalizes the sc-11796 krea-only reject to every wired family — the MLX twin of
+// the candle `candle_image_route_rejects_wired_pose_when_control_base_absent` (sc-11171/F-008).
+#[cfg(target_os = "macos")]
+#[test]
+fn image_route_rejects_wired_pose_when_control_base_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    // Isolate the HF hub cache to the empty tempdir so the control base is genuinely absent regardless of
+    // the machine's real cache (the weight resolvers read the global HF cache in preference to `data_dir`).
+    let _hf = HfHubCacheGuard::isolate_to(dir.path());
+    let mut settings = Settings::from_env();
+    // Empty data_dir + isolated HF cache + no `modelPath` → every `…_control_available` weight-gate (and
+    // `mlx_available`) resolves nothing, so each wired-family pose job falls through to the reject arm.
+    settings.data_dir = dir.path().to_path_buf();
+
+    for model in WIRED_MLX_POSE_FAMILIES {
+        // A `referenceAssetId` is present so the `kolors` lane (which additionally requires a reference)
+        // is proven to reject on the ABSENT BASE, not the missing reference; it is inert for the others.
+        let pose = request(json!({
+            "projectId": "p", "model": model, "count": 1,
+            "referenceAssetId": "ref",
+            "advanced": { "poses": [{ "id": "a" }] }
+        }));
+        let route = resolve_image_route(&pose, &settings);
+        assert_eq!(
+            route,
+            Some(ImageRoute::PoseControlBaseMissing),
+            "wired pose family {model:?} with an absent control base must loudly reject",
+        );
+        assert_ne!(
+            route,
+            Some(ImageRoute::Mlx),
+            "wired pose family {model:?} with an absent control base must NOT silently render plain txt2img",
+        );
+
+        // The SAME family WITHOUT poses still resolves to the generic MLX txt2img lane when base weights
+        // are present — the reject is scoped to the strict-pose shape, not the model id. `modelPath`
+        // satisfies `resolve_weights_dir` (an empty tempdir dir, as in `image_route_count_...`).
+        let t2i = request(json!({
+            "projectId": "p", "model": model, "count": 1,
+            "advanced": { "modelPath": dir.path().to_string_lossy() }
+        }));
+        // `krea_2_turbo`/`kolors` base t2i route through their own arms; assert only that a non-pose job is
+        // never a pose-reject route (the invariant under test), whatever concrete lane claims it.
+        let t2i_route = resolve_image_route(&t2i, &settings);
+        assert_ne!(t2i_route, Some(ImageRoute::PoseControlBaseMissing));
+        assert_ne!(t2i_route, Some(ImageRoute::PoseReject));
+    }
+}
+
+// sc-11814: a wired MLX pose family with its base PRESENT still routes to its bespoke control lane — the
+// reject arm must not shadow a legitimately-claimable job. `modelPath` (an empty tempdir) satisfies the
+// generic `resolve_weights_dir` gate the zimage/qwen/kolors/flux lanes share. (`krea_2_turbo`'s custom
+// `resolve_krea_control_base` is covered by its dedicated sc-11853 test.)
+#[cfg(target_os = "macos")]
+#[test]
+fn image_route_wired_pose_with_base_present_routes_to_control_lane() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+    let model_path = dir.path().to_string_lossy().to_string();
+
+    // (model id, expected control lane) — every resolve_weights_dir-gated wired family. `kolors`
+    // additionally needs a reference to reach its lane.
+    let cases = [
+        ("z_image_turbo", ImageRoute::ZImageControl, false),
+        ("z_image", ImageRoute::ZImageBaseControl, false),
+        ("qwen_image", ImageRoute::QwenControl, false),
+        ("kolors", ImageRoute::KolorsControl, true),
+        ("flux_dev", ImageRoute::Flux1DevControl, false),
+        ("flux2_dev", ImageRoute::Flux2DevControl, false),
+    ];
+    for (model, expected, needs_ref) in cases {
+        let mut payload = json!({
+            "projectId": "p", "model": model, "count": 1,
+            "advanced": { "modelPath": model_path.clone(), "poses": [{ "id": "a" }] }
+        });
+        if needs_ref {
+            payload["referenceAssetId"] = json!("ref");
+        }
+        let route = resolve_image_route(&request(payload), &settings);
+        assert_eq!(
+            route,
+            Some(expected),
+            "wired pose family {model:?} with its base present must route to its control lane, not the reject",
+        );
+    }
+}
+
+// sc-11814 (sc-5968 parity): a strict-pose job on an MLX model with NO pose-control lane (a plain `sdxl`
+// pose job with no reference → no `sdxl` advanced sub-mode) that `mlx_available` would otherwise render as
+// plain txt2img must route to the loud `PoseReject` — the MLX twin of the candle `PoseReject`. `sdxl` is a
+// MODEL_TABLE id, so `mlx_available` matches it; without the reject arm the poses silently drop.
+#[cfg(target_os = "macos")]
+#[test]
+fn image_route_rejects_pose_on_unwired_mlx_family() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+    let model_path = dir.path().to_string_lossy().to_string();
+
+    // Plain `sdxl` pose job, base weights present (`modelPath`), no reference → no sub-mode → `PoseReject`,
+    // never `Mlx`.
+    let sdxl_pose = request(json!({
+        "projectId": "p", "model": "sdxl", "count": 1,
+        "advanced": { "modelPath": model_path.clone(), "poses": [{ "id": "a" }] }
+    }));
+    let route = resolve_image_route(&sdxl_pose, &settings);
+    assert_eq!(route, Some(ImageRoute::PoseReject));
+    assert_ne!(
+        route,
+        Some(ImageRoute::Mlx),
+        "an unwired MLX pose family must NOT silently render plain txt2img",
+    );
+    // `sdxl` is not a wired family, so it is the sc-5968 no-lane reject, not the missing-base variant.
+    assert_ne!(route, Some(ImageRoute::PoseControlBaseMissing));
+
+    // Guard: the same `sdxl` job WITHOUT poses is unaffected — it routes to the generic MLX txt2img lane.
+    let sdxl_t2i = request(json!({
+        "projectId": "p", "model": "sdxl", "count": 1,
+        "advanced": { "modelPath": model_path }
+    }));
+    assert_eq!(
+        resolve_image_route(&sdxl_t2i, &settings),
+        Some(ImageRoute::Mlx)
+    );
+}
+
 // sc-8828 (F-026): `resolve_candle_image_route` is the extracted candle dispatch decision — the
 // `else if settings.backend_candle_enabled && <predicate>` ladder pulled out of `run_image_generate_job`
 // into a table (the candle sibling of `resolve_image_route`/`ImageRoute`). Locks the flag gate + the
