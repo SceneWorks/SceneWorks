@@ -1,6 +1,7 @@
 # SceneWorks Multi-Repository Rearchitecture Plan
 
-> **Status:** Active; Phase 0 baseline complete, awaiting Phase 1 import approval.
+> **Status:** Active; Phase 1 import complete locally, remote publication blocked
+> by GitHub CLI authentication.
 >
 > **Date:** 2026-07-12
 >
