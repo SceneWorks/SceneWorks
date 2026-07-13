@@ -93,16 +93,33 @@ fn resolve_krea_control_base(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| strict_control_default_repo(KREA_CONTROL_ENGINE_ID));
-    // Legacy / bring-your-own dense diffusers base (`krea/Krea-2-Turbo`), if separately cached — keeps
-    // existing dense-install behavior byte-identical.
-    if let Some(dense) = huggingface_snapshot_dir(&settings.data_dir, repo) {
-        return Ok(Some(dense));
+    // The manifest `repo` (or the `krea_2_turbo_control` catalog default) resolved to a cached snapshot.
+    // Two on-disk shapes share this arm: a LEGACY dense diffusers tree (`krea/Krea-2-Turbo` — `tokenizer/
+    // text_encoder/ transformer/ vae/` AT THE ROOT), or the current turnkey `SceneWorks/krea-2-turbo-mlx`
+    // (q8/q4/bf16 tier SUBDIRS, nothing loadable at the root). CRUCIAL divergence from the candle twin: the
+    // MLX `krea_2_turbo_control` catalog default (`strict_control_default_repo`) is the TIERED repo, whereas
+    // candle's step-3 default is the dense `krea/Krea-2-Turbo`. So the common MLX case lands the tiered
+    // turnkey here — and returning its root un-descended made `KreaText::from_snapshot` look for
+    // `<root>/tokenizer/tokenizer.json` on the tier-less root and fail with "tokenizer: No such file or
+    // directory" (sc-11853). Only a genuine dense tree (tokenizer at the root) is the base as-is; a turnkey
+    // root MUST be descended into the `mlxQuantize`-selected tier.
+    if let Some(snapshot) = huggingface_snapshot_dir(&settings.data_dir, repo) {
+        if snapshot.join("tokenizer").is_dir() {
+            // Legacy / bring-your-own dense diffusers base (tokenizer at the root) — keep existing
+            // dense-install behavior byte-identical.
+            return Ok(Some(snapshot));
+        }
+        // A tiered turnkey root — descend EXACTLY like the txt2img lane (`krea_model_subdir` honours
+        // `advanced.mlxQuantize` and falls back to any downloaded tier). The packed tier auto-detects its
+        // quant and the `Krea2Transformer` runs a true packed forward on the base (sc-11727). Gate on
+        // `transformer/` so a partial download surfaces "base not installed" rather than half-loading.
+        let tier = krea_model_subdir(&snapshot, request);
+        if tier.join("transformer").is_dir() {
+            return Ok(Some(tier));
+        }
     }
-    // The installed `SceneWorks/krea-2-turbo-mlx` tier the user actually has (q8 default / q4 / bf16),
-    // resolved EXACTLY like the txt2img lane (`krea_model_subdir` honours `advanced.mlxQuantize` and falls
-    // back to any downloaded tier). The MLX control lane sets no `spec.quantize`, so the packed tier
-    // auto-detects its quant and the `Krea2Transformer` runs a true packed forward on the base (sc-11727).
-    // Gate on `transformer/` so a partial download surfaces "base not installed" rather than half-loading.
+    // Explicit fallback to the installed `SceneWorks/krea-2-turbo-mlx` tier when the manifest `repo` pointed
+    // at an absent legacy dense repo (so the arm above resolved nothing). Same tier descent.
     if let Some(root) = huggingface_snapshot_dir(&settings.data_dir, KREA_CONTROL_MLX_REPO) {
         let tier = krea_model_subdir(&root, request);
         if tier.join("transformer").is_dir() {
@@ -257,24 +274,43 @@ fn krea_control_raw_settings(
         "controlEngine".to_owned(),
         Value::String(KREA_CONTROL_ENGINE_ID.to_owned()),
     );
+    // User LoRA labels applied on top of the pose control branch (mlx-gen sc-11720) — mirrors the candle
+    // twin's `loras` field so the control-lane asset records what rode alongside the pose lock. Omitted
+    // when no LoRA was requested (the sc-4408 omit-when-absent contract).
+    let loras: Vec<Value> = request
+        .loras
+        .iter()
+        .filter_map(lora_label)
+        .map(Value::String)
+        .collect();
+    if !loras.is_empty() {
+        raw.insert("loras".to_owned(), Value::Array(loras));
+    }
     raw
 }
 
-/// Load the MLX Krea pose-control generator: the base tier subdir + the control overlay. The base runs at
-/// the `mlxQuantize`-selected tier (mlx-gen sc-11730): a pre-packed q4/q8 tier subdir loads packed and the
-/// matching `quant` is a no-op (`load_time_quant_bits` detects already-packed), while a dense bf16 subdir
-/// with `quant` set quantizes the base DiT/TE at load. Activation precision stays bf16 (the control
-/// provider requires it; weight packing is orthogonal) and the pose overlay stays bf16. CFG-free, no
-/// adapters yet (user-LoRA-on-control, mlx-gen sc-11720, is a follow-up), no identity img2img-init.
+/// Load the MLX Krea pose-control generator: the base tier subdir + the control overlay (+ quant +
+/// user adapters). The base runs at the `mlxQuantize`-selected tier (mlx-gen sc-11730): a pre-packed q4/q8
+/// tier subdir loads packed and the matching `quant` is a no-op (`load_time_quant_bits` detects
+/// already-packed), while a dense bf16 subdir with `quant` set quantizes the base DiT/TE at load.
+/// Activation precision stays bf16 (the control provider requires it; weight packing is orthogonal) and the
+/// pose overlay stays bf16. User LoRA/LoKr adapters ride additively on the frozen base DiT (mlx-gen
+/// sc-11720): `spec.adapters` install BEFORE the optional quantize (mlx-gen `load_control_heavy`), so the
+/// residual stacks over the possibly-already-packed base; the pose control branch is never an adapter
+/// target. CFG-free, no identity img2img-init.
 fn krea_control_spec(
     weights_dir: PathBuf,
     control_weights: PathBuf,
     quant: Option<Quant>,
+    adapters: Vec<AdapterSpec>,
 ) -> LoadSpec {
     let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir))
         .with_control(WeightsSource::File(control_weights));
     if let Some(quant) = quant {
         spec = spec.with_quant(quant);
+    }
+    if !adapters.is_empty() {
+        spec = spec.with_adapters(adapters);
     }
     spec
 }
@@ -342,6 +378,12 @@ async fn generate_krea_control_stream(
         )
     })?;
     let control_weights = ensure_krea_control_weights(api, settings, job, request).await?;
+    // User LoRA/LoKr adapters ride additively on the frozen base DiT (mlx-gen sc-11720, the MLX twin of the
+    // candle sc-11721 wiring): resolved + path-confined by the shared helper (enforces MAX_JOB_LORAS +
+    // `normalize_app_managed_lora_path`), then installed on the base at load — the pose control branch is
+    // never adapted. A character/style adapter reshapes the subject while the control branch keeps the pose
+    // lock. Empty ⇒ stock control.
+    let adapters = resolve_adapters(request, settings)?;
 
     let steps = krea_control_steps(request);
     let control_scale = advanced::f32_clamped(
@@ -392,10 +434,10 @@ async fn generate_krea_control_stream(
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
-    // The base runs at the `mlxQuantize`-selected tier (sc-11730); the pose overlay rides it bf16. No
-    // adapters on this lane yet (user-LoRA-on-control, mlx-gen sc-11720, is a follow-up).
+    // The base runs at the `mlxQuantize`-selected tier (sc-11730); the pose overlay rides it bf16. User
+    // LoRA/LoKr adapters (resolved above) install additively on the base DiT (mlx-gen sc-11720).
     let (quant, _quant_bits) = resolve_quant(request);
-    let spec = krea_control_spec(weights_dir, control_weights, quant);
+    let spec = krea_control_spec(weights_dir, control_weights, quant, adapters);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         KREA_CONTROL_ENGINE_ID,

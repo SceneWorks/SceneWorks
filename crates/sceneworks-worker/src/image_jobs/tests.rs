@@ -5006,23 +5006,30 @@ fn candle_image_route_sends_krea_img2img_to_txt2img() {
 }
 
 /// RAII guard isolating the HF hub-cache env (`HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE` / `HF_HOME`) to an
-/// explicit (empty) dir for a test, restoring the previous values on drop. The candle control-base
-/// resolvers read the GLOBAL HF hub cache in preference to `settings.data_dir` (`hf_home.rs`
-/// `huggingface_hub_cache_dir` checks the env vars first), so a "control base absent" test must point that
-/// cache at an empty dir — otherwise it observes the machine's / CI runner's REAL cache. When that cache
-/// happens to hold `alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1` (e.g. after any Z-Image control
-/// work on the box) the base is NOT absent and the route flips `PoseControlBaseMissing` → `ZimageControl`.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+/// explicit dir for a test, restoring the previous values on drop. The control-base resolvers (both the
+/// candle lanes and the MLX `resolve_krea_control_base`) read the GLOBAL HF hub cache in preference to
+/// `settings.data_dir` (`hf_home.rs` `huggingface_hub_cache_dir` checks the env vars first), so a test that
+/// wants a controlled base (absent, or a hand-seeded snapshot) must point that cache at its own dir —
+/// otherwise it observes the machine's / CI runner's REAL cache. E.g. when the real cache happens to hold
+/// `alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1` the candle base is NOT absent and the route flips
+/// `PoseControlBaseMissing` → `ZimageControl`; on the MLX side the real tiered turnkey masks a seeded one.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 struct HfHubCacheGuard {
     prev: [(&'static str, Option<String>); 3],
 }
 
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 impl HfHubCacheGuard {
     fn isolate_to(hub: &std::path::Path) -> Self {
         let prev = ["HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME"]
             .map(|key| (key, std::env::var(key).ok()));
-        // `HF_HUB_CACHE` is consulted first; point it at the empty dir and clear the lower-priority
+        // `HF_HUB_CACHE` is consulted first; point it at the isolated dir and clear the lower-priority
         // fallbacks so nothing resolves to the real cache.
         std::env::set_var("HF_HUB_CACHE", hub);
         std::env::remove_var("HUGGINGFACE_HUB_CACHE");
@@ -5031,7 +5038,10 @@ impl HfHubCacheGuard {
     }
 }
 
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 impl Drop for HfHubCacheGuard {
     fn drop(&mut self) {
         for (key, value) in &self.prev {
@@ -9336,4 +9346,266 @@ fn candle_ipadapter_and_pulid_revisions_are_pinned_commits_not_main() {
 #[test]
 fn krea_convrot_base_revision_is_pinned_commit_not_main() {
     assert_pinned_revision("KREA_MLX_TURNKEY_REVISION", KREA_MLX_TURNKEY_REVISION);
+}
+
+/// sc-11853 end-to-end real-weight smoke — the ONE test that exercises BOTH sc-11853 fixes through the
+/// actual worker seams (`resolve_krea_control_base` → `resolve_adapters` → `krea_control_spec` →
+/// `gen_core::load` → `krea_control_generate_one`), which the `krea_control_q8_mlx_smoke` bypasses (it
+/// hand-builds the spec from a self-discovered q8 dir). Proves, on real weights:
+///   1. BASE RESOLUTION (Bug 1): a `krea_2_turbo` pose job whose manifest carries the TIERED
+///      `SceneWorks/krea-2-turbo-mlx` repo resolves to a tier subdir WITH `tokenizer/tokenizer.json` — so
+///      `gen_core::load` succeeds instead of failing "tokenizer: No such file or directory".
+///   2. USER LoRA (Bug 2): `resolve_adapters` turns the request's `loras` into an `AdapterSpec` and the
+///      control lane installs it — the WITH-LoRA render differs meaningfully from the stock (no-LoRA) render
+///      at the same pose/seed/scale (the adapter actually reshapes the subject).
+///   3. POSE LOCK still holds: scale 0.6 vs 0.0 (base passthrough) differ, so wiring the LoRA didn't break
+///      the pose residual.
+///
+/// `#[ignore]`d real-weight GPU smoke — run by hand on an Apple-Silicon Mac with the turnkey q8 tier, the
+/// `krea2-pose-controlnet-beta` overlay, and a `krea_2`-family LoRA under `~/SceneWorks/data/loras/`.
+/// ```text
+/// KREA_CTRL_LORA=~/SceneWorks/data/loras/krea_2_realism_engine/realism_engine_krea2_v2.safetensors \
+///   cargo test -p sceneworks-worker krea_control_lora_end_to_end_mlx_smoke -- --ignored --nocapture
+/// ```
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight MLX smoke; needs krea-2-turbo-mlx q8 + krea2-pose-controlnet-beta overlay + a krea_2 LoRA cached on Apple Silicon"]
+fn krea_control_lora_end_to_end_mlx_smoke() {
+    use crate::smoke_support::{env_or, image_std, DEGENERATE_STD_FLOOR_DEFAULT};
+
+    // Point the HF hub-cache env at the REAL cache so `resolve_krea_control_base` / overlay discovery find
+    // the installed turnkey + overlay (the resolver reads the env cache before `settings.data_dir`).
+    let real_hub = dirs_home().join(".cache/huggingface/hub");
+    let _hf = HfHubCacheGuard::isolate_to(&real_hub);
+
+    // The LoRA lives under the app data dir; `resolve_adapters` confines it to `settings.data_dir` via
+    // `normalize_app_managed_lora_path`, so the data dir must be the real one holding `loras/`.
+    let data_dir = dirs_home().join("SceneWorks/data");
+    let lora_file = PathBuf::from(env_or(
+        "KREA_CTRL_LORA",
+        data_dir
+            .join("loras/krea_2_realism_engine/realism_engine_krea2_v2.safetensors")
+            .to_str()
+            .unwrap(),
+    ));
+    if !lora_file.is_file() {
+        eprintln!(
+            "[smoke] no krea_2 LoRA at {} — skipping",
+            lora_file.display()
+        );
+        return;
+    }
+    let mut settings = Settings::from_env();
+    settings.data_dir = data_dir;
+
+    // The exact payload that hit the bug: krea_2_turbo + poses, manifest `repo` = the TIERED turnkey, plus a
+    // user LoRA. `mlxQuantize:8` pins the packed q8 tier.
+    let lora_json = json!({ "path": lora_file.to_str().unwrap(), "weight": 0.9 });
+    let req = request(json!({
+        "projectId": "p", "model": "krea_2_turbo", "count": 1,
+        "advanced": { "poses": [{ "id": "a" }], "mlxQuantize": 8 },
+        "modelManifestEntry": { "repo": "SceneWorks/krea-2-turbo-mlx" },
+        "loras": [lora_json],
+    }));
+
+    // --- Bug 1: base resolves to a tokenizer-bearing tier, NOT the tier-less snapshot root. ---
+    let base = resolve_krea_control_base(&req, &settings)
+        .expect("resolve ok")
+        .expect("turnkey base resolves");
+    assert!(
+        base.join("tokenizer").join("tokenizer.json").is_file(),
+        "Bug 1: resolved base {} lacks tokenizer/tokenizer.json — the load would fail 'No such file'",
+        base.display()
+    );
+    println!("[smoke] Bug 1 OK — base resolved to {}", base.display());
+
+    // Overlay: discover the cached beta checkpoint directly (skip the async `ensure_` download seam).
+    let overlay = std::fs::read_dir(
+        real_hub.join("models--SceneWorks--krea2-pose-controlnet-beta/snapshots"),
+    )
+    .expect("overlay snapshots dir")
+    .flatten()
+    .map(|e| e.path().join("control_step5000.safetensors"))
+    .find(|p| p.is_file())
+    .expect("cached control_step5000.safetensors");
+
+    // --- Bug 2: the user LoRA resolves to exactly one adapter. ---
+    let adapters = resolve_adapters(&req, &settings).expect("resolve_adapters ok");
+    assert_eq!(
+        adapters.len(),
+        1,
+        "Bug 2: the krea LoRA must resolve to one adapter"
+    );
+    println!("[smoke] Bug 2 OK — resolved {} adapter(s)", adapters.len());
+
+    let (quant, _) = resolve_quant(&req);
+    let load = |adapters: Vec<AdapterSpec>| {
+        let spec = krea_control_spec(base.clone(), overlay.clone(), quant, adapters);
+        load_control_engine(KREA_CONTROL_ENGINE_ID, &spec)
+            .expect("load krea_2_turbo_control (no tokenizer error)")
+    };
+
+    // Load a repo pose skeleton (already an OpenPose render) as the pose Control map.
+    let pose_png = PathBuf::from(env_or(
+        "KREA_CTRL_POSE",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../poses/dance_01.png"),
+    ));
+    let skel = image::open(&pose_png)
+        .unwrap_or_else(|e| panic!("open pose {}: {e}", pose_png.display()))
+        .to_rgb8();
+    let (sw, sh) = skel.dimensions();
+    let skeleton = Image {
+        width: sw,
+        height: sh,
+        pixels: skel.into_raw(),
+    };
+
+    let (size, steps, seed) = (512u32, 8u32, 1234i64);
+    let prompt = env_or(
+        "KREA_CTRL_PROMPT",
+        "a full-body studio photo of a person, plain grey background, sharp focus",
+    );
+    let render = |gen: &dyn Generator, scale: f32| -> Image {
+        let conditioning =
+            build_control_conditioning(skeleton.clone(), ControlKind::Pose, scale, None);
+        let (w, h, pixels) = krea_control_generate_one(
+            gen,
+            &prompt,
+            size,
+            size,
+            seed,
+            steps,
+            conditioning,
+            &CancelFlag::new(),
+            &mut |_| {},
+        )
+        .expect("krea control render");
+        Image {
+            width: w,
+            height: h,
+            pixels,
+        }
+    };
+
+    // WITH LoRA at pose-lock, WITHOUT LoRA at pose-lock (same pose/seed/scale), and WITH LoRA at scale 0.
+    let with_lora = render(load(adapters.clone()).as_ref(), 0.6);
+    let no_lora = render(load(Vec::new()).as_ref(), 0.6);
+    let with_lora_no_pose = render(load(adapters).as_ref(), 0.0);
+
+    let out = PathBuf::from(env_or("KREA_CTRL_OUT_DIR", "/tmp/krea_control_lora_smoke"));
+    std::fs::create_dir_all(&out).unwrap();
+    for (label, img) in [
+        ("with_lora", &with_lora),
+        ("no_lora", &no_lora),
+        ("with_lora_scale0", &with_lora_no_pose),
+    ] {
+        crate::smoke_support::save_png(img, &out.join(format!("krea_ctrl_{label}.png")));
+    }
+
+    let lora_delta = mean_abs_delta_img(&with_lora, &no_lora);
+    let pose_delta = mean_abs_delta_img(&with_lora, &with_lora_no_pose);
+    println!(
+        "[smoke] lora_delta {lora_delta:.2} (with vs without LoRA) / pose_delta {pose_delta:.2} \
+         (scale 0.6 vs 0.0) -> {}",
+        out.display()
+    );
+
+    assert!(
+        image_std(&with_lora) > DEGENERATE_STD_FLOOR_DEFAULT,
+        "WITH-LoRA render looks degenerate (std {:.2})",
+        image_std(&with_lora)
+    );
+    assert!(
+        lora_delta > 1.0,
+        "Bug 2: the LoRA did not change the render (meanAbsΔ {lora_delta:.2}) — it was ignored"
+    );
+    assert!(
+        pose_delta > 1.0,
+        "the pose did not steer (meanAbsΔ {pose_delta:.2}) — pose lock broke"
+    );
+    println!("[smoke] DONE: base resolves (Bug 1), LoRA applies (Bug 2), pose still locks");
+}
+
+/// Mean absolute per-byte delta between two same-size RGB buffers.
+#[cfg(target_os = "macos")]
+fn mean_abs_delta_img(a: &Image, b: &Image) -> f64 {
+    assert_eq!(
+        a.pixels.len(),
+        b.pixels.len(),
+        "compared images differ in size"
+    );
+    let sum: u64 = a
+        .pixels
+        .iter()
+        .zip(&b.pixels)
+        .map(|(&x, &y)| (x as i16 - y as i16).unsigned_abs() as u64)
+        .sum();
+    sum as f64 / a.pixels.len() as f64
+}
+
+/// sc-11853 regression: the MLX Krea pose-control base resolver must DESCEND a `SceneWorks/krea-2-turbo-mlx`
+/// turnkey snapshot into the `mlxQuantize`-selected tier subdir (which carries `tokenizer/`), NOT return the
+/// tier-less snapshot ROOT. Returning the root made `KreaText::from_snapshot` look for
+/// `<root>/tokenizer/tokenizer.json` on a dir that has only `q8/ q4/ bf16/` and fail with the reported
+/// "Krea control load failed: tokenizer: No such file or directory (os error 2)". This only bit the MLX
+/// lane because its step-3 default repo (`strict_control_default_repo` = the TIERED `krea-2-turbo-mlx`)
+/// resolves a cached snapshot, whereas the candle twin defaults to the dense `krea/Krea-2-Turbo` (tokenizer
+/// at the root, usually uncached → step 3 no-ops → the tier descent runs). The fix routes a tiered root
+/// through `krea_model_subdir` before returning it.
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_krea_control_base_descends_turnkey_root_into_tier_with_tokenizer() {
+    let dir = tempfile::tempdir().unwrap();
+    // Isolate the global HF hub cache to the tempdir so the resolver only sees the snapshot we seed here
+    // (it reads the env cache before `settings.data_dir` — a real cached turnkey would otherwise mask it).
+    let hub = dir.path().join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let _hf = HfHubCacheGuard::isolate_to(&hub);
+
+    // Seed a `SceneWorks/krea-2-turbo-mlx` HF snapshot with a packed q8 tier (transformer + tokenizer) and
+    // NOTHING loadable at the root — the exact turnkey shape that triggered the bug.
+    let repo = "SceneWorks/krea-2-turbo-mlx";
+    let snapshot = hub
+        .join("models--SceneWorks--krea-2-turbo-mlx")
+        .join("snapshots")
+        .join("rev0");
+    let q8 = snapshot.join("q8");
+    std::fs::create_dir_all(q8.join("transformer")).unwrap();
+    std::fs::write(
+        q8.join("transformer")
+            .join("diffusion_pytorch_model.safetensors"),
+        b"x",
+    )
+    .unwrap();
+    std::fs::create_dir_all(q8.join("tokenizer")).unwrap();
+    std::fs::write(q8.join("tokenizer").join("tokenizer.json"), b"{}").unwrap();
+    // `refs/main` → the seeded revision so `huggingface_snapshot_dir` resolves it deterministically.
+    let refs = hub
+        .join("models--SceneWorks--krea-2-turbo-mlx")
+        .join("refs");
+    std::fs::create_dir_all(&refs).unwrap();
+    std::fs::write(refs.join("main"), b"rev0").unwrap();
+
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+
+    // A krea_2_turbo pose job whose manifest carries the tiered repo (the catalog default) — the exact
+    // payload that hit step 3 and returned the tier-less root.
+    let req = request(json!({
+        "projectId": "p", "model": "krea_2_turbo", "count": 1,
+        "advanced": { "poses": [{ "id": "a" }] },
+        "modelManifestEntry": { "repo": repo }
+    }));
+
+    let base = resolve_krea_control_base(&req, &settings)
+        .expect("resolve ok")
+        .expect("turnkey base resolves");
+    assert_eq!(
+        base, q8,
+        "turnkey base must descend into the q8 tier (with tokenizer/), not return the tier-less root"
+    );
+    assert!(
+        base.join("tokenizer").join("tokenizer.json").is_file(),
+        "resolved base must carry the tokenizer whose absence produced the sc-11853 load failure"
+    );
 }
