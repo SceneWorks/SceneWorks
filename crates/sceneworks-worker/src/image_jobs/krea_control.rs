@@ -260,10 +260,23 @@ fn krea_control_raw_settings(
     raw
 }
 
-/// Load the MLX Krea pose-control generator: the dense base snapshot + the control overlay. Krea control
-/// is CFG-free dense bf16 — no quant, no adapters (the candle-lane parity), no identity img2img-init.
-fn krea_control_spec(weights_dir: PathBuf, control_weights: PathBuf) -> LoadSpec {
-    LoadSpec::new(WeightsSource::Dir(weights_dir)).with_control(WeightsSource::File(control_weights))
+/// Load the MLX Krea pose-control generator: the base tier subdir + the control overlay. The base runs at
+/// the `mlxQuantize`-selected tier (mlx-gen sc-11730): a pre-packed q4/q8 tier subdir loads packed and the
+/// matching `quant` is a no-op (`load_time_quant_bits` detects already-packed), while a dense bf16 subdir
+/// with `quant` set quantizes the base DiT/TE at load. Activation precision stays bf16 (the control
+/// provider requires it; weight packing is orthogonal) and the pose overlay stays bf16. CFG-free, no
+/// adapters yet (user-LoRA-on-control, mlx-gen sc-11720, is a follow-up), no identity img2img-init.
+fn krea_control_spec(
+    weights_dir: PathBuf,
+    control_weights: PathBuf,
+    quant: Option<Quant>,
+) -> LoadSpec {
+    let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir))
+        .with_control(WeightsSource::File(control_weights));
+    if let Some(quant) = quant {
+        spec = spec.with_quant(quant);
+    }
+    spec
 }
 
 /// Generate one strict-pose image: the pre-built `conditioning` (the required pose `Control`) drives the
@@ -379,8 +392,10 @@ async fn generate_krea_control_stream(
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
-    // Dense bf16, no adapters — the control overlay rides the frozen base (parity with the candle lane).
-    let spec = krea_control_spec(weights_dir, control_weights);
+    // The base runs at the `mlxQuantize`-selected tier (sc-11730); the pose overlay rides it bf16. No
+    // adapters on this lane yet (user-LoRA-on-control, mlx-gen sc-11720, is a follow-up).
+    let (quant, _quant_bits) = resolve_quant(request);
+    let spec = krea_control_spec(weights_dir, control_weights, quant);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         KREA_CONTROL_ENGINE_ID,
