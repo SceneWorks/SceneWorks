@@ -4477,6 +4477,10 @@ mod candle_routing_tests {
             // sc-10996 (epic 6562): the candle Bernini still-image companion routes to candle for plain
             // t2i (the dedicated `generate_candle_bernini_image_stream` lane, `frames:1`).
             "bernini_image",
+            // sc-11780 (epic 8485): base `sana_1600m` plain txt2img rides the candle lane now (the
+            // `candle-gen-sana` provider, candle-gen #495). Pure txt2img — its conditioning/adapter/quant
+            // refusal is asserted just below. (SANA-Sprint stays MLX-only, candle_routed=false.)
+            "sana_1600m",
         ] {
             assert!(
                 worker_supports_job(
@@ -4486,12 +4490,25 @@ mod candle_routing_tests {
                 "candle worker should claim {model} plain txt2img"
             );
         }
-        // Refuses a family with no candle provider (`sana_1600m` — MLX-only, candle_routed=false), and a
-        // conditioning shape on a wired family — both defer to torch.
+        // Refuses a family with no candle provider (`sana_sprint_1600m` — the CFG-free SANA-Sprint distill
+        // is MLX-only, candle_routed=false), an adapter shape on the txt2img-only SANA base (candle SANA
+        // advertises neither quant nor LoRA — sc-11780), and a conditioning shape on a wired family — all
+        // defer to torch.
         assert!(!worker_supports_job(
             &candle,
-            &image_generate_job(json!({ "model": "sana_1600m", "prompt": "p" }))
+            &image_generate_job(json!({ "model": "sana_sprint_1600m", "prompt": "p" }))
         ));
+        assert!(
+            !worker_supports_job(
+                &candle,
+                &image_generate_job(json!({
+                    "model": "sana_1600m",
+                    "prompt": "p",
+                    "loras": [{ "path": "x", "weight": 0.8 }]
+                }))
+            ),
+            "candle SANA base is pure txt2img — a LoRA request defers to torch (sc-11780)"
+        );
         assert!(!worker_supports_job(
             &candle,
             &image_generate_job(json!({
