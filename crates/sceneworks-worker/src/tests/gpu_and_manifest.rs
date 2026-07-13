@@ -542,6 +542,138 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
     );
 }
 
+/// sc-11754 (epic 8459 → epic 10765): the Krea 2 Turbo `candle.control` block drives the pose-ControlNet
+/// VRAM fit LADDER end-to-end against the SHIPPED manifest bytes. The control-lane sibling of
+/// `flux2_candle_blocks_drive_the_fit_gate_and_reject`: guards the DATA half — dropping the `control` block
+/// makes `predicted_control_peak_gb` return `None` → the control fit-gate goes INERT (bf16 branch always,
+/// the pre-sc-11754 behavior). Exercises the same `SCENEWORKS_CUDA_VRAM_CAP_GB` small-card emulation via
+/// `apply_vram_cap`, asserting the whole ladder: big card → bf16 branch (no penalty), 24 GB → q4 branch
+/// (the last-resort rung), 16 GB → reject-before-OOM. The branch-quant deltas are the sc-11743 measured
+/// values; a manifest edit that drifts them fails here.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn krea_control_candle_block_drives_the_fit_ladder() {
+    use crate::krea_control_fit::{
+        branch_quant_save_gb, fit_ladder, predicted_control_peak_gb, KreaControlFit,
+    };
+    use crate::vram_gate::apply_vram_cap;
+    use gen_core::Quant;
+
+    let krea = builtin_model_entry("krea_2_turbo");
+    let entry = krea.as_object().expect("krea_2_turbo entry object");
+    let candle = entry
+        .get("candle")
+        .and_then(Value::as_object)
+        .expect("krea_2_turbo candle block");
+    assert!(
+        candle.get("control").and_then(Value::as_object).is_some(),
+        "krea_2_turbo candle.control block present (absent ⇒ control fit-gate inert → always bf16 branch)"
+    );
+
+    // Shipped MEASURED branch-quant deltas (sc-11743): q8 −8.4 (near-lossless), q4 −10.2 (pose-locked).
+    let q8 = branch_quant_save_gb(entry, "q8");
+    let q4 = branch_quant_save_gb(entry, "q4");
+    assert_eq!(q8, Some(8.4));
+    assert_eq!(q4, Some(10.2));
+
+    // The common small-card install: q4 BASE tier. Peak 30.9 (measured sc-11744) + 2 headroom = 32.9.
+    let q4_peak = predicted_control_peak_gb(entry, "q4");
+    assert!((q4_peak.expect("q4 control peak") - 32.9).abs() < 1e-6);
+
+    // 96 GB card: the bf16 branch fits outright — nothing engages, zero speed/quality penalty.
+    assert_eq!(
+        fit_ladder(q4_peak, apply_vram_cap(None, Some(96.0)), q8, q4),
+        KreaControlFit::Fits {
+            branch_quant: None
+        }
+    );
+    // Emulate a 24 GB card: 32.9 > 24; q8 → 24.5 > 24; q4 → 22.7 ≤ 24 ⇒ q4 branch (last-resort rung).
+    assert_eq!(
+        fit_ladder(q4_peak, apply_vram_cap(None, Some(24.0)), q8, q4),
+        KreaControlFit::Fits {
+            branch_quant: Some(Quant::Q4)
+        }
+    );
+    // Emulate a 16 GB card: even q4 (22.7) won't fit ⇒ reject-before-OOM (the sc-11744/45 rungs would add
+    // the remaining headroom once shipped).
+    match fit_ladder(q4_peak, apply_vram_cap(None, Some(16.0)), q8, q4) {
+        KreaControlFit::TooBig {
+            needed_gb,
+            available_gb,
+        } => {
+            assert!((needed_gb - 22.7).abs() < 1e-6, "best-case q4 peak, got {needed_gb}");
+            assert!((available_gb - 16.0).abs() < 1e-6);
+        }
+        other => panic!("16 GB → reject, got {other:?}"),
+    }
+
+    // The bf16 BASE tier (peak 46.2 measured sc-11743 + 2 = 48.2) exercises the q8 rung: a 41 GB card
+    // takes q8 (48.2 − 8.4 = 39.8 ≤ 41), the near-lossless preference before q4.
+    let bf16_peak = predicted_control_peak_gb(entry, "bf16");
+    assert!((bf16_peak.expect("bf16 control peak") - 48.2).abs() < 1e-6);
+    assert_eq!(
+        fit_ladder(bf16_peak, apply_vram_cap(None, Some(41.0)), q8, q4),
+        KreaControlFit::Fits {
+            branch_quant: Some(Quant::Q8)
+        }
+    );
+}
+
+/// Live real-hardware validation (sc-11754): the REAL `nvidia-smi` VRAM reading on GPU 0 + the cap →
+/// predict → ladder chain against the SHIPPED krea_2_turbo control block — the one piece the pure/data
+/// tests can't cover (they use a synthetic budget). Mirrors `vram_gate`'s
+/// `live_cuda_budget_drives_a_real_fit_decision`. Ignored by default (needs a CUDA GPU); run on the 96 GB
+/// box with `cargo test -p sceneworks-worker --lib --features backend-candle -- --ignored --nocapture
+/// krea_control_live`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[tokio::test]
+#[ignore]
+async fn krea_control_live_ladder_on_a_real_card() {
+    use crate::krea_control_fit::{
+        branch_quant_save_gb, fit_ladder, predicted_control_peak_gb, KreaControlFit,
+    };
+    use crate::vram_gate::apply_vram_cap;
+    use gen_core::Quant;
+
+    let krea = builtin_model_entry("krea_2_turbo");
+    let entry = krea.as_object().expect("krea_2_turbo entry object");
+    let q8 = branch_quant_save_gb(entry, "q8");
+    let q4 = branch_quant_save_gb(entry, "q4");
+    // The common small-card install: q4 base tier.
+    let peak = predicted_control_peak_gb(entry, "q4");
+
+    let real = crate::gpu::nvidia_vram_budget_gb("0")
+        .await
+        .expect("GPU 0 should report a live VRAM budget on a CUDA box");
+    eprintln!("live CUDA budget GPU0: {real:?}");
+
+    // Uncapped real 96 GB card → bf16 branch, no rung engages.
+    assert_eq!(
+        fit_ladder(peak, apply_vram_cap(Some(real), None), q8, q4),
+        KreaControlFit::Fits {
+            branch_quant: None
+        },
+        "uncapped 96 GB card keeps the bf16 branch"
+    );
+    // Emulate a 24 GB card off the REAL reading (free := min(real_free, 24)) → q4 branch (last-resort rung).
+    assert_eq!(
+        fit_ladder(peak, apply_vram_cap(Some(real), Some(24.0)), q8, q4),
+        KreaControlFit::Fits {
+            branch_quant: Some(Quant::Q4)
+        },
+        "SCENEWORKS_CUDA_VRAM_CAP_GB=24 → q4 branch fits"
+    );
+    // Emulate a 16 GB card → reject-before-OOM.
+    assert!(
+        matches!(
+            fit_ladder(peak, apply_vram_cap(Some(real), Some(16.0)), q8, q4),
+            KreaControlFit::TooBig { .. }
+        ),
+        "SCENEWORKS_CUDA_VRAM_CAP_GB=16 → reject-before-OOM"
+    );
+    eprintln!("krea control fit ladder on a real card: 96→bf16, 24→q4 branch, 16→reject ✓");
+}
+
 /// epic 10765 sc-11019: the Qwen-Image-Edit `candle` blocks drive the EDIT fit-gate (qwen_edit_candle.rs,
 /// sc-10968) end-to-end against the SHIPPED manifest bytes — resident-fits → sequential-offload →
 /// reject-before-OOM. The edit sibling of `flux2_candle_blocks_drive_the_fit_gate_and_reject`: guards the

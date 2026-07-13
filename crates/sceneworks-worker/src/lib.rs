@@ -110,6 +110,12 @@ mod job_metrics;
 mod supervisor;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod vram_gate;
+// Krea pose-ControlNet VRAM fit ladder (sc-11754, epic 8459 → epic 10765). The dedicated fit-gate for the
+// control lane, which is diverted around the base.rs `generate_candle_stream` gate. Same candle cfg as
+// `vram_gate` (its only consumer, krea_control_candle.rs, is under that cfg) so its pub(crate) helpers
+// aren't dead code under `-D warnings` on the non-candle / macOS builds.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+mod krea_control_fit;
 use supervisor::*;
 mod model_jobs;
 use model_jobs::*;
