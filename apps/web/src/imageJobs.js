@@ -39,6 +39,7 @@ export function buildEditJobBody({
   fitMode = "crop",
   loras = null,
   editLora = null,
+  editLoraWeight = null,
   guidanceScale = null,
 }) {
   // Guidance override (sc-10275): only sent when the user set a finite value —
@@ -75,9 +76,15 @@ export function buildEditJobBody({
   // and deduped by id so a manual selection that already carries it isn't doubled. `editLora` is the
   // raw catalog entry (its `conditioningRole` must round-trip via serializeLora, or the worker's edit
   // lane rejects the run); it's null for edit models that need no such LoRA (Qwen-Image-Edit, FLUX.2).
+  // `editLoraWeight` (sc-11798) is the user's Identity-strength override; when finite it overrides the
+  // manifest `defaultWeight` on the serialized entry (else serializeLora falls back to that default).
   const loraList = Array.isArray(loras) ? [...loras] : [];
   if (editLora && !loraList.some((lora) => lora.id === editLora.id)) {
-    loraList.push(serializeLora(editLora));
+    const override =
+      editLoraWeight == null || !Number.isFinite(Number(editLoraWeight))
+        ? undefined
+        : { weight: Number(editLoraWeight) };
+    loraList.push(serializeLora(editLora, override));
   }
   if (loraList.length) body.loras = loraList;
   // Inpaint mask (sc-2436): only sent for inpaint-capable models with a painted

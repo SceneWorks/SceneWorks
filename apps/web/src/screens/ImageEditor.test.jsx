@@ -1072,6 +1072,12 @@ describe("AI prompt edit", () => {
       editLora,
     });
     expect(alreadyPresent.loras.filter((l) => l.id === "krea2_identity_edit")).toHaveLength(1);
+
+    // Identity strength (sc-11798): a finite editLoraWeight overrides the manifest default on the
+    // auto-applied entry; absent/non-finite falls back to the LoRA's defaultWeight (1.0 here).
+    expect(buildEditJobBody({ ...base, editLora }).loras[0].weight).toBe(1);
+    expect(buildEditJobBody({ ...base, editLora, editLoraWeight: 1.35 }).loras[0].weight).toBe(1.35);
+    expect(buildEditJobBody({ ...base, editLora, editLoraWeight: null }).loras[0].weight).toBe(1);
   });
 
   it("sends advanced.guidanceScale only for a finite override (sc-10275)", () => {
