@@ -52,11 +52,11 @@ describe("ControlPanel (sc-8245 gating + toggle)", () => {
     await act(async () => root.render(ui));
   }
 
-  // The panel is collapsed by default (large, optional section); clicking the head expands it so the
-  // gated inner content (tabs, pose/upload, slider) mounts. Most tests below assert on that content, so
-  // they render then expand.
-  async function expand() {
-    const head = container.querySelector(".control-panel-head");
+  // The panel is collapsed by default (large, optional section); clicking the toggle expands it so
+  // the gated inner content (tabs, pose/upload, slider) mounts. Most tests below assert on that
+  // content, so they render then expand.
+  async function toggle() {
+    const head = container.querySelector(".control-panel-toggle");
     await act(async () => {
       head.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
@@ -64,7 +64,7 @@ describe("ControlPanel (sc-8245 gating + toggle)", () => {
 
   async function renderExpanded(ui) {
     await render(ui);
-    await expand();
+    await toggle();
   }
 
   const tabLabels = () =>
@@ -108,21 +108,21 @@ describe("ControlPanel (sc-8245 gating + toggle)", () => {
     };
   }
 
-  it("is collapsed by default and expands on clicking the head", async () => {
+  it("is collapsed by default and expands on clicking the toggle", async () => {
     await render(<ControlPanel {...baseProps()} />);
-    // Collapsed: the header is present but the gated inner content is not mounted.
-    const head = container.querySelector(".control-panel-head");
+    // Collapsed: the disclosure toggle is present but the gated inner content is not mounted.
+    const head = container.querySelector(".control-panel-toggle");
     expect(head).not.toBeNull();
     expect(head.getAttribute("aria-expanded")).toBe("false");
     expect(tabLabels()).toEqual([]);
     expect(container.querySelector(".control-mode-tabs")).toBeNull();
 
-    await expand();
+    await toggle();
     expect(head.getAttribute("aria-expanded")).toBe("true");
     expect(tabLabels()).toEqual(["Pose", "Canny", "Depth"]);
 
     // Clicking again collapses it back.
-    await expand();
+    await toggle();
     expect(head.getAttribute("aria-expanded")).toBe("false");
     expect(tabLabels()).toEqual([]);
   });
