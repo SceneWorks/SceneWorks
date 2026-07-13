@@ -2523,15 +2523,25 @@
         // free VRAM and, only when constrained, engages the cheapest sufficient rung. @1024²/8-step/scale 0.6
         // on an RTX PRO 6000 (Blackwell sm_120).
         "control": {
-          // Overall render peak (GB) by BASE tier, bf16 control branch, NO rungs engaged. q4 MEASURED 30.9
-          // (sc-11744 GPU timeline, the VAE-decode spike); bf16 MEASURED 46.2 (sc-11743, dense base + bf16
-          // branch); q8 ESTIMATED ~35.5 (between the two) pending measurement.
+          // Overall render peak (GB) by BASE tier, bf16 control branch, NO rungs engaged (monolithic VAE
+          // decode). q4 MEASURED 30.9 (sc-11744 GPU timeline, the VAE-decode spike); bf16 MEASURED 46.2
+          // (sc-11743, dense base + bf16 branch); q8 ESTIMATED ~35.5 (between the two) pending measurement.
           "peakGbByTier": { "q4": 30.9, "q8": 35.5, "bf16": 46.2 },
+          // CHEAPEST rung (sc-11744, candle-gen #492): the peak reduction (GB) from forcing the seam-free
+          // tiled VAE decode (`Krea2ControlRequest.tile_vae_decode`) — a SPEED cost, no quality cost. The
+          // fit-gate engages it BEFORE branch-quant. GPU-MEASURED on an RTX PRO 6000 (Blackwell sm_120),
+          // 1024²/8-step: the monolithic decode peaks at +6.7 GiB over the tiled tail (40.2 → 33.4 GiB
+          // whole-render), at a decode cost of +0.14 s (0.56 → 0.71 s, +26%). Seam-free: the tiled render
+          // is bit-near-identical to monolithic (mean |Δ| 0.05/255, no tile-boundary spike). Keyed to the
+          // q4 BASE tier, where the ~30.9 GB decode spike IS the render peak; 6.7 brings it to ~24.2 GB,
+          // essentially the denoise steady floor. Higher tiers omit it (their denoise steady-state, not the
+          // decode, is the peak — tiling there recovers little, so branch-quant is the operative rung).
+          "decodeTileSaveGb": { "q4": 6.7 },
           // Last-resort rung: the peak reduction (GB) from quantizing the control branch bf16 → q8/q4
           // (candle-gen #483, sc-11743), MEASURED (dense base holds the rest fixed to isolate the branch):
           // q8 −8.4 (near-lossless), q4 −10.2 (pose-locked; non-pose details drift). The gate prefers q8
-          // before q4. Cheaper rungs (VAE-decode tiling sc-11744, activation chunking / res-cap sc-11745)
-          // engage BEFORE this once their candle-gen mechanism ships; their deltas land with those stories.
+          // before q4, and composes it with the tiling rung above. The activation-chunking / res-cap rung
+          // (sc-11745) slots between tiling and branch-quant once its candle-gen mechanism ships.
           "branchQuantSaveGb": { "q8": 8.4, "q4": 10.2 },
           "measured": false
         }

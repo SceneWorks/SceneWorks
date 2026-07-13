@@ -305,6 +305,10 @@ struct KreaStrictControl {
     /// peak wouldn't otherwise fit the (possibly emulated) card. Folds the ~6.6 GB dense branch onto the
     /// GPU packed (dequant-on-forward) so it never lands dense in VRAM.
     branch_quant: Option<gen_core::Quant>,
+    /// Force the seam-free tiled VAE decode (sc-11744) — the fit ladder's cheapest rung, engaged only
+    /// when the predicted decode-phase peak exceeds free VRAM. `false` (the big-card default) is the
+    /// monolithic full-speed decode. A *speed* cost, no quality cost.
+    tile_vae_decode: bool,
     prompt: String,
     width: u32,
     height: u32,
@@ -363,6 +367,7 @@ impl CandleStrictControl for KreaStrictControl {
             steps: self.steps as usize,
             control_scale: self.control_scale,
             seed,
+            tile_vae_decode: self.tile_vae_decode,
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {
@@ -432,27 +437,34 @@ async fn generate_candle_krea_control_stream(
         crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
         crate::vram_gate::cuda_vram_cap_gb(),
     );
-    let branch_quant = match crate::krea_control_fit::fit_ladder(
+    let (tile_vae_decode, branch_quant) = match crate::krea_control_fit::fit_ladder(
         crate::krea_control_fit::predicted_control_peak_gb(&request.model_manifest_entry, tier),
         budget,
+        crate::krea_control_fit::decode_tile_save_gb(&request.model_manifest_entry, tier),
         crate::krea_control_fit::branch_quant_save_gb(&request.model_manifest_entry, "q8"),
         crate::krea_control_fit::branch_quant_save_gb(&request.model_manifest_entry, "q4"),
     ) {
-        // Big-card fast path (or no signal): keep the bf16 branch.
+        // Big-card fast path (or no signal): monolithic full-speed decode, bf16 branch.
         crate::krea_control_fit::KreaControlFit::Unknown
-        | crate::krea_control_fit::KreaControlFit::Fits { branch_quant: None } => None,
-        // Constrained card: the fit ladder engaged the branch-quant rung to fit.
+        | crate::krea_control_fit::KreaControlFit::Fits {
+            tile_vae_decode: false,
+            branch_quant: None,
+        } => (false, None),
+        // Constrained card: the fit ladder engaged the cheapest sufficient set of rungs to fit — the
+        // seam-free tiled VAE decode (sc-11744, a speed cost) and/or the last-resort branch quant.
         crate::krea_control_fit::KreaControlFit::Fits {
-            branch_quant: Some(quant),
+            tile_vae_decode: tile,
+            branch_quant: quant,
         } => {
             tracing::info!(
                 model = %request.model,
                 tier,
+                tile_vae_decode = tile,
                 branch_quant = ?quant,
-                "Krea control VRAM fit ladder: predicted peak exceeds free VRAM — quantizing the \
-                 control branch (last-resort rung) to fit"
+                "Krea control VRAM fit ladder: predicted peak exceeds free VRAM — engaging rungs \
+                 (VAE-decode tiling and/or control-branch quant) to fit"
             );
-            Some(quant)
+            (tile, quant)
         }
         // Won't fit even at the last rung ⇒ reject before the reactive CUDA OOM.
         crate::krea_control_fit::KreaControlFit::TooBig {
@@ -461,8 +473,9 @@ async fn generate_candle_krea_control_stream(
         } => {
             return Err(WorkerError::InvalidPayload(format!(
                 "Krea 2 pose-ControlNet at the {tier} base tier needs ~{needed} GB of VRAM (with \
-                 headroom, control branch quantized to q4) but GPU {gpu} has ~{available} GB \
-                 available. Lower the output resolution or run on a card with more VRAM.",
+                 headroom, tiled VAE decode + control branch quantized to q4) but GPU {gpu} has \
+                 ~{available} GB available. Lower the output resolution or run on a card with more \
+                 VRAM.",
                 needed = needed_gb.round() as i64,
                 available = available_gb.round() as i64,
                 gpu = settings.gpu_id,
@@ -475,6 +488,7 @@ async fn generate_candle_krea_control_stream(
         control,
         adapters,
         branch_quant,
+        tile_vae_decode,
         prompt: request.prompt.clone(),
         width: request.width,
         height: request.height,
