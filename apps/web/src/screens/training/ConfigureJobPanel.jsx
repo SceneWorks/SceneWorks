@@ -130,7 +130,7 @@ export function ConfigureJobPanel({
                   return (
                     <option key={target.id} value={target.id} disabled={blocked}>
                       {target.ui?.label ?? target.name}
-                      {blocked ? " — not on Mac (MLX only)" : ""}
+                      {blocked ? " — not on Mac (Cuda only)" : ""}
                     </option>
                   );
                 })}
@@ -315,7 +315,7 @@ export function ConfigureJobPanel({
                       return (
                         <option key={option} value={option} disabled={blocked}>
                           {networkTypeLabel(option)}
-                          {blocked ? " — not on Mac (MLX only)" : ""}
+                          {blocked ? " — not on Mac for Wan targets" : ""}
                         </option>
                       );
                     })}
