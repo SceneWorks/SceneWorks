@@ -3930,6 +3930,47 @@ mod candle_routing_tests {
     }
 
     #[test]
+    fn boogu_base_and_turbo_img2img_route_to_candle() {
+        // sc-11786 (epic 8588): a `boogu_image` / `boogu_image_turbo` job in a non-edit mode with a
+        // `referenceAssetId` is now the REGISTRY img2img path — the candle Base/Turbo generators advertise
+        // `Reference` and VAE-encode it into the reduced-schedule denoise. Branched before the txt2img gate
+        // (which rejects any `referenceAssetId`), disjoint from the `boogu_image_edit` instruction-edit lane.
+        for model in ["boogu_image", "boogu_image_turbo"] {
+            let img2img = json!({
+                "model": model,
+                "referenceAssetId": "asset_1",
+                "advanced": { "strength": 0.6 }
+            });
+            assert!(
+                image_job_is_candle_eligible(&image_generate_job(img2img.clone())),
+                "{model} img2img (referenceAssetId, non-edit) must be candle-eligible (sc-11786)"
+            );
+            // The eligibility predicate: a non-edit reference is img2img; an `edit_image` reference is NOT
+            // (that is the `boogu_image_edit` instruction-edit lane, a different engine id).
+            assert!(boogu_img2img_candle_eligible(&object(json!({
+                "model": model, "referenceAssetId": "asset_1"
+            }))));
+            assert!(!boogu_img2img_candle_eligible(&object(json!({
+                "model": model, "mode": "edit_image", "referenceAssetId": "asset_1"
+            }))));
+            // A blank/absent reference is plain txt2img, not img2img.
+            assert!(!boogu_img2img_candle_eligible(&object(json!({
+                "model": model, "referenceAssetId": "  "
+            }))));
+            assert!(!boogu_img2img_candle_eligible(&object(
+                json!({ "model": model })
+            )));
+        }
+        // Base/Turbo carry NO separate edit lane, so an `edit_image` job on them stays ineligible (the
+        // img2img branch is gated to a non-edit mode; the edit branch is gated to `boogu_image_edit`).
+        for model in ["boogu_image", "boogu_image_turbo"] {
+            assert!(!image_job_is_candle_eligible(&image_edit_job(json!({
+                "model": model, "mode": "edit_image", "sourceAssetId": "asset_1"
+            }))));
+        }
+    }
+
+    #[test]
     fn explicit_quantization_falls_back_to_torch_image_and_video() {
         // sc-5099: a candle provider that advertises NO quant (supported_quants: &[]) must route an
         // explicit `advanced.mlxQuantize > 0` to Python rather than silently running dense. chroma1_hd

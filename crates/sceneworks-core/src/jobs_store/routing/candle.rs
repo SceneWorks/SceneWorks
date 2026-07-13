@@ -142,6 +142,20 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if model == "boogu_image_edit" && boogu_edit_candle_eligible(&job.payload) {
         return true;
     }
+    // Boogu Base/Turbo img2img (reference-guided latent-init, sc-11786, epic 8588): a `boogu_image` /
+    // `boogu_image_turbo` job in a **non-edit** mode with a `referenceAssetId` is the REGISTRY img2img
+    // path — the candle Base/Turbo generators now advertise `Reference` and their `generate` VAE-encodes
+    // a single reference into the clean init latent + denoises the reduced schedule tail (`pipeline`
+    // `resolve_reference` + `init_time_step` + `render_base`/`render_turbo`, candle-gen sc-11786), and the
+    // worker `generate_candle_stream` resolves the init generically (`model_supports_img2img`, sc-10134).
+    // DISJOINT from the `boogu_image_edit` multi-reference instruction-edit lane above (a different engine
+    // id + the Qwen3-VL vision tower). The txt2img gate below rejects any `referenceAssetId`, so branch it
+    // out here. Mirrors the mlx-gen-boogu img2img (sc-10191) + the Z-Image img2img routing.
+    if matches!(model, "boogu_image" | "boogu_image_turbo")
+        && boogu_img2img_candle_eligible(&job.payload)
+    {
+        return true;
+    }
     // Krea 2 Kontext-style dual-conditioned image-edit (epic 10871 Raw + sc-11640 Turbo): a `krea_2_raw` /
     // `krea_2_turbo` `edit_image` job with a source image is the bespoke candle `KreaEdit` lane
     // (`generate_candle_krea_edit_stream`), NOT txt2img — Raw runs the full-CFG loop, Turbo the CFG-free
@@ -858,6 +872,26 @@ pub(crate) fn boogu_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
                 .any(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()))
         });
     single || plural
+}
+
+/// Boogu Base/Turbo img2img (reference-guided latent-init) candle-routing conditions (sc-11786, epic
+/// 8588). The registered `boogu_image` (Base) and `boogu_image_turbo` candle generators serve registry
+/// img2img: a single `Conditioning::Reference` in a **non-edit** request VAE-encodes to the clean init
+/// latent and denoises the reduced schedule tail (`candle-gen-boogu` `resolve_reference` +
+/// `init_time_step` — `render_base` / `render_turbo`). So a Base/Turbo job in a non-edit mode with a
+/// `referenceAssetId` is candle-eligible; the worker resolves the init generically
+/// (`model_supports_img2img`, sc-10134). Same payload predicate as [`zimage_img2img_candle_eligible`],
+/// gated to the Boogu Base/Turbo ids by the caller. DISJOINT from the `boogu_image_edit` multi-reference
+/// instruction-edit lane (`boogu_edit_candle_eligible`, a different engine id + `edit_image` mode + the
+/// Qwen3-VL vision tower). Mirrors the mlx-gen-boogu img2img (sc-10191).
+pub(crate) fn boogu_img2img_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 /// Bernini still-image i2i candle-routing conditions (sc-10996, epic 6562). The candle
