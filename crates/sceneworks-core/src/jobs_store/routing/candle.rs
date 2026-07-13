@@ -219,6 +219,17 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     if model == "z_image" && zimage_control_candle_eligible(&job.payload) {
         return true;
     }
+    // Z-Image base img2img (reference-guided latent-init, sc-10265, epic 8588): `z_image` (base, NOT
+    // Turbo) in a non-edit mode with a `referenceAssetId` is the REGISTRY img2img path — the candle
+    // `z_image` generator's `generate` already VAE-encodes a single `Conditioning::Reference` and denoises
+    // the reduced schedule tail (`base.rs` `resolve_reference` + `init_time_step` + `render_base`, sc-8646),
+    // and the worker `generate_candle_stream` resolves the init generically (`model_supports_img2img`,
+    // sc-10134). The txt2img gate below rejects any `referenceAssetId`, so branch it out (after the pose-
+    // control branch above — a pose job stays on control). `z_image_turbo` is the separate sc-11783 (its
+    // registry descriptor is txt2img-only; its img2img is a bespoke `edit_image` stream).
+    if model == "z_image" && zimage_img2img_candle_eligible(&job.payload) {
+        return true;
+    }
     // FLUX.1-dev strict-control Shakker Union-Pro-2.0 (sc-8412, epic 8236): `flux_dev` + `advanced.poses` is
     // the bespoke candle `Flux1DevControl` lane (`generate_candle_flux1_control_stream`), NOT txt2img — the
     // `image_request_candle_eligible` gate below DEFERS any `advanced.poses` job to torch, and the
@@ -763,6 +774,25 @@ pub(crate) fn krea_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// (Raw img2img is the separate sc-10226). Mirrors the worker's `krea_2_turbo` img2img resolve in
 /// `generate_candle_stream` (the `model_supports_img2img` + `resolve_img2img_init_generic` path).
 pub(crate) fn krea_img2img_candle_eligible(payload: &Map<String, Value>) -> bool {
+    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
+        return false;
+    }
+    payload
+        .get("referenceAssetId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// Z-Image **base** img2img (reference-guided latent-init) candle-routing conditions (sc-10265, epic
+/// 8588). The registered `z_image` (base) candle generator already serves registry img2img — a single
+/// `Conditioning::Reference` in a non-edit request VAE-encodes to the clean init latent and denoises the
+/// reduced schedule tail (`candle-gen-z-image::base` `resolve_reference` + `init_time_step`, sc-8646). So
+/// a `z_image` job in a non-edit mode with a `referenceAssetId` is candle-eligible; the worker resolves
+/// the init generically (`model_supports_img2img`, sc-10134). Same payload shape as
+/// [`krea_img2img_candle_eligible`], gated to `z_image` by the caller. NOT Turbo (`z_image_turbo`'s
+/// registry descriptor is txt2img-only — its img2img is the bespoke `edit_image` stream; sc-11783) and
+/// NOT the pose-control shape (`advanced.poses`, branched first).
+pub(crate) fn zimage_img2img_candle_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }

@@ -4208,6 +4208,45 @@ mod candle_routing_tests {
     }
 
     #[test]
+    fn zimage_base_img2img_routes_to_candle() {
+        // sc-10265 (epic 8588): a `z_image` (base, NOT Turbo) job in a non-edit mode with a
+        // `referenceAssetId` is the REGISTRY img2img path — the base candle engine already serves it
+        // (sc-8646) and the worker resolves the init generically (sc-10134), so only the router branch was
+        // missing. Branched before the txt2img gate that rejects references.
+        let img2img = json!({
+            "model": "z_image",
+            "referenceAssetId": "asset_1",
+            "advanced": { "strength": 0.6 }
+        });
+        assert!(
+            image_job_is_candle_eligible(&image_generate_job(img2img.clone())),
+            "z_image base img2img (referenceAssetId, non-edit) must be candle-eligible"
+        );
+        assert!(zimage_img2img_candle_eligible(&object(img2img)));
+        // NOT the edit lane: `edit_image` is the bespoke `ZimageEdit` stream, not registry img2img.
+        assert!(!zimage_img2img_candle_eligible(&object(json!({
+            "mode": "edit_image",
+            "referenceAssetId": "asset_1"
+        }))));
+        // A pose job stays on the control lane (poses branch first), not img2img.
+        assert!(image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "z_image",
+            "advanced": { "poses": [{ "keypoints": [] }] }
+        }))));
+        // `z_image_turbo` img2img is NOT yet candle-eligible — its registry descriptor is txt2img-only
+        // (img2img is a bespoke `edit_image` stream); the tile shape (referenceAssetId + advanced.strength,
+        // no `character_image`/referenceStrength → not identity-init) has no candle lane until sc-11783.
+        assert!(
+            !image_job_is_candle_eligible(&image_generate_job(json!({
+                "model": "z_image_turbo",
+                "referenceAssetId": "asset_1",
+                "advanced": { "strength": 0.6 }
+            }))),
+            "z_image_turbo img2img needs the candle engine (sc-11783), not yet eligible"
+        );
+    }
+
+    #[test]
     fn sdxl_advanced_shapes_fall_back_to_torch() {
         // Every conditioning shape the txt2img candle lane can't honor must be ineligible. A LoRA is NOT
         // in this set anymore (sc-10767): the SDXL family advertises inference LoRA on candle, so a plain
