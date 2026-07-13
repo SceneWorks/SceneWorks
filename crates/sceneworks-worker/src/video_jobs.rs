@@ -4423,6 +4423,8 @@ async fn generate_video(
                             }
                         }
                         Progress::Decoding => phase_timer.mark_decoding(Instant::now()),
+                        // Sequential-residency component-load boundary (gen-core sc-11126) — no phase mark.
+                        Progress::Loading(_) => {}
                     }
                     let (fraction, message) = match progress {
                         Progress::Step { current, total } => (
@@ -4430,6 +4432,9 @@ async fn generate_video(
                             format!("Generating frames — step {current}/{total}."),
                         ),
                         Progress::Decoding => (0.58, "Decoding frames.".to_owned()),
+                        // A Sequential-residency component (text encoder / renderer) is (re)loading before
+                        // denoise starts; surface a stable pre-generation status without regressing the bar.
+                        Progress::Loading(_) => (0.22, "Loading model components.".to_owned()),
                     };
                     update_job(
                         api,
@@ -13465,6 +13470,8 @@ mod tests {
                 // Peak so far = the DiT-denoise peak (the VAE decode is the *next* stage).
                 dit_peak_bytes.get_or_insert(mlx_rs::memory::get_peak_memory());
             }
+            // Sequential-residency component-load boundary (gen-core sc-11126) — not a step/decode marker.
+            Progress::Loading(_) => {}
         };
         let decoded =
             run_video_generation(input, &cancel, &mut on_progress).expect("5B generation");

@@ -101,11 +101,13 @@ const STRICT_CONTROL_ENGINES: &[StrictControlEngine] = &[
         // control-branch overlay on the frozen Turbo base — a from-scratch pose ControlNet, not a
         // Fun-Union VACE engine, so it has no canny/depth conditioning (those are Phase-C follow-ups).
         // Listed here so the candle lane routes through `run_candle_strict_control` and a
-        // `controlMode = canny | depth` request is REJECTED (not silently rendered as pose). Off-Mac
-        // candle-only; the candle lane resolves its overlay from env / `advanced.controlWeights` (no
-        // hosted default repo yet — B4/sc-10165 + sc-8466), so `repo` here is informational.
+        // `controlMode = canny | depth` request is REJECTED (not silently rendered as pose). `repo` here
+        // is INFORMATIONAL for Krea: neither lane resolves its base from this row. The MLX lane
+        // (`krea_control.rs`) loads the packed `SceneWorks/krea-2-turbo-mlx` turnkey tier subdir (sc-11796);
+        // the candle lane keeps its own dense `krea/Krea-2-Turbo` const; both resolve the overlay from
+        // env / `advanced.controlWeights` / the hosted beta (sc-8466).
         engine_id: "krea_2_turbo_control",
-        repo: "krea/Krea-2-Turbo",
+        repo: "SceneWorks/krea-2-turbo-mlx",
         supported_kinds: &[ControlKind::Pose],
     },
 ];

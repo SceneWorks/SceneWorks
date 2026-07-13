@@ -1239,6 +1239,7 @@ function usePoseController({ activeModel, loraSelection }) {
     controls: (
       <>
         <PoseLibraryPicker
+          categoryFilter
           loadUserPoses={loadUserPoses}
           onClear={() => setSelectedPoseIds([])}
           onToggle={togglePose}

@@ -250,6 +250,12 @@ mod zimage_pid_gpu_smoke;
 // the worker-lane validation (the crate links + drives the engine), not just the mlx-gen-krea crate.
 #[cfg(all(test, target_os = "macos"))]
 mod krea_turbo_mlx_smoke;
+// Real-weight MLX smoke for the Krea 2 Turbo pose-ControlNet worker lane on a PACKED Q8 base (sc-11796).
+// Test-only + macOS-only; drives `gen_core::load("krea_2_turbo_control")` with the exact packed-q8
+// `LoadSpec` `krea_control_spec` builds and asserts the pose steers the render vs a base passthrough —
+// the worker-lane proof that pose control is honored on the installed quant tier (not silently dropped).
+#[cfg(all(test, target_os = "macos"))]
+mod krea_control_mlx_smoke;
 // Real-weight MLX smoke for the FLUX.1-dev strict-control worker lane (sc-8244; engine E2 sc-8239).
 // Test-only + macOS-only; drives `gen_core::load("flux1_dev_control")` (Dir base + Shakker control
 // overlay) per control mode (pose/canny/depth) and asserts a control-vs-control-free steer — the
