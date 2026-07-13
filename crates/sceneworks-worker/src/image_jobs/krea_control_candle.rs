@@ -377,11 +377,6 @@ impl CandleStrictControl for KreaStrictControl {
             seed,
             tile_vae_decode: self.tile_vae_decode,
             cancel: cancel.clone(),
-            // Tiled VAE decode is the fit ladder's cheapest-VRAM rung (candle-gen sc-11744). The worker's
-            // Krea control fit ladder (sc-11754) does not wire this rung yet (WIRED_CHEAPER_RUNGS is still
-            // branch-quant-only), so keep the descriptor default — full (non-tiled) decode — for behavior
-            // parity with the pre-bump path. Flipping it on is the sc-11744/45 follow-up.
-            tile_vae_decode: false,
         };
         model.generate(&req, control, on_progress).map_err(|error| {
             WorkerError::Engine(format!("Krea 2 strict-pose generation failed: {error}"))
