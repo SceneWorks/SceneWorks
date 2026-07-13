@@ -40,6 +40,9 @@ import {
   buildUpscaleJobBody,
   detailCapableModels,
   editCapableModels,
+  tileControlNetInstalled,
+  tileControlNetModel,
+  TILE_CONTROLNET_MODEL_ID,
   upscaleEngineHasSoftness,
   upscaleFactorsForEngine,
 } from "../imageJobs.js";
@@ -102,6 +105,9 @@ export {
   buildUpscaleJobBody,
   detailCapableModels,
   editCapableModels,
+  tileControlNetInstalled,
+  tileControlNetModel,
+  TILE_CONTROLNET_MODEL_ID,
   upscaleEngineHasSoftness,
   upscaleFactorsForEngine,
 };
@@ -609,6 +615,11 @@ export function ImageEditor() {
     releaseEditorScratchOp,
     registerEditorScratchClaim,
     imageModels,
+    // Full catalog (all types incl. utility) + downloader — the Detail tool's tile ControlNet is a
+    // `type:"utility"` entry, so it is absent from the image-only `imageModels`; we look it up here to
+    // gate the run and offer a one-click install (sc-2437/sc-2438 provisioning gap).
+    models = [],
+    createModelDownloadJob,
     editorLaunch = null,
     clearEditorLaunch,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
@@ -734,6 +745,22 @@ export function ImageEditor() {
   const [detailModel, setDetailModel] = useState("");
   const [detailStrength, setDetailStrength] = useState(0.55);
   const [detailCnScale, setDetailCnScale] = useState(0.7);
+  // The tile ControlNet is a hard co-requisite of every detail run (worker `detail.rs`), but it ships as
+  // a separate `type:"utility"` catalog artifact — so a detail-capable backbone can be installed while
+  // the ControlNet is not, and the job would fail at run time. Surface it as a required dependency with a
+  // one-click install, mirroring the managed edit-LoRA CTA below. Installed == not "missing" (App.jsx).
+  const tileControlNet = tileControlNetModel(models);
+  const tileControlNetReady = tileControlNetInstalled(models);
+  const [tileControlNetDownloadRequested, setTileControlNetDownloadRequested] = useState(false);
+  // Clear the transient "requested" state once the download lands (installState flips off "missing").
+  useEffect(() => {
+    if (tileControlNetReady) setTileControlNetDownloadRequested(false);
+  }, [tileControlNetReady]);
+  const requestTileControlNetDownload = useCallback(() => {
+    if (!tileControlNet || !createModelDownloadJob) return;
+    setTileControlNetDownloadRequested(true);
+    createModelDownloadJob(tileControlNet);
+  }, [tileControlNet, createModelDownloadJob]);
 
   // Keyboard-shortcut quick reference panel (sc-6111).
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -2710,8 +2737,38 @@ export function ImageEditor() {
                 <p className="ie-note">Higher keeps the result closer to the source composition.</p>
               </div>
             </div>
+            {/* Tile ControlNet dependency (sc-2437/sc-2438): Detail can't run without it, but it's a
+                separate utility download — surface it as required with a one-click install when missing,
+                and gate the run. Mirrors the managed edit-LoRA CTA in the AI Edit panel. */}
             <div className="ie-section">
-              <button className="ie-btn block primary" disabled={!!aiOp || !detailModel} onClick={runDetail} type="button">
+              <div className="ie-sec-title">Required model</div>
+              {tileControlNetReady ? (
+                <p className="ie-note">✨ {tileControlNet.name ?? "SDXL Tile ControlNet"} is installed and ready.</p>
+              ) : (
+                <>
+                  <p className="ie-note">
+                    The SDXL tile ControlNet (~2.5 GB) is required for Detail enhance and isn’t installed yet.
+                  </p>
+                  <button
+                    className="ie-btn block"
+                    disabled={!tileControlNet || !createModelDownloadJob || tileControlNetDownloadRequested}
+                    onClick={requestTileControlNetDownload}
+                    type="button"
+                  >
+                    {tileControlNetDownloadRequested
+                      ? "Downloading…"
+                      : `Download ${tileControlNet?.name ?? "SDXL Tile ControlNet"}`}
+                  </button>
+                </>
+              )}
+            </div>
+            <div className="ie-section">
+              <button
+                className="ie-btn block primary"
+                disabled={!!aiOp || !detailModel || !tileControlNetReady}
+                onClick={runDetail}
+                type="button"
+              >
                 Enhance detail
               </button>
               <button className="ie-btn block" onClick={() => setTool("move")} type="button">

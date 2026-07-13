@@ -7194,6 +7194,57 @@
       }
     },
     {
+      // SDXL tile ControlNet — the auxiliary weights the Image Editor Detail enhancer needs
+      // (`JobType::ImageDetail`, sc-2437/sc-2438). The native worker (`image_jobs/detail.rs`) resolves it
+      // by REPO STRING (`TILE_CONTROLNET_REPO = "xinsir/controlnet-tile-sdxl-1.0"`, overridable via
+      // `advanced.tileControlNetRepo`) through `huggingface_snapshot_dir` — which only RESOLVES an
+      // already-cached snapshot, never auto-downloads (the JoyCaption / CLIP seam, epic 3482). Without a
+      // catalog entry Detail dead-ended with "tile ControlNet weights not found (download
+      // xinsir/controlnet-tile-sdxl-1.0)" and there was no UI to install it. Cataloging it as a utility
+      // lets Model Manager pull the snapshot into the HF cache the worker reads, and lets the Detail panel
+      // surface it as a required dependency with a one-click download (mirrors the managed edit-LoRA CTA).
+      // apache-2.0, ungated; stock repo pulled as-is (a plain SDXL ControlNet safetensors — no conversion).
+      // Shared by every SDXL-family `image_detail` backbone (realvisxl / sdxl / …), so it is a single
+      // standalone artifact rather than a per-model co-requisite bolted onto each base's footprint.
+      "id": "controlnet_tile_sdxl",
+      "autoDownload": false,
+      "name": "SDXL Tile ControlNet (Detail enhance)",
+      "family": "controlnet-tile",
+      "type": "utility",
+      "adapter": "controlnet-tile",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "xinsir/controlnet-tile-sdxl-1.0",
+          "files": ["diffusion_pytorch_model.safetensors", "config.json"],
+          "estimatedSizeBytes": 2500000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/xinsir/controlnet-tile-sdxl-1.0"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "SDXL Tile ControlNet (Detail enhance)",
+        "description": "Optional tile ControlNet weights used only by the Image Editor's Detail enhancer to refine texture on an SDXL/RealVisXL backbone. A small utility dependency shared by every SDXL detail-capable model — not a generation model of its own. apache-2.0, commercial-use OK, ungated.",
+        "recommendedFor": ["image_detail"],
+        "promptGuide": {
+          "title": "SDXL Tile ControlNet (Detail enhance)",
+          "path": "/prompt-guides/controlnet-tile-sdxl.md",
+          "sources": [
+            { "label": "xinsir/controlnet-tile-sdxl-1.0 model card", "url": "https://huggingface.co/xinsir/controlnet-tile-sdxl-1.0" },
+            { "label": "ControlNet paper", "url": "https://arxiv.org/abs/2302.05543" }
+          ]
+        }
+      }
+    },
+    {
       // PiD pixel-diffusion super-resolving decoder — qwenimage latent space (epic 7840, sc-7852).
       // OPTIONAL per-generation replacement for the VAE decoder (request `advanced.usePid`): PiD
       // denoises directly in pixel space and decodes + 4x super-resolves in one 4-step pass. It is tied
