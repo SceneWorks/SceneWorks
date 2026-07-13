@@ -10725,6 +10725,30 @@ details[open] > summary.lora-scope-group-heading::before,
   font-size: 0.85rem;
 }
 
+/* Recovery block shown when the first project can't be created because the
+   workspace folder rejects writes (issue #1435 / sc-11855). */
+.setup-wizard-recovery {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in oklch, var(--danger) 35%, var(--border));
+  background: var(--danger-soft);
+  border-radius: 10px;
+  text-align: left;
+  font-size: 0.85rem;
+}
+
+.setup-wizard-recovery p {
+  margin: 0;
+  color: var(--text);
+}
+
+.setup-wizard-notice {
+  color: var(--text-muted);
+}
+
 /* Settings screen (sc-1350) */
 .settings-screen {
   display: flex;

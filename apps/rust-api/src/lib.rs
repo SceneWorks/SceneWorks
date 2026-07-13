@@ -816,6 +816,33 @@ fn warn_on_startup_err(label: &str, path: &FsPath, result: std::io::Result<()>) 
     }
 }
 
+/// issue #1435 / sc-11855: `create_dir_all` on an existing-but-non-writable data
+/// dir returns `Ok`, so the startup dir checks above pass even when the workspace
+/// folder silently rejects the in-place writes a `project.db` needs — the failure
+/// only surfaces later as an opaque `SQLITE_READONLY` on the first project
+/// creation. Run the SAME faithful rollback-mode probe project creation uses,
+/// against the projects tree, and log the resolved path + result so the condition
+/// is diagnosable from `api.log` without reproducing it. Purely diagnostic —
+/// never fails startup (the app must still boot so the user can reach Settings and
+/// repoint the workspace folder).
+fn probe_data_dir_writable(data_dir: &FsPath) {
+    let projects = data_dir.join("projects");
+    match sceneworks_core::project_store::probe_storage_writable(&projects) {
+        Ok(()) => tracing::info!(
+            event = "startup_data_dir_writable",
+            path = %projects.display(),
+            "workspace projects folder is writable"
+        ),
+        Err(error) => tracing::warn!(
+            event = "startup_data_dir_not_writable",
+            path = %projects.display(),
+            error = %error,
+            "workspace projects folder is NOT writable — creating a project will fail; \
+             the user must pick a different workspace folder or fix this folder's permissions"
+        ),
+    }
+}
+
 /// Log (but never fail on) a stale-upload sweep error. sc-8882 (F-080): a failed sweep
 /// silently leaves leaked multi-GB upload temps unreclaimed; a warning makes that
 /// diagnosable without aborting startup.
@@ -848,6 +875,9 @@ pub(crate) fn create_app_with_state(
         &settings.data_dir,
         std::fs::create_dir_all(&settings.data_dir),
     );
+    // create_dir_all above is a no-op (and returns Ok) for an existing but
+    // non-writable data dir, so probe the projects tree for real (sc-11855 C).
+    probe_data_dir_writable(&settings.data_dir);
     warn_on_startup_err(
         "config_dir",
         &settings.config_dir,
