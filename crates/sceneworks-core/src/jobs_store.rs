@@ -3795,11 +3795,51 @@ mod candle_routing_tests {
             assert!(!ideogram_edit_candle_eligible(&object(json!({
                 "model": model, "mode": "edit_image"
             }))));
-            // Pure IP-Adapter reference (Ideogram has no candle IP path) still defers to torch.
+            // The raw txt2img gate still rejects any `referenceAssetId` (it stays txt2img-only). A
+            // text_to_image reference is the `ui.img2img` "Image reference" tile, handled by the bespoke
+            // `ideogram_img2img_candle_eligible` branch in the dispatcher (covered by
+            // `ideogram_img2img_routes_to_candle`), NOT the generic gate.
             assert!(!image_request_candle_eligible(
                 model,
                 &object(json!({ "referenceAssetId": "a" }))
             ));
+        }
+    }
+
+    #[test]
+    fn ideogram_img2img_routes_to_candle() {
+        // sc-10261 (epic 8588): the candle parity of the MLX Ideogram generic img2img arm (sc-10192). An
+        // `ideogram_4` / `ideogram_4_turbo` job in a non-edit mode with a `referenceAssetId` is the
+        // `ui.img2img` "Image reference" tile — a single `Conditioning::Reference` with NO `Mask`, which
+        // the candle `candle-gen-ideogram` pipeline denoises as plain img2img (`resolve_edit` →
+        // `prepare_edit` with `mask = None`). Branched before the txt2img gate (which rejects any
+        // `referenceAssetId`), disjoint from the `edit_image` Remix/inpaint lane. No worker/candle-gen
+        // change — the worker `generate_candle_stream` already resolves the init generically (sc-10134).
+        for model in ["ideogram_4", "ideogram_4_turbo"] {
+            let img2img = json!({
+                "model": model,
+                "referenceAssetId": "asset_1",
+                "advanced": { "strength": 0.6 }
+            });
+            assert!(
+                image_job_is_candle_eligible(&image_generate_job(img2img.clone())),
+                "{model} img2img (referenceAssetId, non-edit) must be candle-eligible (sc-10261)"
+            );
+            // The eligibility predicate: a non-edit reference is img2img; an `edit_image` reference is the
+            // Remix/inpaint edit lane, NOT this img2img arm.
+            assert!(ideogram_img2img_candle_eligible(&object(json!({
+                "model": model, "referenceAssetId": "asset_1"
+            }))));
+            assert!(!ideogram_img2img_candle_eligible(&object(json!({
+                "model": model, "mode": "edit_image", "referenceAssetId": "asset_1"
+            }))));
+            // A blank/absent reference is plain txt2img, not img2img.
+            assert!(!ideogram_img2img_candle_eligible(&object(json!({
+                "model": model, "referenceAssetId": "  "
+            }))));
+            assert!(!ideogram_img2img_candle_eligible(&object(
+                json!({ "model": model })
+            )));
         }
     }
 
