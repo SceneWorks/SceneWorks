@@ -2611,19 +2611,22 @@ fn candle_supported_rejects_unsupported_strict_pose() {
 
 #[test]
 fn candle_supported_flags_a_torch_only_image_model() {
-    // `sana_sprint_1600m` (the CFG-free SANA-Sprint distill) is MLX-only — it has no candle provider and
-    // is not in CANDLE_ROUTED_MODELS — so the candle/CUDA oracle must flag it as an unsupported image
-    // model off-Mac. (`bernini_image` used to be the example here but is now candle-routed — sc-10996,
-    // epic 6562; the base `sana_1600m` was the example next but is now candle-routed too — sc-11780,
-    // epic 8485. SANA-Sprint stays the still-torch-only representative.)
+    // `pulid_flux_dev` is txt2img-torch-only off-Mac: its ONLY candle lane is the bespoke
+    // character-reference path (`pulid_flux_candle_eligible`, which needs character_image + a
+    // referenceAssetId), so a PLAIN txt2img prompt has no candle route and it is not in
+    // CANDLE_ROUTED_MODELS — the candle/CUDA oracle must flag it as an unsupported image model off-Mac.
+    // (`bernini_image` used to be the example here but is now candle-routed — sc-10996, epic 6562; the
+    // base `sana_1600m` was the example next but is now candle-routed too — sc-11780, epic 8485; then
+    // `sana_sprint_1600m`, but the CFG-free SANA-Sprint distill is candle-routed too now — sc-11781,
+    // epic 8485. PuLID-FLUX's reference-less txt2img shape is the still-torch-only representative.)
     let store = store("candle-oracle-torch-model");
     let job = job_of(
         &store,
         JobType::ImageGenerate,
-        json!({ "model": "sana_sprint_1600m", "prompt": "p" }),
+        json!({ "model": "pulid_flux_dev", "prompt": "p" }),
     );
     let reason = candle_supported(&job).unwrap_err();
-    assert_eq!(reason.model.as_deref(), Some("sana_sprint_1600m"));
+    assert_eq!(reason.model.as_deref(), Some("pulid_flux_dev"));
     assert!(reason
         .candle_error_message()
         .starts_with("candle_unsupported:"));

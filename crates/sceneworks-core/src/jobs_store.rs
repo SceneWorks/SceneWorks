@@ -3661,13 +3661,15 @@ mod candle_routing_tests {
 
     #[test]
     fn non_candle_families_and_variants_are_never_candle_eligible() {
-        // The still-unwired weight/shape variants of wired families (edit ids) plus the MLX-only
-        // SANA-Sprint distill all stay on the Python torch worker. (chroma / kolors / sensenova ARE
-        // candle-routed now — sc-5484 / sc-5576 — for txt2img; the FLUX.2-klein `_kv` / `_true_v2` weight
-        // variants are too — sc-7459 — see the dedicated test below. `bernini_image` is now candle-routed
-        // off-Mac too — sc-10996. Base `sana_1600m` is candle-routed off-Mac too — sc-11780 — see
-        // `sana_candle_txt2img_routes_to_candle` below; only the Sprint distill stays MLX-only.)
-        for model in ["sana_sprint_1600m", "z_image_edit", "qwen_image_edit"] {
+        // The still-unwired weight/shape variants of wired families (edit ids) plus a genuinely
+        // txt2img-torch-only image id (`pulid_flux_dev` — its only candle lane is the bespoke
+        // character-reference path, so a PLAIN txt2img prompt has no candle route) all stay on the Python
+        // torch worker. (chroma / kolors / sensenova ARE candle-routed now — sc-5484 / sc-5576 — for
+        // txt2img; the FLUX.2-klein `_kv` / `_true_v2` weight variants are too — sc-7459 — see the
+        // dedicated test below. `bernini_image` is now candle-routed off-Mac too — sc-10996. Base
+        // `sana_1600m` AND the Sprint distill `sana_sprint_1600m` are candle-routed off-Mac too —
+        // sc-11780 / sc-11781 — see `sana_candle_txt2img_routes_to_candle` below.)
+        for model in ["pulid_flux_dev", "z_image_edit", "qwen_image_edit"] {
             assert!(
                 !image_request_candle_eligible(model, &object(json!({ "prompt": "p" }))),
                 "{model} must fall back to the Python worker"
@@ -3679,33 +3681,29 @@ mod candle_routing_tests {
     fn sana_candle_txt2img_routes_to_candle() {
         // sc-11780 (epic 8485): base `sana_1600m` plain txt2img rides the candle lane (the
         // `candle-gen-sana` provider, candle-gen #495 — the whole `Efficient-Large-Model/
-        // Sana_1600M_1024px_diffusers` snapshot). Pure txt2img: any conditioning / LoRA / quant shape
-        // still defers to the Python torch worker (the candle base path advertises neither adapters nor
-        // quant). SANA-Sprint stays MLX-only.
-        assert!(
-            image_request_candle_eligible("sana_1600m", &object(json!({ "prompt": "a red fox" }))),
-            "base sana_1600m plain txt2img must be candle-eligible (sc-11780)"
-        );
-        for payload in [
-            json!({ "prompt": "p", "mode": "edit_image", "sourceAssetId": "a" }),
-            json!({ "prompt": "p", "referenceAssetId": "a" }),
-            json!({ "prompt": "p", "maskAssetId": "a" }),
-            json!({ "prompt": "p", "loras": [{ "path": "x", "weight": 0.8 }] }),
-            json!({ "prompt": "p", "advanced": { "mlxQuantize": 4 } }),
-        ] {
+        // Sana_1600M_1024px_diffusers` snapshot). sc-11781: the CFG-free SANA-Sprint distill
+        // `sana_sprint_1600m` rides it too (the `candle-gen-sana` Sprint pipeline, candle-gen #498 — the
+        // whole `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` snapshot). Pure txt2img on BOTH:
+        // any conditioning / LoRA / quant shape still defers to the Python torch worker (neither candle
+        // base path advertises adapters or quant — the Sprint adapter rejects all three).
+        for model in ["sana_1600m", "sana_sprint_1600m"] {
             assert!(
-                !image_request_candle_eligible("sana_1600m", &object(payload.clone())),
-                "sana_1600m conditioning/adapter/quant shape must fall back to torch: {payload}"
+                image_request_candle_eligible(model, &object(json!({ "prompt": "a red fox" }))),
+                "{model} plain txt2img must be candle-eligible (sc-11780 / sc-11781)"
             );
+            for payload in [
+                json!({ "prompt": "p", "mode": "edit_image", "sourceAssetId": "a" }),
+                json!({ "prompt": "p", "referenceAssetId": "a" }),
+                json!({ "prompt": "p", "maskAssetId": "a" }),
+                json!({ "prompt": "p", "loras": [{ "path": "x", "weight": 0.8 }] }),
+                json!({ "prompt": "p", "advanced": { "mlxQuantize": 4 } }),
+            ] {
+                assert!(
+                    !image_request_candle_eligible(model, &object(payload.clone())),
+                    "{model} conditioning/adapter/quant shape must fall back to torch: {payload}"
+                );
+            }
         }
-        // SANA-Sprint has no candle provider — even plain txt2img stays on MLX/torch.
-        assert!(
-            !image_request_candle_eligible(
-                "sana_sprint_1600m",
-                &object(json!({ "prompt": "a red fox" }))
-            ),
-            "sana_sprint_1600m stays MLX-only (no candle provider)"
-        );
     }
 
     #[test]
@@ -4479,8 +4477,12 @@ mod candle_routing_tests {
             "bernini_image",
             // sc-11780 (epic 8485): base `sana_1600m` plain txt2img rides the candle lane now (the
             // `candle-gen-sana` provider, candle-gen #495). Pure txt2img — its conditioning/adapter/quant
-            // refusal is asserted just below. (SANA-Sprint stays MLX-only, candle_routed=false.)
+            // refusal is asserted just below.
             "sana_1600m",
+            // sc-11781 (epic 8485): the CFG-free SANA-Sprint distill `sana_sprint_1600m` rides the candle
+            // lane too (the `candle-gen-sana` Sprint pipeline, candle-gen #498). Pure txt2img (1–4 step
+            // SCM/TrigFlow) — the Sprint adapter rejects quant / LoRA / control, so those defer to torch.
+            "sana_sprint_1600m",
         ] {
             assert!(
                 worker_supports_job(
@@ -4490,13 +4492,13 @@ mod candle_routing_tests {
                 "candle worker should claim {model} plain txt2img"
             );
         }
-        // Refuses a family with no candle provider (`sana_sprint_1600m` — the CFG-free SANA-Sprint distill
-        // is MLX-only, candle_routed=false), an adapter shape on the txt2img-only SANA base (candle SANA
-        // advertises neither quant nor LoRA — sc-11780), and a conditioning shape on a wired family — all
-        // defer to torch.
+        // Refuses a genuinely txt2img-torch-only image id (`pulid_flux_dev` — its only candle lane is the
+        // bespoke character-reference path, so a PLAIN txt2img prompt has no candle route, candle_routed=
+        // false), an adapter shape on the txt2img-only SANA base (candle SANA advertises neither quant nor
+        // LoRA — sc-11780/sc-11781), and a conditioning shape on a wired family — all defer to torch.
         assert!(!worker_supports_job(
             &candle,
-            &image_generate_job(json!({ "model": "sana_sprint_1600m", "prompt": "p" }))
+            &image_generate_job(json!({ "model": "pulid_flux_dev", "prompt": "p" }))
         ));
         assert!(
             !worker_supports_job(

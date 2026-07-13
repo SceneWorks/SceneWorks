@@ -601,6 +601,17 @@ const IDEOGRAM_BF16_REPO: &str = "SceneWorks/ideogram-4";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const SANA_CANDLE_DIFFUSERS_REPO: &str = "Efficient-Large-Model/Sana_1600M_1024px_diffusers";
 
+/// The whole-repo `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` HF snapshot the candle
+/// SANA-Sprint lane loads (sc-11781, epic 8485). The `candle-gen-sana` Sprint pipeline reads the same
+/// diffusers-layout tree (`transformer/` Sprint Linear-DiT + guidance embedder + `vae/` + `text_encoder/`)
+/// as base SANA, so the off-Mac lane resolves this repo's snapshot root — NOT the MLX-packed
+/// `SceneWorks/Sana_Sprint_1.6B_1024px_mlx` turnkey (the `MODEL_TABLE` `default_repo`, which the macOS/MLX
+/// path loads) and NOT a `q4/q8/bf16` tier subdir. Matches the manifest's windows/linux whole-repo
+/// download entry.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const SANA_SPRINT_CANDLE_DIFFUSERS_REPO: &str =
+    "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers";
+
 /// Resolve the weights snapshot directory: an explicit `modelPath` dir wins, else the
 /// HuggingFace cache snapshot for the model repo. `None` when the model is not a known
 /// engine family or its snapshot is absent. Available on the candle lane too (sc-5501): the
@@ -717,6 +728,20 @@ pub(crate) fn resolve_weights_dir(
         return Ok(huggingface_snapshot_dir(
             &settings.data_dir,
             SANA_CANDLE_DIFFUSERS_REPO,
+        ));
+    }
+    // SANA-Sprint 1.6B off-Mac (candle, sc-11781, epic 8485): identical treatment to base SANA above —
+    // the `candle-gen-sana` Sprint pipeline loads the WHOLE `Efficient-Large-Model/
+    // Sana_Sprint_1.6B_1024px_diffusers` HF snapshot (same diffusers layout: `transformer/` + `vae/` +
+    // `text_encoder/`), NOT the MLX-packed turnkey and NOT a `q4/q8/bf16` tier subdir. Resolve the
+    // diffusers repo's snapshot ROOT directly, BYPASSING the `STANDARD_TIER_MODELS` descent below
+    // (`sana_sprint_1600m` is registered there for the MLX turnkey, which would otherwise append a
+    // nonexistent `q4/`). macOS never compiles this branch (it keeps the MLX turnkey path).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if request.model == "sana_sprint_1600m" {
+        return Ok(huggingface_snapshot_dir(
+            &settings.data_dir,
+            SANA_SPRINT_CANDLE_DIFFUSERS_REPO,
         ));
     }
     // Catalog-wide quant-matrix models (sc-8513, epic 8506) ship as SceneWorks pre-quantized
@@ -3957,9 +3982,17 @@ fn is_candle_engine(model: &str) -> bool {
             // Sana_1600M_1024px_diffusers` diffusers snapshot (transformer/ + vae/ + text_encoder/) via the
             // candle-sana branch in `resolve_weights_dir` — NOT the MLX-packed turnkey, NOT a tier subdir.
             // Pure txt2img (20 steps / guidance 4.5 + negative prompt); no edit/reference/control/LoRA/quant
-            // candle path (those defer to torch via `image_request_candle_eligible`). SANA-Sprint stays
-            // MLX-only (the CFG-free distill is not ported on candle).
+            // candle path (those defer to torch via `image_request_candle_eligible`).
             | "sana_1600m"
+            // SANA-Sprint 1.6B (sc-11781, epic 8485): NVIDIA's CFG-free few-step distill of SANA rides the
+            // generic candle lane too (the `candle-gen-sana` Sprint pipeline, candle-gen #498 — the off-Mac
+            // sibling of `mlx-gen-sana`'s Sprint id). `generate_candle_stream` resolves the whole
+            // `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` diffusers snapshot (transformer/ +
+            // vae/ + text_encoder/) via the candle-sana branch in `resolve_weights_dir` — NOT the MLX-packed
+            // turnkey, NOT a tier subdir. Pure txt2img, CFG-free 1–4 step SCM/TrigFlow (guidance embedded,
+            // no negative-prompt second pass); no edit/reference/control/LoRA/quant candle path (the Sprint
+            // adapter rejects those — they defer to torch via `image_request_candle_eligible`).
+            | "sana_sprint_1600m"
             // Anima 2B base / aesthetic / turbo (sc-10676, epic 10512): the candle port (sc-10525,
             // GPU-validated sc-10625) rides the generic candle txt2img lane off-Mac. `generate_candle_\
             // stream` dense-loads bf16 from the raw `circlestone-labs/Anima` split_files/ tree (no
@@ -4000,8 +4033,9 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "krea_2_turbo" | "krea_2_raw" => "candle_krea",
         // Stable Diffusion 3.5 (sc-7880): Large / Large Turbo / Medium share the candle SD3.5 engine.
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => "candle_sd3",
-        // SANA 1600M (sc-11780): the off-Mac sibling of the `mlx_sana` label.
-        "sana_1600m" => "candle_sana",
+        // SANA 1600M + SANA-Sprint (sc-11780 / sc-11781): both share the candle SANA engine (the off-Mac
+        // sibling of the `mlx_sana` label).
+        "sana_1600m" | "sana_sprint_1600m" => "candle_sana",
         // Anima 2B (sc-10676): base / aesthetic / turbo share the candle Anima engine (the off-Mac
         // sibling of the `mlx_anima` label).
         "anima_base" | "anima_aesthetic" | "anima_turbo" => "candle_anima",
