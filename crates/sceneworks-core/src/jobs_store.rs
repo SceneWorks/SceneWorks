@@ -4233,17 +4233,41 @@ mod candle_routing_tests {
             "model": "z_image",
             "advanced": { "poses": [{ "keypoints": [] }] }
         }))));
-        // `z_image_turbo` img2img is NOT yet candle-eligible — its registry descriptor is txt2img-only
-        // (img2img is a bespoke `edit_image` stream); the tile shape (referenceAssetId + advanced.strength,
-        // no `character_image`/referenceStrength → not identity-init) has no candle lane until sc-11783.
+    }
+
+    #[test]
+    fn zimage_turbo_img2img_routes_to_candle() {
+        // sc-11783 (epic 8588): `z_image_turbo` in a non-edit mode with a `referenceAssetId` is now the
+        // REGISTRY img2img path too — the candle Turbo generator advertises `Reference` and blends the
+        // reference into the CFG-free denoise. Branched AFTER identity/edit/control, before the txt2img gate.
+        let img2img = json!({
+            "model": "z_image_turbo",
+            "referenceAssetId": "asset_1",
+            "advanced": { "strength": 0.6 }
+        });
         assert!(
-            !image_job_is_candle_eligible(&image_generate_job(json!({
-                "model": "z_image_turbo",
-                "referenceAssetId": "asset_1",
-                "advanced": { "strength": 0.6 }
-            }))),
-            "z_image_turbo img2img needs the candle engine (sc-11783), not yet eligible"
+            image_job_is_candle_eligible(&image_generate_job(img2img.clone())),
+            "z_image_turbo img2img (referenceAssetId, non-edit) must be candle-eligible (sc-11783)"
         );
+        // Precedence: the identity-init shape (`character_image` mode + `referenceStrength`) stays on the
+        // `zimage_identity` lane, NOT this img2img branch (both reach the candle worker, different lanes).
+        assert!(image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "z_image_turbo",
+            "mode": "character_image",
+            "referenceAssetId": "asset_1",
+            "advanced": { "referenceStrength": 0.7 }
+        }))));
+        // The `edit_image` masked-edit shape is the bespoke `ZimageEdit` stream, not this img2img branch.
+        assert!(!zimage_img2img_candle_eligible(&object(json!({
+            "model": "z_image_turbo",
+            "mode": "edit_image",
+            "referenceAssetId": "asset_1"
+        }))));
+        // A pose job stays on the Turbo control lane (poses branch first), not img2img.
+        assert!(image_job_is_candle_eligible(&image_generate_job(json!({
+            "model": "z_image_turbo",
+            "advanced": { "poses": [{ "keypoints": [] }] }
+        }))));
     }
 
     #[test]
