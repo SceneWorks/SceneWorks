@@ -351,7 +351,13 @@ export function VideoStudio() {
   );
   const showSamplerPicker = samplerOptions.length > 1;
   const showSchedulerPicker = schedulerOptions.length > 1;
+  // Guard on a resolved model (sc-11962): before the video catalog loads `samplerOptions`
+  // falls back to ["default"], so an un-guarded snap would revert a restored non-default
+  // sampler during the restart-restore window and never recover once the catalog lands.
   useEffect(() => {
+    if (!selectedModel) {
+      return;
+    }
     if (samplerOptions.includes(sampler)) {
       return;
     }
@@ -361,6 +367,9 @@ export function VideoStudio() {
     setSampler(preferred);
   }, [samplerOptions, sampler, selectedModel]);
   useEffect(() => {
+    if (!selectedModel) {
+      return;
+    }
     if (schedulerOptions.includes(scheduler)) {
       return;
     }
@@ -588,7 +597,11 @@ export function VideoStudio() {
     videoConditioningStrength,
     bridgeRightVideoConditioningStrength,
     fitMode,
-  });
+  },
+  // Suppress the live writer until the video catalog has loaded (sc-11962), so a transient
+  // defaults-reset during the restart-restore/settle window can't overwrite the restored
+  // snapshot before the async catalogs settle.
+  videoModels.length > 0);
 
   useEffect(() => {
     if (mode !== "replace_person") {

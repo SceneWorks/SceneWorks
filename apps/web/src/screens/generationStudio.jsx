@@ -139,7 +139,14 @@ export function useGenerationStudio({
   const [showIncompatibleLoras, setShowIncompatibleLoras] = useState(initialShowIncompatibleLoras);
 
   // Snap the model back into range when the catalog changes out from under it.
+  // Guard on a loaded catalog (sc-11962): on the first mount after a restart the model
+  // catalog is still resolving (empty), and an empty `models` would otherwise snap the
+  // restored model to the fallback — permanently, since the fallback IS in the catalog
+  // once it lands. Only snap once there is a real catalog to validate against.
   useEffect(() => {
+    if (!models.length) {
+      return;
+    }
     if (!models.some((item) => item.id === model)) {
       setModel(models[0]?.id ?? fallbackModelId);
     }
@@ -195,23 +202,35 @@ export function useGenerationStudio({
 
   // An explicitly chosen preset that drops out of the available set falls back to
   // the first available preset (or None) rather than showing stale config.
+  // Guard on loaded catalogs (sc-11962): `availablePresets` filters on both the preset
+  // catalog AND the resolved model, so an empty `presets`/`models` during the
+  // restart-restore window would strip the restored base preset to None. Wait until
+  // there is a real catalog to validate the restored id against.
   useEffect(() => {
+    if (!presets.length || !models.length) {
+      return;
+    }
     if (!selectedPresetId || selectedPresetId === noPresetId) {
       return;
     }
     if (!selectedPreset) {
       setSelectedPresetId(availablePresets[0]?.id ?? noPresetId);
     }
-  }, [availablePresets, selectedPresetId, selectedPreset]);
+  }, [presets.length, models.length, availablePresets, selectedPresetId, selectedPreset]);
 
   // Prune stacked general presets that leave the catalog (archived/deleted). Unlike the
   // base slot this drops silently — a stack has no single "fall back to the first" notion.
+  // Guard on a loaded preset catalog (sc-11962) so the restored stack isn't pruned to
+  // empty while the catalog is still resolving after a restart.
   useEffect(() => {
+    if (!presets.length) {
+      return;
+    }
     setGeneralStackIds((ids) => {
       const next = ids.filter((id) => availableGeneralPresets.some((preset) => preset.id === id));
       return next.length === ids.length ? ids : next;
     });
-  }, [availableGeneralKey]);
+  }, [presets.length, availableGeneralKey]);
 
   // Add/remove a general preset from the stack. Toggling never touches the model, mode, or
   // the LoRA picker — general presets carry none of those. Composition into the prompt is
@@ -299,9 +318,17 @@ export function useGenerationStudio({
         : `No installed LoRAs match ${selectedModel.name ?? selectedModel.id}.`;
 
   // Drop selections that fall out of the compatible set (model/filter change).
+  // Guard on loaded inputs (sc-11962): `compatibleLoras` is empty both when the LoRA
+  // catalog hasn't resolved yet AND when the model hasn't (loraMatchesModel needs a
+  // model). Running the filter during that restart-restore window would strip the
+  // restored LoRA ids permanently. Only prune once both the LoRA catalog and the model
+  // are present, so a genuine model/filter change still drops incompatible selections.
   useEffect(() => {
+    if (!loras.length || !selectedModel) {
+      return;
+    }
     setSelectedLoraIds((ids) => ids.filter((id) => compatibleLoras.some((lora) => lora.id === id)));
-  }, [compatibleLoraKey]);
+  }, [loras.length, selectedModel, compatibleLoraKey]);
   // Auto-open the advanced panel when an incompatible LoRA is selected so the
   // generate-blocking warning is visible.
   useEffect(() => {
@@ -350,8 +377,16 @@ export function useGenerationStudio({
   const skipPresetLoraSeedOnHydrate = useRef(initialPresetId != null && initialPresetId !== noPresetId);
   useEffect(() => {
     if (skipPresetLoraSeedOnHydrate.current) {
+      // On the first mount after a restart the preset catalog is still resolving, so the
+      // restored preset hasn't materialized yet (selectedPreset is null). Wait for it —
+      // consuming the one-shot on the empty-catalog pass would make the preset re-SEED
+      // (instead of adopt) its LoRAs once it lands, double-counting the restored ones
+      // (sc-11962). Only decide once the preset has actually resolved.
+      if (!selectedPreset) {
+        return;
+      }
       skipPresetLoraSeedOnHydrate.current = false;
-      if (selectedPreset && selectedPreset.id === initialPresetId) {
+      if (selectedPreset.id === initialPresetId) {
         // The restored selection already reflects this preset; adopt it without re-seeding.
         // addedIds is left empty so a post-reload deselect doesn't strip LoRAs we can't prove
         // the preset added (the user removes them by hand instead).
