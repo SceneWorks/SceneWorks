@@ -986,10 +986,22 @@ export function ImageStudio() {
   }, [structuredActive, caption]);
   // Reset the reference tuning to the selected model's declared defaults whenever the
   // model changes, so InstantID starts at its tuned 0.8/0.8 and Kolors at 0.6, and the
-  // view angle never carries over to a model that doesn't support it. Skip the mount
-  // run when restoring a snapshot so the user's saved tuning survives.
-  const skipReferenceTuningReset = useRef(saved.ipAdapterScale != null);
+  // view angle never carries over to a model that doesn't support it.
+  //
+  // Tracks the PREVIOUS model VALUE rather than a one-shot bool (sc-11962): a one-shot is
+  // consumed on the mount pass, so a later async model "snap" (catalog arriving) would be
+  // mistaken for a user model change and reset the restored tuning. Keying on the actual
+  // value means an async catalog that leaves the model unchanged never fires the reset.
+  // Seeded from the model when restoring (so the restored tuning survives mount) and null
+  // otherwise (so a fresh mount still gets the model's declared defaults). `skip*` stays
+  // for the recipe path, which sets the model AND the tuning together.
+  const skipReferenceTuningReset = useRef(false);
+  const referenceTuningModel = useRef(saved.ipAdapterScale != null ? model : null);
   useEffect(() => {
+    if (referenceTuningModel.current === model) {
+      return;
+    }
+    referenceTuningModel.current = model;
     if (skipReferenceTuningReset.current) {
       skipReferenceTuningReset.current = false;
       return;
@@ -1170,13 +1182,22 @@ export function ImageStudio() {
   // Snap the sampler / scheduler back to the model's declared default when the
   // current value is no longer in the menu (e.g. user switched to a sealed
   // model whose only option is "default"). Mirrors the resolution-snap effect.
+  // Guard on a resolved model (sc-11962): before the model catalog loads,
+  // `samplerOptions` falls back to ["default"], so an un-guarded snap would revert a
+  // restored non-default sampler during the restart-restore window and never recover.
   useEffect(() => {
+    if (!selectedModel) {
+      return;
+    }
     if (samplerOptions.includes(sampler)) {
       return;
     }
     setSampler(preferredOption(samplerDefaultFromModel(selectedModel), samplerOptions));
   }, [samplerOptions, sampler, selectedModel]);
   useEffect(() => {
+    if (!selectedModel) {
+      return;
+    }
     if (schedulerOptions.includes(scheduler)) {
       return;
     }
@@ -1186,6 +1207,9 @@ export function ImageStudio() {
   // the active backend for this model (e.g. switching off the SDXL family drops
   // CFG++) — the N3 guard at the UI layer, so an unsupported method is never sent.
   useEffect(() => {
+    if (!selectedModel) {
+      return;
+    }
     if (guidanceMethodOptions.includes(guidanceMethod)) {
       return;
     }
@@ -1196,7 +1220,13 @@ export function ImageStudio() {
   // Keep the selected resolution valid for the current model's buckets. Switching
   // to a model whose options exclude the current value snaps to its default (or
   // 1024x1024, then the first option) rather than leaving a stale, unselectable value.
+  // Guard on a resolved model (sc-11962): before the catalog loads `resolutionOptions`
+  // falls back to DEFAULT_RESOLUTION_OPTIONS, so an un-guarded snap would revert a
+  // restored model-specific resolution (e.g. 1536x1536) during restart-restore.
   useEffect(() => {
+    if (!selectedModel) {
+      return;
+    }
     if (resolutionOptions.includes(resolution)) {
       return;
     }
@@ -1725,7 +1755,12 @@ export function ImageStudio() {
     bf16Precision,
     usePid,
     pidTarget,
-  });
+  },
+  // Suppress the live writer until the model catalog has loaded (sc-11962), so a
+  // transient defaults-reset during the restart-restore/settle window can't be
+  // persisted over the restored snapshot. When there are no models the studio shows
+  // the availability gate (no editable form), so nothing meaningful is lost by waiting.
+  imageModels.length > 0);
 
   // Each stacked run carries its already-resolved completed assets + the
   // expected count, which the WorkerProgressCard image-grid variant uses to
