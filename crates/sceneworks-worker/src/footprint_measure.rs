@@ -518,7 +518,7 @@ fn footprint_qwen_image_q8() {
 fn fit_gate_ab_illustrious_q8() {
     use crate::mlx_fit_gate::{
         apply_residency_policy, predicted_peak_gb, predicted_sequential_peak_gb,
-        sum_safetensors_bytes, sum_text_encoder_bytes, MLX_MEMORY_CAP_ENV,
+        resolve_text_encoder_bytes, sum_safetensors_bytes, MLX_MEMORY_CAP_ENV,
     };
     use gen_core::OffloadPolicy;
 
@@ -538,8 +538,19 @@ fn fit_gate_ab_illustrious_q8() {
     );
     // Illustrious loads on the sequential-capable `sdxl` engine, so all three outcomes are reachable.
     let engine = "sdxl";
+    let make_spec = || LoadSpec::new(WeightsSource::Dir(dir.to_path_buf())).with_quant(Quant::Q8);
     let disk = sum_safetensors_bytes(&dir);
-    let te = sum_text_encoder_bytes(&dir);
+    // Derive `te` through the SAME footprint-preferred path the gate uses
+    // (`resolve_text_encoder_bytes`), NOT the bare `text_encoder*` subdir scan. If sdxl's declared
+    // per-component footprint TE differs from the subdir sum, the gate's internal staged peak would
+    // shift off this test's midpoint `cap_seq` window (~0.7 GiB each side) and the Sequential assertion
+    // would flake. Querying the footprint here keeps the derived caps exactly on the gate's staged peak
+    // (sc-10863).
+    let footprint_te = gen_core::footprint(engine, &make_spec())
+        .ok()
+        .flatten()
+        .map(|fp| fp.text_encoder);
+    let te = resolve_text_encoder_bytes(footprint_te, &dir);
     let resident_peak = predicted_peak_gb(disk).expect("weights measured");
     let staged_peak = predicted_sequential_peak_gb(disk, te).expect("weights measured");
     let gib = 1024.0 * 1024.0 * 1024.0;
@@ -553,7 +564,6 @@ fn fit_gate_ab_illustrious_q8() {
         te as f64 / gib,
     );
 
-    let make_spec = || LoadSpec::new(WeightsSource::Dir(dir.to_path_buf())).with_quant(Quant::Q8);
     let set_cap = |gb: f64| std::env::set_var(MLX_MEMORY_CAP_ENV, format!("{gb}"));
 
     // (C) cap BELOW the staged peak ⇒ reject even one-component-at-a-time, with the actionable message.

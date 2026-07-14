@@ -95,20 +95,29 @@ pub(crate) const MLX_MEMORY_CAP_ENV: &str = "SCENEWORKS_MLX_MEMORY_CAP_GB";
 /// resolution (the generator is cached across resolutions), so a per-request `f(resolution)` term is
 /// not threadable at this seam. A conservative CONSTANT is therefore the right structure.
 ///
-/// 18 GiB = the max measured transient at 1024² (14.04, illustrious q8 & lens q4) + ~4 GiB macOS/app
-/// reserve. This replaces the provisional 10.0, which UNDER-predicted 3 of the 4 measured tiers
-/// (illustrious 15.0<18.8, lens 27.7<30.5, lens-turbo 38.4<75.6) — i.e. was a latent SIGKILL risk on
-/// Macs sized between the predicted and the real peak. All three resident≈disk tiers are now covered
-/// with margin without over-rejecting a model that fits (illustrious q8: 5.01+18=23.0 still fits a
-/// 24 GiB Mac, where its real 18.8 GiB peak + OS does too).
+/// 18 GiB = the max COMMON-CASE transient at 1024² (14.04, illustrious q8 & lens q4 — the three
+/// resident≈disk tiers; lens-turbo's larger 29.88 transient is a separate architecture outlier, below)
+/// plus a ~4 GiB macOS/app reserve. This replaces the provisional 10.0, which UNDER-predicted 3 of the
+/// 4 measured tiers (illustrious 15.0<18.8, lens 27.7<30.5, lens-turbo 38.4<75.6) — i.e. was a latent
+/// SIGKILL risk on Macs sized between the predicted and the real peak. All three resident≈disk tiers
+/// are now covered with margin without over-rejecting a model that fits (illustrious q8: 5.01+18=23.0
+/// still fits a 24 GiB Mac, where its real 18.8 GiB peak + OS does too).
 ///
-/// NOT covered by this constant (surfaced sc-10863, tracked follow-ups — see the story): (1) IN-MEMORY
-/// WEIGHT EXPANSION — lens-turbo bf16's headroom is 47 because its mxfp4-on-disk gpt-oss text encoder
-/// loads to bf16 (resident 45.67 = 1.61× disk 28.43), so `sum_safetensors_bytes` under-counts the
-/// in-memory weights and the gate under-predicts this tier REGARDLESS of headroom (pre-existing: 10
-/// under-predicted it by 37 GiB, 18 by 33). A blanket bf16 expansion factor can't fix it (a bf16 tier
-/// whose encoder is bf16-on-disk would then be over-rejected ~1.6×); the real fix needs the weight-byte
-/// input to reflect in-memory size, per family, backed by bf16 measurements across models. (2) Output
+/// NOT covered by this constant (surfaced sc-10863, tracked follow-ups — see the story): (1) the
+/// lens-turbo bf16 OUTLIER, whose 47.12 GiB headroom (peak 75.55 − disk 28.43) is NOT one effect but
+/// TWO that must be modeled together. It DECOMPOSES as (a) 17.24 GiB IN-MEMORY WEIGHT EXPANSION
+/// (resident 45.67 − disk 28.43) — its mxfp4-on-disk gpt-oss text encoder expands loading to bf16
+/// (45.67 = 1.61× disk 28.43), so `sum_safetensors_bytes` under-counts the in-memory weights — PLUS
+/// (b) a 29.88 GiB ACTIVATION TRANSIENT (peak 75.55 − resident 45.67), which is architecture-bound (the
+/// large gpt-oss encoder's activations) and ~2× the ~14 GiB the other three tiers show at the same
+/// 1024². HEADROOM=18 covers the common-case transient (~14) + ~4 GiB OS/app reserve, but UNDER-predicts
+/// this class by ~29 GiB even AFTER a weight-byte correction — because the 29.88 transient ALONE exceeds
+/// 18 (75.55 − (28.43 + 18) = 29.12; the old provisional 10 under-predicted it by ~37: 75.55 −
+/// (28.43 + 10) = 37.12). So correcting only the weight bytes is INSUFFICIENT: both the in-memory weight
+/// size AND the outsized transient must be modeled for these tiers. (A blanket bf16 expansion factor
+/// also can't fix the weight half — a bf16 tier whose encoder is bf16-on-disk would then be
+/// over-rejected ~1.6× — so that fix needs per-family in-memory weight sizing plus a per-architecture
+/// transient term, backed by bf16 measurements across models.) Tracked in sc-11924. (2) Output
 /// RESOLUTION > 1024² grows the VAE-decode transient past 14 GiB — all four points are 1024², so 18 is
 /// a 1024²-worst-case; a higher-res campaign is a follow-up.
 const HEADROOM_GB: f64 = 18.0;
