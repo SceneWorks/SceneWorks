@@ -42,6 +42,43 @@ function typeLabel(value) {
   return characterTypes.find(([id]) => id === value)?.[1] ?? "Person";
 }
 
+// sc-11965: tell an untouched draft (safe to re-sync from the server) from an
+// in-progress edit (must be preserved) by comparing the current editable state to
+// the last snapshot we seeded from the server. Comparison is by value (not object
+// identity, which a background/SSE refetch always breaks) and whole-object: the
+// draft counts as clean only when every field still matches the last seed, so any
+// one edited field makes the entire draft compare dirty.
+function draftsEqual(a, b) {
+  return (
+    (a?.name ?? "") === (b?.name ?? "") &&
+    (a?.type ?? "") === (b?.type ?? "") &&
+    (a?.description ?? "") === (b?.description ?? "")
+  );
+}
+
+function loraEditsEqual(a, b) {
+  const aKeys = Object.keys(a ?? {});
+  const bKeys = Object.keys(b ?? {});
+  if (aKeys.length !== bKeys.length) {
+    return false;
+  }
+  return aKeys.every((key) => {
+    const left = a[key];
+    const right = b?.[key];
+    if (!left || !right) {
+      return left === right;
+    }
+    return (
+      (left.name ?? "") === (right.name ?? "") &&
+      (left.triggerWords ?? "") === (right.triggerWords ?? "") &&
+      // The weight input hands back a string; the seed is a number. Compare as text.
+      String(left.defaultWeight ?? "") === String(right.defaultWeight ?? "") &&
+      (left.families ?? "") === (right.families ?? "") &&
+      (left.scope ?? "") === (right.scope ?? "")
+    );
+  });
+}
+
 export function CharacterStudio() {
   const {
     activeProject,
@@ -256,25 +293,73 @@ export function CharacterStudio() {
     }
   }, [characters, selectedCharacter]);
 
+  // Mirror the editable drafts into refs so the reseed effect can read the latest
+  // committed values without listing them as deps (which would re-run it on every
+  // keystroke). Reading these refs only ever happens inside the effect, after commit.
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const loraEditsRef = useRef(loraEdits);
+  loraEditsRef.current = loraEdits;
+  // The last server snapshot we actually pushed into the drafts ({ id, draft,
+  // loraEdits }). Lets the effect tell a clean draft from a dirty one on a bump.
+  const lastSeededRef = useRef(null);
+
+  // Seed the editable draft / LoRA edits from the selected character. A genuine
+  // identity change (different id) always loads fresh. An `updatedAt` bump on the
+  // SAME character — a background/SSE refetch — re-syncs at object granularity, NOT
+  // per field: the whole draft is re-synced only while it is clean as a whole
+  // (name/type/description compared as a unit via draftsEqual), and the whole loraEdits
+  // map only while it is clean as a whole (loraEditsEqual over the entire map), so it
+  // never clobbers an in-progress, unsaved edit (sc-11965, "class B" clobber,
+  // independent of navigation). Because each check is whole-object, one dirty field
+  // holds its siblings too — a single edited field pins the entire draft (and one
+  // edited LoRA pins the entire loraEdits map) to the prior snapshot until saved.
+  // Reference-pick pruning stays unconditional since it only drops now-invalid ids, and
+  // the CharacterReferences panel keeps its own reference-pick guard (characterPanels.jsx:554).
   useEffect(() => {
     if (!selectedCharacter) {
       setDraft({ name: "", type: "person", description: "" });
+      lastSeededRef.current = null;
       return;
     }
-    setDraft({
+    const serverDraft = {
       name: selectedCharacter.name ?? "",
       type: selectedCharacter.type ?? "person",
       description: selectedCharacter.description ?? "",
-    });
+    };
+    const serverLoraEdits = Object.fromEntries(
+      (selectedCharacter.loras ?? []).map((link) => [link.id, editableLora(link)]),
+    );
+    const seeded = lastSeededRef.current;
+    const identityChanged = !seeded || seeded.id !== selectedCharacter.id;
+
+    let seededDraft = seeded?.draft;
+    if (identityChanged || draftsEqual(draftRef.current, seeded.draft)) {
+      setDraft(serverDraft);
+      seededDraft = serverDraft;
+    }
+
+    let seededLoraEdits = seeded?.loraEdits;
+    if (identityChanged || loraEditsEqual(loraEditsRef.current, seeded.loraEdits)) {
+      setLoraEdits(serverLoraEdits);
+      seededLoraEdits = serverLoraEdits;
+    }
+
     setSelectedReferenceIds((ids) =>
       ids.filter((id) => selectedCharacter.approvedReferences?.some((reference) => reference.assetId === id)),
-    );
-    setLoraEdits(
-      Object.fromEntries((selectedCharacter.loras ?? []).map((link) => [link.id, editableLora(link)])),
     );
     if (testLookId && !selectedCharacter.looks?.some((look) => look.id === testLookId)) {
       setTestLookId("");
     }
+
+    // Record what we last seeded so the next bump can classify clean vs dirty. Whatever
+    // we kept (a dirty draft or a dirty loraEdits map, each held as a whole) stays pinned
+    // to its prior snapshot, not the newer server value.
+    lastSeededRef.current = {
+      id: selectedCharacter.id,
+      draft: seededDraft ?? serverDraft,
+      loraEdits: seededLoraEdits ?? serverLoraEdits,
+    };
   }, [selectedCharacter?.id, selectedCharacter?.updatedAt]);
 
   useEffect(() => {

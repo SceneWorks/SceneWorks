@@ -2013,4 +2013,158 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Timeline not found");
   });
 
+  // sc-11965: a background/SSE refresh that bumps `updatedAt` on the SAME character
+  // must not re-seed the lifted `draft`/`loraEdits` state from the server record and
+  // clobber an in-progress, unsaved edit ("class B" clobber, independent of nav).
+  const characterStudioContext = (characters, overrides = {}) => ({
+    activeProject: { id: "project-1", name: "Noir" },
+    addCharacterReference: () => {},
+    archiveCharacter: () => {},
+    assets: [],
+    attachCharacterLora: () => {},
+    characters,
+    createCharacter: () => {},
+    createCharacterLook: () => {},
+    createCharacterTestJob: () => {},
+    deleteAsset: () => {},
+    deleteCharacterLook: () => {},
+    detachCharacterLora: () => {},
+    imageModels: [],
+    latestImageAssets: [],
+    loras: [],
+    setPreviewAsset: () => {},
+    sendCharacterToImage: () => {},
+    sendCharacterToVideo: () => {},
+    purgeAsset: () => {},
+    removeCharacterReference: () => {},
+    updateAssetStatus: () => {},
+    updateCharacter: () => {},
+    updateCharacterLook: () => {},
+    updateCharacterLora: () => {},
+    updateCharacterReference: () => {},
+    ...overrides,
+  });
+
+  it("keeps an in-progress character draft when a background refresh bumps updatedAt (sc-11965)", async () => {
+    const baseChar = {
+      id: "char-1",
+      name: "Mira",
+      type: "person",
+      description: "",
+      references: [],
+      approvedReferences: [],
+      looks: [],
+      loras: [],
+      updatedAt: "t1",
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(characterStudioContext([{ ...baseChar }]), <CharacterStudio />));
+    });
+
+    // Edit the lifted draft (name + notes) without saving.
+    await changeField(field(container, "Name"), "Mira Vex");
+    await changeField(field(container, "Notes"), "work in progress");
+    expect(field(container, "Name").value).toBe("Mira Vex");
+
+    // A background/SSE refresh bumps updatedAt on the SAME character id (server record
+    // unchanged). The old effect re-seeded from the server and wiped the edits.
+    await act(async () => {
+      root.render(withAppContext(characterStudioContext([{ ...baseChar, updatedAt: "t2" }]), <CharacterStudio />));
+    });
+
+    expect(field(container, "Name").value).toBe("Mira Vex");
+    expect(field(container, "Notes").value).toBe("work in progress");
+  });
+
+  it("keeps in-progress LoRA weight edits when a background refresh bumps updatedAt (sc-11965)", async () => {
+    const baseChar = {
+      id: "char-1",
+      name: "Mira",
+      type: "person",
+      description: "",
+      references: [],
+      approvedReferences: [],
+      looks: [],
+      loras: [{ id: "lk1", name: "Kelsie", triggerWords: [], defaultWeight: 0.8, scope: "project" }],
+      updatedAt: "t1",
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(characterStudioContext([{ ...baseChar }]), <CharacterStudio />));
+    });
+
+    const weightInput = () => document.body.querySelector(".lora-editor input[type='number']");
+    expect(weightInput().value).toBe("0.8");
+    await changeField(weightInput(), "1.5");
+    expect(weightInput().value).toBe("1.5");
+
+    // Background refresh bumps updatedAt; the server still holds the 0.8 weight.
+    await act(async () => {
+      root.render(
+        withAppContext(
+          characterStudioContext([{ ...baseChar, loras: [{ ...baseChar.loras[0] }], updatedAt: "t2" }]),
+          <CharacterStudio />,
+        ),
+      );
+    });
+
+    expect(weightInput().value).toBe("1.5");
+  });
+
+  it("loads a different character fresh on selection even with an unsaved draft (sc-11965)", async () => {
+    const characters = [
+      { id: "char-1", name: "Mira", type: "person", description: "", references: [], approvedReferences: [], looks: [], loras: [] },
+      { id: "char-2", name: "Dax", type: "person", description: "", references: [], approvedReferences: [], looks: [], loras: [] },
+    ];
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(characterStudioContext(characters), <CharacterStudio />));
+    });
+
+    // Dirty the char-1 draft, then switch identity via the compact selector.
+    await changeField(field(container, "Name"), "Mira Vex");
+    await act(async () => {
+      document.body.querySelector(".compact-selector-pill").click();
+    });
+    await act(async () => {
+      [...document.body.querySelectorAll(".compact-selector-item")].find((button) => button.textContent.includes("Dax")).click();
+    });
+
+    // An identity change always loads the selected character fresh (not the stale edit).
+    expect(field(container, "Name").value).toBe("Dax");
+  });
+
+  it("syncs an untouched character draft when a background refresh updates the server record (sc-11965)", async () => {
+    const baseChar = {
+      id: "char-1",
+      name: "Mira",
+      type: "person",
+      description: "",
+      references: [],
+      approvedReferences: [],
+      looks: [],
+      loras: [],
+      updatedAt: "t1",
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(withAppContext(characterStudioContext([{ ...baseChar }]), <CharacterStudio />));
+    });
+    expect(field(container, "Name").value).toBe("Mira");
+
+    // No local edits: an external change (bumped updatedAt) should still flow in.
+    await act(async () => {
+      root.render(
+        withAppContext(characterStudioContext([{ ...baseChar, name: "Mira Updated", updatedAt: "t2" }]), <CharacterStudio />),
+      );
+    });
+
+    expect(field(container, "Name").value).toBe("Mira Updated");
+  });
+
 });
