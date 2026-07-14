@@ -27,6 +27,7 @@ import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import { useAppStatic } from "../context/AppContext.js";
 import { qualityChoices } from "../jobTypes.js";
+import { appConfirm } from "../appConfirm.jsx";
 
 // The Workflow segment a preset editor offers, and how each choice persists.
 //
@@ -111,6 +112,19 @@ const GENERAL_ASPECT_RATIOS = [
 ];
 
 const scopeRank = { builtin: 0, global: 1, project: 2 };
+
+// Desktop-safe discard confirmation for the editor's DESTRUCTIVE in-screen transitions
+// (leave to the list, start/switch a preset, or the explicit Discard action) while the
+// form carries unsaved edits. Routed through appConfirm — window.confirm silently no-ops
+// inside the Tauri desktop WebView, so a raw confirm there would neither confirm nor
+// cancel and the guard would be dead on desktop (sc-11968 / sc-11969).
+const DISCARD_CONFIRM = {
+  title: "Discard changes?",
+  message: "This preset has unsaved changes that will be lost.",
+  confirmLabel: "Discard changes",
+  cancelLabel: "Keep editing",
+  tone: "danger",
+};
 
 // The `defaults` keys this editor renders. Everything else a preset carries —
 // upscale*, ipAdapterScale, controlnetScale, guidanceMethod, trueCfgScale, viewAngle,
@@ -646,24 +660,64 @@ export function PresetManagerScreen() {
     }
   }
 
+  // Guard a DESTRUCTIVE in-screen transition (leave to the list, start a new preset, or
+  // switch to a different preset) that would silently drop an in-progress edit. A clean
+  // form proceeds synchronously — the long-standing no-op path, so nothing that isn't
+  // genuinely dirty ever prompts — while a dirty edit confirms first via the desktop-safe
+  // appConfirm. Plain app navigation is deliberately NOT guarded here: keep-alive
+  // (sc-11959) leaves this screen mounted, so an edit survives a nav round trip untouched
+  // and a nav prompt would be misleading noise (sc-11969).
+  function guardDiscard(proceed) {
+    if (!dirty) {
+      proceed();
+      return;
+    }
+    appConfirm(DISCARD_CONFIRM).then((ok) => {
+      if (ok) {
+        proceed();
+      }
+    });
+  }
+
   function startNewPreset() {
-    setSelectedPresetId("");
-    setShowLoraPicker(false);
-    setAdvancedOpen(false);
-    setEditing(true);
+    guardDiscard(() => {
+      setSelectedPresetId("");
+      setShowLoraPicker(false);
+      setAdvancedOpen(false);
+      setEditing(true);
+    });
   }
 
   function editPreset(preset) {
-    setShowLoraPicker(false);
-    setAdvancedOpen(false);
-    setSelectedPresetId(preset.id);
-    setEditing(true);
+    guardDiscard(() => {
+      setShowLoraPicker(false);
+      setAdvancedOpen(false);
+      setSelectedPresetId(preset.id);
+      setEditing(true);
+    });
   }
 
   function backToList() {
-    setEditing(false);
-    setShowLoraPicker(false);
-    setMessage({ tone: "neutral", text: "" });
+    guardDiscard(() => {
+      setEditing(false);
+      setShowLoraPicker(false);
+      setMessage({ tone: "neutral", text: "" });
+    });
+  }
+
+  // Explicit unsaved-state affordance paired with the "Unsaved changes" pill: revert the
+  // in-progress edit to the last-saved baseline, confirmed the same desktop-safe way. Only
+  // reachable while dirty (the button renders only then), so a clean form is a no-op.
+  function discardChanges() {
+    if (!dirty) {
+      return;
+    }
+    appConfirm(DISCARD_CONFIRM).then((ok) => {
+      if (ok) {
+        setForm(baseline);
+        setMessage({ tone: "neutral", text: "" });
+      }
+    });
   }
 
   const visiblePresets = useMemo(() => {
@@ -984,6 +1038,11 @@ export function PresetManagerScreen() {
         </div>
         <div className="preset-editor-actions">
           {statusPill}
+          {dirty ? (
+            <button className="secondary-action preset-discard" onClick={discardChanges} type="button">
+              Discard
+            </button>
+          ) : null}
           <button className="secondary-action" onClick={backToList} type="button">
             Cancel
           </button>
