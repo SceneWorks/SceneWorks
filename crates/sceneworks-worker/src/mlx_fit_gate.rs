@@ -71,16 +71,56 @@ pub(crate) fn engine_supports_sequential(engine_id: &str) -> bool {
 /// as on real small hardware. Unset / non-positive ⇒ use the real `sysctl hw.memsize` total.
 pub(crate) const MLX_MEMORY_CAP_ENV: &str = "SCENEWORKS_MLX_MEMORY_CAP_GB";
 
-/// Headroom (GB) added on top of the summed on-disk component weights to cover MLX Metal activation
-/// spikes during denoise/decode plus the OS + other apps drawing from the same unified pool.
+/// Headroom (GiB) added on top of the summed on-disk component weights to cover the MLX Metal
+/// activation transient during denoise/decode plus the OS + other apps drawing from the same unified
+/// pool (the gate budgets against TOTAL physical RAM, so the OS share must come out of this headroom).
 ///
-/// PROVISIONAL — calibrate against `get_peak_memory` telemetry per the sc-10835 measurement
-/// sub-task. Anchor: the candle FLUX A/B (sc-10769) measured ~11 GB of transient over ~33 GB of
-/// resident weights at 1024²; a Mac additionally shares the pool with the OS + app. 10 GB is a
-/// deliberately conservative floor that keeps the gate from over-rejecting borderline models while
-/// still catching the genuinely-too-big ones; the real activation term scales with resolution and is
-/// refined once measured.
-const HEADROOM_GB: f64 = 10.0;
+/// CALIBRATED (sc-10863) from real `get_peak_memory` footprints measured through
+/// `footprint_measure.rs` (one tier per process; peak = load + one 1024² generation, RESIDENT
+/// hold-all path, no memory cap). Measured `transient = peak − resident` and `headroom = peak − disk`:
+///
+/// | model            | disk GiB | resident | peak  | transient | headroom(peak−disk) |
+/// |------------------|---------:|---------:|------:|----------:|--------------------:|
+/// | illustrious q8   |     5.01 |     4.74 | 18.78 |     14.04 |               13.77 |
+/// | lens q4          |    17.67 |    16.46 | 30.50 |     14.04 |               12.83 |
+/// | qwen-image q8    |    35.90 |    33.45 | 41.11 |      7.66 |                5.20 |
+/// | lens-turbo bf16  |    28.43 |    45.67 | 75.55 |     29.88 |               47.12 |
+///
+/// FINDING — the transient is NOT a function of on-disk weight bytes: qwen-image q8 has the LARGEST
+/// weights (35.9 GiB) but the SMALLEST transient (7.66 — its VAE decode is tiled, sc-11747), while
+/// illustrious q8 has the smallest weights but a 14 GiB transient. It is architecture- and
+/// resolution-bound (dominated by the VAE decode + attention at the output resolution), so a
+/// disk-SCALED predictor (`Σweights · k`) would over-reject the large-but-efficient models and
+/// under-predict the small ones — the wrong shape. And the load-time gate cannot see the request
+/// resolution (the generator is cached across resolutions), so a per-request `f(resolution)` term is
+/// not threadable at this seam. A conservative CONSTANT is therefore the right structure.
+///
+/// 18 GiB = the max COMMON-CASE transient at 1024² (14.04, illustrious q8 & lens q4 — the three
+/// resident≈disk tiers; lens-turbo's larger 29.88 transient is a separate architecture outlier, below)
+/// plus a ~4 GiB macOS/app reserve. This replaces the provisional 10.0, which UNDER-predicted 3 of the
+/// 4 measured tiers (illustrious 15.0<18.8, lens 27.7<30.5, lens-turbo 38.4<75.6) — i.e. was a latent
+/// SIGKILL risk on Macs sized between the predicted and the real peak. All three resident≈disk tiers
+/// are now covered with margin without over-rejecting a model that fits (illustrious q8: 5.01+18=23.0
+/// still fits a 24 GiB Mac, where its real 18.8 GiB peak + OS does too).
+///
+/// NOT covered by this constant (surfaced sc-10863, tracked follow-ups — see the story): (1) the
+/// lens-turbo bf16 OUTLIER, whose 47.12 GiB headroom (peak 75.55 − disk 28.43) is NOT one effect but
+/// TWO that must be modeled together. It DECOMPOSES as (a) 17.24 GiB IN-MEMORY WEIGHT EXPANSION
+/// (resident 45.67 − disk 28.43) — its mxfp4-on-disk gpt-oss text encoder expands loading to bf16
+/// (45.67 = 1.61× disk 28.43), so `sum_safetensors_bytes` under-counts the in-memory weights — PLUS
+/// (b) a 29.88 GiB ACTIVATION TRANSIENT (peak 75.55 − resident 45.67), which is architecture-bound (the
+/// large gpt-oss encoder's activations) and ~2× the ~14 GiB the other three tiers show at the same
+/// 1024². HEADROOM=18 covers the common-case transient (~14) + ~4 GiB OS/app reserve, but UNDER-predicts
+/// this class by ~29 GiB even AFTER a weight-byte correction — because the 29.88 transient ALONE exceeds
+/// 18 (75.55 − (28.43 + 18) = 29.12; the old provisional 10 under-predicted it by ~37: 75.55 −
+/// (28.43 + 10) = 37.12). So correcting only the weight bytes is INSUFFICIENT: both the in-memory weight
+/// size AND the outsized transient must be modeled for these tiers. (A blanket bf16 expansion factor
+/// also can't fix the weight half — a bf16 tier whose encoder is bf16-on-disk would then be
+/// over-rejected ~1.6× — so that fix needs per-family in-memory weight sizing plus a per-architecture
+/// transient term, backed by bf16 measurements across models.) Tracked in sc-11924. (2) Output
+/// RESOLUTION > 1024² grows the VAE-decode transient past 14 GiB — all four points are 1024², so 18 is
+/// a 1024²-worst-case; a higher-res campaign is a follow-up.
+const HEADROOM_GB: f64 = 18.0;
 
 /// Bytes per binary gigabyte (GiB) — matches `gpu::total_unified_memory_gb`, which divides
 /// `hw.memsize` by 1024³, and the epic's measured on-disk table.
@@ -530,17 +570,20 @@ mod tests {
     #[test]
     fn fit_decision_rejects_only_a_genuine_overflow() {
         let budget = MemoryBudget { total_gb: 16.0 };
-        // qwen-image q8: ~36 GiB weights + 10 headroom = 46 ⇒ too big for a 16 GB Mac.
+        // qwen-image q8: ~36 GiB weights + 18 headroom (sc-10863) = 54 ⇒ too big for a 16 GB Mac.
         assert_eq!(
             fit_decision(predicted_peak_gb(36 * 1024 * 1024 * 1024_u64), Some(budget)),
             FitDecision::TooBig {
-                needed_gb: 46.0,
+                needed_gb: 36.0 + HEADROOM_GB,
                 available_gb: 16.0,
             }
         );
-        // A ~3 GiB model fits.
+        // A ~3 GiB model fits a roomy budget (3 + 18 headroom = 21 < 32).
         assert_eq!(
-            fit_decision(predicted_peak_gb(3 * 1024 * 1024 * 1024_u64), Some(budget)),
+            fit_decision(
+                predicted_peak_gb(3 * 1024 * 1024 * 1024_u64),
+                Some(MemoryBudget { total_gb: 32.0 })
+            ),
             FitDecision::Fits
         );
         // Exactly-fits is not a rejection: budget 46, need 46.
@@ -795,8 +838,8 @@ mod tests {
     #[test]
     fn decide_residency_picks_resident_sequential_or_reject_by_budget() {
         let gib = 1024 * 1024 * 1024_u64;
-        // illustrious q8-class: total ~5 GiB (TE ~1, DiT+VAE ~4). Resident peak = 5+10 = 15;
-        // staged peak = max(1, 4)+10 = 14.
+        // illustrious q8-class: total ~5 GiB (TE ~1, DiT+VAE ~4). With HEADROOM_GB=18 (sc-10863):
+        // resident peak = 5+18 = 23; staged peak = max(1, 4)+18 = 22.
         let total = 5 * gib;
         let te = gib;
 
@@ -805,23 +848,23 @@ mod tests {
             decide_residency(total, te, Some(MemoryBudget { total_gb: 128.0 }), true),
             ResidencyOutcome::Resident
         );
-        // Budget between staged (14) and resident (15): resident won't fit, staged will, provider
+        // Budget between staged (22) and resident (23): resident won't fit, staged will, provider
         // stages ⇒ Sequential. This is the fit-gate SELECTING sequential residency.
         assert_eq!(
-            decide_residency(total, te, Some(MemoryBudget { total_gb: 14.5 }), true),
+            decide_residency(total, te, Some(MemoryBudget { total_gb: 22.5 }), true),
             ResidencyOutcome::Sequential
         );
         // Same budget but a provider that can't stage ⇒ reject (never a silent Resident that OOMs).
         assert!(matches!(
-            decide_residency(total, te, Some(MemoryBudget { total_gb: 14.5 }), false),
+            decide_residency(total, te, Some(MemoryBudget { total_gb: 22.5 }), false),
             ResidencyOutcome::Reject {
                 staged_gb: None,
                 ..
             }
         ));
-        // Budget below even the staged peak ⇒ reject, naming the staged requirement.
+        // Budget below even the staged peak (22) ⇒ reject, naming the staged requirement.
         assert!(matches!(
-            decide_residency(total, te, Some(MemoryBudget { total_gb: 12.0 }), true),
+            decide_residency(total, te, Some(MemoryBudget { total_gb: 20.0 }), true),
             ResidencyOutcome::Reject {
                 staged_gb: Some(_),
                 ..
@@ -935,10 +978,11 @@ mod tests {
         // boogu-class: whole model 22 GiB (mllm 13 + transformer 8 + vae 1). No `text_encoder*` subdir,
         // so the subdir scan reads 0.
         let total = 22 * gib;
-        let budget = Some(MemoryBudget { total_gb: 25.0 });
+        // Budget between the staged (31) and resident (40) peaks under HEADROOM_GB=18 (sc-10863).
+        let budget = Some(MemoryBudget { total_gb: 34.0 });
 
         // Fallback path (footprint None on a dir with no `text_encoder*`) → te = 0 → staged == resident
-        // peak (22 + 10 = 32) > 25 → Reject, even though one-component-at-a-time WOULD fit.
+        // peak (22 + 18 = 40) > 34 → Reject, even though one-component-at-a-time WOULD fit.
         let te_fallback = resolve_text_encoder_bytes(None, std::path::Path::new("/nonexistent"));
         assert_eq!(te_fallback, 0);
         assert!(matches!(
@@ -946,7 +990,7 @@ mod tests {
             ResidencyOutcome::Reject { .. }
         ));
 
-        // Provider footprint (te = 13 GiB) → staged = max(13, 22 − 13 = 9) + 10 = 23 ≤ 25 → Sequential.
+        // Provider footprint (te = 13 GiB) → staged = max(13, 22 − 13 = 9) + 18 = 31 ≤ 34 → Sequential.
         let te_footprint =
             resolve_text_encoder_bytes(Some(13 * gib), std::path::Path::new("/ignored"));
         assert_eq!(te_footprint, 13 * gib);

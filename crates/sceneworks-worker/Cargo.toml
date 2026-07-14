@@ -576,6 +576,10 @@ uuid = { version = "1.11", features = ["v4"] }
 [dev-dependencies]
 axum = "0.7"
 tower = { version = "0.5", features = ["util"] }
+# sc-10863 fit-gate A/B: a stdout tracing subscriber so the `#[ignore]`d emulation A/B smoke
+# (`footprint_measure::fit_gate_ab_*`) surfaces the real `mlx_sequential_residency_selected`
+# decision event `apply_residency_policy` emits. Dev-only ⇒ never enters the worker binary.
+tracing-subscriber = { workspace = true }
 # sc-6541 closed-loop study: the LoRA eval harness (test-only, src/lora_eval_harness.rs) reuses
 # the canonical Dataset Doctor blur measurement (`scalars_from_image(..).blur_variance`) for the
 # output-sharpness Y axis. GPU-free path crate (image/imageproc/core), builds anywhere; dev-only

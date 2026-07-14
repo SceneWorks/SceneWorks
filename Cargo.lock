@@ -6063,6 +6063,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "zip 2.4.2",
 ]
