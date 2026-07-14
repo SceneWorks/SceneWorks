@@ -30,6 +30,7 @@ export function EditorScreen() {
     selectedTimelineId,
     setActiveTimeline,
     setSelectedTimelineId,
+    isActiveTimelineDirty,
     timelines,
   } = useAppStatic();
   const assets = mediaAssets;
@@ -134,6 +135,28 @@ export function EditorScreen() {
   async function submitNewTimeline(event) {
     event.preventDefault();
     await createTimeline({ name: newTimelineName, aspectRatio: newAspectRatio, fps: 30 });
+  }
+
+  // sc-11967 (S8): re-selecting a timeline from the dropdown reloads the server copy and
+  // replaces the in-memory working copy, dropping any unsaved structural edits. Guard the
+  // switch when the active timeline is dirty. The <select> is controlled by
+  // `selectedTimelineId`, so returning early (no state change) snaps its value back to the
+  // current timeline. Uses window.confirm to match the app's existing discard-edits confirm
+  // (ImageEditor.confirmDiscardEdits / App.purgeAsset); when confirm is unavailable it falls
+  // through to allow, matching those call sites.
+  function handleSelectTimeline(nextId) {
+    if (nextId === selectedTimelineId) {
+      return;
+    }
+    if (isActiveTimelineDirty?.()) {
+      const proceed =
+        typeof window.confirm !== "function" ||
+        window.confirm("You have unsaved timeline edits. Switch timelines and discard them?");
+      if (!proceed) {
+        return;
+      }
+    }
+    setSelectedTimelineId(nextId);
   }
 
   function commit(nextTimeline) {
@@ -431,7 +454,7 @@ export function EditorScreen() {
         }
       >
         <div className="editor-header">
-          <select onChange={(event) => setSelectedTimelineId(event.target.value)} value={selectedTimelineId ?? ""}>
+          <select onChange={(event) => handleSelectTimeline(event.target.value)} value={selectedTimelineId ?? ""}>
             <option value="">Select timeline</option>
             {timelines.map((timeline) => (
               <option key={timeline.id} value={timeline.id}>

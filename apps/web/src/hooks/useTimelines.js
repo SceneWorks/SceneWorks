@@ -2,6 +2,13 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { apiFetch, isAbortError } from "../api.js";
 import { ensureItemVersionFields } from "../timeline.js";
 
+// Canonical serialization of a persisted-timeline snapshot for dirty comparison (sc-11967).
+// Value equality (not reference) so a server round-trip that re-emits the same content is
+// still "clean". Null timeline → null baseline.
+function serializeTimeline(timeline) {
+  return timeline ? JSON.stringify(timeline) : null;
+}
+
 // Owns the editor's timeline state (list, selection, the loaded timeline) plus every
 // timeline mutation, frame extraction, and the SSE-driven "apply generated clip to the
 // timeline" pipeline. Extracted from App.jsx (sc-1651) — the largest, most coupled
@@ -26,6 +33,33 @@ export function useTimelines({
   const [activeTimeline, setActiveTimeline] = useState(null);
   const selectedTimelineIdRef = useRef(null);
   const timelineApplyQueueRef = useRef(Promise.resolve());
+  // sc-11967 (S8): the active timeline survives soft navigation in memory, so the user can
+  // accumulate unsaved structural edits. Two async paths (the SSE "generation ready" apply
+  // and dropdown re-select) used to overwrite `activeTimeline` with the server copy and
+  // silently drop those edits. To detect "has unsaved edits" without a bespoke dirty flag
+  // scattered across every mutation, we snapshot the last *persisted* timeline (serialized)
+  // at each clean baseline point (load / create / save / clean SSE-adopt) and compare the
+  // live working copy against it. `activeTimelineRef` mirrors the committed state so the
+  // async apply queue and the exposed dirty check read the freshest working copy.
+  const savedTimelineSnapshotRef = useRef(null);
+  const activeTimelineRef = useRef(null);
+
+  useEffect(() => {
+    activeTimelineRef.current = activeTimeline;
+  }, [activeTimeline]);
+
+  // Compare a timeline against the last-persisted snapshot. Unknown baseline (nothing loaded
+  // yet) or no working copy → not dirty, so a freshly loaded/empty editor never prompts.
+  function timelineHasUnsavedEdits(timeline) {
+    if (!timeline || savedTimelineSnapshotRef.current == null) {
+      return false;
+    }
+    return serializeTimeline(timeline) !== savedTimelineSnapshotRef.current;
+  }
+
+  // Stable identity (reads refs only) so it can ride the memoized App context without
+  // re-rendering consumers. The re-select guard (EditorScreen) calls this imperatively.
+  const isActiveTimelineDirty = useCallback(() => timelineHasUnsavedEdits(activeTimelineRef.current), []);
 
   useEffect(() => {
     selectedTimelineIdRef.current = selectedTimelineId;
@@ -60,6 +94,7 @@ export function useTimelines({
         setSelectedTimelineId((current) => (items.some((item) => item.id === current) ? current : items[0]?.id ?? null));
         if (!items.length) {
           setActiveTimeline(null);
+          savedTimelineSnapshotRef.current = null;
         }
         setError("");
       } catch (err) {
@@ -77,6 +112,8 @@ export function useTimelines({
         return;
       }
       setActiveTimeline(timeline);
+      activeTimelineRef.current = timeline;
+      savedTimelineSnapshotRef.current = serializeTimeline(timeline);
       setError("");
     } catch (err) {
       setError(err.message);
@@ -98,6 +135,8 @@ export function useTimelines({
         setTimelinesProjectId(activeProject.id);
         setSelectedTimelineId(created.id);
         setActiveTimeline(created);
+        activeTimelineRef.current = created;
+        savedTimelineSnapshotRef.current = serializeTimeline(created);
         setError("");
         return created;
       } catch (err) {
@@ -119,6 +158,11 @@ export function useTimelines({
           body: JSON.stringify({ timeline }),
         });
         setActiveTimeline(saved);
+        // sc-11967: reset the dirty baseline to the persisted copy so the timeline reads
+        // clean immediately after save (the S7 sibling bug left the baseline stale, so the
+        // re-select/SSE guards kept firing on an already-saved timeline).
+        activeTimelineRef.current = saved;
+        savedTimelineSnapshotRef.current = serializeTimeline(saved);
         refreshTimelines(activeProject.id);
         setError("");
         return saved;
@@ -295,6 +339,9 @@ export function useTimelines({
       return;
     }
     try {
+      // Always apply the generation onto the server copy and persist it, so the result is
+      // durable regardless of what the in-memory working copy looks like (never drop the
+      // generation).
       const timeline = await apiFetch(`/api/v1/projects/${projectId}/timelines/${timelineId}`, token);
       const updated = applyTimelineGenerationResult(timeline, job);
       if (updated === timeline) {
@@ -304,8 +351,29 @@ export function useTimelines({
         method: "PUT",
         body: JSON.stringify({ timeline: updated }),
       });
+      // Preserve the existing gate: only touch the UI copy when this timeline is the one the
+      // user is looking at. Re-read the live working copy *after* the awaits — the user may
+      // have edited it while the fetch/save was in flight.
       if (selectedTimelineIdRef.current === timelineId) {
-        setActiveTimeline(saved);
+        const workingCopy = activeTimelineRef.current;
+        if (workingCopy?.id === timelineId && timelineHasUnsavedEdits(workingCopy)) {
+          // sc-11967 (S8): the active copy has unsaved structural edits. Overwriting it with
+          // the server copy would silently discard them, so merge the generation onto the
+          // working copy instead. The baseline is left untouched, so the copy stays dirty and
+          // the user still owns the decision to save their edits.
+          const merged = applyTimelineGenerationResult(workingCopy, job);
+          if (merged !== workingCopy) {
+            setActiveTimeline(merged);
+            activeTimelineRef.current = merged;
+          }
+        } else {
+          // Clean (or the item the generation targets is gone) → adopt the persisted server
+          // copy and reset the baseline so the timeline stays clean (no spurious dirty on a
+          // later re-select). This is the pre-sc-11967 behavior.
+          setActiveTimeline(saved);
+          activeTimelineRef.current = saved;
+          savedTimelineSnapshotRef.current = serializeTimeline(saved);
+        }
       }
       refreshTimelines(projectId);
     } catch (err) {
@@ -322,6 +390,7 @@ export function useTimelines({
     setSelectedTimelineId,
     activeTimeline,
     setActiveTimeline,
+    isActiveTimelineDirty,
     refreshTimelines,
     createTimeline,
     saveTimeline,
