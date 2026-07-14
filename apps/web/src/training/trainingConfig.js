@@ -184,6 +184,41 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
   };
 }
 
+// Decide how the config-draft basis effect should react to a basis change (sc-11970).
+// The basis is keyed on (targetId, datasetId, defaultPresetId). Distinguishing a genuine
+// USER action from an ASYNC catalog load is the whole point (mirrors S3, sc-11962):
+//   - target OR dataset changed  → the user switched context → fully re-SEED the draft.
+//   - ONLY the default preset id changed (target+dataset stable) → the trainingPresets
+//     catalog just resolved async. If the user has already customized fields, MERGE the
+//     newly-available preset defaults UNDER their edits rather than wiping them ("merge").
+//     With no pending edits it's safe to seed the freshly-resolved preset ("seed").
+//   - nothing changed → "noop".
+// `prev`/`next` are `{ targetId, datasetId, presetId }` basis records.
+export function configReseedDecision(prev, next, customizedFieldCount = 0) {
+  const previous = prev ?? {};
+  const userChange = previous.targetId !== next.targetId || previous.datasetId !== next.datasetId;
+  if (!userChange && previous.presetId === next.presetId) {
+    return "noop";
+  }
+  if (!userChange && customizedFieldCount > 0) {
+    return "merge";
+  }
+  return "seed";
+}
+
+// Overlay the user's customized field values onto a freshly-seeded draft (sc-11970). Used
+// on the "merge" path above so an async preset-catalog load re-seeds the fields the user
+// did NOT touch from the now-available preset while preserving the ones they did.
+export function mergeCustomizedConfigDraft(seeded, current = {}, customizedFields = new Set()) {
+  const merged = { ...seeded };
+  for (const field of customizedFields) {
+    if (Object.prototype.hasOwnProperty.call(current, field)) {
+      merged[field] = current[field];
+    }
+  }
+  return merged;
+}
+
 // The training config's rule set, in the shape `useValidation` wants: a pure
 // `(draft, ctx) => Issue[]` living beside the draft it validates (epic 10644).
 //

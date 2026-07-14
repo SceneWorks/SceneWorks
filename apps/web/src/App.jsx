@@ -85,7 +85,7 @@ const ImageEditor = React.lazy(() =>
 // Library/Assets) keeps today's conditional unmount-on-navigation behavior. Training
 // contributes two view ids — the default "Train" workspace and the "LibraryDataSets"
 // Data Sets mode — both part of the Training Studio family.
-const KEEP_ALIVE_VIEWS = Object.freeze(
+export const KEEP_ALIVE_VIEWS = Object.freeze(
   new Set([
     "Image",
     "Video",
@@ -586,6 +586,41 @@ export function App() {
     }
     if (decision === false) return; // guard returned false → user cancelled the leave
     setActiveView(viewId);
+  }, []);
+
+  // A screen holding an unsaved draft (Training Studio / Data Sets, sc-11970) can register
+  // a guard consulted before the active PROJECT is switched — which would otherwise silently
+  // reset the screen and discard the draft. Distinct from the nav leave-guard above: project
+  // switch bypasses navTo entirely, and keep-alive screens must NOT prompt on plain nav, only
+  // on a project change. Like the nav guard, a promise defers the switch until the user
+  // answers; only a falsy answer cancels it. The guard receives the target project.
+  const projectSwitchGuardRef = useRef(null);
+  const registerProjectSwitchGuard = useCallback((guard) => {
+    projectSwitchGuardRef.current = guard;
+    return () => {
+      if (projectSwitchGuardRef.current === guard) projectSwitchGuardRef.current = null;
+    };
+  }, []);
+  const selectProject = useCallback((project) => {
+    // No-op re-selection (same project) and clears bypass the guard — nothing is discarded.
+    if (!project || project.id === activeProjectRef.current?.id) {
+      setActiveProject(project);
+      return;
+    }
+    const guard = projectSwitchGuardRef.current;
+    if (!guard) {
+      setActiveProject(project);
+      return;
+    }
+    const decision = guard(project);
+    if (decision && typeof decision.then === "function") {
+      decision.then((ok) => {
+        if (ok) setActiveProject(project);
+      });
+      return;
+    }
+    if (decision === false) return; // guard returned false → user kept editing
+    setActiveProject(project);
   }, []);
 
   // sc-4194: defined here (above the data hooks) because useTimelines takes it as a
@@ -2186,6 +2221,8 @@ export function App() {
     // Navigation
     setActiveView,
     registerLeaveGuard,
+    // Unsaved-draft guard consulted before a project switch (sc-11970)
+    registerProjectSwitchGuard,
     // Image-Editor scratch-op survivor coordination (sc-8850)
     trackEditorScratchOp,
     releaseEditorScratchOp,
@@ -2236,7 +2273,7 @@ export function App() {
     refreshTrainingDatasets, loadTrainingDataset, loadTrainingDatasetReadiness, setTrainingDatasetItemQualityAck, createTrainingDataset, uploadTrainingDatasetItem,
     updateTrainingDataset, batchRenameTrainingDataset, writeTrainingDatasetCaptionSidecars,
     createTrainingDatasetCaptionJob, createTrainingDatasetUpscaleJob, createTrainingDatasetAnalysisJob, createTrainingDatasetFaceAnalysisJob, smartCropTrainingDataset, stripExifTrainingDataset, createTrainingJob, trainingPresets, trainingPresetsError,
-    trainingTargets, trainingTargetsError, setActiveView, registerLeaveGuard,
+    trainingTargets, trainingTargetsError, setActiveView, registerLeaveGuard, registerProjectSwitchGuard,
     trackEditorScratchOp, releaseEditorScratchOp, registerEditorScratchClaim, characters,
     createCharacter, updateCharacter, archiveCharacter, unarchiveCharacter, listArchivedCharacters,
     addCharacterReference, updateCharacterReference,
@@ -2264,7 +2301,7 @@ export function App() {
           activeProject={activeProject}
           disabled={!authenticated}
           onCreate={createProject}
-          onSelect={setActiveProject}
+          onSelect={selectProject}
           projects={projects}
         />
 

@@ -3604,6 +3604,20 @@ input.dataset-name-input.boxed:focus {
   background: var(--warn);
 }
 
+/* The unsaved chip is a real affordance (sc-11970): the "Unsaved changes" pill paired
+   with an inline Discard action that reverts the draft to the last saved state. */
+.dataset-status-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dataset-discard-button {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: color-mix(in oklch, var(--warn) 78%, var(--text));
+}
+
 .dataset-tools-row {
   display: flex;
   align-items: flex-end;

@@ -34,11 +34,13 @@ import {
 } from "../training/datasetReadiness.js";
 import {
   configDraftFromTarget,
+  configReseedDecision,
   configValidation,
   defaultGpuOptions,
   defaultOptimizerOptions,
   defaultPresetForTarget,
   lrSchedulerOptions,
+  mergeCustomizedConfigDraft,
   presetForQualityTier,
   presetsForTarget,
   promptListToLines,
@@ -48,6 +50,7 @@ import {
   trainingAdapterVersionOptions,
   trainingConfigSnapshot,
 } from "../training/trainingConfig.js";
+import { appConfirm } from "../appConfirm.jsx";
 import { useValidation } from "../validation/useValidation.js";
 import { ConfigureJobPanel } from "./training/ConfigureJobPanel.jsx";
 import { DatasetEditorPanel } from "./training/DatasetEditorPanel.jsx";
@@ -325,6 +328,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     models = [],
     createModelDownloadJob,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
+    registerProjectSwitchGuard,
   } = useAppContext();
   const datasets = trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : [];
   const datasetsError = trainingDatasetsError;
@@ -387,7 +391,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // until the user edits them (sc-8671), mirroring configTriggerFollowsCaptions.
   const [configPromptsFollowTrigger, setConfigPromptsFollowTrigger] = useState(true);
   const [submittingJob, setSubmittingJob] = useState(false);
-  const configBasisRef = useRef("");
+  // The config-draft basis, keyed on (target, dataset, default-preset). Value-preserving
+  // across an async trainingPresets load (sc-11970): a preset-only basis flip no longer
+  // wipes the user's config edits. See the basis effect below.
+  const configBasisRef = useRef({ targetId: "", datasetId: "", presetId: "" });
+  // Live mirror of customizedConfigFields so the basis effect can read the current set
+  // without listing it as a dependency (which would re-run the effect on every keystroke).
+  const customizedConfigFieldsRef = useRef(customizedConfigFields);
+  customizedConfigFieldsRef.current = customizedConfigFields;
 
   const datasetAssets = useMemo(
     () => datasetOwnedAssets(activeDataset, activeProject?.id, assets),
@@ -460,6 +471,13 @@ export function TrainingStudio({ mode = "training" } = {}) {
       selectedAssetIds.length !== originalAssetIds.length ||
       selectedAssetIds.some((id, index) => id !== originalAssetIds[index]) ||
       captionsDirty);
+  // Unsaved work the destructive-transition guards protect (sc-11970): an edited saved
+  // dataset (dirty) OR a brand-new dataset the user has started building (name / members /
+  // character) but not yet saved. A new draft isn't "dirty" (no baseline), but discarding
+  // it is just as destructive, so the guard covers it too.
+  const hasUnsavedDatasetDraft = activeDataset
+    ? dirty
+    : Boolean(draftName.trim() || selectedAssetIds.length || associatedCharacterId);
   // One summary gates Save and feeds the chip row, so they cannot disagree (epic 10644).
   // `savingDataset` and "nothing changed" are non-validation gates — like submittingJob on
   // the Train button — so they stay in the disabled expression rather than becoming issues.
@@ -714,7 +732,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setConfigError("");
     setConfigTriggerFollowsCaptions(true);
     setConfigPromptsFollowTrigger(true);
-    configBasisRef.current = "";
+    configBasisRef.current = { targetId: "", datasetId: "", presetId: "" };
   }, [activeProject?.id]);
 
   // sc-2022: open a dataset requested from elsewhere (Character Studio's
@@ -747,18 +765,46 @@ export function TrainingStudio({ mode = "training" } = {}) {
 
   useEffect(() => {
     if (!selectedTarget) {
-      if (configBasisRef.current) {
-        configBasisRef.current = "";
+      if (configBasisRef.current.targetId) {
+        configBasisRef.current = { targetId: "", datasetId: "", presetId: "" };
         setConfigDraft({});
       }
       return;
     }
     const defaultPreset = defaultPresetForTarget(trainingPresets, selectedTarget.id);
-    const basis = `${selectedTarget.id}\u0000${activeDataset?.id ?? ""}\u0000${defaultPreset?.id ?? ""}`;
-    if (configBasisRef.current === basis) {
+    const nextBasis = {
+      targetId: selectedTarget.id,
+      datasetId: activeDataset?.id ?? "",
+      presetId: defaultPreset?.id ?? "",
+    };
+    const customizedFields = customizedConfigFieldsRef.current;
+    const decision = configReseedDecision(configBasisRef.current, nextBasis, customizedFields.size);
+    if (decision === "noop") {
       return;
     }
-    configBasisRef.current = basis;
+    configBasisRef.current = nextBasis;
+    if (decision === "merge") {
+      // The trainingPresets catalog resolved async AFTER the user tweaked config (sc-11970).
+      // Re-seed only the fields they did NOT customize from the now-available default preset,
+      // preserving their edits + the customized-field set. Do NOT reset the follow-flags or
+      // clear the customized set — that would discard genuine user input on a catalog load.
+      setSelectedPresetId((currentId) => currentId || (defaultPreset?.id ?? ""));
+      setConfigDraft((current) => {
+        const seeded = configDraftFromTarget(
+          selectedTarget,
+          activeDataset,
+          gpuOptions,
+          current.triggerWord || triggerPhraseFromText(activeDataset?.name),
+          defaultPreset,
+          { outputName: current.outputName },
+        );
+        return mergeCustomizedConfigDraft(seeded, current, customizedFields);
+      });
+      setConfigSnapshot(null);
+      return;
+    }
+    // "seed": a genuine target/dataset switch (or a preset resolve with no pending edits) —
+    // safe to (re)seed the whole draft from the target + default preset.
     setSelectedPresetId(defaultPreset?.id ?? "");
     setCustomizedConfigFields(new Set());
     setConfigDraft(configDraftFromTarget(selectedTarget, activeDataset, gpuOptions, triggerPhraseFromText(activeDataset?.name), defaultPreset));
@@ -814,7 +860,52 @@ export function TrainingStudio({ mode = "training" } = {}) {
     });
   }, [gpuOptionsKey]);
 
+  // Live mirror of the unsaved-draft flag so imperative guards (the project-switch guard
+  // registered with App, and the leave-guard callbacks) read the current value without
+  // being re-created on every keystroke (sc-11970).
+  const hasUnsavedDatasetDraftRef = useRef(hasUnsavedDatasetDraft);
+  hasUnsavedDatasetDraftRef.current = hasUnsavedDatasetDraft;
+
+  // Desktop-safe confirm before a transition would discard the current dataset draft
+  // (sc-11970). Resolves true (proceed) when there's nothing unsaved or the user confirms.
+  // Uses appConfirm (a real Modal) — window.confirm silently no-ops in the Tauri WebView.
+  function confirmDiscardUnsavedDraft() {
+    if (!hasUnsavedDatasetDraftRef.current) {
+      return Promise.resolve(true);
+    }
+    return appConfirm({
+      title: "Discard unsaved changes?",
+      message: "This dataset has unsaved changes. They will be lost if you continue.",
+      confirmLabel: "Discard",
+      cancelLabel: "Keep editing",
+      tone: "danger",
+    });
+  }
+
+  // Register a project-switch guard with App (sc-11970). Switching the active project
+  // resets this screen (the reset effect above), silently discarding the dataset draft.
+  // The guard is consulted BEFORE the switch and defers it until the user answers. Scoped
+  // to Data Sets mode — that's where a dataset draft is authored — so the single App-level
+  // registration slot isn't contended by the Train-mode twin. Keep-alive keeps this mounted
+  // across plain nav, so the guard stays live even when Data Sets isn't the foreground view.
+  useEffect(() => {
+    if (!datasetLibraryMode || typeof registerProjectSwitchGuard !== "function") {
+      return undefined;
+    }
+    // confirmDiscardUnsavedDraft reads a ref, so the registration itself is stable.
+    return registerProjectSwitchGuard(() => confirmDiscardUnsavedDraft());
+  }, [datasetLibraryMode, registerProjectSwitchGuard]);
+
   async function openDataset(datasetId) {
+    // Opening a DIFFERENT dataset re-seeds the whole editor; confirm before discarding an
+    // unsaved draft (sc-11970). Re-opening the SAME dataset (internal reloads after a save)
+    // never prompts — the ids match and the draft is already persisted.
+    if (datasetId && datasetId !== activeDataset?.id) {
+      const proceed = await confirmDiscardUnsavedDraft();
+      if (!proceed) {
+        return;
+      }
+    }
     if (!datasetId) {
       setActiveDataset(null);
       setDraftName("");
@@ -846,7 +937,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setSelectedAssetIds((current) => current.filter((id) => id !== assetId));
   }
 
-  function startNewDataset() {
+  function clearDatasetDraft() {
     setActiveDataset(null);
     setDatasetError("");
     setDatasetMessage("");
@@ -855,6 +946,36 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setAssociatedCharacterId("");
     setUploadedDatasetAssets([]);
     setSelectedDatasetId("");
+  }
+
+  // Starting a new dataset abandons the current draft — confirm before discarding unsaved
+  // work (sc-11970), then clear to a blank draft.
+  async function startNewDataset() {
+    const proceed = await confirmDiscardUnsavedDraft();
+    if (!proceed) {
+      return;
+    }
+    clearDatasetDraft();
+  }
+
+  // Revert the draft to the last saved state (sc-11970): the actionable half of the
+  // "Unsaved changes" pill. A saved dataset restores from `activeDataset` in place (no
+  // reload); an unstarted draft clears. `activeDataset` is unchanged, so the caption-seed
+  // effect won't fire — reset the per-field drafts explicitly.
+  function discardDraft() {
+    if (!hasUnsavedDatasetDraft) {
+      return;
+    }
+    if (!activeDataset) {
+      clearDatasetDraft();
+      return;
+    }
+    setDatasetError("");
+    setDatasetMessage("");
+    setDraftName(activeDataset.name ?? "");
+    setSelectedAssetIds(normalizeDatasetAssetIds(activeDataset, assets));
+    setAssociatedCharacterId(activeDataset.characterId ?? "");
+    setCaptionDraftById(captionDraftsFromDataset(activeDataset));
   }
 
   // Editing a caption marks it as manually authored (sc-2025) — caption source
@@ -1489,6 +1610,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 draftName={draftName}
                 setDraftName={setDraftName}
                 dirty={dirty}
+                discardDraft={discardDraft}
                 setAddDialogOpen={setAddDialogOpen}
                 renamePrefix={renamePrefix}
                 setRenamePrefix={setRenamePrefix}

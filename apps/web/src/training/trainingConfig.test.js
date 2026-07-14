@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import { summarize } from "../validation/issues.js";
-import { configDraftFromTarget, configValidation, trainingConfigSnapshot } from "./trainingConfig.js";
+import {
+  configDraftFromTarget,
+  configReseedDecision,
+  configValidation,
+  mergeCustomizedConfigDraft,
+  trainingConfigSnapshot,
+} from "./trainingConfig.js";
 
 // sc-4199: configDraftFromTarget (target/preset → form draft) and
 // trainingConfigSnapshot (form draft → worker payload) were pure builders buried
@@ -271,5 +277,72 @@ describe("configValidation", () => {
     it("defaults to trainable when readiness is unknown", () => {
       expect(summarize(configValidation(wholeDraft, ctx)).ready).toBe(true);
     });
+  });
+});
+
+// sc-11970: the config-draft basis effect must NOT wipe a user's config edits when the
+// trainingPresets catalog resolves ASYNC. These two pure helpers encode that decision so
+// the (hook-driven) screen effect stays thin and the async-vs-user distinction is testable.
+describe("configReseedDecision (sc-11970)", () => {
+  const basis = (over = {}) => ({ targetId: "sdxl_lora", datasetId: "ds-1", presetId: "", ...over });
+
+  it("seeds on the first pass (empty previous basis)", () => {
+    expect(configReseedDecision({ targetId: "", datasetId: "", presetId: "" }, basis(), 0)).toBe("seed");
+  });
+
+  it("seeds when the user switches target", () => {
+    const prev = basis({ presetId: "balanced" });
+    const next = basis({ targetId: "z_image_lora", presetId: "balanced" });
+    // Even with customized fields, a genuine target switch fully re-seeds.
+    expect(configReseedDecision(prev, next, 3)).toBe("seed");
+  });
+
+  it("seeds when the user switches dataset", () => {
+    const prev = basis({ presetId: "balanced" });
+    const next = basis({ datasetId: "ds-2", presetId: "balanced" });
+    expect(configReseedDecision(prev, next, 3)).toBe("seed");
+  });
+
+  it("MERGES (does not wipe) when only the default preset resolves async AND the user has edits", () => {
+    // target + dataset stable, preset id appears (catalog just loaded), user tweaked fields.
+    const prev = basis({ presetId: "" });
+    const next = basis({ presetId: "balanced" });
+    expect(configReseedDecision(prev, next, 2)).toBe("merge");
+  });
+
+  it("seeds on an async preset resolve when the user has NOT customized anything", () => {
+    const prev = basis({ presetId: "" });
+    const next = basis({ presetId: "balanced" });
+    expect(configReseedDecision(prev, next, 0)).toBe("seed");
+  });
+
+  it("no-ops when nothing changed", () => {
+    const prev = basis({ presetId: "balanced" });
+    expect(configReseedDecision(prev, { ...prev }, 4)).toBe("noop");
+  });
+});
+
+describe("mergeCustomizedConfigDraft (sc-11970)", () => {
+  it("overlays only the customized fields onto the freshly-seeded draft", () => {
+    const seeded = { learningRate: "0.0001", steps: "1000", rank: "8" };
+    const current = { learningRate: "0.0005", steps: "2500", rank: "16" };
+    const merged = mergeCustomizedConfigDraft(seeded, current, new Set(["learningRate", "steps"]));
+    // Customized fields keep the user's value; untouched fields take the preset seed.
+    expect(merged.learningRate).toBe("0.0005");
+    expect(merged.steps).toBe("2500");
+    expect(merged.rank).toBe("8");
+  });
+
+  it("ignores customized field names absent from the current draft", () => {
+    const seeded = { learningRate: "0.0001" };
+    const merged = mergeCustomizedConfigDraft(seeded, {}, new Set(["learningRate", "ghost"]));
+    expect(merged).toEqual({ learningRate: "0.0001" });
+  });
+
+  it("returns a fresh object (no mutation of the seed)", () => {
+    const seeded = { steps: "1000" };
+    const merged = mergeCustomizedConfigDraft(seeded, { steps: "2000" }, new Set(["steps"]));
+    expect(merged).not.toBe(seeded);
+    expect(seeded.steps).toBe("1000");
   });
 });
