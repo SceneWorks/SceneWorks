@@ -66,6 +66,9 @@ describe("Image Editor keep-alive edit survival (sc-11968)", () => {
   const editor = () => document.body.querySelector(".ie-shell");
   const modelsSurface = () => document.body.querySelector(".models-surface");
   const shortcutsPanel = () => document.body.querySelector(".image-editor-shortcuts");
+  // The desktop-safe leave/close confirm dialog (appConfirm → ConfirmHost). A plain in-app
+  // nav under keep-alive must never surface it — leaving is non-destructive (sc-11968).
+  const confirmDialog = () => document.body.querySelector(".app-confirm-modal");
 
   // Navigate to the (lazy) Image Editor and wait for the dynamic import + Suspense to
   // resolve (the first visit transforms + loads the editor chunk, which takes real time).
@@ -112,11 +115,17 @@ describe("Image Editor keep-alive edit survival (sc-11968)", () => {
 
     // Navigate to an OUT screen (Models unmounts on nav away) and back.
     await clickButton("Models");
+    // A plain nav away is non-destructive under keep-alive, so it must NOT prompt a
+    // leave-guard confirm (sc-11968): the editor stays mounted and loses nothing, so the
+    // old "you'll discard your edits" dialog would be misleading. Nav completes immediately.
+    expect(confirmDialog()).toBeNull();
     expect(modelsSurface()).not.toBeNull();
     // The editor stays resident (hidden) while another view is active.
     expect(editor()).not.toBeNull();
 
     await openImageEditor();
+    // Returning is likewise silent — no confirm on either leg of the round trip.
+    expect(confirmDialog()).toBeNull();
     // Same DOM node → never unmounted/remounted.
     expect(editor()).toBe(editorBefore);
     // …and its in-editor state is intact with no re-hydrate.

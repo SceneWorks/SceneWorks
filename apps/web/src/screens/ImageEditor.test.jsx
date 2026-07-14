@@ -288,38 +288,39 @@ describe("ImageEditor scaffold", () => {
 describe("in-flight AI-op scratch survival (sc-8850)", () => {
   it("leaveGuardMessage warns while an AI op is pending even when NOT dirty", () => {
     // The regression: the guard was gated only on `dirty`, so a running AI op (which never
-    // sets dirty) left the editor unguarded and silently abandonable.
+    // sets dirty) left the editor unguarded and silently abandonable on a browser unload.
     expect(leaveGuardMessage({ dirty: false, aiOpPending: false })).toBeNull();
-    expect(leaveGuardMessage({ dirty: false, aiOpPending: true })).toBe(
-      "An image edit is still running. Leave and abandon it?",
-    );
+    expect(leaveGuardMessage({ dirty: false, aiOpPending: true })).toContain("still running");
+    // The wording now speaks to a browser close/reload (the only surface that loses state
+    // under keep-alive), not an in-app "leave"/"abandon".
+    expect(leaveGuardMessage({ dirty: false, aiOpPending: true })).toContain("close or reload");
     // Unsaved edits still take precedence over the AI-op wording.
     expect(leaveGuardMessage({ dirty: true, aiOpPending: false })).toContain("unsaved edits");
     expect(leaveGuardMessage({ dirty: true, aiOpPending: true })).toContain("unsaved edits");
   });
 
-  it("arms the beforeunload guard even when backgrounded, but the in-app guard only when foregrounded (sc-11959)", () => {
-    // The regression under keep-alive: gating BOTH guards on screenActive meant a dirty
-    // BACKGROUNDED (kept-alive) editor registered no beforeunload handler, so an app
-    // close/refresh discarded its unsaved edits with no warning.
+  it("arms ONLY the beforeunload guard on unsaved work; the in-app nav guard is never armed (sc-11968)", () => {
+    // Under keep-alive an in-app navigation away does NOT unmount the editor, so unsaved
+    // edits and an in-flight op survive the nav (the op's result lands back on return) — a
+    // plain nav is non-destructive and must show NO prompt. The in-app guard is therefore
+    // permanently disarmed (regression guard: old code returned `inApp: true` here, which
+    // surfaced a misleading "you'll lose your work" dialog for work that was NOT lost). Only
+    // a real browser close/refresh drops the in-memory state, so the beforeunload guard still
+    // arms — even when the editor is backgrounded (screenActive is no longer consulted).
 
-    // Dirty + backgrounded: browser-unload guard still arms; in-app nav guard does not.
-    expect(leaveGuardArming({ dirty: true, aiOpPending: false, screenActive: false })).toMatchObject({
+    // Dirty: browser-unload guard arms; in-app nav guard never does.
+    expect(leaveGuardArming({ dirty: true, aiOpPending: false })).toMatchObject({
       beforeUnload: true,
       inApp: false,
     });
-    // Dirty + foregrounded: both guards arm.
-    expect(leaveGuardArming({ dirty: true, aiOpPending: false, screenActive: true })).toMatchObject({
-      beforeUnload: true,
-      inApp: true,
-    });
-    // In-flight AI op + backgrounded: browser-unload guard arms (the op is still abandonable).
-    expect(leaveGuardArming({ dirty: false, aiOpPending: true, screenActive: false })).toMatchObject({
+    // In-flight AI op: browser-unload guard arms (the op's result would be lost on unload);
+    // in-app nav guard never does.
+    expect(leaveGuardArming({ dirty: false, aiOpPending: true })).toMatchObject({
       beforeUnload: true,
       inApp: false,
     });
-    // Clean + foregrounded: neither guard arms.
-    expect(leaveGuardArming({ dirty: false, aiOpPending: false, screenActive: true })).toMatchObject({
+    // Clean & idle: neither guard arms.
+    expect(leaveGuardArming({ dirty: false, aiOpPending: false })).toMatchObject({
       message: null,
       beforeUnload: false,
       inApp: false,

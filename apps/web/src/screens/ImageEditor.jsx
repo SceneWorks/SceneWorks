@@ -5,7 +5,6 @@ import { Stage, Layer, Image as KonvaImage, Line, Rect, Transformer } from "reac
 import { apiFetch } from "../api.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
-import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
@@ -294,30 +293,34 @@ const EDITOR_SHORTCUTS = [
 // (image_jobs/flux2.rs). The working image takes one slot, so the editor allows up to 3 user refs.
 export const MAX_EDIT_REFERENCES = 4;
 
-// The leave-guard prompt shown before navigating away from the editor, or null when it's
-// safe to leave silently (sc-2434 / sc-8850). Unsaved edits win the message. Crucially the
-// guard also fires while an AI op is in flight — starting one does NOT set `dirty` (its
-// result only lands on success), so without this branch the user could silently abandon a
-// running edit (losing the result and, before the App survivor sweep, orphaning scratch).
+// The browser CLOSE/REFRESH (beforeunload) warning shown while there is unsaved work, or
+// null when a real unload would lose nothing (sc-2434 / sc-8850). Under keep-alive the
+// editor stays mounted across in-app navigation, so a plain nav is non-destructive and gets
+// NO prompt (see leaveGuardArming); only a genuine browser unload drops the in-memory state,
+// which is what this wording addresses. Unsaved edits win the message. It also fires while an
+// AI op is in flight — starting one does NOT set `dirty` (its result only lands on success) —
+// so an unload mid-op is still flagged (its result would be lost).
 export function leaveGuardMessage({ dirty, aiOpPending }) {
-  if (dirty) return "You have unsaved edits in the Image Editor. Leave and discard them?";
-  if (aiOpPending) return "An image edit is still running. Leave and abandon it?";
+  if (dirty) return "You have unsaved edits in the Image Editor that will be lost if you close or reload.";
+  if (aiOpPending) return "An image edit is still running; its result will be lost if you close or reload.";
   return null;
 }
 
-// Decide which of the two leave-guards to arm (sc-11959). The browser-unload
-// (close/refresh) guard must arm whenever there are unsaved edits or an in-flight AI op,
-// EVEN when the editor is backgrounded under keep-alive — an app close/refresh would
-// otherwise silently discard a backgrounded editor's unsaved edits (a safeguard that
-// predates keep-alive). The in-app nav guard, by contrast, only arms while the editor is
-// the foreground view, so a backgrounded (still-mounted) editor doesn't re-fire its
-// confirm() on every UNRELATED navigation between other screens.
-export function leaveGuardArming({ dirty, aiOpPending, screenActive }) {
+// Decide which leave-guard to arm (sc-11959 / sc-11968). Under selective keep-alive an in-app
+// navigation away does NOT unmount the editor — unsaved edits, undo history, and an in-flight
+// AI op all survive on the still-resident editor and the op's result lands back on return — so
+// a plain nav is NON-DESTRUCTIVE and the in-app nav guard is permanently disarmed (`inApp:
+// false`); prompting there would falsely warn users of loss that won't happen, undermining the
+// keep-alive promise. Only a real browser close/refresh drops the in-memory state, so the
+// beforeunload guard still arms whenever there are unsaved edits or an in-flight op — EVEN when
+// the editor is backgrounded under keep-alive (an app close/refresh would otherwise silently
+// discard a backgrounded editor's unsaved edits, a safeguard that predates keep-alive).
+export function leaveGuardArming({ dirty, aiOpPending }) {
   const message = leaveGuardMessage({ dirty, aiOpPending });
   return {
     message,
     beforeUnload: Boolean(message),
-    inApp: Boolean(message) && Boolean(screenActive),
+    inApp: false,
   };
 }
 
@@ -651,7 +654,6 @@ export function ImageEditor() {
     jobs,
     importAsset,
     purgeAsset,
-    registerLeaveGuard,
     // App-level scratch-op survivor coordination (sc-8850). The editor stages an ephemeral
     // scratch asset per AI op; these let App purge it (and the result) even if the user
     // navigates away mid-job and this component unmounts before its own watcher can run.
@@ -678,11 +680,6 @@ export function ImageEditor() {
     theme = "light",
     changeTheme,
   } = useAppContext();
-  // Under the keep-alive shell (sc-11959) the editor stays mounted (hidden) after the
-  // user navigates away, so it can no longer rely on unmount to drop its leave-guard.
-  // `true` unless a KeepAlivePane says this editor is backgrounded (defaults to true
-  // for the direct-render unit tests, which carry no ScreenActiveContext).
-  const screenActive = useScreenActive();
   // Mac UI gating (sc-3486): the upscale tool itself runs in-process on Rust (Real-ESRGAN,
   // sc-3489), so it is available on a gated Mac — this block is a defensive guard that stays
   // null. The second engine (AuraSR) is dropped on Mac (sc-3668) and gated per-engine below.
@@ -2370,43 +2367,29 @@ export function ImageEditor() {
     setStatus({ loading: false, error: "" });
   }, [resetHistory]);
 
-  // Warn before leaving with unsaved edits OR an in-flight AI op (sc-2434 / sc-8850): a
-  // browser unload (close/refresh) and an in-app navigation away (the App nav consults
-  // this guard). Starting an AI op does NOT set `dirty` — its result only lands on
-  // success — so the guard must also fire while `aiOp` is non-null, otherwise the user
-  // can silently navigate away and abandon the running op (losing the result and, before
-  // the App-level survivor sweep, orphaning the scratch upload).
+  // Warn before a browser CLOSE/REFRESH that would drop unsaved edits OR an in-flight AI op
+  // (sc-2434 / sc-8850 / sc-11968). Under keep-alive an in-app navigation away does NOT
+  // unmount this editor (App keeps it resident), so unsaved edits, undo history, and an
+  // in-flight op all SURVIVE the nav and the op's result lands back on return — a plain nav
+  // is non-destructive and shows NO prompt. Only a real unload drops the in-memory state, so
+  // just the beforeunload guard arms here (even when backgrounded). Starting an AI op does
+  // NOT set `dirty` — its result only lands on success — so the guard must also arm while
+  // `aiOp` is non-null, else an unload mid-op silently loses the result. The intentional
+  // lose-work prompts live elsewhere: the explicit Close/Discard button (closeDoc) and the
+  // open-new / flatten confirms, all via the desktop-safe appConfirm dialog.
   const aiOpPending = Boolean(aiOp);
   useEffect(() => {
-    // See leaveGuardArming: the beforeunload handler arms whenever there are unsaved
-    // edits / an in-flight op (even backgrounded); the in-app nav guard only arms while
-    // this editor is foregrounded (sc-11959).
-    const { message, beforeUnload, inApp } = leaveGuardArming({ dirty, aiOpPending, screenActive });
+    const { beforeUnload } = leaveGuardArming({ dirty, aiOpPending });
     if (!beforeUnload) return undefined;
     const onBeforeUnload = (event) => {
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", onBeforeUnload);
-    // Desktop-safe in-app leave guard (sc-11968): the guard returns a Promise<boolean> from
-    // appConfirm (a real dialog), which navTo awaits before switching views — replacing the
-    // raw window.confirm that silently no-ops in the Tauri WebView.
-    const unregister = inApp
-      ? registerLeaveGuard?.(() =>
-          appConfirm({
-            title: "Leave the Image Editor?",
-            message,
-            confirmLabel: "Leave",
-            cancelLabel: "Stay",
-            tone: "danger",
-          }),
-        )
-      : undefined;
     return () => {
       window.removeEventListener("beforeunload", onBeforeUnload);
-      if (typeof unregister === "function") unregister();
     };
-  }, [dirty, aiOpPending, registerLeaveGuard, screenActive]);
+  }, [dirty, aiOpPending]);
 
   // Claim the in-flight AI op's jobId with App so its survivor sweep (sc-8850) knows this
   // editor is alive and owns loading the result back before the scratch/result assets are
