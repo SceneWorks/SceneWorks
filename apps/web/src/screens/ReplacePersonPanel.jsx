@@ -50,6 +50,50 @@ function boxesEqual(a, b) {
   return BOX_FIELDS.every(([key]) => Math.abs((a[key] ?? 0) - (b[key] ?? 0)) < 1e-4);
 }
 
+// The MEANINGFUL corrections in a drafts working set: only frames whose box
+// drifted from the tracked box or that are rejected carry intent worth
+// persisting. This is the single source of truth for "what would this drafts set
+// save", shared by the render (Save/dirty), the seed effect's dirty measure, and
+// the post-save re-baseline (sc-11966). A NO-OP touched draft (e.g. reject
+// toggled on then off) collapses out here, so all three agree it is clean.
+function pendingCorrectionsFromDrafts(drafts, frames) {
+  return Object.entries(drafts ?? {})
+    .map(([key, entry]) => {
+      const index = Number(key);
+      const original = frames[index]?.box;
+      const boxChanged = entry?.box && original && !boxesEqual(entry.box, original);
+      const isRejected = Boolean(entry?.rejected);
+      if (!boxChanged && !isRejected) {
+        return null;
+      }
+      const correction = { frameIndex: index, rejected: isRejected, author: "ui", source: "manual" };
+      if (boxChanged) {
+        correction.box = normalizeBox(entry.box);
+      }
+      return correction;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.frameIndex - b.frameIndex);
+}
+
+// Stable comparable form of a correction (ignores stamped author/createdAt/source)
+// so equality checks only fire on frameIndex/box/rejected changes.
+function comparableCorrection(correction) {
+  return JSON.stringify({
+    frameIndex: correction.frameIndex,
+    box: correction.box ? normalizeBox(correction.box) : null,
+    rejected: Boolean(correction.rejected),
+  });
+}
+
+// Signature of the MEANINGFUL corrections in a drafts working set. The seed
+// effect and the post-save re-baseline measure dirtiness against this — NOT the
+// raw drafts JSON — so a no-op touched draft reads clean and an external
+// correction on the same track is reseeded/shown instead of hidden (sc-11966).
+function meaningfulDraftsSignature(drafts, frames) {
+  return JSON.stringify(pendingCorrectionsFromDrafts(drafts, frames).map(comparableCorrection).sort());
+}
+
 function maskUrl(projectId, relPath) {
   if (!projectId || !relPath) {
     return "";
@@ -71,9 +115,31 @@ function PersonTrackCorrections({ track, sourceClip, saveTrackCorrections }) {
   const [saving, setSaving] = useState(false);
   const videoRef = useRef(null);
 
+  // Keep the latest drafts and last-seeded snapshot addressable from the seed
+  // effect without listing `drafts` as a dep (which would refire it on every
+  // keystroke). `draftsRef` is the current working set; `seededSignatureRef` is
+  // the MEANINGFUL-corrections signature of the drafts as last seeded (null until
+  // the first seed), so "dirty" == the working set's meaningful corrections have
+  // diverged from that snapshot — matching the Save/display `dirty` measure below.
+  const draftsRef = useRef(drafts);
+  draftsRef.current = drafts;
+  const seededSignatureRef = useRef(null);
+  const seededTrackIdRef = useRef(null);
+
   const correctionsSignature = JSON.stringify(track?.corrections ?? []);
   // Seed working drafts from the persisted corrections so reopening a track
-  // shows its saved adjustments, and re-seed after a save converges the UI.
+  // shows its saved adjustments. A successful save re-baselines `seededSignatureRef`
+  // (see save()), so the post-save corrections refetch — and any later external
+  // correction on the same track — converge cleanly instead of being mistaken for
+  // a dirty conflict against the pre-edit seed.
+  //
+  // sc-11966: a background track refresh (SSE / track-job update) can bump the
+  // corrections signature on the SAME track while the user has unsaved
+  // per-frame edits. Reseeding then would clobber those dirty drafts. So reseed
+  // only when the track IDENTITY changes (a genuine switch — the key remount
+  // also resets this), on the first seed, or when a signature change lands while
+  // drafts are CLEAN (external-change visibility). Dirty drafts on the same
+  // track are preserved.
   useEffect(() => {
     const seeded = {};
     for (const correction of track?.corrections ?? []) {
@@ -86,8 +152,25 @@ function PersonTrackCorrections({ track, sourceClip, saveTrackCorrections }) {
         rejected: Boolean(correction.rejected),
       };
     }
-    setDrafts(seeded);
-    setFrameIndex((current) => (current < frames.length ? current : 0));
+
+    const trackChanged = seededTrackIdRef.current !== track?.id;
+    const firstSeed = seededSignatureRef.current === null;
+    // Measure dirtiness on the MEANINGFUL corrections (the same filtered view the
+    // Save/display `dirty` uses), NOT the raw drafts JSON. Otherwise a no-op
+    // touched draft (reject toggled on then off) reads "dirty" here while the
+    // display reads clean, so a same-track external correction would be silently
+    // skipped/hidden and later dropped on save (sc-11966).
+    const draftsDirty =
+      !firstSeed && meaningfulDraftsSignature(draftsRef.current, frames) !== seededSignatureRef.current;
+
+    if (trackChanged || firstSeed || !draftsDirty) {
+      const seededSignature = meaningfulDraftsSignature(seeded, frames);
+      draftsRef.current = seeded;
+      seededSignatureRef.current = seededSignature;
+      seededTrackIdRef.current = track?.id;
+      setDrafts(seeded);
+      setFrameIndex((current) => (current < frames.length ? current : 0));
+    }
   }, [track?.id, correctionsSignature, frames.length]);
 
   useEffect(() => {
@@ -149,40 +232,20 @@ function PersonTrackCorrections({ track, sourceClip, saveTrackCorrections }) {
 
   // The corrections payload is the UI's full view: only frames whose box drifted
   // from the tracked box or that are rejected carry intent worth persisting.
-  const pendingCorrections = Object.entries(drafts)
-    .map(([key, entry]) => {
-      const index = Number(key);
-      const original = frames[index]?.box;
-      const boxChanged = entry.box && original && !boxesEqual(entry.box, original);
-      const isRejected = Boolean(entry.rejected);
-      if (!boxChanged && !isRejected) {
-        return null;
-      }
-      const correction = { frameIndex: index, rejected: isRejected, author: "ui", source: "manual" };
-      if (boxChanged) {
-        correction.box = normalizeBox(entry.box);
-      }
-      return correction;
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.frameIndex - b.frameIndex);
+  const pendingCorrections = pendingCorrectionsFromDrafts(drafts, frames);
 
   const persistedCount = (track?.corrections ?? []).length;
   const frameCorrected = pendingCorrections.some((correction) => correction.frameIndex === safeIndex);
 
   // Compare the working set against what is persisted (ignoring stamped
-  // author/createdAt/source) so Save only lights up when something changed.
-  const comparable = (correction) =>
-    JSON.stringify({
-      frameIndex: correction.frameIndex,
-      box: correction.box ? normalizeBox(correction.box) : null,
-      rejected: Boolean(correction.rejected),
-    });
+  // author/createdAt/source) so Save only lights up when something changed. This
+  // is the same meaningful-corrections measure the seed effect now uses for
+  // dirtiness (sc-11966).
   const persistedComparable = (track?.corrections ?? [])
     .filter((correction) => Number.isInteger(correction?.frameIndex))
-    .map(comparable)
+    .map(comparableCorrection)
     .sort();
-  const pendingComparable = pendingCorrections.map(comparable).sort();
+  const pendingComparable = pendingCorrections.map(comparableCorrection).sort();
   const dirty = JSON.stringify(persistedComparable) !== JSON.stringify(pendingComparable);
 
   async function save() {
@@ -191,7 +254,18 @@ function PersonTrackCorrections({ track, sourceClip, saveTrackCorrections }) {
     }
     setSaving(true);
     try {
-      await saveTrackCorrections(track.id, pendingCorrections);
+      const result = await saveTrackCorrections(track.id, pendingCorrections);
+      // sc-11966: a successful save makes the just-saved working set the new clean
+      // baseline. The save returns the updated track, so the parent refetch bumps
+      // correctionsSignature to the persisted value. Without re-baselining here,
+      // the seed effect keeps measuring "dirty" against the stale pre-edit seed, so
+      // the post-save refetch (and any later external correction on the same track)
+      // is treated as a dirty conflict and skipped — hiding the external change and
+      // letting the next Save silently drop it. Baseline on the MEANINGFUL-
+      // corrections signature so it matches the seed effect's dirty measure.
+      if (result) {
+        seededSignatureRef.current = meaningfulDraftsSignature(draftsRef.current, frames);
+      }
     } finally {
       setSaving(false);
     }
