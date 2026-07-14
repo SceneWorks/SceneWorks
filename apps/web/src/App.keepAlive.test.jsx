@@ -414,4 +414,62 @@ describe("selective lazy keep-alive shell (sc-11959)", () => {
     expect(imageStudio()).toBe(studioBefore);
     expect(generalChip().classList.contains("active")).toBe(true);
   });
+
+  it("does NOT re-apply a stale launch token on a nav round trip (an edit over an injected recipe survives)", async () => {
+    // The apply effect is keyed on the studioLaunch token id, and keep-alive never remounts
+    // the studio across a nav round trip — so a stale token must not re-fire and clobber a
+    // later edit. This is the flip side of the injection tests above: a NEW token applies,
+    // but re-entering the same studio with the SAME (already-consumed) token must not.
+    const generatedAsset = {
+      id: "asset-recipe",
+      projectId: "project-1",
+      generationSetId: "genset-recipe",
+      type: "image",
+      displayName: "Atrium still",
+      file: { path: "assets/images/atrium.png", mimeType: "image/png" },
+      status: { favorite: false, rating: 0, rejected: false, trashed: false },
+      generationSet: {
+        recipe: {
+          mode: "text_to_image",
+          model: "z_image_turbo",
+          prompt: "mist over a glass atrium",
+          negativePrompt: "flat lighting",
+          seed: 1234,
+          normalizedSettings: { width: 1024, height: 1024, count: 2 },
+          rawAdapterSettings: { steps: 14, guidanceScale: 2.5 },
+        },
+      },
+    };
+    mockFetch({ assets: [generatedAsset] });
+    await renderApp();
+
+    // Mount the studio and inject the recipe (the token fires once).
+    await clickButton("Image");
+    const studioBefore = imageStudio();
+    await clickButton("Assets");
+    await act(async () => {
+      document.body.querySelector(".asset-tile")?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    });
+    await settle();
+    await clickButton("Use this recipe");
+    expect(imageStudio()).toBe(studioBefore);
+    expect(promptField().value).toBe("mist over a glass atrium");
+
+    // Edit the prompt OVER the injected recipe value.
+    await changeField(promptField(), "my edit after the recipe applied");
+    expect(promptField().value).toBe("my edit after the recipe applied");
+
+    // Clear localStorage so a hypothetical remount could NOT re-hydrate the prompt — the only
+    // way the edit can survive is if the studio was neither remounted nor re-injected.
+    window.localStorage.clear();
+
+    // Nav away and back: the launch token id is unchanged, so its apply effect must not re-run.
+    await clickButton("Assets");
+    await clickButton("Image");
+
+    // Same DOM node (never remounted) AND the edit survived — the stale token did not re-apply
+    // "mist over a glass atrium" over the user's later edit.
+    expect(imageStudio()).toBe(studioBefore);
+    expect(promptField().value).toBe("my edit after the recipe applied");
+  });
 });
