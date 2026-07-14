@@ -420,9 +420,10 @@ export function useTimelines({
             );
           }
         } else {
-          // Clean (or the item the generation targets is gone) → adopt the persisted server
-          // copy and reset the baseline so the timeline stays clean (no spurious dirty on a
-          // later re-select). This is the pre-sc-11967 behavior.
+          // Clean working copy → adopt the persisted server copy (which received the
+          // generation) and reset the baseline so the timeline stays clean (no spurious dirty
+          // on a later re-select). This is the pre-sc-11967 behavior. (The dirty-but-target-
+          // deleted case is handled above as an sc-12018 conflict, not here.)
           setActiveTimeline(saved);
           activeTimelineRef.current = saved;
           savedTimelineSnapshotRef.current = serializeTimeline(saved);
