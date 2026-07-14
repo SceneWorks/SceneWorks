@@ -1,5 +1,6 @@
 import React from "react";
 import { isAbortError } from "../api.js";
+import { appConfirm } from "../appConfirm.jsx";
 import { assetMatchesCharacter } from "../characterMembership.js";
 import { saveAssetAs, revealAsset } from "../assetActions.js";
 import { isDesktop, isPageFullscreen, setViewerFullscreen } from "../runtime.js";
@@ -64,20 +65,24 @@ export function clampPan(view, stageWidth, stageHeight) {
 
 // Permanently purge every discarded asset in a single Trashcan view. The caller
 // passes only the assets visible in that view, so per-character and per-filter
-// trashcans empty their own scope and nothing else. Confirms first (guarded so
-// headless/test environments skip the prompt) and purges sequentially.
+// trashcans empty their own scope and nothing else. Confirms first through the
+// desktop-safe appConfirm (sc-12068) — window.confirm silently no-ops in the Tauri
+// WebView. appConfirm still falls back to window.confirm (or proceeds) when no
+// ConfirmHost is mounted, preserving the "skip the prompt → proceed" behavior in
+// headless/test contexts. Purges sequentially.
 export async function emptyTrash(trashedAssets, purgeAsset) {
   const items = (trashedAssets ?? []).filter((asset) => asset?.status?.trashed);
   if (!items.length || typeof purgeAsset !== "function") {
     return;
   }
-  if (
-    typeof window !== "undefined" &&
-    typeof window.confirm === "function" &&
-    !window.confirm(
-      `Permanently delete ${items.length} discarded item${items.length === 1 ? "" : "s"}? This cannot be undone.`,
-    )
-  ) {
+  const proceed = await appConfirm({
+    title: "Empty trash?",
+    message: `Permanently delete ${items.length} discarded item${items.length === 1 ? "" : "s"}? This cannot be undone.`,
+    confirmLabel: "Delete permanently",
+    cancelLabel: "Cancel",
+    tone: "danger",
+  });
+  if (!proceed) {
     return;
   }
   for (const asset of items) {

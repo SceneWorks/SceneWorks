@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
+import { appConfirm } from "../appConfirm.jsx";
 import { upsertJobNewest } from "../sorters.js";
 
 const maxLoraUploadBytes = 2 * 1024 * 1024 * 1024;
@@ -12,10 +13,18 @@ function uploadLimitLabel(bytes) {
 
 // A delete first tries to move the artifacts to the OS trash (Recycle Bin / Trash).
 // When that fails the API removes nothing and returns `trashUnavailable`; the user is
-// then asked whether to fall back to a permanent delete. Returns true to proceed.
+// then asked whether to fall back to a permanent delete. Resolves true to proceed.
+// Routed through the desktop-safe appConfirm (sc-12068) — window.confirm silently
+// no-ops in the Tauri WebView; the delete actions below await this Promise<boolean>.
 export const TRASH_UNAVAILABLE_CONFIRM = "Cannot move to trash. Continue to permanently delete.";
 function confirmPermanentDelete() {
-  return typeof window.confirm !== "function" || window.confirm(TRASH_UNAVAILABLE_CONFIRM);
+  return appConfirm({
+    title: "Move to trash failed",
+    message: TRASH_UNAVAILABLE_CONFIRM,
+    confirmLabel: "Delete permanently",
+    cancelLabel: "Cancel",
+    tone: "danger",
+  });
 }
 
 // Owns the model + LoRA catalogs and their import/download/convert/delete actions.
@@ -72,7 +81,7 @@ export function useModelsAndLoras({
         method: "DELETE",
       });
       if (result?.trashUnavailable) {
-        if (!confirmPermanentDelete()) {
+        if (!(await confirmPermanentDelete())) {
           return { cancelled: true };
         }
         result = await apiFetch(
@@ -103,7 +112,7 @@ export function useModelsAndLoras({
       )}`;
       let result = await apiFetch(base, token, { method: "DELETE" });
       if (result?.trashUnavailable) {
-        if (!confirmPermanentDelete()) {
+        if (!(await confirmPermanentDelete())) {
           return { cancelled: true };
         }
         result = await apiFetch(`${base}?permanent=true`, token, { method: "DELETE" });
@@ -129,7 +138,7 @@ export function useModelsAndLoras({
       method: "DELETE",
     });
     if (result?.trashUnavailable) {
-      if (!confirmPermanentDelete()) {
+      if (!(await confirmPermanentDelete())) {
         return { cancelled: true };
       }
       params.set("permanent", "true");

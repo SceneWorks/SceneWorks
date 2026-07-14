@@ -14,6 +14,7 @@ import {
 import { useAppContext } from "../context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../macGating.js";
 import { apiFetch } from "../api.js";
+import { appConfirm } from "../appConfirm.jsx";
 import { KeywordTagEditor } from "../components/KeywordTagEditor.jsx";
 import { isDesktop, tauriInvoke } from "../runtime.js";
 import { tierLabel } from "../quantTier.js";
@@ -947,7 +948,16 @@ export function ModelManagerScreen() {
     if (!onDeleteModel || model.removable === false) {
       return;
     }
-    if (typeof window.confirm === "function" && !window.confirm(deleteConfirmation("model", model, recipePresets))) {
+    // Desktop-safe confirm (sc-12068) — window.confirm no-ops in the Tauri WebView.
+    if (
+      !(await appConfirm({
+        title: "Delete model?",
+        message: deleteConfirmation("model", model, recipePresets),
+        confirmLabel: "Delete",
+        cancelLabel: "Cancel",
+        tone: "danger",
+      }))
+    ) {
       return;
     }
     setDeletingItem(`model:${model.id}`);
@@ -983,7 +993,16 @@ export function ModelManagerScreen() {
       `Delete the ${tierName} tier of "${model.name ?? model.id}"?`,
       `${sizeClause} only this tier — the model and its other tiers stay installed.`,
     ].join("\n\n");
-    if (typeof window.confirm === "function" && !window.confirm(message)) {
+    // Desktop-safe confirm (sc-12068) — window.confirm no-ops in the Tauri WebView.
+    if (
+      !(await appConfirm({
+        title: "Delete tier?",
+        message,
+        confirmLabel: "Delete",
+        cancelLabel: "Cancel",
+        tone: "danger",
+      }))
+    ) {
       return;
     }
     setDeletingItem(`variant:${model.id}:${tier}`);
@@ -1010,7 +1029,16 @@ export function ModelManagerScreen() {
     if (!onDeleteLora || lora.removable === false) {
       return;
     }
-    if (typeof window.confirm === "function" && !window.confirm(deleteConfirmation("lora", lora, recipePresets))) {
+    // Desktop-safe confirm (sc-12068) — window.confirm no-ops in the Tauri WebView.
+    if (
+      !(await appConfirm({
+        title: "Delete LoRA?",
+        message: deleteConfirmation("lora", lora, recipePresets),
+        confirmLabel: "Delete",
+        cancelLabel: "Cancel",
+        tone: "danger",
+      }))
+    ) {
       return;
     }
     setDeletingItem(`lora:${lora.scope ?? "global"}:${lora.id}`);
