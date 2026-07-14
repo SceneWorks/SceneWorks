@@ -71,9 +71,27 @@ function PersonTrackCorrections({ track, sourceClip, saveTrackCorrections }) {
   const [saving, setSaving] = useState(false);
   const videoRef = useRef(null);
 
+  // Keep the latest drafts and last-seeded snapshot addressable from the seed
+  // effect without listing `drafts` as a dep (which would refire it on every
+  // keystroke). `draftsRef` is the current working set; `seededSignatureRef` is
+  // the signature of the drafts as last seeded (null until the first seed), so
+  // "dirty" == the working set has diverged from that snapshot.
+  const draftsRef = useRef(drafts);
+  draftsRef.current = drafts;
+  const seededSignatureRef = useRef(null);
+  const seededTrackIdRef = useRef(null);
+
   const correctionsSignature = JSON.stringify(track?.corrections ?? []);
   // Seed working drafts from the persisted corrections so reopening a track
   // shows its saved adjustments, and re-seed after a save converges the UI.
+  //
+  // sc-11966: a background track refresh (SSE / track-job update) can bump the
+  // corrections signature on the SAME track while the user has unsaved
+  // per-frame edits. Reseeding then would clobber those dirty drafts. So reseed
+  // only when the track IDENTITY changes (a genuine switch — the key remount
+  // also resets this), on the first seed, or when a signature change lands while
+  // drafts are CLEAN (external-change visibility). Dirty drafts on the same
+  // track are preserved.
   useEffect(() => {
     const seeded = {};
     for (const correction of track?.corrections ?? []) {
@@ -86,8 +104,20 @@ function PersonTrackCorrections({ track, sourceClip, saveTrackCorrections }) {
         rejected: Boolean(correction.rejected),
       };
     }
-    setDrafts(seeded);
-    setFrameIndex((current) => (current < frames.length ? current : 0));
+
+    const trackChanged = seededTrackIdRef.current !== track?.id;
+    const firstSeed = seededSignatureRef.current === null;
+    const draftsDirty =
+      !firstSeed && JSON.stringify(draftsRef.current ?? {}) !== seededSignatureRef.current;
+
+    if (trackChanged || firstSeed || !draftsDirty) {
+      const seededSignature = JSON.stringify(seeded);
+      draftsRef.current = seeded;
+      seededSignatureRef.current = seededSignature;
+      seededTrackIdRef.current = track?.id;
+      setDrafts(seeded);
+      setFrameIndex((current) => (current < frames.length ? current : 0));
+    }
   }, [track?.id, correctionsSignature, frames.length]);
 
   useEffect(() => {
