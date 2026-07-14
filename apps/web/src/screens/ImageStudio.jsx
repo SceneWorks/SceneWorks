@@ -183,6 +183,18 @@ const TIER_SCREEN = "image";
 // character share the text_to_image workflow.
 const IMAGE_MODES = ["text_to_image", "edit_image", "character_image"];
 
+// sc-12034: the reference-tuning knobs the fresh-mount declared-defaults resolver owns (see the
+// resolver + the recipe disarm below). A recipe or a saved preset that injects any of these must
+// disarm that resolver so its injected values survive the async catalog arrival instead of being
+// overwritten by the selected model's DECLARED defaults once the catalog resolves.
+const REFERENCE_TUNING_PRESET_KEYS = [
+  "ipAdapterScale",
+  "controlnetScale",
+  "trueCfgScale",
+  "controlScale",
+  "textStyleGain",
+];
+
 // Above this many resolved images a batch run needs explicit confirmation, so a stray
 // value or an over-eager cross-product can't silently queue a huge job (sc-9957).
 const BATCH_RENDER_CAP = 100;
@@ -1026,6 +1038,39 @@ export function ImageStudio() {
     // (sc-10165 B4); the picker re-fetches for the new backbone.
     setControlOverlayId(null);
   }, [model]);
+  // sc-12034: On a FRESH mount (no restored snapshot) whose model catalog arrives AFTER mount, the
+  // reset effect above ran once with an empty `ui` (the catalog hadn't surfaced the model yet) and
+  // settled the reference-tuning knobs at the model-agnostic fallbacks (0.6 / 0.8 / 4.0). Because
+  // the fallback model id is a valid installed model that never changes, `model` never changes and
+  // that effect never re-fires — so the model's DECLARED defaults are never applied. Re-apply them
+  // ONCE, the first time the selected model actually resolves in the catalog.
+  //
+  // Fresh-mount ONLY: a restored snapshot seeds this disarmed (its tuning is authoritative and must
+  // survive, mirroring the `referenceTuningModel` seed above), and the recipe path disarms it too
+  // (it injects its own tuning). Mirrors the declared-default writes above; the clears
+  // (viewAngle / poses / control image) are omitted because on a fresh mount they are already at
+  // their initial values and the model never changed, so there is nothing stale to clear.
+  const referenceTuningDeclaredArmed = useRef(saved.ipAdapterScale == null);
+  useEffect(() => {
+    if (!referenceTuningDeclaredArmed.current) {
+      return;
+    }
+    const resolved = imageModels.find((item) => item.id === model);
+    if (!resolved) {
+      return; // Catalog hasn't surfaced this model yet — wait for it to arrive.
+    }
+    referenceTuningDeclaredArmed.current = false;
+    if (skipReferenceTuningReset.current) {
+      // A recipe/preset injection is applying its own tuning in this same commit — don't override it.
+      return;
+    }
+    const ui = resolved.ui ?? {};
+    setIpAdapterScale(typeof ui.referenceStrengthDefault === "number" ? ui.referenceStrengthDefault : 0.6);
+    setControlnetScale(typeof ui.identityStructure?.default === "number" ? ui.identityStructure.default : 0.8);
+    setTrueCfgScale(typeof ui.variationStrength?.default === "number" ? ui.variationStrength.default : 4.0);
+    setControlScale(typeof ui.controlScale?.default === "number" ? ui.controlScale.default : null);
+    setTextStyleGain(typeof ui.textStyleGain?.default === "number" ? ui.textStyleGain.default : 1.0);
+  }, [model, imageModels]);
   // Approved reference images for the selected character (the IP-Adapter identity
   // source). Resolve the full asset from the catalog so thumbnails render even when
   // the character payload only carries assetIds.
@@ -1442,6 +1487,10 @@ export function ImageStudio() {
     );
 
     skipReferenceTuningReset.current = true;
+    // A recipe injects its own reference tuning below (setIpAdapterScale/…), so disarm the
+    // fresh-mount declared-defaults resolver (sc-12034) — it must not overwrite the recipe values
+    // once the catalog resolves, even on a late-catalog mount where `skip*` was already consumed.
+    referenceTuningDeclaredArmed.current = false;
     setSelectedPresetId(noPresetId);
     setMode(nextMode);
     if (recipe.model) {
@@ -1683,6 +1732,16 @@ export function ImageStudio() {
       // prompt won't clobber the restored prompt.
       if (Object.prototype.hasOwnProperty.call(defaults, "prompt")) {
         promptEdited.current = true;
+      }
+      // sc-12034: a saved preset that carries its own reference-tuning (a character-mode preset
+      // stores ipAdapterScale / controlnetScale / trueCfgScale — see buildDefaults) must be
+      // protected exactly like a recipe (the disarm at the recipe injection below). If the preset
+      // resolves in the narrow window BEFORE the model catalog first surfaces the model, disarm the
+      // fresh-mount declared-defaults resolver so it can't overwrite the applied preset tuning when
+      // the catalog arrives on a later render. Only disarm when the preset actually carries a tuning
+      // key — a preset with no tuning must still let the model's DECLARED defaults resolve.
+      if (REFERENCE_TUNING_PRESET_KEYS.some((key) => Object.prototype.hasOwnProperty.call(defaults, key))) {
+        referenceTuningDeclaredArmed.current = false;
       }
     },
     buildDefaults: () => ({

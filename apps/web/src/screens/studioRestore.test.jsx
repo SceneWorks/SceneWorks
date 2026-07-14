@@ -475,3 +475,197 @@ describe("studio restart-restore does not clobber the restored snapshot (sc-1196
     expect(snap.resolution).toBe("768x512");
   });
 });
+
+// sc-12034 — the OTHER late-catalog corner (pre-existing, not introduced by S3): on a FRESH
+// mount (NO saved snapshot) whose model catalog arrives AFTER mount, the reference-tuning knobs
+// (ipAdapterScale / controlnetScale / trueCfgScale …) can settle at the model-agnostic fallbacks
+// (0.6 / 0.8 / 4.0) instead of the model's DECLARED defaults. `model` initializes to the hardcoded
+// fallback id while the catalog is empty; when the catalog arrives it CONTAINS that id (a valid
+// installed model), so the model id never changes and the model-change reset never re-fires — the
+// declared defaults are never applied. The fix re-applies them the first time the model resolves,
+// but ONLY on a fresh mount (a restored snapshot's tuning, and a recipe's injected tuning, survive).
+describe("reference-tuning declared defaults apply on a fresh late-catalog mount (sc-12034)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function renderSequence(Studio, contexts) {
+    for (const ctx of contexts) {
+      await act(async () => {
+        root.render(
+          <AppContext.Provider value={ctx}>
+            <Studio />
+          </AppContext.Provider>,
+        );
+      });
+      await act(async () => {});
+    }
+  }
+
+  // The fallback model id ("z_image_turbo" — ImageStudio's hardcoded default) that a fresh mount
+  // lands on before any catalog loads. It DECLARES its own reference-tuning defaults, distinct from
+  // the generic 0.6 / 0.8 / 4.0, so a knob left at the generic value proves the declared default
+  // was never applied.
+  const Z_IMAGE_TUNED = {
+    ...Z_IMAGE,
+    ui: {
+      referenceStrengthDefault: 0.75,
+      identityStructure: { default: 0.9 },
+      variationStrength: { default: 6 },
+    },
+  };
+
+  it("applies the model's DECLARED reference-tuning defaults, not the generic fallbacks", async () => {
+    // No seeded snapshot → fresh mount. First render: empty catalog (model = fallback id).
+    // Second render: the catalog arrives and CONTAINS that same id, so the id never changes.
+    await renderSequence(ImageStudio, [
+      imageContext(),
+      imageContext({ imageModels: [Z_IMAGE_TUNED], models: [Z_IMAGE_TUNED] }),
+    ]);
+
+    expect(modelSelectValue()).toBe("z_image_turbo");
+    const snap = readSnapshot("image");
+    // Declared defaults, NOT the generic 0.6 / 0.8 / 4.0.
+    expect(snap.ipAdapterScale).toBe(0.75);
+    expect(snap.controlnetScale).toBe(0.9);
+    expect(snap.trueCfgScale).toBe(6);
+  });
+
+  it("does NOT clobber a restored snapshot's tuning on a late-catalog mount", async () => {
+    // A restored snapshot (ipAdapterScale present) is authoritative — the fresh-mount resolver must
+    // stay disarmed so the restored value survives the async catalog arrival, even though the model
+    // id (z_image_turbo) is stable and would otherwise look like a fresh mount.
+    seedSnapshot("image", {
+      mode: "text_to_image",
+      model: "z_image_turbo",
+      ipAdapterScale: 0.42,
+      controlnetScale: 0.31,
+      trueCfgScale: 2.5,
+    });
+    await renderSequence(ImageStudio, [
+      imageContext(),
+      imageContext({ imageModels: [Z_IMAGE_TUNED], models: [Z_IMAGE_TUNED] }),
+    ]);
+
+    expect(modelSelectValue()).toBe("z_image_turbo");
+    const snap = readSnapshot("image");
+    expect(snap.ipAdapterScale).toBe(0.42);
+    expect(snap.controlnetScale).toBe(0.31);
+    expect(snap.trueCfgScale).toBe(2.5);
+  });
+
+  // ---- The epic's HARD CONSTRAINT: a recipe/preset injection is NEVER clobbered -------------
+  // The fresh-mount resolver exists to fill in the model's declared defaults, but it must yield
+  // to any injected tuning. The recipe path already carries the model-change `skip*` guard, but
+  // that guard is CONSUMED during the injection commit when the recipe sets a model different from
+  // the fresh-mount fallback — so the ONLY thing protecting the recipe's values when the catalog
+  // resolves on a later render is the declared-defaults resolver being disarmed at the recipe path
+  // (ImageStudio.jsx). Deleting that disarm makes this test go red (verified), which is exactly the
+  // regression the epic forbids.
+  const FLUX_TUNED = {
+    ...FLUX,
+    ui: {
+      referenceStrengthDefault: 0.75,
+      identityStructure: { default: 0.9 },
+      variationStrength: { default: 6 },
+    },
+  };
+
+  it("does NOT clobber a recipe's injected reference tuning on a late-catalog mount", async () => {
+    const recipeLaunch = {
+      id: "recipe-launch-1",
+      view: "Image",
+      recipe: {
+        // A model DIFFERENT from the z_image_turbo fallback → the model actually changes during the
+        // injection commit, which consumes the model-change `skip*` guard. That leaves the
+        // declared-defaults resolver's disarm as the sole protector once the catalog lands.
+        model: "flux2_dev",
+        prompt: "a recipe prompt",
+        loras: [],
+        normalizedSettings: {},
+        rawAdapterSettings: { ipAdapterScale: 0.33, controlnetScale: 0.22, trueCfgScale: 1.5 },
+      },
+    };
+    // Fresh mount (no snapshot). First render: the recipe injects its tuning + model while the
+    // catalog is empty. Second render: the catalog arrives CONTAINING flux2_dev, which declares its
+    // OWN distinct defaults (0.75 / 0.9 / 6) — the resolver must leave the recipe's values alone.
+    await renderSequence(ImageStudio, [
+      imageContext({ studioLaunch: recipeLaunch }),
+      imageContext({ studioLaunch: recipeLaunch, imageModels: [FLUX_TUNED], models: [FLUX_TUNED] }),
+    ]);
+
+    expect(modelSelectValue()).toBe("flux2_dev");
+    const snap = readSnapshot("image");
+    // The recipe's injected tuning, NOT flux2_dev's declared 0.75 / 0.9 / 6.
+    expect(snap.ipAdapterScale).toBe(0.33);
+    expect(snap.controlnetScale).toBe(0.22);
+    expect(snap.trueCfgScale).toBe(1.5);
+  });
+
+  // Issue-2 companion: a saved preset that carries its OWN reference tuning (a character-mode preset
+  // stores ipAdapterScale / controlnetScale / trueCfgScale) gets the same protection as a recipe.
+  // When the PRESET catalog resolves BEFORE the MODEL catalog, the preset-apply pass injects the
+  // preset's tuning while the resolver is still armed (the model hasn't surfaced yet); the disarm in
+  // the preset-apply path (onApplyDefaults, ImageStudio.jsx) must keep the resolver from overwriting
+  // it when the model catalog lands on a later render.
+  const Z_IMAGE_CHAR = {
+    ...Z_IMAGE,
+    capabilities: ["text_to_image", "character_image"],
+    ui: {
+      referenceStrengthDefault: 0.75,
+      identityStructure: { default: 0.9 },
+      variationStrength: { default: 6 },
+    },
+  };
+  const CHAR_PRESET_TUNED = {
+    id: "char-tuned",
+    name: "Char Tuned",
+    kind: "model",
+    scope: "global",
+    workflow: "character_image",
+    modes: ["character_image"],
+    model: "z_image_turbo",
+    loras: [],
+    defaults: { mode: "character_image", ipAdapterScale: 0.28, controlnetScale: 0.19, trueCfgScale: 1.7 },
+  };
+
+  it("does NOT clobber a saved preset's injected tuning when presets resolve before models", async () => {
+    const presetLaunch = {
+      id: "preset-launch-1",
+      view: "Image",
+      presetId: "char-tuned",
+      presetMode: "character_image",
+      presetModel: "z_image_turbo",
+    };
+    // Fresh mount. R1: empty catalogs; the launch selects the preset id + character mode.
+    // R2: the PRESET catalog arrives (models STILL empty) → the preset-apply pass injects its tuning
+    // while the resolver is armed. R3: the MODEL catalog arrives → the resolver must stay disarmed.
+    await renderSequence(ImageStudio, [
+      imageContext({ studioLaunch: presetLaunch }),
+      imageContext({ studioLaunch: presetLaunch, presets: [CHAR_PRESET_TUNED] }),
+      imageContext({
+        studioLaunch: presetLaunch,
+        presets: [CHAR_PRESET_TUNED],
+        imageModels: [Z_IMAGE_CHAR],
+        models: [Z_IMAGE_CHAR],
+      }),
+    ]);
+
+    expect(modelSelectValue()).toBe("z_image_turbo");
+    const snap = readSnapshot("image");
+    // The preset's injected tuning, NOT z_image_turbo's declared 0.75 / 0.9 / 6.
+    expect(snap.ipAdapterScale).toBe(0.28);
+    expect(snap.controlnetScale).toBe(0.19);
+    expect(snap.trueCfgScale).toBe(1.7);
+  });
+});
