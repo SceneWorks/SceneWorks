@@ -391,15 +391,28 @@ export function VideoStudio() {
   const requiresLtxIcLora = selectedModel?.id === ltxVideoModelId && ltxIcLoraRequiredModes.has(mode);
   const hasLtxIcLora = presetLoraDetails.some((lora) => !lora.missing && loraLooksLikeIcLora(lora));
 
-  // Seed the source from an EXPLICIT asset selection only — never App's assets[0] fallback
-  // (sc-11964). App derives `selectedAsset = assets.find(id === selectedAssetId) ?? assets[0]`,
-  // so on a cold restart (selectedAssetId still null) `selectedAsset` resolves to the NEWEST
-  // asset once the catalog lands; syncing that would clobber the source restored from the
-  // snapshot whenever the user's source isn't the newest asset. Gating on a real `selectedAssetId`
-  // (and confirming `selectedAsset` actually resolves to it) keeps a genuine library/launch
-  // selection working while leaving a restored, still-valid source untouched.
+  // Sync the source from a genuine USER asset selection — but NOT from App's non-user
+  // auto-default (sc-11964). App derives `selectedAsset = assets.find(id === selectedAssetId)
+  // ?? assets[0]`, and `refreshAssets` auto-selects the newest asset once the catalog lands
+  // (`setSelectedAssetId((current) => current ?? defaultAsset.id)`, App.jsx). On a cold restart
+  // that makes selectedAssetId === selectedAsset.id === the newest asset, so a plain "does
+  // selectedAssetId resolve" gate still fires and clobbers a source restored from the snapshot
+  // whenever the restored source isn't the newest asset. The one-shot below consumes exactly that
+  // first auto-default when a restored source is present; every later explicit user pick syncs.
+  //
+  // The first non-null selectedAssetId after a restart is ALWAYS the auto-default (a user can't
+  // pick an asset before the catalog lands, and App keeps `current` on later refreshes), so arming
+  // on mount and consuming it on the first resolved selection reliably distinguishes the non-user
+  // auto-default from a real user selection.
+  const skipAutoDefaultSourceSyncRef = useRef(
+    !selectedAssetId && Boolean(saved.sourceAssetId || saved.sourceClipAssetId),
+  );
   useEffect(() => {
     if (!selectedAssetId || selectedAsset?.id !== selectedAssetId) {
+      return;
+    }
+    if (skipAutoDefaultSourceSyncRef.current) {
+      skipAutoDefaultSourceSyncRef.current = false;
       return;
     }
     if (selectedAsset.type === "image" || selectedAsset.type === "frame") {

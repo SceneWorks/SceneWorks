@@ -837,10 +837,15 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     // Restart window: catalogs empty, no explicit selection.
     await renderVideoStudio({});
-    // Catalogs land. selectedAssetId stays null → App's selectedAsset falls back to assets[0],
-    // which is the NEWEST clip ("clip-new"), NOT the restored source.
+    // Catalogs land. App's refreshAssets auto-selects the default/newest asset once the catalog
+    // lands (`setSelectedAssetId((current) => current ?? defaultAsset.id)`, App.jsx:1270), so
+    // selectedAssetId resolves to the NEWEST clip ("clip-new") — NOT the restored source. This is
+    // what the real app does; without it the sync effect never fires and the assertion false-greens.
+    // With the pre-fix gate this auto-default clobbers the restored source to "clip-new"; the
+    // one-shot auto-default skip must keep "clip-old".
     await renderVideoStudio({
       videoModels: [berniniModel],
+      selectedAssetId: "clip-new",
       assets: [
         { id: "clip-new", type: "video", displayName: "Newest Clip" },
         { id: "clip-old", type: "video", displayName: "Restored Clip" },
