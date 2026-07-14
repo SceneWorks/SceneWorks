@@ -1026,6 +1026,39 @@ export function ImageStudio() {
     // (sc-10165 B4); the picker re-fetches for the new backbone.
     setControlOverlayId(null);
   }, [model]);
+  // sc-12034: On a FRESH mount (no restored snapshot) whose model catalog arrives AFTER mount, the
+  // reset effect above ran once with an empty `ui` (the catalog hadn't surfaced the model yet) and
+  // settled the reference-tuning knobs at the model-agnostic fallbacks (0.6 / 0.8 / 4.0). Because
+  // the fallback model id is a valid installed model that never changes, `model` never changes and
+  // that effect never re-fires — so the model's DECLARED defaults are never applied. Re-apply them
+  // ONCE, the first time the selected model actually resolves in the catalog.
+  //
+  // Fresh-mount ONLY: a restored snapshot seeds this disarmed (its tuning is authoritative and must
+  // survive, mirroring the `referenceTuningModel` seed above), and the recipe path disarms it too
+  // (it injects its own tuning). Mirrors the declared-default writes above; the clears
+  // (viewAngle / poses / control image) are omitted because on a fresh mount they are already at
+  // their initial values and the model never changed, so there is nothing stale to clear.
+  const referenceTuningDeclaredArmed = useRef(saved.ipAdapterScale == null);
+  useEffect(() => {
+    if (!referenceTuningDeclaredArmed.current) {
+      return;
+    }
+    const resolved = imageModels.find((item) => item.id === model);
+    if (!resolved) {
+      return; // Catalog hasn't surfaced this model yet — wait for it to arrive.
+    }
+    referenceTuningDeclaredArmed.current = false;
+    if (skipReferenceTuningReset.current) {
+      // A recipe/preset injection is applying its own tuning in this same commit — don't override it.
+      return;
+    }
+    const ui = resolved.ui ?? {};
+    setIpAdapterScale(typeof ui.referenceStrengthDefault === "number" ? ui.referenceStrengthDefault : 0.6);
+    setControlnetScale(typeof ui.identityStructure?.default === "number" ? ui.identityStructure.default : 0.8);
+    setTrueCfgScale(typeof ui.variationStrength?.default === "number" ? ui.variationStrength.default : 4.0);
+    setControlScale(typeof ui.controlScale?.default === "number" ? ui.controlScale.default : null);
+    setTextStyleGain(typeof ui.textStyleGain?.default === "number" ? ui.textStyleGain.default : 1.0);
+  }, [model, imageModels]);
   // Approved reference images for the selected character (the IP-Adapter identity
   // source). Resolve the full asset from the catalog so thumbnails render even when
   // the character payload only carries assetIds.
@@ -1442,6 +1475,10 @@ export function ImageStudio() {
     );
 
     skipReferenceTuningReset.current = true;
+    // A recipe injects its own reference tuning below (setIpAdapterScale/…), so disarm the
+    // fresh-mount declared-defaults resolver (sc-12034) — it must not overwrite the recipe values
+    // once the catalog resolves, even on a late-catalog mount where `skip*` was already consumed.
+    referenceTuningDeclaredArmed.current = false;
     setSelectedPresetId(noPresetId);
     setMode(nextMode);
     if (recipe.model) {

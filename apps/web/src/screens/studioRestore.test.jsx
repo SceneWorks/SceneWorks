@@ -475,3 +475,92 @@ describe("studio restart-restore does not clobber the restored snapshot (sc-1196
     expect(snap.resolution).toBe("768x512");
   });
 });
+
+// sc-12034 — the OTHER late-catalog corner (pre-existing, not introduced by S3): on a FRESH
+// mount (NO saved snapshot) whose model catalog arrives AFTER mount, the reference-tuning knobs
+// (ipAdapterScale / controlnetScale / trueCfgScale …) can settle at the model-agnostic fallbacks
+// (0.6 / 0.8 / 4.0) instead of the model's DECLARED defaults. `model` initializes to the hardcoded
+// fallback id while the catalog is empty; when the catalog arrives it CONTAINS that id (a valid
+// installed model), so the model id never changes and the model-change reset never re-fires — the
+// declared defaults are never applied. The fix re-applies them the first time the model resolves,
+// but ONLY on a fresh mount (a restored snapshot's tuning, and a recipe's injected tuning, survive).
+describe("reference-tuning declared defaults apply on a fresh late-catalog mount (sc-12034)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function renderSequence(Studio, contexts) {
+    for (const ctx of contexts) {
+      await act(async () => {
+        root.render(
+          <AppContext.Provider value={ctx}>
+            <Studio />
+          </AppContext.Provider>,
+        );
+      });
+      await act(async () => {});
+    }
+  }
+
+  // The fallback model id ("z_image_turbo" — ImageStudio's hardcoded default) that a fresh mount
+  // lands on before any catalog loads. It DECLARES its own reference-tuning defaults, distinct from
+  // the generic 0.6 / 0.8 / 4.0, so a knob left at the generic value proves the declared default
+  // was never applied.
+  const Z_IMAGE_TUNED = {
+    ...Z_IMAGE,
+    ui: {
+      referenceStrengthDefault: 0.75,
+      identityStructure: { default: 0.9 },
+      variationStrength: { default: 6 },
+    },
+  };
+
+  it("applies the model's DECLARED reference-tuning defaults, not the generic fallbacks", async () => {
+    // No seeded snapshot → fresh mount. First render: empty catalog (model = fallback id).
+    // Second render: the catalog arrives and CONTAINS that same id, so the id never changes.
+    await renderSequence(ImageStudio, [
+      imageContext(),
+      imageContext({ imageModels: [Z_IMAGE_TUNED], models: [Z_IMAGE_TUNED] }),
+    ]);
+
+    expect(modelSelectValue()).toBe("z_image_turbo");
+    const snap = readSnapshot("image");
+    // Declared defaults, NOT the generic 0.6 / 0.8 / 4.0.
+    expect(snap.ipAdapterScale).toBe(0.75);
+    expect(snap.controlnetScale).toBe(0.9);
+    expect(snap.trueCfgScale).toBe(6);
+  });
+
+  it("does NOT clobber a restored snapshot's tuning on a late-catalog mount", async () => {
+    // A restored snapshot (ipAdapterScale present) is authoritative — the fresh-mount resolver must
+    // stay disarmed so the restored value survives the async catalog arrival, even though the model
+    // id (z_image_turbo) is stable and would otherwise look like a fresh mount.
+    seedSnapshot("image", {
+      mode: "text_to_image",
+      model: "z_image_turbo",
+      ipAdapterScale: 0.42,
+      controlnetScale: 0.31,
+      trueCfgScale: 2.5,
+    });
+    await renderSequence(ImageStudio, [
+      imageContext(),
+      imageContext({ imageModels: [Z_IMAGE_TUNED], models: [Z_IMAGE_TUNED] }),
+    ]);
+
+    expect(modelSelectValue()).toBe("z_image_turbo");
+    const snap = readSnapshot("image");
+    expect(snap.ipAdapterScale).toBe(0.42);
+    expect(snap.controlnetScale).toBe(0.31);
+    expect(snap.trueCfgScale).toBe(2.5);
+  });
+});
