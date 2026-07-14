@@ -2914,6 +2914,30 @@ fn model_supports_img2img(request: &ImageRequest) -> bool {
         .unwrap_or(false)
 }
 
+/// Resolve the Krea "text style" tap-reweight gain (sc-11878; gate fixed in sc-12008). Set ONLY when
+/// the model's manifest declares the `ui.textStyleGain` slider — Krea/Qwen-Image-family only, so every
+/// other family self-gates to `None`. The user value comes from `advanced.textStyleGain`, clamped to
+/// the GPU-validated `[0.25, 1.75]`; the manifest slider object is not a scalar, so the `1.0` default
+/// (a byte-exact engine no-op) applies when the user leaves it at default.
+///
+/// NOTE (sc-12008): `model_manifest_entry` is the FULL model entry (`resolve_model_manifest_entry`),
+/// so the slider lives at `.ui.textStyleGain`, NOT the top level. Reading `.get("textStyleGain")`
+/// directly is always `None` and silently disables the feature — the original end-to-end bug. This is
+/// the single seam for both the MLX (`generate_stream`) and candle (`generate_candle_stream`) lanes so
+/// the two can't drift apart again.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_text_style_gain(request: &ImageRequest) -> Option<f32> {
+    request
+        .model_manifest_entry
+        .get("ui")
+        .and_then(|ui| ui.get("textStyleGain"))
+        .is_some()
+        .then(|| advanced::f32_clamped(&request.advanced, "textStyleGain", 1.0, 0.25..=1.75))
+}
+
 /// Whether a Z-Image t2i request should take the generic `ui.img2img` reference-guided latent-init
 /// rather than the Character Studio identity-init (sc-3619). Z-Image already owns a bespoke reference
 /// arm in [`resolve_generic_lane_conditioning`] (keyed on `referenceStrength`), so it never reaches the
@@ -3757,15 +3781,8 @@ async fn generate_stream(
     // base picks whether the output lands on ~2K or ~4K. `4k`/native leave the requested dims untouched;
     // `2k` caps the base (also lowering the F-013 decode peak). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
-    // Krea "text style" tap-reweight gain (sc-11878): set ONLY when the model's manifest (`ui`) declares
-    // the `textStyleGain` slider — Krea/Qwen-Image-family only, so this self-gates and every other family
-    // passes `None`. The user value comes from `advanced.textStyleGain` (the manifest object isn't a
-    // scalar, so the helper's `1.0` default applies when absent), clamped to the GPU-validated [0.25, 1.75].
-    let text_style_gain = request
-        .model_manifest_entry
-        .get("textStyleGain")
-        .is_some()
-        .then(|| advanced::f32_clamped(&request.advanced, "textStyleGain", 1.0, 0.25..=1.75));
+    // Krea "text style" tap-reweight gain — see `resolve_text_style_gain` (sc-11878, gate fixed sc-12008).
+    let text_style_gain = resolve_text_style_gain(request);
     let mut spec = load_spec(weights_dir, quant, adapters, flux_ip_dir);
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
@@ -4339,15 +4356,8 @@ async fn generate_candle_stream(
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
-    // Krea "text style" tap-reweight gain (sc-11878): set ONLY when the model's manifest (`ui`) declares
-    // the `textStyleGain` slider — Krea/Qwen-Image-family only, so this self-gates and every other family
-    // passes `None`. The user value comes from `advanced.textStyleGain` (the manifest object isn't a
-    // scalar, so the helper's `1.0` default applies when absent), clamped to the GPU-validated [0.25, 1.75].
-    let text_style_gain = request
-        .model_manifest_entry
-        .get("textStyleGain")
-        .is_some()
-        .then(|| advanced::f32_clamped(&request.advanced, "textStyleGain", 1.0, 0.25..=1.75));
+    // Krea "text style" tap-reweight gain — see `resolve_text_style_gain` (sc-11878, gate fixed sc-12008).
+    let text_style_gain = resolve_text_style_gain(request);
     // VRAM fit-gate (epic 10765, sc-10766 Phase 0 + sc-10821 Phase 1b + sc-10856): when the selected
     // tier's predicted resident peak won't fit the card, either RUN SEQUENTIALLY (a provider that
     // supports sequential component residency — the candle FLUX lane, sc-10769 — drops the text encoders
@@ -6541,5 +6551,72 @@ mod quant_tier_reconcile_tests {
             (None, Some(4)),
             "genuine q8→q4 fallback records the resolved q4 tier, load quant stays None"
         );
+    }
+}
+
+// Krea "text style" gain gate (sc-12008): the slider lives at `.ui.textStyleGain` in the FULL model
+// entry the worker receives, so the gate MUST read through `ui`. Reading the top level is a silent
+// no-op end-to-end (the original bug). This drives a real resolved manifest entry through the shared
+// `resolve_text_style_gain` seam — the coverage the engine-only A/B (sc-11878/sc-11884) never had.
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
+mod text_style_gain_gate_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request_with(manifest_entry: Value, advanced: Value) -> ImageRequest {
+        let payload = json!({
+            "projectId": "p",
+            "model": "krea_2_turbo",
+            "modelManifestEntry": manifest_entry,
+            "advanced": advanced,
+        });
+        ImageRequest::from_payload(payload.as_object().expect("payload is an object"))
+    }
+
+    #[test]
+    fn gain_resolves_through_ui_nesting_not_top_level() {
+        // Correct nesting → the user value flows through, clamped to the GPU-validated band.
+        let declared = request_with(
+            json!({ "id": "krea_2_turbo", "ui": { "textStyleGain": { "default": 1.0, "min": 0.25, "max": 1.75 } } }),
+            json!({ "textStyleGain": 1.75 }),
+        );
+        assert_eq!(resolve_text_style_gain(&declared), Some(1.75));
+
+        // Slider declared but user left it at default (web omits the key) → Some(1.0), a byte-exact
+        // engine no-op — NOT None, so the field is still wired through.
+        let defaulted = request_with(
+            json!({ "id": "krea_2_turbo", "ui": { "textStyleGain": { "default": 1.0 } } }),
+            json!({}),
+        );
+        assert_eq!(resolve_text_style_gain(&defaulted), Some(1.0));
+
+        // Out-of-range user value is clamped to [0.25, 1.75].
+        let hot = request_with(
+            json!({ "id": "krea_2_turbo", "ui": { "textStyleGain": { "default": 1.0 } } }),
+            json!({ "textStyleGain": 9.0 }),
+        );
+        assert_eq!(resolve_text_style_gain(&hot), Some(1.75));
+
+        // MUTATION CHECK (the sc-12008 bug): the slider object at the manifest TOP LEVEL with no `ui`
+        // block must NOT resolve — guards against regressing to `.get("textStyleGain")`.
+        let top_level_only = request_with(
+            json!({ "id": "krea_2_turbo", "textStyleGain": { "default": 1.0 } }),
+            json!({ "textStyleGain": 1.75 }),
+        );
+        assert_eq!(resolve_text_style_gain(&top_level_only), None);
+
+        // A model that doesn't declare the slider (no `ui.textStyleGain`) self-gates to None even when
+        // the client sends an `advanced.textStyleGain` — the manifest is the gate.
+        let undeclared = request_with(
+            json!({ "id": "sana_1600m", "ui": { "img2img": true } }),
+            json!({ "textStyleGain": 1.75 }),
+        );
+        assert_eq!(resolve_text_style_gain(&undeclared), None);
     }
 }
