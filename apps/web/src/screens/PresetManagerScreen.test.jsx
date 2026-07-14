@@ -3,6 +3,15 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PresetManagerScreen } from "./PresetManagerScreen.jsx";
 import { withAppContext, field, changeField } from "../main.testSupport.jsx";
+import { appConfirm } from "../appConfirm.jsx";
+
+// The unsaved-changes guard routes through the desktop-safe appConfirm (sc-11969), not
+// window.confirm (which no-ops in the Tauri WebView). Mock it so a test controls the
+// user's choice and can assert the guard fired without mounting a real <ConfirmHost/>.
+vi.mock("../appConfirm.jsx", () => {
+  const appConfirm = vi.fn(() => Promise.resolve(true));
+  return { appConfirm, useConfirm: () => appConfirm, ConfirmHost: () => null };
+});
 
 const imageModel = {
   id: "z_image_turbo",
@@ -92,6 +101,8 @@ describe("PresetManagerScreen", () => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");
     document.body.appendChild(container);
+    appConfirm.mockClear();
+    appConfirm.mockResolvedValue(true);
   });
 
   afterEach(async () => {
@@ -411,5 +422,120 @@ describe("PresetManagerScreen", () => {
     // …and a workflow filter never surfaces a general preset.
     await changeField(container.querySelector("select[aria-label='Type']"), "text_to_image");
     expect(cardNames()).not.toContain("Film Stock");
+  });
+
+  // sc-11969 (epic 11958, S10): the editor's DESTRUCTIVE in-screen transitions guard an
+  // in-progress edit behind the desktop-safe appConfirm; plain navigation (keep-alive)
+  // never prompts, which is covered at the App level in App.presetManagerKeepAlive.test.jsx.
+  describe("unsaved-changes guard on destructive transitions", () => {
+    const pill = () => container.querySelector(".preset-status-pill")?.textContent ?? "";
+    const editorForm = () => container.querySelector(".preset-editor-form");
+
+    async function editCard(name) {
+      await act(async () => {
+        [...container.querySelectorAll(".preset-card")]
+          .find((card) => card.textContent.includes(name))
+          .querySelector(".secondary-action")
+          .click();
+      });
+    }
+
+    // Click a button by exact visible text, then drain appConfirm()'s promise and its
+    // .then(proceed) plus the resulting re-render — all inside act — so the guarded
+    // transition has fully settled before the assertions run.
+    async function clickAndFlush(label) {
+      await act(async () => {
+        [...container.querySelectorAll("button")].find((button) => button.textContent.trim() === label).click();
+        for (let index = 0; index < 4; index += 1) {
+          await Promise.resolve();
+        }
+      });
+    }
+
+    it("prompts via the desktop-safe appConfirm before leaving a dirty edit, and cancel keeps it", async () => {
+      appConfirm.mockResolvedValue(false);
+      await render();
+      await editCard("Cinematic Portrait");
+      await changeField(field(container, "Name"), "Cinematic Portrait v2");
+      expect(pill()).toContain("Unsaved changes");
+
+      await clickAndFlush("All presets");
+      // A danger-toned confirm was shown (appConfirm, not window.confirm).
+      expect(appConfirm).toHaveBeenCalledWith(expect.objectContaining({ tone: "danger" }));
+      // Cancelled → still in the editor with the edit intact.
+      expect(editorForm()).not.toBeNull();
+      expect(field(container, "Name").value).toBe("Cinematic Portrait v2");
+      expect(pill()).toContain("Unsaved changes");
+    });
+
+    it("discards the edit and returns to the list when the leave is confirmed", async () => {
+      appConfirm.mockResolvedValue(true);
+      await render();
+      await editCard("Cinematic Portrait");
+      await changeField(field(container, "Name"), "Cinematic Portrait v2");
+
+      await clickAndFlush("All presets");
+      expect(appConfirm).toHaveBeenCalledTimes(1);
+      // Back on the list; the edit was dropped (never saved), so the card keeps its name.
+      expect(editorForm()).toBeNull();
+      expect(cardNames()).toContain("Cinematic Portrait");
+    });
+
+    it("leaves a clean edit immediately, without prompting", async () => {
+      await render();
+      await editCard("Cinematic Portrait");
+      // No field change → the form is clean.
+      await clickAndFlush("All presets");
+      expect(appConfirm).not.toHaveBeenCalled();
+      expect(editorForm()).toBeNull();
+    });
+
+    it("guards the Cancel button in the editor footer the same way", async () => {
+      appConfirm.mockResolvedValue(false);
+      await render();
+      await editCard("Cinematic Portrait");
+      await changeField(field(container, "Name"), "Cinematic Portrait v2");
+
+      // Two Cancel buttons (head + footer) both route through the guarded backToList.
+      const cancels = [...container.querySelectorAll("button")].filter((b) => b.textContent.trim() === "Cancel");
+      expect(cancels.length).toBeGreaterThan(1);
+      await act(async () => {
+        cancels[cancels.length - 1].click();
+        for (let index = 0; index < 4; index += 1) {
+          await Promise.resolve();
+        }
+      });
+      expect(appConfirm).toHaveBeenCalledWith(expect.objectContaining({ tone: "danger" }));
+      expect(editorForm()).not.toBeNull();
+    });
+
+    it("reverts to the saved baseline via the explicit Discard action after confirming", async () => {
+      appConfirm.mockResolvedValue(true);
+      await render();
+      await editCard("Cinematic Portrait");
+      await changeField(field(container, "Name"), "Edited Name");
+      expect(pill()).toContain("Unsaved changes");
+      // The Discard affordance only appears while dirty.
+      expect([...container.querySelectorAll("button")].some((b) => b.textContent.trim() === "Discard")).toBe(true);
+
+      await clickAndFlush("Discard");
+      expect(appConfirm).toHaveBeenCalled();
+      // Reverted: name restored to baseline, pill back to Saved, still editing.
+      expect(field(container, "Name").value).toBe("Cinematic Portrait");
+      expect(pill()).toContain("Saved");
+      expect(editorForm()).not.toBeNull();
+    });
+
+    it("keeps the edit when the Discard action is cancelled", async () => {
+      appConfirm.mockResolvedValue(false);
+      await render();
+      await editCard("Cinematic Portrait");
+      await changeField(field(container, "Name"), "Edited Name");
+
+      await clickAndFlush("Discard");
+      expect(appConfirm).toHaveBeenCalled();
+      expect(field(container, "Name").value).toBe("Edited Name");
+      expect(pill()).toContain("Unsaved changes");
+    });
   });
 });
