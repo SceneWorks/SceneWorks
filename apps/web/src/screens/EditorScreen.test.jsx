@@ -8,6 +8,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AppContext } from "../context/AppContext.js";
+import { ScreenActiveContext } from "../context/ScreenActiveContext.js";
 import { EditorScreen } from "./EditorScreen.jsx";
 
 function makeTimeline(id, name) {
@@ -103,5 +104,123 @@ describe("EditorScreen timeline re-select guard (sc-11967)", () => {
 
     expect(confirmSpy).toHaveBeenCalledTimes(1);
     expect(setSelectedTimelineId).toHaveBeenCalledWith("tl_2");
+  });
+});
+
+// sc-11961 (S2): under keep-alive the editor stays mounted while another view is
+// foregrounded. Its one continuous piece of work is preview playback (video.play()).
+// These tests assert the play effect only drives the <video> when the screen is the
+// active view, and pauses (does no playback work) while hidden.
+describe("EditorScreen preview playback keep-alive gating (sc-11961)", () => {
+  function makeVideoAsset() {
+    return {
+      id: "asset_v1",
+      type: "video",
+      displayName: "Clip A",
+      url: "/api/v1/files/v1.mp4",
+      file: { mimeType: "video/mp4", duration: 4 },
+    };
+  }
+
+  function makeTimelineWithVideoItem() {
+    return {
+      id: "tl_1",
+      name: "Main",
+      aspectRatio: "16:9",
+      fps: 30,
+      width: 1280,
+      height: 720,
+      tracks: [
+        {
+          id: "track_main",
+          name: "Main",
+          items: [
+            {
+              id: "item_1",
+              trackId: "track_main",
+              assetId: "asset_v1",
+              type: "video",
+              displayName: "Clip A",
+              sourceIn: 0,
+              sourceOut: 4,
+              timelineStart: 0,
+              timelineEnd: 4,
+              speed: 1,
+              fit: "fit",
+              volume: 1,
+              versionAssetIds: ["asset_v1"],
+              currentVersionAssetId: "asset_v1",
+              versionHistory: [{ assetId: "asset_v1", createdAt: null, source: "original", jobId: null, note: null }],
+              transitionIn: { id: "t_in", type: "cut", duration: 0 },
+              transitionOut: { id: "t_out", type: "cut", duration: 0 },
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  function renderEditor(screenActive) {
+    const timeline = makeTimelineWithVideoItem();
+    const value = {
+      activeProject: { id: "proj_1", name: "Proj" },
+      activeTimeline: timeline,
+      mediaAssets: [makeVideoAsset()],
+      timelines: [timeline],
+      selectedTimelineId: "tl_1",
+      setSelectedTimelineId: vi.fn(),
+      setActiveTimeline: vi.fn(),
+      setPreviewAsset: vi.fn(),
+      sendAssetToImage: vi.fn(),
+      sendAssetToVideo: vi.fn(),
+      createTimeline: vi.fn(),
+      extractTimelineFrame: vi.fn(),
+      exportTimeline: vi.fn(),
+      queueTimelineVideoJob: vi.fn(),
+      saveTimeline: vi.fn(),
+      isActiveTimelineDirty: () => false,
+    };
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <AppContext.Provider value={value}>
+          <ScreenActiveContext.Provider value={screenActive}>
+            <EditorScreen />
+          </ScreenActiveContext.Provider>
+        </AppContext.Provider>,
+      );
+    });
+  }
+
+  // Select the timeline clip (renders the preview <video>) then click Play.
+  function selectClipAndPressPlay() {
+    const clip = container.querySelector(".timeline-item");
+    act(() => clip.dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+    const playButton = container.querySelector(".playback-bar button");
+    act(() => playButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+  }
+
+  it("plays the preview when it is the ACTIVE view", () => {
+    const play = vi.spyOn(window.HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    // Stub pause too (jsdom's is unimplemented); the effect pauses once on selection.
+    vi.spyOn(window.HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+
+    renderEditor(true);
+    selectClipAndPressPlay();
+
+    expect(play).toHaveBeenCalled();
+  });
+
+  it("does NOT play (only pauses) while the editor is HIDDEN under keep-alive", () => {
+    const play = vi.spyOn(window.HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    const pause = vi.spyOn(window.HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+
+    renderEditor(false);
+    selectClipAndPressPlay();
+
+    // Pressing Play flips isPlaying, but the hidden screen's effect refuses to drive the
+    // <video>: play is never invoked and the element is kept paused — no background decode.
+    expect(play).not.toHaveBeenCalled();
+    expect(pause).toHaveBeenCalled();
   });
 });

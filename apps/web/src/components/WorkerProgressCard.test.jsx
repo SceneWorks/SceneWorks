@@ -1,8 +1,14 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { WorkerProgressCard, deriveJobTitle, getJobTypeChip } from "./WorkerProgressCard.jsx";
+import {
+  WorkerProgressCard,
+  deriveJobTitle,
+  getJobTypeChip,
+  useLiveJobElapsedSeconds,
+} from "./WorkerProgressCard.jsx";
 import { AppContext } from "../context/AppContext.js";
+import { ScreenActiveContext } from "../context/ScreenActiveContext.js";
 import { buildWorkersById } from "../workers.js";
 
 const cudaWorker = {
@@ -596,5 +602,131 @@ describe("WorkerProgressCard thumbnails", () => {
     const placeholder = api.container.querySelector(".asset-thumb-missing");
     expect(placeholder).not.toBeNull();
     expect(placeholder.getAttribute("aria-label")).toBe("Deleted asset");
+  });
+});
+
+// sc-11961 (S2): the live elapsed-seconds timer is the one piece of WorkerProgressCard
+// that runs continuously (a 1s setInterval) while an in-flight job's card is mounted.
+// Under keep-alive a studio stays mounted while backgrounded, so without gating each
+// visited studio's in-flight card would keep ticking — several concurrent timers doing
+// hidden work. These tests assert the interval only runs when the card's screen is the
+// foreground view (ScreenActiveContext=true) and that no timer is created for hidden
+// (backgrounded) kept-alive screens.
+describe("useLiveJobElapsedSeconds keep-alive gating (sc-11961)", () => {
+  const runningJob = {
+    id: "job-elapsed",
+    type: "image_generate",
+    status: "running",
+    startedAt: "2026-05-28T12:00:00Z",
+    elapsedSeconds: 0,
+  };
+
+  // Minimal probe that surfaces the hook's return value into the DOM so we can read it.
+  function ElapsedProbe({ job }) {
+    const seconds = useLiveJobElapsedSeconds(job);
+    return <span data-testid="elapsed">{seconds}</span>;
+  }
+
+  let roots;
+  let priorActEnv;
+
+  beforeEach(() => {
+    priorActEnv = global.IS_REACT_ACT_ENVIRONMENT;
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-28T12:00:05Z"));
+    roots = [];
+  });
+
+  afterEach(() => {
+    act(() => roots.forEach(({ root }) => root.unmount()));
+    roots.forEach(({ container }) => container.remove());
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    global.IS_REACT_ACT_ENVIRONMENT = priorActEnv;
+  });
+
+  function mount(active) {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <ScreenActiveContext.Provider value={active}>
+          <ElapsedProbe job={runningJob} />
+        </ScreenActiveContext.Provider>,
+      );
+    });
+    const entry = { container, root };
+    roots.push(entry);
+    return entry;
+  }
+
+  function elapsed(entry) {
+    return Number(entry.container.querySelector("[data-testid='elapsed']").textContent);
+  }
+
+  it("ticks the elapsed timer only for the ACTIVE (foreground) screen", () => {
+    const activeEntry = mount(true);
+    const hiddenEntry = mount(false);
+
+    // Both start at 5s elapsed (system time is 5s past startedAt).
+    expect(elapsed(activeEntry)).toBe(5);
+    expect(elapsed(hiddenEntry)).toBe(5);
+
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+
+    // Active screen's interval advanced the clock; hidden screen stayed frozen —
+    // no continuous work ran for the backgrounded card.
+    expect(elapsed(activeEntry)).toBe(8);
+    expect(elapsed(hiddenEntry)).toBe(5);
+  });
+
+  it("creates NO interval for a hidden kept-alive screen, and no duplicates across many mounted screens", () => {
+    const setIntervalSpy = vi.spyOn(window, "setInterval");
+
+    // One active + three hidden (as if four studios were all visited and kept alive).
+    mount(true);
+    mount(false);
+    mount(false);
+    mount(false);
+
+    // Exactly one interval exists — only the foreground card runs its loop. The three
+    // hidden kept-alive cards create none, so mounting many screens does not multiply
+    // the background work.
+    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts an interval when a hidden screen becomes active again (resume on re-show)", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push({ container, root });
+
+    act(() => {
+      root.render(
+        <ScreenActiveContext.Provider value={false}>
+          <ElapsedProbe job={runningJob} />
+        </ScreenActiveContext.Provider>,
+      );
+    });
+    // Hidden: frozen at 5s even after time passes.
+    act(() => vi.advanceTimersByTime(2000));
+    expect(Number(container.querySelector("[data-testid='elapsed']").textContent)).toBe(5);
+
+    // Re-show: the effect re-runs, snaps to the current time (now 7s past start), and
+    // resumes ticking.
+    act(() => {
+      root.render(
+        <ScreenActiveContext.Provider value={true}>
+          <ElapsedProbe job={runningJob} />
+        </ScreenActiveContext.Provider>,
+      );
+    });
+    expect(Number(container.querySelector("[data-testid='elapsed']").textContent)).toBe(7);
+    act(() => vi.advanceTimersByTime(1000));
+    expect(Number(container.querySelector("[data-testid='elapsed']").textContent)).toBe(8);
   });
 });

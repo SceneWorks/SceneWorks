@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { actionStatuses, terminalStatuses } from "../jobTypes.js";
 import { formatSeconds, liveElapsedSeconds, percent } from "../formatting.js";
 import { useAppLive } from "../context/AppContext.js";
+import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { deriveWorkerHardware, findWorkerForJob, liveMeters } from "../workers.js";
 import { AssetMedia, AssetThumbnail, assetUrl, posterUrl, suppressThumbnailContextMenu } from "./assetMedia.jsx";
 import { LikenessBadge } from "./LikenessBadge.jsx";
@@ -10,15 +11,26 @@ import { LikenessBadge } from "./LikenessBadge.jsx";
 // sc-2093 cleanup deleted the legacy JobProgress.jsx that originally housed it.
 export function useLiveJobElapsedSeconds(job) {
   const active = !terminalStatuses.has(job.status) && Boolean(job.startedAt);
+  // sc-11961 (S2): this card renders inside kept-alive studios (Image/Video/Document/
+  // Training/Character). Under keep-alive a studio stays mounted while hidden, so its
+  // in-flight job cards would otherwise keep this 1s timer ticking in the background —
+  // and with several studios visited, several timers would run concurrently. Gate the
+  // interval on the screen being the foreground view. `useScreenActive()` defaults to
+  // true outside a KeepAlivePane, so the OUT screens that render this card (Queue, Model
+  // Manager, Setup Wizard) are unaffected.
+  const screenActive = useScreenActive();
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
-    if (!active) {
+    if (!active || !screenActive) {
       return undefined;
     }
+    // Snap to the current time immediately so a card that just became visible again
+    // shows the correct elapsed value without waiting for the first 1s tick.
+    setNowMs(Date.now());
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [active, job.startedAt]);
+  }, [active, screenActive, job.startedAt]);
 
   return liveElapsedSeconds(job, nowMs);
 }
